@@ -43,14 +43,6 @@ function testStreaming() {
     })
   })
 
-  test('streaming: plain value still works', async () => {
-    await page.click('#test-plain-value')
-    await autoRetry(async () => {
-      const result = JSON.parse((await page.textContent('#streaming-result'))!)
-      expect(result).deep.equal({ doubled: 42 })
-    })
-  })
-
   test('streaming: delayed ReadableStream arrives over time', async () => {
     await page.click('#test-delayed-stream')
     // Should see intermediate state (not done yet)

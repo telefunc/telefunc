@@ -1,30 +1,44 @@
 export { useGenerator }
-export type { UseGeneratorState }
+export type { UseGeneratorState, UseGeneratorOptions, GeneratorError }
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+
+type GeneratorError = {
+  message: string
+  name?: string
+  stack?: string
+  cause?: unknown
+}
+
+type UseGeneratorOptions<T> = {
+  /** Called for each yielded value */
+  onValue?: (value: T) => void
+  /** Called when streaming starts */
+  onStart?: () => void
+  /** Called when streaming ends (whether completed, aborted, or errored) */
+  onEnd?: () => void
+  /** Called when an error occurs */
+  onError?: (error: GeneratorError) => void
+}
 
 type UseGeneratorState<T, Args extends unknown[]> = {
   /** Values yielded by the current invocation (resets on each `invoke`) */
   values: T[]
   /** The most recently yielded value, or undefined if nothing yielded yet */
   lastValue: T | undefined
-  /** All values across all invocations (only resets via `clearHistory`) */
-  history: T[]
   /** Whether the generator is currently yielding values */
   isStreaming: boolean
-  /** Error thrown during iteration, if any */
-  error: unknown
+  /** Error thrown during iteration, or null if no error */
+  error: GeneratorError | null
   /** Abort the current generator early */
   abort: () => void
   /** Call the telefunction and start streaming */
   invoke: (...args: Args) => void
-  /** Clear the history */
-  clearHistory: () => void
 }
 
 /**
  * React hook for consuming a telefunction that returns an AsyncGenerator.
- * Event-driven: call `invoke(args)` to start streaming, `abort()` to stop.
+ * Call `invoke(args)` to start streaming, `abort()` to stop.
  * Cleans up automatically on unmount or when `invoke` is called again.
  *
  * @param fn - A telefunction that returns an `AsyncGenerator<T>`
@@ -38,36 +52,46 @@ type UseGeneratorState<T, Args extends unknown[]> = {
  * ```
  */
 function useGenerator<T, Args extends unknown[]>(
-  fn: (...args: Args) => Promise<AsyncGenerator<T>>,
+  fn: (...args: Args) => Promise<AsyncGenerator<T>> | AsyncGenerator<T>,
+  options?: UseGeneratorOptions<T>,
 ): UseGeneratorState<T, Args> {
   const [values, setValues] = useState<T[]>([])
-  const [history, setHistory] = useState<T[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
-  const [error, setError] = useState<unknown>(undefined)
+  const [error, setError] = useState<GeneratorError | null>(null)
 
   const versionRef = useRef(0)
   const fnRef = useRef(fn)
   fnRef.current = fn
+  const optionsRef = useRef(options)
+  optionsRef.current = options
 
   const invoke = useCallback((...args: Args) => {
     const version = ++versionRef.current
     const isCurrent = () => version === versionRef.current
 
     setValues([])
-    setError(undefined)
+    setError(null)
     setIsStreaming(true)
+    optionsRef.current?.onStart?.()
     ;(async () => {
       try {
         const gen = await fnRef.current(...args)
         for await (const value of gen) {
           if (!isCurrent()) break
           setValues((prev) => [...prev, value])
-          setHistory((prev) => [...prev, value])
+          optionsRef.current?.onValue?.(value)
         }
       } catch (err) {
-        if (isCurrent()) setError(err)
+        if (isCurrent()) {
+          const generatorError = toGeneratorError(err)
+          setError(generatorError)
+          optionsRef.current?.onError?.(generatorError)
+        }
       } finally {
-        if (isCurrent()) setIsStreaming(false)
+        if (isCurrent()) {
+          setIsStreaming(false)
+          optionsRef.current?.onEnd?.()
+        }
       }
     })()
   }, [])
@@ -75,10 +99,6 @@ function useGenerator<T, Args extends unknown[]>(
   const abort = useCallback(() => {
     versionRef.current++
     setIsStreaming(false)
-  }, [])
-
-  const clearHistory = useCallback(() => {
-    setHistory([])
   }, [])
 
   useEffect(() => {
@@ -90,11 +110,36 @@ function useGenerator<T, Args extends unknown[]>(
   return {
     values,
     lastValue: values.length > 0 ? values[values.length - 1]! : undefined,
-    history,
     isStreaming,
     error,
     abort,
     invoke,
-    clearHistory,
   }
+}
+
+function toGeneratorError(originalError: unknown): GeneratorError {
+  const message = getErrorMessage(originalError)
+  const error: GeneratorError = { message }
+  if (originalError && typeof originalError === 'object') {
+    Object.assign(error, originalError)
+    for (const key of ['name', 'stack', 'cause'] as const) {
+      if (key in originalError) {
+        Object.assign(error, { [key]: (originalError as Record<string, unknown>)[key] })
+      }
+    }
+  }
+  return error
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message
+  }
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
+    return error.message
+  }
+  if (typeof error === 'string') {
+    return error
+  }
+  return 'Unknown error'
 }
