@@ -165,18 +165,30 @@ async function parseStreamingResponseBody(response: Response): Promise<{ ret: un
     createStream: (_meta) => {
       return new ReadableStream<Uint8Array>({
         async pull(controller) {
-          const chunk = await streamReader.readNextChunk()
-          if (chunk === null) controller.close()
-          else controller.enqueue(chunk)
+          try {
+            const chunk = await streamReader.readNextChunk()
+            if (chunk === null) controller.close()
+            else controller.enqueue(chunk)
+          } catch (err) {
+            reader.cancel()
+            controller.error(err)
+          }
+        },
+        cancel() {
+          reader.cancel()
         },
       })
     },
     createGenerator: (_meta) => {
       return (async function* () {
-        while (true) {
-          const chunk = await streamReader.readNextChunk()
-          if (chunk === null) return
-          yield parse(new TextDecoder().decode(chunk))
+        try {
+          while (true) {
+            const chunk = await streamReader.readNextChunk()
+            if (chunk === null) return
+            yield parse(new TextDecoder().decode(chunk))
+          }
+        } finally {
+          reader.cancel()
         }
       })()
     },
@@ -201,7 +213,9 @@ class StreamReader {
   async readExact(n: number): Promise<Uint8Array> {
     while (this.buffer.length < n) {
       const { done, value } = await this.reader.read()
-      assert(!done)
+      if (done) {
+        throw new Error('Connection lost — the server closed the stream before all data was received.')
+      }
       this.buffer = this.buffer.length === 0 ? value : concat(this.buffer, value)
     }
     const result = this.buffer.subarray(0, n)

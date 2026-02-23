@@ -6,11 +6,12 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamReplacer } from '../../../shared/wire-protocol/replacer-response.js'
 
-type StreamSegment =
+type StreamingValue =
   | { type: 'stream'; value: ReadableStream<Uint8Array> }
   | { type: 'generator'; value: AsyncGenerator<unknown> }
 
 type SerializeResult = { type: 'text'; body: string } | { type: 'streaming'; body: ReadableStream<Uint8Array> }
+const textEncoder = new TextEncoder()
 
 function serializeTelefunctionResult(runContext: {
   telefunctionReturn: unknown
@@ -25,13 +26,13 @@ function serializeTelefunctionResult(runContext: {
     bodyValue.abort = true
   }
 
-  const segments: StreamSegment[] = []
+  const streamingValues: StreamingValue[] = []
   const replacer = createStreamReplacer({
     onStream: (stream) => {
-      segments.push({ type: 'stream', value: stream })
+      streamingValues.push({ type: 'stream', value: stream })
     },
     onGenerator: (gen) => {
-      segments.push({ type: 'generator', value: gen })
+      streamingValues.push({ type: 'generator', value: gen })
     },
   })
 
@@ -50,24 +51,26 @@ function serializeTelefunctionResult(runContext: {
     )
   }
 
-  assertUsage(
-    segments.length <= 1,
-    `Telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) returns multiple streaming values. Only one ReadableStream or AsyncGenerator per return value is supported.`,
-  )
-
-  if (segments.length === 0) {
+  if (streamingValues.length === 0) {
     return { type: 'text', body: httpResponseBody }
   }
 
+  assertUsage(
+    streamingValues.length <= 1,
+    `Telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) returns multiple streaming values. Only one ReadableStream or AsyncGenerator per return value is supported.`,
+  )
   // Build binary streaming response: [u32 metadata len][metadata JSON][chunk frames...][zero terminator]
-  return { type: 'streaming', body: buildStreamingResponseBody(httpResponseBody, segments[0]!) }
+  return { type: 'streaming', body: buildStreamingResponseBody(httpResponseBody, streamingValues[0]!) }
 }
 
 // ===== Streaming response framing =====
 
-/** Build a ReadableStream that frames metadata + a single streaming segment. */
-function buildStreamingResponseBody(metadataSerialized: string, segment: StreamSegment): ReadableStream<Uint8Array> {
-  const gen = generateResponseBody(metadataSerialized, segment)
+/** Build a ReadableStream that frames metadata + a single streaming value. */
+function buildStreamingResponseBody(
+  metadataSerialized: string,
+  streamingValue: StreamingValue,
+): ReadableStream<Uint8Array> {
+  const gen = generateResponseBody(metadataSerialized, streamingValue)
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
@@ -84,17 +87,18 @@ function buildStreamingResponseBody(metadataSerialized: string, segment: StreamS
   })
 }
 
-async function* generateResponseBody(metadataSerialized: string, segment: StreamSegment): AsyncGenerator<Uint8Array> {
+async function* generateResponseBody(
+  metadataSerialized: string,
+  streamingValue: StreamingValue,
+): AsyncGenerator<Uint8Array> {
   // Metadata header
-  const metadataBytes = new TextEncoder().encode(metadataSerialized)
-  const lengthPrefix = new Uint8Array(4)
-  new DataView(lengthPrefix.buffer).setUint32(0, metadataBytes.length, false)
-  yield lengthPrefix
+  const metadataBytes = textEncoder.encode(metadataSerialized)
+  yield encodeU32(metadataBytes.length)
   yield metadataBytes
 
-  // Single segment as length-prefixed chunks terminated by a zero-length frame
-  if (segment.type === 'stream') {
-    const reader = segment.value.getReader()
+  // Chunks as length-prefixed frames terminated by a zero-length frame
+  if (streamingValue.type === 'stream') {
+    const reader = streamingValue.value.getReader()
     try {
       while (true) {
         const { done, value } = await reader.read()
@@ -103,25 +107,26 @@ async function* generateResponseBody(metadataSerialized: string, segment: Stream
           value instanceof Uint8Array,
           'ReadableStream returned by a telefunction must yield Uint8Array chunks.',
         )
-        const chunkLen = new Uint8Array(4)
-        new DataView(chunkLen.buffer).setUint32(0, value.byteLength, false)
-        yield chunkLen
+        yield encodeU32(value.byteLength)
         yield value
       }
     } finally {
-      reader.releaseLock()
+      await reader.cancel()
     }
   } else {
-    // Generator: serialize each yielded value
-    const encoder = new TextEncoder()
-    for await (const value of segment.value) {
-      const serialized = encoder.encode(stringify(value))
-      const chunkLen = new Uint8Array(4)
-      new DataView(chunkLen.buffer).setUint32(0, serialized.byteLength, false)
-      yield chunkLen
+    for await (const value of streamingValue.value) {
+      const serialized = textEncoder.encode(stringify(value))
+      yield encodeU32(serialized.byteLength)
       yield serialized
     }
   }
+
   // Zero-length terminator
-  yield new Uint8Array(4)
+  yield encodeU32(0)
+}
+
+function encodeU32(n: number): Uint8Array {
+  const buf = new Uint8Array(4)
+  new DataView(buf.buffer).setUint32(0, n, false)
+  return buf
 }

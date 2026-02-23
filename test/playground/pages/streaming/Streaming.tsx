@@ -1,6 +1,7 @@
 export { Streaming }
 
 import React, { useEffect, useState } from 'react'
+import { useGenerator } from 'telefunc/react'
 import {
   onReturnReadableStream,
   onReturnAsyncGenerator,
@@ -203,6 +204,27 @@ function Streaming() {
       >
         Stream + generator (should error)
       </button>
+
+      <UseGeneratorDemo />
     </div>
+  )
+}
+
+function UseGeneratorDemo() {
+  const { values, lastValue, isStreaming, error, abort, invoke } = useGenerator(onReturnDelayedGenerator)
+
+  return (
+    <>
+      <h2>useGenerator Hook</h2>
+      <pre id="use-generator-result">
+        {JSON.stringify({ values, lastValue, isStreaming, error: error ? String(error) : null })}
+      </pre>
+      <button id="use-generator-invoke" onClick={() => invoke()}>
+        Invoke
+      </button>
+      <button id="use-generator-abort" onClick={abort}>
+        Abort
+      </button>
+    </>
   )
 }

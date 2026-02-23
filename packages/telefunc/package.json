@@ -41,6 +41,11 @@
       "types": "./dist/client/index.d.ts",
       "default": "./dist/node/client.js"
     },
+    "./react": {
+      "browser": "./dist/client/react/index.js",
+      "types": "./dist/client/react/index.d.ts",
+      "default": "./dist/client/react/index.js"
+    },
     "./react-streaming": {
       "worker": "./dist/node/react-streaming/index.js",
       "browser": "./dist/client/react-streaming/index.js",
@@ -96,7 +101,7 @@
     "@types/node": "^24.0.4",
     "@types/react": "^19.1.8",
     "next": "^15.3.4",
-    "react": "^19.1.0",
+    "react": "^19.2.0",
     "react-streaming": "^0.4.2",
     "typescript": "^5.8.3",
     "vite": "^7.0.0"

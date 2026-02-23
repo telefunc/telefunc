@@ -16,7 +16,11 @@ import { callBugListeners } from './runTelefunc/onBug.js'
 import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
 import { getServerConfig } from './serverConfig.js'
-import type { Readable as StreamReadableNode, Writable as StreamWritableNode } from 'node:stream'
+import type {
+  Readable as StreamReadableNode,
+  Writable as StreamWritableNode,
+  pipeline as PipelineNode,
+} from 'node:stream'
 import { import_ } from '@brillout/import'
 import {
   STATUS_CODE_THROW_ABORT,
@@ -119,15 +123,19 @@ function createHttpResponse({
         return responseBody
       }
       const reader = responseBody.getReader()
-      const decoder = new TextDecoder()
-      let result = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        result += decoder.decode(value, { stream: true })
+      try {
+        const decoder = new TextDecoder()
+        let result = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          result += decoder.decode(value, { stream: true })
+        }
+        result += decoder.decode()
+        return result
+      } finally {
+        await reader.cancel()
       }
-      result += decoder.decode()
-      return result
     },
     err,
   }
@@ -142,14 +150,18 @@ function isStreamWritableNode(writable: unknown): writable is StreamWritableNode
   return hasProp(writable, 'write', 'function')
 }
 
-function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: StreamWritableWeb): void {
+async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: StreamWritableWeb): Promise<void> {
   if (typeof responseBody === 'string') {
     const writer = writable.getWriter()
     writer.write(encodeForWebStream(responseBody))
     writer.close()
     return
   }
-  responseBody.pipeTo(writable)
+  try {
+    await responseBody.pipeTo(writable)
+  } catch (err) {
+    handleError(err)
+  }
 }
 
 async function pipeToStreamWritableNode(responseBody: ResponseBody, writable: StreamWritableNode): Promise<void> {
@@ -159,8 +171,12 @@ async function pipeToStreamWritableNode(responseBody: ResponseBody, writable: St
     return
   }
   // Convert ReadableStream (Web) to Node.js Readable for piping
-  const { Readable } = await loadStreamNodeModule()
-  Readable.fromWeb(responseBody as import('stream/web').ReadableStream).pipe(writable)
+  const { Readable, pipeline } = await loadStreamNodeModule()
+  try {
+    await pipeline(Readable.fromWeb(responseBody as import('stream/web').ReadableStream), writable)
+  } catch (error) {
+    handleError(error)
+  }
 }
 
 function getStreamReadableWeb(responseBody: ResponseBody): StreamReadableWeb {
@@ -195,13 +211,12 @@ function encodeForWebStream(thing: unknown) {
 }
 
 // Because of Cloudflare Workers, we cannot statically import the `stream` module, instead we dynamically import it.
-async function loadStreamNodeModule(): Promise<{
-  Readable: typeof StreamReadableNode
-  Writable: typeof StreamWritableNode
-}> {
+async function loadStreamNodeModule() {
   const streamModule = (await import_('stream')).default as Awaited<typeof import('stream')>
+  const utilModule = (await import_('util')).default as Awaited<typeof import('util')>
+  const pipeline = utilModule.promisify(streamModule.pipeline)
   const { Readable, Writable } = streamModule
-  return { Readable, Writable }
+  return { Readable, Writable, pipeline }
 }
 
 const shieldValidationError = {
