@@ -56,19 +56,31 @@ function useChat() {
     onClearHistory()
   }, [])
 
-  const allMessages = current ? [...messages, current] : messages
-  return { messages: allMessages, isStreaming, error, send, abort, clear }
+  return { history: messages, current, isStreaming, error, send, abort, clear }
 }
 
+const MessageBubble = React.memo(function MessageBubble({ msg }: { msg: Message }) {
+  return (
+    <div className="mb-8">
+      <div className="flex justify-end mb-3">
+        <div className="bg-zinc-900 text-white px-4 py-2.5 rounded-[20px] rounded-br-[4px] max-w-[70%] text-sm leading-relaxed break-words [overflow-wrap:anywhere]">
+          {msg.prompt}
+        </div>
+      </div>
+      <div className="text-sm leading-[1.7] text-zinc-800">{msg.response}</div>
+    </div>
+  )
+})
+
 function Chat() {
-  const { messages, isStreaming, error, send, abort, clear } = useChat()
+  const { history, current, isStreaming, error, send, abort, clear } = useChat()
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, isStreaming])
+  }, [history, current, isStreaming])
 
-  const empty = messages.length === 0 && !isStreaming
+  const empty = history.length === 0 && !current
 
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-white">
@@ -105,26 +117,22 @@ function Chat() {
           </div>
         ) : (
           <div className="max-w-[720px] mx-auto px-6 py-8">
-            {messages.map((msg, i) => {
-              const isCurrent = i === messages.length - 1 && isStreaming
-              return (
-                <div key={i} className="mb-8">
-                  {/* User */}
-                  <div className="flex justify-end mb-3">
-                    <div className="bg-zinc-900 text-white px-4 py-2.5 rounded-[20px] rounded-br-[4px] max-w-[70%] text-sm leading-relaxed break-words [overflow-wrap:anywhere]">
-                      {msg.prompt}
-                    </div>
-                  </div>
-                  {/* Assistant */}
-                  <div className="text-sm leading-[1.7] text-zinc-800">
-                    {msg.response}
-                    {isCurrent && (
-                      <span className="inline-block w-[2px] h-[17px] bg-zinc-900 ml-0.5 align-text-bottom animate-pulse" />
-                    )}
+            {history.map((msg, i) => (
+              <MessageBubble key={i} msg={msg} />
+            ))}
+            {current && (
+              <div className="mb-8">
+                <div className="flex justify-end mb-3">
+                  <div className="bg-zinc-900 text-white px-4 py-2.5 rounded-[20px] rounded-br-[4px] max-w-[70%] text-sm leading-relaxed break-words [overflow-wrap:anywhere]">
+                    {current.prompt}
                   </div>
                 </div>
-              )
-            })}
+                <div className="text-sm leading-[1.7] text-zinc-800">
+                  {current.response}
+                  <span className="inline-block w-[2px] h-[17px] bg-zinc-900 ml-0.5 align-text-bottom animate-pulse" />
+                </div>
+              </div>
+            )}
             <div ref={bottomRef} />
           </div>
         )}
