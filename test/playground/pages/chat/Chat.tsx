@@ -6,6 +6,7 @@ import type { Message } from './Chat.telefunc'
 
 function useChat() {
   const [messages, setMessages] = useState<Message[]>([])
+  const [current, setCurrent] = useState<Message | null>(null)
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<{ message: string } | null>(null)
   const versionRef = useRef(0)
@@ -21,16 +22,19 @@ function useChat() {
 
     setError(null)
     setIsStreaming(true)
-    setMessages((prev) => [...prev, { prompt, response: '' }])
+    setCurrent({ prompt, response: '' })
     ;(async () => {
       try {
         const gen = await onSendMessage(prompt)
+        let response = ''
         for await (const word of gen) {
           if (!isCurrent()) break
-          setMessages((prev) => {
-            const last = prev[prev.length - 1]!
-            return [...prev.slice(0, -1), { ...last, response: (last.response + ' ' + word).trimStart() }]
-          })
+          response += (response ? ' ' : '') + word
+          setCurrent({ prompt, response })
+        }
+        if (isCurrent()) {
+          setMessages((prev) => [...prev, { prompt, response }])
+          setCurrent(null)
         }
       } catch (err) {
         if (isCurrent()) setError({ message: err instanceof Error ? err.message : String(err) })
@@ -42,15 +46,18 @@ function useChat() {
 
   const abort = useCallback(() => {
     versionRef.current++
+    setCurrent(null)
     setIsStreaming(false)
   }, [])
 
   const clear = useCallback(() => {
     setMessages([])
+    setCurrent(null)
     onClearHistory()
   }, [])
 
-  return { messages, isStreaming, error, send, abort, clear }
+  const allMessages = current ? [...messages, current] : messages
+  return { messages: allMessages, isStreaming, error, send, abort, clear }
 }
 
 function Chat() {
