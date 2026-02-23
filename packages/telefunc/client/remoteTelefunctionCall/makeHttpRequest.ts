@@ -20,17 +20,14 @@ const method = 'POST'
 
 async function makeHttpRequest(callContext: {
   telefuncUrl: string
-  httpRequestBody: string | FormData
+  httpRequestBody: string | Blob
   telefunctionName: string
   telefuncFilePath: string
   httpHeaders: Record<string, string> | null
   fetch: typeof globalThis.fetch | null
 }): Promise<{ telefunctionReturn: unknown }> {
-  const isMultipart = typeof callContext.httpRequestBody !== 'string'
-  const contentType = isMultipart
-    ? // Don't set Content-Type for FormData — browser sets multipart/form-data with boundary automatically
-      null
-    : { 'Content-Type': 'text/plain' }
+  const isBinaryFrame = typeof callContext.httpRequestBody !== 'string'
+  const contentType = isBinaryFrame ? { 'Content-Type': 'application/octet-stream' } : { 'Content-Type': 'text/plain' }
   let response: Response
   try {
     const fetch = callContext.fetch ?? window.fetch

@@ -3,7 +3,7 @@ export { LazyFile }
 export { isLazyBlob }
 export { isLazyFile }
 
-import type { MultipartReader } from './MultipartReader.js'
+import type { StreamReader } from './StreamReader.js'
 import type { FileMetadata, BlobMetadata } from '../../../shared/multipart/constants.js'
 import { assertUsage } from '../../../utils/assert.js'
 
@@ -66,7 +66,7 @@ abstract class BaseStreamBlob implements Blob {
 }
 
 /**
- * A Blob backed by a pull-based MultipartReader.
+ * A Blob backed by a pull-based StreamReader.
  *
  * `size` and `type` are available immediately from metadata.
  * Body data is pulled from the stream on demand — no background pump.
@@ -77,16 +77,17 @@ class LazyBlob extends BaseStreamBlob {
   readonly type: string
   readonly [LAZY_BLOB_BRAND] = true
 
-  #reader: MultipartReader
-  #partKey: string
+  #reader: StreamReader
+  #index: number
   #consumed = false
 
-  constructor(reader: MultipartReader, metadata: BlobMetadata) {
+  constructor(reader: StreamReader, metadata: BlobMetadata) {
     super()
     this.#reader = reader
-    this.#partKey = metadata.key
+    this.#index = metadata.index
     this.size = metadata.size
     this.type = metadata.type
+    reader.registerFile(metadata.index, metadata.size)
   }
 
   stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
@@ -95,7 +96,7 @@ class LazyBlob extends BaseStreamBlob {
     let inner: ReadableStreamDefaultReader<Uint8Array>
     return new ReadableStream<Uint8Array<ArrayBuffer>>({
       start: async () => {
-        inner = (await this.#reader.consumePart(this.#partKey)).getReader()
+        inner = (await this.#reader.consumeFile(this.#index, this.size)).getReader()
       },
       pull: async (controller) => {
         const { done, value } = await inner.read()
@@ -159,7 +160,7 @@ class SlicedBlob extends BaseStreamBlob {
 }
 
 /**
- * A File implementation backed by a pull-based MultipartReader.
+ * A File implementation backed by a pull-based StreamReader.
  * Extends LazyBlob with `name`, `lastModified`, and `webkitRelativePath`.
  */
 class LazyFile extends LazyBlob implements File {
@@ -168,7 +169,7 @@ class LazyFile extends LazyBlob implements File {
   readonly webkitRelativePath: string = ''
   readonly [LAZY_FILE_BRAND] = true
 
-  constructor(reader: MultipartReader, metadata: FileMetadata) {
+  constructor(reader: StreamReader, metadata: FileMetadata) {
     super(reader, metadata)
     this.name = metadata.name
     this.lastModified = metadata.lastModified

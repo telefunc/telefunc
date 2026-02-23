@@ -6,9 +6,8 @@ import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
 import { getUrlPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
-import { createMultipartReviver } from '../../../shared/multipart/serializer-server.js'
-import { FORM_DATA_MAIN_FIELD } from '../../../shared/multipart/constants.js'
-import { MultipartReader } from '../multipart/MultipartReader.js'
+import { createFileReviver } from '../../../shared/multipart/serializer-server.js'
+import { StreamReader } from '../multipart/StreamReader.js'
 import { LazyBlob, LazyFile } from '../multipart/LazyFile.js'
 
 type ParseResult =
@@ -36,15 +35,13 @@ async function parseHttpRequest(runContext: {
 
   const { request } = runContext
   const contentType = request.headers.get('content-type') || ''
-  const isMultipart = contentType.includes('multipart/form-data')
-  if (!isMultipart) {
+  const isBinaryFrame = contentType.includes('application/octet-stream')
+  if (!isBinaryFrame) {
     const text = await request.text()
     return parseTelefuncPayload(text, runContext)
   } else {
     assert(request.body)
-    const boundary = getBoundary(contentType)
-    assert(boundary, 'The multipart request is missing a boundary in the Content-Type header.')
-    return parseMultipartBody(request.body, boundary, runContext)
+    return parseBinaryFrameBody(request.body, runContext)
   }
 }
 
@@ -88,22 +85,16 @@ function parseTelefuncPayload(
   }
 }
 
-// ===== Multipart parsing =====
+// ===== Binary frame parsing =====
 
-async function parseMultipartBody(
+async function parseBinaryFrameBody(
   bodyStream: ReadableStream<Uint8Array>,
-  boundary: string,
   runContext: { logMalformedRequests: boolean },
 ): Promise<ParseResult> {
-  const reader = new MultipartReader(bodyStream, boundary)
+  const reader = new StreamReader(bodyStream)
+  const metaText = await reader.readMetadata()
 
-  const metaText = await reader.readNextPartAsText(FORM_DATA_MAIN_FIELD)
-  if (metaText === null) {
-    logParseError(`The multipart request body is missing the ${FORM_DATA_MAIN_FIELD} field.`, runContext)
-    return { isMalformedRequest: true }
-  }
-
-  const reviver = createMultipartReviver({
+  const reviver = createFileReviver({
     createFile: (fileMetadata) => new LazyFile(reader, fileMetadata),
     createBlob: (blobMetadata) => new LazyBlob(reader, blobMetadata),
   })
@@ -111,11 +102,6 @@ async function parseMultipartBody(
 }
 
 // ===== Helpers =====
-
-function getBoundary(contentType: string): string | null {
-  const match = contentType.match(/boundary=(?:"([^"]+)"|([^\s;]+))/)
-  return match ? match[1] || match[2] || null : null
-}
 
 function isWrongMethod(runContext: { request: Request; logMalformedRequests: boolean }) {
   const { method } = runContext.request

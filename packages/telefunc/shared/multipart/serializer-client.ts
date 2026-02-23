@@ -1,32 +1,22 @@
-export { createMultipartReplacer }
+export { createFileReplacer }
 
-import {
-  SERIALIZER_PREFIX_FILE,
-  SERIALIZER_PREFIX_BLOB,
-  SERIALIZER_PLACEHOLDER_KEY,
-  type FileMetadata,
-  type BlobMetadata,
-} from './constants.js'
-
-function constructMultipartKey(index: number): string {
-  return `${SERIALIZER_PLACEHOLDER_KEY}_${index}`
-}
+import { SERIALIZER_PREFIX_FILE, SERIALIZER_PREFIX_BLOB, type FileMetadata, type BlobMetadata } from './constants.js'
 
 /**
- * Serialize `fileMetadata`/`blobMetadata`.
- *`onFile`/`onBlob` collect the file parts for the FormData.
+ * Serialize File/Blob → metadata strings with prefix.
+ * `onFile`/`onBlob` collect the file parts for the binary frame.
  */
-function createMultipartReplacer(callbacks: {
-  onFile: (key: string, file: File) => void
-  onBlob: (key: string, blob: Blob) => void
+function createFileReplacer(callbacks: {
+  onFile: (index: number, file: File) => void
+  onBlob: (index: number, blob: Blob) => void
 }) {
   let nextIndex = 0
   return (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     if (value instanceof File) {
-      const key = constructMultipartKey(nextIndex++)
-      callbacks.onFile(key, value)
+      const index = nextIndex++
+      callbacks.onFile(index, value)
       const fileMetadata: FileMetadata = {
-        key,
+        index,
         name: value.name,
         size: value.size,
         type: value.type,
@@ -38,9 +28,9 @@ function createMultipartReplacer(callbacks: {
       }
     }
     if (value instanceof Blob) {
-      const key = constructMultipartKey(nextIndex++)
-      callbacks.onBlob(key, value)
-      const blobMetadata: BlobMetadata = { key, size: value.size, type: value.type }
+      const index = nextIndex++
+      callbacks.onBlob(index, value)
+      const blobMetadata: BlobMetadata = { index, size: value.size, type: value.type }
       return {
         replacement: SERIALIZER_PREFIX_BLOB + serializer(blobMetadata),
         resolved: true,

@@ -4,8 +4,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
-import { createMultipartReplacer } from '../../shared/multipart/serializer-client.js'
-import { FORM_DATA_MAIN_FIELD } from '../../shared/multipart/constants.js'
+import { createFileReplacer } from '../../shared/multipart/serializer-client.js'
 
 type CallContext = {
   telefuncFilePath: string
@@ -14,29 +13,27 @@ type CallContext = {
   telefuncUrl: string
 }
 
-function serializeTelefunctionArguments(callContext: CallContext): string | FormData {
+function serializeTelefunctionArguments(callContext: CallContext): string | Blob {
   const dataMain = {
     file: callContext.telefuncFilePath,
     name: callContext.telefunctionName,
     args: callContext.telefunctionArgs,
   }
 
-  const files: { key: string; value: File | Blob }[] = []
-  const replacer = createMultipartReplacer({
-    onFile: (key, file) => files.push({ key, value: file }),
-    onBlob: (key, blob) => files.push({ key, value: blob }),
+  const files: { index: number; value: File | Blob }[] = []
+  const replacer = createFileReplacer({
+    onFile: (index, file) => files.push({ index, value: file }),
+    onBlob: (index, blob) => files.push({ index, value: blob }),
   })
 
   const dataMainSerialized = serialize(dataMain, callContext, replacer)
   if (files.length === 0) return dataMainSerialized
 
-  const formData = new FormData()
-  // dataMainSerialized MUST come first — it contains the files metadata, which streaming needs before the files data
-  formData.append(FORM_DATA_MAIN_FIELD, dataMainSerialized)
-  for (const { key, value } of files) {
-    formData.append(key, value)
-  }
-  return formData
+  // Build binary frame: [u32 metadata length][metadata UTF-8][file0 bytes][file1 bytes]...
+  const metadataBytes = new TextEncoder().encode(dataMainSerialized)
+  const lengthPrefix = new Uint8Array(4)
+  new DataView(lengthPrefix.buffer).setUint32(0, metadataBytes.length, false)
+  return new Blob([lengthPrefix, metadataBytes, ...files.map((f) => f.value)])
 }
 
 type Replacer = Parameters<typeof stringify>[1] extends infer O ? (O extends { replacer?: infer R } ? R : never) : never

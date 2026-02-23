@@ -1,29 +1,17 @@
-export { parseMultipartIndex }
-export { createMultipartReviver }
+export { createFileReviver }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
 import type { LazyBlob, LazyFile } from '../../node/server/multipart/LazyFile.js'
-import {
-  SERIALIZER_PREFIX_FILE,
-  SERIALIZER_PREFIX_BLOB,
-  SERIALIZER_PLACEHOLDER_KEY,
-  type FileMetadata,
-  type BlobMetadata,
-} from './constants.js'
+import { SERIALIZER_PREFIX_FILE, SERIALIZER_PREFIX_BLOB, type FileMetadata, type BlobMetadata } from './constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
-
-/** Extract the numeric index from a multipart key (e.g. `__telefunc_multipart_2` → `2`). */
-function parseMultipartIndex(key: string): number {
-  return parseInt(key.slice(SERIALIZER_PLACEHOLDER_KEY.length + 1), 10)
-}
 
 /**
  * Deserialize:
  * - FileMetadata => LazyFile
  * - BlobMetadata => LazyBlob
  */
-function createMultipartReviver(callbacks: {
+function createFileReviver(callbacks: {
   createFile: (fileMetadata: FileMetadata) => LazyFile
   createBlob: (blobMetadata: BlobMetadata) => LazyBlob
 }): Reviver {
