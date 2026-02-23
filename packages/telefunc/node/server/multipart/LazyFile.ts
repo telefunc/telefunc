@@ -4,7 +4,7 @@ export { isLazyBlob }
 export { isLazyFile }
 
 import type { StreamReader } from './StreamReader.js'
-import type { FileMetadata, BlobMetadata } from '../../../shared/multipart/constants.js'
+import type { FileMetadata, BlobMetadata } from '../../../shared/wire-protocol/constants.js'
 import { assertUsage } from '../../../utils/assert.js'
 
 const LAZY_BLOB_BRAND = Symbol.for('telefunc.LazyBlob')

@@ -3,11 +3,16 @@ export { testRun }
 import { page, test, expect, expectLog, run, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
+import { testStreaming } from './pages/streaming/e2e-test'
 
 function testRun(cmd: 'npm run dev' | 'npm run preview') {
   run(cmd, {
     tolerateError(log) {
-      return log.logText.includes('File arguments are being consumed out of order')
+      return (
+        log.logText.includes('File arguments are being consumed out of order') ||
+        log.logText.includes('multiple streaming values') ||
+        log.logText.includes('the server responded with a status of 500')
+      )
     },
   })
 
@@ -34,6 +39,8 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
   })
 
   testFileUpload()
+
+  testStreaming()
 
   if (!isDev) {
     test('shield() generation', async () => {

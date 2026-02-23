@@ -6,7 +6,7 @@ import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
 import { getUrlPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
-import { createFileReviver } from '../../../shared/multipart/serializer-server.js'
+import { createFileReviver } from '../../../shared/wire-protocol/reviver-request.js'
 import { StreamReader } from '../multipart/StreamReader.js'
 import { LazyBlob, LazyFile } from '../multipart/LazyFile.js'
 

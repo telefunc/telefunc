@@ -17,8 +17,8 @@ function addTelefuncMiddleware(middlewares: ConnectServer) {
     const request = nodeReadableToWebRequest(req, 'http://localhost/_telefunc', req.method!, req.headers)
 
     const httpResponse = await telefunc({ request })
-    res.setHeader('Content-Type', httpResponse.contentType)
+    httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
     res.statusCode = httpResponse.statusCode
-    res.end(httpResponse.body)
+    httpResponse.pipe(res)
   })
 }

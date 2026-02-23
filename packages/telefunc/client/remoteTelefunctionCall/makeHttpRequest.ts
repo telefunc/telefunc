@@ -5,6 +5,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { callOnAbortListeners } from './onAbort.js'
+import { createStreamReviver } from '../../shared/wire-protocol/reviver-response.js'
 import {
   STATUS_CODE_THROW_ABORT,
   STATUS_CODE_INTERNAL_SERVER_ERROR,
@@ -49,6 +50,12 @@ async function makeHttpRequest(callContext: {
   const statusCode = response.status
 
   if (statusCode === STATUS_CODE_SUCCESS) {
+    const responseContentType = response.headers.get('content-type') || ''
+    if (responseContentType.includes('application/octet-stream')) {
+      // Binary streaming response — parse metadata with stream reviver
+      const { ret } = await parseStreamingResponseBody(response)
+      return { telefunctionReturn: ret }
+    }
     const { ret } = await parseResponseBody(response, callContext)
     const telefunctionReturn = ret
     return { telefunctionReturn }
@@ -138,4 +145,81 @@ async function getErrMsg(
   const responseBody = await response.text()
   assertUsage(responseBody === errMsg, wrongInstallation({ method, callContext }))
   return `${errMsg} — see server logs${errMsgAddendum}` as const
+}
+
+// ===== Streaming response parsing =====
+
+/** Parse a binary streaming response: [u32 metadata len][metadata JSON][chunk frames...][zero terminator] */
+async function parseStreamingResponseBody(response: Response): Promise<{ ret: unknown }> {
+  assert(response.body)
+  const reader = response.body.getReader()
+  const streamReader = new StreamReader(reader)
+
+  // Read metadata header
+  const metaLenBuf = await streamReader.readExact(4)
+  const metaLen = new DataView(metaLenBuf.buffer, metaLenBuf.byteOffset, 4).getUint32(0, false)
+  const metaBytes = await streamReader.readExact(metaLen)
+  const metaText = new TextDecoder().decode(metaBytes)
+
+  const reviver = createStreamReviver({
+    createStream: (_meta) => {
+      return new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          const chunk = await streamReader.readNextChunk()
+          if (chunk === null) controller.close()
+          else controller.enqueue(chunk)
+        },
+      })
+    },
+    createGenerator: (_meta) => {
+      return (async function* () {
+        while (true) {
+          const chunk = await streamReader.readNextChunk()
+          if (chunk === null) return
+          yield parse(new TextDecoder().decode(chunk))
+        }
+      })()
+    },
+  })
+
+  const parsed = parse(metaText, { reviver })
+  assert(isObject(parsed) && 'ret' in parsed)
+
+  return { ret: parsed.ret }
+}
+
+const EMPTY = new Uint8Array(0)
+
+class StreamReader {
+  private reader: ReadableStreamDefaultReader<Uint8Array>
+  private buffer: Uint8Array = EMPTY
+
+  constructor(reader: ReadableStreamDefaultReader<Uint8Array>) {
+    this.reader = reader
+  }
+
+  async readExact(n: number): Promise<Uint8Array> {
+    while (this.buffer.length < n) {
+      const { done, value } = await this.reader.read()
+      assert(!done)
+      this.buffer = this.buffer.length === 0 ? value : concat(this.buffer, value)
+    }
+    const result = this.buffer.subarray(0, n)
+    this.buffer = n < this.buffer.length ? this.buffer.subarray(n) : EMPTY
+    return result
+  }
+
+  async readNextChunk(): Promise<Uint8Array | null> {
+    const lenBuf = await this.readExact(4)
+    const len = new DataView(lenBuf.buffer, lenBuf.byteOffset, 4).getUint32(0, false)
+    if (len === 0) return null
+    return this.readExact(len)
+  }
+}
+
+function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const result = new Uint8Array(a.length + b.length)
+  result.set(a, 0)
+  result.set(b, a.length)
+  return result
 }

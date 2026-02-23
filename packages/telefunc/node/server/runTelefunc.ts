@@ -1,9 +1,10 @@
 export { runTelefunc }
 export type { HttpResponse }
 
-import { assert } from '../../utils/assert.js'
+import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
 import { isProduction } from '../../utils/isProduction.js'
 import { objectAssign } from '../../utils/objectAssign.js'
+import { hasProp } from '../../utils/hasProp.js'
 import { Telefunc } from './getContext.js'
 import { loadTelefuncFiles } from './runTelefunc/loadTelefuncFiles.js'
 import { parseHttpRequest } from './runTelefunc/parseHttpRequest.js'
@@ -15,6 +16,8 @@ import { callBugListeners } from './runTelefunc/onBug.js'
 import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
 import { getServerConfig } from './serverConfig.js'
+import type { Readable as StreamReadableNode, Writable as StreamWritableNode } from 'node:stream'
+import { import_ } from '@brillout/import'
 import {
   STATUS_CODE_THROW_ABORT,
   STATUS_CODE_SHIELD_VALIDATION_ERROR,
@@ -26,25 +29,186 @@ import {
   STATUS_CODE_SUCCESS,
 } from '../../shared/constants.js'
 
+type StreamWritableWeb = WritableStream
+type StreamReadableWeb = ReadableStream
+
 /** The HTTP Response of a telefunction remote call HTTP Request */
 type HttpResponse = {
   /** HTTP Response Status Code */
   statusCode: 200 | 400 | 403 | 422 | 500
-  /** HTTP Response Body */
+  /** HTTP Response Body (only for non-streaming responses, throws for streaming — use `pipe()` or `getReadableWebStream()` instead) */
   body: string
-  /** HTTP Response Header `Content-Type` */
-  contentType: 'text/plain'
-  /** HTTP Response Header `ETag` */
+  /** HTTP Response Headers */
+  headers: [string, string][]
+  /** Pipe the response body to a Node.js or Web writable stream */
+  pipe: (writable: StreamWritableWeb | StreamWritableNode) => void
+  /** Get the response body as a Web ReadableStream */
+  getReadableWebStream: () => StreamReadableWeb
+  /** Get the response body as a Node.js Readable stream */
+  getReadableNodeStream: () => Promise<StreamReadableNode>
+  /** Get the full response body as a string (awaits streaming if needed) */
+  getBody: () => Promise<string>
+  /** @deprecated Use `headers` instead */
+  contentType: 'text/plain' | 'application/octet-stream'
+  /** @deprecated Unused, always null */
   etag: string | null
   /** Error thrown by your telefunction */
   err?: unknown
+}
+
+type ContentType = 'text/plain' | 'application/octet-stream'
+type ResponseBody = string | ReadableStream<Uint8Array>
+
+function createHttpResponse({
+  statusCode,
+  contentType,
+  headers,
+  body: responseBody,
+  err,
+}: {
+  statusCode: HttpResponse['statusCode']
+  contentType: ContentType
+  headers: [string, string][]
+  body: ResponseBody
+  err?: unknown
+}): HttpResponse {
+  headers.push(['Content-Type', contentType])
+
+  return {
+    statusCode,
+    headers,
+    get contentType() {
+      assertWarning(false, 'httpResponse.contentType is deprecated, use httpResponse.headers instead.', {
+        onlyOnce: true,
+      })
+      return contentType
+    },
+    get etag() {
+      assertWarning(false, 'httpResponse.etag is deprecated and unused.', { onlyOnce: true })
+      return null
+    },
+    get body() {
+      assertUsage(
+        typeof responseBody === 'string',
+        "httpResponse.body can't be used for streaming responses. Use httpResponse.pipe() or httpResponse.getReadableWebStream() instead.",
+      )
+      return responseBody
+    },
+    pipe(writable: StreamWritableWeb | StreamWritableNode) {
+      if (isStreamWritableWeb(writable)) {
+        pipeToStreamWritableWeb(responseBody, writable)
+        return
+      }
+      if (isStreamWritableNode(writable)) {
+        pipeToStreamWritableNode(responseBody, writable)
+        return
+      }
+      assertUsage(
+        false,
+        "The argument `writable` passed to `httpResponse.pipe(writable)` doesn't seem to be a Web WritableStream nor a Node.js Writable.",
+      )
+    },
+    getReadableWebStream() {
+      return getStreamReadableWeb(responseBody)
+    },
+    async getReadableNodeStream() {
+      return getStreamReadableNode(responseBody)
+    },
+    async getBody() {
+      if (typeof responseBody === 'string') {
+        return responseBody
+      }
+      const reader = responseBody.getReader()
+      const decoder = new TextDecoder()
+      let result = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        result += decoder.decode(value, { stream: true })
+      }
+      result += decoder.decode()
+      return result
+    },
+    err,
+  }
+}
+
+function isStreamWritableWeb(writable: unknown): writable is StreamWritableWeb {
+  return typeof WritableStream !== 'undefined' && writable instanceof WritableStream
+}
+
+function isStreamWritableNode(writable: unknown): writable is StreamWritableNode {
+  if (isStreamWritableWeb(writable)) return false
+  return hasProp(writable, 'write', 'function')
+}
+
+function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: StreamWritableWeb): void {
+  if (typeof responseBody === 'string') {
+    const writer = writable.getWriter()
+    writer.write(encodeForWebStream(responseBody))
+    writer.close()
+    return
+  }
+  responseBody.pipeTo(writable)
+}
+
+async function pipeToStreamWritableNode(responseBody: ResponseBody, writable: StreamWritableNode): Promise<void> {
+  if (typeof responseBody === 'string') {
+    writable.write(responseBody)
+    writable.end()
+    return
+  }
+  // Convert ReadableStream (Web) to Node.js Readable for piping
+  const { Readable } = await loadStreamNodeModule()
+  Readable.fromWeb(responseBody as import('stream/web').ReadableStream).pipe(writable)
+}
+
+function getStreamReadableWeb(responseBody: ResponseBody): StreamReadableWeb {
+  if (typeof responseBody === 'string') {
+    return new ReadableStream({
+      start(controller) {
+        controller.enqueue(encodeForWebStream(responseBody))
+        controller.close()
+      },
+    })
+  }
+  return responseBody
+}
+
+async function getStreamReadableNode(responseBody: ResponseBody): Promise<StreamReadableNode> {
+  const { Readable } = await loadStreamNodeModule()
+  if (typeof responseBody === 'string') {
+    return Readable.from(responseBody)
+  }
+  return Readable.fromWeb(responseBody as import('stream/web').ReadableStream)
+}
+
+let encoder: TextEncoder
+function encodeForWebStream(thing: unknown) {
+  if (!encoder) {
+    encoder = new TextEncoder()
+  }
+  if (typeof thing === 'string') {
+    return encoder.encode(thing)
+  }
+  return thing
+}
+
+// Because of Cloudflare Workers, we cannot statically import the `stream` module, instead we dynamically import it.
+async function loadStreamNodeModule(): Promise<{
+  Readable: typeof StreamReadableNode
+  Writable: typeof StreamWritableNode
+}> {
+  const streamModule = (await import_('stream')).default as Awaited<typeof import('stream')>
+  const { Readable, Writable } = streamModule
+  return { Readable, Writable }
 }
 
 const shieldValidationError = {
   statusCode: STATUS_CODE_SHIELD_VALIDATION_ERROR,
   body: STATUS_BODY_SHIELD_VALIDATION_ERROR,
   contentType: 'text/plain' as const,
-  etag: null,
+  headers: [] as [string, string][],
 } as const
 
 // HTTP Response for:
@@ -55,7 +219,7 @@ const serverError = {
   statusCode: STATUS_CODE_INTERNAL_SERVER_ERROR,
   body: STATUS_BODY_INTERNAL_SERVER_ERROR,
   contentType: 'text/plain' as const,
-  etag: null,
+  headers: [] as [string, string][],
 } as const
 
 // HTTP Response for:
@@ -65,7 +229,7 @@ const malformedRequest = {
   statusCode: STATUS_CODE_MALFORMED_REQUEST,
   body: STATUS_BODY_MALFORMED_REQUEST,
   contentType: 'text/plain' as const,
-  etag: null,
+  headers: [] as [string, string][],
 } as const
 
 async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[0]): Promise<HttpResponse> {
@@ -74,10 +238,10 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   } catch (err: unknown) {
     callBugListeners(err)
     handleError(err)
-    return {
-      err,
+    return createHttpResponse({
       ...serverError,
-    }
+      err,
+    })
   }
 }
 
@@ -115,7 +279,7 @@ async function runTelefunc_({
   {
     const parsed = await parseHttpRequest(runContext)
     if (parsed.isMalformedRequest) {
-      return malformedRequest
+      return createHttpResponse({ ...malformedRequest })
     }
     const { telefunctionKey, telefunctionArgs, telefuncFilePath, telefunctionName } = parsed
     objectAssign(runContext, {
@@ -135,7 +299,7 @@ async function runTelefunc_({
   {
     const telefunction = await findTelefunction(runContext)
     if (!telefunction) {
-      return malformedRequest
+      return createHttpResponse({ ...malformedRequest })
     }
     objectAssign(runContext, { telefunction })
   }
@@ -148,7 +312,7 @@ async function runTelefunc_({
         telefunctionAborted: true,
         telefunctionReturn: undefined,
       })
-      return shieldValidationError
+      return createHttpResponse({ ...shieldValidationError })
     }
   }
 
@@ -169,8 +333,19 @@ async function runTelefunc_({
   }
 
   {
-    const httpResponseBody = serializeTelefunctionResult(runContext)
-    objectAssign(runContext, { httpResponseBody })
+    const result = serializeTelefunctionResult(runContext)
+    if (result.type === 'streaming') {
+      return createHttpResponse({
+        statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
+        contentType: 'application/octet-stream',
+        headers: [
+          ['Cache-Control', 'no-cache, no-transform'],
+          ['X-Accel-Buffering', 'no'],
+        ],
+        body: result.body,
+      })
+    }
+    objectAssign(runContext, { httpResponseBody: result.body })
   }
 
   // {
@@ -178,11 +353,10 @@ async function runTelefunc_({
   //   objectAssign(runContext, { httpResponseEtag })
   // }
 
-  return {
+  return createHttpResponse({
     statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
-    body: runContext.httpResponseBody,
     contentType: 'text/plain',
-    // etag: runContext.httpResponseEtag,
-    etag: null,
-  }
+    headers: [],
+    body: runContext.httpResponseBody,
+  })
 }

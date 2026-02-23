@@ -4,7 +4,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
-import { createFileReplacer } from '../../shared/multipart/serializer-client.js'
+import { createFileReplacer } from '../../shared/wire-protocol/replacer-request.js'
 
 type CallContext = {
   telefuncFilePath: string

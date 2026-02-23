@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "dev": "vike dev",
+    "dev": "rm -rf ./node_modules/.vite && vike dev",
     "build": "vike build",
     "preview": "vike build && node dist/nested/server/index.mjs"
   },
