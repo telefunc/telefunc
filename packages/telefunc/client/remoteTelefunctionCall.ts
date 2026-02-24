@@ -52,7 +52,7 @@ function addAsyncGeneratorInterface(promise: Promise<unknown>): AsyncGenerator<u
         isAsyncGenerator(returnValue),
         '`for await...of` can only be used with telefunctions that return an async generator',
       )
-      yield* returnValue as AsyncIterable<unknown>
+      yield* returnValue
     })())
 
   const augmented = Object.assign(promise, {
