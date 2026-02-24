@@ -51,14 +51,11 @@ async function makeHttpRequest(callContext: {
 
   if (statusCode === STATUS_CODE_SUCCESS) {
     const responseContentType = response.headers.get('content-type') || ''
-    if (responseContentType.includes('application/octet-stream')) {
-      // Binary streaming response — parse metadata with stream reviver
-      const { ret } = await parseStreamingResponseBody(response)
-      return { telefunctionReturn: ret }
-    }
-    const { ret } = await parseResponseBody(response, callContext)
-    const telefunctionReturn = ret
-    return { telefunctionReturn }
+    const isStreaming = responseContentType.includes('application/octet-stream')
+    const { ret } = isStreaming
+      ? await parseStreamingResponseBody(response)
+      : await parseResponseBody(response, callContext)
+    return { telefunctionReturn: ret }
   } else if (statusCode === STATUS_CODE_THROW_ABORT) {
     const { ret } = await parseResponseBody(response, callContext)
     const abortValue = ret

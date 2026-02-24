@@ -31,39 +31,36 @@ function remoteTelefunctionCall(
     objectAssign(callContext, { httpRequestBody })
   }
 
-  const httpRequestPromise = makeHttpRequest(callContext)
+  const httpResponsePromise = makeHttpRequest(callContext)
 
-  const promise = (async () => {
-    const { telefunctionReturn } = await httpRequestPromise
+  const telefunctionReturnPromise: Promise<unknown> = (async () => {
+    const { telefunctionReturn } = await httpResponsePromise
     return telefunctionReturn
   })()
 
-  return addAsyncGeneratorInterface(promise, httpRequestPromise)
+  return addAsyncGeneratorInterface(telefunctionReturnPromise)
 }
 
 /** Augment a promise with the AsyncGenerator interface
  *  so `for await...of` works directly without an intermediate `await`. */
-function addAsyncGeneratorInterface(
-  promise: Promise<unknown>,
-  httpRequestPromise: Promise<{ telefunctionReturn: unknown }>,
-): AsyncGenerator<unknown> & Promise<unknown> {
-  let innerGen: AsyncGenerator<unknown> | null = null
-  const getInnerGen = () =>
-    (innerGen ??= (async function* () {
-      const { telefunctionReturn } = await httpRequestPromise
+function addAsyncGeneratorInterface(promise: Promise<unknown>): AsyncGenerator<unknown> & Promise<unknown> {
+  let gen: AsyncGenerator<unknown> | null = null
+  const getGen = () =>
+    (gen ??= (async function* () {
+      const returnValue = await promise
       assertUsage(
-        isAsyncGenerator(telefunctionReturn),
+        isAsyncGenerator(returnValue),
         '`for await...of` can only be used with telefunctions that return an async generator',
       )
-      yield* telefunctionReturn as AsyncIterable<unknown>
+      yield* returnValue as AsyncIterable<unknown>
     })())
 
   const augmented = Object.assign(promise, {
-    next: (...args: [] | [unknown]) => getInnerGen().next(...args),
-    return: (value?: unknown) => getInnerGen().return(value),
-    throw: (e?: any) => getInnerGen().throw(e),
+    next: (...args: [] | [unknown]) => getGen().next(...args),
+    return: (value?: unknown) => getGen().return(value),
+    throw: (e?: any) => getGen().throw(e),
     [Symbol.asyncDispose]: async () => {
-      await getInnerGen().return(undefined)
+      await getGen().return(undefined)
     },
     [Symbol.asyncIterator]: () => augmented,
   })
