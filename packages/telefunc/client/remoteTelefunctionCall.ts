@@ -38,20 +38,34 @@ function remoteTelefunctionCall(
     return telefunctionReturn
   })()
 
-  // Make the promise also async-iterable so that:
-  //   for await (const x of onMyTelefunc()) { ... }
-  // works without needing to first `await` the promise.
-  // This makes the RPC boundary transparent for async generators.
-  Object.assign(promise, {
-    async *[Symbol.asyncIterator]() {
+  return addAsyncGeneratorInterface(promise, httpRequestPromise)
+}
+
+/** Augment a promise with the AsyncGenerator interface
+ *  so `for await...of` works directly without an intermediate `await`. */
+function addAsyncGeneratorInterface(
+  promise: Promise<unknown>,
+  httpRequestPromise: Promise<{ telefunctionReturn: unknown }>,
+): AsyncGenerator<unknown> & Promise<unknown> {
+  let innerGen: AsyncGenerator<unknown> | null = null
+  const getInnerGen = () =>
+    (innerGen ??= (async function* () {
       const { telefunctionReturn } = await httpRequestPromise
       assertUsage(
         isAsyncGenerator(telefunctionReturn),
         '`for await...of` can only be used with telefunctions that return an async generator',
       )
       yield* telefunctionReturn as AsyncIterable<unknown>
-    },
-  })
+    })())
 
-  return promise
+  const augmented = Object.assign(promise, {
+    next: (...args: [] | [unknown]) => getInnerGen().next(...args),
+    return: (value?: unknown) => getInnerGen().return(value),
+    throw: (e?: any) => getInnerGen().throw(e),
+    [Symbol.asyncDispose]: async () => {
+      await getInnerGen().return(undefined)
+    },
+    [Symbol.asyncIterator]: () => augmented,
+  })
+  return augmented
 }
