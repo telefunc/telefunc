@@ -146,8 +146,6 @@ function encodeErrorFrame(err: unknown, telefuncId: TelefuncIdentifier): Uint8Ar
       const payload: StreamingErrorFrameAbort = {
         type: STREAMING_ERROR_TYPE.ABORT,
         abortValue: err.abortValue,
-        telefunctionName: telefuncId.telefunctionName,
-        telefuncFilePath: telefuncId.telefuncFilePath,
       }
       errorPayload = stringify(payload)
     } catch {

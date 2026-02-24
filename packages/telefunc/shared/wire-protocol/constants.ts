@@ -8,8 +8,6 @@ export type BlobMetadata = { index: number; size: number; type: string }
 export type StreamMetadata = Record<string, never>
 export type GeneratorMetadata = Record<string, never>
 
-import type { TelefuncIdentifier } from '../constants.js'
-
 // ===== Streaming error frames =====
 
 /** Marker u32 value used as frame length in streaming responses to signal an error frame. */
@@ -22,11 +20,11 @@ export const STREAMING_ERROR_TYPE = {
 } as const
 export type StreamingErrorType = (typeof STREAMING_ERROR_TYPE)[keyof typeof STREAMING_ERROR_TYPE]
 
-/** Streaming error frame payload: abort with value and telefunction identity. */
+/** Streaming error frame payload: abort with value. */
 export type StreamingErrorFrameAbort = {
   type: typeof STREAMING_ERROR_TYPE.ABORT
   abortValue: unknown
-} & TelefuncIdentifier
+}
 
 /** Streaming error frame payload: unhandled bug (no details sent to client). */
 export type StreamingErrorFrameBug = {

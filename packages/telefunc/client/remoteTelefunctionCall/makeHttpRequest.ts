@@ -56,7 +56,7 @@ async function makeHttpRequest(callContext: {
     const responseContentType = response.headers.get('content-type') || ''
     const isStreaming = responseContentType.includes('application/octet-stream')
     const { ret } = isStreaming
-      ? await parseStreamingResponseBody(response)
+      ? await parseStreamingResponseBody(response, callContext)
       : await parseResponseBody(response, callContext)
     return { telefunctionReturn: ret }
   } else if (statusCode === STATUS_CODE_THROW_ABORT) {
@@ -144,10 +144,13 @@ async function getErrMsg(
 // ===== Streaming response parsing =====
 
 /** Parse a binary streaming response: [u32 metadata len][metadata JSON][chunk frames...][zero terminator] */
-async function parseStreamingResponseBody(response: Response): Promise<{ ret: unknown }> {
+async function parseStreamingResponseBody(
+  response: Response,
+  callContext: { telefunctionName: string; telefuncFilePath: string },
+): Promise<{ ret: unknown }> {
   assert(response.body)
   const reader = response.body.getReader()
-  const streamReader = new StreamReader(reader)
+  const streamReader = new StreamReader(reader, callContext)
 
   // Read metadata header
   const metaLenBuf = await streamReader.readExact(4)
@@ -198,10 +201,15 @@ const EMPTY = new Uint8Array(0)
 
 class StreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array>
+  private callContext: { telefunctionName: string; telefuncFilePath: string }
   private buffer: Uint8Array = EMPTY
 
-  constructor(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  constructor(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    callContext: { telefunctionName: string; telefuncFilePath: string },
+  ) {
     this.reader = reader
+    this.callContext = callContext
   }
 
   async readExact(n: number): Promise<Uint8Array> {
@@ -228,7 +236,7 @@ class StreamReader {
       const errorBytes = await this.readExact(errorLen)
       const errorPayload = parse(new TextDecoder().decode(errorBytes)) as StreamingErrorFramePayload
       if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT) {
-        throwAbortError(errorPayload.telefunctionName, errorPayload.telefuncFilePath, errorPayload.abortValue)
+        throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, errorPayload.abortValue)
       }
       throwBugError()
     }
