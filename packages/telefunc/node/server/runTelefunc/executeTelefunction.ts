@@ -6,6 +6,8 @@ import type { Telefunction } from '../types.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { isAsyncGenerator } from '../../../utils/isAsyncGenerator.js'
+import { validateTelefunctionError } from './validateTelefunctionError.js'
+import type { TelefuncIdentifier } from '../../../shared/constants.js'
 
 async function executeTelefunction(runContext: {
   telefunction: Telefunction
@@ -23,14 +25,7 @@ async function executeTelefunction(runContext: {
   let telefunctionHasErrored = false
   let telefunctionAborted = false
   const onError = (err: unknown) => {
-    assertUsage(
-      typeof err === 'object' && err !== null,
-      `The telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) threw a non-object error: \`${err}\`. Make sure the telefunction does \`throw new Error(${err})\` instead.`,
-    )
-    assertUsage(
-      err !== Abort,
-      `Missing parentheses \`()\` in \`throw Abort\` (it should be \`throw Abort()\`) at telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}).`,
-    )
+    validateTelefunctionError(err, runContext)
     if (isAbort(err)) {
       telefunctionAborted = true
       telefunctionReturn = err.abortValue

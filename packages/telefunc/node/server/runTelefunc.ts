@@ -11,8 +11,8 @@ import { parseHttpRequest } from './runTelefunc/parseHttpRequest.js'
 // import { getEtag } from './runTelefunc/getEtag.js'
 import { executeTelefunction } from './runTelefunc/executeTelefunction.js'
 import { serializeTelefunctionResult } from './runTelefunc/serializeTelefunctionResult.js'
+import { handleTelefunctionBug } from './runTelefunc/validateTelefunctionError.js'
 import { handleError } from './runTelefunc/handleError.js'
-import { callBugListeners } from './runTelefunc/onBug.js'
 import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
 import { getServerConfig } from './serverConfig.js'
@@ -251,8 +251,7 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
   try {
     return await runTelefunc_(httpRequestResolved)
   } catch (err: unknown) {
-    callBugListeners(err)
-    handleError(err)
+    handleTelefunctionBug(err)
     return createHttpResponse({
       ...serverError,
       err,

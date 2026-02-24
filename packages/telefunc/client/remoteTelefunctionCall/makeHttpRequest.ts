@@ -16,6 +16,9 @@ import {
   STATUS_BODY_SHIELD_VALIDATION_ERROR,
   STATUS_CODE_SUCCESS,
 } from '../../shared/constants.js'
+import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../shared/wire-protocol/constants.js'
+import type { StreamingErrorFramePayload } from '../../shared/wire-protocol/constants.js'
+import type { TelefuncResponseBody } from '../../shared/constants.js'
 
 const method = 'POST'
 
@@ -58,16 +61,10 @@ async function makeHttpRequest(callContext: {
     return { telefunctionReturn: ret }
   } else if (statusCode === STATUS_CODE_THROW_ABORT) {
     const { ret } = await parseResponseBody(response, callContext)
-    const abortValue = ret
-    const telefunctionCallError = new Error(
-      `Aborted telefunction call ${callContext.telefunctionName}() (${callContext.telefuncFilePath}).`,
-    )
-    objectAssign(telefunctionCallError, { isAbort: true as const, abortValue })
-    callOnAbortListeners(telefunctionCallError)
-    throw telefunctionCallError
+    throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, ret)
   } else if (statusCode === STATUS_CODE_INTERNAL_SERVER_ERROR) {
     const errMsg = await getErrMsg(STATUS_BODY_INTERNAL_SERVER_ERROR, response, callContext)
-    throw new Error(errMsg)
+    throwBugError(errMsg)
   } else if (statusCode === STATUS_CODE_SHIELD_VALIDATION_ERROR) {
     const errMsg = await getErrMsg(
       STATUS_BODY_SHIELD_VALIDATION_ERROR,
@@ -107,10 +104,10 @@ async function makeHttpRequest(callContext: {
 
 async function parseResponseBody(response: Response, callContext: { telefuncUrl: string }): Promise<{ ret: unknown }> {
   const responseBody = await response.text()
-  const responseBodyParsed = parse(responseBody)
+  const responseBodyParsed: unknown = parse(responseBody)
   assertUsage(isObject(responseBodyParsed) && 'ret' in responseBodyParsed, wrongInstallation({ method, callContext }))
   assert(response.status !== STATUS_CODE_THROW_ABORT || 'abort' in responseBodyParsed)
-  const { ret } = responseBodyParsed
+  const { ret } = responseBodyParsed as TelefuncResponseBody
   return { ret }
 }
 
@@ -191,7 +188,7 @@ async function parseStreamingResponseBody(response: Response): Promise<{ ret: un
     },
   })
 
-  const parsed = parse(metaText, { reviver })
+  const parsed = parse(metaText, { reviver }) as TelefuncResponseBody
   assert(isObject(parsed) && 'ret' in parsed)
 
   return { ret: parsed.ret }
@@ -224,6 +221,17 @@ class StreamReader {
     const lenBuf = await this.readExact(4)
     const len = new DataView(lenBuf.buffer, lenBuf.byteOffset, 4).getUint32(0, false)
     if (len === 0) return null
+    if (len === STREAMING_ERROR_FRAME_MARKER) {
+      // Error frame: [ERROR_MARKER][u32 payload_len][payload_bytes]
+      const errorLenBuf = await this.readExact(4)
+      const errorLen = new DataView(errorLenBuf.buffer, errorLenBuf.byteOffset, 4).getUint32(0, false)
+      const errorBytes = await this.readExact(errorLen)
+      const errorPayload = parse(new TextDecoder().decode(errorBytes)) as StreamingErrorFramePayload
+      if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT) {
+        throwAbortError(errorPayload.telefunctionName, errorPayload.telefuncFilePath, errorPayload.abortValue)
+      }
+      throwBugError()
+    }
     return this.readExact(len)
   }
 }
@@ -233,4 +241,17 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   result.set(a, 0)
   result.set(b, a.length)
   return result
+}
+
+// ===== Shared error helpers =====
+
+function throwAbortError(telefunctionName: string, telefuncFilePath: string, abortValue: unknown): never {
+  const telefunctionCallError = new Error(`Aborted telefunction call ${telefunctionName}() (${telefuncFilePath}).`)
+  objectAssign(telefunctionCallError, { isAbort: true as const, abortValue })
+  callOnAbortListeners(telefunctionCallError)
+  throw telefunctionCallError
+}
+
+function throwBugError(errMsg = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`): never {
+  throw new Error(errMsg)
 }
