@@ -25,7 +25,7 @@ function useChat() {
     setCurrent({ prompt, response: '' })
     ;(async () => {
       try {
-        const gen = await onSendMessage(prompt)
+        const gen = onSendMessage(prompt)
         let response = ''
         for await (const word of gen) {
           if (!isCurrent()) break
