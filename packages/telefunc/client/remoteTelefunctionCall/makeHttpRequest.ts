@@ -197,9 +197,9 @@ async function parseStreamingResponseBody(
       })()
       const origReturn = gen.return.bind(gen)
       gen.return = (...args: Parameters<(typeof gen)['return']>) => {
-        const val = origReturn(...args)
+        streamReader.cancelled = true
         reader.cancel()
-        return val
+        return origReturn(...args)
       }
       return gen
     },
@@ -217,6 +217,7 @@ class StreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array>
   private callContext: { telefunctionName: string; telefuncFilePath: string }
   private buffer: Uint8Array = EMPTY
+  cancelled = false
 
   constructor(
     reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -230,6 +231,7 @@ class StreamReader {
     while (this.buffer.length < n) {
       const { done, value } = await this.reader.read()
       if (done) {
+        if (this.cancelled) return EMPTY
         throw new Error('Connection lost — the server closed the stream before all data was received.')
       }
       this.buffer = this.buffer.length === 0 ? value : concat(this.buffer, value)
@@ -241,6 +243,7 @@ class StreamReader {
 
   async readNextChunk(): Promise<Uint8Array | null> {
     const lenBuf = await this.readExact(4)
+    if (this.cancelled) return null
     const len = new DataView(lenBuf.buffer, lenBuf.byteOffset, 4).getUint32(0, false)
     if (len === 0) return null
     if (len === STREAMING_ERROR_FRAME_MARKER) {

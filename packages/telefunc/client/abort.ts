@@ -1,16 +1,20 @@
 export { abort, withAbort, setAbortController }
 
+import { isAsyncGenerator } from '../utils/isAsyncGenerator.js'
+
 const ABORT_CONTROLLER = Symbol.for('telefuncAbort')
+
+type TelefuncCall = Promise<unknown> | AsyncGenerator<unknown>
 
 type WithAbortController = { [ABORT_CONTROLLER]?: AbortController }
 
-function setAbortController(promise: Promise<unknown>, controller: AbortController): void {
-  const p = promise as WithAbortController
+function setAbortController(call: TelefuncCall, controller: AbortController): void {
+  const p = call as WithAbortController
   p[ABORT_CONTROLLER] = controller
 }
 
-function getAbortController(promise: Promise<unknown>): AbortController | undefined {
-  const p = promise as WithAbortController
+function getAbortController(call: TelefuncCall): AbortController | undefined {
+  const p = call as WithAbortController
   return p[ABORT_CONTROLLER]
 }
 
@@ -18,12 +22,17 @@ function getAbortController(promise: Promise<unknown>): AbortController | undefi
  *
  *  ```ts
  *  import { abort } from 'telefunc/client'
- *  const promise = onSlowTelefunc()
- *  abort(promise)
+ *  const call = onSlowTelefunc()
+ *  abort(call)
  *  ```
  */
-function abort(promise: Promise<unknown>): void {
-  const controller = getAbortController(promise)
+function abort(call: TelefuncCall): void {
+  // If an async generator is active, close it first so the stream reader
+  // is cancelled cleanly before the fetch is aborted.
+  if (isAsyncGenerator(call)) {
+    call.return(undefined)
+  }
+  const controller = getAbortController(call)
   if (controller) controller.abort()
 }
 
@@ -36,8 +45,8 @@ function abort(promise: Promise<unknown>): void {
  *  // later: controller.abort()
  *  ```
  */
-function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  const controller = getAbortController(promise)
+function withAbort<T extends TelefuncCall>(call: T, signal: AbortSignal): T {
+  const controller = getAbortController(call)
   if (controller) {
     if (signal.aborted) {
       controller.abort()
@@ -45,5 +54,5 @@ function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
       signal.addEventListener('abort', () => controller.abort(), { once: true })
     }
   }
-  return promise
+  return call
 }

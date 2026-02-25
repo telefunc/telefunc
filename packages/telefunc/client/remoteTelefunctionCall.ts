@@ -38,14 +38,14 @@ function remoteTelefunctionCall(
   const telefunctionReturnPromise = makeHttpRequest(callContext)
 
   setAbortController(telefunctionReturnPromise, abortController)
-  addAsyncGeneratorInterface(telefunctionReturnPromise)
+  addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)
 
   return telefunctionReturnPromise
 }
 
 /** Augment a promise with the AsyncGenerator interface
  *  so `for await...of` works directly without an intermediate `await`. */
-function addAsyncGeneratorInterface(promise: Promise<unknown>) {
+function addAsyncGeneratorInterface(promise: Promise<unknown>, abortController: AbortController) {
   let gen: AsyncGenerator<unknown> | null = null
   const getGen = () =>
     (gen ??= (async function* () {
@@ -54,6 +54,7 @@ function addAsyncGeneratorInterface(promise: Promise<unknown>) {
         isAsyncGenerator(returnValue),
         '`for await...of` can only be used with telefunctions that return an async generator',
       )
+      setAbortController(returnValue, abortController)
       gen = returnValue
       yield* returnValue
     })())

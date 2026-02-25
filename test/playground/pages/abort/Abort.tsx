@@ -22,15 +22,16 @@ function Abort() {
           setResult('')
           const gen = onSlowAIGenerator()
           const values: string[] = []
-          const iterator = gen[Symbol.asyncIterator]()
           // First token arrives immediately
-          const first = await iterator.next()
+          const first = await gen.next()
           if (!first.done) values.push(first.value)
           // Second token takes 10s — cancel after 500ms while read is pending
-          const nextPromise = iterator.next()
-          const timeout = new Promise((r) => setTimeout(() => r('timeout'), 500))
-          const race = await Promise.race([nextPromise, timeout])
-          if (race === 'timeout') await iterator.return(undefined)
+          const nextPromise = gen.next()
+          setTimeout(() => {
+            abort(gen)
+            // gen.return(undefined)
+          }, 500)
+          console.log(await nextPromise)
           setResult(JSON.stringify({ values, aiDisconnected: true }))
         }}
       >
