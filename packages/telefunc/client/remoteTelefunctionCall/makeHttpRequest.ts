@@ -49,7 +49,7 @@ async function makeHttpRequest(callContext: {
   } catch (err) {
     if (callContext.abortController.signal.aborted) {
       const cancelError = new Error('Telefunc call cancelled')
-      objectAssign(cancelError, { isCancelled: true as const })
+      objectAssign(cancelError, { isCancel: true as const })
       throw cancelError
     }
     const telefunctionCallError = new Error('No Server Connection')
