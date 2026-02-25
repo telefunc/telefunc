@@ -103,4 +103,41 @@ function testStreaming() {
       expect(result.message).toContain('Internal Server Error')
     })
   })
+
+  test('streaming: generator Abort() mid-stream', async () => {
+    await page.goto(`${getServerUrl()}/streaming`)
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+
+    await page.click('#test-generator-abort-midstream')
+    await autoRetry(async () => {
+      const result = JSON.parse((await page.textContent('#streaming-result'))!)
+      expect(result.error).toBe(true)
+      expect(result.isAbort).toBe(true)
+      expect(result.values).deep.equal(['before-abort'])
+    })
+  })
+
+  test('streaming: generator Abort() with value mid-stream', async () => {
+    await page.click('#test-generator-abort-with-value')
+    await autoRetry(async () => {
+      const result = JSON.parse((await page.textContent('#streaming-result'))!)
+      expect(result.error).toBe(true)
+      expect(result.isAbort).toBe(true)
+      expect(result.abortValue).deep.equal({ reason: 'not-allowed', code: 403 })
+      expect(result.values).deep.equal(['before-abort'])
+    })
+  })
+
+  test('streaming: generator bug mid-stream', async () => {
+    await page.click('#test-generator-bug-midstream')
+    await autoRetry(async () => {
+      const result = JSON.parse((await page.textContent('#streaming-result'))!)
+      expect(result.error).toBe(true)
+      expect(result.isBug).toBe(true)
+      expect(result.message).toContain('Internal Server Error')
+      expect(result.values).deep.equal(['before-bug'])
+    })
+  })
 }

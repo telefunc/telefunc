@@ -1,22 +1,19 @@
 export { nodeReadableToWebRequest }
 
 import type { Readable } from 'node:stream'
+import { loadStreamNodeModule } from './loadStreamNodeModule.js'
 import { assertIsNotBrowser } from './assertIsNotBrowser.js'
 assertIsNotBrowser()
 
-function nodeReadableToWebRequest(
+async function nodeReadableToWebRequest(
   readable: Readable,
   url: string,
   method: string,
   headers: Record<string, string | string[] | undefined>,
-): Request {
-  const body = new ReadableStream({
-    start(controller) {
-      readable.on('data', (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)))
-      readable.on('end', () => controller.close())
-      readable.on('error', (err) => controller.error(err))
-    },
-  })
+): Promise<Request> {
+  const { Readable: ReadableClass } = await loadStreamNodeModule()
+  const body = ReadableClass.toWeb(readable) as ReadableStream<Uint8Array>
+
   const headerPairs: [string, string][] = []
   for (const [key, value] of Object.entries(headers)) {
     if (value === undefined) continue
@@ -26,10 +23,20 @@ function nodeReadableToWebRequest(
       headerPairs.push([key, value])
     }
   }
+  // Wire the readable's close event to an AbortSignal so that
+  // request.signal fires when the client disconnects.
+  // `close` fires both after normal completion and on premature disconnect —
+  // readableAborted is true when the stream was destroyed before emitting 'end'
+  // (i.e. client disconnected).
+  const abortController = new AbortController()
+  readable.on('close', () => {
+    if (readable.readableAborted && !abortController.signal.aborted) abortController.abort()
+  })
   return new Request(url, {
     method,
     headers: headerPairs,
     body,
+    signal: abortController.signal,
     // @ts-expect-error duplex required for streaming request bodies
     duplex: 'half',
   })

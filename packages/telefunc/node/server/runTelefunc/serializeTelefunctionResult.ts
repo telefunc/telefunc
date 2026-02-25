@@ -23,6 +23,7 @@ function serializeTelefunctionResult(runContext: {
   telefunctionName: string
   telefuncFilePath: string
   telefunctionAborted: boolean
+  onStreamComplete?: () => void
 }): SerializeResult {
   const bodyValue: TelefuncResponseBody = runContext.telefunctionAborted
     ? { ret: runContext.telefunctionReturn, abort: true }
@@ -66,7 +67,10 @@ function serializeTelefunctionResult(runContext: {
     telefunctionName: runContext.telefunctionName,
     telefuncFilePath: runContext.telefuncFilePath,
   }
-  return { type: 'streaming', body: buildStreamingResponseBody(httpResponseBody, streamingValues[0]!, telefuncId) }
+  return {
+    type: 'streaming',
+    body: buildStreamingResponseBody(httpResponseBody, streamingValues[0]!, telefuncId, runContext.onStreamComplete),
+  }
 }
 
 // ===== Streaming response framing =====
@@ -76,19 +80,24 @@ function buildStreamingResponseBody(
   metadataSerialized: string,
   streamingValue: StreamingValue,
   telefuncId: TelefuncIdentifier,
+  onStreamComplete?: () => void,
 ): ReadableStream<Uint8Array> {
   const gen = generateResponseBody(metadataSerialized, streamingValue, telefuncId)
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const { done, value } = await gen.next()
-        if (done) controller.close()
-        else controller.enqueue(value)
+        if (done) {
+          onStreamComplete?.()
+          controller.close()
+        } else controller.enqueue(value)
       } catch (err) {
+        onStreamComplete?.()
         controller.error(err)
       }
     },
     async cancel() {
+      onStreamComplete?.()
       await gen.return(undefined)
     },
   })

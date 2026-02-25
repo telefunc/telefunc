@@ -9,6 +9,9 @@ export {
   onReturnStreamWithMeta,
   onReturnTwoGenerators,
   onReturnStreamAndGenerator,
+  onGeneratorAbortMidStream,
+  onGeneratorAbortWithValue,
+  onGeneratorBugMidStream,
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -113,4 +116,23 @@ const onReturnStreamAndGenerator = async () => {
     yield 1
   }
   return { stream, gen: gen() }
+}
+
+// ── Mid-stream error cases (e2e tests) ──────────────────────────────
+
+import { Abort } from 'telefunc'
+
+async function* onGeneratorAbortMidStream(): AsyncGenerator<string> {
+  yield 'before-abort'
+  throw Abort()
+}
+
+async function* onGeneratorAbortWithValue(): AsyncGenerator<string> {
+  yield 'before-abort'
+  throw Abort({ reason: 'not-allowed', code: 403 })
+}
+
+async function* onGeneratorBugMidStream(): AsyncGenerator<string> {
+  yield 'before-bug'
+  throw new Error('Unexpected generator error')
 }

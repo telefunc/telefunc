@@ -58,7 +58,7 @@ async function resolveHttpRequest(httpRequest: HttpRequest): Promise<HttpRequest
     return { request: httpRequest.request, context: httpRequest.context }
   }
   if ('readable' in httpRequest) {
-    const request = nodeReadableToWebRequest(
+    const request = await nodeReadableToWebRequest(
       httpRequest.readable,
       'http://localhost' + httpRequest.url,
       httpRequest.method,

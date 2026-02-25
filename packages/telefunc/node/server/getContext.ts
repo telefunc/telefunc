@@ -9,6 +9,7 @@ import { getContext_sync, provideTelefuncContext_sync, restoreContext_sync } fro
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isObject } from '../../utils/isObject.js'
+import { getRequestContext } from './requestContext.js'
 import type { Telefunc } from './getContext/TelefuncNamespace.js'
 
 type GetContext = () => Telefunc.Context
@@ -27,10 +28,40 @@ const globalObject = getGlobalObject<{
   isAsyncMode: false,
 })
 
-function getContext<Context extends object = Telefunc.Context>(): Context {
+function getContext<Context extends object = Telefunc.Context>(): Context & TelefuncBuiltins {
   const context = globalObject.getContext()
   assert(isObject(context))
-  return context as Context
+  augmentContext(context)
+  return context as Context & TelefuncBuiltins
+}
+
+type TelefuncBuiltins = {
+  /** Register a callback that fires when the client aborts the connection (disconnects before the response finishes). */
+  onConnectionAbort: (cb: () => void) => void
+}
+
+function augmentContext(context: Record<string, unknown>): void {
+  const reqCtx = getRequestContext()
+  assert(reqCtx)
+  const { abortSignal } = reqCtx
+  context.onConnectionAbort = (cb: () => void) => {
+    // Guard: some server environments (e.g. certain Node.js adapters, edge runtimes) may fire
+    // the abort signal even after the response has been fully sent. The `completed` flag ensures
+    // callbacks only run for genuine client-initiated disconnects, not false positives from
+    // inconsistent signal propagation across environments.
+    if (reqCtx.completed) return
+    if (abortSignal.aborted) {
+      cb()
+      return
+    }
+    abortSignal.addEventListener(
+      'abort',
+      () => {
+        if (!reqCtx.completed) cb()
+      },
+      { once: true },
+    )
+  }
 }
 
 function provideTelefuncContext<Context extends object = Telefunc.Context>(context: Context): void {

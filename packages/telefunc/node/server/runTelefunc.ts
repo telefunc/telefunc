@@ -16,12 +16,8 @@ import { handleError } from './runTelefunc/handleError.js'
 import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
 import { getServerConfig } from './serverConfig.js'
-import type {
-  Readable as StreamReadableNode,
-  Writable as StreamWritableNode,
-  pipeline as PipelineNode,
-} from 'node:stream'
-import { import_ } from '@brillout/import'
+import type { Readable as StreamReadableNode, Writable as StreamWritableNode } from 'node:stream'
+import { loadStreamNodeModule } from '../../utils/loadStreamNodeModule.js'
 import {
   STATUS_CODE_THROW_ABORT,
   STATUS_CODE_SHIELD_VALIDATION_ERROR,
@@ -210,15 +206,6 @@ function encodeForWebStream(thing: unknown) {
   return thing
 }
 
-// Because of Cloudflare Workers, we cannot statically import the `stream` module, instead we dynamically import it.
-async function loadStreamNodeModule() {
-  const streamModule = (await import_('stream')).default as Awaited<typeof import('stream')>
-  const utilModule = (await import_('util')).default as Awaited<typeof import('util')>
-  const pipeline = utilModule.promisify(streamModule.pipeline)
-  const { Readable, Writable } = streamModule
-  return { Readable, Writable, pipeline }
-}
-
 const shieldValidationError = {
   statusCode: STATUS_CODE_SHIELD_VALIDATION_ERROR,
   body: STATUS_BODY_SHIELD_VALIDATION_ERROR,
@@ -332,13 +319,14 @@ async function runTelefunc_({
 
   {
     assert(runContext.isValidRequest)
-    const { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionError } =
+    const { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionError, requestContext } =
       await executeTelefunction(runContext)
     objectAssign(runContext, {
       telefunctionReturn,
       telefunctionHasErrored,
       telefunctionAborted,
       telefunctionError,
+      requestContext,
     })
   }
 
@@ -347,6 +335,11 @@ async function runTelefunc_({
   }
 
   {
+    objectAssign(runContext, {
+      onStreamComplete: () => {
+        runContext.requestContext.completed = true
+      },
+    })
     const result = serializeTelefunctionResult(runContext)
     if (result.type === 'streaming') {
       return createHttpResponse({
@@ -362,10 +355,9 @@ async function runTelefunc_({
     objectAssign(runContext, { httpResponseBody: result.body })
   }
 
-  // {
-  //   const httpResponseEtag = await getEtag(runContext)
-  //   objectAssign(runContext, { httpResponseEtag })
-  // }
+  // Non-streaming response is fully computed — mark request as completed
+  // so that late-firing abort signals don't trigger onConnectionAbort callbacks.
+  runContext.requestContext.completed = true
 
   return createHttpResponse({
     statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,

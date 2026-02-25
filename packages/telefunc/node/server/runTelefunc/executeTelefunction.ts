@@ -2,12 +2,12 @@ export { executeTelefunction }
 
 import { isAbort, Abort } from '../Abort.js'
 import { restoreContext, Telefunc } from '../getContext.js'
+import { restoreRequestContext } from '../requestContext.js'
 import type { Telefunction } from '../types.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { isAsyncGenerator } from '../../../utils/isAsyncGenerator.js'
 import { validateTelefunctionError } from './validateTelefunctionError.js'
-import type { TelefuncIdentifier } from '../../../shared/constants.js'
 
 async function executeTelefunction(runContext: {
   telefunction: Telefunction
@@ -15,10 +15,13 @@ async function executeTelefunction(runContext: {
   telefuncFilePath: string
   telefunctionArgs: unknown[]
   providedContext: Telefunc.Context | null
+  request: Request
 }) {
   const { telefunction, telefunctionArgs } = runContext
 
   restoreContext(runContext.providedContext)
+  const requestContext = { abortSignal: runContext.request.signal, completed: false }
+  restoreRequestContext(requestContext)
 
   let telefunctionReturn: unknown
   let telefunctionError: unknown
@@ -58,5 +61,5 @@ async function executeTelefunction(runContext: {
     }
   }
 
-  return { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionError }
+  return { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionError, requestContext }
 }

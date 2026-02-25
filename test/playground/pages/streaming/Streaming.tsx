@@ -12,6 +12,9 @@ import {
   onReturnStreamWithMeta,
   onReturnTwoGenerators,
   onReturnStreamAndGenerator,
+  onGeneratorAbortMidStream,
+  onGeneratorAbortWithValue,
+  onGeneratorBugMidStream,
 } from './Streaming.telefunc'
 
 function Streaming() {
@@ -191,6 +194,65 @@ function Streaming() {
         }}
       >
         Stream + generator (should error)
+      </button>
+
+      <h2>Mid-stream error tests</h2>
+
+      <button
+        id="test-generator-abort-midstream"
+        onClick={async () => {
+          setResult('')
+          const gen = await onGeneratorAbortMidStream()
+          const values: string[] = []
+          try {
+            for await (const v of gen) {
+              values.push(v)
+            }
+            setResult(JSON.stringify({ error: false, values }))
+          } catch (e: any) {
+            setResult(JSON.stringify({ error: true, isAbort: !!e.isAbort, abortValue: e.abortValue, values }))
+          }
+        }}
+      >
+        Generator Abort mid-stream
+      </button>
+
+      <button
+        id="test-generator-abort-with-value"
+        onClick={async () => {
+          setResult('')
+          const gen = await onGeneratorAbortWithValue()
+          const values: string[] = []
+          try {
+            for await (const v of gen) {
+              values.push(v)
+            }
+            setResult(JSON.stringify({ error: false, values }))
+          } catch (e: any) {
+            setResult(JSON.stringify({ error: true, isAbort: !!e.isAbort, abortValue: e.abortValue, values }))
+          }
+        }}
+      >
+        Generator Abort with value
+      </button>
+
+      <button
+        id="test-generator-bug-midstream"
+        onClick={async () => {
+          setResult('')
+          const gen = await onGeneratorBugMidStream()
+          const values: string[] = []
+          try {
+            for await (const v of gen) {
+              values.push(v)
+            }
+            setResult(JSON.stringify({ error: false, values }))
+          } catch (e: any) {
+            setResult(JSON.stringify({ error: true, isBug: !e.isAbort, message: String(e), values }))
+          }
+        }}
+      >
+        Generator Bug mid-stream
       </button>
     </div>
   )

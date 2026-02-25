@@ -4,6 +4,7 @@ import { page, test, expect, expectLog, run, getServerUrl, autoRetry, fetchHtml 
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testStreaming } from './pages/streaming/e2e-test'
+import { testAbort } from './pages/abort/e2e-test'
 
 function testRun(cmd: 'npm run dev' | 'npm run preview') {
   run(cmd, {
@@ -11,7 +12,8 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
       return (
         log.logText.includes('File arguments are being consumed out of order') ||
         log.logText.includes('multiple streaming values') ||
-        log.logText.includes('the server responded with a status of 500')
+        log.logText.includes('the server responded with a status of 500') ||
+        log.logText.includes('Unexpected generator error')
       )
     },
   })
@@ -41,6 +43,8 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
   testFileUpload()
 
   testStreaming()
+
+  testAbort()
 
   if (!isDev) {
     test('shield() generation', async () => {
