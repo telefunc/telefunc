@@ -7,6 +7,7 @@ import { assertUsage } from '../utils/assert.js'
 import { isBrowser } from '../utils/isBrowser.js'
 import { objectAssign } from '../utils/objectAssign.js'
 import { isAsyncGenerator } from '../utils/isAsyncGenerator.js'
+import { setAbortController } from './abort.js'
 
 function remoteTelefunctionCall(
   telefuncFilePath: string,
@@ -26,24 +27,25 @@ function remoteTelefunctionCall(
 
   objectAssign(callContext, resolveClientConfig())
 
+  const abortController = new AbortController()
+  objectAssign(callContext, { abortController })
+
   {
     const httpRequestBody = serializeTelefunctionArguments(callContext)
     objectAssign(callContext, { httpRequestBody })
   }
 
-  const httpResponsePromise = makeHttpRequest(callContext)
+  const telefunctionReturnPromise = makeHttpRequest(callContext)
 
-  const telefunctionReturnPromise: Promise<unknown> = (async () => {
-    const { telefunctionReturn } = await httpResponsePromise
-    return telefunctionReturn
-  })()
+  setAbortController(telefunctionReturnPromise, abortController)
+  addAsyncGeneratorInterface(telefunctionReturnPromise)
 
-  return addAsyncGeneratorInterface(telefunctionReturnPromise)
+  return telefunctionReturnPromise
 }
 
 /** Augment a promise with the AsyncGenerator interface
  *  so `for await...of` works directly without an intermediate `await`. */
-function addAsyncGeneratorInterface(promise: Promise<unknown>): AsyncGenerator<unknown> & Promise<unknown> {
+function addAsyncGeneratorInterface(promise: Promise<unknown>) {
   let gen: AsyncGenerator<unknown> | null = null
   const getGen = () =>
     (gen ??= (async function* () {
@@ -52,17 +54,15 @@ function addAsyncGeneratorInterface(promise: Promise<unknown>): AsyncGenerator<u
         isAsyncGenerator(returnValue),
         '`for await...of` can only be used with telefunctions that return an async generator',
       )
+      gen = returnValue
       yield* returnValue
     })())
 
-  const augmented = Object.assign(promise, {
+  objectAssign(promise, {
     next: (...args: [] | [unknown]) => getGen().next(...args),
-    return: (value?: unknown) => getGen().return(value),
-    throw: (e?: any) => getGen().throw(e),
-    [Symbol.asyncDispose]: async () => {
-      await getGen().return(undefined)
-    },
-    [Symbol.asyncIterator]: () => augmented,
+    return: (value?: unknown) => (gen ? gen.return(value) : Promise.resolve({ done: true as const, value })),
+    throw: (e?: any) => (gen ? gen.throw(e) : Promise.reject(e)),
+    [Symbol.asyncDispose]: () => (gen ? gen[Symbol.asyncDispose]() : Promise.resolve()),
+    [Symbol.asyncIterator]: () => promise,
   })
-  return augmented
 }

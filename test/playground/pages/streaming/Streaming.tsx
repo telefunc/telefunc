@@ -49,7 +49,7 @@ function Streaming() {
       <button
         id="test-async-generator"
         onClick={async () => {
-          const gen = await onReturnAsyncGenerator()
+          const gen = onReturnAsyncGenerator()
           const values: number[] = []
           for await (const v of gen) {
             values.push(v)
@@ -96,7 +96,7 @@ function Streaming() {
       <button
         id="test-empty-generator"
         onClick={async () => {
-          const gen = await onReturnEmptyGenerator()
+          const gen = onReturnEmptyGenerator()
           const values: number[] = []
           for await (const v of gen) {
             values.push(v)
@@ -136,7 +136,7 @@ function Streaming() {
         id="test-delayed-generator"
         onClick={async () => {
           setResult('')
-          const gen = await onReturnDelayedGenerator()
+          const gen = onReturnDelayedGenerator()
           const values: string[] = []
           for await (const v of gen) {
             values.push(v)
@@ -202,7 +202,7 @@ function Streaming() {
         id="test-generator-abort-midstream"
         onClick={async () => {
           setResult('')
-          const gen = await onGeneratorAbortMidStream()
+          const gen = onGeneratorAbortMidStream()
           const values: string[] = []
           try {
             for await (const v of gen) {
@@ -221,7 +221,7 @@ function Streaming() {
         id="test-generator-abort-with-value"
         onClick={async () => {
           setResult('')
-          const gen = await onGeneratorAbortWithValue()
+          const gen = onGeneratorAbortWithValue()
           const values: string[] = []
           try {
             for await (const v of gen) {
@@ -240,7 +240,7 @@ function Streaming() {
         id="test-generator-bug-midstream"
         onClick={async () => {
           setResult('')
-          const gen = await onGeneratorBugMidStream()
+          const gen = onGeneratorBugMidStream()
           const values: string[] = []
           try {
             for await (const v of gen) {

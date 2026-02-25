@@ -67,13 +67,11 @@ function testAbort() {
     await resetCleanupState()
 
     await page.click('#test-slow-normal-telefunc')
-    // Wait for a few steps to run
+    // Wait for abort() to fire after 1.5s
     await autoRetry(async () => {
       const result = JSON.parse((await page.textContent('#abort-result'))!)
       expect(result.normalStarted).toBe(true)
     })
-    // Navigate away to disconnect (aborts the pending fetch)
-    await page.goto('about:blank')
     // Server should detect abort and the telefunc should exit early
     await autoRetry(async () => {
       const state = await getCleanupState()

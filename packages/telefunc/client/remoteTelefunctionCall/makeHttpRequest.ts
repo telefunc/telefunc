@@ -29,7 +29,8 @@ async function makeHttpRequest(callContext: {
   telefuncFilePath: string
   httpHeaders: Record<string, string> | null
   fetch: typeof globalThis.fetch | null
-}): Promise<{ telefunctionReturn: unknown }> {
+  abortController: AbortController
+}): Promise<unknown> {
   const isBinaryFrame = typeof callContext.httpRequestBody !== 'string'
   const contentType = isBinaryFrame ? { 'Content-Type': 'application/octet-stream' } : { 'Content-Type': 'text/plain' }
   let response: Response
@@ -43,8 +44,14 @@ async function makeHttpRequest(callContext: {
         ...contentType,
         ...callContext.httpHeaders,
       },
+      signal: callContext.abortController.signal,
     })
-  } catch (_) {
+  } catch (err) {
+    if (callContext.abortController.signal.aborted) {
+      const cancelError = new Error('Telefunc call cancelled')
+      objectAssign(cancelError, { isCancelled: true as const })
+      throw cancelError
+    }
     const telefunctionCallError = new Error('No Server Connection')
     objectAssign(telefunctionCallError, { isConnectionError: true as const })
     throw telefunctionCallError
@@ -58,7 +65,7 @@ async function makeHttpRequest(callContext: {
     const { ret } = isStreaming
       ? await parseStreamingResponseBody(response, callContext)
       : await parseResponseBody(response, callContext)
-    return { telefunctionReturn: ret }
+    return ret
   } else if (statusCode === STATUS_CODE_THROW_ABORT) {
     const { ret } = await parseResponseBody(response, callContext)
     throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, ret)
@@ -177,7 +184,7 @@ async function parseStreamingResponseBody(
       })
     },
     createGenerator: (_meta) => {
-      return (async function* () {
+      const gen = (async function* () {
         try {
           while (true) {
             const chunk = await streamReader.readNextChunk()
@@ -188,6 +195,13 @@ async function parseStreamingResponseBody(
           reader.cancel()
         }
       })()
+      const origReturn = gen.return.bind(gen)
+      gen.return = (...args: Parameters<(typeof gen)['return']>) => {
+        const val = origReturn(...args)
+        reader.cancel()
+        return val
+      }
+      return gen
     },
   })
 

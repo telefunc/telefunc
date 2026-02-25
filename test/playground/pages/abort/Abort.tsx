@@ -2,6 +2,7 @@ export { Abort }
 
 import React, { useEffect, useState } from 'react'
 import { onSlowAIGenerator, onSlowStreamForAbort, onSlowNormalTelefunc } from './Abort.telefunc'
+import { abort } from 'telefunc/client'
 
 function Abort() {
   const [hydrated, setHydrated] = useState(false)
@@ -19,13 +20,17 @@ function Abort() {
         id="test-slow-ai-generator"
         onClick={async () => {
           setResult('')
-          const gen = await onSlowAIGenerator()
+          const gen = onSlowAIGenerator()
           const values: string[] = []
-          for await (const v of gen) {
-            values.push(v)
-            // Break after first token — simulates user navigating away
-            if (values.length >= 1) break
-          }
+          const iterator = gen[Symbol.asyncIterator]()
+          // First token arrives immediately
+          const first = await iterator.next()
+          if (!first.done) values.push(first.value)
+          // Second token takes 10s — cancel after 500ms while read is pending
+          const nextPromise = iterator.next()
+          const timeout = new Promise((r) => setTimeout(() => r('timeout'), 500))
+          const race = await Promise.race([nextPromise, timeout])
+          if (race === 'timeout') await iterator.return(undefined)
           setResult(JSON.stringify({ values, aiDisconnected: true }))
         }}
       >
@@ -40,16 +45,13 @@ function Abort() {
           const reader = stream.getReader()
           const decoder = new TextDecoder()
           const chunks: string[] = []
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            chunks.push(decoder.decode(value, { stream: true }))
-            // Cancel after first chunk
-            if (chunks.length >= 1) {
-              await reader.cancel()
-              break
-            }
-          }
+          // First chunk arrives immediately
+          const first = await reader.read()
+          if (!first.done) chunks.push(decoder.decode(first.value, { stream: true }))
+          // Second chunk takes 5s — cancel after 500ms while read is pending
+          const timeout = new Promise((r) => setTimeout(() => r('timeout'), 500))
+          const race = await Promise.race([reader.read(), timeout])
+          if (race === 'timeout') await reader.cancel()
           setResult(JSON.stringify({ chunks, streamCancelled: true }))
         }}
       >
@@ -60,10 +62,10 @@ function Abort() {
         id="test-slow-normal-telefunc"
         onClick={async () => {
           setResult('')
-          // Fire and forget — we'll navigate away to disconnect
-          onSlowNormalTelefunc()
-          // Wait a bit for a few steps to run, then signal done
+          const promise = onSlowNormalTelefunc()
+          // Wait a bit for a few steps to run, then abort
           await new Promise((r) => setTimeout(r, 1500))
+          abort(promise)
           setResult(JSON.stringify({ normalStarted: true }))
         }}
       >
