@@ -36,6 +36,9 @@ async function makeHttpRequest(callContext: {
   let response: Response
   try {
     const fetch = callContext.fetch ?? window.fetch
+    // Yield to the microtask queue so that setAbortController() and withAbort() can wire up
+    // the AbortController before the fetch is initiated.
+    await void 0
     response = await fetch(callContext.telefuncUrl, {
       method,
       body: callContext.httpRequestBody,
