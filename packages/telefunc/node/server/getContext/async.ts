@@ -33,6 +33,8 @@ function getContext_async(): Telefunc.Context {
   assertUsage(globalObject.asyncStore, errMsg)
   const context = globalObject.asyncStore.getStore()
   assert(context === undefined || isObject(context))
+  // context is always set inside a telefunc execution — restoreContext_async initializes it with {}
+  // if no user context was provided, so augmentContext() can attach onConnectionAbort().
   assertUsage(context, errMsg)
   return context
 }
@@ -50,4 +52,8 @@ function restoreContext_async(context: null | Telefunc.Context): any {
     'When using `provideTelefuncContext()` (i.e. Async Hooks), then providing the `context` object to the server middleware `telefunc()` has no effect.',
     { onlyOnce: true },
   )
+  // Always initialize the store with at least an empty object so getContext() works inside
+  // a telefunc execution even without provideTelefuncContext() — needed for onConnectionAbort().
+  globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
+  globalObject.asyncStore.enterWith(context ?? ({} as Telefunc.Context))
 }

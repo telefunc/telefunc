@@ -29,14 +29,7 @@ function getContext_sync(): Telefunc.Context {
         'Using Telefunc to fetch the initial data of your page is discouraged, see https://telefunc.com/initial-data',
       )
     }
-    if (globalObject.hasRestoreAccess || globalObject.neverProvided) {
-      assertUsage(
-        false,
-        '[getContext()] Make sure to provide a context object, see https://telefunc.com/getContext#provide',
-      )
-    } else {
-      assertUsage(false, '[getContext()] Cannot access context object, see https://telefunc.com/getContext#access')
-    }
+    assertUsage(false, '[getContext()] Cannot access context object, see https://telefunc.com/getContext#access')
   }
   assert(isObject(globalObject.context))
   return globalObject.context
@@ -56,8 +49,10 @@ function provide(context: null | Telefunc.Context) {
   assert(context === null || isObject(context))
   if (context) {
     globalObject.neverProvided = false
-    globalObject.context = context
   }
+  // Always initialize context — use {} if no user context provided so getContext() works
+  // inside a telefunc execution for built-in methods like onConnectionAbort().
+  globalObject.context = context ?? ({} as Telefunc.Context)
   globalObject.hasRestoreAccess = true
   // We don't use process.nextTick() to avoid dependency on Node.js
   setTimeout(() => {

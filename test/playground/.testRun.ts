@@ -14,7 +14,8 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
         log.logText.includes('multiple streaming values') ||
         log.logText.includes('the server responded with a status of 500') ||
         log.logText.includes('Unexpected generator error') ||
-        // log.logText.includes('The user aborted a request') ||
+        log.logText.includes('Client disconnected during file upload') ||
+        log.logText.includes('The user aborted a request') ||
         log.logText.includes('Telefunc call cancelled')
       )
     },

@@ -339,8 +339,10 @@ async function runTelefunc_({
       onStreamComplete: () => {
         runContext.requestContext.completed = true
       },
+      abortSignal: runContext.requestContext.abortSignal,
     })
     const result = serializeTelefunctionResult(runContext)
+
     if (result.type === 'streaming') {
       return createHttpResponse({
         statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,

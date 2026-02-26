@@ -8,6 +8,7 @@ import { isBrowser } from '../utils/isBrowser.js'
 import { objectAssign } from '../utils/objectAssign.js'
 import { isAsyncGenerator } from '../utils/isAsyncGenerator.js'
 import { setAbortController } from './abort.js'
+import { getPendingContext } from './withContext.js'
 
 function remoteTelefunctionCall(
   telefuncFilePath: string,
@@ -16,7 +17,11 @@ function remoteTelefunctionCall(
 ): Promise<unknown> {
   assertUsage(isBrowser(), 'The Telefunc Client is meant to be run only in the browser.')
 
+  // Read pending context synchronously — set by withContext(), reset by its finally block.
+  const callClientContext = getPendingContext()
+
   const callContext = {}
+
   {
     objectAssign(callContext, {
       telefuncFilePath,
@@ -27,7 +32,13 @@ function remoteTelefunctionCall(
 
   objectAssign(callContext, resolveClientConfig())
 
-  const abortController = new AbortController()
+  if (callClientContext?.headers) {
+    const merged = { ...callContext.headers, ...callClientContext.headers }
+    objectAssign(callContext, { headers: merged })
+  }
+
+  const abortController = createAbortController(callClientContext?.signal)
+
   objectAssign(callContext, { abortController })
 
   {
@@ -41,6 +52,21 @@ function remoteTelefunctionCall(
   addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)
 
   return telefunctionReturnPromise
+}
+
+/** Create an AbortController optionally wired to an external signal. */
+function createAbortController(signal?: AbortSignal): AbortController {
+  const abortController = new AbortController()
+
+  if (signal) {
+    if (signal.aborted) {
+      abortController.abort()
+    } else {
+      signal.addEventListener('abort', () => abortController.abort(), { once: true })
+    }
+  }
+
+  return abortController
 }
 
 /** Augment a promise with the AsyncGenerator interface

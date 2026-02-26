@@ -140,4 +140,27 @@ function testStreaming() {
       expect(result.values).deep.equal(['before-bug'])
     })
   })
+
+  test('streaming: upload with progress', async () => {
+    await page.goto(`${getServerUrl()}/streaming`)
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+
+    await page.click('#test-upload-progress')
+    await autoRetry(async () => {
+      const result = JSON.parse((await page.textContent('#streaming-result'))!)
+      expect(result.done).toBe(true)
+      expect(result.updates.length).greaterThanOrEqual(1)
+      const last = result.updates[result.updates.length - 1]
+      expect(last.bytesRead).toBe(1_000_000)
+      expect(last.totalSize).toBe(1_000_000)
+      // 1MB file should produce multiple chunks
+      expect(result.updates.length).greaterThan(1)
+      // Each update should have monotonically increasing bytesRead
+      for (let i = 1; i < result.updates.length; i++) {
+        expect(result.updates[i].bytesRead).greaterThan(result.updates[i - 1].bytesRead)
+      }
+    })
+  })
 }

@@ -1,6 +1,4 @@
-export { abort, withAbort, setAbortController }
-
-import { isAsyncGenerator } from '../utils/isAsyncGenerator.js'
+export { abort, setAbortController }
 
 const ABORT_CONTROLLER = Symbol.for('telefuncAbort')
 
@@ -20,6 +18,9 @@ function getAbortController(call: TelefuncCall): AbortController | undefined {
 
 /** Immediately abort a pending telefunc call.
  *
+ *  Aborts the underlying fetch. Rejects with a cancel error (`isCancel: true`);
+ *  for streaming calls mid-stream, the next read rejects instead.
+ *
  *  ```ts
  *  import { abort } from 'telefunc/client'
  *  const call = onSlowTelefunc()
@@ -27,32 +28,6 @@ function getAbortController(call: TelefuncCall): AbortController | undefined {
  *  ```
  */
 function abort(call: TelefuncCall): void {
-  // If an async generator is active, close it first so the stream reader
-  // is cancelled cleanly before the fetch is aborted.
-  if (isAsyncGenerator(call)) {
-    call.return(undefined)
-  }
   const controller = getAbortController(call)
   if (controller) controller.abort()
-}
-
-/** Wire an AbortSignal to a telefunc call. Returns the same promise for chaining.
- *
- *  ```ts
- *  import { withAbort } from 'telefunc/client'
- *  const controller = new AbortController()
- *  const value = await withAbort(onSlowTelefunc(), controller.signal)
- *  // later: controller.abort()
- *  ```
- */
-function withAbort<T extends TelefuncCall>(call: T, signal: AbortSignal): T {
-  const controller = getAbortController(call)
-  if (controller) {
-    if (signal.aborted) {
-      controller.abort()
-    } else {
-      signal.addEventListener('abort', () => controller.abort(), { once: true })
-    }
-  }
-  return call
 }

@@ -12,6 +12,7 @@ export {
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
+  onUploadWithProgress,
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -135,4 +136,19 @@ async function* onGeneratorAbortWithValue(): AsyncGenerator<string> {
 async function* onGeneratorBugMidStream(): AsyncGenerator<string> {
   yield 'before-bug'
   throw new Error('Unexpected generator error')
+}
+
+// ── Upload progress via streaming (e2e tests) ──────────────────────
+
+async function* onUploadWithProgress(file: File): AsyncGenerator<{ bytesRead: number; totalSize: number }> {
+  const totalSize = file.size
+  const stream = file.stream()
+  const reader = stream.getReader()
+  let bytesRead = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    bytesRead += value.byteLength
+    yield { bytesRead, totalSize }
+  }
 }

@@ -23,7 +23,8 @@ function serializeTelefunctionResult(runContext: {
   telefunctionName: string
   telefuncFilePath: string
   telefunctionAborted: boolean
-  onStreamComplete?: () => void
+  onStreamComplete: () => void
+  abortSignal: AbortSignal
 }): SerializeResult {
   const bodyValue: TelefuncResponseBody = runContext.telefunctionAborted
     ? { ret: runContext.telefunctionReturn, abort: true }
@@ -69,7 +70,13 @@ function serializeTelefunctionResult(runContext: {
   }
   return {
     type: 'streaming',
-    body: buildStreamingResponseBody(httpResponseBody, streamingValues[0]!, telefuncId, runContext.onStreamComplete),
+    body: buildStreamingResponseBody(
+      httpResponseBody,
+      streamingValues[0]!,
+      telefuncId,
+      runContext.onStreamComplete,
+      runContext.abortSignal,
+    ),
   }
 }
 
@@ -80,25 +87,49 @@ function buildStreamingResponseBody(
   metadataSerialized: string,
   streamingValue: StreamingValue,
   telefuncId: TelefuncIdentifier,
-  onStreamComplete?: () => void,
+  onStreamComplete: () => void,
+  abortSignal: AbortSignal,
 ): ReadableStream<Uint8Array> {
   const gen = generateResponseBody(metadataSerialized, streamingValue, telefuncId)
+  let cancelled = false
+  let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+
+  const doCancel = (controller?: ReadableStreamDefaultController<Uint8Array> | null) => {
+    if (cancelled) return
+    cancelled = true
+    gen.return(undefined)
+    if (controller)
+      try {
+        controller.close()
+      } catch {}
+  }
+
+  abortSignal.addEventListener('abort', () => doCancel(streamController), { once: true })
+
   return new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller
+    },
     async pull(controller) {
       try {
         const { done, value } = await gen.next()
+        if (cancelled) return
         if (done) {
-          onStreamComplete?.()
+          onStreamComplete()
           controller.close()
-        } else controller.enqueue(value)
+        } else {
+          controller.enqueue(value)
+        }
       } catch (err) {
-        onStreamComplete?.()
-        controller.error(err)
+        if (cancelled) return
+        onStreamComplete()
+        try {
+          controller.error(err)
+        } catch {}
       }
     },
-    async cancel() {
-      onStreamComplete?.()
-      await gen.return(undefined)
+    cancel() {
+      doCancel()
     },
   })
 }
@@ -132,10 +163,17 @@ async function* generateResponseBody(
         await reader.cancel()
       }
     } else {
-      for await (const value of streamingValue.value) {
-        const serialized = textEncoder.encode(stringify(value))
-        yield encodeU32(serialized.byteLength)
-        yield serialized
+      const gen = streamingValue.value
+      try {
+        while (true) {
+          const { done, value } = await gen.next()
+          if (done) break
+          const serialized = textEncoder.encode(stringify(value))
+          yield encodeU32(serialized.byteLength)
+          yield serialized
+        }
+      } finally {
+        await gen.return(undefined)
       }
     }
     // Success: zero-length terminator

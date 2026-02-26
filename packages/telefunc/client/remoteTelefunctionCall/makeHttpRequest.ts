@@ -27,7 +27,7 @@ async function makeHttpRequest(callContext: {
   httpRequestBody: string | Blob
   telefunctionName: string
   telefuncFilePath: string
-  httpHeaders: Record<string, string> | null
+  headers: Record<string, string> | null
   fetch: typeof globalThis.fetch | null
   abortController: AbortController
 }): Promise<unknown> {
@@ -36,24 +36,19 @@ async function makeHttpRequest(callContext: {
   let response: Response
   try {
     const fetch = callContext.fetch ?? window.fetch
-    // Yield to the microtask queue so that setAbortController() and withAbort() can wire up
-    // the AbortController before the fetch is initiated.
-    await void 0
     response = await fetch(callContext.telefuncUrl, {
       method,
       body: callContext.httpRequestBody,
       credentials: 'same-origin',
       headers: {
         ...contentType,
-        ...callContext.httpHeaders,
+        ...callContext.headers,
       },
       signal: callContext.abortController.signal,
     })
   } catch (err) {
     if (callContext.abortController.signal.aborted) {
-      const cancelError = new Error('Telefunc call cancelled')
-      objectAssign(cancelError, { isCancel: true as const })
-      throw cancelError
+      throwCancelError()
     }
     const telefunctionCallError = new Error('No Server Connection')
     objectAssign(telefunctionCallError, { isConnectionError: true as const })
@@ -156,7 +151,7 @@ async function getErrMsg(
 /** Parse a binary streaming response: [u32 metadata len][metadata JSON][chunk frames...][zero terminator] */
 async function parseStreamingResponseBody(
   response: Response,
-  callContext: { telefunctionName: string; telefuncFilePath: string },
+  callContext: { telefunctionName: string; telefuncFilePath: string; abortController: AbortController },
 ): Promise<{ ret: unknown }> {
   assert(response.body)
   const reader = response.body.getReader()
@@ -182,6 +177,7 @@ async function parseStreamingResponseBody(
           }
         },
         cancel() {
+          streamReader.cancelled = true
           reader.cancel()
         },
       })
@@ -218,26 +214,45 @@ const EMPTY = new Uint8Array(0)
 
 class StreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array>
-  private callContext: { telefunctionName: string; telefuncFilePath: string }
+  private callContext: { telefunctionName: string; telefuncFilePath: string; abortController: AbortController }
   private buffer: Uint8Array = EMPTY
   cancelled = false
 
   constructor(
     reader: ReadableStreamDefaultReader<Uint8Array>,
-    callContext: { telefunctionName: string; telefuncFilePath: string },
+    callContext: { telefunctionName: string; telefuncFilePath: string; abortController: AbortController },
   ) {
     this.reader = reader
     this.callContext = callContext
+
+    // When the fetch is aborted, cancel the reader first to prevent the browser
+    // from generating a spurious unhandled "BodyStreamBuffer was aborted" rejection.
+    callContext.abortController.signal.addEventListener(
+      'abort',
+      () => {
+        reader.cancel()
+      },
+      { once: true },
+    )
   }
 
   async readExact(n: number): Promise<Uint8Array> {
     while (this.buffer.length < n) {
-      const { done, value } = await this.reader.read()
-      if (done) {
-        if (this.cancelled) return EMPTY
-        throw new Error('Connection lost — the server closed the stream before all data was received.')
+      let done: boolean
+      let value: Uint8Array | undefined
+      let readError: unknown
+      try {
+        ;({ done, value } = await this.reader.read())
+      } catch (err) {
+        readError = err
+        done = true
       }
-      this.buffer = this.buffer.length === 0 ? value : concat(this.buffer, value)
+      if (done) {
+        if (this.callContext.abortController.signal.aborted) throwCancelError()
+        if (this.cancelled) return EMPTY
+        throw readError ?? new Error('Connection lost — the server closed the stream before all data was received.')
+      }
+      this.buffer = this.buffer.length === 0 ? value! : concat(this.buffer, value!)
     }
     const result = this.buffer.subarray(0, n)
     this.buffer = n < this.buffer.length ? this.buffer.subarray(n) : EMPTY
@@ -272,6 +287,12 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
 }
 
 // ===== Shared error helpers =====
+
+function throwCancelError(): never {
+  const cancelError = new Error('Telefunc call cancelled')
+  objectAssign(cancelError, { isCancel: true as const })
+  throw cancelError
+}
 
 function throwAbortError(telefunctionName: string, telefuncFilePath: string, abortValue: unknown): never {
   const telefunctionCallError = new Error(`Aborted telefunction call ${telefunctionName}() (${telefuncFilePath}).`)
