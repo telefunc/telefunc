@@ -11,13 +11,11 @@ const telefuncUniversalMiddleware: UniversalMiddleware = async (request, context
       ...runtime,
     },
   })
-  const { body, statusCode, contentType } = httpResponse
+  const { body, statusCode, headers } = httpResponse
 
   return new Response(body, {
     status: statusCode,
-    headers: {
-      'content-type': contentType,
-    },
+    headers,
   })
 }
 

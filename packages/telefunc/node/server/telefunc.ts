@@ -37,8 +37,8 @@ type HttpRequest =
       method: string
       /** The Node.js `req` readable stream. */
       readable: Readable
-      /** The Content-Type header value */
-      contentType: string
+      /** The HTTP request headers */
+      headers: Record<string, string | string[] | undefined> | [string, string][]
       /** The context object, see https://telefunc.com/getContext  */
       context?: Telefunc.Context
     }
@@ -62,7 +62,7 @@ async function resolveHttpRequest(httpRequest: HttpRequest): Promise<HttpRequest
       httpRequest.readable,
       'http://localhost' + httpRequest.url,
       httpRequest.method,
-      { 'content-type': httpRequest.contentType },
+      httpRequest.headers,
     )
     return { request, context: httpRequest.context }
   }
@@ -94,11 +94,7 @@ function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {
       hasProp(httpRequest, 'method', 'string'),
       '`telefunc({ method })`: argument `method` should be a string.',
     )
-    assertUsage(hasProp(httpRequest, 'contentType'), '`telefunc({ contentType })`: argument `contentType` is missing.')
-    assertUsage(
-      hasProp(httpRequest, 'contentType', 'string'),
-      '`telefunc({ contentType })`: argument `contentType` should be a string.',
-    )
+    assertUsage(hasProp(httpRequest, 'headers'), '`telefunc({ headers })`: argument `headers` is missing.')
   } else {
     assertUsage(hasProp(httpRequest, 'url'), '`telefunc({ url })`: argument `url` is missing.')
     assertUsage(hasProp(httpRequest, 'url', 'string'), '`telefunc({ url })`: argument `url` should be a string.')
@@ -120,7 +116,7 @@ function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {
   const allowedKeys = hasRequest
     ? ['request', 'context']
     : hasReadable
-      ? ['url', 'method', 'readable', 'contentType', 'context']
+      ? ['url', 'method', 'readable', 'headers', 'context']
       : ['url', 'method', 'body', 'context']
   Object.keys(httpRequest).forEach((key) => {
     assertUsage(allowedKeys.includes(key), '`telefunc({ ' + key + ' })`: Unknown argument `' + key + '`.')

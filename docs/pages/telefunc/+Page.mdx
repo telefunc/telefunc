@@ -30,7 +30,7 @@ const httpResponse = await telefunc({
   url: req.originalUrl,
   method: req.method,
   readable: req,
-  contentType: req.headers['content-type'] || '',
+  headers: req.headers,
 
   // Optional
   context: {
@@ -44,7 +44,7 @@ The return value `httpResponse` is a plain JavaScript object with all the inform
 ```js
 const response = new Response(httpResponse.body, {
   status: httpResponse.statusCode,
-  headers: { 'content-type': httpResponse.contentType },
+  headers: httpResponse.headers,
 })
 ```
 

@@ -10,7 +10,7 @@ const handler: RequestHandler = async (event) => {
     },
   })
   return new Response(response.body, {
-    headers: new Headers({ 'content-type': response.contentType }),
+    headers: response.headers,
     status: response.statusCode,
   })
 }

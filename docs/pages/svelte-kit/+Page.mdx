@@ -35,7 +35,7 @@ import type { RequestHandler } from './$types'
 const handler: RequestHandler = async (event) => {
   const httpResponse = await telefunc({ request: event.request })
   return new Response(httpResponse.body, {
-    headers: new Headers({ 'content-type': httpResponse.contentType }),
+    headers: httpResponse.headers,
     status: httpResponse.statusCode,
   })
 }

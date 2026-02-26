@@ -102,7 +102,7 @@
     "@types/react": "^19.1.8",
     "next": "^15.3.4",
     "react": "^19.2.0",
-    "react-streaming": "^0.4.2",
+    "react-streaming": "^0.4.15",
     "typescript": "^5.8.3",
     "vite": "^7.0.0"
   },

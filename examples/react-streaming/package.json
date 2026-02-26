@@ -14,10 +14,10 @@
     "express": "^4.17.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-streaming": "^0.4.2",
+    "react-streaming": "^0.4.15",
     "telefunc": "0.2.19",
     "typescript": "^5.8.3",
-    "vike": "^0.4.240",
+    "vike": "^0.4.253",
     "vite": "^7.0.2"
   }
 }

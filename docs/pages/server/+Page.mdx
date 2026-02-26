@@ -24,7 +24,7 @@ app.all('/_telefunc', async (c) => {
   const httpResponse = await telefunc({ request: c.req.raw })
   return new Response(httpResponse.body, {
     status: httpResponse.statusCode,
-    headers: { 'content-type': httpResponse.contentType },
+    headers: httpResponse.headers,
     context: {
       // You can add any arbitrary contextual information here
     },
@@ -54,12 +54,13 @@ app.all('/_telefunc', async (req, res) => {
     url: req.originalUrl,
     method: req.method,
     readable: req,
-    contentType: req.headers['content-type'] || '',
+    headers: req.headers,
     context: {
       // You can add any arbitrary contextual information here
     },
   })
-  res.status(httpResponse.statusCode).type(httpResponse.contentType).send(httpResponse.body)
+  httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
+  res.status(httpResponse.statusCode).send(httpResponse.body)
 })
 ```
 

@@ -7,7 +7,7 @@ async function handleTelefunc(request: Request) {
   if (!pathname.startsWith('/_telefunc')) return null
   const httpResponse = await telefunc({ request })
   return new Response(httpResponse.body, {
-    headers: { 'content-type': httpResponse.contentType },
+    headers: httpResponse.headers,
     status: httpResponse.statusCode,
   })
 }

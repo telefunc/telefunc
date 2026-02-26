@@ -62,7 +62,7 @@ app.all('/_telefunc', async (c) => {
   })
   return new Response(httpResponse.body, {
     status: httpResponse.statusCode,
-    headers: { 'content-type': httpResponse.contentType }
+    headers: httpResponse.headers,
   })
 })
 
@@ -118,8 +118,9 @@ app.all('/_telefunc', async (req: Request, res: Response) => {
     body: req.body
   })
 
-  const { body, statusCode, contentType } = httpResponse
-  res.status(statusCode).type(contentType).send(body)
+  const { body, statusCode, headers } = httpResponse
+  headers.forEach(([name, value]) => res.setHeader(name, value))
+  res.status(statusCode).send(body)
 })
 ```
 

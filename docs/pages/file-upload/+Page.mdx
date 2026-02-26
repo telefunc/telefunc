@@ -142,7 +142,7 @@ Pass the [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) o
 const httpResponse = await telefunc({ request })
 ```
 
-Alternatively, with Express, Fastify, or any Node.js framework, you can pass the request as a [`Readable`](https://nodejs.org/api/stream.html#readable-streams) stream along with the `Content-Type` header:
+Alternatively, with Express, Fastify, or any Node.js framework, you can pass the request as a [`Readable`](https://nodejs.org/api/stream.html#readable-streams) stream along with the headers:
 
 ```ts
 app.all('/_telefunc', async (req, res) => {
@@ -150,9 +150,10 @@ app.all('/_telefunc', async (req, res) => {
     url: req.originalUrl,
     method: req.method,
     readable: req,
-    contentType: req.headers['content-type'] || '',
+    headers: req.headers,
   })
-  res.status(httpResponse.statusCode).type(httpResponse.contentType).send(httpResponse.body)
+  httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
+  res.status(httpResponse.statusCode).send(httpResponse.body)
 })
 ```
 

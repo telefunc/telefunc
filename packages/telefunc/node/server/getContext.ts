@@ -6,7 +6,7 @@ export { isAsyncMode }
 export type { Telefunc }
 
 import { getContext_sync, provideTelefuncContext_sync, restoreContext_sync } from './getContext/sync.js'
-import { assert } from '../../utils/assert.js'
+import { assert, assertWarning } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isObject } from '../../utils/isObject.js'
 import { getRequestContext } from './requestContext.js'
@@ -42,7 +42,11 @@ type TelefuncBuiltins = {
 
 function augmentContext(context: Record<string, unknown>): void {
   const reqCtx = getRequestContext()
-  assert(reqCtx)
+  if (!reqCtx) {
+    // SSR implementation not trivial
+    context.onConnectionAbort = () => {}
+    return
+  }
   const { abortSignal } = reqCtx
   context.onConnectionAbort = (cb: () => void) => {
     // Guard: some server environments (e.g. certain Node.js adapters, edge runtimes) may fire

@@ -8,7 +8,7 @@ async function handler(request: Request) {
   const httpResponse = await telefunc({ request, context })
   return new Response(httpResponse.body, {
     status: httpResponse.statusCode,
-    headers: { 'content-type': httpResponse.contentType },
+    headers: httpResponse.headers,
   })
 }
 export { handler as GET, handler as POST }

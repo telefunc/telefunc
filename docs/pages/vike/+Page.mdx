@@ -42,7 +42,7 @@ app.all('/_telefunc', async (c) => {
   const httpResponse = await telefunc({ request: c.req.raw })
   return new Response(httpResponse.body, {
     status: httpResponse.statusCode,
-    headers: { 'content-type': httpResponse.contentType },
+    headers: httpResponse.headers,
   })
 })
 ```
