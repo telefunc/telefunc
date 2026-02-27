@@ -90,13 +90,18 @@ function buildStreamingResponseBody(
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
 ): ReadableStream<Uint8Array> {
-  const gen = generateResponseBody(metadataSerialized, streamingValue, telefuncId)
   let cancelled = false
   let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+  // Acquire the reader here so doCancel can call reader.cancel() directly.
+  // gen.return() alone cannot interrupt a suspended reader.read();
+  // reader.cancel() resolves it immediately and fires the upstream cancel callback.
+  const innerReader = streamingValue.type === 'stream' ? streamingValue.value.getReader() : null
+  const gen = generateResponseBody(metadataSerialized, streamingValue, telefuncId, innerReader)
 
   const doCancel = (controller?: ReadableStreamDefaultController<Uint8Array> | null) => {
     if (cancelled) return
     cancelled = true
+    innerReader?.cancel()
     gen.return(undefined)
     if (controller)
       try {
@@ -138,6 +143,7 @@ async function* generateResponseBody(
   metadataSerialized: string,
   streamingValue: StreamingValue,
   telefuncId: TelefuncIdentifier,
+  innerReader: ReadableStreamDefaultReader<Uint8Array> | null,
 ): AsyncGenerator<Uint8Array> {
   // Metadata header
   const metadataBytes = textEncoder.encode(metadataSerialized)
@@ -147,7 +153,7 @@ async function* generateResponseBody(
   try {
     // Chunks as length-prefixed frames terminated by a zero-length frame
     if (streamingValue.type === 'stream') {
-      const reader = streamingValue.value.getReader()
+      const reader = innerReader!
       try {
         while (true) {
           const { done, value } = await reader.read()
