@@ -194,6 +194,22 @@ function testStreaming() {
     })
   })
 
+  test('streaming: abort(res) on multiplexed return object', async () => {
+    await resetCleanupState()
+    await page.click('#test-abort-multiplexed')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result.isCancel).toBe(true)
+      expect(result.error).toContain('Telefunc call cancelled')
+      expect(result.genValues).lengthOf(2)
+    })
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.mixedEndless).toBe('cleaned-up')
+      expect(state.mixedEndlessAborted).not.toBe('')
+    })
+  })
+
   test('streaming: generator Abort() mid-stream', async () => {
     await page.click('#test-generator-abort-midstream')
     await autoRetry(async () => {

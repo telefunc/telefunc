@@ -1,8 +1,10 @@
 export { abort, setAbortController }
 
+import { assertUsage } from '../utils/assert.js'
+
 const ABORT_CONTROLLER = Symbol.for('telefuncAbort')
 
-type TelefuncCall = Promise<unknown> | AsyncGenerator<unknown>
+type TelefuncCall = object
 
 type WithAbortController = { [ABORT_CONTROLLER]?: AbortController }
 
@@ -21,13 +23,21 @@ function getAbortController(call: TelefuncCall): AbortController | undefined {
  *  Aborts the underlying fetch. Rejects with a cancel error (`isCancel: true`);
  *  for streaming calls mid-stream, the next read rejects instead.
  *
+ *  Works with promises, async generators, or multiplexed return objects
+ *  (objects containing generators/streams/promises).
+ *
  *  ```ts
  *  import { abort } from 'telefunc/client'
  *  const call = onSlowTelefunc()
  *  abort(call)
+ *
+ *  // Also works on awaited multiplexed returns:
+ *  const res = await onDashboard()
+ *  abort(res)
  *  ```
  */
 function abort(call: TelefuncCall): void {
   const controller = getAbortController(call)
-  if (controller) controller.abort()
+  assertUsage(controller, '`abort()`: the argument is not a pending telefunc call')
+  controller.abort()
 }

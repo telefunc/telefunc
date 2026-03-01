@@ -21,6 +21,7 @@ import {
   onGeneratorBugMidStream,
   onUploadWithProgress,
 } from './Streaming.telefunc'
+import { abort } from 'telefunc/client'
 
 function Streaming() {
   const [result, setResult] = useState<string>('')
@@ -343,6 +344,34 @@ function Streaming() {
         }}
       >
         Asymmetric generators
+      </button>
+
+      <button
+        id="test-abort-multiplexed"
+        onClick={async () => {
+          setResult('')
+          const res = await onReturnMixedEndless()
+          const genValues: string[] = []
+
+          // Read a couple of gen values
+          for (let i = 0; i < 2; i++) {
+            const { value } = await res.gen.next()
+            genValues.push(value)
+          }
+
+          // Abort the entire multiplexed result
+          abort(res)
+
+          // Next read should reject with isCancel
+          try {
+            await res.gen.next()
+            setResult(JSON.stringify({ error: null, genValues }))
+          } catch (e: any) {
+            setResult(JSON.stringify({ error: e.message, isCancel: !!e.isCancel, genValues }))
+          }
+        }}
+      >
+        Abort multiplexed result
       </button>
 
       <h2>Mid-stream error tests</h2>

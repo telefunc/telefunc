@@ -7,6 +7,7 @@ import { decodeU32, decodeIndexedFrame, concat } from '../../frame.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../constants.js'
 import { createStreamingReviver } from './registry.js'
 import { throwCancelError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
+import { setAbortController } from '../../../client/abort.js'
 
 // ===== Streaming response parsing =====
 
@@ -46,7 +47,14 @@ async function parseStreamingResponseBody(
   const parsed: unknown = parse(metaText, { reviver })
   assert(isObject(parsed) && 'ret' in parsed)
 
-  return { ret: parsed.ret }
+  // Attach the abort controller to the return object so that
+  // abort(res) works after the user awaits the multiplexed result.
+  const { ret } = parsed
+  if (isObject(ret)) {
+    setAbortController(ret, callContext.abortController)
+  }
+
+  return { ret }
 }
 
 // ===== Frame demultiplexer =====
