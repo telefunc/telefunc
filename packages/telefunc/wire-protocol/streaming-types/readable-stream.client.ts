@@ -1,14 +1,11 @@
 export { readableStreamClientType }
 
-import type { ClientStreamingType } from './interface.js'
+import { SERIALIZER_PREFIX_STREAM } from '../constants.js'
+import type { ClientStreamingType, ReadableStreamContract } from './interface.js'
 
-const readableStreamClientType: ClientStreamingType = {
-  prefix: '!TelefuncStream:',
-  createValue: (
-    _metadata: unknown,
-    readNextChunk: () => Promise<Uint8Array | null>,
-    cancel: () => void,
-  ): ReadableStream<Uint8Array> => {
+const readableStreamClientType: ClientStreamingType<ReadableStreamContract> = {
+  prefix: SERIALIZER_PREFIX_STREAM,
+  createValue: (_metadata, readNextChunk, cancel) => {
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {

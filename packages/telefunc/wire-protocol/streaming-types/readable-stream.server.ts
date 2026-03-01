@@ -1,18 +1,18 @@
 export { readableStreamServerType }
 
-import { assertUsage } from '../../../utils/assert.js'
-import type { ServerStreamingType, StreamingProducer } from './interface.js'
+import { assertUsage } from '../../utils/assert.js'
+import { SERIALIZER_PREFIX_STREAM } from '../constants.js'
+import type { ServerStreamingType, ReadableStreamContract } from './interface.js'
 
-const readableStreamServerType: ServerStreamingType = {
-  prefix: '!TelefuncStream:',
-  detect: (value: unknown): boolean => value instanceof ReadableStream,
-  getMetadata: (_value: unknown, index: number) => ({ index }),
-  createProducer: (value: unknown): StreamingProducer => {
-    const stream = value as ReadableStream<Uint8Array>
+const readableStreamServerType: ServerStreamingType<ReadableStreamContract> = {
+  prefix: SERIALIZER_PREFIX_STREAM,
+  detect: (value): value is ReadableStream<Uint8Array> => value instanceof ReadableStream,
+  getMetadata: () => ({}),
+  createProducer: (value) => {
     // Acquire the reader here so cancel() can call reader.cancel() directly.
     // gen.return() alone cannot interrupt a suspended reader.read();
     // reader.cancel() resolves it immediately and fires the upstream cancel callback.
-    const reader = stream.getReader()
+    const reader = value.getReader()
     const chunks = (async function* () {
       try {
         while (true) {

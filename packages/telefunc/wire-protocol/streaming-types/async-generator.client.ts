@@ -2,15 +2,12 @@ export { asyncGeneratorClientType }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { textDecoder } from '../frame.js'
-import type { ClientStreamingType } from './interface.js'
+import { SERIALIZER_PREFIX_GENERATOR } from '../constants.js'
+import type { ClientStreamingType, AsyncGeneratorContract } from './interface.js'
 
-const asyncGeneratorClientType: ClientStreamingType = {
-  prefix: '!TelefuncGenerator:',
-  createValue: (
-    _metadata: unknown,
-    readNextChunk: () => Promise<Uint8Array | null>,
-    cancel: () => void,
-  ): AsyncGenerator<unknown> => {
+const asyncGeneratorClientType: ClientStreamingType<AsyncGeneratorContract> = {
+  prefix: SERIALIZER_PREFIX_GENERATOR,
+  createValue: (_metadata, readNextChunk, cancel) => {
     const gen = (async function* () {
       try {
         while (true) {

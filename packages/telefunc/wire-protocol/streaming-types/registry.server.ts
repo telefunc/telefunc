@@ -4,6 +4,8 @@ import { asyncGeneratorServerType } from './async-generator.server.js'
 import { readableStreamServerType } from './readable-stream.server.js'
 import { promiseServerType } from './promise.server.js'
 import type { ServerStreamingType, StreamingValueServer } from './interface.js'
+import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+assertIsNotBrowser()
 
 const serverStreamingTypes: ServerStreamingType[] = [
   asyncGeneratorServerType,
@@ -12,27 +14,26 @@ const serverStreamingTypes: ServerStreamingType[] = [
 ]
 
 /**
- * JSON-serializer replacer that detects streaming values and replaces them with
- * prefixed metadata placeholders. Collected streaming values are pushed to the
- * provided array for later frame encoding.
- *
- * Absorbs the logic previously in replacer-response.ts, now driven by the
- * registered type plugins.
+ * Creates a JSON-serializer replacer that detects streaming values and replaces
+ * them with prefixed metadata placeholders. Returns the replacer function and
+ * the collected streaming values.
  */
-function createStreamingReplacer(streamingValues: StreamingValueServer[]) {
+function createStreamingReplacer() {
+  const streamingValues: StreamingValueServer[] = []
   let nextIndex = 0
-  return (_key: string, value: unknown, serializer: (v: unknown) => string) => {
+  const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of serverStreamingTypes) {
       if (type.detect(value)) {
         const index = nextIndex++
         streamingValues.push({ type, value, index })
-        const meta = type.getMetadata(value, index)
+        const pluginMeta = type.getMetadata(value)
         return {
-          replacement: type.prefix + serializer(meta),
+          replacement: type.prefix + serializer(pluginMeta),
           resolved: true,
         }
       }
     }
     return undefined
   }
+  return { replacer, streamingValues }
 }

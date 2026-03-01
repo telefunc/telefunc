@@ -3,8 +3,7 @@ export { LazyFile }
 export { isLazyBlob }
 export { isLazyFile }
 
-import type { StreamReader } from './StreamReader.js'
-import type { FileMetadata, BlobMetadata } from '../../../shared/wire-protocol/constants.js'
+import type { RequestBodyReader, FileMetadata, BlobMetadata } from '../interface.js'
 import { assertUsage } from '../../../utils/assert.js'
 
 const LAZY_BLOB_BRAND = Symbol.for('telefunc.LazyBlob')
@@ -77,11 +76,11 @@ class LazyBlob extends BaseStreamBlob {
   readonly type: string
   readonly [LAZY_BLOB_BRAND] = true
 
-  #reader: StreamReader
+  #reader: RequestBodyReader
   #index: number
   #consumed = false
 
-  constructor(reader: StreamReader, metadata: BlobMetadata) {
+  constructor(metadata: BlobMetadata, reader: RequestBodyReader) {
     super()
     this.#reader = reader
     this.#index = metadata.index
@@ -169,8 +168,8 @@ class LazyFile extends LazyBlob implements File {
   readonly webkitRelativePath: string = ''
   readonly [LAZY_FILE_BRAND] = true
 
-  constructor(reader: StreamReader, metadata: FileMetadata) {
-    super(reader, metadata)
+  constructor(metadata: FileMetadata, reader: RequestBodyReader) {
+    super(metadata, reader)
     this.name = metadata.name
     this.lastModified = metadata.lastModified
   }

@@ -1,19 +1,20 @@
 export { promiseServerType }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { isPromise } from '../../../utils/isPromise.js'
+import { isPromise } from '../../utils/isPromise.js'
 import { textEncoder } from '../frame.js'
-import type { ServerStreamingType, StreamingProducer } from './interface.js'
+import { SERIALIZER_PREFIX_PROMISE } from '../constants.js'
+import type { ServerStreamingType, PromiseContract } from './interface.js'
 
-const promiseServerType: ServerStreamingType = {
-  prefix: '!TelefuncPromise:',
-  detect: (value: unknown): boolean => isPromise(value),
-  getMetadata: (_value: unknown, index: number) => ({ index }),
-  createProducer: (value: unknown): StreamingProducer => {
+const promiseServerType: ServerStreamingType<PromiseContract> = {
+  prefix: SERIALIZER_PREFIX_PROMISE,
+  detect: (value): value is Promise<unknown> => isPromise(value),
+  getMetadata: () => ({}),
+  createProducer: (value) => {
     return {
       chunks: (async function* () {
         console.log('[server:promise] awaiting promise...')
-        const resolved = await (value as Promise<unknown>)
+        const resolved = await value
         console.log('[server:promise] promise resolved, yielding value')
         yield textEncoder.encode(stringify(resolved))
         console.log('[server:promise] producer done')

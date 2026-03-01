@@ -1,21 +1,21 @@
 export { asyncGeneratorServerType }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { isAsyncGenerator } from '../../../utils/isAsyncGenerator.js'
+import { isAsyncGenerator } from '../../utils/isAsyncGenerator.js'
 import { textEncoder } from '../frame.js'
-import type { ServerStreamingType, StreamingProducer } from './interface.js'
+import { SERIALIZER_PREFIX_GENERATOR } from '../constants.js'
+import type { ServerStreamingType, AsyncGeneratorContract } from './interface.js'
 
-const asyncGeneratorServerType: ServerStreamingType = {
-  prefix: '!TelefuncGenerator:',
-  detect: (value: unknown): boolean => isAsyncGenerator(value),
-  getMetadata: (_value: unknown, index: number) => ({ index }),
-  createProducer: (value: unknown): StreamingProducer => {
-    const gen = value as AsyncGenerator<unknown>
+const asyncGeneratorServerType: ServerStreamingType<AsyncGeneratorContract> = {
+  prefix: SERIALIZER_PREFIX_GENERATOR,
+  detect: (value): value is AsyncGenerator<unknown> => isAsyncGenerator(value),
+  getMetadata: () => ({}),
+  createProducer: (value) => {
     const chunks = (async function* () {
       try {
         while (true) {
           console.log('[server:async-gen] calling gen.next()')
-          const { done, value: chunk } = await gen.next()
+          const { done, value: chunk } = await value.next()
           if (done) {
             console.log('[server:async-gen] gen.next() returned done=true')
             break
@@ -25,7 +25,7 @@ const asyncGeneratorServerType: ServerStreamingType = {
         }
       } finally {
         console.log('[server:async-gen] finally block — calling gen.return()')
-        await gen.return(undefined)
+        await value.return(undefined)
       }
     })()
     return {
@@ -33,7 +33,7 @@ const asyncGeneratorServerType: ServerStreamingType = {
       cancel: () => {
         console.log('[server:async-gen] cancel() called')
         chunks.return(undefined)
-        gen.return(undefined)
+        value.return(undefined)
       },
     }
   },

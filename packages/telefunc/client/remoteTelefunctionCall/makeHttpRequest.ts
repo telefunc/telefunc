@@ -5,11 +5,10 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { callOnAbortListeners } from './onAbort.js'
-import { decodeU32, concat } from '../../shared/wire-protocol/frame.js'
-import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../shared/wire-protocol/constants.js'
-import type { StreamingErrorFramePayload } from '../../shared/wire-protocol/constants.js'
-import { createStreamingReviver } from '../../shared/wire-protocol/streaming-types/registry.client.js'
-import type { StreamingEntry } from '../../shared/wire-protocol/streaming-types/registry.client.js'
+import { decodeU32, concat } from '../../wire-protocol/frame.js'
+import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../wire-protocol/constants.js'
+import type { StreamingErrorFramePayload } from '../../wire-protocol/constants.js'
+import { createStreamingReviver } from '../../wire-protocol/streaming-types/registry.client.js'
 import {
   STATUS_CODE_SUCCESS,
   STATUS_CODE_THROW_ABORT,
@@ -142,18 +141,16 @@ async function parseStreamingResponseBody(
   const metaBytes = await streamReader.readExact(metaLen)
   const metaText = new TextDecoder().decode(metaBytes)
 
-  const entries: StreamingEntry[] = []
-
-  const getChunkReader = (tag: number) => {
+  const getChunkReader = (index: number) => {
     demuxer.registerConsumer()
-    return () => demuxer.readNextChunkForTag(tag)
+    return () => demuxer.readNextChunkForIndex(index)
   }
 
-  const getCancelForTag = (tag: number) => {
-    return demuxer.getCancelForTag(tag)
+  const getCancelForIndex = (index: number) => {
+    return demuxer.getCancelForIndex(index)
   }
 
-  const reviver = createStreamingReviver(entries, getChunkReader, getCancelForTag)
+  const { reviver } = createStreamingReviver(getChunkReader, getCancelForIndex)
 
   const parsed = parse(metaText, { reviver }) as TelefuncResponseBody
   assert(isObject(parsed) && 'ret' in parsed)
@@ -163,32 +160,32 @@ async function parseStreamingResponseBody(
 
 // ===== Frame demultiplexer =====
 
-/** Demultiplexes tagged frames from a single HTTP stream to multiple consumers.
+/** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
  *  Best-effort backpressure: stops reading when an idle consumer's buffer hits
- *  MAX_BUFFER_PER_TAG, resumes when drained. Active consumers (registered as
+ *  MAX_BUFFER_PER_INDEX, resumes when drained. Active consumers (registered as
  *  waiters) receive frames via direct dispatch — zero buffering, zero delay.
  *
- *  Note: a tag's buffer may briefly exceed MAX_BUFFER_PER_TAG. This happens when
+ *  Note: an index's buffer may briefly exceed MAX_BUFFER_PER_INDEX. This happens when
  *  another consumer's drain restarts the read loop, and the next frame on the wire
- *  is for the already-full tag. Each restart adds at most 1 frame of overshoot.
+ *  is for the already-full index. Each restart adds at most 1 frame of overshoot.
  *  This is the unavoidable cost of multiplexing over a single stream — we can't
- *  peek at the next frame's tag without reading it.
+ *  peek at the next frame's index without reading it.
  *
- *  Cancellation follows .tee() semantics: cancelling one consumer marks its tag
+ *  Cancellation follows .tee() semantics: cancelling one consumer marks its index
  *  as cancelled and drops future frames for it. Other consumers continue normally.
  *  The upstream reader is only cancelled when ALL consumers are cancelled. */
 class FrameDemuxer {
-  private static readonly MAX_BUFFER_BYTES_PER_TAG = 1024 * 1024 // 1 MB
+  private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
   private streamReader: StreamReader
   private pendingFrames = new Map<number, Uint8Array[]>()
   private pendingBytes = new Map<number, number>()
-  private tagWaiters = new Map<number, { resolve: (v: Uint8Array | null) => void; reject: (e: unknown) => void }>()
+  private indexWaiters = new Map<number, { resolve: (v: Uint8Array | null) => void; reject: (e: unknown) => void }>()
   private reading = false
   private ended = false
   private streamError: unknown = null
-  private cancelledTags = new Set<number>()
-  private doneTags = new Set<number>()
+  private cancelledIndices = new Set<number>()
+  private doneIndices = new Set<number>()
   private totalConsumers = 0
   private cancelUpstream: (() => void) | null = null
 
@@ -201,27 +198,27 @@ class FrameDemuxer {
     this.totalConsumers++
   }
 
-  /** Returns a cancel function for the given tag. Follows .tee() semantics:
-   *  marks the tag as cancelled, drops its buffered/future frames, and resolves
+  /** Returns a cancel function for the given index. Follows .tee() semantics:
+   *  marks the index as cancelled, drops its buffered/future frames, and resolves
    *  any pending waiter with null. Upstream is cancelled only when all consumers
    *  are cancelled. */
-  getCancelForTag(tag: number): () => void {
+  getCancelForIndex(index: number): () => void {
     return () => {
-      if (this.cancelledTags.has(tag)) return
+      if (this.cancelledIndices.has(index)) return
       console.log(
-        `[client:demux] cancelForTag(${tag}) called, cancelledTags=${this.cancelledTags.size + 1}/${this.totalConsumers}`,
+        `[client:demux] cancelForIndex(${index}) called, cancelledIndices=${this.cancelledIndices.size + 1}/${this.totalConsumers}`,
       )
-      this.cancelledTags.add(tag)
-      // Drop buffered frames for this tag
-      this.pendingFrames.delete(tag)
+      this.cancelledIndices.add(index)
+      // Drop buffered frames for this index
+      this.pendingFrames.delete(index)
       // Resolve any pending waiter with null (stream ended for this consumer)
-      const waiter = this.tagWaiters.get(tag)
+      const waiter = this.indexWaiters.get(index)
       if (waiter) {
-        this.tagWaiters.delete(tag)
+        this.indexWaiters.delete(index)
         waiter.resolve(null)
       }
       // Cancel upstream when all consumers are cancelled
-      if (this.cancelledTags.size >= this.totalConsumers) {
+      if (this.cancelledIndices.size >= this.totalConsumers) {
         console.log('[client:demux] all consumers cancelled, cancelling upstream')
         this.cancelUpstream?.()
         this.cancelUpstream = null
@@ -229,40 +226,40 @@ class FrameDemuxer {
     }
   }
 
-  async readNextChunkForTag(tag: number): Promise<Uint8Array | null> {
-    if (this.cancelledTags.has(tag)) {
-      console.log(`[client:demux] readNextChunkForTag(${tag}) — tag cancelled, returning null`)
+  async readNextChunkForIndex(index: number): Promise<Uint8Array | null> {
+    if (this.cancelledIndices.has(index)) {
+      console.log(`[client:demux] readNextChunkForIndex(${index}) — index cancelled, returning null`)
       return null
     }
     if (this.streamError) throw this.streamError
 
-    const pending = this.pendingFrames.get(tag)
+    const pending = this.pendingFrames.get(index)
     if (pending && pending.length > 0) {
       const frame = pending.shift()!
-      this.pendingBytes.set(tag, (this.pendingBytes.get(tag) ?? 0) - frame.byteLength)
+      this.pendingBytes.set(index, (this.pendingBytes.get(index) ?? 0) - frame.byteLength)
       console.log(
-        `[client:demux] readNextChunkForTag(${tag}) — returning buffered frame (${frame.byteLength} bytes, ${pending.length} remaining, ${this.pendingBytes.get(tag)} buffered bytes)`,
+        `[client:demux] readNextChunkForIndex(${index}) — returning buffered frame (${frame.byteLength} bytes, ${pending.length} remaining, ${this.pendingBytes.get(index)} buffered bytes)`,
       )
       this.ensureReading()
       return frame
     }
-    if (this.doneTags.has(tag)) {
-      console.log(`[client:demux] readNextChunkForTag(${tag}) — tag done, returning null`)
+    if (this.doneIndices.has(index)) {
+      console.log(`[client:demux] readNextChunkForIndex(${index}) — index done, returning null`)
       return null
     }
     if (this.ended) {
-      console.log(`[client:demux] readNextChunkForTag(${tag}) — stream ended, returning null`)
+      console.log(`[client:demux] readNextChunkForIndex(${index}) — stream ended, returning null`)
       return null
     }
 
-    console.log(`[client:demux] readNextChunkForTag(${tag}) — registering waiter`)
+    console.log(`[client:demux] readNextChunkForIndex(${index}) — registering waiter`)
     let resolve: (v: Uint8Array | null) => void
     let reject: (e: unknown) => void
     const promise = new Promise<Uint8Array | null>((res, rej) => {
       resolve = res
       reject = rej
     })
-    this.tagWaiters.set(tag, { resolve: resolve!, reject: reject! })
+    this.indexWaiters.set(index, { resolve: resolve!, reject: reject! })
     this.ensureReading()
     return promise
   }
@@ -270,74 +267,74 @@ class FrameDemuxer {
   private async ensureReading() {
     if (this.reading) return
     this.reading = true
-    console.log(`[client:demux] ensureReading started, waiters=[${[...this.tagWaiters.keys()].join(',')}]`)
+    console.log(`[client:demux] ensureReading started, waiters=[${[...this.indexWaiters.keys()].join(',')}]`)
     try {
-      while (this.tagWaiters.size > 0) {
-        console.log(`[client:demux] reading next frame... (waiters=[${[...this.tagWaiters.keys()].join(',')}])`)
+      while (this.indexWaiters.size > 0) {
+        console.log(`[client:demux] reading next frame... (waiters=[${[...this.indexWaiters.keys()].join(',')}])`)
         const frame = await this.streamReader.readNextFrame()
         if (frame === null) {
           console.log('[client:demux] readNextFrame returned null (terminator/end), resolving all waiters with null')
           this.ended = true
-          for (const [tag, w] of this.tagWaiters) {
-            console.log(`[client:demux] resolving waiter tag=${tag} with null`)
+          for (const [index, w] of this.indexWaiters) {
+            console.log(`[client:demux] resolving waiter index=${index} with null`)
             w.resolve(null)
           }
-          this.tagWaiters.clear()
+          this.indexWaiters.clear()
           return
         }
 
-        console.log(`[client:demux] received frame tag=${frame.tag} payloadLen=${frame.payload.length}`)
-        // Drop frames for cancelled tags
-        if (this.cancelledTags.has(frame.tag)) {
-          console.log(`[client:demux] dropping frame for cancelled tag=${frame.tag}`)
+        console.log(`[client:demux] received frame index=${frame.index} payloadLen=${frame.payload.length}`)
+        // Drop frames for cancelled indices
+        if (this.cancelledIndices.has(frame.index)) {
+          console.log(`[client:demux] dropping frame for cancelled index=${frame.index}`)
           continue
         }
 
-        // Empty payload = per-tag "done" signal
+        // Empty payload = per-index "done" signal
         if (frame.payload.length === 0) {
-          console.log(`[client:demux] empty frame = done signal for tag=${frame.tag}`)
-          this.doneTags.add(frame.tag)
-          const waiter = this.tagWaiters.get(frame.tag)
+          console.log(`[client:demux] empty frame = done signal for index=${frame.index}`)
+          this.doneIndices.add(frame.index)
+          const waiter = this.indexWaiters.get(frame.index)
           if (waiter) {
-            this.tagWaiters.delete(frame.tag)
-            console.log(`[client:demux] resolving waiter for done tag=${frame.tag} with null`)
+            this.indexWaiters.delete(frame.index)
+            console.log(`[client:demux] resolving waiter for done index=${frame.index} with null`)
             waiter.resolve(null)
           }
           continue
         }
 
         // Direct dispatch — no buffering, no delay
-        const waiter = this.tagWaiters.get(frame.tag)
+        const waiter = this.indexWaiters.get(frame.index)
         if (waiter) {
-          this.tagWaiters.delete(frame.tag)
-          console.log(`[client:demux] direct dispatch tag=${frame.tag} (${frame.payload.length} bytes)`)
+          this.indexWaiters.delete(frame.index)
+          console.log(`[client:demux] direct dispatch index=${frame.index} (${frame.payload.length} bytes)`)
           waiter.resolve(frame.payload)
           continue
         }
 
         // No consumer waiting — buffer it
-        const pending = this.pendingFrames.get(frame.tag)
+        const pending = this.pendingFrames.get(frame.index)
         if (pending) pending.push(frame.payload)
-        else this.pendingFrames.set(frame.tag, [frame.payload])
-        const newBytes = (this.pendingBytes.get(frame.tag) ?? 0) + frame.payload.byteLength
-        this.pendingBytes.set(frame.tag, newBytes)
-        console.log(`[client:demux] buffered frame tag=${frame.tag} (${newBytes} bytes buffered)`)
+        else this.pendingFrames.set(frame.index, [frame.payload])
+        const newBytes = (this.pendingBytes.get(frame.index) ?? 0) + frame.payload.byteLength
+        this.pendingBytes.set(frame.index, newBytes)
+        console.log(`[client:demux] buffered frame index=${frame.index} (${newBytes} bytes buffered)`)
 
-        // Per-tag backpressure: stop reading when this tag's buffer exceeds 1 MB.
-        // The loop restarts when the consumer drains via readNextChunkForTag().
-        if (newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_TAG) {
+        // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
+        // The loop restarts when the consumer drains via readNextChunkForIndex().
+        if (newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) {
           console.log(
-            `[client:demux] backpressure break for tag=${frame.tag} (${newBytes} bytes, waiters=[${[...this.tagWaiters.keys()].join(',')}])`,
+            `[client:demux] backpressure break for index=${frame.index} (${newBytes} bytes, waiters=[${[...this.indexWaiters.keys()].join(',')}])`,
           )
           break
         }
       }
-      console.log(`[client:demux] ensureReading loop exited (waiters=${this.tagWaiters.size})`)
+      console.log(`[client:demux] ensureReading loop exited (waiters=${this.indexWaiters.size})`)
     } catch (err) {
       console.log('[client:demux] ensureReading caught error:', err)
       this.streamError ??= err
-      for (const [, w] of this.tagWaiters) w.reject(err)
-      this.tagWaiters.clear()
+      for (const [, w] of this.indexWaiters) w.reject(err)
+      this.indexWaiters.clear()
     } finally {
       this.reading = false
       console.log('[client:demux] ensureReading done')
@@ -352,7 +349,7 @@ const EMPTY = new Uint8Array(0)
 /** Buffered reader for the HTTP response body stream.
  *
  *  readExact: read N bytes (low-level byte I/O with buffering).
- *  readNextFrame: read one tagged frame (wire protocol + error handling). */
+ *  readNextFrame: read one indexed frame (wire protocol + error handling). */
 class StreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array>
   private callContext: { telefunctionName: string; telefuncFilePath: string; abortController: AbortController }
@@ -415,9 +412,9 @@ class StreamReader {
     return result
   }
 
-  /** Read the next tagged frame from the wire.
-   *  Returns { tag, payload } or null on terminator. Throws on error frames. */
-  async readNextFrame(): Promise<{ tag: number; payload: Uint8Array } | null> {
+  /** Read the next indexed frame from the wire.
+   *  Returns { index, payload } or null on terminator. Throws on error frames. */
+  async readNextFrame(): Promise<{ index: number; payload: Uint8Array } | null> {
     const lenBuf = await this.readExact(4)
     if (this.cancelled) {
       console.log('[client:reader] readNextFrame — cancelled after reading len')
@@ -442,7 +439,7 @@ class StreamReader {
     }
     const frameData = await this.readExact(len)
     if (this.cancelled) return null
-    return { tag: frameData[0]!, payload: frameData.subarray(1) }
+    return { index: frameData[0]!, payload: frameData.subarray(1) }
   }
 }
 

@@ -4,7 +4,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
-import { createFileReplacer } from '../../shared/wire-protocol/replacer-request.js'
+import { createRequestReplacer } from '../../wire-protocol/request-types/registry.client.js'
 
 type CallContext = {
   telefuncFilePath: string
@@ -20,11 +20,7 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
     args: callContext.telefunctionArgs,
   }
 
-  const files: { index: number; value: File | Blob }[] = []
-  const replacer = createFileReplacer({
-    onFile: (index, file) => files.push({ index, value: file }),
-    onBlob: (index, blob) => files.push({ index, value: blob }),
-  })
+  const { replacer, files } = createRequestReplacer()
 
   const dataMainSerialized = serialize(dataMain, callContext, replacer)
   if (files.length === 0) return dataMainSerialized
@@ -33,7 +29,7 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
   const metadataBytes = new TextEncoder().encode(dataMainSerialized)
   const lengthPrefix = new Uint8Array(4)
   new DataView(lengthPrefix.buffer).setUint32(0, metadataBytes.length, false)
-  return new Blob([lengthPrefix, metadataBytes, ...files.map((f) => f.value)])
+  return new Blob([lengthPrefix, metadataBytes, ...files.map((f) => f.body)])
 }
 
 type Replacer = Parameters<typeof stringify>[1] extends infer O ? (O extends { replacer?: infer R } ? R : never) : never

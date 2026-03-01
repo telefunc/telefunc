@@ -6,9 +6,8 @@ import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
 import { getUrlPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
-import { createFileReviver } from '../../../shared/wire-protocol/reviver-request.js'
-import { StreamReader } from '../binary-request/StreamReader.js'
-import { LazyBlob, LazyFile } from '../binary-request/LazyFile.js'
+import { createRequestReviver } from '../../../wire-protocol/request-types/registry.server.js'
+import { StreamReader } from '../../../wire-protocol/request-types/server/StreamReader.js'
 
 type ParseResult =
   | {
@@ -94,10 +93,7 @@ async function parseBinaryFrameBody(
   const reader = new StreamReader(bodyStream)
   const metaText = await reader.readMetadata()
 
-  const reviver = createFileReviver({
-    createFile: (fileMetadata) => new LazyFile(reader, fileMetadata),
-    createBlob: (blobMetadata) => new LazyBlob(reader, blobMetadata),
-  })
+  const reviver = createRequestReviver(reader)
   return parseTelefuncPayload(metaText, runContext, reviver)
 }
 

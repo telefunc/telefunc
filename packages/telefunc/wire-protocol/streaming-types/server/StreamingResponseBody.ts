@@ -1,15 +1,15 @@
 export { buildStreamingResponseBody }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { encodeU32, textEncoder } from '../../../shared/wire-protocol/frame.js'
-import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../shared/wire-protocol/constants.js'
-import type { StreamingErrorFrameAbort, StreamingErrorFrameBug } from '../../../shared/wire-protocol/constants.js'
+import { encodeU32, textEncoder } from '../../frame.js'
+import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../constants.js'
+import type { StreamingErrorFrameAbort, StreamingErrorFrameBug } from '../../constants.js'
 import type {
   StreamingValueServer,
   StreamingProducer,
-} from '../../../shared/wire-protocol/streaming-types/interface.js'
-import { isAbort } from '../Abort.js'
-import { handleTelefunctionBug, validateTelefunctionError } from '../runTelefunc/validateTelefunctionError.js'
+} from '../interface.js'
+import { isAbort } from '../../../node/server/Abort.js'
+import { handleTelefunctionBug, validateTelefunctionError } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import type { TelefuncIdentifier } from '../../../shared/constants.js'
 
 const EMPTY = new Uint8Array(0)
@@ -31,9 +31,9 @@ function buildStreamingResponseBody(
   // Create all producers upfront so doCancel can call cancel() on each.
   // This is critical for ReadableStream: gen.return() alone can't interrupt
   // a suspended reader.read(); reader.cancel() resolves it immediately.
-  const producers: Array<{ producer: StreamingProducer; tag: number }> = streamingValues.map((sv) => ({
+  const producers: Array<{ producer: StreamingProducer; index: number }> = streamingValues.map((sv) => ({
     producer: sv.type.createProducer(sv.value),
-    tag: sv.index,
+    index: sv.index,
   }))
 
   const gen = generateResponseBody(metadataSerialized, producers, telefuncId)
@@ -44,8 +44,8 @@ function buildStreamingResponseBody(
     console.log('[server:stream] doCancel called', new Error().stack)
     // cancel() interrupts suspended reads (reader.read() / gen.next()) —
     // iter.return() alone can't do this since it waits for the pending await to settle.
-    for (const { producer, tag } of producers) {
-      console.log(`[server:stream] cancelling producer tag=${tag}`)
+    for (const { producer, index } of producers) {
+      console.log(`[server:stream] cancelling producer index=${index}`)
       producer.cancel()
     }
     // Terminates the merge loop generator, whose finally block calls
@@ -107,14 +107,14 @@ function buildStreamingResponseBody(
 // ===== Frame generation =====
 
 /** Multiplexed frame generator: races all streaming value producers,
- *  yields tagged frames as they become ready.
+ *  yields indexed frames as they become ready.
  *
- *  Wire format per frame: [u32 frame_len][u8 tag][payload]
+ *  Wire format per frame: [u32 frame_len][u8 index][payload]
  *  Terminator: [u32 0x00000000]
  *  Error: [u32 0xFFFFFFFF][u32 error_len][error_bytes] */
 async function* generateResponseBody(
   metadataSerialized: string,
-  producerEntries: Array<{ producer: StreamingProducer; tag: number }>,
+  producerEntries: Array<{ producer: StreamingProducer; index: number }>,
   telefuncId: TelefuncIdentifier,
 ): AsyncGenerator<Uint8Array> {
   // Metadata header
@@ -124,15 +124,15 @@ async function* generateResponseBody(
   yield metadataBytes
 
   type RaceEntry = {
-    tag: number
+    index: number
     iter: AsyncIterator<Uint8Array>
     pending: Promise<{ entry: RaceEntry; result: IteratorResult<Uint8Array> }>
   }
 
   const advance = (entry: RaceEntry) => {
-    console.log(`[server:gen] advancing producer tag=${entry.tag}`)
+    console.log(`[server:gen] advancing producer index=${entry.index}`)
     entry.pending = entry.iter.next().then((result) => {
-      console.log(`[server:gen] producer tag=${entry.tag} resolved, done=${result.done}`)
+      console.log(`[server:gen] producer index=${entry.index} resolved, done=${result.done}`)
       return { entry, result }
     })
   }
@@ -141,32 +141,32 @@ async function* generateResponseBody(
   // multiplexing. Without this, Promise.race can't know which producer
   // has data ready.
   const active: RaceEntry[] = []
-  for (const { producer, tag } of producerEntries) {
-    const entry: RaceEntry = { tag, iter: producer.chunks, pending: null! }
+  for (const { producer, index } of producerEntries) {
+    const entry: RaceEntry = { index, iter: producer.chunks, pending: null! }
     advance(entry)
     active.push(entry)
   }
 
   try {
-    // Merge loop: yield one tagged frame per pull().
+    // Merge loop: yield one frame per pull().
     // After a producer wins the race, it's moved to the end of the array
     // so other already-resolved producers get priority next iteration.
     // Without this, a fast producer at index 0 would always win Promise.race
     // (which picks the first resolved promise in array order), starving others.
     while (active.length > 0) {
-      console.log(`[server:gen] racing ${active.length} active producers: [${active.map((e) => e.tag).join(',')}]`)
+      console.log(`[server:gen] racing ${active.length} active producers: [${active.map((e) => e.index).join(',')}]`)
       const { entry, result } = await Promise.race(active.map((e) => e.pending))
 
       if (result.done) {
-        // Send empty-payload frame to signal this tag is done.
+        // Send empty-payload frame to signal this index is done.
         // Without this, the client consumer would hang until the global terminator.
-        console.log(`[server:gen] producer tag=${entry.tag} done, sending empty frame`)
-        yield encodeTaggedFrame(entry.tag, EMPTY)
+        console.log(`[server:gen] producer index=${entry.index} done, sending empty frame`)
+        yield encodeIndexedFrame(entry.index, EMPTY)
         active.splice(active.indexOf(entry), 1)
-        console.log(`[server:gen] remaining active: [${active.map((e) => e.tag).join(',')}]`)
+        console.log(`[server:gen] remaining active: [${active.map((e) => e.index).join(',')}]`)
       } else {
-        console.log(`[server:gen] producer tag=${entry.tag} yielded ${result.value.byteLength} bytes`)
-        yield encodeTaggedFrame(entry.tag, result.value)
+        console.log(`[server:gen] producer index=${entry.index} yielded ${result.value.byteLength} bytes`)
+        yield encodeIndexedFrame(entry.index, result.value)
         advance(entry)
         // Move to end for fair round-robin scheduling
         active.splice(active.indexOf(entry), 1)
@@ -191,11 +191,11 @@ async function* generateResponseBody(
 
 // ===== Frame encoding helpers =====
 
-function encodeTaggedFrame(tag: number, payload: Uint8Array): Uint8Array {
+function encodeIndexedFrame(index: number, payload: Uint8Array): Uint8Array {
   const frameLen = 1 + payload.byteLength
   const frame = new Uint8Array(4 + frameLen)
   new DataView(frame.buffer).setUint32(0, frameLen, false)
-  frame[4] = tag
+  frame[4] = index
   frame.set(payload, 5)
   return frame
 }
