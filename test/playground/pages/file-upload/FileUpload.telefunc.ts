@@ -75,11 +75,11 @@ const onReadTwice = async (file: File) => {
   }
 }
 
-// Streaming integrity test: verify the server never assembles the full file in memory.
-// maxChunkSize captures the largest single chunk yielded by the HTTP stream — if the
-// file were buffered and flushed at once, it would be near the total file size.
-// rssDuringSleep measures RSS while the server is idle (before reading) — if the client
-// blasts all data into server buffers, RSS will spike here instead of during streaming.
+// Streaming integrity test: verify the server never buffers the full file in memory.
+// After reading the first chunk, we stall 3 s before continuing — if backpressure works,
+// the browser should not have pushed the remaining data into OS/server buffers during the
+// sleep, keeping rssGrowthDuringSleep near zero. maxChunkSize verifies individual chunks
+// arrive at TCP frame size rather than as one large assembled buffer.
 const onUploadBackpressure = async (file: File) => {
   const rssBeforeSleep = process.memoryUsage().rss
   let rssAfterSleep = rssBeforeSleep
