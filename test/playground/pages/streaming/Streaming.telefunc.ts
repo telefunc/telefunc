@@ -12,6 +12,7 @@ export {
   onReturnMultiplePromises,
   onReturnMixedEndless,
   onReturnDeadlockStream,
+  onReturnAsymmetricGenerators,
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
@@ -199,6 +200,27 @@ const onReturnMixedEndless = async () => {
     }, 1000),
   )
   return { gen: gen(), slow }
+}
+
+// ── Asymmetric completion test (e2e tests) ─────────────────────────
+
+// fast finishes in 1 yield; slow takes 3 yields × 200 ms each.
+// Tests that the per-index empty-payload done frame correctly closes the fast
+// consumer while the slow consumer is still streaming.
+// fast yields immediately; slow yields 3 values with 200 ms delays.
+// Tests that the per-index empty-payload done frame correctly closes the fast
+// consumer while the slow consumer is still streaming.
+const onReturnAsymmetricGenerators = async () => {
+  async function* fast(): AsyncGenerator<string> {
+    yield 'fast-done'
+  }
+  async function* slow(): AsyncGenerator<string> {
+    for (const v of ['slow-0', 'slow-1', 'slow-2']) {
+      await sleep(200)
+      yield v
+    }
+  }
+  return { fast: fast(), slow: slow() }
 }
 
 // ── Mid-stream error cases (e2e tests) ──────────────────────────────

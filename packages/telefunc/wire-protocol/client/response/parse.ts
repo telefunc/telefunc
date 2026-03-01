@@ -14,7 +14,11 @@ import { throwCancelError, throwAbortError, throwBugError } from '../../../clien
 
 async function parseStreamingResponseBody(
   response: Response,
-  callContext: { telefunctionName: string; telefuncFilePath: string; abortController: AbortController },
+  callContext: {
+    telefunctionName: string
+    telefuncFilePath: string
+    abortController: AbortController
+  },
 ): Promise<{ ret: unknown }> {
   assert(response.body)
   const reader = response.body.getReader()
@@ -245,13 +249,21 @@ const EMPTY = new Uint8Array(0)
  *  readNextFrame: read one indexed frame (wire protocol + error handling). */
 class StreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array>
-  private callContext: { telefunctionName: string; telefuncFilePath: string; abortController: AbortController }
+  private callContext: {
+    telefunctionName: string
+    telefuncFilePath: string
+    abortController: AbortController
+  }
   private buffer: Uint8Array = EMPTY
   cancelled = false
 
   constructor(
     reader: ReadableStreamDefaultReader<Uint8Array>,
-    callContext: { telefunctionName: string; telefuncFilePath: string; abortController: AbortController },
+    callContext: {
+      telefunctionName: string
+      telefuncFilePath: string
+      abortController: AbortController
+    },
   ) {
     this.reader = reader
     this.callContext = callContext

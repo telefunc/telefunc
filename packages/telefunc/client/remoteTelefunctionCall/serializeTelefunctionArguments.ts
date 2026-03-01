@@ -5,6 +5,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
+import { encodeBinaryRequest } from '../../wire-protocol/client/request/serialize.js'
 
 type CallContext = {
   telefuncFilePath: string
@@ -24,12 +25,7 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
 
   const dataMainSerialized = serialize(dataMain, callContext, replacer)
   if (files.length === 0) return dataMainSerialized
-
-  // Build binary frame: [u32 metadata length][metadata UTF-8][file0 bytes][file1 bytes]...
-  const metadataBytes = new TextEncoder().encode(dataMainSerialized)
-  const lengthPrefix = new Uint8Array(4)
-  new DataView(lengthPrefix.buffer).setUint32(0, metadataBytes.length, false)
-  return new Blob([lengthPrefix, metadataBytes, ...files.map((f) => f.body)])
+  return encodeBinaryRequest(dataMainSerialized, files)
 }
 
 type Replacer = Parameters<typeof stringify>[1] extends infer O ? (O extends { replacer?: infer R } ? R : never) : never

@@ -198,6 +198,17 @@ function testStreaming() {
     })
   })
 
+  test('streaming: asymmetric generators — fast producer done frame received while slow still running', async () => {
+    await page.click('#test-asymmetric-generators')
+    await autoRetry(async () => {
+      const result = JSON.parse((await page.textContent('#streaming-result'))!)
+      expect(result.fastValues).deep.equal(['fast-done'])
+      expect(result.slowValues).deep.equal(['slow-0', 'slow-1', 'slow-2'])
+      // fast's per-index done frame closed the fast consumer while slow was still streaming
+      expect(result.fastDoneBeforeSlowFinished).toBe(true)
+    })
+  })
+
   test('streaming: generator Abort() mid-stream', async () => {
     await page.click('#test-generator-abort-midstream')
     await autoRetry(async () => {

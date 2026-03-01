@@ -15,6 +15,7 @@ import {
   onReturnMultiplePromises,
   onReturnMixedEndless,
   onReturnDeadlockStream,
+  onReturnAsymmetricGenerators,
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
@@ -317,6 +318,31 @@ function Streaming() {
         }}
       >
         Mixed endless cancel
+      </button>
+
+      <button
+        id="test-asymmetric-generators"
+        onClick={async () => {
+          setResult('')
+          const res = await onReturnAsymmetricGenerators()
+          const fastValues: string[] = []
+          const slowValues: string[] = []
+          let slowFinished = false
+          let fastDoneBeforeSlowFinished = false
+          await Promise.all([
+            (async () => {
+              for await (const v of res.fast) fastValues.push(v)
+              fastDoneBeforeSlowFinished = !slowFinished
+            })(),
+            (async () => {
+              for await (const v of res.slow) slowValues.push(v)
+              slowFinished = true
+            })(),
+          ])
+          setResult(JSON.stringify({ fastValues, slowValues, fastDoneBeforeSlowFinished }))
+        }}
+      >
+        Asymmetric generators
       </button>
 
       <h2>Mid-stream error tests</h2>
