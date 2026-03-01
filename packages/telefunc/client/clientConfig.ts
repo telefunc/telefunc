@@ -1,7 +1,7 @@
 export { configUser as config }
 export { resolveClientConfig }
 
-import { assertUsage } from '../utils/assert.js'
+import { assertUsage, assertWarning } from '../utils/assert.js'
 
 /** Telefunc Client Configuration */
 type ConfigUser = {
@@ -55,9 +55,13 @@ function validateUserConfig(configUserUnwrapped: ConfigUser, prop: string, val: 
     )
     configUserUnwrapped[prop] = val as Record<string, string>
   } else if (prop === 'httpHeaders') {
+    assertWarning(false, '`config.httpHeaders` (client-side) is deprecated, use `config.headers` instead', {
+      onlyOnce: true,
+      showStackTrace: true,
+    })
     assertUsage(
       typeof val === 'object' && val !== null && Object.values(val).every((v) => typeof v === 'string'),
-      '`config.httpHeaders` should be an object of strings — note: `httpHeaders` is deprecated, use `headers` instead',
+      '`config.httpHeaders` should be an object of strings',
     )
     configUserUnwrapped[prop] = val as Record<string, string>
   } else if (prop === 'fetch') {
