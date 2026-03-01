@@ -111,7 +111,7 @@ const report = await res.report    // Resolves when ready (slow)
 >   }
 > }
 > ```
-> If that isn't what you want, then retrun the `prepare()` promise instead of awaiting it:
+> If that isn't what you want, then return the `prepare()` promise instead of awaiting it:
 > ```ts
 > export async function onLoadDashboard() {
 >   const promise = prepare() // Blocks the entire telefunction call
