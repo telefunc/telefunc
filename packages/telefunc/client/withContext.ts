@@ -1,23 +1,12 @@
 export { withContext }
 export type { ClientCallContext }
 
-import { getGlobalObject } from '../utils/getGlobalObject.js'
-
 /** Per-call context options for the HTTP transport layer. */
 type ClientCallContext = {
   /** AbortSignal to cancel the telefunc call. */
   signal?: AbortSignal
   /** Additional HTTP headers for this call. */
   headers?: Record<string, string>
-}
-
-const globalObject = getGlobalObject<{ pendingContext: ClientCallContext | null }>('withContext.ts', {
-  pendingContext: null,
-})
-
-// TODO/ai remove this and the whole globalObject.pendingContext mechanism in favor of passing the context directly to remoteTelefunctionCall
-export function getPendingContext(): ClientCallContext | null {
-  return globalObject.pendingContext
 }
 
 /** Wrap a telefunc function with per-call context (signal, headers).
@@ -30,13 +19,11 @@ export function getPendingContext(): ClientCallContext | null {
  */
 function withContext<F extends (...args: any[]) => any>(telefunc: F, context: ClientCallContext): F {
   return ((...args: any[]) => {
-    globalObject.pendingContext = context
+    ;(telefunc as any)._context = context
     try {
-      // telefunc(...args) synchronously enters remoteTelefunctionCall,
-      // which reads globalObject.pendingContext before any await.
       return telefunc(...args)
     } finally {
-      globalObject.pendingContext = null
+      ;(telefunc as any)._context = undefined
     }
   }) as F
 }

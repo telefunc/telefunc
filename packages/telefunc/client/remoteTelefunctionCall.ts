@@ -7,18 +7,16 @@ import { assertUsage } from '../utils/assert.js'
 import { isBrowser } from '../utils/isBrowser.js'
 import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
-import { getPendingContext } from './withContext.js'
+import type { ClientCallContext } from './withContext.js'
 import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/async-generator-interface.js'
 
 function remoteTelefunctionCall(
   telefuncFilePath: string,
   telefunctionName: string,
   telefunctionArgs: unknown[],
+  callClientContext?: ClientCallContext,
 ): Promise<unknown> {
   assertUsage(isBrowser(), 'The Telefunc Client is meant to be run only in the browser.')
-
-  // Read pending context synchronously — set by withContext(), reset by its finally block.
-  const callClientContext = getPendingContext()
 
   const callContext = {}
 
