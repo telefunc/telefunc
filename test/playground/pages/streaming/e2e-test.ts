@@ -248,8 +248,9 @@ function testStreaming() {
   })
 
   // Half-duplex: browser withholds the response until upload completes,
-  // so progress updates arrive simultaneously. When full duplex is supported,
-  // the timing assertion should be inverted to > 1000.
+  // so progress updates arrive simultaneously on the client side.
+  // When full duplex is supported, client duration will exceed server duration
+  // and the assertion below should be inverted.
   test('streaming: upload with progress (half duplex)', async () => {
     await page.click('#test-upload-progress')
     await autoRetry(async () => {
@@ -265,7 +266,10 @@ function testStreaming() {
       }
       const firstMs: number = result.updates[0].clientMs
       const lastMs: number = result.updates[result.updates.length - 1].clientMs
-      expect(lastMs - firstMs).lessThan(3000)
+      // Half-duplex: browser buffers the full response before delivering any chunk,
+      // so both updates arrive nearly simultaneously on the client.
+      // Client duration must be less than server duration to prove no real-time delivery.
+      expect(lastMs - firstMs).lessThan(last.duration)
     })
   })
 }

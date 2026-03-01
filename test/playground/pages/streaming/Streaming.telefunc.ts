@@ -225,10 +225,13 @@ async function* onGeneratorBugMidStream(): AsyncGenerator<string> {
 
 // ── Upload progress via streaming ────────────────────────────────────
 
-async function* onUploadWithProgress(file: File): AsyncGenerator<{ bytesRead: number; totalSize: number }> {
+async function* onUploadWithProgress(
+  file: File,
+): AsyncGenerator<{ bytesRead: number; totalSize: number; timestamp: number; duration?: number }> {
   const totalSize = file.size
   let bytesRead = 0
-  yield { bytesRead, totalSize }
+  const t0 = Date.now()
+  yield { bytesRead, totalSize, timestamp: t0 }
 
   await sleep(3000)
   const reader = file.stream().getReader()
@@ -237,5 +240,6 @@ async function* onUploadWithProgress(file: File): AsyncGenerator<{ bytesRead: nu
     if (done) break
     bytesRead += value.byteLength
   }
-  yield { bytesRead, totalSize }
+  const t1 = Date.now()
+  yield { bytesRead, totalSize, timestamp: t1, duration: t1 - t0 }
 }
