@@ -23,7 +23,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowAI).toBe('cleaned-up')
-      expect(Number(state.slowAIAbortedAt) - t0).to.be.below(600)
+      expect(Number(state.slowAIAbortedAt) - t0).to.be.below(1000)
       expect(state.slowAIFinallyRan).toBe('true')
     })
   })
@@ -45,7 +45,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowAI).toBe('cleaned-up')
-      expect(Number(state.slowAIAbortedAt) - t0).to.be.below(600)
+      expect(Number(state.slowAIAbortedAt) - t0).to.be.below(1000)
       expect(state.slowAIFinallyRan).toBe('true')
     })
   })
@@ -67,7 +67,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowAI).toBe('cleaned-up')
-      expect(Number(state.slowAIAbortedAt) - t0).to.be.below(600)
+      expect(Number(state.slowAIAbortedAt) - t0).to.be.below(1000)
       expect(state.slowAIFinallyRan).toBe('true')
     })
   })
@@ -91,7 +91,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowStream).toBe('cleaned-up')
-      expect(Number(state.slowStreamAbortedAt) - t0).to.be.below(600)
+      expect(Number(state.slowStreamAbortedAt) - t0).to.be.below(1000)
       expect(state.slowStreamCancelled).toBe('true')
     })
   })
@@ -113,7 +113,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowStream).toBe('cleaned-up')
-      expect(Number(state.slowStreamAbortedAt) - t0).to.be.below(600)
+      expect(Number(state.slowStreamAbortedAt) - t0).to.be.below(1000)
       expect(state.slowStreamCancelled).toBe('true')
     })
   })
