@@ -1,11 +1,11 @@
 import { Link } from '@brillout/docpress'
 
-Telefunctions can return streaming values — `AsyncGenerator`, `ReadableStream`, or objects containing a mix of both plus `Promise` values. Telefunc handles serialization and transport automatically.
+Telefunctions can return streams via [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator), [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream), or [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise).
+
+> A single telefunction can return multiple streams using a mix of `AsyncGenerator`, `ReadableStream`, and `Promise`.
 
 
-## AsyncGenerator
-
-Return an `AsyncGenerator` from a telefunction and the client receives it transparently.
+## `AsyncGenerator`
 
 ```ts
 // Chat.telefunc.ts
@@ -32,16 +32,14 @@ for await (const token of gen) {
 ```
 
 
-## ReadableStream
-
-Return a `ReadableStream` for raw binary streaming.
+## `ReadableStream`
 
 ```ts
 // Download.telefunc.ts
 // Environment: server
 
-export async function onDownload(fileId: string): Promise<ReadableStream<Uint8Array>> {
-  const fileStream = fs.createReadStream(`./files/${fileId}`)
+export async function onDownload(fileName: string): Promise<ReadableStream<Uint8Array>> {
+  const fileStream = fs.createReadStream(`./files/${fileName}`)
   return new ReadableStream({
     async pull(controller) {
       const { done, value } = await fileStream.read()
@@ -67,10 +65,70 @@ while (true) {
 }
 ```
 
+## `Promise`
 
-## Mixed returns
+Returning a `Promise` inside a telefunction's return value enables lazy streaming — the server sends the response immediately and resolves the promise concurrently. The client receives the resolved values as they arrive, without blocking other return values.
 
-A telefunction can return an object containing any combination of generators, streams, and promises. They're multiplexed over a single HTTP response and delivered as they resolve.
+```ts
+// Dashboard.telefunc.ts
+// Environment: server
+
+export async function onLoadDashboard() {
+  return {
+    // Plain values are delivered immediately
+    title: 'Dashboard',
+    // Promises resolve independently — the client gets each as it settles
+    summary: fetchSummary(), // fast promise
+    report: fetchExtensiveReport(), // slow promise
+  }
+}
+```
+
+```tsx
+// Dashboard.tsx
+// Environment: client
+
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const res = await onLoadDashboard()
+
+// Plain values are available right away
+console.log(res.title) // 'Dashboard'
+
+// Await each promise when you need it — they resolve independently
+const summary = await res.summary  // Resolves first (fast)
+const report = await res.report    // Resolves when ready (slow)
+```
+
+> Awaiting a promise blocks the entire telefunction call:
+> ```ts
+> export async function onLoadDashboard() {
+>   await prepare() // Blocks the entire telefunction call
+>   return {
+>     // ⚠️  Delivered delayed by `await prepare()`
+>     title: 'Dashboard',
+>     /* ... */
+>   }
+> }
+> ```
+> If that isn't what you want, then retrun the `prepare()` promise instead of awaiting it:
+> ```ts
+> export async function onLoadDashboard() {
+>   const promise = prepare() // Blocks the entire telefunction call
+>   return {
+>     // ✅ Delivered immediately
+>     title: 'Dashboard',
+>     promise,
+>     /* ... */
+>   }
+> }
+> ```
+
+## Mixed
+
+A telefunction can return an object containing any combination of generators, streams, and promises.
+
+> All streams are multiplexed over a single HTTP response — delivered concurrently and eagerly as they resolve.
 
 ```ts
 // Dashboard.telefunc.ts
@@ -87,7 +145,7 @@ export async function onLoadDashboard() {
     stream: notifications(),
     // Promises resolve independently — fast resolves before slow
     fast: Promise.resolve({ count: 42 }),
-    slow: fetchExpensiveReport(),
+    slow: fetchExtensiveReport(),
     // Plain values are delivered immediately
     title: 'Dashboard',
   }
@@ -114,8 +172,6 @@ for await (const notification of res.stream) {
 const fast = await res.fast  // Resolves first
 const slow = await res.slow  // Resolves when ready
 ```
-
-> When returning multiple streams or generators, they're delivered concurrently over a single connection. Each consumer progresses independently.
 
 
 ## `throw Abort()` mid-stream

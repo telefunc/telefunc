@@ -177,6 +177,7 @@ const headings = [
     level: 2,
     title: '`throw Abort()`',
     url: '/Abort',
+    sectionTitles: ['Mid-stream abort'],
   },
   {
     level: 2,
