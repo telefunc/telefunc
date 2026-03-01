@@ -179,13 +179,13 @@ function FileUpload() {
       <button
         id="test-large"
         onClick={async () => {
-          // 5MB file
-          const content = 'X'.repeat(5 * 1024 * 1024)
+          // 50MB file
+          const content = 'X'.repeat(50 * 1024 * 1024)
           const res = await onUploadLarge(new File([content], 'large.bin', { type: 'application/octet-stream' }))
           setResult(JSON.stringify(res))
         }}
       >
-        5MB file
+        50MB file
       </button>
 
       <button

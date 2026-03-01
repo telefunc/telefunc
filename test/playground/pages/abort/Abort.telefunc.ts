@@ -1,9 +1,8 @@
 export { onSlowAIGenerator, onSlowStreamForAbort, onSlowNormalTelefunc, onUploadAbortSingle, onUploadAbortMultiple }
 
 import { getContext } from 'telefunc'
-import { cleanupState } from './cleanup-state'
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+import { cleanupState } from '../../cleanup-state'
+import { sleep } from '../../sleep'
 
 // Simulates a slow AI upstream: each "token" takes 1 second.
 // Client disconnects after first token — onConnectionAbort should fire
@@ -17,9 +16,7 @@ async function* onSlowAIGenerator(): AsyncGenerator<string> {
       cleanupState.slowAI = 'cleaned-up'
       cleanupState.slowAIAbortedAt = String(Date.now())
     })
-    // First token arrives quickly
     yield 'token-0'
-    // Subsequent tokens take 1s each — client will disconnect before these
     for (let i = 1; i < 1000; i++) {
       await sleep(1_000)
       yield `token-${i}`
@@ -29,7 +26,7 @@ async function* onSlowAIGenerator(): AsyncGenerator<string> {
   }
 }
 
-// Simulates a slow ReadableStream: each chunk takes 5 seconds.
+// Simulates a slow ReadableStream: each chunk takes 1 second.
 // Client cancels after first chunk — onConnectionAbort should fire quickly.
 const onSlowStreamForAbort = async (): Promise<ReadableStream<Uint8Array>> => {
   cleanupState.slowStream = 'running'
@@ -56,8 +53,8 @@ const onSlowStreamForAbort = async (): Promise<ReadableStream<Uint8Array>> => {
 }
 
 // Non-streaming telefunc with many slow steps.
-// Client navigates away — onConnectionAbort fires, and the telefunc
-// can check an `aborted` flag to bail out early.
+// Client aborts — onConnectionAbort fires, and the telefunc
+// checks an `aborted` flag to bail out early.
 async function onSlowNormalTelefunc(): Promise<{ stepsCompleted: number }> {
   cleanupState.slowNormal = 'running'
   cleanupState.slowNormalSteps = '0'
@@ -79,13 +76,9 @@ async function onSlowNormalTelefunc(): Promise<{ stepsCompleted: number }> {
 
 // ── Upload abort tests ──────────────────────────────────────────────
 
-/** Single file upload — read slowly so client has time to abort mid-upload.
- *
- *  The sleep(100) between reads is critical: without it, a 1MB file on localhost
- *  would be consumed instantly (well within the ~4-16MB TCP buffer), completing
- *  before the client's 300ms abort fires. The sleep creates a window (~1.6s total
- *  for ~16 chunks) so the abort arrives mid-read, causing StreamReader.#pullChunk()
- *  to return null and throw "Client disconnected during file upload". */
+// Single file upload — read slowly so client has time to abort mid-upload.
+// The sleep(100) between reads stretches consumption to ~1.6s for ~16 chunks,
+// giving the client's 300ms abort time to arrive mid-read.
 async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; error: string | null }> {
   cleanupState.uploadAbortSingle = 'running'
   cleanupState.uploadAbortSingleError = ''
@@ -100,7 +93,6 @@ async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; err
       const { done, value } = await reader.read()
       if (done) break
       bytesRead += value.byteLength
-      // Slow down so client can abort mid-upload
       await sleep(100)
     }
     cleanupState.uploadAbortSingleError = ''
@@ -112,16 +104,11 @@ async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; err
   }
 }
 
-/** Multiple file upload — read each file fully, sleep between files.
- *  Client aborts during the sleep after file1. File2+file3 should error.
- *
- *  Unlike the single-file test, there is no sleep between reads within a file.
- *  On localhost, 50MB is consumed in well under 3s, so file1 completes fully
- *  before the client aborts at 3s. The 5s sleep after file1 is where the abort
- *  lands. When file2's stream starts pulling, StreamReader may still have
- *  leftover bytes in its internal buffer from a chunk that spanned the file1/file2
- *  boundary — so file2.bytesRead can be > 0 even though the connection is dead.
- *  The next #pullChunk() call hits the closed connection and throws. */
+// Multiple file upload — read each file fully, sleep between files.
+// Client aborts during the sleep after file1. File2+file3 should error.
+// On localhost 50MB is consumed in well under 3s, so file1 completes fully.
+// The 5s sleep after file1 is where the abort lands. File2/file3 may have
+// leftover bytes in StreamReader's buffer from chunk boundaries.
 async function onUploadAbortMultiple(
   file1: File,
   file2: File,
@@ -146,7 +133,6 @@ async function onUploadAbortMultiple(
         if (done) break
         bytesRead += value.byteLength
       }
-      // Simulate slow processing between files — client aborts during this pause
       await sleep(5000)
       results.push({ name: file.name, bytesRead, error: null })
     } catch (e: any) {
@@ -154,8 +140,6 @@ async function onUploadAbortMultiple(
     }
   }
 
-  // Store results in cleanup state for e2e assertions
   cleanupState.uploadAbortMultiResults = JSON.stringify(results)
-
   return { results }
 }

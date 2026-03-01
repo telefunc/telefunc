@@ -19,9 +19,11 @@ export {
   onUploadWithProgress,
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+import { Abort, getContext } from 'telefunc'
+import { cleanupState } from '../../cleanup-state'
+import { sleep } from '../../sleep'
 
-// ── Streaming primitives (e2e tests) ────────────────────────────────
+// ── Streaming primitives ─────────────────────────────────────────────
 
 async function* onReturnAsyncGenerator(): AsyncGenerator<number> {
   for (const n of [1, 2, 3, 4, 5]) yield n
@@ -63,7 +65,7 @@ const onReturnDelayedStream = async (): Promise<ReadableStream<Uint8Array>> => {
   })
 }
 
-// ── Streaming + metadata (e2e tests) ────────────────────────────────
+// ── Streaming + metadata ─────────────────────────────────────────────
 
 const onReturnGeneratorWithMeta = async () => {
   async function* messages(): AsyncGenerator<string> {
@@ -97,10 +99,7 @@ const onReturnStreamWithMeta = async () => {
   return { stream, count: 3 }
 }
 
-// ── Multiplexed streaming (e2e tests) ────────────────────────────────
-
-import { getContext } from 'telefunc'
-import { cleanupState } from '../abort/cleanup-state'
+// ── Multiplexed streaming ────────────────────────────────────────────
 
 const onReturnTwoGenerators = async () => {
   cleanupState.twoGeneratorsAborted = ''
@@ -147,16 +146,15 @@ const onReturnMultiplePromises = async () => {
   return { fast, slow, label: 'promises' }
 }
 
-// ── Deadlock test (e2e tests) ────────────────────────────────────────
-
+// ── Deadlock test ────────────────────────────────────────────────────
 // Stream is large enough (2 MB) to exceed the client-side demuxer buffer
 // (1 MB) so that the demuxer stalls and cannot deliver further frames
-// (including the promise resolution frame) until the client starts consuming
-// the stream and drains the buffer.
+// until the client starts consuming the stream.
+
 const onReturnDeadlockStream = async () => {
   const encoder = new TextEncoder()
   const CHUNK = encoder.encode('x'.repeat(64 * 1024)) // 64 KB
-  const CHUNKS = 32 // 32 × 64 KB = 2 MB
+  const CHUNKS = 32 // 32 x 64 KB = 2 MB
   let i = 0
   const stream = new ReadableStream<Uint8Array>({
     pull(controller) {
@@ -169,7 +167,7 @@ const onReturnDeadlockStream = async () => {
   return { stream, promise }
 }
 
-// ── Per-tag cancel test (e2e tests) ──────────────────────────────────
+// ── Per-tag cancel test ──────────────────────────────────────────────
 
 const onReturnMixedEndless = async () => {
   cleanupState.mixedEndless = 'running'
@@ -190,12 +188,11 @@ const onReturnMixedEndless = async () => {
   return { gen: gen(), slow }
 }
 
-// ── Asymmetric completion test (e2e tests) ─────────────────────────
+// ── Asymmetric completion test ───────────────────────────────────────
+// fast finishes in 1 yield; slow takes 3 yields x 200 ms each.
+// Tests that the per-index done frame correctly closes the fast consumer
+// while the slow consumer is still streaming.
 
-// fast finishes in 1 yield; slow takes 3 yields × 200 ms each.
-// Tests that the per-index empty-payload done frame correctly closes the fast
-// consumer while the slow consumer is still streaming.
-// fast yields immediately; slow yields 3 values with 200 ms delays.
 const onReturnAsymmetricGenerators = async () => {
   async function* fast(): AsyncGenerator<string> {
     yield 'fast-done'
@@ -209,9 +206,7 @@ const onReturnAsymmetricGenerators = async () => {
   return { fast: fast(), slow: slow() }
 }
 
-// ── Mid-stream error cases (e2e tests) ──────────────────────────────
-
-import { Abort } from 'telefunc'
+// ── Mid-stream error cases ───────────────────────────────────────────
 
 async function* onGeneratorAbortMidStream(): AsyncGenerator<string> {
   yield 'before-abort'
@@ -228,13 +223,15 @@ async function* onGeneratorBugMidStream(): AsyncGenerator<string> {
   throw new Error('Unexpected generator error')
 }
 
-// ── Upload progress via streaming (e2e tests) ──────────────────────
+// ── Upload progress via streaming ────────────────────────────────────
 
 async function* onUploadWithProgress(file: File): AsyncGenerator<{ bytesRead: number; totalSize: number }> {
   const totalSize = file.size
-  const stream = file.stream()
-  const reader = stream.getReader()
   let bytesRead = 0
+  yield { bytesRead, totalSize }
+
+  await sleep(1000)
+  const reader = file.stream().getReader()
   while (true) {
     const { done, value } = await reader.read()
     if (done) break

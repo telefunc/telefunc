@@ -1,7 +1,7 @@
 export { onGetHistory, onSendMessage, onClearHistory }
 export type { Message }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+import { sleep } from '../../sleep'
 
 type Message = {
   prompt: string

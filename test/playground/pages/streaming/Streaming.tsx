@@ -410,15 +410,17 @@ function Streaming() {
         id="test-upload-progress"
         onClick={async () => {
           setResult('')
-          const content = 'x'.repeat(1_000_000)
-          const file = new File([content], 'progress-test.txt', { type: 'text/plain' })
+          const content = 'x'.repeat(10_000_000)
+          const file = new File([content], 'progress-test-100mb.txt', { type: 'text/plain' })
+          const t0 = Date.now()
           const gen = onUploadWithProgress(file)
-          const updates: { bytesRead: number; totalSize: number }[] = []
+          const updates: { bytesRead: number; totalSize: number; clientMs: number }[] = []
+
           for await (const update of gen) {
-            updates.push(update)
-            setResult(JSON.stringify({ updates: [...updates], done: false }))
+            updates.push({ ...update, clientMs: Date.now() - t0 })
+            setResult(JSON.stringify({ updates: [...updates], done: false, totalMs: Date.now() - t0 }))
           }
-          setResult(JSON.stringify({ updates, done: true }))
+          setResult(JSON.stringify({ updates, done: true, totalMs: Date.now() - t0 }))
         }}
       >
         Upload with progress

@@ -1,13 +1,10 @@
-export default startServer()
-
 import { Hono } from 'hono'
 import { apply, serve } from '@photonjs/hono'
-import { cleanupState, resetCleanupState } from '../pages/abort/cleanup-state'
+import { cleanupState, resetCleanupState } from '../cleanup-state'
 
 function startServer() {
   const app = new Hono()
 
-  // Test-only API: query/reset server-side cleanup state
   app.get('/api/cleanup-state', (c) => c.json(cleanupState))
   app.post('/api/cleanup-state/reset', (c) => {
     resetCleanupState()
@@ -17,3 +14,5 @@ function startServer() {
   apply(app)
   return serve(app, { port: 3000 })
 }
+
+export default startServer()

@@ -21,7 +21,8 @@ export {
   onUploadIgnored,
 }
 
-/** Single file + text argument */
+import { sleep } from '../../sleep'
+
 const onUploadFile = async (file: File, description: string) => {
   const content = await file.text()
   return {
@@ -33,7 +34,6 @@ const onUploadFile = async (file: File, description: string) => {
   }
 }
 
-/** Multiple files as separate arguments */
 const onUploadMultiple = async (file1: File, file2: File) => {
   const text1 = await file1.text()
   const text2 = await file2.text()
@@ -43,7 +43,6 @@ const onUploadMultiple = async (file1: File, file2: File) => {
   }
 }
 
-/** Multiple files as an array argument */
 const onUploadArray = async (files: File[]) => {
   const results = []
   for (const file of files) {
@@ -52,7 +51,6 @@ const onUploadArray = async (files: File[]) => {
   return results
 }
 
-/** Read via file.stream() */
 const onUploadStream = async (file: File) => {
   let totalBytes = 0
   let chunkCount = 0
@@ -63,13 +61,12 @@ const onUploadStream = async (file: File) => {
   return { totalBytes, chunkCount }
 }
 
-/** Read via file.arrayBuffer() */
 const onUploadArrayBuffer = async (file: File) => {
   const ab = await file.arrayBuffer()
   return { content: new TextDecoder().decode(ab), byteLength: ab.byteLength }
 }
 
-/** Try to read the same file twice — should throw */
+// Reading the same file twice should throw (one-shot consumption)
 const onReadTwice = async (file: File) => {
   await file.text()
   try {
@@ -80,9 +77,8 @@ const onReadTwice = async (file: File) => {
   }
 }
 
-/** Read with backpressure — slow consumer delays 50ms per chunk */
+// Slow consumer — delays 50ms per chunk to test backpressure
 const onUploadBackpressure = async (file: File) => {
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
   let totalBytes = 0
   let chunkCount = 0
   const start = Date.now()
@@ -95,19 +91,15 @@ const onUploadBackpressure = async (file: File) => {
   return { totalBytes, chunkCount, elapsed }
 }
 
-/** Read a slice of a file */
 const onUploadSlice = async (file: File) => {
-  // 'hello world' (11 bytes) → slice(0,5) = 'hello'
   const slice = file.slice(0, 5)
   const content = await slice.text()
   return { content, sliceSize: slice.size, originalSize: file.size }
 }
 
-/** Read files out of order — file1 should be drained and unreadable */
+// Reading file2 first (out of order) drains file1 — it becomes unreadable
 const onUploadOutOfOrder = async (file1: File, file2: File) => {
-  // Read file2 first (out of order)
   const text2 = await file2.text()
-  // file1 was drained — trying to read should throw
   try {
     await file1.text()
     return { text2, file1Error: null }
@@ -116,13 +108,11 @@ const onUploadOutOfOrder = async (file1: File, file2: File) => {
   }
 }
 
-/** Empty file — 0 bytes */
 const onUploadEmpty = async (file: File) => {
   const content = await file.text()
   return { name: file.name, size: file.size, content, isEmpty: content === '' }
 }
 
-/** Many small files in an array */
 const onUploadManyFiles = async (files: File[]) => {
   const results = []
   for (const file of files) {
@@ -131,17 +121,15 @@ const onUploadManyFiles = async (files: File[]) => {
   return { count: results.length, results }
 }
 
-/** Binary content — verify bytes survive the round-trip */
 const onUploadBinary = async (file: File) => {
   const ab = await file.arrayBuffer()
   const bytes = new Uint8Array(ab)
-  // Return a checksum: sum of all byte values
   let sum = 0
   for (const b of bytes) sum += b
   return { byteLength: ab.byteLength, checksum: sum }
 }
 
-/** Mixed args: file, text, number, deeply nested file, boolean */
+// Mixed args: file, text, number, deeply nested file, boolean
 const onUploadMixed = async (
   file1: File,
   label: string,
@@ -163,7 +151,6 @@ const onUploadMixed = async (
   }
 }
 
-/** Large file — 5MB */
 const onUploadLarge = async (file: File) => {
   let totalBytes = 0
   let chunkCount = 0
@@ -174,36 +161,29 @@ const onUploadLarge = async (file: File) => {
   return { totalBytes, chunkCount, name: file.name, size: file.size }
 }
 
-/** Slice from the middle of a file */
 const onUploadSliceMiddle = async (file: File) => {
-  // 'abcdefghij' (10 bytes) → slice(3, 7) = 'defg'
   const slice = file.slice(3, 7)
   const content = await slice.text()
   return { content, sliceSize: slice.size, originalSize: file.size }
 }
 
-/** Slice with negative indices */
 const onUploadSliceNegative = async (file: File) => {
-  // 'abcdefghij' (10 bytes) → slice(-4) = 'ghij'
   const slice = file.slice(-4)
   const content = await slice.text()
   return { content, sliceSize: slice.size, originalSize: file.size }
 }
 
-/** Empty slice — slice(0, 0) */
 const onUploadSliceEmpty = async (file: File) => {
   const slice = file.slice(0, 0)
   const content = await slice.text()
   return { content, sliceSize: slice.size, originalSize: file.size }
 }
 
-/** Concurrent telefunc calls — stress the server with parallel requests */
 const onUploadConcurrent = async (file: File, id: number) => {
   const content = await file.text()
   return { id, content, name: file.name }
 }
 
-/** Round-trip all File/Blob properties */
 const onUploadProps = async (file: File) => {
   return {
     name: file.name,
@@ -213,7 +193,7 @@ const onUploadProps = async (file: File) => {
   }
 }
 
-/** Files sent but never read on the server — should not hang or error */
+// Files sent but never read on the server — should not hang or error
 const onUploadIgnored = async (_file1: File, _file2: File) => {
   return { ok: true }
 }
