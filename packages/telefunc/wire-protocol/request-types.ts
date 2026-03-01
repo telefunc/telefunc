@@ -24,10 +24,11 @@ type RequestBodyReader = {
 }
 
 /** Shared contract tying client and server plugins for one request type. */
-type RequestTypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = Record<string, unknown>> = { value: V; result: R; metadata: M }
-
-type FileRequestContract = RequestTypeContract<File, File, FileMetadata>
-type BlobRequestContract = RequestTypeContract<Blob, Blob, BlobMetadata>
+type RequestTypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = Record<string, unknown>> = {
+  value: V
+  result: R
+  metadata: M
+}
 
 /** Client-side plugin: detect a value, extract metadata + blob body for the binary request frame. */
 type ClientRequestType<C extends RequestTypeContract = RequestTypeContract> = {
@@ -42,3 +43,8 @@ type ServerRequestType<C extends RequestTypeContract = RequestTypeContract> = {
   prefix: string
   createValue(metadata: C['metadata'], reader: RequestBodyReader): C['result']
 }
+
+// ===== Concrete contracts =====
+
+type FileRequestContract = RequestTypeContract<File, File, FileMetadata>
+type BlobRequestContract = RequestTypeContract<Blob, Blob, BlobMetadata>

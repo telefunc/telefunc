@@ -4,12 +4,12 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { encodeU32, textEncoder } from '../../frame.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../constants.js'
 import type { StreamingErrorFrameAbort, StreamingErrorFrameBug } from '../../constants.js'
-import type {
-  StreamingValueServer,
-  StreamingProducer,
-} from '../interface.js'
+import type { StreamingValueServer, StreamingProducer } from '../../streaming-types.js'
 import { isAbort } from '../../../node/server/Abort.js'
-import { handleTelefunctionBug, validateTelefunctionError } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import {
+  handleTelefunctionBug,
+  validateTelefunctionError,
+} from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import type { TelefuncIdentifier } from '../../../shared/constants.js'
 
 const EMPTY = new Uint8Array(0)

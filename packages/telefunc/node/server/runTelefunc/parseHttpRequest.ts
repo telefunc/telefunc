@@ -6,8 +6,8 @@ import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
 import { getUrlPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
-import { createRequestReviver } from '../../../wire-protocol/request-types/registry.server.js'
-import { StreamReader } from '../../../wire-protocol/request-types/server/StreamReader.js'
+import { createRequestReviver } from '../../../wire-protocol/server/request/registry.js'
+import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
 
 type ParseResult =
   | {

@@ -13,11 +13,11 @@ export type {
 type StreamingMetadata = Record<string, never>
 
 /** Shared contract tying server and client plugins for one streaming type. */
-type StreamingTypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = Record<string, unknown>> = { value: V; result: R; metadata: M }
-
-type AsyncGeneratorContract = StreamingTypeContract<AsyncGenerator<unknown>, AsyncGenerator<unknown>, StreamingMetadata>
-type ReadableStreamContract = StreamingTypeContract<ReadableStream<Uint8Array>, ReadableStream<Uint8Array>, StreamingMetadata>
-type PromiseContract = StreamingTypeContract<Promise<unknown>, Promise<unknown>, StreamingMetadata>
+type StreamingTypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = Record<string, unknown>> = {
+  value: V
+  result: R
+  metadata: M
+}
 
 /** Collected during serialization: one entry per detected streaming value. */
 type StreamingValueServer = {
@@ -58,3 +58,13 @@ type ClientStreamingType<C extends StreamingTypeContract = StreamingTypeContract
   prefix: string
   createValue(metadata: C['metadata'], readNextChunk: () => Promise<Uint8Array | null>, cancel: () => void): C['result']
 }
+
+// ===== Concrete contracts =====
+
+type AsyncGeneratorContract = StreamingTypeContract<AsyncGenerator<unknown>, AsyncGenerator<unknown>, StreamingMetadata>
+type ReadableStreamContract = StreamingTypeContract<
+  ReadableStream<Uint8Array>,
+  ReadableStream<Uint8Array>,
+  StreamingMetadata
+>
+type PromiseContract = StreamingTypeContract<Promise<unknown>, Promise<unknown>, StreamingMetadata>

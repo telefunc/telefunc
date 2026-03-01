@@ -1,9 +1,9 @@
 export { createRequestReplacer }
 export type { RequestFileEntry }
 
-import { fileClientType } from './file.client.js'
-import { blobClientType } from './blob.client.js'
-import type { ClientRequestType } from './interface.js'
+import { fileClientType } from './file.js'
+import { blobClientType } from './blob.js'
+import type { ClientRequestType } from '../../request-types.js'
 
 /** File before Blob — File extends Blob, so must be checked first. */
 const clientRequestTypes: ClientRequestType[] = [fileClientType, blobClientType]

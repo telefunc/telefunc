@@ -1,7 +1,7 @@
 export { readableStreamClientType }
 
-import { SERIALIZER_PREFIX_STREAM } from '../constants.js'
-import type { ClientStreamingType, ReadableStreamContract } from './interface.js'
+import { SERIALIZER_PREFIX_STREAM } from '../../constants.js'
+import type { ClientStreamingType, ReadableStreamContract } from '../../streaming-types.js'
 
 const readableStreamClientType: ClientStreamingType<ReadableStreamContract> = {
   prefix: SERIALIZER_PREFIX_STREAM,

@@ -1,10 +1,10 @@
 export { asyncGeneratorServerType }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { isAsyncGenerator } from '../../utils/isAsyncGenerator.js'
-import { textEncoder } from '../frame.js'
-import { SERIALIZER_PREFIX_GENERATOR } from '../constants.js'
-import type { ServerStreamingType, AsyncGeneratorContract } from './interface.js'
+import { isAsyncGenerator } from '../../../utils/isAsyncGenerator.js'
+import { textEncoder } from '../../frame.js'
+import { SERIALIZER_PREFIX_GENERATOR } from '../../constants.js'
+import type { ServerStreamingType, AsyncGeneratorContract } from '../../streaming-types.js'
 
 const asyncGeneratorServerType: ServerStreamingType<AsyncGeneratorContract> = {
   prefix: SERIALIZER_PREFIX_GENERATOR,

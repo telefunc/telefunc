@@ -1,8 +1,8 @@
 export { readableStreamServerType }
 
-import { assertUsage } from '../../utils/assert.js'
-import { SERIALIZER_PREFIX_STREAM } from '../constants.js'
-import type { ServerStreamingType, ReadableStreamContract } from './interface.js'
+import { assertUsage } from '../../../utils/assert.js'
+import { SERIALIZER_PREFIX_STREAM } from '../../constants.js'
+import type { ServerStreamingType, ReadableStreamContract } from '../../streaming-types.js'
 
 const readableStreamServerType: ServerStreamingType<ReadableStreamContract> = {
   prefix: SERIALIZER_PREFIX_STREAM,

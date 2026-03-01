@@ -1,10 +1,10 @@
 export { serverStreamingTypes, createStreamingReplacer }
 
-import { asyncGeneratorServerType } from './async-generator.server.js'
-import { readableStreamServerType } from './readable-stream.server.js'
-import { promiseServerType } from './promise.server.js'
-import type { ServerStreamingType, StreamingValueServer } from './interface.js'
-import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { asyncGeneratorServerType } from './async-generator.js'
+import { readableStreamServerType } from './readable-stream.js'
+import { promiseServerType } from './promise.js'
+import type { ServerStreamingType, StreamingValueServer } from '../../streaming-types.js'
+import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
 const serverStreamingTypes: ServerStreamingType[] = [

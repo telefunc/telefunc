@@ -1,7 +1,7 @@
 export { fileClientType }
 
-import { SERIALIZER_PREFIX_FILE } from '../constants.js'
-import type { ClientRequestType, FileRequestContract } from './interface.js'
+import { SERIALIZER_PREFIX_FILE } from '../../constants.js'
+import type { ClientRequestType, FileRequestContract } from '../../request-types.js'
 
 const fileClientType: ClientRequestType<FileRequestContract> = {
   prefix: SERIALIZER_PREFIX_FILE,

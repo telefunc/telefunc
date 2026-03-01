@@ -7,7 +7,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isCallable } from '../../utils/isCallable.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
 import { unique } from '../../utils/unique.js'
-import { isLazyFile, isLazyBlob } from '../../wire-protocol/request-types/server/LazyFile.js'
+import { isLazyFile, isLazyBlob } from '../../wire-protocol/server/request/LazyFile.js'
 
 const shieldKey = '__telefunc_shield'
 const isVerifierKey = '__telefunc_isVerifier'

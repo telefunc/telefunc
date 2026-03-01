@@ -1,7 +1,7 @@
 export { blobClientType }
 
-import { SERIALIZER_PREFIX_BLOB } from '../constants.js'
-import type { ClientRequestType, BlobRequestContract } from './interface.js'
+import { SERIALIZER_PREFIX_BLOB } from '../../constants.js'
+import type { ClientRequestType, BlobRequestContract } from '../../request-types.js'
 
 const blobClientType: ClientRequestType<BlobRequestContract> = {
   prefix: SERIALIZER_PREFIX_BLOB,

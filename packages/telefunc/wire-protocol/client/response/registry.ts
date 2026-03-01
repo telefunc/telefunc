@@ -1,10 +1,10 @@
 export { clientStreamingTypes, createStreamingReviver }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
-import { asyncGeneratorClientType } from './async-generator.client.js'
-import { readableStreamClientType } from './readable-stream.client.js'
-import { promiseClientType } from './promise.client.js'
-import type { ClientStreamingType } from './interface.js'
+import { asyncGeneratorClientType } from './async-generator.js'
+import { readableStreamClientType } from './readable-stream.js'
+import { promiseClientType } from './promise.js'
+import type { ClientStreamingType } from '../../streaming-types.js'
 
 const clientStreamingTypes: ClientStreamingType[] = [
   asyncGeneratorClientType,

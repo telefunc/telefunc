@@ -4,8 +4,8 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
-import { createStreamingReplacer } from '../../../wire-protocol/streaming-types/registry.server.js'
-import { buildStreamingResponseBody } from '../../../wire-protocol/streaming-types/server/StreamingResponseBody.js'
+import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
+import { buildStreamingResponseBody } from '../../../wire-protocol/server/response/StreamingResponseBody.js'
 import type { TelefuncIdentifier, TelefuncResponseBody } from '../../../shared/constants.js'
 
 type SerializeResult = { type: 'text'; body: string } | { type: 'streaming'; body: ReadableStream<Uint8Array> }

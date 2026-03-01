@@ -1,9 +1,9 @@
 export { promiseClientType }
 
 import { parse } from '@brillout/json-serializer/parse'
-import { textDecoder } from '../frame.js'
-import { SERIALIZER_PREFIX_PROMISE } from '../constants.js'
-import type { ClientStreamingType, PromiseContract } from './interface.js'
+import { textDecoder } from '../../frame.js'
+import { SERIALIZER_PREFIX_PROMISE } from '../../constants.js'
+import type { ClientStreamingType, PromiseContract } from '../../streaming-types.js'
 
 const promiseClientType: ClientStreamingType<PromiseContract> = {
   prefix: SERIALIZER_PREFIX_PROMISE,

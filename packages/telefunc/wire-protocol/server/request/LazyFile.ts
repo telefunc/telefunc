@@ -3,7 +3,7 @@ export { LazyFile }
 export { isLazyBlob }
 export { isLazyFile }
 
-import type { RequestBodyReader, FileMetadata, BlobMetadata } from '../interface.js'
+import type { RequestBodyReader, FileMetadata, BlobMetadata } from '../../request-types.js'
 import { assertUsage } from '../../../utils/assert.js'
 
 const LAZY_BLOB_BRAND = Symbol.for('telefunc.LazyBlob')

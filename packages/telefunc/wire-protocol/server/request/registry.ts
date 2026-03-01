@@ -1,10 +1,10 @@
 export { createRequestReviver }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
-import { fileServerType } from './file.server.js'
-import { blobServerType } from './blob.server.js'
-import type { ServerRequestType, RequestBodyReader } from './interface.js'
-import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { fileServerType } from './file.js'
+import { blobServerType } from './blob.js'
+import type { ServerRequestType, RequestBodyReader } from '../../request-types.js'
+import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
 /** File before Blob — same detection order as client-side. */

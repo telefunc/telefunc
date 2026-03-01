@@ -1,8 +1,8 @@
 export { blobServerType }
 
-import { SERIALIZER_PREFIX_BLOB } from '../constants.js'
-import { LazyBlob } from './server/LazyFile.js'
-import type { ServerRequestType, BlobRequestContract } from './interface.js'
+import { SERIALIZER_PREFIX_BLOB } from '../../constants.js'
+import { LazyBlob } from './LazyFile.js'
+import type { ServerRequestType, BlobRequestContract } from '../../request-types.js'
 
 const blobServerType: ServerRequestType<BlobRequestContract> = {
   prefix: SERIALIZER_PREFIX_BLOB,

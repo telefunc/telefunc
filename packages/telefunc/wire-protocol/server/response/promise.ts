@@ -1,10 +1,10 @@
 export { promiseServerType }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { isPromise } from '../../utils/isPromise.js'
-import { textEncoder } from '../frame.js'
-import { SERIALIZER_PREFIX_PROMISE } from '../constants.js'
-import type { ServerStreamingType, PromiseContract } from './interface.js'
+import { isPromise } from '../../../utils/isPromise.js'
+import { textEncoder } from '../../frame.js'
+import { SERIALIZER_PREFIX_PROMISE } from '../../constants.js'
+import type { ServerStreamingType, PromiseContract } from '../../streaming-types.js'
 
 const promiseServerType: ServerStreamingType<PromiseContract> = {
   prefix: SERIALIZER_PREFIX_PROMISE,
