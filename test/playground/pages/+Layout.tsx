@@ -10,6 +10,7 @@ const nav = [
   { href: '/file-upload', label: 'Upload' },
   { href: '/abort', label: 'Abort' },
   { href: '/chat', label: 'Chat' },
+  { href: '/kitchen-sink', label: 'Kitchen Sink' },
 ]
 
 function Layout({ children }: { children: React.ReactNode }) {

@@ -13,14 +13,9 @@ const promiseServerType: ServerStreamingType<PromiseContract> = {
   createProducer: (value) => {
     return {
       chunks: (async function* () {
-        console.log('[server:promise] awaiting promise...')
-        const resolved = await value
-        console.log('[server:promise] promise resolved, yielding value')
-        yield textEncoder.encode(stringify(resolved))
-        console.log('[server:promise] producer done')
+        yield textEncoder.encode(stringify(await value))
       })(),
       cancel: () => {
-        console.log('[server:promise] cancel() called (no-op)')
         // Promises can't be cancelled
       },
     }

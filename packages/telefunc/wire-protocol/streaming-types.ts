@@ -21,8 +21,7 @@ type StreamingTypeContract<V = unknown, R = unknown, M extends Record<string, un
 
 /** Collected during serialization: one entry per detected streaming value. */
 type StreamingValueServer = {
-  type: ServerStreamingType
-  value: unknown
+  createProducer: () => StreamingProducer
   /** Index assigned during serialization (for multiplexed frames). */
   index: number
 }

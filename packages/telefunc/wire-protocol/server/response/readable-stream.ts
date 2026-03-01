@@ -16,28 +16,21 @@ const readableStreamServerType: ServerStreamingType<ReadableStreamContract> = {
     const chunks = (async function* () {
       try {
         while (true) {
-          console.log('[server:readable-stream] calling reader.read()')
           const { done, value: chunk } = await reader.read()
-          if (done) {
-            console.log('[server:readable-stream] reader.read() returned done=true')
-            break
-          }
+          if (done) break
           assertUsage(
             chunk instanceof Uint8Array,
             'ReadableStream returned by a telefunction must yield Uint8Array chunks.',
           )
-          console.log(`[server:readable-stream] yielding ${chunk.byteLength} bytes`)
           yield chunk
         }
       } finally {
-        console.log('[server:readable-stream] finally block — calling reader.cancel()')
         await reader.cancel()
       }
     })()
     return {
       chunks,
       cancel: () => {
-        console.log('[server:readable-stream] cancel() called')
         chunks.return(undefined)
         reader.cancel()
       },

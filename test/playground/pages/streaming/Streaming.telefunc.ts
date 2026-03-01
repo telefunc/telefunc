@@ -172,33 +172,21 @@ const onReturnDeadlockStream = async () => {
 // ── Per-tag cancel test (e2e tests) ──────────────────────────────────
 
 const onReturnMixedEndless = async () => {
-  console.time('onReturnMixedEndless')
   cleanupState.mixedEndless = 'running'
   cleanupState.mixedEndlessAborted = ''
   const context = getContext()
   context.onConnectionAbort(() => {
-    console.timeLog('onReturnMixedEndless', 'aborted')
     cleanupState.mixedEndless = 'cleaned-up'
     cleanupState.mixedEndlessAborted = String(Date.now())
   })
   async function* gen(): AsyncGenerator<string> {
-    try {
-      let i = 0
-      while (true) {
-        await sleep(100)
-        console.timeLog('onReturnMixedEndless', `yielding g-${i}`)
-        yield `g-${i++}`
-      }
-    } finally {
-      console.timeLog('onReturnMixedEndless', 'gen finally')
+    let i = 0
+    while (true) {
+      await sleep(100)
+      yield `g-${i++}`
     }
   }
-  const slow = new Promise<string>((resolve) =>
-    setTimeout(() => {
-      console.timeLog('onReturnMixedEndless', 'slow resolved')
-      resolve('done')
-    }, 1000),
-  )
+  const slow = new Promise<string>((resolve) => setTimeout(() => resolve('done'), 1000))
   return { gen: gen(), slow }
 }
 
@@ -208,8 +196,6 @@ const onReturnMixedEndless = async () => {
 // Tests that the per-index empty-payload done frame correctly closes the fast
 // consumer while the slow consumer is still streaming.
 // fast yields immediately; slow yields 3 values with 200 ms delays.
-// Tests that the per-index empty-payload done frame correctly closes the fast
-// consumer while the slow consumer is still streaming.
 const onReturnAsymmetricGenerators = async () => {
   async function* fast(): AsyncGenerator<string> {
     yield 'fast-done'

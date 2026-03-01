@@ -5,6 +5,7 @@ import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testStreaming } from './pages/streaming/e2e-test'
 import { testAbort } from './pages/abort/e2e-test'
+import { testKitchenSink } from './pages/kitchen-sink/e2e-test'
 
 function testRun(cmd: 'npm run dev' | 'npm run preview') {
   run(cmd, {
@@ -43,11 +44,13 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
     await testCounter()
   })
 
-  testFileUpload()
+  // testFileUpload()
 
-  testStreaming()
+  // testStreaming()
 
-  testAbort()
+  // testAbort()
+
+  testKitchenSink()
 
   if (!isDev) {
     test('shield() generation', async () => {

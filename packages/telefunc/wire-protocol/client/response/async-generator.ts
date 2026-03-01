@@ -11,23 +11,16 @@ const asyncGeneratorClientType: ClientStreamingType<AsyncGeneratorContract> = {
     const gen = (async function* () {
       try {
         while (true) {
-          console.log('[client:async-gen] calling readNextChunk()')
           const chunk = await readNextChunk()
-          if (chunk === null) {
-            console.log('[client:async-gen] readNextChunk returned null, done')
-            return
-          }
-          console.log(`[client:async-gen] got chunk (${chunk.byteLength} bytes), yielding`)
+          if (chunk === null) return
           yield parse(textDecoder.decode(chunk))
         }
       } finally {
-        console.log('[client:async-gen] finally block — calling cancel()')
         cancel()
       }
     })()
     const origReturn = gen.return.bind(gen)
     gen.return = (...args: Parameters<(typeof gen)['return']>) => {
-      console.log('[client:async-gen] gen.return() called by consumer')
       cancel()
       return origReturn(...args)
     }

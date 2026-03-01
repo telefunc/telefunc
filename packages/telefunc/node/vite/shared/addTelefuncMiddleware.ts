@@ -19,6 +19,8 @@ function addTelefuncMiddleware(middlewares: ConnectServer) {
     const httpResponse = await telefunc({ request })
     httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
     res.statusCode = httpResponse.statusCode
+    res.socket?.setNoDelay(true)
+    res.flushHeaders()
     httpResponse.pipe(res)
   })
 }

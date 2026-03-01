@@ -147,13 +147,13 @@ function isStreamWritableNode(writable: unknown): writable is StreamWritableNode
 }
 
 async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: StreamWritableWeb): Promise<void> {
-  if (typeof responseBody === 'string') {
-    const writer = writable.getWriter()
-    writer.write(encodeForWebStream(responseBody))
-    writer.close()
-    return
-  }
   try {
+    if (typeof responseBody === 'string') {
+      const writer = writable.getWriter()
+      writer.write(encodeForWebStream(responseBody))
+      writer.close()
+      return
+    }
     await responseBody.pipeTo(writable)
   } catch (err) {
     handleError(err)
@@ -161,14 +161,14 @@ async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: Str
 }
 
 async function pipeToStreamWritableNode(responseBody: ResponseBody, writable: StreamWritableNode): Promise<void> {
-  if (typeof responseBody === 'string') {
-    writable.write(responseBody)
-    writable.end()
-    return
-  }
-  // Convert ReadableStream (Web) to Node.js Readable for piping
-  const { Readable, pipeline } = await loadStreamNodeModule()
   try {
+    if (typeof responseBody === 'string') {
+      writable.write(responseBody)
+      writable.end()
+      return
+    }
+    // Convert ReadableStream (Web) to Node.js Readable for piping
+    const { Readable, pipeline } = await loadStreamNodeModule()
     await pipeline(Readable.fromWeb(responseBody as import('stream/web').ReadableStream), writable)
   } catch (error) {
     handleError(error)
@@ -350,6 +350,7 @@ async function runTelefunc_({
         headers: [
           ['Cache-Control', 'no-cache, no-transform'],
           ['X-Accel-Buffering', 'no'],
+          ['transfer-encoding', 'chunked'],
         ],
         body: result.body,
       })

@@ -31,42 +31,26 @@ function buildStreamingResponseBody(
   // Create all producers upfront so doCancel can call cancel() on each.
   // This is critical for ReadableStream: gen.return() alone can't interrupt
   // a suspended reader.read(); reader.cancel() resolves it immediately.
-  const producers: Array<{ producer: StreamingProducer; index: number }> = streamingValues.map((sv) => ({
-    producer: sv.type.createProducer(sv.value),
-    index: sv.index,
-  }))
+  const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
 
   const gen = generateResponseBody(metadataSerialized, producers, telefuncId)
 
   const doCancel = (controller?: ReadableStreamDefaultController<Uint8Array> | null) => {
     if (cancelled) return
     cancelled = true
-    console.log('[server:stream] doCancel called', new Error().stack)
     // cancel() interrupts suspended reads (reader.read() / gen.next()) —
     // iter.return() alone can't do this since it waits for the pending await to settle.
-    for (const { producer, index } of producers) {
-      console.log(`[server:stream] cancelling producer index=${index}`)
-      producer.cancel()
-    }
+    for (const { producer } of producers) producer.cancel()
     // Terminates the merge loop generator, whose finally block calls
     // iter.return() on active entries → triggers each producer's finally for cleanup.
-    console.log('[server:stream] calling gen.return()')
     gen.return(undefined)
     if (controller)
       try {
-        console.log('[server:stream] closing controller')
         controller.close()
       } catch {}
   }
 
-  abortSignal.addEventListener(
-    'abort',
-    () => {
-      console.log('[server:stream] abortSignal fired')
-      doCancel(streamController)
-    },
-    { once: true },
-  )
+  abortSignal.addEventListener('abort', () => doCancel(streamController), { once: true })
 
   return new ReadableStream<Uint8Array>({
     start(controller) {
@@ -74,22 +58,15 @@ function buildStreamingResponseBody(
     },
     async pull(controller) {
       try {
-        console.log('[server:stream] pull() called')
         const { done, value } = await gen.next()
-        if (cancelled) {
-          console.log('[server:stream] pull() — cancelled, returning')
-          return
-        }
+        if (cancelled) return
         if (done) {
-          console.log('[server:stream] pull() — gen done, closing controller')
           onStreamComplete()
           controller.close()
         } else {
-          console.log(`[server:stream] pull() — enqueuing ${value.byteLength} bytes`)
           controller.enqueue(value)
         }
       } catch (err) {
-        console.log('[server:stream] pull() — caught error:', err)
         if (cancelled) return
         onStreamComplete()
         try {
@@ -98,7 +75,6 @@ function buildStreamingResponseBody(
       }
     },
     cancel() {
-      console.log('[server:stream] ReadableStream.cancel() called')
       doCancel()
     },
   })
@@ -118,7 +94,6 @@ async function* generateResponseBody(
   telefuncId: TelefuncIdentifier,
 ): AsyncGenerator<Uint8Array> {
   // Metadata header
-  console.log(`[server:gen] yielding metadata (${metadataSerialized.length} chars)`)
   const metadataBytes = textEncoder.encode(metadataSerialized)
   yield encodeU32(metadataBytes.length)
   yield metadataBytes
@@ -130,11 +105,7 @@ async function* generateResponseBody(
   }
 
   const advance = (entry: RaceEntry) => {
-    console.log(`[server:gen] advancing producer index=${entry.index}`)
-    entry.pending = entry.iter.next().then((result) => {
-      console.log(`[server:gen] producer index=${entry.index} resolved, done=${result.done}`)
-      return { entry, result }
-    })
+    entry.pending = entry.iter.next().then((result) => ({ entry, result }))
   }
 
   // Each producer gets one pending .next() call — the minimum needed for
@@ -154,18 +125,14 @@ async function* generateResponseBody(
     // Without this, a fast producer at index 0 would always win Promise.race
     // (which picks the first resolved promise in array order), starving others.
     while (active.length > 0) {
-      console.log(`[server:gen] racing ${active.length} active producers: [${active.map((e) => e.index).join(',')}]`)
       const { entry, result } = await Promise.race(active.map((e) => e.pending))
 
       if (result.done) {
         // Send empty-payload frame to signal this index is done.
         // Without this, the client consumer would hang until the global terminator.
-        console.log(`[server:gen] producer index=${entry.index} done, sending empty frame`)
         yield encodeIndexedFrame(entry.index, EMPTY)
         active.splice(active.indexOf(entry), 1)
-        console.log(`[server:gen] remaining active: [${active.map((e) => e.index).join(',')}]`)
       } else {
-        console.log(`[server:gen] producer index=${entry.index} yielded ${result.value.byteLength} bytes`)
         yield encodeIndexedFrame(entry.index, result.value)
         advance(entry)
         // Move to end for fair round-robin scheduling
@@ -174,11 +141,9 @@ async function* generateResponseBody(
       }
     }
 
-    console.log('[server:gen] all producers done, sending terminator')
     // Success: zero-length terminator
     yield encodeU32(0)
   } catch (err) {
-    console.log('[server:gen] caught error in merge loop:', err)
     // Cancel all producers — iter.return() can't interrupt a suspended await,
     // only producer.cancel() can unblock pending reads.
     for (const { producer } of producerEntries) {

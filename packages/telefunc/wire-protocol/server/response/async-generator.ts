@@ -14,24 +14,17 @@ const asyncGeneratorServerType: ServerStreamingType<AsyncGeneratorContract> = {
     const chunks = (async function* () {
       try {
         while (true) {
-          console.log('[server:async-gen] calling gen.next()')
           const { done, value: chunk } = await value.next()
-          if (done) {
-            console.log('[server:async-gen] gen.next() returned done=true')
-            break
-          }
-          console.log('[server:async-gen] gen.next() yielded value, encoding')
+          if (done) break
           yield textEncoder.encode(stringify(chunk))
         }
       } finally {
-        console.log('[server:async-gen] finally block — calling gen.return()')
         await value.return(undefined)
       }
     })()
     return {
       chunks,
       cancel: () => {
-        console.log('[server:async-gen] cancel() called')
         chunks.return(undefined)
         value.return(undefined)
       },

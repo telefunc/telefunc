@@ -25,7 +25,7 @@ function createStreamingReplacer() {
     for (const type of serverStreamingTypes) {
       if (type.detect(value)) {
         const index = nextIndex++
-        streamingValues.push({ type, value, index })
+        streamingValues.push({ createProducer: () => type.createProducer(value), index })
         const pluginMeta = type.getMetadata(value)
         return {
           replacement: type.prefix + serializer(pluginMeta),
