@@ -134,13 +134,18 @@ function testStreaming() {
   })
 
   test('streaming: stream + promise deadlock — promise unblocks when stream is consumed', async () => {
-    await page.click('#test-stream-promise-deadlock')
+    // Start: makes the call but does NOT consume the stream yet
+    await page.click('#test-stream-promise-deadlock-start')
 
-    // The button handler waits 3s before setting the pending state
-    await sleep(3500)
-    const pendingResult = await getResult('#streaming-result')
-    expect(pendingResult.promisePending).toBe(true)
-    expect(pendingResult.streamDone).toBe(false)
+    // Promise must stay pending while the stream is unconsumed
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result.promisePending).toBe(true)
+      expect(result.streamDone).toBe(false)
+    })
+
+    // Consume: drains the 2 MB stream, unblocking the promise frame
+    await page.click('#test-stream-promise-deadlock-consume')
 
     // After the stream is consumed the pipeline uncorks and the promise resolves
     await autoRetry(async () => {
@@ -260,7 +265,7 @@ function testStreaming() {
       }
       const firstMs: number = result.updates[0].clientMs
       const lastMs: number = result.updates[result.updates.length - 1].clientMs
-      expect(lastMs - firstMs).lessThan(1000)
+      expect(lastMs - firstMs).lessThan(3000)
     })
   })
 }

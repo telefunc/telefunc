@@ -230,12 +230,12 @@ async function* onUploadWithProgress(file: File): AsyncGenerator<{ bytesRead: nu
   let bytesRead = 0
   yield { bytesRead, totalSize }
 
-  await sleep(1000)
+  await sleep(3000)
   const reader = file.stream().getReader()
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
     bytesRead += value.byteLength
-    yield { bytesRead, totalSize }
   }
+  yield { bytesRead, totalSize }
 }

@@ -1,6 +1,6 @@
 export { Streaming }
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   onReturnReadableStream,
   onReturnAsyncGenerator,
@@ -26,6 +26,10 @@ import { abort } from 'telefunc/client'
 function Streaming() {
   const [result, setResult] = useState<string>('')
   const [hydrated, setHydrated] = useState(false)
+  const deadlockRef = useRef<{
+    reader: ReadableStreamDefaultReader<Uint8Array>
+    promiseDone: Promise<unknown>
+  } | null>(null)
   useEffect(() => setHydrated(true), [])
 
   return (
@@ -245,9 +249,10 @@ function Streaming() {
       </button>
 
       <button
-        id="test-stream-promise-deadlock"
+        id="test-stream-promise-deadlock-start"
         onClick={async () => {
           setResult('')
+          deadlockRef.current = null
           const res = await onReturnDeadlockStream()
 
           let promiseResolved = false
@@ -256,15 +261,24 @@ function Streaming() {
             return v
           })
 
-          // Wait without reading the stream — promise should stay pending because
-          // the large stream fills the demuxer buffer (1 MB), stalling frame delivery.
-          await new Promise((resolve) => setTimeout(resolve, 3000))
+          // Store reader + promise; don't consume the stream yet so the promise stays pending.
+          deadlockRef.current = { reader: res.stream.getReader(), promiseDone }
+          // Promise must still be pending here — the large stream fills the demuxer
+          // buffer (1 MB), stalling delivery of the promise frame until stream is consumed.
           setResult(JSON.stringify({ promisePending: !promiseResolved, streamDone: false }))
-          // Give the e2e test time to observe the pending state before we start consuming.
-          await new Promise((resolve) => setTimeout(resolve, 500))
+        }}
+      >
+        Stream + promise deadlock (start)
+      </button>
 
-          // Start reading the stream — this drains the demuxer buffer so the promise frame can be delivered.
-          const reader = res.stream.getReader()
+      <button
+        id="test-stream-promise-deadlock-consume"
+        onClick={async () => {
+          const state = deadlockRef.current
+          if (!state) return
+          const { reader, promiseDone } = state
+
+          // Drain the stream — this unblocks the demuxer so the promise frame can be delivered.
           let byteCount = 0
           while (true) {
             const { done, value } = await reader.read()
@@ -272,12 +286,11 @@ function Streaming() {
             byteCount += value.byteLength
           }
 
-          // Promise should now resolve quickly.
           await promiseDone
           setResult(JSON.stringify({ promisePending: false, streamDone: true, byteCount, promiseResolved: true }))
         }}
       >
-        Stream + promise deadlock
+        Stream + promise deadlock (consume)
       </button>
 
       <button
