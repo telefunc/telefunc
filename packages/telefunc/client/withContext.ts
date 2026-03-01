@@ -15,12 +15,7 @@ const globalObject = getGlobalObject<{ pendingContext: ClientCallContext | null 
   pendingContext: null,
 })
 
-/** Read the pending context set by withContext().
- *
- *  Must be called synchronously inside remoteTelefunctionCall() —
- *  before any await — to capture the context while it's still set.
- *  The context is reset by withContext()'s finally block after the call returns.
- */
+// TODO/ai remove this and the whole globalObject.pendingContext mechanism in favor of passing the context directly to remoteTelefunctionCall
 export function getPendingContext(): ClientCallContext | null {
   return globalObject.pendingContext
 }
