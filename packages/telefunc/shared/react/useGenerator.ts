@@ -37,7 +37,7 @@ type UseGeneratorState<T, Args extends unknown[]> = {
 }
 
 /**
- * @exprimental — DO NOT USE unless you reached out to a Telefunc maintainer — this component hook will break upon minor version releases.
+ * @experimental — DO NOT USE unless you reached out to a Telefunc maintainer — this component hook will break upon minor version releases.
  *
  * React hook for consuming a telefunction that returns an AsyncGenerator.
  * Call `invoke(args)` to start streaming, `abort()` to stop.
