@@ -3,11 +3,9 @@ export { parseStreamingResponseBody }
 import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
-import { decodeU32, concat } from '../../frame.js'
+import { decodeU32, decodeIndexedFrame, concat } from '../../frame.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../constants.js'
-import type { StreamingErrorFramePayload } from '../../constants.js'
 import { createStreamingReviver } from './registry.js'
-import type { TelefuncResponseBody } from '../../../shared/constants.js'
 import { throwCancelError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 
 // ===== Streaming response parsing =====
@@ -32,8 +30,7 @@ async function parseStreamingResponseBody(
   const demuxer = new FrameDemuxer(streamReader, cancelUpstream)
 
   // Read metadata header
-  const metaLenBuf = await streamReader.readExact(4)
-  const metaLen = decodeU32(metaLenBuf)
+  const metaLen = await streamReader.readU32()
   const metaBytes = await streamReader.readExact(metaLen)
   const metaText = new TextDecoder().decode(metaBytes)
 
@@ -42,13 +39,11 @@ async function parseStreamingResponseBody(
     return () => demuxer.readNextChunkForIndex(index)
   }
 
-  const getCancelForIndex = (index: number) => {
-    return demuxer.getCancelForIndex(index)
-  }
+  const getCancelIndex = (index: number) => () => demuxer.cancelIndex(index)
 
-  const { reviver } = createStreamingReviver(getChunkReader, getCancelForIndex)
+  const { reviver } = createStreamingReviver(getChunkReader, getCancelIndex)
 
-  const parsed = parse(metaText, { reviver }) as TelefuncResponseBody
+  const parsed: unknown = parse(metaText, { reviver })
   assert(isObject(parsed) && 'ret' in parsed)
 
   return { ret: parsed.ret }
@@ -94,27 +89,24 @@ class FrameDemuxer {
     this.totalConsumers++
   }
 
-  /** Returns a cancel function for the given index. Follows .tee() semantics:
-   *  marks the index as cancelled, drops its buffered/future frames, and resolves
-   *  any pending waiter with null. Upstream is cancelled only when all consumers
-   *  are cancelled. */
-  getCancelForIndex(index: number): () => void {
-    return () => {
-      if (this.cancelledIndices.has(index)) return
-      this.cancelledIndices.add(index)
-      // Drop buffered frames for this index
-      this.pendingFrames.delete(index)
-      // Resolve any pending waiter with null (stream ended for this consumer)
-      const waiter = this.indexWaiters.get(index)
-      if (waiter) {
-        this.indexWaiters.delete(index)
-        waiter.resolve(null)
-      }
-      // Cancel upstream when all consumers are cancelled
-      if (this.cancelledIndices.size >= this.totalConsumers) {
-        this.cancelUpstream?.()
-        this.cancelUpstream = null
-      }
+  /** Cancel the given index. Follows .tee() semantics:
+   *  drops its buffered/future frames, resolves any pending waiter with null.
+   *  Upstream is cancelled only when all consumers are cancelled. */
+  cancelIndex(index: number): void {
+    if (this.cancelledIndices.has(index)) return
+    this.cancelledIndices.add(index)
+    // Drop buffered frames for this index
+    this.pendingFrames.delete(index)
+    // Resolve any pending waiter with null (stream ended for this consumer)
+    const waiter = this.indexWaiters.get(index)
+    if (waiter) {
+      this.indexWaiters.delete(index)
+      waiter.resolve(null)
+    }
+    // Cancel upstream when all consumers are cancelled
+    if (this.cancelledIndices.size >= this.totalConsumers) {
+      this.cancelUpstream?.()
+      this.cancelUpstream = null
     }
   }
 
@@ -159,10 +151,11 @@ class FrameDemuxer {
         // Drop frames for cancelled indices
         if (this.cancelledIndices.has(frame.index)) continue
 
+        const waiter = this.indexWaiters.get(frame.index)
+
         // Empty payload = per-index "done" signal
         if (frame.payload.length === 0) {
           this.doneIndices.add(frame.index)
-          const waiter = this.indexWaiters.get(frame.index)
           if (waiter) {
             this.indexWaiters.delete(frame.index)
             waiter.resolve(null)
@@ -171,7 +164,6 @@ class FrameDemuxer {
         }
 
         // Direct dispatch — no buffering, no delay
-        const waiter = this.indexWaiters.get(frame.index)
         if (waiter) {
           this.indexWaiters.delete(frame.index)
           waiter.resolve(frame.payload)
@@ -233,6 +225,11 @@ class StreamReader {
     callContext.abortController.signal.addEventListener('abort', () => reader.cancel(), { once: true })
   }
 
+  async readU32(): Promise<number> {
+    const buf = await this.readExact(4) // sizeof uint32
+    return this.cancelled ? 0 : decodeU32(buf)
+  }
+
   async readExact(n: number): Promise<Uint8Array> {
     while (this.buffer.length < n) {
       let done: boolean
@@ -259,23 +256,23 @@ class StreamReader {
   /** Read the next indexed frame from the wire.
    *  Returns { index, payload } or null on terminator. Throws on error frames. */
   async readNextFrame(): Promise<{ index: number; payload: Uint8Array } | null> {
-    const lenBuf = await this.readExact(4)
+    const len = await this.readU32()
     if (this.cancelled) return null
-    const len = decodeU32(lenBuf)
     if (len === 0) return null
     if (len === STREAMING_ERROR_FRAME_MARKER) {
       // Error frame: [ERROR_MARKER][u32 payload_len][payload_bytes]
-      const errorLenBuf = await this.readExact(4)
-      const errorLen = decodeU32(errorLenBuf)
+      const errorLen = await this.readU32()
       const errorBytes = await this.readExact(errorLen)
-      const errorPayload = parse(new TextDecoder().decode(errorBytes)) as StreamingErrorFramePayload
+      const errorPayload: unknown = parse(new TextDecoder().decode(errorBytes))
+      assert(isObject(errorPayload) && 'type' in errorPayload)
       if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT) {
+        assert('abortValue' in errorPayload)
         throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, errorPayload.abortValue)
       }
       throwBugError()
     }
     const frameData = await this.readExact(len)
     if (this.cancelled) return null
-    return { index: frameData[0]!, payload: frameData.subarray(1) }
+    return decodeIndexedFrame(frameData)
   }
 }

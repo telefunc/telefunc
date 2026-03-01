@@ -8,7 +8,57 @@ Use `throw Abort()` to implement permissions and other guards, see <Link href="/
 
 You can also call `throw Abort(someValue)` for implementing `getContext()` wrappers, see <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={true} />.
 
+
+## Mid-stream abort
+
+You can `throw Abort()` inside an `AsyncGenerator` to stop streaming and signal the client:
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+import { Abort } from 'telefunc'
+
+export async function* onChat(prompt: string): AsyncGenerator<string> {
+  yield 'before-abort'
+  throw Abort()
+}
+```
+
+The client catches the abort — values yielded before `throw Abort()` are still delivered:
+
+```ts
+const gen = onChat('hello')
+try {
+  for await (const token of gen) { /* receives 'before-abort' */ }
+} catch (err) {
+  err.isAbort // true
+}
+```
+
+### `throw Abort(value)` mid-stream
+
+Pass a value to `Abort()` and the client receives it as `err.abortValue`:
+
+```ts
+export async function* onChat(prompt: string): AsyncGenerator<string> {
+  yield 'some-data'
+  throw Abort({ reason: 'not-allowed', code: 403 })
+}
+```
+
+```ts
+try {
+  for await (const token of onChat('hello')) { /* ... */ }
+} catch (err) {
+  err.isAbort    // true
+  err.abortValue // { reason: 'not-allowed', code: 403 }
+}
+```
+
+
 ## See also
 
  - <Link href="/permissions" />
  - <Link href="/onAbort" />
+ - <Link href="/streaming" />

@@ -1,7 +1,7 @@
 export { buildStreamingResponseBody }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { encodeU32, textEncoder } from '../../frame.js'
+import { encodeU32, encodeIndexedFrame, textEncoder } from '../../frame.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../constants.js'
 import type { StreamingErrorFrameAbort, StreamingErrorFrameBug } from '../../constants.js'
 import type { StreamingValueServer, StreamingProducer } from '../../streaming-types.js'
@@ -155,15 +155,6 @@ async function* generateResponseBody(
 }
 
 // ===== Frame encoding helpers =====
-
-function encodeIndexedFrame(index: number, payload: Uint8Array): Uint8Array {
-  const frameLen = 1 + payload.byteLength
-  const frame = new Uint8Array(4 + frameLen)
-  new DataView(frame.buffer).setUint32(0, frameLen, false)
-  frame[4] = index
-  frame.set(payload, 5)
-  return frame
-}
 
 /** Encode an error as an error frame: [ERROR_MARKER][u32 payload_len][payload_bytes] */
 function encodeErrorFrame(err: unknown, telefuncId: TelefuncIdentifier): Uint8Array[] {

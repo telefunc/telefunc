@@ -1,6 +1,7 @@
 export { StreamReader }
 
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
+import { decodeU32 } from '../../frame.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
@@ -27,8 +28,7 @@ class StreamReader {
 
   /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. */
   async readMetadata(): Promise<string> {
-    const lengthBytes = await this.#readExact(4)
-    const length = new DataView(lengthBytes.buffer, lengthBytes.byteOffset, 4).getUint32(0, false)
+    const length = await this.#readU32()
     return new TextDecoder().decode(await this.#readExact(length))
   }
 
@@ -111,6 +111,11 @@ class StreamReader {
     const result = this.#buffer.subarray(0, take)
     this.#buffer = take < this.#buffer.length ? this.#buffer.subarray(take) : EMPTY
     return result
+  }
+
+  /** Read a big-endian u32. Throws on disconnect. */
+  async #readU32(): Promise<number> {
+    return decodeU32(await this.#readExact(4)) // sizeof uint32
   }
 
   /** Read exactly `n` bytes. Throws on disconnect. */

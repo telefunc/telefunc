@@ -144,6 +144,16 @@ const headings = [
     url: '/file-upload',
   },
   {
+    level: 2,
+    title: 'Streaming',
+    url: '/streaming',
+  },
+  {
+    level: 2,
+    title: 'Cancellation',
+    url: '/cancellation',
+  },
+  {
     level: 1,
     title: 'API',
     titleIcon: iconGear,

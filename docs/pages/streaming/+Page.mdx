@@ -1,0 +1,173 @@
+import { Link } from '@brillout/docpress'
+
+Telefunctions can return streaming values — `AsyncGenerator`, `ReadableStream`, or objects containing a mix of both plus `Promise` values. Telefunc handles serialization and transport automatically.
+
+
+## AsyncGenerator
+
+Return an `AsyncGenerator` from a telefunction and the client receives it transparently.
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+export async function* onChat(prompt: string): AsyncGenerator<string> {
+  const stream = await ai.streamText({ prompt })
+  for await (const token of stream) {
+    yield token
+  }
+}
+```
+
+```tsx
+// Chat.tsx
+// Environment: client
+
+import { onChat } from './Chat.telefunc'
+
+const gen = onChat('Tell me a joke')
+for await (const token of gen) {
+  console.log(token) // Each token arrives as it's yielded
+}
+```
+
+
+## ReadableStream
+
+Return a `ReadableStream` for raw binary streaming.
+
+```ts
+// Download.telefunc.ts
+// Environment: server
+
+export async function onDownload(fileId: string): Promise<ReadableStream<Uint8Array>> {
+  const fileStream = fs.createReadStream(`./files/${fileId}`)
+  return new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await fileStream.read()
+      if (done) return controller.close()
+      controller.enqueue(value)
+    },
+  })
+}
+```
+
+```ts
+// Download.tsx
+// Environment: client
+
+import { onDownload } from './Download.telefunc'
+
+const stream = await onDownload('report.pdf')
+const reader = stream.getReader()
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  // Process raw bytes
+}
+```
+
+
+## Mixed returns
+
+A telefunction can return an object containing any combination of generators, streams, and promises. They're multiplexed over a single HTTP response and delivered as they resolve.
+
+```ts
+// Dashboard.telefunc.ts
+// Environment: server
+
+export async function onLoadDashboard() {
+  async function* notifications(): AsyncGenerator<string> {
+    for (const n of await fetchNotifications()) {
+      yield n.text
+    }
+  }
+
+  return {
+    stream: notifications(),
+    // Promises resolve independently — fast resolves before slow
+    fast: Promise.resolve({ count: 42 }),
+    slow: fetchExpensiveReport(),
+    // Plain values are delivered immediately
+    title: 'Dashboard',
+  }
+}
+```
+
+```tsx
+// Dashboard.tsx
+// Environment: client
+
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const res = await onLoadDashboard()
+
+// Plain values available immediately
+console.log(res.title) // 'Dashboard'
+
+// Consume the generator
+for await (const notification of res.stream) {
+  console.log(notification)
+}
+
+// Promises resolve independently — await whenever you need them
+const fast = await res.fast  // Resolves first
+const slow = await res.slow  // Resolves when ready
+```
+
+> When returning multiple streams or generators, they're delivered concurrently over a single connection. Each consumer progresses independently.
+
+
+## `throw Abort()` mid-stream
+
+You can `throw Abort()` inside a generator to stop streaming and signal the client. See <Link href="/Abort" />.
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+import { Abort } from 'telefunc'
+
+export async function* onChat(prompt: string): AsyncGenerator<string> {
+  if (isFlagged(prompt)) {
+    throw Abort({ reason: 'content-policy', code: 403 })
+  }
+  for await (const token of ai.streamText({ prompt })) {
+    yield token
+  }
+}
+```
+
+The client catches it with `isAbort: true`:
+
+```ts
+const gen = onChat('bad prompt')
+try {
+  for await (const token of gen) { /* ... */ }
+} catch (err) {
+  if (err.isAbort) {
+    console.log(err.abortValue) // { reason: 'content-policy', code: 403 }
+  }
+}
+```
+
+> Values yielded before the `throw Abort()` are delivered to the client. Only subsequent values are dropped.
+
+
+## Error handling
+
+If a generator throws a regular error (not `Abort()`), the client receives an error with message `'Internal Server Error'`. Values yielded before the error are preserved.
+
+See <Link href="/error-handling" /> for details.
+
+
+## Cleanup
+
+Use `onConnectionAbort()` to detect when the client disconnects — for example to cancel upstream work or release resources. See <Link href="/cancellation" />.
+
+
+## See also
+
+- <Link href="/cancellation" />
+- <Link href="/Abort" />
+- <Link href="/error-handling" />

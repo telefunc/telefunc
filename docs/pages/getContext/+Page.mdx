@@ -213,7 +213,21 @@ export async function someTelefunction() {
 }
 ```
 
+## `onConnectionAbort()`
+
+The context object returned by `getContext()` also includes `onConnectionAbort()` — a callback that fires when the client disconnects before the response completes. Use it to cancel upstream work or release resources.
+
+```ts
+const context = getContext()
+context.onConnectionAbort(() => {
+  // Clean up server-side resources
+})
+```
+
+See <Link href="/cancellation" /> for full documentation.
+
+
 ## See also
 
 - <Link href="/server" />
-- <Link href="/getContext" />
+- <Link href="/cancellation" />

@@ -1,0 +1,156 @@
+import { Link } from '@brillout/docpress'
+
+Telefunc provides several mechanisms to cancel in-flight calls — from the client side and for cleanup on the server side.
+
+
+## `abort()`
+
+**Environment**: client.
+
+Imperatively cancel a pending telefunction call.
+
+```ts
+import { abort } from 'telefunc/client'
+```
+
+### With promises
+
+```ts
+import { onSave } from './Todo.telefunc'
+
+const promise = onSave(data)
+
+// Cancel the call
+abort(promise)
+```
+
+### With generators
+
+```ts
+import { onChat } from './Chat.telefunc'
+
+const gen = onChat('Tell me a story')
+const first = await gen.next()
+
+// Cancel mid-stream
+abort(gen)
+```
+
+### Error handling
+
+When a call is aborted, the promise rejects (or the generator's next read rejects) with an error that has `isCancel: true`:
+
+```ts
+try {
+  await promise
+} catch (err) {
+  if (err.isCancel) {
+    // Call was aborted by the client
+  }
+}
+```
+
+> You can also cancel a generator using the standard `gen.return()` method. The difference: `abort()` rejects pending reads with an error, while `gen.return()` resolves them with `{ done: true }`.
+
+
+## `withContext()`
+
+**Environment**: client.
+
+Wrap a telefunction with per-call context — an `AbortSignal` for cancellation, or custom HTTP headers.
+
+```ts
+import { withContext } from 'telefunc/client'
+```
+
+### AbortSignal
+
+```ts
+import { onChat } from './Chat.telefunc'
+import { withContext } from 'telefunc/client'
+
+const controller = new AbortController()
+
+const gen = withContext(onChat, { signal: controller.signal })('Tell me a story')
+for await (const token of gen) {
+  console.log(token)
+}
+
+// Abort from anywhere — e.g. a "Stop" button
+controller.abort()
+```
+
+This is equivalent to calling `abort()` when the signal fires, but integrates with the standard `AbortController` pattern.
+
+### Custom headers
+
+```ts
+import { onLoad } from './Data.telefunc'
+import { withContext } from 'telefunc/client'
+
+const result = await withContext(onLoad, {
+  headers: { 'X-Request-Id': '12345' },
+})()
+```
+
+
+## `onConnectionAbort()`
+
+**Environment**: server.
+
+Register a callback that fires when the client disconnects before the response completes. Accessed via <Link text={<code>getContext()</code>} href="/getContext" />.
+
+```ts
+// AI.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+
+export async function* onChat(prompt: string): AsyncGenerator<string> {
+  const context = getContext()
+  const upstream = ai.streamText({ prompt })
+
+  context.onConnectionAbort(() => {
+    // Client disconnected — stop the upstream AI call
+    upstream.cancel()
+  })
+
+  for await (const token of upstream) {
+    yield token
+  }
+}
+```
+
+### Non-streaming usage
+
+`onConnectionAbort()` also works with regular (non-streaming) telefunctions:
+
+```ts
+// Report.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+
+export async function onGenerateReport(): Promise<Report> {
+  const context = getContext()
+  let aborted = false
+
+  context.onConnectionAbort(() => {
+    aborted = true
+  })
+
+  for (const step of expensiveSteps) {
+    if (aborted) break
+    await step.run()
+  }
+
+  return buildReport()
+}
+```
+
+
+## See also
+
+- <Link href="/streaming" />
+- <Link href="/getContext" />
+- <Link href="/Abort" />
