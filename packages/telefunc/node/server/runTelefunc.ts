@@ -350,7 +350,6 @@ async function runTelefunc_({
         headers: [
           ['Cache-Control', 'no-cache, no-transform'],
           ['X-Accel-Buffering', 'no'],
-          ['transfer-encoding', 'chunked'],
         ],
         body: result.body,
       })

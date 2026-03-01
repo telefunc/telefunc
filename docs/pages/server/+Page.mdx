@@ -21,13 +21,15 @@ import { telefunc } from 'telefunc'
 const app = new Hono()
 
 app.all('/_telefunc', async (c) => {
-  const httpResponse = await telefunc({ request: c.req.raw })
-  return new Response(httpResponse.body, {
-    status: httpResponse.statusCode,
-    headers: httpResponse.headers,
+  const httpResponse = await telefunc({
+    request: c.req.raw,
     context: {
       // You can add any arbitrary contextual information here
     },
+  })
+  return new Response(httpResponse.getReadableWebStream(), {
+    status: httpResponse.statusCode,
+    headers: httpResponse.headers,
   })
 })
 ```
@@ -60,7 +62,8 @@ app.all('/_telefunc', async (req, res) => {
     },
   })
   httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
-  res.status(httpResponse.statusCode).send(httpResponse.body)
+  res.status(httpResponse.statusCode)
+  httpResponse.pipe(res)
 })
 ```
 
