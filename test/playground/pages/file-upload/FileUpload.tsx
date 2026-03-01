@@ -99,8 +99,22 @@ function FileUpload() {
       <button
         id="test-backpressure"
         onClick={async () => {
-          const res = await onUploadBackpressure(file('bp.txt', 'x'.repeat(800_000)))
-          setResult(JSON.stringify(res))
+          setResult('')
+          // Build a 100 MB File using a single 1 MB buffer repeated 100 times.
+          // The Blob constructor references the chunks without copying them, so
+          // the client allocates only ~1 MB regardless of the total file size.
+          const CHUNK_SIZE = 1024 * 1024 // 1 MB
+          const CHUNKS = 100 // 100 MB total
+          const chunk = new Uint8Array(CHUNK_SIZE).fill(97)
+          const largeFile = new File(
+            Array.from({ length: CHUNKS }, () => chunk),
+            'large.bin',
+            {
+              type: 'application/octet-stream',
+            },
+          )
+          const res = await onUploadBackpressure(largeFile)
+          setResult(JSON.stringify({ ...res, done: true }))
         }}
       >
         Backpressure

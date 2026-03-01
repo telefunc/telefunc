@@ -21,8 +21,6 @@ export {
   onUploadIgnored,
 }
 
-import { sleep } from '../../sleep'
-
 const onUploadFile = async (file: File, description: string) => {
   const content = await file.text()
   return {
@@ -77,18 +75,39 @@ const onReadTwice = async (file: File) => {
   }
 }
 
-// Slow consumer — delays 50ms per chunk to test backpressure
+// Streaming integrity test: verify the server never assembles the full file in memory.
+// maxChunkSize captures the largest single chunk yielded by the HTTP stream — if the
+// file were buffered and flushed at once, it would be near the total file size.
+// rssDuringSleep measures RSS while the server is idle (before reading) — if the client
+// blasts all data into server buffers, RSS will spike here instead of during streaming.
 const onUploadBackpressure = async (file: File) => {
+  const rssBeforeSleep = process.memoryUsage().rss
+  let rssAfterSleep = rssBeforeSleep
+
   let totalBytes = 0
   let chunkCount = 0
-  const start = Date.now()
+  let maxChunkSize = 0
   for await (const chunk of file.stream()) {
     totalBytes += chunk.byteLength
     chunkCount++
-    await sleep(50)
+    if (chunk.byteLength > maxChunkSize) maxChunkSize = chunk.byteLength
+
+    if (chunkCount === 1) {
+      // Stall after first chunk — if backpressure works, the browser should not
+      // have pushed the remaining ~100 MB into OS/server buffers while we sleep.
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      rssAfterSleep = process.memoryUsage().rss
+    }
   }
-  const elapsed = Date.now() - start
-  return { totalBytes, chunkCount, elapsed }
+
+  return {
+    totalBytes,
+    chunkCount,
+    maxChunkSize,
+    rssBeforeSleep,
+    rssAfterSleep,
+    rssGrowthDuringSleep: rssAfterSleep - rssBeforeSleep,
+  }
 }
 
 const onUploadSlice = async (file: File) => {

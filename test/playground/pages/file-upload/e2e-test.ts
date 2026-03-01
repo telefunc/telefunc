@@ -86,14 +86,28 @@ function testFileUpload() {
     })
   })
 
-  test('file upload: backpressure (slow consumer)', async () => {
+  // 100 MB upload via a 1 MB repeated chunk (client allocates only ~1 MB).
+  // Server sleeps 3 s before reading — if backpressure works, OS/server buffers
+  // should not absorb the full 100 MB during the sleep, keeping RSS growth low.
+  // maxChunkSize verifies the body was never assembled into a single large buffer.
+  test('file upload: 100 MB streams without buffering (max chunk < 128 KB)', async () => {
     await page.click('#test-backpressure')
-    await autoRetry(async () => {
-      const result = await getResult('#upload-result')
-      expect(result.totalBytes).toBe(800_000)
-      expect(result.chunkCount).greaterThan(1)
-      expect(result.elapsed).greaterThanOrEqual(result.chunkCount * 30)
-    })
+    await autoRetry(
+      async () => {
+        const result = await getResult('#upload-result')
+        expect(result.done).toBe(true)
+        expect(result.totalBytes).toBe(100 * 1024 * 1024)
+        expect(result.chunkCount).greaterThan(0)
+        // No single chunk should be near the full file size.
+        // Observed empirically: 64 KB (one TCP frame). 128 KB gives 2× headroom.
+        expect(result.maxChunkSize).lessThan(128 * 1024)
+        // RSS growth during the 3 s sleep must be well below the 100 MB file size.
+        // If the client blasted everything into server buffers, RSS would spike here.
+        // Observed empirically: 0 bytes.
+        expect(result.rssGrowthDuringSleep).lessThan(5 * 1024 * 1024)
+      },
+      { timeout: 60_000 },
+    )
   })
 
   // --- Stress tests ---
