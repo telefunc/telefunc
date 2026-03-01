@@ -9,6 +9,9 @@ export {
   onReturnStreamWithMeta,
   onReturnTwoGenerators,
   onReturnStreamAndGenerator,
+  onReturnMultiplePromises,
+  onReturnMixedEndless,
+  onReturnDeadlockStream,
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
@@ -93,19 +96,32 @@ const onReturnStreamWithMeta = async () => {
   return { stream, count: 3 }
 }
 
-// ── Error cases (e2e tests) ─────────────────────────────────────────
+// ── Multiplexed streaming (e2e tests) ────────────────────────────────
+
+import { getContext } from 'telefunc'
+import { cleanupState } from '../abort/cleanup-state'
 
 const onReturnTwoGenerators = async () => {
+  cleanupState.twoGeneratorsAborted = ''
+  const context = getContext()
+  context.onConnectionAbort(() => {
+    cleanupState.twoGeneratorsAborted = String(Date.now())
+  })
   async function* gen1(): AsyncGenerator<number> {
-    yield 1
+    for (const n of [1, 2, 3]) yield n
   }
   async function* gen2(): AsyncGenerator<number> {
-    yield 2
+    for (const n of [10, 20, 30]) yield n
   }
   return { first: gen1(), second: gen2() }
 }
 
 const onReturnStreamAndGenerator = async () => {
+  cleanupState.streamAndGeneratorAborted = ''
+  const context = getContext()
+  context.onConnectionAbort(() => {
+    cleanupState.streamAndGeneratorAborted = String(Date.now())
+  })
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -117,6 +133,72 @@ const onReturnStreamAndGenerator = async () => {
     yield 1
   }
   return { stream, gen: gen() }
+}
+
+const onReturnMultiplePromises = async () => {
+  cleanupState.multiplePromisesAborted = ''
+  const context = getContext()
+  context.onConnectionAbort(() => {
+    cleanupState.multiplePromisesAborted = String(Date.now())
+  })
+  const fast = Promise.resolve('quick')
+  const slow = new Promise<string>((resolve) => setTimeout(() => resolve('delayed'), 1000))
+  return { fast, slow, label: 'promises' }
+}
+
+// ── Deadlock test (e2e tests) ────────────────────────────────────────
+
+// Stream is large enough (2 MB) to exceed the client-side demuxer buffer
+// (1 MB) so that the demuxer stalls and cannot deliver further frames
+// (including the promise resolution frame) until the client starts consuming
+// the stream and drains the buffer.
+const onReturnDeadlockStream = async () => {
+  const encoder = new TextEncoder()
+  const CHUNK = encoder.encode('x'.repeat(64 * 1024)) // 64 KB
+  const CHUNKS = 32 // 32 × 64 KB = 2 MB
+  let i = 0
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i >= CHUNKS) return controller.close()
+      controller.enqueue(CHUNK)
+      i++
+    },
+  })
+  const promise = new Promise<string>((resolve) => setTimeout(() => resolve('uncorked'), 300))
+  return { stream, promise }
+}
+
+// ── Per-tag cancel test (e2e tests) ──────────────────────────────────
+
+const onReturnMixedEndless = async () => {
+  console.time('onReturnMixedEndless')
+  cleanupState.mixedEndless = 'running'
+  cleanupState.mixedEndlessAborted = ''
+  const context = getContext()
+  context.onConnectionAbort(() => {
+    console.timeLog('onReturnMixedEndless', 'aborted')
+    cleanupState.mixedEndless = 'cleaned-up'
+    cleanupState.mixedEndlessAborted = String(Date.now())
+  })
+  async function* gen(): AsyncGenerator<string> {
+    try {
+      let i = 0
+      while (true) {
+        await sleep(100)
+        console.timeLog('onReturnMixedEndless', `yielding g-${i}`)
+        yield `g-${i++}`
+      }
+    } finally {
+      console.timeLog('onReturnMixedEndless', 'gen finally')
+    }
+  }
+  const slow = new Promise<string>((resolve) =>
+    setTimeout(() => {
+      console.timeLog('onReturnMixedEndless', 'slow resolved')
+      resolve('done')
+    }, 1000),
+  )
+  return { gen: gen(), slow }
 }
 
 // ── Mid-stream error cases (e2e tests) ──────────────────────────────

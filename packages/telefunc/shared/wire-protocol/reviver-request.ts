@@ -1,7 +1,7 @@
 export { createFileReviver }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
-import type { LazyBlob, LazyFile } from '../../node/server/multipart/LazyFile.js'
+import type { LazyBlob, LazyFile } from '../../node/server/binary-request/LazyFile.js'
 import { SERIALIZER_PREFIX_FILE, SERIALIZER_PREFIX_BLOB, type FileMetadata, type BlobMetadata } from './constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()

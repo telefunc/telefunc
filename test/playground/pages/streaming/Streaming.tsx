@@ -12,6 +12,9 @@ import {
   onReturnStreamWithMeta,
   onReturnTwoGenerators,
   onReturnStreamAndGenerator,
+  onReturnMultiplePromises,
+  onReturnMixedEndless,
+  onReturnDeadlockStream,
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
@@ -165,36 +168,155 @@ function Streaming() {
         Delayed Generator + meta
       </button>
 
-      <h2>Error tests</h2>
+      <h2>Multiplexed streaming tests</h2>
 
       <button
         id="test-two-generators"
         onClick={async () => {
           setResult('')
-          try {
-            await onReturnTwoGenerators()
-            setResult(JSON.stringify({ error: false }))
-          } catch (e: unknown) {
-            setResult(JSON.stringify({ error: true, message: String(e) }))
-          }
+          const res = await onReturnTwoGenerators()
+          const first: number[] = []
+          const second: number[] = []
+          await Promise.all([
+            (async () => {
+              for await (const v of res.first) first.push(v)
+            })(),
+            (async () => {
+              for await (const v of res.second) second.push(v)
+            })(),
+          ])
+          setResult(JSON.stringify({ first, second }))
         }}
       >
-        Two generators (should error)
+        Two generators
       </button>
 
       <button
         id="test-stream-and-generator"
         onClick={async () => {
           setResult('')
-          try {
-            await onReturnStreamAndGenerator()
-            setResult(JSON.stringify({ error: false }))
-          } catch (e: unknown) {
-            setResult(JSON.stringify({ error: true, message: String(e) }))
-          }
+          const res = await onReturnStreamAndGenerator()
+          const decoder = new TextDecoder()
+          const chunks: string[] = []
+          const values: number[] = []
+          await Promise.all([
+            (async () => {
+              const reader = res.stream.getReader()
+              while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+                chunks.push(decoder.decode(value, { stream: true }))
+              }
+            })(),
+            (async () => {
+              for await (const v of res.gen) values.push(v)
+            })(),
+          ])
+          setResult(JSON.stringify({ chunks, values }))
         }}
       >
-        Stream + generator (should error)
+        Stream + generator
+      </button>
+
+      <button
+        id="test-multiple-promises"
+        onClick={async () => {
+          setResult('')
+          const res = await onReturnMultiplePromises()
+          const resolved: Record<string, unknown> = { label: res.label }
+          const updates: string[] = []
+          await Promise.all([
+            res.fast.then((v) => {
+              resolved.fast = v
+              updates.push('fast')
+              setResult(JSON.stringify({ ...resolved, updates: [...updates] }))
+            }),
+            res.slow.then((v) => {
+              resolved.slow = v
+              updates.push('slow')
+              setResult(JSON.stringify({ ...resolved, updates: [...updates] }))
+            }),
+          ])
+        }}
+      >
+        Multiple promises
+      </button>
+
+      <button
+        id="test-stream-promise-deadlock"
+        onClick={async () => {
+          setResult('')
+          const res = await onReturnDeadlockStream()
+
+          let promiseResolved = false
+          const promiseDone = res.promise.then((v) => {
+            promiseResolved = true
+            return v
+          })
+
+          // Wait without reading the stream — promise should stay pending because
+          // the large stream fills the demuxer buffer (1 MB), stalling frame delivery.
+          await new Promise((resolve) => setTimeout(resolve, 3000))
+          setResult(JSON.stringify({ promisePending: !promiseResolved, streamDone: false }))
+          // Give the e2e test time to observe the pending state before we start consuming.
+          await new Promise((resolve) => setTimeout(resolve, 500))
+
+          // Start reading the stream — this drains the demuxer buffer so the promise frame can be delivered.
+          const reader = res.stream.getReader()
+          let byteCount = 0
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            byteCount += value.byteLength
+          }
+
+          // Promise should now resolve quickly.
+          await promiseDone
+          setResult(JSON.stringify({ promisePending: false, streamDone: true, byteCount, promiseResolved: true }))
+        }}
+      >
+        Stream + promise deadlock
+      </button>
+
+      <button
+        id="test-mixed-endless-cancel"
+        onClick={async () => {
+          setResult('')
+          const res = await onReturnMixedEndless()
+          const genValues: string[] = []
+          const steps: string[] = []
+          let promiseResult: unknown = undefined
+
+          const render = () =>
+            setResult(JSON.stringify({ steps: [...steps], promiseResult, genValues: [...genValues] }))
+
+          // Start promise consumption in background — resolves when its frame arrives
+          // (piggybacks on gen frame reads in the demuxer)
+          const promiseP = res.slow.then((v) => {
+            promiseResult = v
+            steps.push('promise-resolved')
+            render()
+            return v
+          })
+
+          // Consume gen values one by one, rendering after each chunk
+          for (let i = 0; i < 3; i++) {
+            const { value } = await res.gen.next()
+            genValues.push(value)
+            steps.push(`gen-${i}`)
+            render()
+          }
+
+          // Ensure promise has resolved before cancelling
+          await promiseP
+
+          // Cancel generator — all consumers done → onConnectionAbort fires
+          await res.gen.return(undefined)
+          steps.push('gen-cancelled')
+          render()
+        }}
+      >
+        Mixed endless cancel
       </button>
 
       <h2>Mid-stream error tests</h2>

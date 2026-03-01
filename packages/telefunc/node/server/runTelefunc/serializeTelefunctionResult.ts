@@ -4,19 +4,12 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
-import { createStreamReplacer } from '../../../shared/wire-protocol/replacer-response.js'
-import { isAbort } from '../Abort.js'
-import { handleTelefunctionBug, validateTelefunctionError } from './validateTelefunctionError.js'
-import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../../shared/wire-protocol/constants.js'
-import type { StreamingErrorFrameAbort, StreamingErrorFrameBug } from '../../../shared/wire-protocol/constants.js'
+import { createStreamingReplacer } from '../../../shared/wire-protocol/streaming-types/registry.server.js'
+import type { StreamingValueServer } from '../../../shared/wire-protocol/streaming-types/interface.js'
+import { buildStreamingResponseBody } from '../streaming/StreamingResponseBody.js'
 import type { TelefuncIdentifier, TelefuncResponseBody } from '../../../shared/constants.js'
 
-type StreamingValue =
-  | { type: 'stream'; value: ReadableStream<Uint8Array> }
-  | { type: 'generator'; value: AsyncGenerator<unknown> }
-
 type SerializeResult = { type: 'text'; body: string } | { type: 'streaming'; body: ReadableStream<Uint8Array> }
-const textEncoder = new TextEncoder()
 
 function serializeTelefunctionResult(runContext: {
   telefunctionReturn: unknown
@@ -30,15 +23,8 @@ function serializeTelefunctionResult(runContext: {
     ? { ret: runContext.telefunctionReturn, abort: true }
     : { ret: runContext.telefunctionReturn }
 
-  const streamingValues: StreamingValue[] = []
-  const replacer = createStreamReplacer({
-    onStream: (stream) => {
-      streamingValues.push({ type: 'stream', value: stream })
-    },
-    onGenerator: (gen) => {
-      streamingValues.push({ type: 'generator', value: gen })
-    },
-  })
+  const streamingValues: StreamingValueServer[] = []
+  const replacer = createStreamingReplacer(streamingValues)
 
   let httpResponseBody: string
   try {
@@ -59,11 +45,6 @@ function serializeTelefunctionResult(runContext: {
     return { type: 'text', body: httpResponseBody }
   }
 
-  assertUsage(
-    streamingValues.length <= 1,
-    `Telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) returns multiple streaming values. Only one ReadableStream or AsyncGenerator per return value is supported.`,
-  )
-  // Build binary streaming response: [u32 metadata len][metadata JSON][chunk frames...][zero terminator]
   const telefuncId: TelefuncIdentifier = {
     telefunctionName: runContext.telefunctionName,
     telefuncFilePath: runContext.telefuncFilePath,
@@ -72,152 +53,10 @@ function serializeTelefunctionResult(runContext: {
     type: 'streaming',
     body: buildStreamingResponseBody(
       httpResponseBody,
-      streamingValues[0]!,
+      streamingValues,
       telefuncId,
       runContext.onStreamComplete,
       runContext.abortSignal,
     ),
   }
-}
-
-// ===== Streaming response framing =====
-
-/** Build a ReadableStream that frames metadata + a single streaming value. */
-function buildStreamingResponseBody(
-  metadataSerialized: string,
-  streamingValue: StreamingValue,
-  telefuncId: TelefuncIdentifier,
-  onStreamComplete: () => void,
-  abortSignal: AbortSignal,
-): ReadableStream<Uint8Array> {
-  let cancelled = false
-  let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
-  // Acquire the reader here so doCancel can call reader.cancel() directly.
-  // gen.return() alone cannot interrupt a suspended reader.read();
-  // reader.cancel() resolves it immediately and fires the upstream cancel callback.
-  const innerReader = streamingValue.type === 'stream' ? streamingValue.value.getReader() : null
-  const gen = generateResponseBody(metadataSerialized, streamingValue, telefuncId, innerReader)
-
-  const doCancel = (controller?: ReadableStreamDefaultController<Uint8Array> | null) => {
-    if (cancelled) return
-    cancelled = true
-    innerReader?.cancel()
-    gen.return(undefined)
-    if (controller)
-      try {
-        controller.close()
-      } catch {}
-  }
-
-  abortSignal.addEventListener('abort', () => doCancel(streamController), { once: true })
-
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      streamController = controller
-    },
-    async pull(controller) {
-      try {
-        const { done, value } = await gen.next()
-        if (cancelled) return
-        if (done) {
-          onStreamComplete()
-          controller.close()
-        } else {
-          controller.enqueue(value)
-        }
-      } catch (err) {
-        if (cancelled) return
-        onStreamComplete()
-        try {
-          controller.error(err)
-        } catch {}
-      }
-    },
-    cancel() {
-      doCancel()
-    },
-  })
-}
-
-async function* generateResponseBody(
-  metadataSerialized: string,
-  streamingValue: StreamingValue,
-  telefuncId: TelefuncIdentifier,
-  innerReader: ReadableStreamDefaultReader<Uint8Array> | null,
-): AsyncGenerator<Uint8Array> {
-  // Metadata header
-  const metadataBytes = textEncoder.encode(metadataSerialized)
-  yield encodeU32(metadataBytes.length)
-  yield metadataBytes
-
-  try {
-    // Chunks as length-prefixed frames terminated by a zero-length frame
-    if (streamingValue.type === 'stream') {
-      const reader = innerReader!
-      try {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          assertUsage(
-            value instanceof Uint8Array,
-            'ReadableStream returned by a telefunction must yield Uint8Array chunks.',
-          )
-          yield encodeU32(value.byteLength)
-          yield value
-        }
-      } finally {
-        await reader.cancel()
-      }
-    } else {
-      const gen = streamingValue.value
-      try {
-        while (true) {
-          const { done, value } = await gen.next()
-          if (done) break
-          const serialized = textEncoder.encode(stringify(value))
-          yield encodeU32(serialized.byteLength)
-          yield serialized
-        }
-      } finally {
-        await gen.return(undefined)
-      }
-    }
-    // Success: zero-length terminator
-    yield encodeU32(0)
-  } catch (err) {
-    // Error mid-stream: send error frame instead of terminator
-    yield* encodeErrorFrame(err, telefuncId)
-  }
-}
-
-/** Encode an error as an error frame: [ERROR_MARKER][u32 payload_len][payload_bytes] */
-function encodeErrorFrame(err: unknown, telefuncId: TelefuncIdentifier): Uint8Array[] {
-  validateTelefunctionError(err, telefuncId)
-  let errorPayload: string
-  if (isAbort(err)) {
-    try {
-      const payload: StreamingErrorFrameAbort = {
-        type: STREAMING_ERROR_TYPE.ABORT,
-        abortValue: err.abortValue,
-      }
-      errorPayload = stringify(payload)
-    } catch {
-      // Abort value not serializable — fall back to bug
-      handleTelefunctionBug(err)
-      const payload: StreamingErrorFrameBug = { type: STREAMING_ERROR_TYPE.BUG }
-      errorPayload = stringify(payload)
-    }
-  } else {
-    handleTelefunctionBug(err)
-    const payload: StreamingErrorFrameBug = { type: STREAMING_ERROR_TYPE.BUG }
-    errorPayload = stringify(payload)
-  }
-  const errorBytes = textEncoder.encode(errorPayload)
-  return [encodeU32(STREAMING_ERROR_FRAME_MARKER), encodeU32(errorBytes.byteLength), errorBytes]
-}
-
-function encodeU32(n: number): Uint8Array {
-  const buf = new Uint8Array(4)
-  new DataView(buf.buffer).setUint32(0, n, false)
-  return buf
 }

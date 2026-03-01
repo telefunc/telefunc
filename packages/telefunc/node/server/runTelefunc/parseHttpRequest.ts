@@ -7,8 +7,8 @@ import { getUrlPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createFileReviver } from '../../../shared/wire-protocol/reviver-request.js'
-import { StreamReader } from '../multipart/StreamReader.js'
-import { LazyBlob, LazyFile } from '../multipart/LazyFile.js'
+import { StreamReader } from '../binary-request/StreamReader.js'
+import { LazyBlob, LazyFile } from '../binary-request/LazyFile.js'
 
 type ParseResult =
   | {
