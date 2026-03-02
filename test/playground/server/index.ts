@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 import { apply, serve } from '@photonjs/hono'
+import { telefuncWebSocket } from 'telefunc'
 import { cleanupState, resetCleanupState } from '../cleanup-state'
+import type { Server } from 'node:http'
 
 function startServer() {
   const app = new Hono()
@@ -12,7 +14,12 @@ function startServer() {
   })
 
   apply(app)
-  return serve(app, { port: 3000 })
+  return serve(app, {
+    port: 3000,
+    onCreate(server) {
+      telefuncWebSocket(server as Server)
+    },
+  })
 }
 
 export default startServer()

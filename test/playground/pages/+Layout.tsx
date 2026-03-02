@@ -10,6 +10,7 @@ const nav = [
   { href: '/file-upload', label: 'Upload' },
   { href: '/abort', label: 'Abort' },
   { href: '/chat', label: 'Chat' },
+  { href: '/channel', label: 'Channel' },
   { href: '/kitchen-sink', label: 'Kitchen Sink' },
 ]
 

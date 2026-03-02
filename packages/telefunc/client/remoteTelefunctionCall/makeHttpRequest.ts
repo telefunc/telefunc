@@ -5,6 +5,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { parseStreamingResponseBody } from '../../wire-protocol/client/response/parse.js'
+import { createPlaceholderReviver } from '../../wire-protocol/client/response/registry.js'
 import { throwCancelError, throwAbortError, throwBugError } from './errors.js'
 import {
   STATUS_CODE_SUCCESS,
@@ -107,7 +108,8 @@ async function makeHttpRequest(callContext: {
 
 async function parseResponseBody(response: Response, callContext: { telefuncUrl: string }): Promise<{ ret: unknown }> {
   const responseBody = await response.text()
-  const responseBodyParsed: unknown = parse(responseBody)
+  const { reviver } = createPlaceholderReviver()
+  const responseBodyParsed: unknown = parse(responseBody, { reviver })
   assertUsage(isObject(responseBodyParsed) && 'ret' in responseBodyParsed, wrongInstallation({ method, callContext }))
   assert(response.status !== STATUS_CODE_THROW_ABORT || 'abort' in responseBodyParsed)
   const { ret } = responseBodyParsed as TelefuncResponseBody

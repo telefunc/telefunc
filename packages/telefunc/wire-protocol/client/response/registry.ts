@@ -1,10 +1,12 @@
-export { clientStreamingTypes, createStreamingReviver }
+export { clientStreamingTypes, createStreamingReviver, createPlaceholderReviver }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
 import { asyncGeneratorClientType } from './async-generator.js'
 import { readableStreamClientType } from './readable-stream.js'
 import { promiseClientType } from './promise.js'
+import { channelClientPlaceholderType } from './channel.js'
 import type { ClientStreamingType } from '../../streaming-types.js'
+import type { ClientPlaceholderType } from '../../placeholder-types.js'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 
@@ -14,26 +16,58 @@ const clientStreamingTypes: ClientStreamingType[] = [
   promiseClientType,
 ]
 
+const clientPlaceholderTypes: ClientPlaceholderType[] = [channelClientPlaceholderType]
+
 /**
- * Creates a JSON-serializer reviver that reconstructs streaming values from
- * prefixed metadata placeholders.
+ * Creates a JSON-serializer reviver that reconstructs streaming values and
+ * placeholder values (e.g. Channel) from prefixed metadata placeholders.
+ *
+ * Streaming types consume chunks from the HTTP response body. The server injects
+ * an explicit `__index` into each metadata object to deterministically map each
+ * value to its chunk reader.
+ *
+ * Placeholder types are reconstructed from metadata only — no chunk consumption.
  */
 function createStreamingReviver(
   getChunkReader: (index: number) => () => Promise<Uint8Array | null>,
   getCancelIndex: (index: number) => () => void,
 ) {
-  let nextIndex = 0
   const reviver: Reviver = (_key: undefined | string, value: string, parser: (str: string) => unknown) => {
     for (const type of clientStreamingTypes) {
       if (value.startsWith(type.prefix)) {
         const metadata = parser(value.slice(type.prefix.length))
         assert(isObject(metadata))
-        const index = nextIndex++
+        const index = metadata.__index
+        assert(typeof index === 'number')
+        delete metadata.__index
         const liveValue = type.createValue(metadata, getChunkReader(index), getCancelIndex(index))
         return { replacement: liveValue }
       }
     }
-    return undefined
+    return revivePlaceholder(value, parser)
   }
   return { reviver }
+}
+
+/**
+ * Creates a reviver that only handles placeholder types (e.g. Channel).
+ * Used for non-streaming responses where no chunk reader is available.
+ */
+function createPlaceholderReviver() {
+  const reviver: Reviver = (_key: undefined | string, value: string, parser: (str: string) => unknown) => {
+    return revivePlaceholder(value, parser)
+  }
+  return { reviver }
+}
+
+function revivePlaceholder(value: string, parser: (str: string) => unknown) {
+  for (const type of clientPlaceholderTypes) {
+    if (value.startsWith(type.prefix)) {
+      const metadata = parser(value.slice(type.prefix.length))
+      assert(isObject(metadata))
+      const liveValue = type.createValue(metadata)
+      return { replacement: liveValue }
+    }
+  }
+  return undefined
 }

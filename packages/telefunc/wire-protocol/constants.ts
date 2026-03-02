@@ -3,6 +3,7 @@ export const SERIALIZER_PREFIX_BLOB = '!TelefuncBlob:'
 export const SERIALIZER_PREFIX_STREAM = '!TelefuncStream:'
 export const SERIALIZER_PREFIX_GENERATOR = '!TelefuncGenerator:'
 export const SERIALIZER_PREFIX_PROMISE = '!TelefuncPromise:'
+export const SERIALIZER_PREFIX_CHANNEL = '!TelefuncChannel:'
 
 // ===== Streaming error frames =====
 

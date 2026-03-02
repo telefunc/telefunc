@@ -3,7 +3,9 @@ export { serverStreamingTypes, createStreamingReplacer }
 import { asyncGeneratorServerType } from './async-generator.js'
 import { readableStreamServerType } from './readable-stream.js'
 import { promiseServerType } from './promise.js'
+import { channelServerPlaceholderType } from './channel.js'
 import type { ServerStreamingType, StreamingValueServer } from '../../streaming-types.js'
+import type { ServerPlaceholderType } from '../../placeholder-types.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -13,10 +15,18 @@ const serverStreamingTypes: ServerStreamingType[] = [
   promiseServerType,
 ]
 
+const serverPlaceholderTypes: ServerPlaceholderType[] = [channelServerPlaceholderType]
+
 /**
- * Creates a JSON-serializer replacer that detects streaming values and replaces
- * them with prefixed metadata placeholders. Returns the replacer function and
- * the collected streaming values.
+ * Creates a JSON-serializer replacer that detects streaming values and placeholder
+ * values (e.g. Channel), replacing them with prefixed metadata strings.
+ *
+ * Streaming types produce chunks over the HTTP response body.
+ * Placeholder types are serialization-only — they do NOT produce HTTP streaming chunks.
+ *
+ * An explicit `__index` is injected into each streaming metadata object so the
+ * client can deterministically reconstruct chunk readers without relying on
+ * JSON traversal order.
  */
 function createStreamingReplacer() {
   const streamingValues: StreamingValueServer[] = []
@@ -26,6 +36,15 @@ function createStreamingReplacer() {
       if (type.detect(value)) {
         const index = nextIndex++
         streamingValues.push({ createProducer: () => type.createProducer(value), index })
+        const pluginMeta = type.getMetadata(value)
+        return {
+          replacement: type.prefix + serializer({ ...pluginMeta, __index: index }),
+          resolved: true,
+        }
+      }
+    }
+    for (const type of serverPlaceholderTypes) {
+      if (type.detect(value)) {
         const pluginMeta = type.getMetadata(value)
         return {
           replacement: type.prefix + serializer(pluginMeta),
