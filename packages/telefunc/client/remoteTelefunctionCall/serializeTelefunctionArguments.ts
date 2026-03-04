@@ -7,18 +7,27 @@ import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
 import { encodeBinaryRequest } from '../../wire-protocol/client/request/serialize.js'
 
+import type { TelefuncTransport } from '../withContext.js'
+import { DEFAULT_TRANSPORT } from '../../wire-protocol/constants.js'
+
 type CallContext = {
   telefuncFilePath: string
   telefunctionName: string
   telefunctionArgs: unknown[]
   telefuncUrl: string
+  transport: TelefuncTransport
 }
 
 function serializeTelefunctionArguments(callContext: CallContext): string | Blob {
-  const dataMain = {
+  const dataMain: Record<string, unknown> = {
     file: callContext.telefuncFilePath,
     name: callContext.telefunctionName,
     args: callContext.telefunctionArgs,
+  }
+
+  // Only include transport when it's not the default
+  if (callContext.transport !== DEFAULT_TRANSPORT) {
+    dataMain.transport = callContext.transport
   }
 
   const { replacer, files } = createRequestReplacer()

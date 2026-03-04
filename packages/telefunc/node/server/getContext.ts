@@ -36,7 +36,11 @@ function getContext<Context extends object = Telefunc.Context>(): Context & Tele
 }
 
 type TelefuncBuiltins = {
-  /** Register a callback that fires when the client aborts the connection (disconnects before the response finishes). */
+  /** Register a callback that fires when the request lifecycle ends for any reason
+   *  (response sent, stream complete, or client disconnect). Fires exactly once. */
+  onConnectionClose: (cb: () => void) => void
+  /** Register a callback that fires only when the client disconnects unexpectedly
+   *  (before the response/stream completes). Does NOT fire on normal completion. */
   onConnectionAbort: (cb: () => void) => void
 }
 
@@ -44,28 +48,12 @@ function augmentContext(context: Record<string, unknown>): void {
   const reqCtx = getRequestContext()
   if (!reqCtx) {
     // SSR implementation not trivial
+    context.onConnectionClose = () => {}
     context.onConnectionAbort = () => {}
     return
   }
-  const { abortSignal } = reqCtx
-  context.onConnectionAbort = (cb: () => void) => {
-    // Guard: some server environments (e.g. certain Node.js adapters, edge runtimes) may fire
-    // the abort signal even after the response has been fully sent. The `completed` flag ensures
-    // callbacks only run for genuine client-initiated disconnects, not false positives from
-    // inconsistent signal propagation across environments.
-    if (reqCtx.completed) return
-    if (abortSignal.aborted) {
-      cb()
-      return
-    }
-    abortSignal.addEventListener(
-      'abort',
-      () => {
-        if (!reqCtx.completed) cb()
-      },
-      { once: true },
-    )
-  }
+  context.onConnectionClose = (cb: () => void) => reqCtx.onConnectionClose(cb)
+  context.onConnectionAbort = (cb: () => void) => reqCtx.onConnectionAbort(cb)
 }
 
 function provideTelefuncContext<Context extends object = Telefunc.Context>(context: Context): void {

@@ -98,7 +98,7 @@ const result = await withContext(onLoad, {
 
 **Environment**: server.
 
-Register a callback that fires when the client disconnects before the response completes. Accessed via <Link text={<code>getContext()</code>} href="/getContext" />.
+Register a callback that fires when the client disconnects. Does NOT fire on normal response completion. Accessed via <Link text={<code>getContext()</code>} href="/getContext" />.
 
 ```ts
 // AI.telefunc.ts
@@ -145,6 +145,29 @@ export async function onGenerateReport(): Promise<Report> {
   }
 
   return buildReport()
+}
+```
+
+## `onConnectionClose()`
+
+**Environment**: server.
+
+Register a callback that fires when the request lifecycle ends — whether the response completes normally, the client disconnects, or the stream finishes. Fires exactly once. Accessed via <Link text={<code>getContext()</code>} href="/getContext" />.
+
+Use `onConnectionClose()` to release resources that should be cleaned up regardless of how the request ended:
+
+```ts
+import { getContext } from 'telefunc'
+
+export async function onQuery() {
+  const context = getContext()
+  const connection = await db.connect()
+
+  context.onConnectionClose(() => {
+    connection.release()
+  })
+
+  return await connection.query('SELECT ...')
 }
 ```
 

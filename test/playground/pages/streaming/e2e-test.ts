@@ -1,6 +1,6 @@
 export { testStreaming }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
 import { resetCleanupState, getCleanupState, waitForHydration, getResult, sleep } from '../../e2e-utils'
 
 function testStreaming() {
@@ -252,6 +252,12 @@ function testStreaming() {
   // When full duplex is supported, client duration will exceed server duration
   // and the assertion below should be inverted.
   test('streaming: upload with progress (half duplex)', async () => {
+    if (process.env.PUBLIC_ENV__TRANSPORT === 'ws') {
+      return skip(
+        'WS transport returns the HTTP response before the request body is fully consumed, breaking lazy file streaming (ERR_CONNECTION_RESET)',
+      )
+    }
+
     await page.click('#test-upload-progress')
     await autoRetry(async () => {
       const result = await getResult('#streaming-result')

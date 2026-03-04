@@ -1,39 +1,35 @@
-export { parseStreamingResponseBody }
+export { parseStreamingResponseBody, parseWsStreamingResponse, FrameDemuxer }
+export { BaseStreamReader } from './BaseStreamReader.js'
 
 import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
-import { decodeU32, decodeIndexedFrame, concat } from '../../frame.js'
-import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../constants.js'
 import { createStreamingReviver } from './registry.js'
-import { throwCancelError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { setAbortController } from '../../../client/abort.js'
+import { BaseStreamReader } from './BaseStreamReader.js'
+import { StreamReader } from './StreamReader.js'
+import { SSEStreamReader } from './SSEStreamReader.js'
+import { ChannelStreamReader } from './ChannelStreamReader.js'
+import { ClientChannel } from '../../../client/channel.js'
 
 // ===== Streaming response parsing =====
 
-async function parseStreamingResponseBody(
-  response: Response,
-  callContext: {
-    telefunctionName: string
-    telefuncFilePath: string
-    abortController: AbortController
-  },
-): Promise<{ ret: unknown }> {
-  assert(response.body)
-  const reader = response.body.getReader()
-  const streamReader = new StreamReader(reader, callContext)
+type CallContext = {
+  telefunctionName: string
+  telefuncFilePath: string
+  abortController: AbortController
+}
 
-  const cancelUpstream = () => {
-    streamReader.cancelled = true
-    reader.cancel()
-  }
-
-  const demuxer = new FrameDemuxer(streamReader, cancelUpstream)
-
-  // Read metadata header
-  const metaLen = await streamReader.readU32()
-  const metaBytes = await streamReader.readExact(metaLen)
-  const metaText = new TextDecoder().decode(metaBytes)
+/** Shared core: wire a BaseStreamReader through FrameDemuxer + streaming reviver.
+ *
+ *  Both HTTP streaming and WS transports create a transport-specific reader,
+ *  obtain the metadata text, then delegate here to reconstruct live values. */
+function reviveStreamingResponse(
+  streamReader: BaseStreamReader,
+  metadataText: string,
+  callContext: CallContext,
+): { ret: unknown } {
+  const demuxer = new FrameDemuxer(streamReader)
 
   const getChunkReader = (index: number) => {
     demuxer.registerConsumer()
@@ -42,19 +38,56 @@ async function parseStreamingResponseBody(
 
   const getCancelIndex = (index: number) => () => demuxer.cancelIndex(index)
 
-  const { reviver } = createStreamingReviver(getChunkReader, getCancelIndex)
+  const { reviver, channels } = createStreamingReviver(getChunkReader, getCancelIndex)
 
-  const parsed: unknown = parse(metaText, { reviver })
+  const parsed: unknown = parse(metadataText, { reviver })
   assert(isObject(parsed) && 'ret' in parsed)
 
-  // Attach the abort controller to the return object so that
-  // abort(res) works after the user awaits the multiplexed result.
+  // Close all revived channels when the call is aborted
+  if (channels.length > 0) {
+    callContext.abortController.signal.addEventListener(
+      'abort',
+      () => {
+        for (const ch of channels) ch.close()
+      },
+      { once: true },
+    )
+  }
+
   const { ret } = parsed
   if (isObject(ret)) {
     setAbortController(ret, callContext.abortController)
   }
 
   return { ret }
+}
+
+/** HTTP streaming (binary / SSE): read metadata header from the stream,
+ *  then revive streaming values via FrameDemuxer. */
+async function parseStreamingResponseBody(response: Response, callContext: CallContext): Promise<{ ret: unknown }> {
+  assert(response.body)
+  const reader = response.body.getReader()
+  const isSSE = (response.headers.get('content-type') ?? '').includes('text/event-stream')
+  const streamReader = isSSE ? new SSEStreamReader(reader, callContext) : new StreamReader(reader, callContext)
+
+  // Read metadata header from the stream
+  const metaLen = await streamReader.readU32()
+  const metaBytes = await streamReader.readExact(metaLen)
+  const metaText = new TextDecoder().decode(metaBytes)
+
+  return reviveStreamingResponse(streamReader, metaText, callContext)
+}
+
+/** WS transport: metadata is already in the HTTP body, data frames arrive
+ *  via the ClientChannel. */
+function parseWsStreamingResponse(
+  channel: ClientChannel,
+  metadataBody: string,
+  callContext: CallContext,
+): { ret: unknown } {
+  const streamReader = new ChannelStreamReader(channel, callContext)
+
+  return reviveStreamingResponse(streamReader, metadataBody, callContext)
 }
 
 // ===== Frame demultiplexer =====
@@ -76,7 +109,7 @@ async function parseStreamingResponseBody(
  *  The upstream reader is only cancelled when ALL consumers are cancelled. */
 class FrameDemuxer {
   private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
-  private streamReader: StreamReader
+  private streamReader: BaseStreamReader
   private pendingFrames = new Map<number, Uint8Array[]>()
   private pendingBytes = new Map<number, number>()
   private indexWaiters = new Map<number, { resolve: (v: Uint8Array | null) => void; reject: (e: unknown) => void }>()
@@ -86,11 +119,9 @@ class FrameDemuxer {
   private cancelledIndices = new Set<number>()
   private doneIndices = new Set<number>()
   private totalConsumers = 0
-  private cancelUpstream: (() => void) | null = null
 
-  constructor(streamReader: StreamReader, cancelUpstream: () => void) {
+  constructor(streamReader: BaseStreamReader) {
     this.streamReader = streamReader
-    this.cancelUpstream = cancelUpstream
   }
 
   registerConsumer() {
@@ -113,8 +144,7 @@ class FrameDemuxer {
     }
     // Cancel upstream when all consumers are cancelled
     if (this.cancelledIndices.size >= this.totalConsumers) {
-      this.cancelUpstream?.()
-      this.cancelUpstream = null
+      this.streamReader.cancel()
     }
   }
 
@@ -196,91 +226,5 @@ class FrameDemuxer {
     } finally {
       this.reading = false
     }
-  }
-}
-
-// ===== Client StreamReader =====
-
-const EMPTY = new Uint8Array(0)
-
-/** Buffered reader for the HTTP response body stream.
- *
- *  readExact: read N bytes (low-level byte I/O with buffering).
- *  readNextFrame: read one indexed frame (wire protocol + error handling). */
-class StreamReader {
-  private reader: ReadableStreamDefaultReader<Uint8Array>
-  private callContext: {
-    telefunctionName: string
-    telefuncFilePath: string
-    abortController: AbortController
-  }
-  private buffer: Uint8Array = EMPTY
-  cancelled = false
-
-  constructor(
-    reader: ReadableStreamDefaultReader<Uint8Array>,
-    callContext: {
-      telefunctionName: string
-      telefuncFilePath: string
-      abortController: AbortController
-    },
-  ) {
-    this.reader = reader
-    this.callContext = callContext
-
-    // When the fetch is aborted, cancel the reader first to prevent the browser
-    // from generating a spurious unhandled "BodyStreamBuffer was aborted" rejection.
-    callContext.abortController.signal.addEventListener('abort', () => reader.cancel(), { once: true })
-  }
-
-  async readU32(): Promise<number> {
-    const buf = await this.readExact(4) // sizeof uint32
-    return this.cancelled ? 0 : decodeU32(buf)
-  }
-
-  async readExact(n: number): Promise<Uint8Array> {
-    while (this.buffer.length < n) {
-      let done: boolean
-      let value: Uint8Array | undefined
-      let readError: unknown
-      try {
-        ;({ done, value } = await this.reader.read())
-      } catch (err) {
-        readError = err
-        done = true
-      }
-      if (done) {
-        if (this.callContext.abortController.signal.aborted) throwCancelError()
-        if (this.cancelled) return EMPTY
-        throw readError ?? new Error('Connection lost — the server closed the stream before all data was received.')
-      }
-      this.buffer = this.buffer.length === 0 ? value! : concat(this.buffer, value!)
-    }
-    const result = this.buffer.subarray(0, n)
-    this.buffer = n < this.buffer.length ? this.buffer.subarray(n) : EMPTY
-    return result
-  }
-
-  /** Read the next indexed frame from the wire.
-   *  Returns { index, payload } or null on terminator. Throws on error frames. */
-  async readNextFrame(): Promise<{ index: number; payload: Uint8Array } | null> {
-    const len = await this.readU32()
-    if (this.cancelled) return null
-    if (len === 0) return null
-    if (len === STREAMING_ERROR_FRAME_MARKER) {
-      // Error frame: [ERROR_MARKER][u32 payload_len][payload_bytes]
-      const errorLen = await this.readU32()
-      const errorBytes = await this.readExact(errorLen)
-      const errorPayload: unknown = parse(new TextDecoder().decode(errorBytes))
-      assert(isObject(errorPayload) && 'type' in errorPayload)
-      if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT) {
-        assert('abortValue' in errorPayload)
-        throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, errorPayload.abortValue)
-      }
-      throwBugError()
-    }
-    const frameData = await this.readExact(len)
-    if (this.cancelled) return null
-    return decodeIndexedFrame(frameData)
   }
 }

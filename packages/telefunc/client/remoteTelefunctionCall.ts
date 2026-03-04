@@ -35,6 +35,11 @@ function remoteTelefunctionCall(
     objectAssign(callContext, { headers: merged })
   }
 
+  // Per-call transport overrides global config.transport
+  if (callClientContext?.transport) {
+    objectAssign(callContext, { transport: callClientContext.transport })
+  }
+
   const abortController = createAbortController(callClientContext?.signal)
 
   objectAssign(callContext, { abortController })

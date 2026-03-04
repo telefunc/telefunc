@@ -8,6 +8,7 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver } from '../../../wire-protocol/server/request/registry.js'
 import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
+import { TRANSPORT, DEFAULT_TRANSPORT, type Transport } from '../../../wire-protocol/constants.js'
 
 type ParseResult =
   | {
@@ -15,6 +16,7 @@ type ParseResult =
       telefunctionName: string
       telefunctionKey: string
       telefunctionArgs: unknown[]
+      transport: Transport
       isMalformedRequest: false
     }
   | { isMalformedRequest: true }
@@ -75,11 +77,16 @@ function parseTelefuncPayload(
   }
 
   const telefunctionKey = getTelefunctionKey(parsed.file, parsed.name)
+  const transport: Transport =
+    hasProp(parsed, 'transport', 'string') && (parsed.transport === TRANSPORT.SSE || parsed.transport === TRANSPORT.WS)
+      ? parsed.transport
+      : DEFAULT_TRANSPORT
   return {
     telefuncFilePath: parsed.file,
     telefunctionName: parsed.name,
     telefunctionKey,
     telefunctionArgs: parsed.args,
+    transport,
     isMalformedRequest: false,
   }
 }

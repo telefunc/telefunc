@@ -1,4 +1,4 @@
-export { buildStreamingResponseBody }
+export { buildStreamingResponseBody, buildSSEResponseBody, generateResponseBody }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { encodeU32, encodeIndexedFrame, textEncoder } from '../../frame.js'
@@ -11,6 +11,7 @@ import {
   validateTelefunctionError,
 } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import type { TelefuncIdentifier } from '../../../shared/constants.js'
+import { uint8ArrayToBase64url } from '../../base64url.js'
 
 const EMPTY = new Uint8Array(0)
 
@@ -24,6 +25,48 @@ function buildStreamingResponseBody(
   telefuncId: TelefuncIdentifier,
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
+): ReadableStream<Uint8Array> {
+  return buildResponseBodyStream(
+    metadataSerialized,
+    streamingValues,
+    telefuncId,
+    onStreamComplete,
+    abortSignal,
+    (frame) => frame,
+  )
+}
+
+/** Build a ReadableStream that frames metadata + multiplexed streaming values as SSE events.
+ *
+ *  Each binary frame is base64url-encoded and wrapped in `data: ...\n\n`.
+ *  Same pull-based backpressure as the raw binary variant. */
+function buildSSEResponseBody(
+  metadataSerialized: string,
+  streamingValues: StreamingValueServer[],
+  telefuncId: TelefuncIdentifier,
+  onStreamComplete: () => void,
+  abortSignal: AbortSignal,
+): ReadableStream<Uint8Array> {
+  return buildResponseBodyStream(
+    metadataSerialized,
+    streamingValues,
+    telefuncId,
+    onStreamComplete,
+    abortSignal,
+    (frame) => textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`),
+  )
+}
+
+/** Shared core: both `'stream'` and `'sse'` transports use this. The only
+ *  difference is the `encodeFrame` closure — identity for raw binary,
+ *  base64url SSE wrapping for `text/event-stream`. */
+function buildResponseBodyStream(
+  metadataSerialized: string,
+  streamingValues: StreamingValueServer[],
+  telefuncId: TelefuncIdentifier,
+  onStreamComplete: () => void,
+  abortSignal: AbortSignal,
+  encodeFrame: (frame: Uint8Array) => Uint8Array,
 ): ReadableStream<Uint8Array> {
   let cancelled = false
   let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
@@ -64,7 +107,7 @@ function buildStreamingResponseBody(
           onStreamComplete()
           controller.close()
         } else {
-          controller.enqueue(value)
+          controller.enqueue(encodeFrame(value))
         }
       } catch (err) {
         if (cancelled) return
@@ -92,11 +135,14 @@ async function* generateResponseBody(
   metadataSerialized: string,
   producerEntries: Array<{ producer: StreamingProducer; index: number }>,
   telefuncId: TelefuncIdentifier,
+  options?: { skipMetadata?: boolean },
 ): AsyncGenerator<Uint8Array> {
-  // Metadata header
-  const metadataBytes = textEncoder.encode(metadataSerialized)
-  yield encodeU32(metadataBytes.length)
-  yield metadataBytes
+  // Metadata header (skipped for WS transport — metadata is in the HTTP body)
+  if (!options?.skipMetadata) {
+    const metadataBytes = textEncoder.encode(metadataSerialized)
+    yield encodeU32(metadataBytes.length)
+    yield metadataBytes
+  }
 
   type RaceEntry = {
     index: number

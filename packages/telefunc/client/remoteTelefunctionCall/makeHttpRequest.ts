@@ -4,8 +4,9 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { objectAssign } from '../../utils/objectAssign.js'
-import { parseStreamingResponseBody } from '../../wire-protocol/client/response/parse.js'
+import { parseStreamingResponseBody, parseWsStreamingResponse } from '../../wire-protocol/client/response/parse.js'
 import { createPlaceholderReviver } from '../../wire-protocol/client/response/registry.js'
+import { extractFrameChannel } from '../../wire-protocol/frame-channel.js'
 import { throwCancelError, throwAbortError, throwBugError } from './errors.js'
 import {
   STATUS_CODE_SUCCESS,
@@ -58,7 +59,8 @@ async function makeHttpRequest(callContext: {
 
   if (statusCode === STATUS_CODE_SUCCESS) {
     const responseContentType = response.headers.get('content-type') || ''
-    const isStreaming = responseContentType.includes('application/octet-stream')
+    const isStreaming =
+      responseContentType.includes('application/octet-stream') || responseContentType.includes('text/event-stream')
     const { ret } = isStreaming
       ? await parseStreamingResponseBody(response, callContext)
       : await parseResponseBody(response, callContext)
@@ -106,12 +108,40 @@ async function makeHttpRequest(callContext: {
   }
 }
 
-async function parseResponseBody(response: Response, callContext: { telefuncUrl: string }): Promise<{ ret: unknown }> {
+async function parseResponseBody(
+  response: Response,
+  callContext: {
+    telefuncUrl: string
+    telefunctionName: string
+    telefuncFilePath: string
+    abortController: AbortController
+  },
+): Promise<{ ret: unknown }> {
   const responseBody = await response.text()
-  const { reviver } = createPlaceholderReviver()
+
+  // WS transport: extract the frame channel from the raw body before any reviver runs.
+  // extractFrameChannel strips __frameChannel so the streaming reviver never sees it.
+  const extracted = extractFrameChannel(responseBody)
+  if (extracted) {
+    return parseWsStreamingResponse(extracted.channel, extracted.strippedBody, callContext)
+  }
+
+  const { reviver, channels } = createPlaceholderReviver()
   const responseBodyParsed: unknown = parse(responseBody, { reviver })
+
+  // Close all revived channels when the call is aborted
+  if (channels.length > 0) {
+    callContext.abortController.signal.addEventListener(
+      'abort',
+      () => {
+        for (const ch of channels) ch.close()
+      },
+      { once: true },
+    )
+  }
   assertUsage(isObject(responseBodyParsed) && 'ret' in responseBodyParsed, wrongInstallation({ method, callContext }))
   assert(response.status !== STATUS_CODE_THROW_ABORT || 'abort' in responseBodyParsed)
+
   const { ret } = responseBodyParsed as TelefuncResponseBody
   return { ret }
 }

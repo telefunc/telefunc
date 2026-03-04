@@ -9,6 +9,7 @@ import type { ClientStreamingType } from '../../streaming-types.js'
 import type { ClientPlaceholderType } from '../../placeholder-types.js'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
+import { ClientChannel } from '../../../client/channel.js'
 
 const clientStreamingTypes: ClientStreamingType[] = [
   asyncGeneratorClientType,
@@ -32,6 +33,7 @@ function createStreamingReviver(
   getChunkReader: (index: number) => () => Promise<Uint8Array | null>,
   getCancelIndex: (index: number) => () => void,
 ) {
+  const channels: ClientChannel[] = []
   const reviver: Reviver = (_key: undefined | string, value: string, parser: (str: string) => unknown) => {
     for (const type of clientStreamingTypes) {
       if (value.startsWith(type.prefix)) {
@@ -44,9 +46,9 @@ function createStreamingReviver(
         return { replacement: liveValue }
       }
     }
-    return revivePlaceholder(value, parser)
+    return revivePlaceholder(value, parser, channels)
   }
-  return { reviver }
+  return { reviver, channels }
 }
 
 /**
@@ -54,18 +56,20 @@ function createStreamingReviver(
  * Used for non-streaming responses where no chunk reader is available.
  */
 function createPlaceholderReviver() {
+  const channels: ClientChannel[] = []
   const reviver: Reviver = (_key: undefined | string, value: string, parser: (str: string) => unknown) => {
-    return revivePlaceholder(value, parser)
+    return revivePlaceholder(value, parser, channels)
   }
-  return { reviver }
+  return { reviver, channels }
 }
 
-function revivePlaceholder(value: string, parser: (str: string) => unknown) {
+function revivePlaceholder(value: string, parser: (str: string) => unknown, channels: ClientChannel[]) {
   for (const type of clientPlaceholderTypes) {
     if (value.startsWith(type.prefix)) {
       const metadata = parser(value.slice(type.prefix.length))
       assert(isObject(metadata))
       const liveValue = type.createValue(metadata)
+      if (liveValue instanceof ClientChannel) channels.push(liveValue)
       return { replacement: liveValue }
     }
   }

@@ -2,6 +2,9 @@ export { configUser as config }
 export { resolveClientConfig }
 
 import { assertUsage, assertWarning } from '../utils/assert.js'
+import { DEFAULT_TRANSPORT } from '../wire-protocol/constants.js'
+
+import type { TelefuncTransport } from './withContext.js'
 
 /** Telefunc Client Configuration */
 type ConfigUser = {
@@ -22,11 +25,20 @@ type ConfigUser = {
   httpHeaders?: Record<string, string>
   /** Custom fetch implementations */
   fetch?: typeof globalThis.fetch
+  /**
+   * Transport for streaming values.
+   *
+   * - `'stream'` (default) — raw binary chunked HTTP response
+   * - `'sse'` — base64url-encoded `text/event-stream` (proxy-compatible)
+   * - `'ws'` — WebSocket binary messages (per-call dedicated connection)
+   */
+  transport?: TelefuncTransport
 }
 type ConfigResolved = {
   telefuncUrl: string
   headers: Record<string, string> | null
   fetch: typeof globalThis.fetch | null
+  transport: TelefuncTransport
 }
 
 const configUser: ConfigUser = new Proxy({}, { set: validateUserConfig })
@@ -36,6 +48,7 @@ function resolveClientConfig(): ConfigResolved {
     headers: configUser.headers ?? configUser.httpHeaders ?? null,
     telefuncUrl: configUser.telefuncUrl || '/_telefunc',
     fetch: configUser.fetch ?? null,
+    transport: configUser.transport ?? DEFAULT_TRANSPORT,
   }
 }
 
@@ -67,6 +80,12 @@ function validateUserConfig(configUserUnwrapped: ConfigUser, prop: string, val: 
   } else if (prop === 'fetch') {
     assertUsage(typeof val === 'function', '`config.fetch` should be a function')
     configUserUnwrapped[prop] = val as typeof globalThis.fetch
+  } else if (prop === 'transport') {
+    assertUsage(
+      val === 'stream' || val === 'sse' || val === 'ws',
+      "`config.transport` should be 'stream', 'sse', or 'ws'",
+    )
+    configUserUnwrapped[prop] = val
   } else {
     assertUsage(false, `Unknown config.${prop}`)
   }

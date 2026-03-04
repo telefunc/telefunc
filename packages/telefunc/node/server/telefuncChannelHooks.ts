@@ -31,7 +31,11 @@ function getTelefuncChannelHooks() {
     },
 
     message(peer, message) {
-      peer.context.channel._onPeerMessage(message.text())
+      if (message.rawData instanceof ArrayBuffer || message.rawData instanceof Uint8Array) {
+        peer.context.channel._onPeerBinaryMessage(message.uint8Array())
+      } else {
+        peer.context.channel._onPeerMessage(message.text())
+      }
     },
 
     close(peer) {

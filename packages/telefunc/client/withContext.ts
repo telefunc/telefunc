@@ -1,5 +1,10 @@
 export { withContext }
-export type { ClientCallContext }
+export type { ClientCallContext, TelefuncTransport }
+
+import type { Transport } from '../wire-protocol/constants.js'
+
+/** Transport type for streaming values. */
+type TelefuncTransport = Transport
 
 /** Per-call context options for the HTTP transport layer. */
 type ClientCallContext = {
@@ -7,6 +12,8 @@ type ClientCallContext = {
   signal?: AbortSignal
   /** Additional HTTP headers for this call. */
   headers?: Record<string, string>
+  /** Transport for streaming values — overrides `config.transport` for this call. */
+  transport?: TelefuncTransport
 }
 
 /** Wrap a telefunc function with per-call context (signal, headers).

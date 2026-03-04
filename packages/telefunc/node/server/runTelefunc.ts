@@ -28,6 +28,8 @@ import {
   STATUS_BODY_MALFORMED_REQUEST,
   STATUS_CODE_SUCCESS,
 } from '../../shared/constants.js'
+import { TRANSPORT } from '../../wire-protocol/constants.js'
+import { createRequestContext } from './requestContext.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -49,14 +51,14 @@ type HttpResponse = {
   /** Get the full response body as a string (awaits streaming if needed) */
   getBody: () => Promise<string>
   /** @deprecated Use `headers` instead */
-  contentType: 'text/plain' | 'application/octet-stream'
+  contentType: ContentType
   /** @deprecated Unused, always null */
   etag: string | null
   /** Error thrown by your telefunction */
   err?: unknown
 }
 
-type ContentType = 'text/plain' | 'application/octet-stream'
+type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-stream'
 type ResponseBody = string | ReadableStream<Uint8Array>
 
 function createHttpResponse({
@@ -253,7 +255,9 @@ async function runTelefunc_({
   request: Request
   context?: Telefunc.Context
 }): Promise<HttpResponse> {
-  const runContext = {}
+  const requestContext = createRequestContext(request.signal)
+  const runContext = { requestContext }
+
   {
     // TO-DO/eventually: remove? Since `serverConfig` is global I don't think we need to set it to `runContext`, see for example https://github.com/brillout/telefunc/commit/5e3367d2d463b72e805e75ddfc68ef7f177a35c0
     const serverConfig = getServerConfig()
@@ -282,12 +286,13 @@ async function runTelefunc_({
     if (parsed.isMalformedRequest) {
       return createHttpResponse({ ...malformedRequest })
     }
-    const { telefunctionKey, telefunctionArgs, telefuncFilePath, telefunctionName } = parsed
+    const { telefunctionKey, telefunctionArgs, telefuncFilePath, telefunctionName, transport } = parsed
     objectAssign(runContext, {
       telefunctionKey,
       telefunctionArgs,
       telefuncFilePath,
       telefunctionName,
+      transport,
     })
   }
 
@@ -319,14 +324,13 @@ async function runTelefunc_({
 
   {
     assert(runContext.isValidRequest)
-    const { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionError, requestContext } =
+    const { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionError } =
       await executeTelefunction(runContext)
     objectAssign(runContext, {
       telefunctionReturn,
       telefunctionHasErrored,
       telefunctionAborted,
       telefunctionError,
-      requestContext,
     })
   }
 
@@ -336,17 +340,15 @@ async function runTelefunc_({
 
   {
     objectAssign(runContext, {
-      onStreamComplete: () => {
-        runContext.requestContext.completed = true
-      },
       abortSignal: runContext.requestContext.abortSignal,
     })
     const result = serializeTelefunctionResult(runContext)
 
     if (result.type === 'streaming') {
+      const contentType = result.transport === TRANSPORT.SSE ? 'text/event-stream' : 'application/octet-stream'
       return createHttpResponse({
         statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
-        contentType: 'application/octet-stream',
+        contentType,
         headers: [
           ['Cache-Control', 'no-cache, no-transform'],
           ['X-Accel-Buffering', 'no'],
@@ -354,12 +356,9 @@ async function runTelefunc_({
         body: result.body,
       })
     }
+
     objectAssign(runContext, { httpResponseBody: result.body })
   }
-
-  // Non-streaming response is fully computed — mark request as completed
-  // so that late-firing abort signals don't trigger onConnectionAbort callbacks.
-  runContext.requestContext.completed = true
 
   return createHttpResponse({
     statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,

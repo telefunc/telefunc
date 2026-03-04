@@ -28,3 +28,6 @@ export type TelefuncResponseBodyAbort = {
 
 /** Wire format of the JSON response body / streaming metadata. */
 export type TelefuncResponseBody = TelefuncResponseBodySuccess | TelefuncResponseBodyAbort
+
+// Re-export transport constants from wire-protocol
+export { TRANSPORT, DEFAULT_TRANSPORT, type Transport } from '../wire-protocol/constants.js'

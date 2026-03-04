@@ -5,6 +5,11 @@ export const SERIALIZER_PREFIX_GENERATOR = '!TelefuncGenerator:'
 export const SERIALIZER_PREFIX_PROMISE = '!TelefuncPromise:'
 export const SERIALIZER_PREFIX_CHANNEL = '!TelefuncChannel:'
 
+// ===== WS transport =====
+
+/** JSON key for the frame channel injected into WS transport responses. */
+export const FRAME_CHANNEL_KEY = '__frameChannel'
+
 // ===== Streaming error frames =====
 
 /** Marker u32 value used as frame length in streaming responses to signal an error frame. */
@@ -30,3 +35,14 @@ export type StreamingErrorFrameBug = {
 
 /** Union of all streaming error frame payloads. */
 export type StreamingErrorFramePayload = StreamingErrorFrameAbort | StreamingErrorFrameBug
+
+// ===== Transport =====
+
+/** Transport modes for streaming values. */
+export const TRANSPORT = {
+  STREAM: 'stream',
+  SSE: 'sse',
+  WS: 'ws',
+} as const
+export type Transport = (typeof TRANSPORT)[keyof typeof TRANSPORT]
+export const DEFAULT_TRANSPORT: Transport = TRANSPORT.STREAM
