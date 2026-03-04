@@ -71,7 +71,7 @@ function serializeTelefunctionResult(runContext: {
     const serverChannel = channel as unknown as ServerChannel<never, { p: 0 | 1 }>
     serverChannel.onAbort(() => requestContext.markAborted())
     serverChannel.onClose(() => requestContext.markComplete())
-    httpResponseBody = injectFrameChannel(httpResponseBody, serverChannel.id)
+    httpResponseBody = injectFrameChannel(httpResponseBody, { channelId: serverChannel.id })
     buildChannelResponseBody(streamingValues, telefuncId, serverChannel, runContext)
     return { type: 'text', body: httpResponseBody }
   }

@@ -1,4 +1,4 @@
-export { parseStreamingResponseBody, parseWsStreamingResponse, FrameDemuxer }
+export { parseResponse, FrameDemuxer }
 export { BaseStreamReader } from './BaseStreamReader.js'
 
 import { parse } from '@brillout/json-serializer/parse'
@@ -11,8 +11,9 @@ import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
 import { ChannelStreamReader } from './ChannelStreamReader.js'
 import { ClientChannel } from '../../../client/channel.js'
+import { extractFrameChannel } from '../../frame-channel.js'
 
-// ===== Streaming response parsing =====
+// ===== Types =====
 
 type CallContext = {
   telefunctionName: string
@@ -20,30 +21,94 @@ type CallContext = {
   abortController: AbortController
 }
 
-/** Shared core: wire a BaseStreamReader through FrameDemuxer + streaming reviver.
+// ===== Public entry point =====
+
+/** Single entry point for all response transports.
  *
- *  Both HTTP streaming and WS transports create a transport-specific reader,
- *  obtain the metadata text, then delegate here to reconstruct live values. */
+ *  Detects the transport from response headers / body and delegates to
+ *  the right reviver — the caller never needs to know which transport
+ *  was used.
+ *
+ *  - `application/octet-stream` → HTTP binary stream
+ *  - `text/event-stream`        → SSE stream
+ *  - text with `__frameChannel` → WS streaming
+ *  - text without               → plain (placeholder-only) */
+async function parseResponse(response: Response, callContext: CallContext): Promise<unknown> {
+  const contentType = response.headers.get('content-type') ?? ''
+  const isStreaming = contentType.includes('application/octet-stream') || contentType.includes('text/event-stream')
+
+  // HTTP streaming (binary / SSE)
+  if (isStreaming) {
+    assert(response.body)
+    const reader = response.body.getReader()
+    const isSSE = contentType.includes('text/event-stream')
+    const streamReader = isSSE ? new SSEStreamReader(reader, callContext) : new StreamReader(reader, callContext)
+    const metaLen = await streamReader.readU32()
+    const metaBytes = await streamReader.readExact(metaLen)
+    const metaText = new TextDecoder().decode(metaBytes)
+    return reviveStreamingResponse(metaText, callContext, streamReader)
+  }
+
+  // Text response: WS streaming or plain
+  const body = await response.text()
+  const ws = extractFrameChannel(body)
+  if (ws) {
+    const streamReader = new ChannelStreamReader(new ClientChannel(ws.metadata.channelId), callContext)
+    return reviveStreamingResponse(ws.strippedBody, callContext, streamReader)
+  }
+  return revivePlainResponse(body, callContext)
+}
+
+// ===== Streaming response (HTTP / WS) =====
+
+/** Revive a response that contains streaming values (generators, streams, promises).
+ *
+ *  The demuxer is created before parse — this is required because some
+ *  streaming types (e.g. Promise) eagerly read chunks inside `createValue`. */
 function reviveStreamingResponse(
-  streamReader: BaseStreamReader,
   metadataText: string,
   callContext: CallContext,
-): { ret: unknown } {
+  streamReader: BaseStreamReader,
+): unknown {
   const demuxer = new FrameDemuxer(streamReader)
 
   const getChunkReader = (index: number) => {
     demuxer.registerConsumer()
     return () => demuxer.readNextChunkForIndex(index)
   }
-
   const getCancelIndex = (index: number) => () => demuxer.cancelIndex(index)
 
   const { reviver, channels } = createStreamingReviver(getChunkReader, getCancelIndex)
-
   const parsed: unknown = parse(metadataText, { reviver })
-  assert(isObject(parsed) && 'ret' in parsed)
+  if (!isObject(parsed)) return parsed
 
-  // Close all revived channels when the call is aborted
+  return finalizeResponse(parsed, channels, callContext)
+}
+
+// ===== Plain text response =====
+
+/** Revive a non-streaming response. Only placeholder types (e.g. Channel) are revived. */
+function revivePlainResponse(body: string, callContext: CallContext): unknown {
+  const unreachable = (): never => {
+    assert(false, 'Unexpected streaming value in plain response')
+  }
+  const { reviver, channels } = createStreamingReviver(
+    () => unreachable,
+    () => unreachable,
+  )
+  const parsed: unknown = parse(body, { reviver })
+  if (!isObject(parsed)) return parsed
+
+  return finalizeResponse(parsed, channels, callContext)
+}
+
+// ===== Shared cleanup =====
+
+function finalizeResponse(
+  parsed: Record<string, unknown>,
+  channels: ClientChannel[],
+  callContext: CallContext,
+): Record<string, unknown> {
   if (channels.length > 0) {
     callContext.abortController.signal.addEventListener(
       'abort',
@@ -60,34 +125,6 @@ function reviveStreamingResponse(
   }
 
   return { ret }
-}
-
-/** HTTP streaming (binary / SSE): read metadata header from the stream,
- *  then revive streaming values via FrameDemuxer. */
-async function parseStreamingResponseBody(response: Response, callContext: CallContext): Promise<{ ret: unknown }> {
-  assert(response.body)
-  const reader = response.body.getReader()
-  const isSSE = (response.headers.get('content-type') ?? '').includes('text/event-stream')
-  const streamReader = isSSE ? new SSEStreamReader(reader, callContext) : new StreamReader(reader, callContext)
-
-  // Read metadata header from the stream
-  const metaLen = await streamReader.readU32()
-  const metaBytes = await streamReader.readExact(metaLen)
-  const metaText = new TextDecoder().decode(metaBytes)
-
-  return reviveStreamingResponse(streamReader, metaText, callContext)
-}
-
-/** WS transport: metadata is already in the HTTP body, data frames arrive
- *  via the ClientChannel. */
-function parseWsStreamingResponse(
-  channel: ClientChannel,
-  metadataBody: string,
-  callContext: CallContext,
-): { ret: unknown } {
-  const streamReader = new ChannelStreamReader(channel, callContext)
-
-  return reviveStreamingResponse(streamReader, metadataBody, callContext)
 }
 
 // ===== Frame demultiplexer =====

@@ -4,9 +4,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { objectAssign } from '../../utils/objectAssign.js'
-import { parseStreamingResponseBody, parseWsStreamingResponse } from '../../wire-protocol/client/response/parse.js'
-import { createPlaceholderReviver } from '../../wire-protocol/client/response/registry.js'
-import { extractFrameChannel } from '../../wire-protocol/frame-channel.js'
+import { parseResponse } from '../../wire-protocol/client/response/parse.js'
 import { throwCancelError, throwAbortError, throwBugError } from './errors.js'
 import {
   STATUS_CODE_SUCCESS,
@@ -18,7 +16,6 @@ import {
   STATUS_BODY_INTERNAL_SERVER_ERROR,
   STATUS_BODY_SHIELD_VALIDATION_ERROR,
 } from '../../shared/constants.js'
-import type { TelefuncResponseBody } from '../../shared/constants.js'
 
 const method = 'POST'
 
@@ -58,16 +55,15 @@ async function makeHttpRequest(callContext: {
   const statusCode = response.status
 
   if (statusCode === STATUS_CODE_SUCCESS) {
-    const responseContentType = response.headers.get('content-type') || ''
-    const isStreaming =
-      responseContentType.includes('application/octet-stream') || responseContentType.includes('text/event-stream')
-    const { ret } = isStreaming
-      ? await parseStreamingResponseBody(response, callContext)
-      : await parseResponseBody(response, callContext)
-    return ret
+    const parsed = await parseResponse(response, callContext)
+    assertUsage(isObject(parsed) && 'ret' in parsed, wrongInstallation({ method, callContext }))
+    return parsed.ret
   } else if (statusCode === STATUS_CODE_THROW_ABORT) {
-    const { ret } = await parseResponseBody(response, callContext)
-    throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, ret)
+    const responseBody = await response.text()
+    const parsed: unknown = parse(responseBody)
+    assertUsage(isObject(parsed) && 'ret' in parsed, wrongInstallation({ method, callContext }))
+    assert('abort' in parsed)
+    throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, (parsed as { ret: unknown }).ret)
   } else if (statusCode === STATUS_CODE_INTERNAL_SERVER_ERROR) {
     const errMsg = await getErrMsg(STATUS_BODY_INTERNAL_SERVER_ERROR, response, callContext)
     throwBugError(errMsg)
@@ -106,44 +102,6 @@ async function makeHttpRequest(callContext: {
       }),
     )
   }
-}
-
-async function parseResponseBody(
-  response: Response,
-  callContext: {
-    telefuncUrl: string
-    telefunctionName: string
-    telefuncFilePath: string
-    abortController: AbortController
-  },
-): Promise<{ ret: unknown }> {
-  const responseBody = await response.text()
-
-  // WS transport: extract the frame channel from the raw body before any reviver runs.
-  // extractFrameChannel strips __frameChannel so the streaming reviver never sees it.
-  const extracted = extractFrameChannel(responseBody)
-  if (extracted) {
-    return parseWsStreamingResponse(extracted.channel, extracted.strippedBody, callContext)
-  }
-
-  const { reviver, channels } = createPlaceholderReviver()
-  const responseBodyParsed: unknown = parse(responseBody, { reviver })
-
-  // Close all revived channels when the call is aborted
-  if (channels.length > 0) {
-    callContext.abortController.signal.addEventListener(
-      'abort',
-      () => {
-        for (const ch of channels) ch.close()
-      },
-      { once: true },
-    )
-  }
-  assertUsage(isObject(responseBodyParsed) && 'ret' in responseBodyParsed, wrongInstallation({ method, callContext }))
-  assert(response.status !== STATUS_CODE_THROW_ABORT || 'abort' in responseBodyParsed)
-
-  const { ret } = responseBodyParsed as TelefuncResponseBody
-  return { ret }
 }
 
 // ===== Helpers =====

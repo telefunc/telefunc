@@ -1,4 +1,4 @@
-export { clientStreamingTypes, createStreamingReviver, createPlaceholderReviver }
+export { clientStreamingTypes, createStreamingReviver }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
 import { asyncGeneratorClientType } from './async-generator.js'
@@ -46,18 +46,6 @@ function createStreamingReviver(
         return { replacement: liveValue }
       }
     }
-    return revivePlaceholder(value, parser, channels)
-  }
-  return { reviver, channels }
-}
-
-/**
- * Creates a reviver that only handles placeholder types (e.g. Channel).
- * Used for non-streaming responses where no chunk reader is available.
- */
-function createPlaceholderReviver() {
-  const channels: ClientChannel[] = []
-  const reviver: Reviver = (_key: undefined | string, value: string, parser: (str: string) => unknown) => {
     return revivePlaceholder(value, parser, channels)
   }
   return { reviver, channels }
