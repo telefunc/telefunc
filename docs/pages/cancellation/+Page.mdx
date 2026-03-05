@@ -94,11 +94,11 @@ const result = await withContext(onLoad, {
 ```
 
 
-## `onConnectionAbort()`
+## `onConnectionClose()`
 
 **Environment**: server.
 
-Register a callback that fires when the client disconnects. Does NOT fire on normal response completion. Accessed via <Link text={<code>getContext()</code>} href="/getContext" />.
+Register a callback that fires when the request lifecycle ends for any reason (response sent, stream complete, or client disconnect). Fires exactly once. Accessed via <Link text={<code>getContext()</code>} href="/getContext" />.
 
 ```ts
 // AI.telefunc.ts
@@ -110,7 +110,7 @@ export async function* onChat(prompt: string): AsyncGenerator<string> {
   const context = getContext()
   const upstream = ai.streamText({ prompt })
 
-  context.onConnectionAbort(() => {
+  context.onConnectionClose(() => {
     // Client disconnected — stop the upstream AI call
     upstream.cancel()
   })
@@ -123,7 +123,7 @@ export async function* onChat(prompt: string): AsyncGenerator<string> {
 
 ### Non-streaming usage
 
-`onConnectionAbort()` also works with regular (non-streaming) telefunctions:
+`onConnectionClose()` also works with regular (non-streaming) telefunctions:
 
 ```ts
 // Report.telefunc.ts
@@ -135,7 +135,7 @@ export async function onGenerateReport(): Promise<Report> {
   const context = getContext()
   let aborted = false
 
-  context.onConnectionAbort(() => {
+  context.onConnectionClose(() => {
     aborted = true
   })
 

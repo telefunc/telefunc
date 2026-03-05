@@ -1,7 +1,7 @@
 export type { PlaceholderTypeContract, ServerPlaceholderType, ClientPlaceholderType, ChannelContract }
 
-import type { ServerChannel } from '../node/server/channel.js'
-import type { ClientChannel } from '../client/channel.js'
+import type { ServerChannel } from './server/channel.js'
+import type { ClientChannel } from './client/channel.js'
 
 /** Shared contract tying server and client plugins for one placeholder type. */
 type PlaceholderTypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = Record<string, unknown>> = {

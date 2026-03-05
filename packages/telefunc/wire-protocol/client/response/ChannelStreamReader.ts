@@ -3,7 +3,7 @@ export { ChannelStreamReader }
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { concat } from '../../frame.js'
 import { throwCancelError } from '../../../client/remoteTelefunctionCall/errors.js'
-import { ClientChannel } from '../../../client/channel.js'
+import { ClientChannel } from '../channel.js'
 
 const EMPTY = new Uint8Array(0)
 
@@ -23,10 +23,8 @@ const LOW = 512 * 1024
 /** WS transport reader — receives binary frames pushed by the server
  *  via WebSocket, with watermark-based backpressure signaling.
  *
- *  The WebSocket is push-based (data arrives via `listenBinary` callback)
- *  but the frame protocol expects pull-based `readExact(n)` calls.
- *  A single `wake` resolver bridges the gap: `readExact` parks on a promise,
- *  `listenBinary` resolves it when new data arrives. */
+ *  Uses `channel._pause()` / `channel._resume()` for backpressure — these
+ *  are transport-agnostic (work for both direct and shared WS). */
 class ChannelStreamReader extends BaseStreamReader {
   private buffer: Uint8Array = EMPTY
   private wake: (() => void) | null = null
@@ -43,7 +41,6 @@ class ChannelStreamReader extends BaseStreamReader {
   ) {
     super(callContext)
     this.channel = channel
-    // Abort signal: wake blocked readExact so it can check cancelled/aborted.
     callContext.abortController.signal.addEventListener('abort', () => this.cancel(), { once: true })
 
     channel.listenBinary((frame: Uint8Array) => {
@@ -52,7 +49,7 @@ class ChannelStreamReader extends BaseStreamReader {
       this.wake = null
       if (!this.paused && this.buffer.byteLength >= HIGH) {
         this.paused = true
-        this.channel.send({ p: 1 })
+        this.channel._pause()
       }
     })
   }
@@ -61,7 +58,6 @@ class ChannelStreamReader extends BaseStreamReader {
     while (this.buffer.length < n) {
       if (this.callContext.abortController.signal.aborted) throwCancelError()
       if (this.cancelled) return EMPTY
-      // Park until listenBinary fires with new data (push-to-pull bridge).
       await new Promise<void>((r) => {
         this.wake = r
       })
@@ -70,7 +66,7 @@ class ChannelStreamReader extends BaseStreamReader {
     this.buffer = this.buffer.length > n ? this.buffer.subarray(n) : EMPTY
     if (this.paused && this.buffer.byteLength < LOW) {
       this.paused = false
-      this.channel.send({ p: 0 })
+      this.channel._resume()
     }
     return result
   }
@@ -78,7 +74,6 @@ class ChannelStreamReader extends BaseStreamReader {
   cancel(): void {
     this.cancelled = true
     this.channel.close()
-    // Wake blocked readExact so it re-enters the loop and returns EMPTY.
     this.wake?.()
     this.wake = null
   }

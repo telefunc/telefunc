@@ -1,7 +1,7 @@
 export { testStreaming }
 
 import { page, test, expect, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, waitForHydration, getResult, sleep } from '../../e2e-utils'
+import { resetCleanupState, getCleanupState, waitForHydration, getResult } from '../../e2e-utils'
 
 function testStreaming() {
   test('streaming: ReadableStream return', async () => {
@@ -91,9 +91,10 @@ function testStreaming() {
       expect(result.first).deep.equal([1, 2, 3])
       expect(result.second).deep.equal([10, 20, 30])
     })
-    await sleep(1000)
-    const state = await getCleanupState()
-    expect(state.twoGeneratorsAborted).toBe('')
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.twoGeneratorsClosed).not.toBe('')
+    })
   })
 
   test('streaming: stream + generator multiplexed', async () => {
@@ -104,9 +105,10 @@ function testStreaming() {
       expect(result.chunks).deep.equal(['hi'])
       expect(result.values).deep.equal([1])
     })
-    await sleep(1000)
-    const state = await getCleanupState()
-    expect(state.streamAndGeneratorAborted).toBe('')
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.streamAndGeneratorClosed).not.toBe('')
+    })
   })
 
   test('streaming: multiple promises multiplexed', async () => {
@@ -127,10 +129,11 @@ function testStreaming() {
       expect(result.label).toBe('promises')
       expect(result.updates).deep.equal(['fast', 'slow'])
     })
-    // onConnectionAbort must not have been called
-    await sleep(1000)
-    const state = await getCleanupState()
-    expect(state.multiplePromisesAborted).toBe('')
+    // onConnectionClose fires after all streams complete
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.multiplePromisesClosed).not.toBe('')
+    })
   })
 
   test('streaming: stream + promise deadlock — promise unblocks when stream is consumed', async () => {
@@ -181,11 +184,11 @@ function testStreaming() {
     expect(result.steps).toContain('promise-resolved')
     expect(result.steps).toContain('gen-cancelled')
 
-    // After all consumers done, onConnectionAbort should fire
+    // After all consumers done, onConnectionClose should fire
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.mixedEndless).toBe('cleaned-up')
-      expect(state.mixedEndlessAborted).not.toBe('')
+      expect(state.mixedEndlessClosed).not.toBe('')
     })
   })
 
@@ -211,7 +214,7 @@ function testStreaming() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.mixedEndless).toBe('cleaned-up')
-      expect(state.mixedEndlessAborted).not.toBe('')
+      expect(state.mixedEndlessClosed).not.toBe('')
     })
   })
 

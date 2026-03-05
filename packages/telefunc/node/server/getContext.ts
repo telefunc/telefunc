@@ -39,9 +39,6 @@ type TelefuncBuiltins = {
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onConnectionClose: (cb: () => void) => void
-  /** Register a callback that fires only when the client disconnects unexpectedly
-   *  (before the response/stream completes). Does NOT fire on normal completion. */
-  onConnectionAbort: (cb: () => void) => void
 }
 
 function augmentContext(context: Record<string, unknown>): void {
@@ -49,11 +46,9 @@ function augmentContext(context: Record<string, unknown>): void {
   if (!reqCtx) {
     // SSR implementation not trivial
     context.onConnectionClose = () => {}
-    context.onConnectionAbort = () => {}
     return
   }
   context.onConnectionClose = (cb: () => void) => reqCtx.onConnectionClose(cb)
-  context.onConnectionAbort = (cb: () => void) => reqCtx.onConnectionAbort(cb)
 }
 
 function provideTelefuncContext<Context extends object = Telefunc.Context>(context: Context): void {

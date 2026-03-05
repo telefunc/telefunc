@@ -10,7 +10,7 @@ import { BaseStreamReader } from './BaseStreamReader.js'
 import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
 import { ChannelStreamReader } from './ChannelStreamReader.js'
-import { ClientChannel } from '../../../client/channel.js'
+import { ClientChannel } from '../channel.js'
 import { extractFrameChannel } from '../../frame-channel.js'
 
 // ===== Types =====

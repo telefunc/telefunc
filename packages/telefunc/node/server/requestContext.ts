@@ -13,23 +13,15 @@ type RequestContext = {
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onConnectionClose: (cb: () => void) => void
-  /** Register a callback that fires only when the client disconnects unexpectedly
-   *  (before the response/stream completes). Does NOT fire on normal completion. */
-  onConnectionAbort: (cb: () => void) => void
-  /** Mark the response as complete (stream finished or non-streaming body ready).
-   *  Fires onConnectionClose callbacks. Does NOT fire onConnectionAbort. */
+  /** Mark the response as complete.
+   *  Fires onConnectionClose callbacks. */
   markComplete: () => void
-  /** Mark as aborted (client disconnected unexpectedly).
-   *  Fires onConnectionAbort callbacks, then onConnectionClose callbacks. */
-  markAborted: () => void
 }
 
-/** Create a RequestContext and wire the abort signal to markAborted(). */
+/** Create a RequestContext and wire the abort signal to markComplete(). */
 function createRequestContext(abortSignal: AbortSignal): RequestContext {
   const closeCallbacks: Array<() => void> = []
-  const abortCallbacks: Array<() => void> = []
   let closed = false
-  let aborted = false
 
   const fireClose = () => {
     if (closed) return
@@ -42,21 +34,6 @@ function createRequestContext(abortSignal: AbortSignal): RequestContext {
       }
     }
     closeCallbacks.length = 0
-    abortCallbacks.length = 0
-  }
-
-  const fireAbort = () => {
-    if (closed) return
-    aborted = true
-    for (const cb of abortCallbacks) {
-      try {
-        cb()
-      } catch {
-        // User callback errors are silently swallowed
-      }
-    }
-    abortCallbacks.length = 0
-    fireClose()
   }
 
   const ctx: RequestContext = {
@@ -68,25 +45,14 @@ function createRequestContext(abortSignal: AbortSignal): RequestContext {
       }
       closeCallbacks.push(cb)
     },
-    onConnectionAbort(cb) {
-      // Already closed via abort → fire immediately
-      if (closed && aborted) {
-        cb()
-        return
-      }
-      // Already closed normally → abort never happened
-      if (closed) return
-      abortCallbacks.push(cb)
-    },
     markComplete: fireClose,
-    markAborted: fireAbort,
   }
 
-  // Wire abort signal → markAborted (centralized here, not scattered across callers)
+  // Wire abort signal → markComplete
   if (abortSignal.aborted) {
-    fireAbort()
+    fireClose()
   } else {
-    abortSignal.addEventListener('abort', () => fireAbort(), { once: true })
+    abortSignal.addEventListener('abort', () => fireClose(), { once: true })
   }
 
   return ctx

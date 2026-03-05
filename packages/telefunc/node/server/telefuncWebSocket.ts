@@ -2,7 +2,7 @@ export { telefuncWebSocket }
 
 import type { Server } from 'node:http'
 import crossws from 'crossws/adapters/node'
-import { getTelefuncChannelHooks } from './telefuncChannelHooks.js'
+import { getTelefuncChannelHooks } from '../../wire-protocol/server/ws.js'
 import { getServerConfig } from './serverConfig.js'
 
 const registeredServers = new WeakSet<Server>()
@@ -31,11 +31,10 @@ function telefuncWebSocket(httpServer: Server): void {
 
   const ws = crossws({ hooks: getTelefuncChannelHooks() })
   httpServer.on('upgrade', (req, socket, head) => {
-    // Only handle upgrade requests targeting the telefunc URL with a channelId.
-    // Let all other upgrades pass through untouched.
     const url = new URL(req.url ?? '', 'http://localhost')
     const telefuncUrl = getServerConfig().telefuncUrl
-    if (url.pathname !== telefuncUrl || !url.searchParams.has('channelId')) return
+    if (url.pathname !== telefuncUrl) return
+    if (!url.searchParams.has('channelId')) return
     ws.handleUpgrade(req, socket, head)
   })
 }

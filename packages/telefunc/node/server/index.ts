@@ -6,8 +6,8 @@ export { getContext, provideTelefuncContext } from './getContext.js'
 export { Abort } from './Abort.js'
 export { shield } from './shield.js'
 export { onBug } from './runTelefunc/onBug.js'
-export { createChannel } from './channel.js'
-export type { Channel } from './channel.js'
+export { createChannel } from '../../wire-protocol/server/channel.js'
+export type { Channel } from '../../wire-protocol/channel.js'
 export { telefuncWebSocket } from './telefuncWebSocket.js'
 
 // In order to allow users to override `Telefunc.Context`, we need to export `Telefunc` (even if the user never imports `Telefunc`)

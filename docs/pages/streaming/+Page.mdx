@@ -219,7 +219,7 @@ See <Link href="/error-handling" /> for details.
 
 ## Cleanup
 
-Use `onConnectionAbort()` to detect when the client disconnects — for example to cancel upstream work or release resources. See <Link href="/cancellation" />.
+Use `onConnectionClose()` to detect when the connection ends (client disconnect, stream complete, or response sent) — for example to cancel upstream work or release resources. See <Link href="/cancellation" />.
 
 
 ## See also

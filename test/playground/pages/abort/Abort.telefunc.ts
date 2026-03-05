@@ -5,16 +5,16 @@ import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
 // Simulates a slow AI upstream: each "token" takes 1 second.
-// Client disconnects after first token — onConnectionAbort should fire
+// Client disconnects after first token — onConnectionClose should fire
 // immediately, not after waiting 1s for the next token.
 async function* onSlowAIGenerator(): AsyncGenerator<string> {
   try {
     cleanupState.slowAI = 'running'
-    cleanupState.slowAIAbortedAt = ''
+    cleanupState.slowAIClosedAt = ''
     const context = getContext()
-    context.onConnectionAbort(() => {
+    context.onConnectionClose(() => {
       cleanupState.slowAI = 'cleaned-up'
-      cleanupState.slowAIAbortedAt = String(Date.now())
+      cleanupState.slowAIClosedAt = String(Date.now())
     })
     yield 'token-0'
     for (let i = 1; i < 1000; i++) {
@@ -27,15 +27,15 @@ async function* onSlowAIGenerator(): AsyncGenerator<string> {
 }
 
 // Simulates a slow ReadableStream: each chunk takes 1 second.
-// Client cancels after first chunk — onConnectionAbort should fire quickly.
+// Client cancels after first chunk — onConnectionClose should fire quickly.
 const onSlowStreamForAbort = async (): Promise<ReadableStream<Uint8Array>> => {
   cleanupState.slowStream = 'running'
-  cleanupState.slowStreamAbortedAt = ''
+  cleanupState.slowStreamClosedAt = ''
   cleanupState.slowStreamCancelled = ''
   const context = getContext()
-  context.onConnectionAbort(() => {
+  context.onConnectionClose(() => {
     cleanupState.slowStream = 'cleaned-up'
-    cleanupState.slowStreamAbortedAt = String(Date.now())
+    cleanupState.slowStreamClosedAt = String(Date.now())
   })
   const encoder = new TextEncoder()
   let i = 0
@@ -53,14 +53,14 @@ const onSlowStreamForAbort = async (): Promise<ReadableStream<Uint8Array>> => {
 }
 
 // Non-streaming telefunc with many slow steps.
-// Client aborts — onConnectionAbort fires, and the telefunc
+// Client aborts — onConnectionClose fires, and the telefunc
 // checks an `aborted` flag to bail out early.
 async function onSlowNormalTelefunc(): Promise<{ stepsCompleted: number }> {
   cleanupState.slowNormal = 'running'
   cleanupState.slowNormalSteps = '0'
   const context = getContext()
   let aborted = false
-  context.onConnectionAbort(() => {
+  context.onConnectionClose(() => {
     aborted = true
     cleanupState.slowNormal = 'cleaned-up'
   })
@@ -83,7 +83,7 @@ async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; err
   cleanupState.uploadAbortSingle = 'running'
   cleanupState.uploadAbortSingleError = ''
   const context = getContext()
-  context.onConnectionAbort(() => {
+  context.onConnectionClose(() => {
     cleanupState.uploadAbortSingle = 'cleaned-up'
   })
   let bytesRead = 0
@@ -115,11 +115,11 @@ async function onUploadAbortMultiple(
   file3: File,
 ): Promise<{ results: Array<{ name: string; bytesRead: number; error: string | null }> }> {
   cleanupState.uploadAbortMulti = 'running'
-  cleanupState.uploadAbortMultiConnectionAbort = ''
+  cleanupState.uploadAbortMultiConnectionClose = ''
   const context = getContext()
-  context.onConnectionAbort(() => {
+  context.onConnectionClose(() => {
     cleanupState.uploadAbortMulti = 'cleaned-up'
-    cleanupState.uploadAbortMultiConnectionAbort = 'fired'
+    cleanupState.uploadAbortMultiConnectionClose = 'fired'
   })
 
   const results: Array<{ name: string; bytesRead: number; error: string | null }> = []

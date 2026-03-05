@@ -102,10 +102,10 @@ const onReturnStreamWithMeta = async () => {
 // ── Multiplexed streaming ────────────────────────────────────────────
 
 const onReturnTwoGenerators = async () => {
-  cleanupState.twoGeneratorsAborted = ''
+  cleanupState.twoGeneratorsClosed = ''
   const context = getContext()
-  context.onConnectionAbort(() => {
-    cleanupState.twoGeneratorsAborted = String(Date.now())
+  context.onConnectionClose(() => {
+    cleanupState.twoGeneratorsClosed = String(Date.now())
   })
   async function* gen1(): AsyncGenerator<number> {
     for (const n of [1, 2, 3]) yield n
@@ -117,10 +117,10 @@ const onReturnTwoGenerators = async () => {
 }
 
 const onReturnStreamAndGenerator = async () => {
-  cleanupState.streamAndGeneratorAborted = ''
+  cleanupState.streamAndGeneratorClosed = ''
   const context = getContext()
-  context.onConnectionAbort(() => {
-    cleanupState.streamAndGeneratorAborted = String(Date.now())
+  context.onConnectionClose(() => {
+    cleanupState.streamAndGeneratorClosed = String(Date.now())
   })
   const encoder = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
@@ -136,10 +136,10 @@ const onReturnStreamAndGenerator = async () => {
 }
 
 const onReturnMultiplePromises = async () => {
-  cleanupState.multiplePromisesAborted = ''
+  cleanupState.multiplePromisesClosed = ''
   const context = getContext()
-  context.onConnectionAbort(() => {
-    cleanupState.multiplePromisesAborted = String(Date.now())
+  context.onConnectionClose(() => {
+    cleanupState.multiplePromisesClosed = String(Date.now())
   })
   const fast = Promise.resolve('quick')
   const slow = new Promise<string>((resolve) => setTimeout(() => resolve('delayed'), 1000))
@@ -171,11 +171,11 @@ const onReturnDeadlockStream = async () => {
 
 const onReturnMixedEndless = async () => {
   cleanupState.mixedEndless = 'running'
-  cleanupState.mixedEndlessAborted = ''
+  cleanupState.mixedEndlessClosed = ''
   const context = getContext()
-  context.onConnectionAbort(() => {
+  context.onConnectionClose(() => {
     cleanupState.mixedEndless = 'cleaned-up'
-    cleanupState.mixedEndlessAborted = String(Date.now())
+    cleanupState.mixedEndlessClosed = String(Date.now())
   })
   async function* gen(): AsyncGenerator<string> {
     let i = 0

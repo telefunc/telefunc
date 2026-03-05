@@ -9,7 +9,7 @@ import type { ClientStreamingType } from '../../streaming-types.js'
 import type { ClientPlaceholderType } from '../../placeholder-types.js'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
-import { ClientChannel } from '../../../client/channel.js'
+import { ClientChannel } from '../channel.js'
 
 const clientStreamingTypes: ClientStreamingType[] = [
   asyncGeneratorClientType,
