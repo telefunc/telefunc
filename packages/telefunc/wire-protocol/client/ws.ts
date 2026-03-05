@@ -61,15 +61,12 @@ class WsConnection {
     const wsBaseUrl = deriveWsUrl(telefuncUrl)
     let connection = WsConnection.cache.get(wsBaseUrl)
     if (!connection || connection.closed) {
-      const wsUrl = wsBaseUrl + '?channelId=' + encodeURIComponent(channel.id)
-      connection = new WsConnection(wsUrl, wsBaseUrl)
-    } else {
-      connection.register(channel)
+      connection = new WsConnection(wsBaseUrl)
     }
+    connection.register(channel)
     return connection
   }
 
-  private wsUrl: string
   private cacheKey: string
   private ws: WebSocket | null = null
   private connected = false
@@ -88,22 +85,23 @@ class WsConnection {
   private reconnectAttempt = 0
   private reconnectStart = 0
 
-  private constructor(wsUrl: string, cacheKey: string) {
-    this.wsUrl = wsUrl
+  private constructor(cacheKey: string) {
     this.cacheKey = cacheKey
     WsConnection.cache.set(cacheKey, this)
-    this.connect()
   }
 
   /** Register a channel over this connection. */
   private register(channel: WsChannel): void {
     this.clearTimer('ttl')
     this.addChannel(channel)
-    // Trigger a reconcile so the server learns about the new channel.
-    // If not connected yet, the next onopen will reconcile automatically.
-    if (this.connected && !this.reconciling) {
+    if (!this.ws && !this.connected) {
+      // First channel — open the WebSocket.
+      this.connect()
+    } else if (this.connected && !this.reconciling) {
+      // Already connected — reconcile so the server learns about the new channel.
       this.startReconcile()
     }
+    // Otherwise connecting or reconciling — onopen/reconciled will pick it up.
   }
 
   /** Remove a channel (client-initiated close). */
@@ -156,8 +154,13 @@ class WsConnection {
   private connect(): void {
     if (this.closed) return
 
+    // Use the first channel's id in the URL so the server can validate the upgrade.
+    const firstChannel = this.channels.values().next().value
+    const channelId = firstChannel ? firstChannel.id : ''
+    const wsUrl = this.cacheKey + '?channelId=' + encodeURIComponent(channelId)
+
     try {
-      this.ws = new WebSocket(this.wsUrl)
+      this.ws = new WebSocket(wsUrl)
     } catch {
       this.scheduleReconnect()
       return
