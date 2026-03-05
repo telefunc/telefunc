@@ -56,8 +56,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     return this as unknown as Channel<TReceive, TSend>
   }
 
-  /** Can this channel still accept send() calls? Set to false when close begins. */
-  private _acceptsSends = true
+  private _isClosed = false
   private _peer: { sendText(data: string): void; sendBinary(data: Uint8Array): void; close(): void } | null = null
   private _listeners: Array<(data: TReceive) => void> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
@@ -67,7 +66,6 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   private _binarySendBuffer: Uint8Array[] = []
   private _closeCallbacks: Array<() => void> = []
   private _openCallbacks: Array<() => void> = []
-  /** Have the onClose callbacks already fired? Guards against double-firing. */
   private _didFireClose = false
   private _didFireOpen = false
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null
@@ -78,17 +76,23 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   constructor() {
     this.id = crypto.randomUUID()
     getChannelRegistry().set(this.id, this as ServerChannel<unknown, unknown>)
-    this._startTtl()
+    // If no peer connects within TTL, close automatically.
+    this._ttlTimer = this._unrefTimer(
+      setTimeout(() => {
+        this._ttlTimer = null
+        this._shutdown()
+      }, DEFAULT_TTL_MS),
+    )
   }
 
-  get isOpen(): boolean {
-    return this._acceptsSends
+  get isClosed(): boolean {
+    return this._isClosed
   }
 
   /** Send a message to the client.
    *  @throws {ChannelClosedError} if the channel is closed. */
   send(data: TSend): void {
-    if (!this._acceptsSends) throw new ChannelClosedError()
+    if (this._isClosed) throw new ChannelClosedError()
     const serialized = stringify(data, { forbidReactElements: false })
     if (this._peer) {
       this._peer.sendText(serialized)
@@ -100,7 +104,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   /** Send a binary message to the client.
    *  @throws {ChannelClosedError} if the channel is closed. */
   sendBinary(data: Uint8Array): void {
-    if (!this._acceptsSends) throw new ChannelClosedError()
+    if (this._isClosed) throw new ChannelClosedError()
     if (this._peer) {
       this._peer.sendBinary(data)
     } else {
@@ -134,35 +138,30 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._openCallbacks.push(callback)
   }
 
-  /** @internal — Register a callback for when the peer requests a pause (backpressure). */
+  /** @internal — Register a callback for backpressure pause from the transport layer. */
   _onPause(callback: () => void): void {
     this._pauseCallbacks.push(callback)
   }
 
-  /** @internal — Register a callback for when the peer requests a resume. */
+  /** @internal — Register a callback for backpressure resume from the transport layer. */
   _onResume(callback: () => void): void {
     this._resumeCallbacks.push(callback)
   }
 
-  /** Close the channel from the server side (normal close, not abort). */
+  /** Close the channel from the server side. */
   close(): void {
-    if (!this._acceptsSends) return
-    this._acceptsSends = false
-    this._disconnected = false
-    this._clearTtl()
-    this._clearReconnectTimer()
+    if (this._isClosed) return
     if (this._peer) {
       this._peer.close()
       this._peer = null
     }
-    getChannelRegistry().delete(this.id)
-    this._fireClose()
+    this._shutdown()
   }
 
   /** @internal — Called by WS hooks when a peer connects (or reconnects). */
   attachPeer(peer: { sendText(data: string): void; sendBinary(data: Uint8Array): void; close(): void }): void {
-    this._clearTtl()
-    this._clearReconnectTimer()
+    this._clearTimer('_ttlTimer')
+    this._clearTimer('_reconnectTimer')
     const wasDisconnected = this._disconnected
     this._disconnected = false
     this._peer = peer
@@ -171,7 +170,6 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     for (const msg of this._binarySendBuffer) peer.sendBinary(msg)
     this._binarySendBuffer = []
     this._fireOpen()
-    // Resume streaming pumps that were paused during disconnect
     if (wasDisconnected) {
       for (const cb of this._resumeCallbacks) cb()
     }
@@ -190,31 +188,23 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
 
   /** @internal — Connection dropped, keep channel alive for reconnection. */
   _onPeerDisconnect(): void {
-    if (!this._acceptsSends || this._disconnected) return
+    if (this._isClosed || this._disconnected) return
     this._peer = null
     this._disconnected = true
-    // Pause streaming pumps — they resume on reconnect via attachPeer()
     for (const cb of this._pauseCallbacks) cb()
-    // Grace period: if no reconnect within RECONNECT_GRACE_MS, close for real
-    this._reconnectTimer = setTimeout(() => {
-      this._reconnectTimer = null
-      this._onPeerClose()
-    }, RECONNECT_GRACE_MS)
-    if (hasProp(this._reconnectTimer, 'unref', 'function')) {
-      this._reconnectTimer.unref()
-    }
+    this._reconnectTimer = this._unrefTimer(
+      setTimeout(() => {
+        this._reconnectTimer = null
+        this._shutdown()
+      }, RECONNECT_GRACE_MS),
+    )
   }
 
-  /** @internal — Permanent close (intentional or grace period expired). */
+  /** @internal — Permanent close from peer side. */
   _onPeerClose(): void {
-    if (!this._acceptsSends) return
-    this._acceptsSends = false
+    if (this._isClosed) return
     this._peer = null
-    this._disconnected = false
-    this._clearTtl()
-    this._clearReconnectTimer()
-    getChannelRegistry().delete(this.id)
-    this._fireClose()
+    this._shutdown()
   }
 
   /** @internal */
@@ -225,6 +215,18 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   /** @internal */
   _onPeerResume(): void {
     for (const cb of this._resumeCallbacks) cb()
+  }
+
+  // ── Private ──
+
+  /** Single close path — every close route funnels here. */
+  private _shutdown(): void {
+    if (this._isClosed) return
+    this._isClosed = true
+    this._clearTimer('_ttlTimer')
+    this._clearTimer('_reconnectTimer')
+    getChannelRegistry().delete(this.id)
+    this._fireClose()
   }
 
   private _fireClose(): void {
@@ -256,30 +258,16 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._openCallbacks.length = 0
   }
 
-  private _clearReconnectTimer(): void {
-    if (this._reconnectTimer) {
-      clearTimeout(this._reconnectTimer)
-      this._reconnectTimer = null
+  private _clearTimer(name: '_ttlTimer' | '_reconnectTimer'): void {
+    const timer = this[name]
+    if (timer) {
+      clearTimeout(timer)
+      ;(this as any)[name] = null
     }
   }
 
-  private _startTtl(): void {
-    this._ttlTimer = setTimeout(() => {
-      if (!this._peer && this._acceptsSends) {
-        this._acceptsSends = false
-        getChannelRegistry().delete(this.id)
-        this._fireClose()
-      }
-    }, DEFAULT_TTL_MS)
-    if (hasProp(this._ttlTimer, 'unref', 'function')) {
-      this._ttlTimer.unref()
-    }
-  }
-
-  private _clearTtl(): void {
-    if (this._ttlTimer) {
-      clearTimeout(this._ttlTimer)
-      this._ttlTimer = null
-    }
+  private _unrefTimer(timer: ReturnType<typeof setTimeout>): ReturnType<typeof setTimeout> {
+    if (hasProp(timer, 'unref', 'function')) timer.unref()
+    return timer
   }
 }

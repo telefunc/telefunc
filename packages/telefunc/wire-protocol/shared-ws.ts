@@ -28,28 +28,16 @@ const TAG = {
 
 // ===== Control message types =====
 
-type CtrlOpen = { t: 'open'; id: string; ix: number }
-/** Server → client: channel accepted at this index. */
-type CtrlOpened = { t: 'opened'; ix: number }
 type CtrlClose = { t: 'close'; ix: number }
 type CtrlPause = { t: 'pause'; ix: number }
 type CtrlResume = { t: 'resume'; ix: number }
 type CtrlPing = { t: 'ping' }
 type CtrlPong = { t: 'pong' }
-/** Client → server on every connect: all open channels with client-owned indices. */
+/** Client → server on every (re)connect: all open channels with client-owned indices. */
 type CtrlReconcile = { t: 'reconcile'; open: { id: string; ix: number }[] }
 /** Server → client after reconcile: all channels the server actually attached. */
 type CtrlReconciled = { t: 'reconciled'; open: { id: string; ix: number }[] }
-type CtrlMessage =
-  | CtrlOpen
-  | CtrlOpened
-  | CtrlClose
-  | CtrlPause
-  | CtrlResume
-  | CtrlPing
-  | CtrlPong
-  | CtrlReconcile
-  | CtrlReconciled
+type CtrlMessage = CtrlClose | CtrlPause | CtrlResume | CtrlPing | CtrlPong | CtrlReconcile | CtrlReconciled
 
 // ===== Decoded frame =====
 

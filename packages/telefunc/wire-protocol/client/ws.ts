@@ -1,5 +1,4 @@
 export { WsConnection }
-export type { ChannelCallbacks, ChannelHandle }
 
 import { TAG, encode, encodeCtrl, decode } from '../shared-ws.js'
 import type { CtrlMessage } from '../shared-ws.js'
@@ -14,65 +13,72 @@ const RECONNECT_TIMEOUT_MS = 60_000
 const RECONNECT_INITIAL_DELAY_MS = 500
 const RECONNECT_MAX_DELAY_MS = 10_000
 
-// ── Types ──
-
-/** Callbacks from the WS layer into the client channel. */
-type ChannelCallbacks = {
-  onOpen(): void
-  onMessage(data: string): void
-  onBinaryMessage(data: Uint8Array): void
-  onClose(): void
-}
-
-/** Per-channel handle for sending data and closing. */
-type ChannelHandle = {
-  send(data: string): void
-  sendBinary(data: Uint8Array): void
-  pause(): void
-  resume(): void
-  close(): void
-}
-
-/** Entry in the send buffer — channelIx allows dead-channel filtering on flush. */
-type BufferedFrame = {
-  data: Uint8Array<ArrayBuffer>
-  channelIx: number | null
-}
-
-type Channel = {
-  index: number
-  channelId: string
-  callbacks: ChannelCallbacks
+/** Minimal interface that WsConnection needs from a channel.
+ *  Implemented by ClientChannel. */
+interface WsChannel {
+  readonly id: string
+  _onWsOpen(): void
+  _onWsMessage(data: string): void
+  _onWsBinaryMessage(data: Uint8Array): void
+  _onWsClose(): void
 }
 
 /**
- * Multiplexed WebSocket connection.
+ * Multiplexed WebSocket connection shared by all client channels.
  *
- * Channel indices are client-owned and stable for the channel's lifetime.
- * sendBuffer is never cleared — frames keep their original indices.
+ * A single WsConnection is created per server URL. Multiple channels
+ * are multiplexed over it using client-assigned integer indices as
+ * part of a compact binary framing protocol (see shared-ws.ts).
  *
- * Reconcile is symmetric — on every connect (first or reconnect):
- *   1. Client sends `reconcile { open }` — all its open channels.
- *   2. Server attaches alive channels, ignores dead ones.
- *   3. Server responds `reconciled { open }` — all channels it attached.
- *   4. Client diffs: channels it has but server didn't mention → onClose().
+ * Lifecycle:
+ *  - First channel creates the connection and triggers a WebSocket open.
+ *  - Additional channels call `register()` and send a CTRL `open` message.
+ *  - When a channel closes, it calls `unregister()`.
+ *  - When the last channel unregisters, an idle TTL starts. If no new
+ *    channel registers before the TTL expires, the WebSocket closes cleanly.
  *
- * The reconciled response is the SOLE close-notification mechanism during reconcile.
+ * Reconnection:
+ *  - On disconnect, the connection retries with exponential backoff.
+ *  - On every (re)connect, a reconcile handshake runs:
+ *      1. Client sends all its open channel ids + indices.
+ *      2. Server replies with the subset it still has alive.
+ *      3. Client closes any channels the server didn't acknowledge.
+ *  - Buffered frames are held during reconnect and flushed after reconcile.
+ *
+ * Health:
+ *  - Client sends CTRL pings every 5s; server replies with pong.
+ *  - If no pong arrives within 10s, the connection is presumed dead
+ *    and a reconnect is scheduled.
  */
 class WsConnection {
-  readonly primaryHandle: ChannelHandle
   closed = false
 
+  // ── Connection cache — one WsConnection per base URL ──
+  private static cache = new Map<string, WsConnection>()
+
+  /** Get or create a shared connection for the given telefunc URL. */
+  static getOrCreate(telefuncUrl: string, channel: WsChannel): WsConnection {
+    const wsBaseUrl = deriveWsUrl(telefuncUrl)
+    let connection = WsConnection.cache.get(wsBaseUrl)
+    if (!connection || connection.closed) {
+      const wsUrl = wsBaseUrl + '?channelId=' + encodeURIComponent(channel.id)
+      connection = new WsConnection(wsUrl, wsBaseUrl)
+    } else {
+      connection.register(channel)
+    }
+    return connection
+  }
+
   private wsUrl: string
+  private cacheKey: string
   private ws: WebSocket | null = null
   private connected = false
-  private onDispose: () => void
   private nextIndex = 0
-  /** True while waiting for CTRL reconciled. sendBuffer is flushed after. */
   private reconciling = false
 
-  private channels = new Map<number, Channel>()
-  private sendBuffer: BufferedFrame[] = []
+  private channels = new Map<number, WsChannel>()
+  private channelIndex = new Map<WsChannel, number>()
+  private sendBuffer: Array<{ data: Uint8Array<ArrayBuffer>; channelIx: number | null }> = []
 
   // Timers
   private ttl: ReturnType<typeof setTimeout> | null = null
@@ -82,44 +88,70 @@ class WsConnection {
   private reconnectAttempt = 0
   private reconnectStart = 0
 
-  constructor(wsUrl: string, channelId: string, callbacks: ChannelCallbacks, onDispose: () => void) {
+  private constructor(wsUrl: string, cacheKey: string) {
     this.wsUrl = wsUrl
-    this.onDispose = onDispose
-    const ix = this.nextIndex++
-    const ch: Channel = { index: ix, channelId, callbacks }
-    this.channels.set(ix, ch)
-    this.primaryHandle = this.makeHandle(ch)
+    this.cacheKey = cacheKey
+    WsConnection.cache.set(cacheKey, this)
     this.connect()
   }
 
-  /** Register an additional channel over this connection. */
-  register(channelId: string, callbacks: ChannelCallbacks): ChannelHandle {
+  /** Register a channel over this connection. */
+  private register(channel: WsChannel): void {
     this.clearTimer('ttl')
-    const ix = this.nextIndex++
-    const ch: Channel = { index: ix, channelId, callbacks }
-    this.channels.set(ix, ch)
-    this.trySend(encodeCtrl({ t: 'open', id: channelId, ix }), ix)
-    return this.makeHandle(ch)
-  }
-
-  // ── Channel handle ──
-
-  private makeHandle(ch: Channel): ChannelHandle {
-    const ix = ch.index
-    return {
-      send: (data: string) => this.trySend(encode.text(ix, data), ix),
-      sendBinary: (data: Uint8Array) => this.trySend(encode.binary(ix, data), ix),
-      pause: () => this.trySend(encodeCtrl({ t: 'pause', ix }), ix),
-      resume: () => this.trySend(encodeCtrl({ t: 'resume', ix }), ix),
-      close: () => {
-        this.channels.delete(ix)
-        this.trySend(encodeCtrl({ t: 'close', ix }), ix)
-        this.startTtlIfIdle()
-      },
+    this.addChannel(channel)
+    // Trigger a reconcile so the server learns about the new channel.
+    // If not connected yet, the next onopen will reconcile automatically.
+    if (this.connected && !this.reconciling) {
+      this.startReconcile()
     }
   }
 
-  // ── Connection ──
+  /** Remove a channel (client-initiated close). */
+  unregister(channel: WsChannel): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    this.channels.delete(ix)
+    this.channelIndex.delete(channel)
+    this.trySend(encodeCtrl({ t: 'close', ix }), ix)
+    this.startTtlIfIdle()
+  }
+
+  /** Send a text frame for the given channel. */
+  send(channel: WsChannel, data: string): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    this.trySend(encode.text(ix, data), ix)
+  }
+
+  /** Send a binary frame for the given channel. */
+  sendBinary(channel: WsChannel, data: Uint8Array): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    this.trySend(encode.binary(ix, data), ix)
+  }
+
+  /** Send a CTRL pause for the given channel. */
+  sendPause(channel: WsChannel): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    this.trySend(encodeCtrl({ t: 'pause', ix }), ix)
+  }
+
+  /** Send a CTRL resume for the given channel. */
+  sendResume(channel: WsChannel): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    this.trySend(encodeCtrl({ t: 'resume', ix }), ix)
+  }
+
+  // ── Internals ──
+
+  private addChannel(channel: WsChannel): number {
+    const ix = this.nextIndex++
+    this.channels.set(ix, channel)
+    this.channelIndex.set(channel, ix)
+    return ix
+  }
 
   private connect(): void {
     if (this.closed) return
@@ -148,10 +180,10 @@ class WsConnection {
           this.handleCtrl(frame.ctrl)
           break
         case TAG.TEXT:
-          this.channels.get(frame.index)?.callbacks.onMessage(frame.text)
+          this.channels.get(frame.index)?._onWsMessage(frame.text)
           break
         case TAG.BINARY:
-          this.channels.get(frame.index)?.callbacks.onBinaryMessage(frame.data)
+          this.channels.get(frame.index)?._onWsBinaryMessage(frame.data)
           break
       }
     }
@@ -175,23 +207,14 @@ class WsConnection {
     this.ws.onerror = () => {} // always followed by onclose
   }
 
-  // ── Reconcile ──
-
-  /**
-   * Send CTRL reconcile — "here's every channel I have open."
-   * Server diffs with its state, replies reconciled.
-   * sendBuffer is held until reconciled arrives (server needs the full picture first).
-   */
   private startReconcile(): void {
     this.reconciling = true
     const open: { id: string; ix: number }[] = []
-    for (const ch of this.channels.values()) open.push({ id: ch.channelId, ix: ch.index })
+    for (const [ix, ch] of this.channels) open.push({ id: ch.id, ix })
     const ws = this.ws
     assert(ws)
     ws.send(encodeCtrl({ t: 'reconcile', open }))
   }
-
-  // ── Frame sending ──
 
   private trySend(frame: Uint8Array<ArrayBuffer>, channelIx?: number): void {
     if (this.ws && this.connected && !this.reconciling) {
@@ -212,8 +235,6 @@ class WsConnection {
     }
   }
 
-  // ── CTRL handling ──
-
   private handleCtrl(ctrl: CtrlMessage): void {
     if (!ctrl || typeof ctrl !== 'object') return
     switch (ctrl.t) {
@@ -221,31 +242,25 @@ class WsConnection {
         this.resetPongTimer()
         break
 
-      case 'opened': {
-        const ch = this.channels.get(ctrl.ix)
-        if (ch) ch.callbacks.onOpen()
-        break
-      }
-
       case 'close': {
         const ch = this.channels.get(ctrl.ix)
         if (!ch) break
         this.channels.delete(ctrl.ix)
-        ch.callbacks.onClose()
+        this.channelIndex.delete(ch)
+        ch._onWsClose()
         this.startTtlIfIdle()
         break
       }
 
       case 'reconciled': {
-        // Server's truth: these are the channels it has alive.
-        // Anything we have that server didn't mention → dead.
         const serverIxs = new Set(ctrl.open.map((c) => c.ix))
         for (const [ix, ch] of this.channels) {
           if (!serverIxs.has(ix)) {
             this.channels.delete(ix)
-            ch.callbacks.onClose()
+            this.channelIndex.delete(ch)
+            ch._onWsClose()
           } else {
-            ch.callbacks.onOpen()
+            ch._onWsOpen()
           }
         }
         this.reconciling = false
@@ -280,7 +295,6 @@ class WsConnection {
     }, PONG_TIMEOUT_MS)
   }
 
-  /** Detach handlers and best-effort close (connection presumed dead). */
   private abandonWs(): void {
     const ws = this.ws
     if (!ws) return
@@ -333,14 +347,15 @@ class WsConnection {
 
   private notifyAllClosed(): void {
     this.closed = true
-    for (const ch of this.channels.values()) ch.callbacks.onClose()
+    for (const ch of this.channels.values()) ch._onWsClose()
     this.channels.clear()
-    this.onDispose()
+    this.channelIndex.clear()
+    WsConnection.cache.delete(this.cacheKey)
   }
 
   private dispose(): void {
     this.closed = true
-    this.onDispose()
+    WsConnection.cache.delete(this.cacheKey)
   }
 
   private clearTimer(name: 'ttl' | 'pongTimer' | 'pingInterval' | 'reconnectTimer'): void {
@@ -350,4 +365,12 @@ class WsConnection {
       ;(this as any)[name] = null
     }
   }
+}
+
+/** Convert a telefunc HTTP URL to a WebSocket base URL. */
+function deriveWsUrl(telefuncUrl: string): string {
+  const base = telefuncUrl.startsWith('http') ? telefuncUrl : location.origin + telefuncUrl
+  const url = new URL(base)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.toString()
 }

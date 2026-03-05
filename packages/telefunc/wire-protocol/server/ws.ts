@@ -133,7 +133,7 @@ function getTelefuncChannelHooks() {
       } else {
         // Intentional close (code 1000) — tear down all channels + WsState.
         for (const { channel } of state.values()) {
-          if (channel.isOpen) channel._onPeerClose()
+          if (!channel.isClosed) channel._onPeerClose()
         }
         deleteWsState(ctx.primaryId)
       }
@@ -178,18 +178,7 @@ function handleCtrl(ctrl: CtrlMessage, state: WsState, ctx: PeerCtx, peer: WsPee
       break
     }
 
-    // ── Channel lifecycle (client owns ix) ──
-    case 'open': {
-      const channel = getChannelRegistry().get(ctrl.id)
-      if (!channel || !channel.isOpen) {
-        peer.send(encodeCtrl({ t: 'close', ix: ctrl.ix }))
-        return
-      }
-      state.set(ctrl.ix, { channel })
-      channel.attachPeer(new IndexedPeer(peer, ctrl.ix, () => state.delete(ctrl.ix)))
-      peer.send(encodeCtrl({ t: 'opened', ix: ctrl.ix }))
-      break
-    }
+    // ── Channel lifecycle ──
     case 'close': {
       const entry = state.get(ctrl.ix)
       if (!entry) break
@@ -216,7 +205,7 @@ function handleCtrl(ctrl: CtrlMessage, state: WsState, ctx: PeerCtx, peer: WsPee
       for (const { id, ix } of ctrl.open) {
         clientIxs.add(ix)
         const ch = registry.get(id)
-        if (ch && ch.isOpen) {
+        if (ch && !ch.isClosed) {
           state.set(ix, { channel: ch })
           ch.attachPeer(new IndexedPeer(peer, ix, () => state.delete(ix)))
           attached.push({ id, ix })
@@ -227,7 +216,7 @@ function handleCtrl(ctrl: CtrlMessage, state: WsState, ctx: PeerCtx, peer: WsPee
       for (const [ix, { channel }] of state) {
         if (!clientIxs.has(ix)) {
           state.delete(ix)
-          if (channel.isOpen) channel._onPeerClose()
+          if (!channel.isClosed) channel._onPeerClose()
         }
       }
 

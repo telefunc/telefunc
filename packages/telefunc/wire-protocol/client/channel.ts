@@ -5,40 +5,33 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../client/clientConfig.js'
 import { WsConnection } from './ws.js'
-import type { ChannelCallbacks, ChannelHandle } from './ws.js'
-
-// Connection cache — keyed by wsUrl. Allows future channelPerConnection option
-// to bypass the cache and create a dedicated WsConnection per channel.
-const connectionCache = new Map<string, WsConnection>()
-
-function getOrCreateConnection(wsUrl: string, channelId: string, callbacks: ChannelCallbacks): ChannelHandle {
-  let connection = connectionCache.get(wsUrl)
-  if (!connection || connection.closed) {
-    connection = new WsConnection(wsUrl, channelId, callbacks, () => connectionCache.delete(wsUrl))
-    connectionCache.set(wsUrl, connection)
-    return connection.primaryHandle
-  }
-  return connection.register(channelId, callbacks)
-}
 
 /**
  * Client-side channel for bidirectional communication with the server.
  *
  * Created automatically when a telefunction returns a `createChannel()` value.
- * All channels multiplex over a single WebSocket connection per server URL.
+ *
+ * Public API:
+ *  - `send(data)` / `sendBinary(data)` — send to the server.
+ *  - `listen(cb)` / `listenBinary(cb)` — receive from the server.
+ *  - `onOpen(cb)` — fires once, when the server acknowledges this channel.
+ *  - `onClose(cb)` — fires once, when the channel closes for any reason.
+ *  - `close()` — close from the client side.
+ *  - `isClosed` — whether the channel has been closed.
+ *
+ * Implements the shared `Channel` interface (see wire-protocol/channel.ts).
  */
 class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSend, TReceive> {
   readonly id: string
-  private _handle: ChannelHandle
+  private _connection: WsConnection
   private _listeners: Array<(data: TReceive) => void> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _openCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<() => void> = []
-  private _isOpen = true
-  private _closed = false
-  private _opened = false
+  private _isClosed = false
+  private _didFireClose = false
+  private _didFireOpen = false
 
-  /** The other end of the channel with flipped types — on the client this just returns itself. */
   get client(): Channel<TReceive, TSend> {
     return this as unknown as Channel<TReceive, TSend>
   }
@@ -46,38 +39,21 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   constructor(channelId: string) {
     this.id = channelId
     const config = resolveClientConfig()
-    const wsUrl = deriveWsUrl(channelId, config.telefuncUrl)
-
-    const callbacks: ChannelCallbacks = {
-      onOpen: () => this._fireOpen(),
-      onMessage: (data: string) => {
-        const parsed = parse(data) as TReceive
-        for (const cb of this._listeners) cb(parsed)
-      },
-      onBinaryMessage: (data: Uint8Array) => {
-        for (const cb of this._binaryListeners) cb(data)
-      },
-      onClose: () => {
-        this._isOpen = false
-        this._fireClose()
-      },
-    }
-
-    this._handle = getOrCreateConnection(wsUrl, channelId, callbacks)
+    this._connection = WsConnection.getOrCreate(config.telefuncUrl, this)
   }
 
-  get isOpen(): boolean {
-    return this._isOpen
+  get isClosed(): boolean {
+    return this._isClosed
   }
 
   send(data: TSend): void {
-    if (!this._isOpen) return
-    this._handle.send(stringify(data, { forbidReactElements: false }))
+    if (this._isClosed) return
+    this._connection.send(this, stringify(data, { forbidReactElements: false }))
   }
 
   sendBinary(data: Uint8Array): void {
-    if (!this._isOpen) return
-    this._handle.sendBinary(data)
+    if (this._isClosed) return
+    this._connection.sendBinary(this, data)
   }
 
   listen(callback: (data: TReceive) => void): void {
@@ -89,7 +65,7 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   }
 
   onClose(callback: () => void): void {
-    if (this._closed) {
+    if (this._didFireClose) {
       callback()
       return
     }
@@ -97,33 +73,59 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   }
 
   onOpen(callback: () => void): void {
-    if (this._opened) {
+    if (this._didFireOpen) {
       callback()
       return
     }
     this._openCallbacks.push(callback)
   }
 
+  close(): void {
+    if (this._isClosed) return
+    this._isClosed = true
+    this._connection.unregister(this)
+    this._fireClose()
+  }
+
   /** @internal */
   _pause(): void {
-    this._handle.pause()
+    this._connection.sendPause(this)
   }
 
   /** @internal */
   _resume(): void {
-    this._handle.resume()
+    this._connection.sendResume(this)
   }
 
-  close(): void {
-    if (!this._isOpen) return
-    this._isOpen = false
-    this._handle.close()
+  // ── Called by WsConnection ──
+
+  /** @internal */
+  _onWsOpen(): void {
+    this._fireOpen()
+  }
+
+  /** @internal */
+  _onWsMessage(data: string): void {
+    const parsed = parse(data) as TReceive
+    for (const cb of this._listeners) cb(parsed)
+  }
+
+  /** @internal */
+  _onWsBinaryMessage(data: Uint8Array): void {
+    for (const cb of this._binaryListeners) cb(data)
+  }
+
+  /** @internal */
+  _onWsClose(): void {
+    this._isClosed = true
     this._fireClose()
   }
 
+  // ── Private ──
+
   private _fireOpen(): void {
-    if (this._opened) return
-    this._opened = true
+    if (this._didFireOpen) return
+    this._didFireOpen = true
     for (const cb of this._openCallbacks) {
       try {
         cb()
@@ -135,8 +137,8 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   }
 
   private _fireClose(): void {
-    if (this._closed) return
-    this._closed = true
+    if (this._didFireClose) return
+    this._didFireClose = true
     for (const cb of this._closeCallbacks) {
       try {
         cb()
@@ -147,12 +149,4 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._closeCallbacks.length = 0
     this._openCallbacks.length = 0
   }
-}
-
-function deriveWsUrl(channelId: string, telefuncUrl: string): string {
-  const base = telefuncUrl.startsWith('http') ? telefuncUrl : location.origin + telefuncUrl
-  const url = new URL(base)
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-  url.searchParams.set('channelId', channelId)
-  return url.toString()
 }

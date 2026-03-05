@@ -8,7 +8,7 @@ interface Channel<TSend = unknown, TReceive = unknown> {
   readonly id: string
   /** The other end of the channel with flipped types. */
   readonly client: Channel<TReceive, TSend>
-  readonly isOpen: boolean
+  readonly isClosed: boolean
   send(data: TSend): void
   sendBinary(data: Uint8Array): void
   listen(callback: (data: TReceive) => void): void
