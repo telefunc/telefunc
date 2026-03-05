@@ -6,13 +6,11 @@ type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: str
 type ClientMessage = { type: 'ping' } | { type: 'echo'; text: string }
 
 async function onChannelInit() {
-  const channel = createChannel<ServerMessage, ClientMessage>({
-    onClose: () => {
-      clearInterval(intervalId)
-      console.log('[server] channel closed')
-    },
+  const channel = createChannel<ServerMessage, ClientMessage>()
+  channel.onClose(() => {
+    clearInterval(intervalId)
+    console.log('[server] channel closed')
   })
-
   let count = 0
   const intervalId = setInterval(() => {
     count++

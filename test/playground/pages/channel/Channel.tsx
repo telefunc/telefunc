@@ -27,7 +27,8 @@ function ChannelDemo() {
   }, [])
 
   const connect = useCallback(async () => {
-    if (channelRef.current?.isOpen) return
+    // Already have an active channel — skip.
+    if (channelRef.current && !channelRef.current.isClosed) return
     addLog('system', 'Calling onChannelInit()...')
 
     const { channel, serverTime } = await onChannelInit()
@@ -55,7 +56,7 @@ function ChannelDemo() {
   }, [addLog])
 
   const sendEcho = useCallback(() => {
-    if (!channelRef.current?.isOpen || !echoInput.trim()) return
+    if (channelRef.current?.isClosed !== false || !echoInput.trim()) return
     const msg = { type: 'echo' as const, text: echoInput.trim() }
     channelRef.current.send(msg)
     addLog('out', JSON.stringify(msg))
