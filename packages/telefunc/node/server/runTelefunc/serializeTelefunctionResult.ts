@@ -10,7 +10,7 @@ import {
   buildSSEResponseBody,
 } from '../../../wire-protocol/server/response/StreamingResponseBody.js'
 import { buildChannelResponseBody } from '../../../wire-protocol/server/response/ChannelResponseBody.js'
-import { createChannel } from '../../../wire-protocol/server/channel.js'
+import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { injectFrameChannel } from '../../../wire-protocol/frame-channel.js'
 import { TRANSPORT, type Transport } from '../../../wire-protocol/constants.js'
 import type { TelefuncIdentifier, TelefuncResponseBody } from '../../../shared/constants.js'
@@ -67,7 +67,7 @@ function serializeTelefunctionResult(runContext: {
   // WS transport: create a frame channel, inject it into the response body,
   // and start pumping data frames over the WebSocket in the background.
   if (runContext.transport === TRANSPORT.WS) {
-    const serverChannel = createChannel<never, never>()
+    const serverChannel = new ServerChannel<never, never>()
     serverChannel.onClose(() => requestContext.markComplete())
     httpResponseBody = injectFrameChannel(httpResponseBody, { channelId: serverChannel.id })
     buildChannelResponseBody(streamingValues, telefuncId, serverChannel, runContext)
