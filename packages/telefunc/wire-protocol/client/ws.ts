@@ -88,6 +88,7 @@ class WsConnection {
   private pingInterval: ReturnType<typeof setInterval> | null = null
   private pongTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private abandonedWs: WebSocket | null = null
   private reconnectAttempt = 0
   private reconnectStart = 0
 
@@ -200,12 +201,8 @@ class WsConnection {
           this.handleCtrl(frame.ctrl)
           break
         case TAG.TEXT:
-          if (frame.seq && !this.trackSeq(frame.index, frame.seq)) break
-          this.channels.get(frame.index)?._onWsMessage(frame.text)
-          break
         case TAG.BINARY:
-          if (frame.seq && !this.trackSeq(frame.index, frame.seq)) break
-          this.channels.get(frame.index)?._onWsBinaryMessage(frame.data)
+          this.handleDataFrame(frame)
           break
       }
     }
@@ -248,6 +245,16 @@ class WsConnection {
     return true
   }
 
+  /** Process a TEXT or BINARY data frame — dedup by seq, then deliver. */
+  private handleDataFrame(frame: { tag: number; index: number; seq?: number; text?: string; data?: Uint8Array }): void {
+    if (frame.seq && !this.trackSeq(frame.index, frame.seq)) return
+    if (frame.tag === TAG.TEXT) {
+      this.channels.get(frame.index)?._onWsMessage(frame.text!)
+    } else if (frame.tag === TAG.BINARY) {
+      this.channels.get(frame.index)?._onWsBinaryMessage(frame.data!)
+    }
+  }
+
   private trySend(frame: Uint8Array<ArrayBuffer>, channelIx?: number): void {
     if (this.ws && this.connected && !this.reconciling) {
       this.ws.send(frame)
@@ -287,6 +294,7 @@ class WsConnection {
       }
 
       case 'reconciled': {
+        this.closeAbandonedWs()
         const serverMap = new Map(ctrl.open.map((c) => [c.ix, c.lastSeq]))
         for (const [ix, ch] of this.channels) {
           if (!serverMap.has(ix)) {
@@ -343,11 +351,31 @@ class WsConnection {
     const ws = this.ws
     if (!ws) return
     this.ws = null
-    ws.onopen = ws.onclose = ws.onmessage = ws.onerror = null
+    this.closeAbandonedWs() // close any previously abandoned WS first
+    this.abandonedWs = ws
+    ws.onopen = ws.onerror = ws.onclose = null
+    // Hot-swap: this connection is potentially stalled, so we open a new
+    // one immediately. But we can't be certain it's dead — data may still
+    // arrive on it. Keep a data-only handler until the new connection
+    // reconciles, at which point closeAbandonedWs() shuts it down.
+    // CTRL frames are ignored to avoid interfering with the new connection.
+    ws.onmessage = ({ data }: MessageEvent) => {
+      const frame = decode(new Uint8Array(data as ArrayBuffer))
+      if (frame.tag === TAG.TEXT || frame.tag === TAG.BINARY) {
+        this.handleDataFrame(frame)
+      }
+    }
+  }
+
+  private closeAbandonedWs(): void {
+    const ws = this.abandonedWs
+    if (!ws) return
+    this.abandonedWs = null
+    ws.onmessage = ws.onclose = null
     try {
       ws.close()
     } catch {
-      /* connection may already be dead */
+      /* already dead */
     }
   }
 
