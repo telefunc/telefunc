@@ -1,5 +1,7 @@
 export { setShardInfo, getLastShard, getStickyShardForPost }
 
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
+
 /**
  * Client-side shard registry.
  *
@@ -14,19 +16,21 @@ export { setShardInfo, getLastShard, getStickyShardForPost }
 
 type ShardInfo = { shard: string; sticky: boolean }
 
-const registry = new Map<string, ShardInfo>()
+const globalObject = getGlobalObject<{ registry: Map<string, ShardInfo> }>('shard-registry.ts', {
+  registry: new Map<string, ShardInfo>(),
+})
 
 function setShardInfo(telefuncUrl: string, shard: string, sticky: boolean): void {
-  registry.set(telefuncUrl, { shard, sticky })
+  globalObject.registry.set(telefuncUrl, { shard, sticky })
 }
 
 /** Always returns the last known shard (for WS/channel routing). */
 function getLastShard(telefuncUrl: string): string | undefined {
-  return registry.get(telefuncUrl)?.shard
+  return globalObject.registry.get(telefuncUrl)?.shard
 }
 
 /** Returns the shard only when the server has opted in to sticky sharding (for POST URL pinning). */
 function getStickyShardForPost(telefuncUrl: string): string | undefined {
-  const info = registry.get(telefuncUrl)
+  const info = globalObject.registry.get(telefuncUrl)
   return info?.sticky ? info.shard : undefined
 }

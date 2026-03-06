@@ -15,7 +15,7 @@ import { WsConnection } from './ws.js'
  *  - `send(data)` / `sendBinary(data)` — send to the server.
  *  - `listen(cb)` / `listenBinary(cb)` — receive from the server.
  *  - `onOpen(cb)` — fires once, when the server acknowledges this channel.
- *  - `onClose(cb)` — fires once, when the channel closes for any reason.
+ *  - `onClose(cb)` — fires once, when the channel closes; `err` is set on network/timeout errors, `undefined` for clean closes.
  *  - `close()` — close from the client side.
  *  - `isClosed` — whether the channel has been closed.
  *
@@ -27,7 +27,8 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   private _listeners: Array<(data: TReceive) => void> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _openCallbacks: Array<() => void> = []
-  private _closeCallbacks: Array<() => void> = []
+  private _closeCallbacks: Array<(err?: Error) => void> = []
+  private _closeError: Error | undefined
   private _isClosed = false
   private _didFireClose = false
   private _didFireOpen = false
@@ -65,9 +66,9 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._binaryListeners.push(callback)
   }
 
-  onClose(callback: () => void): void {
+  onClose(callback: (err?: Error) => void): void {
     if (this._didFireClose) {
-      callback()
+      callback(this._closeError)
       return
     }
     this._closeCallbacks.push(callback)
@@ -84,6 +85,15 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   close(): void {
     if (this._isClosed) return
     this._isClosed = true
+    this._connection.sendClose(this)
+    this._connection.unregister(this)
+    this._fireClose()
+  }
+
+  abort(abortValue?: unknown): void {
+    if (this._isClosed) return
+    this._isClosed = true
+    this._connection.sendAbort(this, stringify(abortValue, { forbidReactElements: false }))
     this._connection.unregister(this)
     this._fireClose()
   }
@@ -108,18 +118,33 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   /** @internal */
   _onWsMessage(data: string): void {
     const parsed = parse(data) as TReceive
-    for (const cb of this._listeners) cb(parsed)
+    for (const cb of this._listeners) {
+      try {
+        cb(parsed)
+      } catch (err) {
+        this._handleCallbackError(err)
+        return
+      }
+    }
   }
 
   /** @internal */
   _onWsBinaryMessage(data: Uint8Array): void {
-    for (const cb of this._binaryListeners) cb(data)
+    for (const cb of this._binaryListeners) {
+      try {
+        cb(data)
+      } catch (err) {
+        this._handleCallbackError(err)
+        return
+      }
+    }
   }
 
   /** @internal */
-  _onWsClose(): void {
+  _onWsClose(err?: Error): void {
     this._isClosed = true
-    this._fireClose()
+    this._closeError = err
+    this._fireClose(err)
   }
 
   // ── Private ──
@@ -130,25 +155,34 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     for (const cb of this._openCallbacks) {
       try {
         cb()
-      } catch {
-        /* swallow */
+      } catch (err) {
+        this._handleCallbackError(err)
+        return
       }
     }
     this._openCallbacks.length = 0
   }
 
-  private _fireClose(): void {
+  private _fireClose(err?: Error): void {
     if (this._didFireClose) return
     this._didFireClose = true
     for (const cb of this._closeCallbacks) {
       try {
-        cb()
+        cb(err)
       } catch {
         /* swallow */
       }
     }
     this._closeCallbacks.length = 0
     this._openCallbacks.length = 0
+  }
+
+  private _handleCallbackError(err: unknown): void {
+    if (this._isClosed) return
+    this._isClosed = true
+    this._connection.sendClose(this)
+    this._connection.unregister(this)
+    this._fireClose(err instanceof Error ? err : new Error(String(err)))
   }
 }
 

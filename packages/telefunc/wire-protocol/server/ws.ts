@@ -3,11 +3,13 @@ export { getTelefuncChannelHooks }
 import { defineHooks, type Peer } from 'crossws'
 import type { ServerChannel } from './channel.js'
 import { getChannelRegistry } from './channel.js'
-import { TAG, encode, decode, encodeCtrl } from '../shared-ws.js'
+import { TAG, decode, encodeCtrl } from '../shared-ws.js'
 import type { CtrlMessage } from '../shared-ws.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { ReplayBuffer } from '../replay-buffer.js'
+import { IndexedPeer } from './IndexedPeer.js'
+import { parse } from '@brillout/json-serializer/parse'
 
 // Client sends CTRL ping every 5s. If the server doesn't receive a ping
 // within PING_TIMEOUT_MS (2× the interval), the client is dead.
@@ -25,7 +27,7 @@ type ChannelEntry = { channel: ServerChannel; lastClientSeq: number; replay: Rep
 type PeerState = {
   ixMap: Map<number, ChannelEntry>
   pingTimer: ReturnType<typeof setTimeout> | null
-  timedOut: boolean
+  terminatePermanently: boolean | null
 }
 
 const globalObject = getGlobalObject('ws-state.ts', {
@@ -38,42 +40,10 @@ const { peerStates, wsChannels } = globalObject
 function getOrCreatePeerState(peer: Peer): PeerState {
   let s = peerStates.get(peer.id)
   if (!s) {
-    s = { ixMap: new Map(), pingTimer: null, timedOut: false }
+    s = { ixMap: new Map(), pingTimer: null, terminatePermanently: null }
     peerStates.set(peer.id, s)
   }
   return s
-}
-
-/** Wraps a crossws peer, encodes frames with a fixed channel index.
- *  Assigns sequence numbers and stores frames in the replay buffer. */
-class IndexedPeer {
-  constructor(
-    private ws: Peer,
-    private index: number,
-    private replay: ReplayBuffer,
-  ) {}
-
-  sendText(data: string): void {
-    const seq = this.replay.nextSeq()
-    const frame = encode.text(this.index, data, seq)
-    this.replay.push(seq, frame)
-    this.ws.send(frame)
-  }
-
-  sendBinary(data: Uint8Array): void {
-    const seq = this.replay.nextSeq()
-    const frame = encode.binary(this.index, data, seq)
-    this.replay.push(seq, frame)
-    this.ws.send(frame)
-  }
-
-  close(): void {
-    try {
-      this.ws.send(encodeCtrl({ t: 'close', ix: this.index }))
-    } catch {
-      /* WS may already be closed */
-    }
-  }
 }
 
 function getTelefuncChannelHooks() {
@@ -85,35 +55,43 @@ function getTelefuncChannelHooks() {
 
     message(peer, message) {
       const state = getOrCreatePeerState(peer)
-      const frame = decode(message.uint8Array())
+      try {
+        const frame = decode(message.uint8Array())
 
-      switch (frame.tag) {
-        case TAG.CTRL:
-          handleCtrl(frame.ctrl, peer)
-          break
-        case TAG.TEXT: {
-          const entry = state.ixMap.get(frame.index)
-          if (!entry) break
-          if (frame.seq && frame.seq <= entry.lastClientSeq) break
-          if (frame.seq) entry.lastClientSeq = frame.seq
-          entry.channel._onPeerMessage(frame.text)
-          break
+        switch (frame.tag) {
+          case TAG.CTRL:
+            handleCtrl(frame.ctrl, peer)
+            break
+          case TAG.TEXT: {
+            const entry = state.ixMap.get(frame.index)
+            if (!entry) break
+            if (frame.seq && frame.seq <= entry.lastClientSeq) break
+            if (frame.seq) entry.lastClientSeq = frame.seq
+            entry.channel._onPeerMessage(frame.text)
+            break
+          }
+          case TAG.BINARY: {
+            const entry = state.ixMap.get(frame.index)
+            if (!entry) break
+            if (frame.seq && frame.seq <= entry.lastClientSeq) break
+            if (frame.seq) entry.lastClientSeq = frame.seq
+            entry.channel._onPeerBinaryMessage(frame.data)
+            break
+          }
         }
-        case TAG.BINARY: {
-          const entry = state.ixMap.get(frame.index)
-          if (!entry) break
-          if (frame.seq && frame.seq <= entry.lastClientSeq) break
-          if (frame.seq) entry.lastClientSeq = frame.seq
-          entry.channel._onPeerBinaryMessage(frame.data)
-          break
-        }
+      } catch {
+        // Malformed frame from a misbehaving client — permanently close channels and terminate.
+        state.terminatePermanently = true
+        peer.terminate()
       }
     },
 
     close(peer, details) {
       const state = getOrCreatePeerState(peer)
       clearPingTimer(peer)
-      const isPermanent = !state.timedOut && (details?.code === 1000 || details?.code === 1001)
+      const isPermanent =
+        state.terminatePermanently === true ||
+        (state.terminatePermanently === null && (details?.code === 1000 || details?.code === 1001))
       if (isPermanent) {
         for (const entry of state.ixMap.values()) {
           if (!entry.channel.isClosed) entry.channel._onPeerClose()
@@ -142,7 +120,7 @@ function resetPingTimer(peer: Peer): void {
   state.pingTimer = setTimeout(() => {
     state.pingTimer = null
     peer.terminate()
-    state.timedOut = true
+    state.terminatePermanently = false
   }, PING_TIMEOUT_MS)
   if (hasProp(state.pingTimer, 'unref', 'function')) {
     state.pingTimer.unref()
@@ -175,6 +153,14 @@ function handleCtrl(ctrl: CtrlMessage, peer: Peer): void {
       if (!entry) break
       state.ixMap.delete(ctrl.ix)
       entry.channel._onPeerClose()
+      break
+    }
+
+    case 'abort': {
+      const entry = state.ixMap.get(ctrl.ix)
+      if (!entry) break
+      state.ixMap.delete(ctrl.ix)
+      entry.channel.abort(parse(ctrl.abortValue))
       break
     }
 

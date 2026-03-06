@@ -7,6 +7,8 @@ import type { Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
 
 type HttpServer = Server | Http2SecureServer
+// Accept either a plain Node.js server or a srvx-style wrapper ({ node: { server } })
+type HttpServerOrWrapper = HttpServer | { node?: { server?: HttpServer } }
 const registeredServers = new WeakSet<HttpServer>()
 
 /** Return type of {@link telefuncWebSocket}. */
@@ -14,8 +16,9 @@ interface TelefuncAdapter {
   /**
    * Install the WebSocket upgrade handler on a Node.js HTTP server.
    * Idempotent — safe to call multiple times on the same server.
+   * Accepts a plain `http.Server` or a srvx-style wrapper (e.g. from `@photonjs/hono`).
    */
-  install(server: HttpServer): void
+  install(server: HttpServerOrWrapper): void
 }
 
 /**
@@ -39,7 +42,14 @@ function telefuncWebSocket(): TelefuncAdapter {
   const ws = crossws({ hooks: getTelefuncChannelHooks() })
 
   return {
-    install(httpServer: HttpServer): void {
+    install(server: HttpServerOrWrapper): void {
+      // Unwrap srvx-style wrappers (e.g. from @photonjs/hono or srvx directly)
+      const httpServer: HttpServer = (server as any)?.node?.server ?? (server as HttpServer)
+      if (typeof (httpServer as any)?.on !== 'function') {
+        throw new Error(
+          'telefuncWebSocket().install() received an unsupported server object. Pass a Node.js `http.Server` or a srvx-compatible wrapper.',
+        )
+      }
       if (registeredServers.has(httpServer)) return
       registeredServers.add(httpServer)
 

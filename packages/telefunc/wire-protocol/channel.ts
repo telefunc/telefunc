@@ -13,7 +13,8 @@ interface Channel<TSend = unknown, TReceive = unknown> {
   sendBinary(data: Uint8Array): void
   listen(callback: (data: TReceive) => void): void
   listenBinary(callback: (data: Uint8Array) => void): void
-  onClose(callback: () => void): void
+  onClose(callback: (err?: Error) => void): void
   onOpen(callback: () => void): void
   close(): void
+  abort(abortValue?: unknown): void
 }

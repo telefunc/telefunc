@@ -44,11 +44,24 @@ type CtrlPause = { t: 'pause'; ix: number }
 type CtrlResume = { t: 'resume'; ix: number }
 type CtrlPing = { t: 'ping' }
 type CtrlPong = { t: 'pong' }
+/** Server → client: channel closed with an abort value (analogous to throw Abort() in streaming). */
+type CtrlAbort = { t: 'abort'; ix: number; abortValue: string }
+/** Server → client: channel closed due to an unhandled server error (no details sent, analogous to BUG in streaming). */
+type CtrlError = { t: 'error'; ix: number }
 /** Client → server on every (re)connect: all open channels with client-owned indices. */
 type CtrlReconcile = { t: 'reconcile'; open: { id: string; ix: number; lastSeq: number }[] }
 /** Server → client after reconcile: all channels the server actually attached, with lastSeq the server received per channel. */
 type CtrlReconciled = { t: 'reconciled'; open: { id: string; ix: number; lastSeq: number }[] }
-type CtrlMessage = CtrlClose | CtrlPause | CtrlResume | CtrlPing | CtrlPong | CtrlReconcile | CtrlReconciled
+type CtrlMessage =
+  | CtrlClose
+  | CtrlAbort
+  | CtrlError
+  | CtrlPause
+  | CtrlResume
+  | CtrlPing
+  | CtrlPong
+  | CtrlReconcile
+  | CtrlReconciled
 
 // ===== Decoded frame =====
 

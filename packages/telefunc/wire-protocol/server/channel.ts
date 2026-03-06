@@ -1,10 +1,12 @@
 export { createChannel, getChannelRegistry, ServerChannel, ChannelClosedError, setCurrentShard, getCurrentShard }
 
 import type { Channel } from '../channel.js'
+import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
+import { isAbort } from '../../node/server/Abort.js'
 
 const globalObject = getGlobalObject('channel.ts', {
   channelRegistry: new Map<string, ServerChannel<unknown, unknown>>(),
@@ -66,15 +68,16 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   }
 
   private _isClosed = false
-  private _peer: { sendText(data: string): void; sendBinary(data: Uint8Array): void; close(): void } | null = null
+  private _peer: IndexedPeer | null = null
   private _listeners: Array<(data: TReceive) => void> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _pauseCallbacks: Array<() => void> = []
   private _resumeCallbacks: Array<() => void> = []
   private _sendBuffer: string[] = []
   private _binarySendBuffer: Uint8Array[] = []
-  private _closeCallbacks: Array<() => void> = []
+  private _closeCallbacks: Array<(err?: Error) => void> = []
   private _openCallbacks: Array<() => void> = []
+  private _closeError: Error | undefined
   private _didFireClose = false
   private _didFireOpen = false
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null
@@ -89,7 +92,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._ttlTimer = this._unrefTimer(
       setTimeout(() => {
         this._ttlTimer = null
-        this._shutdown()
+        this._shutdown(new Error('Channel timed out: no peer connected within TTL'))
       }, DEFAULT_TTL_MS),
     )
   }
@@ -129,10 +132,11 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._binaryListeners.push(callback)
   }
 
-  /** Register a callback that fires when the channel closes for any reason. Fires exactly once. */
-  onClose(callback: () => void): void {
+  /** Register a callback that fires when the channel closes for any reason. Fires exactly once.
+   *  `err` is set when the close was caused by a network/timeout error; `undefined` for clean closes. */
+  onClose(callback: (err?: Error) => void): void {
     if (this._didFireClose) {
-      callback()
+      callback(this._closeError)
       return
     }
     this._closeCallbacks.push(callback)
@@ -157,6 +161,17 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._resumeCallbacks.push(callback)
   }
 
+  /** Close the channel from the server side with an abort value.
+   *  The client's `onClose` callback will receive an error with `isAbort: true` and `abortValue`. */
+  abort(abortValue?: unknown): void {
+    if (this._isClosed) return
+    if (this._peer) {
+      this._peer.abort(stringify(abortValue, { forbidReactElements: false }))
+      this._peer = null
+    }
+    this._shutdown()
+  }
+
   /** Close the channel from the server side. */
   close(): void {
     if (this._isClosed) return
@@ -168,7 +183,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   }
 
   /** @internal — Called by WS hooks when a peer connects (or reconnects). */
-  attachPeer(peer: { sendText(data: string): void; sendBinary(data: Uint8Array): void; close(): void }): void {
+  attachPeer(peer: IndexedPeer): void {
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     const wasDisconnected = this._disconnected
@@ -187,12 +202,26 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   /** @internal */
   _onPeerMessage(text: string): void {
     const data = parse(text) as TReceive
-    for (const cb of this._listeners) cb(data)
+    for (const cb of this._listeners) {
+      try {
+        cb(data)
+      } catch (err) {
+        this._handleCallbackError(err)
+        return
+      }
+    }
   }
 
   /** @internal */
   _onPeerBinaryMessage(data: Uint8Array): void {
-    for (const cb of this._binaryListeners) cb(data)
+    for (const cb of this._binaryListeners) {
+      try {
+        cb(data)
+      } catch (err) {
+        this._handleCallbackError(err)
+        return
+      }
+    }
   }
 
   /** @internal — Connection dropped, keep channel alive for reconnection. */
@@ -204,7 +233,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._reconnectTimer = this._unrefTimer(
       setTimeout(() => {
         this._reconnectTimer = null
-        this._shutdown()
+        this._shutdown(new Error('Channel closed: peer did not reconnect within grace period'))
       }, RECONNECT_GRACE_MS),
     )
   }
@@ -229,21 +258,22 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   // ── Private ──
 
   /** Single close path — every close route funnels here. */
-  private _shutdown(): void {
+  private _shutdown(err?: Error): void {
     if (this._isClosed) return
     this._isClosed = true
+    this._closeError = err
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     getChannelRegistry().delete(this.id)
-    this._fireClose()
+    this._fireClose(err)
   }
 
-  private _fireClose(): void {
+  private _fireClose(err?: Error): void {
     if (this._didFireClose) return
     this._didFireClose = true
     for (const cb of this._closeCallbacks) {
       try {
-        cb()
+        cb(err)
       } catch {
         /* swallow */
       }
@@ -260,11 +290,25 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     for (const cb of this._openCallbacks) {
       try {
         cb()
-      } catch {
-        /* swallow */
+      } catch (err) {
+        this._handleCallbackError(err)
+        return
       }
     }
     this._openCallbacks.length = 0
+  }
+
+  private _handleCallbackError(err: unknown): void {
+    if (isAbort(err)) {
+      this.abort(err.abortValue)
+    } else {
+      // Non-Abort error — send bug signal to client (no details leaked) then close
+      if (this._peer) {
+        this._peer.error()
+        this._peer = null
+      }
+      this._shutdown()
+    }
   }
 
   private _clearTimer(name: '_ttlTimer' | '_reconnectTimer'): void {

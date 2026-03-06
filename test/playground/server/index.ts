@@ -2,7 +2,6 @@ import { Hono } from 'hono'
 import { apply, serve } from '@photonjs/hono'
 import { telefuncWebSocket } from 'telefunc/websocket/node'
 import { cleanupState, resetCleanupState } from '../cleanup-state'
-import type { Server } from 'node:http'
 
 function startServer() {
   const app = new Hono()
@@ -18,7 +17,10 @@ function startServer() {
     port: 3000,
     onCreate(server) {
       const ws = telefuncWebSocket()
-      ws.install(server as Server)
+      // @photonjs/hono's serve() returns a srvx NodeServer, not a plain http.Server.
+      // The actual Node.js http.Server is at .node.server.
+      // @ts-expect-error srvx types not exposed
+      ws.install(server.node.server)
     },
   })
 }
