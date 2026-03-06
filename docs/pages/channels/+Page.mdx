@@ -90,6 +90,8 @@ Channels require a WebSocket connection. In Vite dev mode, this is handled autom
 
 For production, install the WebSocket handler on your HTTP server using <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
 
+> All channels — and streaming values when using <Link text={<code>transport: 'ws'</code>} href="/transport" /> — share a single multiplexed WebSocket connection per server URL.
+
 
 ## Reconnection
 
@@ -117,8 +119,10 @@ type ClientMessage = { type: 'ping' }
 export async function onInit() {
   const channel = createChannel<ServerMessage, ClientMessage>()
 
-  channel.send({ type: 'tick', count: 1 }) // ServerMessage
-  channel.listen((msg) => {})              // msg: ClientMessage
+  channel.send({ type: 'tick', count: 1 })
+  channel.listen((msg) => {
+    msg.type // 'ping'
+  })
 
   return { channel: channel.client }
 }
@@ -131,9 +135,9 @@ The client channel has the types **flipped** — it sends `ClientMessage` and re
 
 const { channel } = await onInit()
 
-channel.send({ type: 'ping' })    // ClientMessage
+channel.send({ type: 'ping' })
 channel.listen((msg) => {
-  console.log(msg.count) // number — ServerMessage
+  console.log(msg.count) // number
 })
 ```
 

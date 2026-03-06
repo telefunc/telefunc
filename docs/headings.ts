@@ -155,7 +155,7 @@ const headings = [
   },
   {
     level: 2,
-    title: 'Channels',
+    title: 'Real-time (WebSocket)',
     url: '/channels',
   },
   {
