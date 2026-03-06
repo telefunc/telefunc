@@ -11,6 +11,9 @@ async function onChannelInit() {
     clearInterval(intervalId)
     console.log('[server] channel closed')
   })
+  channel.onOpen(() => {
+    console.log('[server] channel opened')
+  })
   let count = 0
   const intervalId = setInterval(() => {
     count++

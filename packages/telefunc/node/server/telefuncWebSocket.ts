@@ -34,7 +34,6 @@ function telefuncWebSocket(httpServer: Server): void {
     const url = new URL(req.url ?? '', 'http://localhost')
     const telefuncUrl = getServerConfig().telefuncUrl
     if (url.pathname !== telefuncUrl) return
-    if (!url.searchParams.has('channelId')) return
     ws.handleUpgrade(req, socket, head)
   })
 }

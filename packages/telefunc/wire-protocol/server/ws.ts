@@ -3,7 +3,6 @@ export { getTelefuncChannelHooks }
 import { defineHooks } from 'crossws'
 import type { ServerChannel } from './channel.js'
 import { getChannelRegistry } from './channel.js'
-import { getServerConfig } from '../../node/server/serverConfig.js'
 import { TAG, encode, decode, encodeCtrl } from '../shared-ws.js'
 import type { CtrlMessage } from '../shared-ws.js'
 import { hasProp } from '../../utils/hasProp.js'
@@ -15,39 +14,24 @@ import { ReplayBuffer } from '../replay-buffer.js'
 const PING_TIMEOUT_MS = 10_000
 const SERVER_REPLAY_BYTES = 256 * 1024
 
-// ── Global WsState — persists across reconnects ──
+// ── Global state — flat map, persists across reconnects ──
 //
-// Keyed by the primary channelId (from the WS URL). Tracks which channels
-// (by index) belong to each client session, so reconcile can diff.
-// This is the SOLE source of truth for channel→index mappings.
+// Keyed by channelId (each channel's own ID) for direct O(1) lookup.
+// Survives WS reconnects so replay buffers and seq tracking are preserved
+// regardless of which channelId appears in the WS URL.
 
-type WsStateEntry = { channel: ServerChannel; lastClientSeq: number; replay: ReplayBuffer }
-type WsState = {
-  channels: Map<number, WsStateEntry>
-}
+type ChannelEntry = { channel: ServerChannel; lastClientSeq: number; replay: ReplayBuffer }
 
 const globalObject = getGlobalObject('ws-state.ts', {
-  wsStates: new Map<string, WsState>(),
+  channels: new Map<string, ChannelEntry>(),
 })
 
-function getOrCreateWsState(primaryId: string): WsState {
-  let state = globalObject.wsStates.get(primaryId)
-  if (!state) {
-    state = { channels: new Map() }
-    globalObject.wsStates.set(primaryId, state)
-  }
-  return state
-}
-
-function deleteWsState(primaryId: string): void {
-  globalObject.wsStates.delete(primaryId)
-}
-
-// ── Per-connection context (only pingTimer + primaryId) ──
+// ── Per-connection context ──
 
 declare module 'crossws' {
   interface PeerContext {
-    primaryId: string
+    /** ix → entry (direct reference). Rebuilt on every reconcile. */
+    ixMap: Map<number, ChannelEntry>
     pingTimer: ReturnType<typeof setTimeout> | null
   }
 }
@@ -61,7 +45,6 @@ class IndexedPeer {
     private ws: WsPeer,
     private index: number,
     private replay: ReplayBuffer,
-    private onDetach: () => void,
   ) {}
 
   sendText(data: string): void {
@@ -84,24 +67,15 @@ class IndexedPeer {
     } catch {
       /* WS may already be closed */
     }
-    this.onDetach()
   }
 }
 
 function getTelefuncChannelHooks() {
   return defineHooks({
-    upgrade(req) {
-      const url = new URL(req.url, 'http://localhost')
-      if (url.pathname !== getServerConfig().telefuncUrl) return
-
-      const channelId = url.searchParams.get('channelId')
-      if (!channelId) return
-      // Validate the primary channel still exists (alive or in grace period)
-      if (!getChannelRegistry().has(channelId)) return
-
+    upgrade() {
       return {
         context: {
-          primaryId: channelId,
+          ixMap: new Map(),
           pingTimer: null as ReturnType<typeof setTimeout> | null,
         },
       }
@@ -113,15 +87,14 @@ function getTelefuncChannelHooks() {
 
     message(peer, message) {
       const ctx = peer.context
-      const state = getOrCreateWsState(ctx.primaryId)
       const frame = decode(message.uint8Array())
 
       switch (frame.tag) {
         case TAG.CTRL:
-          handleCtrl(frame.ctrl, state, ctx, peer)
+          handleCtrl(frame.ctrl, ctx, peer)
           break
         case TAG.TEXT: {
-          const entry = state.channels.get(frame.index)
+          const entry = ctx.ixMap.get(frame.index)
           if (!entry) break
           if (frame.seq && frame.seq <= entry.lastClientSeq) break
           if (frame.seq) entry.lastClientSeq = frame.seq
@@ -129,7 +102,7 @@ function getTelefuncChannelHooks() {
           break
         }
         case TAG.BINARY: {
-          const entry = state.channels.get(frame.index)
+          const entry = ctx.ixMap.get(frame.index)
           if (!entry) break
           if (frame.seq && frame.seq <= entry.lastClientSeq) break
           if (frame.seq) entry.lastClientSeq = frame.seq
@@ -142,21 +115,20 @@ function getTelefuncChannelHooks() {
     close(peer, details) {
       const ctx = peer.context
       clearPingTimer(ctx)
-      const state = getOrCreateWsState(ctx.primaryId)
       // 1000 = explicit programmatic close
       // 1001 = browser going away (refresh, navigation, tab close)
       // Both are permanent — client JS state is gone, channels can never reconnect.
       // Only network drops (1006, etc.) get a grace period for reconnect.
       const isPermanent = details?.code === 1000 || details?.code === 1001
       if (isPermanent) {
-        for (const { channel } of state.channels.values()) {
-          if (!channel.isClosed) channel._onPeerClose()
+        for (const entry of ctx.ixMap.values()) {
+          if (!entry.channel.isClosed) entry.channel._onPeerClose()
         }
-        deleteWsState(ctx.primaryId)
+        ctx.ixMap.clear()
       } else {
-        // Connection lost — each channel enters disconnect/grace period.
-        // WsState + replay buffer persist for the next reconcile.
-        for (const { channel } of state.channels.values()) channel._onPeerDisconnect()
+        for (const entry of ctx.ixMap.values()) {
+          entry.channel._onPeerDisconnect()
+        }
       }
     },
 
@@ -168,7 +140,7 @@ function getTelefuncChannelHooks() {
 
 // ── Ping timer ──
 
-type PeerCtx = { pingTimer: ReturnType<typeof setTimeout> | null }
+type PeerCtx = { ixMap: Map<number, ChannelEntry>; pingTimer: ReturnType<typeof setTimeout> | null }
 
 function resetPingTimer(ctx: PeerCtx, peer: WsPeer): void {
   clearPingTimer(ctx)
@@ -190,7 +162,7 @@ function clearPingTimer(ctx: PeerCtx): void {
 
 // ── CTRL handling ──
 
-function handleCtrl(ctrl: CtrlMessage, state: WsState, ctx: PeerCtx, peer: WsPeer): void {
+function handleCtrl(ctrl: CtrlMessage, ctx: PeerCtx, peer: WsPeer): void {
   switch (ctrl.t) {
     // ── Heartbeat ──
     case 'ping': {
@@ -201,9 +173,9 @@ function handleCtrl(ctrl: CtrlMessage, state: WsState, ctx: PeerCtx, peer: WsPee
 
     // ── Channel lifecycle ──
     case 'close': {
-      const entry = state.channels.get(ctrl.ix)
+      const entry = ctx.ixMap.get(ctrl.ix)
       if (!entry) break
-      state.channels.delete(ctrl.ix)
+      ctx.ixMap.delete(ctrl.ix)
       entry.channel._onPeerClose()
       break
     }
@@ -214,22 +186,26 @@ function handleCtrl(ctrl: CtrlMessage, state: WsState, ctx: PeerCtx, peer: WsPee
     // 2. For each channel the client mentions:
     //    - Alive in registry → attach at client's ix, include in response
     //    - Dead → simply omit from response (client diffs to discover)
-    // 3. For each channel in WsState NOT mentioned by client → _onPeerClose()
+    // 3. For channels in ixMap NOT mentioned by client → _onPeerClose()
     // 4. Respond with reconciled { open } = all channels we actually attached
     // 5. Client diffs its map against our response → closes its orphans
     case 'reconcile': {
       const registry = getChannelRegistry()
-      const clientIxs = new Set<number>()
+      const reconciledIxs = new Set<number>()
       const attached: { id: string; ix: number; lastSeq: number }[] = []
+
+      // Snapshot old ixMap for orphan detection, then rebuild
+      const prevIxMap = new Map(ctx.ixMap)
+      ctx.ixMap.clear()
 
       // Replay missed frames and attach peers for alive channels
       for (const { id, ix, lastSeq } of ctrl.open) {
-        clientIxs.add(ix)
+        reconciledIxs.add(ix)
         const ch = registry.get(id)
         if (!ch || ch.isClosed) continue
 
-        // Get or create per-channel replay buffer
-        const existing = state.channels.get(ix)
+        // Get existing entry (with replay buffer) or create new
+        const existing = globalObject.channels.get(id)
         const replay = existing?.replay ?? new ReplayBuffer(SERVER_REPLAY_BYTES)
         const lastClientSeq = existing?.lastClientSeq ?? 0
 
@@ -237,17 +213,20 @@ function handleCtrl(ctrl: CtrlMessage, state: WsState, ctx: PeerCtx, peer: WsPee
         const missed = replay.getAfter(lastSeq)
         for (const frame of missed) peer.send(frame)
 
-        state.channels.set(ix, { channel: ch, lastClientSeq, replay })
-        ch.attachPeer(new IndexedPeer(peer, ix, replay, () => state.channels.delete(ix)))
+        const entry: ChannelEntry = { channel: ch, lastClientSeq, replay }
+        ctx.ixMap.set(ix, entry)
+
+        globalObject.channels.set(id, entry)
+        ch.onClose(() => globalObject.channels.delete(id))
+
+        ch.attachPeer(new IndexedPeer(peer, ix, replay))
         attached.push({ id, ix, lastSeq: lastClientSeq })
       }
 
-      // Channels in WsState that client didn't mention → client closed them
-      for (const [ix, { channel }] of state.channels) {
-        if (!clientIxs.has(ix)) {
-          state.channels.delete(ix)
-          if (!channel.isClosed) channel._onPeerClose()
-        }
+      // Channels in previous ixMap that client didn't mention → client closed them
+      for (const [ix, entry] of prevIxMap) {
+        if (reconciledIxs.has(ix)) continue
+        if (!entry.channel.isClosed) entry.channel._onPeerClose()
       }
 
       // Respond with what we attached — client diffs to find its own orphans
@@ -257,12 +236,12 @@ function handleCtrl(ctrl: CtrlMessage, state: WsState, ctx: PeerCtx, peer: WsPee
 
     // ── Backpressure ──
     case 'pause': {
-      const entry = state.channels.get(ctrl.ix)
+      const entry = ctx.ixMap.get(ctrl.ix)
       if (entry) entry.channel._onPeerPause()
       break
     }
     case 'resume': {
-      const entry = state.channels.get(ctrl.ix)
+      const entry = ctx.ixMap.get(ctrl.ix)
       if (entry) entry.channel._onPeerResume()
       break
     }

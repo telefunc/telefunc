@@ -69,7 +69,7 @@ class WsConnection {
     return connection
   }
 
-  private cacheKey: string
+  private wsUrl: string
   private ws: WebSocket | null = null
   private connected = false
   private nextIndex = 0
@@ -92,9 +92,9 @@ class WsConnection {
   private reconnectAttempt = 0
   private reconnectStart = 0
 
-  private constructor(cacheKey: string) {
-    this.cacheKey = cacheKey
-    WsConnection.cache.set(cacheKey, this)
+  private constructor(wsUrl: string) {
+    this.wsUrl = wsUrl
+    WsConnection.cache.set(wsUrl, this)
   }
 
   /** Register a channel over this connection. */
@@ -172,14 +172,9 @@ class WsConnection {
   private connect(): void {
     if (this.closed) return
 
-    // Use the first channel's id in the URL so the server can validate the upgrade.
-    const firstChannel = this.channels.values().next().value
-    const channelId = firstChannel ? firstChannel.id : ''
-    const wsUrl = this.cacheKey + '?channelId=' + encodeURIComponent(channelId)
-
     try {
-      this.ws = new WebSocket(wsUrl)
-    } catch {
+      this.ws = new WebSocket(this.wsUrl)
+    } catch (err) {
       this.scheduleReconnect()
       return
     }
@@ -207,7 +202,9 @@ class WsConnection {
       }
     }
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (ev) => {
+      console.log('[telefunc] WebSocket closed:', ev)
+      const wasConnected = this.connected
       this.connected = false
       this.reconciling = false
       this.ws = null
@@ -218,6 +215,9 @@ class WsConnection {
         this.notifyAllClosed()
       } else if (this.channels.size === 0) {
         this.dispose()
+      } else if (!wasConnected && this.reconnectAttempt === 0) {
+        // Server rejected the upgrade (e.g. 403) — don't retry.
+        this.notifyAllClosed()
       } else {
         this.scheduleReconnect()
       }
@@ -230,7 +230,8 @@ class WsConnection {
     this.reconciling = true
     const open: { id: string; ix: number; lastSeq: number }[] = []
     for (const [ix, ch] of this.channels) {
-      open.push({ id: ch.id, ix, lastSeq: this.lastSeqByChannel.get(ix) ?? 0 })
+      const lastSeq = this.lastSeqByChannel.get(ix) ?? 0
+      open.push({ id: ch.id, ix, lastSeq })
     }
     const ws = this.ws
     assert(ws)
@@ -424,12 +425,12 @@ class WsConnection {
     this.channelIndex.clear()
     this.lastSeqByChannel.clear()
     this.replayBuffers.clear()
-    WsConnection.cache.delete(this.cacheKey)
+    WsConnection.cache.delete(this.wsUrl)
   }
 
   private dispose(): void {
     this.closed = true
-    WsConnection.cache.delete(this.cacheKey)
+    WsConnection.cache.delete(this.wsUrl)
   }
 
   private clearTimer(name: 'ttl' | 'pongTimer' | 'pingInterval' | 'reconnectTimer'): void {
