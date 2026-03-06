@@ -2,6 +2,7 @@ export { useGenerator }
 export type { UseGeneratorState, UseGeneratorOptions, GeneratorError }
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { abort } from '../../client/abort.js'
 
 type GeneratorError = {
   message: string
@@ -54,94 +55,85 @@ type UseGeneratorState<T, Args extends unknown[]> = {
  * ```
  */
 function useGenerator<T, Args extends unknown[]>(
-  fn: (...args: Args) => Promise<AsyncGenerator<T>> | AsyncGenerator<T>,
+  fn: (...args: Args) => Promise<AsyncGenerator<T>>,
   options?: UseGeneratorOptions<T>,
 ): UseGeneratorState<T, Args> {
   const [values, setValues] = useState<T[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<GeneratorError | null>(null)
 
-  const versionRef = useRef(0)
+  // The in-flight telefunc call — holds the AbortController telefunc attached to it.
+  const callRef = useRef<Promise<AsyncGenerator<T>> | null>(null)
   const fnRef = useRef(fn)
   fnRef.current = fn
   const optionsRef = useRef(options)
   optionsRef.current = options
 
-  const invoke = useCallback((...args: Args) => {
-    const version = ++versionRef.current
-    const isCurrent = () => version === versionRef.current
-
-    setValues([])
-    setError(null)
-    setIsStreaming(true)
-    optionsRef.current?.onStart?.()
-    ;(async () => {
-      try {
-        const gen = await fnRef.current(...args)
-        for await (const value of gen) {
-          if (!isCurrent()) break
-          setValues((prev) => [...prev, value])
-          optionsRef.current?.onValue?.(value)
-        }
-      } catch (err) {
-        if (isCurrent()) {
-          const generatorError = toGeneratorError(err)
-          setError(generatorError)
-          optionsRef.current?.onError?.(generatorError)
-        }
-      } finally {
-        if (isCurrent()) {
-          setIsStreaming(false)
-          optionsRef.current?.onEnd?.()
-        }
-      }
-    })()
-  }, [])
-
-  const abort = useCallback(() => {
-    versionRef.current++
+  const abortCurrent = useCallback(() => {
+    if (callRef.current) {
+      abort(callRef.current)
+      callRef.current = null
+    }
     setIsStreaming(false)
   }, [])
 
-  useEffect(() => {
-    return () => {
-      versionRef.current++
-    }
-  }, [])
+  const invoke = useCallback(
+    (...args: Args) => {
+      // Cancel any previous call before starting a new one.
+      abortCurrent()
+
+      const call = fnRef.current(...args)
+      callRef.current = call
+
+      setValues([])
+      setError(null)
+      setIsStreaming(true)
+      optionsRef.current?.onStart?.()
+      ;(async () => {
+        try {
+          const gen = await call
+          for await (const value of gen) {
+            if (callRef.current !== call) break
+            setValues((prev) => [...prev, value])
+            optionsRef.current?.onValue?.(value)
+          }
+        } catch (err: unknown) {
+          // isCancel means abort() was called — not a real error.
+          if (err && typeof err === 'object' && 'isCancel' in err) return
+          const generatorError = toGeneratorError(err)
+          setError(generatorError)
+          optionsRef.current?.onError?.(generatorError)
+        } finally {
+          if (callRef.current === call) {
+            callRef.current = null
+            setIsStreaming(false)
+            optionsRef.current?.onEnd?.()
+          }
+        }
+      })()
+    },
+    [abortCurrent],
+  )
+
+  // Abort on unmount.
+  useEffect(() => abortCurrent, [abortCurrent])
 
   return {
     values,
     lastValue: values.length > 0 ? values[values.length - 1]! : undefined,
     isStreaming,
     error,
-    abort,
+    abort: abortCurrent,
     invoke,
   }
 }
 
-function toGeneratorError(originalError: unknown): GeneratorError {
-  const message = getErrorMessage(originalError)
-  const error: GeneratorError = { message }
-  if (originalError && typeof originalError === 'object') {
-    Object.assign(error, originalError)
-    for (const key of ['name', 'stack', 'cause'] as const) {
-      if (key in originalError) {
-        Object.assign(error, { [key]: (originalError as Record<string, unknown>)[key] })
-      }
-    }
+function toGeneratorError(err: unknown): GeneratorError {
+  if (err instanceof Error) {
+    return { message: err.message, name: err.name, stack: err.stack, cause: err.cause }
   }
-  return error
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message
+  if (err && typeof err === 'object' && 'message' in err && typeof err.message === 'string') {
+    return { ...err, message: err.message }
   }
-  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
-    return error.message
-  }
-  if (typeof error === 'string') {
-    return error
-  }
-  return 'Unknown error'
+  return { message: typeof err === 'string' ? err : 'Unknown error' }
 }
