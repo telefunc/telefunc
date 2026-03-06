@@ -2,20 +2,121 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Install the Telefunc WebSocket upgrade handler on a Node.js HTTP server. Required for <Link text={<code>createChannel()</code>} href="/createChannel" /> to work in production.
+Install the Telefunc WebSocket upgrade handler on your server. Pick the adapter for your runtime:
+
+## Node.js
 
 ```ts
-import { telefuncWebSocket } from 'telefunc'
+import { telefuncWebSocket } from 'telefunc/websocket/node'
 import { createServer } from 'node:http'
 
 const server = createServer()
-telefuncWebSocket(server)
+const ws = telefuncWebSocket()
+ws.install(server)
 ```
+
+Works with any Node.js HTTP server — Express, Fastify, Hono with `@hono/node-server`, etc.
 
 Idempotent — safe to call multiple times on the same server.
 
-> In Vite dev mode, the WebSocket handler is installed automatically by Telefunc's Vite plugin. You only need `telefuncWebSocket()` for production deployments.
+## Bun
 
+```ts
+import { telefuncWebSocket } from 'telefunc/websocket/bun'
+
+const ws = telefuncWebSocket()
+
+Bun.serve({
+  port: 3000,
+  websocket: ws.websocket,
+  fetch(request, server) {
+    const upgraded = ws.handleUpgrade(request, server)
+    if (upgraded) return upgraded
+    // ... rest of your fetch handler
+  },
+})
+```
+
+## Deno
+
+```ts
+import { telefuncWebSocket } from 'telefunc/websocket/deno'
+
+const ws = telefuncWebSocket()
+
+Deno.serve({ port: 3000 }, (request, info) => {
+  const upgraded = ws.handleUpgrade(request, info)
+  if (upgraded) return upgraded
+  // ... rest of your handler
+})
+```
+
+In Vite dev mode, the WebSocket handler is set up automatically by Telefunc's Vite plugin — you only need an adapter for production (or when running outside Vite).
+
+## Cloudflare Workers
+
+```ts
+import { telefuncWebSocket } from 'telefunc/websocket/cloudflare'
+
+const ws = telefuncWebSocket()
+
+export const $TelefuncDurableObject = ws.createDurableObjectClass()
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const resp = ws.handleTelefunc(request, env, ctx)
+    if (resp) return resp
+    // ... rest of your fetch handler
+  },
+}
+```
+
+```toml
+# wrangler.toml
+[[durable_objects.bindings]]
+name = "$TelefuncDurableObject"
+class_name = "$TelefuncDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["$TelefuncDurableObject"]
+```
+
+Channels require a [Durable Object](https://developers.cloudflare.com/durable-objects/) so that the WebSocket and the telefunction that created the channel run in the same isolate. Telefunc handles this automatically — you just need to export the class and register the binding.
+
+### Context
+
+To pass per-request data (logged-in user, auth token, etc.) to your telefunctions via `getContext()`, provide a `context` function:
+
+```ts
+const ws = telefuncWebSocket({
+  context: async (request, env: Env) => ({
+    user: await getUserFromCookie(request, env),
+  }),
+})
+```
+
+The function receives the incoming `Request` and your `env` bindings, and its return value is available inside telefunctions via `getContext()`.
+
+### Scaling with shards
+
+By default all channels share a single Durable Object instance. If you have a large number of concurrent open channels and run into memory or CPU limits, you can increase the number of instances:
+
+```ts
+const ws = telefuncWebSocket({ shards: 4 })
+```
+
+Telefunc distributes traffic across the instances automatically.
+
+Each browser session is pinned to one shard (`stickyShards: true` by default): the server tells the client which shard handled its request, and the client sends that shard back on every subsequent call. This keeps a user's open channels and regular telefunction calls on the same Durable Object instance, avoiding redundant WebSocket connections and keeping per-user in-memory state in one place.
+
+### Custom binding name
+
+The binding name defaults to `$TelefuncDurableObject`. To use a different name, pass `bindingName`:
+
+```ts
+const ws = telefuncWebSocket({ bindingName: 'MyDurableObject' })
+```
 
 ## See also
 

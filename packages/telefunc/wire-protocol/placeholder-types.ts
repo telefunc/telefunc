@@ -20,7 +20,7 @@ type ServerPlaceholderType<C extends PlaceholderTypeContract = PlaceholderTypeCo
 /** Client-side placeholder type: reconstructs a live value from prefix+metadata during deserialization. */
 type ClientPlaceholderType<C extends PlaceholderTypeContract = PlaceholderTypeContract> = {
   prefix: string
-  createValue(metadata: C['metadata']): C['result']
+  createValue(metadata: C['metadata'], shard?: string): C['result']
 }
 
 type ChannelContract = {

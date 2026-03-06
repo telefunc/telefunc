@@ -89,14 +89,31 @@
       "browser": "./dist/client/poisen-pills/__internal/loadBuildEntry.js",
       "types": "./dist/node/server/runTelefunc/loadTelefuncFilesUsingVite/loadBuildEntry.d.ts",
       "default": "./dist/node/server/runTelefunc/loadTelefuncFilesUsingVite/loadBuildEntry.js"
+    },
+    "./websocket/node": {
+      "types": "./dist/wire-protocol/server/adapter/node.d.ts",
+      "default": "./dist/wire-protocol/server/adapter/node.js"
+    },
+    "./websocket/bun": {
+      "types": "./dist/wire-protocol/server/adapter/bun.d.ts",
+      "default": "./dist/wire-protocol/server/adapter/bun.js"
+    },
+    "./websocket/deno": {
+      "types": "./dist/wire-protocol/server/adapter/deno.d.ts",
+      "default": "./dist/wire-protocol/server/adapter/deno.js"
+    },
+    "./websocket/cloudflare": {
+      "types": "./dist/wire-protocol/server/adapter/cloudflare.d.ts",
+      "default": "./dist/wire-protocol/server/adapter/cloudflare.js"
     }
   },
   "type": "module",
   "devDependencies": {
-    "@babel/core": "7.27.4",
-    "@babel/parser": "7.27.5",
-    "@babel/types": "7.27.6",
+    "@babel/core": "7.29.0",
+    "@babel/parser": "7.29.0",
+    "@babel/types": "7.29.0",
     "@brillout/release-me": "^0.4.5",
+    "@cloudflare/workers-types": "^4.20260305.1",
     "@nuxt/types": "^2.18.1",
     "@types/express": "^5.0.3",
     "@types/node": "^24.0.4",

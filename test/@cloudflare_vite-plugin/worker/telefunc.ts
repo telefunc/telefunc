@@ -1,13 +1,11 @@
-export { handleTelefunc }
+export { handleTelefunc, $TelefuncDurableObject }
 
-import { telefunc } from 'telefunc'
+import { telefuncWebSocket } from 'telefunc/websocket/cloudflare'
 
-async function handleTelefunc(request: Request) {
-  const { pathname } = new URL(request.url)
-  if (!pathname.startsWith('/_telefunc')) return null
-  const httpResponse = await telefunc({ request })
-  return new Response(httpResponse.body, {
-    headers: httpResponse.headers,
-    status: httpResponse.statusCode,
-  })
+const ws = telefuncWebSocket({ shards: 5 })
+
+const $TelefuncDurableObject = ws.createDurableObjectClass()
+
+function handleTelefunc(request: Request, env: Env, ctx: ExecutionContext) {
+  return ws.handleTelefunc(request, env, ctx)
 }

@@ -1,4 +1,4 @@
-export { createChannel, getChannelRegistry, ServerChannel, ChannelClosedError }
+export { createChannel, getChannelRegistry, ServerChannel, ChannelClosedError, setCurrentShard, getCurrentShard }
 
 import type { Channel } from '../channel.js'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -8,7 +8,16 @@ import { hasProp } from '../../utils/hasProp.js'
 
 const globalObject = getGlobalObject('channel.ts', {
   channelRegistry: new Map<string, ServerChannel<unknown, unknown>>(),
+  currentShard: undefined as string | undefined,
 })
+
+function setCurrentShard(shard: string): void {
+  globalObject.currentShard = shard
+}
+
+function getCurrentShard(): string | undefined {
+  return globalObject.currentShard
+}
 
 function getChannelRegistry(): Map<string, ServerChannel<unknown, unknown>> {
   return globalObject.channelRegistry

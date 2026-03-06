@@ -60,7 +60,7 @@ app.all('/_telefunc', async (c) => {
       user: c.get('user')
     }
   })
-  return new Response(httpResponse.body, {
+  return new Response(httpResponse.getReadableWebStream(), {
     status: httpResponse.statusCode,
     headers: httpResponse.headers,
   })

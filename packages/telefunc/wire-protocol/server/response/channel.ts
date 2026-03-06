@@ -2,7 +2,7 @@ export { channelServerPlaceholderType }
 
 import { SERIALIZER_PREFIX_CHANNEL } from '../../constants.js'
 import type { ServerPlaceholderType, ChannelContract } from '../../placeholder-types.js'
-import { ServerChannel } from '../channel.js'
+import { ServerChannel, getCurrentShard } from '../channel.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -12,6 +12,6 @@ const channelServerPlaceholderType: ServerPlaceholderType<ChannelContract> = {
     return value instanceof ServerChannel
   },
   getMetadata(channel) {
-    return { channelId: channel.id }
+    return { channelId: channel.id, shard: getCurrentShard() }
   },
 }

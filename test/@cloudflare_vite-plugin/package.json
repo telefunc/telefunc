@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "dev": "vite",
+    "dev": "rm -rf ./node_modules/.vite && vite",
     "build": "vite build && pnpm run build:worker && node ./build-fix.js",
     "build:worker": "build-worker --entry worker/index.ts --out dist/worker/index.js --external virtual:telefunc:entry",
     "preview": "pnpm run build && vite preview",

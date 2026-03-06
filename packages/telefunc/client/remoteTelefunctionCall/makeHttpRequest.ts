@@ -6,6 +6,8 @@ import { isObject } from '../../utils/isObject.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { parseResponse } from '../../wire-protocol/client/response/parse.js'
 import { throwCancelError, throwAbortError, throwBugError } from './errors.js'
+import { setShardInfo } from '../../wire-protocol/client/shard-registry.js'
+import { assertWarning } from '../../utils/assert.js'
 import {
   STATUS_CODE_SUCCESS,
   STATUS_CODE_THROW_ABORT,
@@ -21,6 +23,7 @@ const method = 'POST'
 
 async function makeHttpRequest(callContext: {
   telefuncUrl: string
+  baseTelefuncUrl: string
   httpRequestBody: string | Blob
   telefunctionName: string
   telefuncFilePath: string
@@ -53,9 +56,15 @@ async function makeHttpRequest(callContext: {
   }
 
   const statusCode = response.status
+  const shard = response.headers.get('x-telefunc-shard') ?? undefined
+  const sticky = response.headers.get('x-telefunc-sticky') === 'true'
+
+  // Always record shard + stickiness so channels can open to the right DO
+  // and POST URLs can be pinned when the server opts in to sticky sharding.
+  if (shard) setShardInfo(callContext.baseTelefuncUrl, shard, sticky)
 
   if (statusCode === STATUS_CODE_SUCCESS) {
-    const parsed = await parseResponse(response, callContext)
+    const parsed = await parseResponse(response, callContext, shard)
     assertUsage(isObject(parsed) && 'ret' in parsed, wrongInstallation({ method, callContext }))
     return parsed.ret
   } else if (statusCode === STATUS_CODE_THROW_ABORT) {

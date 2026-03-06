@@ -4,7 +4,7 @@ import { parse } from '@babel/parser'
 import { transformTelefuncFileClientSideSync } from '../shared/transformer/transformTelefuncFileClientSideSync.js'
 import { toPosixPath } from '../../utils/path.js'
 import type { PluginObj, NodePath } from '@babel/core'
-import type * as BabelTypes from '@babel/types'
+import type { types as BabelTypes } from '@babel/core'
 
 function getExportsFromBabelAST(programNodePath: NodePath<BabelTypes.Program>, types: typeof BabelTypes) {
   const body = programNodePath.node.body

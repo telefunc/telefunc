@@ -9,7 +9,7 @@
     "build:telefunc": "(cd ../../ && pnpm install && pnpm run build) && npm pack ../../packages/telefunc && mv telefunc-*.tgz telefunc.tgz && npm install telefunc@telefunc.tgz"
   },
   "dependencies": {
-    "@babel/core": "^7.12.9",
+    "@babel/core": "^7.29.0",
     "@expo/webpack-config": "^0.16.18",
     "@types/react": "~17.0.21",
     "@types/react-native": "~0.64.12",

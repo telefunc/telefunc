@@ -34,7 +34,7 @@ import type { RequestHandler } from './$types'
 
 const handler: RequestHandler = async (event) => {
   const httpResponse = await telefunc({ request: event.request })
-  return new Response(httpResponse.body, {
+  return new Response(httpResponse.getReadableWebStream(), {
     headers: httpResponse.headers,
     status: httpResponse.statusCode,
   })

@@ -40,7 +40,7 @@ const app = new Hono()
 
 app.all('/_telefunc', async (c) => {
   const httpResponse = await telefunc({ request: c.req.raw })
-  return new Response(httpResponse.body, {
+  return new Response(httpResponse.getReadableWebStream(), {
     status: httpResponse.statusCode,
     headers: httpResponse.headers,
   })

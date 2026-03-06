@@ -36,10 +36,11 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     return this as unknown as Channel<TReceive, TSend>
   }
 
-  constructor(channelId: string) {
+  constructor(channelId: string, shard?: string) {
     this.id = channelId
     const config = resolveClientConfig()
-    this._connection = WsConnection.getOrCreate(config.telefuncUrl, this)
+    const wsUrl = shard ? appendShardParam(config.telefuncUrl, shard) : config.telefuncUrl
+    this._connection = WsConnection.getOrCreate(wsUrl, this)
   }
 
   get isClosed(): boolean {
@@ -149,4 +150,9 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._closeCallbacks.length = 0
     this._openCallbacks.length = 0
   }
+}
+
+/** Append ?shard=N (or &shard=N) to a URL string. */
+function appendShardParam(url: string, shard: string): string {
+  return url.includes('?') ? `${url}&shard=${shard}` : `${url}?shard=${shard}`
 }

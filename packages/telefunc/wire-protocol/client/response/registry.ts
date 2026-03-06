@@ -32,6 +32,7 @@ const clientPlaceholderTypes: ClientPlaceholderType[] = [channelClientPlaceholde
 function createStreamingReviver(
   getChunkReader: (index: number) => () => Promise<Uint8Array | null>,
   getCancelIndex: (index: number) => () => void,
+  shard?: string,
 ) {
   const channels: ClientChannel[] = []
   const reviver: Reviver = (_key: undefined | string, value: string, parser: (str: string) => unknown) => {
@@ -46,17 +47,17 @@ function createStreamingReviver(
         return { replacement: liveValue }
       }
     }
-    return revivePlaceholder(value, parser, channels)
+    return revivePlaceholder(value, parser, channels, shard)
   }
   return { reviver, channels }
 }
 
-function revivePlaceholder(value: string, parser: (str: string) => unknown, channels: ClientChannel[]) {
+function revivePlaceholder(value: string, parser: (str: string) => unknown, channels: ClientChannel[], shard?: string) {
   for (const type of clientPlaceholderTypes) {
     if (value.startsWith(type.prefix)) {
       const metadata = parser(value.slice(type.prefix.length))
       assert(isObject(metadata))
-      const liveValue = type.createValue(metadata)
+      const liveValue = type.createValue(metadata, shard)
       if (liveValue instanceof ClientChannel) channels.push(liveValue)
       return { replacement: liveValue }
     }

@@ -9,13 +9,18 @@
       {
         "name": "TO_DO_LIST_DURABLE_OBJECTS",
         "class_name": "TodoListDurableObject"
+      },
+      {
+        "name": "$TelefuncDurableObject",
+        "class_name": "$TelefuncDurableObject"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TodoListDurableObject"]
+      "new_sqlite_classes": ["TodoListDurableObject"],
+      "new_classes": ["$TelefuncDurableObject"]
     }
   ]
 }

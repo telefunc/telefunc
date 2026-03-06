@@ -88,7 +88,7 @@ abort(result)
 
 Channels require a WebSocket connection. In Vite dev mode, this is handled automatically.
 
-For production, install the WebSocket handler on your HTTP server using <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
+For production, install the WebSocket adapter for your runtime — see <Link href="/telefuncWebSocket" />.
 
 > All channels — and streaming values when using <Link text={<code>transport: 'ws'</code>} href="/transport" /> — share a single multiplexed WebSocket connection per server URL.
 
@@ -141,6 +141,36 @@ channel.listen((msg) => {
 })
 ```
 
+
+## Cross-instance pub/sub
+
+> **Feedback welcome** — built-in pub/sub is not yet implemented. If this is blocking you, please open an issue.
+
+When you run multiple server instances (e.g. <Link text="Cloudflare shards" href="/telefuncWebSocket#scaling-with-shards" /> or multiple Node processes behind a load balancer), channels on different instances cannot directly message each other. Each channel lives in the process that created it.
+
+You can implement cross-instance pub/sub today by wiring channels to a shared message bus (Redis, Cloudflare Durable Objects, etc.) yourself:
+
+```ts
+// Environment: server
+
+import { createChannel } from 'telefunc'
+
+export async function onJoinRoom(roomId: string) {
+  const channel = createChannel<string, string>()
+
+  // Subscribe this channel to the shared topic
+  const unsubscribe = pubSub.subscribe(roomId, (msg) => channel.send(msg))
+
+  // Forward client messages to the shared topic
+  channel.listen((msg) => pubSub.publish(roomId, msg))
+
+  channel.onClose(unsubscribe)
+
+  return { channel: channel.client }
+}
+```
+
+In the future, Telefunc plans to expose built-in `channel.publish(topic, msg)` / `channel.subscribe(topic, cb)` APIs that handle cross-instance routing automatically — using a central Durable Object on Cloudflare and pluggable adapters (Redis, etc.) elsewhere.
 
 ## See also
 

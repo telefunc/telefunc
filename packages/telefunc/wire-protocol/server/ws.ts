@@ -1,6 +1,6 @@
 export { getTelefuncChannelHooks }
 
-import { defineHooks } from 'crossws'
+import { defineHooks, type Peer } from 'crossws'
 import type { ServerChannel } from './channel.js'
 import { getChannelRegistry } from './channel.js'
 import { TAG, encode, decode, encodeCtrl } from '../shared-ws.js'
@@ -22,27 +22,33 @@ const SERVER_REPLAY_BYTES = 256 * 1024
 
 type ChannelEntry = { channel: ServerChannel; lastClientSeq: number; replay: ReplayBuffer }
 
-const globalObject = getGlobalObject('ws-state.ts', {
-  channels: new Map<string, ChannelEntry>(),
-})
-
-// ── Per-connection context ──
-
-declare module 'crossws' {
-  interface PeerContext {
-    /** ix → entry (direct reference). Rebuilt on every reconcile. */
-    ixMap: Map<number, ChannelEntry>
-    pingTimer: ReturnType<typeof setTimeout> | null
-  }
+type PeerState = {
+  ixMap: Map<number, ChannelEntry>
+  pingTimer: ReturnType<typeof setTimeout> | null
+  timedOut: boolean
 }
 
-type WsPeer = { send(data: string | Uint8Array): void; terminate(): void }
+const globalObject = getGlobalObject('ws-state.ts', {
+  peerStates: new Map<string, PeerState>(),
+  wsChannels: new Map<string, ChannelEntry>(),
+})
+
+const { peerStates, wsChannels } = globalObject
+
+function getOrCreatePeerState(peer: Peer): PeerState {
+  let s = peerStates.get(peer.id)
+  if (!s) {
+    s = { ixMap: new Map(), pingTimer: null, timedOut: false }
+    peerStates.set(peer.id, s)
+  }
+  return s
+}
 
 /** Wraps a crossws peer, encodes frames with a fixed channel index.
  *  Assigns sequence numbers and stores frames in the replay buffer. */
 class IndexedPeer {
   constructor(
-    private ws: WsPeer,
+    private ws: Peer,
     private index: number,
     private replay: ReplayBuffer,
   ) {}
@@ -72,29 +78,21 @@ class IndexedPeer {
 
 function getTelefuncChannelHooks() {
   return defineHooks({
-    upgrade() {
-      return {
-        context: {
-          ixMap: new Map(),
-          pingTimer: null as ReturnType<typeof setTimeout> | null,
-        },
-      }
-    },
-
     open(peer) {
-      resetPingTimer(peer.context, peer)
+      getOrCreatePeerState(peer)
+      resetPingTimer(peer)
     },
 
     message(peer, message) {
-      const ctx = peer.context
+      const state = getOrCreatePeerState(peer)
       const frame = decode(message.uint8Array())
 
       switch (frame.tag) {
         case TAG.CTRL:
-          handleCtrl(frame.ctrl, ctx, peer)
+          handleCtrl(frame.ctrl, peer)
           break
         case TAG.TEXT: {
-          const entry = ctx.ixMap.get(frame.index)
+          const entry = state.ixMap.get(frame.index)
           if (!entry) break
           if (frame.seq && frame.seq <= entry.lastClientSeq) break
           if (frame.seq) entry.lastClientSeq = frame.seq
@@ -102,7 +100,7 @@ function getTelefuncChannelHooks() {
           break
         }
         case TAG.BINARY: {
-          const entry = ctx.ixMap.get(frame.index)
+          const entry = state.ixMap.get(frame.index)
           if (!entry) break
           if (frame.seq && frame.seq <= entry.lastClientSeq) break
           if (frame.seq) entry.lastClientSeq = frame.seq
@@ -113,69 +111,69 @@ function getTelefuncChannelHooks() {
     },
 
     close(peer, details) {
-      const ctx = peer.context
-      clearPingTimer(ctx)
-      // 1000 = explicit programmatic close
-      // 1001 = browser going away (refresh, navigation, tab close)
-      // Both are permanent — client JS state is gone, channels can never reconnect.
-      // Only network drops (1006, etc.) get a grace period for reconnect.
-      const isPermanent = details?.code === 1000 || details?.code === 1001
+      const state = getOrCreatePeerState(peer)
+      clearPingTimer(peer)
+      const isPermanent = !state.timedOut && (details?.code === 1000 || details?.code === 1001)
       if (isPermanent) {
-        for (const entry of ctx.ixMap.values()) {
+        for (const entry of state.ixMap.values()) {
           if (!entry.channel.isClosed) entry.channel._onPeerClose()
         }
-        ctx.ixMap.clear()
+        state.ixMap.clear()
       } else {
-        for (const entry of ctx.ixMap.values()) {
+        for (const entry of state.ixMap.values()) {
           entry.channel._onPeerDisconnect()
         }
       }
+      peerStates.delete(peer.id)
     },
 
     error(peer) {
-      clearPingTimer(peer.context)
+      clearPingTimer(peer)
+      peerStates.delete(peer.id)
     },
   })
 }
 
 // ── Ping timer ──
 
-type PeerCtx = { ixMap: Map<number, ChannelEntry>; pingTimer: ReturnType<typeof setTimeout> | null }
-
-function resetPingTimer(ctx: PeerCtx, peer: WsPeer): void {
-  clearPingTimer(ctx)
-  ctx.pingTimer = setTimeout(() => {
-    ctx.pingTimer = null
+function resetPingTimer(peer: Peer): void {
+  const state = getOrCreatePeerState(peer)
+  clearPingTimer(peer)
+  state.pingTimer = setTimeout(() => {
+    state.pingTimer = null
     peer.terminate()
+    state.timedOut = true
   }, PING_TIMEOUT_MS)
-  if (hasProp(ctx.pingTimer, 'unref', 'function')) {
-    ctx.pingTimer.unref()
+  if (hasProp(state.pingTimer, 'unref', 'function')) {
+    state.pingTimer.unref()
   }
 }
 
-function clearPingTimer(ctx: PeerCtx): void {
-  if (ctx.pingTimer) {
-    clearTimeout(ctx.pingTimer)
-    ctx.pingTimer = null
+function clearPingTimer(peer: Peer): void {
+  const state = peerStates.get(peer.id)
+  if (state?.pingTimer) {
+    clearTimeout(state.pingTimer)
+    state.pingTimer = null
   }
 }
 
 // ── CTRL handling ──
 
-function handleCtrl(ctrl: CtrlMessage, ctx: PeerCtx, peer: WsPeer): void {
+function handleCtrl(ctrl: CtrlMessage, peer: Peer): void {
+  const state = getOrCreatePeerState(peer)
   switch (ctrl.t) {
     // ── Heartbeat ──
     case 'ping': {
       peer.send(encodeCtrl({ t: 'pong' }))
-      resetPingTimer(ctx, peer)
+      resetPingTimer(peer)
       break
     }
 
     // ── Channel lifecycle ──
     case 'close': {
-      const entry = ctx.ixMap.get(ctrl.ix)
+      const entry = state.ixMap.get(ctrl.ix)
       if (!entry) break
-      ctx.ixMap.delete(ctrl.ix)
+      state.ixMap.delete(ctrl.ix)
       entry.channel._onPeerClose()
       break
     }
@@ -195,8 +193,8 @@ function handleCtrl(ctrl: CtrlMessage, ctx: PeerCtx, peer: WsPeer): void {
       const attached: { id: string; ix: number; lastSeq: number }[] = []
 
       // Snapshot old ixMap for orphan detection, then rebuild
-      const prevIxMap = new Map(ctx.ixMap)
-      ctx.ixMap.clear()
+      const prevIxMap = new Map(state.ixMap)
+      state.ixMap.clear()
 
       // Replay missed frames and attach peers for alive channels
       for (const { id, ix, lastSeq } of ctrl.open) {
@@ -205,7 +203,7 @@ function handleCtrl(ctrl: CtrlMessage, ctx: PeerCtx, peer: WsPeer): void {
         if (!ch || ch.isClosed) continue
 
         // Get existing entry (with replay buffer) or create new
-        const existing = globalObject.channels.get(id)
+        const existing = wsChannels.get(id)
         const replay = existing?.replay ?? new ReplayBuffer(SERVER_REPLAY_BYTES)
         const lastClientSeq = existing?.lastClientSeq ?? 0
 
@@ -214,10 +212,10 @@ function handleCtrl(ctrl: CtrlMessage, ctx: PeerCtx, peer: WsPeer): void {
         for (const frame of missed) peer.send(frame)
 
         const entry: ChannelEntry = { channel: ch, lastClientSeq, replay }
-        ctx.ixMap.set(ix, entry)
+        state.ixMap.set(ix, entry)
 
-        globalObject.channels.set(id, entry)
-        ch.onClose(() => globalObject.channels.delete(id))
+        wsChannels.set(id, entry)
+        ch.onClose(() => wsChannels.delete(id))
 
         ch.attachPeer(new IndexedPeer(peer, ix, replay))
         attached.push({ id, ix, lastSeq: lastClientSeq })
@@ -236,12 +234,12 @@ function handleCtrl(ctrl: CtrlMessage, ctx: PeerCtx, peer: WsPeer): void {
 
     // ── Backpressure ──
     case 'pause': {
-      const entry = ctx.ixMap.get(ctrl.ix)
+      const entry = state.ixMap.get(ctrl.ix)
       if (entry) entry.channel._onPeerPause()
       break
     }
     case 'resume': {
-      const entry = ctx.ixMap.get(ctrl.ix)
+      const entry = state.ixMap.get(ctrl.ix)
       if (entry) entry.channel._onPeerResume()
       break
     }

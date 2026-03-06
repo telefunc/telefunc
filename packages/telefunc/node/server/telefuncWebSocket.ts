@@ -1,11 +1,13 @@
 export { telefuncWebSocket }
 
-import type { Server } from 'node:http'
 import crossws from 'crossws/adapters/node'
 import { getTelefuncChannelHooks } from '../../wire-protocol/server/ws.js'
 import { getServerConfig } from './serverConfig.js'
+import type { Server } from 'node:http'
+import type { Http2SecureServer } from 'node:http2'
 
-const registeredServers = new WeakSet<Server>()
+type HttpServer = Server | Http2SecureServer
+const registeredServers = new WeakSet<HttpServer>()
 
 /**
  * Install the Telefunc WebSocket upgrade handler on a Node.js HTTP server.
@@ -25,7 +27,7 @@ const registeredServers = new WeakSet<Server>()
  * telefuncWebSocket(server)
  * ```
  */
-function telefuncWebSocket(httpServer: Server): void {
+function telefuncWebSocket(httpServer: HttpServer): void {
   if (registeredServers.has(httpServer)) return
   registeredServers.add(httpServer)
 

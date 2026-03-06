@@ -35,7 +35,7 @@ config.telefuncUrl = '/api/telefunc'
 
 async function handler(request: Request) {
   const httpResponse = await telefunc({ request })
-  return new Response(httpResponse.body, {
+  return new Response(httpResponse.getReadableWebStream(), {
     status: httpResponse.statusCode,
     headers: httpResponse.headers,
   })

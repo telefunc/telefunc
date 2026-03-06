@@ -6,7 +6,7 @@ import { ClientChannel } from '../channel.js'
 
 const channelClientPlaceholderType: ClientPlaceholderType<ChannelContract> = {
   prefix: SERIALIZER_PREFIX_CHANNEL,
-  createValue(metadata) {
-    return new ClientChannel(metadata.channelId)
+  createValue(metadata, shard) {
+    return new ClientChannel(metadata.channelId, shard)
   },
 }

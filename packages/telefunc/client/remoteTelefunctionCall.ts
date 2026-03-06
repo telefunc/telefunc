@@ -9,6 +9,7 @@ import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
 import type { ClientCallContext } from './withContext.js'
 import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/async-generator-interface.js'
+import { getStickyShardForPost } from '../wire-protocol/client/shard-registry.js'
 
 function remoteTelefunctionCall(
   telefuncFilePath: string,
@@ -28,7 +29,19 @@ function remoteTelefunctionCall(
     })
   }
 
-  objectAssign(callContext, resolveClientConfig())
+  const clientConfig = resolveClientConfig()
+  objectAssign(callContext, clientConfig)
+
+  const baseTelefuncUrl = clientConfig.telefuncUrl
+  objectAssign(callContext, { baseTelefuncUrl })
+  const stickyShardForPost = getStickyShardForPost(baseTelefuncUrl)
+  if (stickyShardForPost) {
+    objectAssign(callContext, {
+      telefuncUrl: baseTelefuncUrl.includes('?')
+        ? `${baseTelefuncUrl}&shard=${stickyShardForPost}`
+        : `${baseTelefuncUrl}?shard=${stickyShardForPost}`,
+    })
+  }
 
   if (callClientContext?.headers) {
     const merged = { ...callContext.headers, ...callClientContext.headers }
