@@ -154,6 +154,11 @@ const headings = [
     url: '/cancellation',
   },
   {
+    level: 2,
+    title: 'Channels',
+    url: '/channels',
+  },
+  {
     level: 1,
     title: 'API',
     titleIcon: iconGear,
@@ -195,6 +200,20 @@ const headings = [
     url: '/telefunc',
   },
   {
+    level: 2,
+    title: '`telefuncWebSocket()`',
+    url: '/telefuncWebSocket',
+  },
+  {
+    level: 4,
+    title: 'Channels',
+  },
+  {
+    level: 2,
+    title: '`createChannel()`',
+    url: '/createChannel',
+  },
+  {
     level: 4,
     title: 'Error Handling',
   },
@@ -226,6 +245,11 @@ const headings = [
     level: 2,
     title: '`httpHeaders`',
     url: '/httpHeaders',
+  },
+  {
+    level: 2,
+    title: '`transport`',
+    url: '/transport',
   },
   {
     level: 2,

@@ -1,0 +1,146 @@
+import { Link } from '@brillout/docpress'
+
+Telefunc supports persistent, bidirectional communication channels over WebSocket using <Link text={<code>createChannel()</code>} href="/createChannel" />.
+
+> Channels are useful for real-time features like chat, live dashboards, or any scenario where the server and client need to exchange messages continuously.
+
+
+## Example
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+import { createChannel } from 'telefunc'
+
+export async function onChat() {
+  const channel = createChannel<string, string>()
+
+  channel.listen((msg) => {
+    console.log('from client:', msg)
+    channel.send(`echo: ${msg}`)
+  })
+
+  channel.onClose(() => {
+    console.log('channel closed')
+  })
+
+  return { channel: channel.client }
+}
+```
+
+```tsx
+// Chat.tsx
+// Environment: client
+
+import { onChat } from './Chat.telefunc'
+
+const { channel } = await onChat()
+
+channel.listen((msg) => {
+  console.log('from server:', msg) // 'echo: hello'
+})
+
+channel.send('hello')
+```
+
+Return `channel.client` to the client — it transparently serializes into a `ClientChannel` connected over WebSocket.
+
+
+## Channel interface
+
+Both server and client channels share the same interface:
+
+| Method | Description |
+|---|---|
+| `send(data)` | Send a message |
+| `sendBinary(data)` | Send raw bytes (`Uint8Array`) |
+| `listen(cb)` | Receive messages |
+| `listenBinary(cb)` | Receive raw bytes |
+| `onOpen(cb)` | Fires when the channel is connected |
+| `onClose(cb)` | Fires when the channel closes |
+| `close()` | Close the channel |
+| `isClosed` | Whether the channel has been closed |
+
+
+## Cancellation
+
+Close a channel from the client:
+
+```ts
+channel.close()
+```
+
+You can also close all channels returned by a telefunction using <Link text={<code>abort()</code>} href="/cancellation#abort" />:
+
+```ts
+import { abort } from 'telefunc/client'
+
+const result = await onInit()
+// Closes all channels in the result
+abort(result)
+```
+
+> `abort()` calls `close()` on each channel internally — the effect is the same. `abort()` is useful when a telefunction returns multiple channels or a mix of channels and streams.
+
+
+## WebSocket setup
+
+Channels require a WebSocket connection. In Vite dev mode, this is handled automatically.
+
+For production, install the WebSocket handler on your HTTP server using <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
+
+
+## Reconnection
+
+If the WebSocket connection drops (e.g. network issue), the client automatically reconnects with exponential backoff. Open channels are reconciled — both sides replay missed frames — so the channel resumes without data loss.
+
+> Reconnection is transparent: `onClose` and `onOpen` don't fire during a reconnect. They only fire when the channel is permanently closed or initially opened.
+
+If the client can't reconnect within 60 seconds, all channels are closed permanently.
+
+
+## TypeScript
+
+`createChannel<TSend, TReceive>()` is generic:
+- `TSend` — type of messages the server **sends**
+- `TReceive` — type of messages the server **receives**
+
+```ts
+// Environment: server
+
+import { createChannel } from 'telefunc'
+
+type ServerMessage = { type: 'tick'; count: number }
+type ClientMessage = { type: 'ping' }
+
+export async function onInit() {
+  const channel = createChannel<ServerMessage, ClientMessage>()
+
+  channel.send({ type: 'tick', count: 1 }) // ServerMessage
+  channel.listen((msg) => {})              // msg: ClientMessage
+
+  return { channel: channel.client }
+}
+```
+
+The client channel has the types **flipped** — it sends `ClientMessage` and receives `ServerMessage`:
+
+```ts
+// Environment: client
+
+const { channel } = await onInit()
+
+channel.send({ type: 'ping' })    // ClientMessage
+channel.listen((msg) => {
+  console.log(msg.count) // number — ServerMessage
+})
+```
+
+
+## See also
+
+- <Link href="/createChannel" />
+- <Link href="/telefuncWebSocket" />
+- <Link href="/streaming" />
+- <Link href="/cancellation" />

@@ -210,6 +210,27 @@ try {
 > Values yielded before the `throw Abort()` are delivered to the client. Only subsequent values are dropped.
 
 
+## Transport
+
+By default, streaming values are sent as raw binary chunks over HTTP (`application/octet-stream`). You can change the transport globally or per-call:
+
+| Transport | Description |
+|---|---|
+| `'stream'` (default) | Raw binary chunked HTTP response |
+| `'sse'` | Base64url-encoded Server-Sent Events — works through proxies that buffer binary responses |
+| `'ws'` | WebSocket binary frames |
+
+```ts
+// Environment: client
+
+import { config } from 'telefunc/client'
+
+config.transport = 'sse'
+```
+
+See <Link href="/transport" /> for details.
+
+
 ## Error handling
 
 If a generator throws a regular error (not `Abort()`), the client receives an error with message `'Internal Server Error'`. Values yielded before the error are preserved.
@@ -227,3 +248,5 @@ Use `onConnectionClose()` to detect when the connection ends (client disconnect,
 - <Link href="/cancellation" />
 - <Link href="/Abort" />
 - <Link href="/error-handling" />
+- <Link href="/transport" />
+- <Link href="/channels" />

@@ -1,0 +1,23 @@
+import { Link } from '@brillout/docpress'
+
+**Environment**: server.
+
+Install the Telefunc WebSocket upgrade handler on a Node.js HTTP server. Required for <Link text={<code>createChannel()</code>} href="/createChannel" /> to work in production.
+
+```ts
+import { telefuncWebSocket } from 'telefunc'
+import { createServer } from 'node:http'
+
+const server = createServer()
+telefuncWebSocket(server)
+```
+
+Idempotent — safe to call multiple times on the same server.
+
+> In Vite dev mode, the WebSocket handler is installed automatically by Telefunc's Vite plugin. You only need `telefuncWebSocket()` for production deployments.
+
+
+## See also
+
+- <Link href="/channels" />
+- <Link href="/createChannel" />

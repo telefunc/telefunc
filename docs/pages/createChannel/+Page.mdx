@@ -1,0 +1,36 @@
+import { Link } from '@brillout/docpress'
+
+**Environment**: server.
+
+Create a bidirectional channel for real-time communication with the client.
+
+```ts
+import { createChannel } from 'telefunc'
+
+export async function onChat() {
+  const channel = createChannel<string, string>()
+  channel.listen((msg) => {
+    channel.send(`echo: ${msg}`)
+  })
+  return { channel: channel.client }
+}
+```
+
+Return `channel.client` to the client — it serializes into a `ClientChannel` on the other side. Use `channel` directly on the server for `send()`, `listen()`, and other operations.
+
+> Channels require a WebSocket connection. See <Link href="/telefuncWebSocket" /> for setup.
+
+
+## TypeScript
+
+`createChannel<TSend, TReceive>()` is generic:
+- `TSend` — type of messages the server sends
+- `TReceive` — type of messages the server receives
+
+The client channel has the types flipped automatically.
+
+
+## See also
+
+- <Link href="/channels" />
+- <Link href="/telefuncWebSocket" />
