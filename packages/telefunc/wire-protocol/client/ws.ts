@@ -3,6 +3,7 @@ export { WsConnection }
 import { TAG, encode, encodeCtrl, decode } from '../shared-ws.js'
 import type { CtrlMessage } from '../shared-ws.js'
 import { assert } from '../../utils/assert.js'
+import { ReplayBuffer } from '../replay-buffer.js'
 
 // ── Constants ──
 
@@ -12,6 +13,7 @@ const PONG_TIMEOUT_MS = 10_000
 const RECONNECT_TIMEOUT_MS = 60_000
 const RECONNECT_INITIAL_DELAY_MS = 500
 const RECONNECT_MAX_DELAY_MS = 10_000
+const CLIENT_REPLAY_BYTES = 1024 * 1024
 
 /** Minimal interface that WsConnection needs from a channel.
  *  Implemented by ClientChannel. */
@@ -76,6 +78,10 @@ class WsConnection {
   private channels = new Map<number, WsChannel>()
   private channelIndex = new Map<WsChannel, number>()
   private sendBuffer: Array<{ data: Uint8Array<ArrayBuffer>; channelIx: number | null }> = []
+  /** Highest sequence number received from the server, per channel index. */
+  private lastSeqByChannel = new Map<number, number>()
+  /** Per-channel outgoing replay buffers (1 MB each). */
+  private replayBuffers = new Map<number, ReplayBuffer>()
 
   // Timers
   private ttl: ReturnType<typeof setTimeout> | null = null
@@ -110,6 +116,8 @@ class WsConnection {
     if (ix === undefined) return
     this.channels.delete(ix)
     this.channelIndex.delete(channel)
+    this.lastSeqByChannel.delete(ix)
+    this.replayBuffers.delete(ix)
     this.trySend(encodeCtrl({ t: 'close', ix }), ix)
     this.startTtlIfIdle()
   }
@@ -118,14 +126,22 @@ class WsConnection {
   send(channel: WsChannel, data: string): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.trySend(encode.text(ix, data), ix)
+    const replay = this.replayBuffers.get(ix)!
+    const seq = replay.nextSeq()
+    const frame = encode.text(ix, data, seq)
+    replay.push(seq, frame)
+    this.trySend(frame, ix)
   }
 
   /** Send a binary frame for the given channel. */
   sendBinary(channel: WsChannel, data: Uint8Array): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.trySend(encode.binary(ix, data), ix)
+    const replay = this.replayBuffers.get(ix)!
+    const seq = replay.nextSeq()
+    const frame = encode.binary(ix, data, seq)
+    replay.push(seq, frame)
+    this.trySend(frame, ix)
   }
 
   /** Send a CTRL pause for the given channel. */
@@ -148,6 +164,7 @@ class WsConnection {
     const ix = this.nextIndex++
     this.channels.set(ix, channel)
     this.channelIndex.set(channel, ix)
+    this.replayBuffers.set(ix, new ReplayBuffer(CLIENT_REPLAY_BYTES))
     return ix
   }
 
@@ -183,9 +200,11 @@ class WsConnection {
           this.handleCtrl(frame.ctrl)
           break
         case TAG.TEXT:
+          if (frame.seq && !this.trackSeq(frame.index, frame.seq)) break
           this.channels.get(frame.index)?._onWsMessage(frame.text)
           break
         case TAG.BINARY:
+          if (frame.seq && !this.trackSeq(frame.index, frame.seq)) break
           this.channels.get(frame.index)?._onWsBinaryMessage(frame.data)
           break
       }
@@ -212,11 +231,21 @@ class WsConnection {
 
   private startReconcile(): void {
     this.reconciling = true
-    const open: { id: string; ix: number }[] = []
-    for (const [ix, ch] of this.channels) open.push({ id: ch.id, ix })
+    const open: { id: string; ix: number; lastSeq: number }[] = []
+    for (const [ix, ch] of this.channels) {
+      open.push({ id: ch.id, ix, lastSeq: this.lastSeqByChannel.get(ix) ?? 0 })
+    }
     const ws = this.ws
     assert(ws)
     ws.send(encodeCtrl({ t: 'reconcile', open }))
+  }
+
+  /** Track seq for a channel. Returns false if this is a duplicate (already seen). */
+  private trackSeq(ix: number, seq: number): boolean {
+    const prev = this.lastSeqByChannel.get(ix) ?? 0
+    if (seq <= prev) return false
+    this.lastSeqByChannel.set(ix, seq)
+    return true
   }
 
   private trySend(frame: Uint8Array<ArrayBuffer>, channelIx?: number): void {
@@ -250,19 +279,31 @@ class WsConnection {
         if (!ch) break
         this.channels.delete(ctrl.ix)
         this.channelIndex.delete(ch)
+        this.lastSeqByChannel.delete(ctrl.ix)
+        this.replayBuffers.delete(ctrl.ix)
         ch._onWsClose()
         this.startTtlIfIdle()
         break
       }
 
       case 'reconciled': {
-        const serverIxs = new Set(ctrl.open.map((c) => c.ix))
+        const serverMap = new Map(ctrl.open.map((c) => [c.ix, c.lastSeq]))
         for (const [ix, ch] of this.channels) {
-          if (!serverIxs.has(ix)) {
+          if (!serverMap.has(ix)) {
             this.channels.delete(ix)
             this.channelIndex.delete(ch)
+            this.lastSeqByChannel.delete(ix)
+            this.replayBuffers.delete(ix)
             ch._onWsClose()
           } else {
+            // Replay missed client→server frames for this channel
+            const lastSeq = serverMap.get(ix)!
+            const replay = this.replayBuffers.get(ix)
+            if (replay) {
+              const missed = replay.getAfter(lastSeq)
+              const ws = this.ws
+              if (ws) for (const frame of missed) ws.send(frame as Uint8Array<ArrayBuffer>)
+            }
             ch._onWsOpen()
           }
         }
@@ -353,6 +394,8 @@ class WsConnection {
     for (const ch of this.channels.values()) ch._onWsClose()
     this.channels.clear()
     this.channelIndex.clear()
+    this.lastSeqByChannel.clear()
+    this.replayBuffers.clear()
     WsConnection.cache.delete(this.cacheKey)
   }
 
