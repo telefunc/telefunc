@@ -23,8 +23,7 @@ const LOW = 512 * 1024
 /** WS transport reader — receives binary frames pushed by the server
  *  via WebSocket, with watermark-based backpressure signaling.
  *
- *  Uses `channel._pause()` / `channel._resume()` for backpressure — these
- *  are transport-agnostic (work for both direct and shared WS). */
+ *  Uses `channel._pause()` / `channel._resume()` for backpressure. */
 class ChannelStreamReader extends BaseStreamReader {
   private buffer: Uint8Array = EMPTY
   private wake: (() => void) | null = null
@@ -42,6 +41,7 @@ class ChannelStreamReader extends BaseStreamReader {
     super(callContext)
     this.channel = channel
     callContext.abortController.signal.addEventListener('abort', () => this.cancel(), { once: true })
+    channel.onClose(() => this.cancel())
 
     channel.listenBinary((frame: Uint8Array) => {
       this.buffer = concat(this.buffer, frame)

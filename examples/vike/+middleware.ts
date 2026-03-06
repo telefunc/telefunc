@@ -11,9 +11,9 @@ const telefuncUniversalMiddleware: UniversalMiddleware = async (request, context
       ...runtime,
     },
   })
-  const { body, statusCode, headers } = httpResponse
+  const { statusCode, headers } = httpResponse
 
-  return new Response(body, {
+  return new Response(httpResponse.getReadableWebStream(), {
     status: statusCode,
     headers,
   })
