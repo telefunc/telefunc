@@ -39,8 +39,8 @@ importers:
   docs:
     dependencies:
       '@brillout/docpress':
-        specifier: ^0.16.12
-        version: 0.16.12(@algolia/client-search@5.31.0)(@types/react@19.2.2)(@vitejs/plugin-react-swc@4.2.1(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(rollup@4.44.0)(search-insights@2.17.3)(typescript@5.9.3)(vike@0.4.253(react-streaming@0.4.15(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)))(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1))
+        specifier: ^0.16.19
+        version: 0.16.20(@algolia/client-search@5.31.0)(@types/react@19.2.2)(@vitejs/plugin-react-swc@4.2.1(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(rollup@4.44.0)(search-insights@2.17.3)(typescript@5.9.3)(vike@0.4.253(react-streaming@0.4.15(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)))(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1))
       '@types/react':
         specifier: ^19.2.2
         version: 19.2.2
@@ -1312,8 +1312,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@brillout/docpress@0.16.23':
-    resolution: {integrity: sha512-kr5Q4kQSgjjV7eF6qagk1sLRP9y5IgljCpBF5DStwuTB4C12wMdOHX+/QdENNRkwhqko+Chb+oeAgtvNAZl2uw==}
+  '@brillout/docpress@0.16.20':
+    resolution: {integrity: sha512-iWLfmRd5GIjPgcX8Op4+4aNeVzKuLJkFK1OhAWyHRWxU0CFKlGxGT3unVxr6QTRZvfkdXhVmh8OspmnAbuow5g==}
     peerDependencies:
       '@vitejs/plugin-react-swc': '>=3.0.0'
       react: '>=18.0.0'
@@ -4523,8 +4523,9 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  detype@1.1.3:
-    resolution: {integrity: sha512-uWLfJhQbLFXJE0VVHzuYfPAMFbzS7VJc96uOGZHL2Uw19H3KLdZ5J84qYUw20ia1kq4M9xiF+YCe/6lwNT8/aA==}
+  detype@2.0.4:
+    resolution: {integrity: sha512-1MXZ7Zbl0KMOK8jT9SdmXcyYrj9bNBuKOv36BWsJCKobJ7tFESJLBKas7SLdyJsvUJt4P1oasTDDAkYW8uLJZA==}
+    engines: {node: 20 || 22 || 24 || 25}
     hasBin: true
 
   devalue@5.1.1:
@@ -4582,10 +4583,6 @@ packages:
   enhanced-resolve@5.19.0:
     resolution: {integrity: sha512-phv3E1Xl4tQOShqSte26C7Fl84EwUdZsyOuSSk9qtAGyyQs2s3jJzComh+Abf4g187lUUAvH+H26omrqia2aGg==}
     engines: {node: '>=10.13.0'}
-
-  entities@4.5.0:
-    resolution: {integrity: sha512-V0hjH4dGPh9Ao5p0MoRY6BVqtwCjhz6vI5LT8AJ55H+4g9/4vbHx1I54fS0XuclLhDHArPQCiMjDxjaL8fPxhw==}
-    engines: {node: '>=0.12'}
 
   entities@6.0.1:
     resolution: {integrity: sha512-aN97NXWF6AWBTahfVOIrB/NShkzi5H7F9r1s9mD3cDj4Ko5f2qhhVoYMibXF7GlLveb/D2ioWay8lxI97Ven3g==}
@@ -6902,6 +6899,19 @@ packages:
       vite:
         optional: true
 
+  vike@0.4.255:
+    resolution: {integrity: sha512-pVRovPzIcxPiSg1nkkHg0+PGDc+qMupHw/xgWCvmJHhHO0qfuQ6UgiMq+OdEKB9q64NJJ6uuDXDtpVgvmYUu3w==}
+    engines: {node: '>=20.19.0'}
+    hasBin: true
+    peerDependencies:
+      react-streaming: '>=0.3.42'
+      vite: '>=6.3.0'
+    peerDependenciesMeta:
+      react-streaming:
+        optional: true
+      vite:
+        optional: true
+
   vite-node@3.2.4:
     resolution: {integrity: sha512-EbKSKh+bh1E1IFxeO0pg1n4dvoOTt0UDiXMd/qn++r98+jPO1xtJilvXldeuQ8giIB5IkpjCgMleHMNEsGH6pg==}
     engines: {node: ^18.0.0 || ^20.0.0 || >=22.0.0}
@@ -8367,7 +8377,7 @@ snapshots:
   '@biomejs/cli-win32-x64@1.9.4':
     optional: true
 
-  '@brillout/docpress@0.16.12(@algolia/client-search@5.31.0)(@types/react@19.2.2)(@vitejs/plugin-react-swc@4.2.1(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(rollup@4.44.0)(search-insights@2.17.3)(typescript@5.9.3)(vike@0.4.253(react-streaming@0.4.15(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)))(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1))':
+  '@brillout/docpress@0.16.20(@algolia/client-search@5.31.0)(@types/react@19.2.2)(@vitejs/plugin-react-swc@4.2.1(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(rollup@4.44.0)(search-insights@2.17.3)(typescript@5.9.3)(vike@0.4.253(react-streaming@0.4.15(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)))(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1))':
     dependencies:
       '@brillout/picocolors': 1.0.30
       '@docsearch/css': 3.9.0
@@ -8376,7 +8386,7 @@ snapshots:
       '@mdx-js/react': 3.0.1(@types/react@19.2.2)(react@19.2.0)
       '@mdx-js/rollup': 3.0.1(rollup@4.44.0)
       '@shikijs/transformers': 1.2.0
-      detype: 2.0.3
+      detype: 2.0.4
       estree-util-value-to-estree: 3.5.0
       npm-to-yarn: 3.0.1
       react: 19.2.0
@@ -11070,7 +11080,7 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  detype@1.1.3:
+  detype@2.0.4:
     dependencies:
       '@babel/core': 7.29.0
       '@babel/preset-typescript': 7.28.5(@babel/core@7.29.0)
@@ -11136,8 +11146,6 @@ snapshots:
     dependencies:
       graceful-fs: 4.2.11
       tapable: 2.3.0
-
-  entities@4.5.0: {}
 
   entities@6.0.1: {}
 
@@ -11489,7 +11497,7 @@ snapshots:
       stable-hash: 0.0.4
       tinyglobby: 0.2.14
     optionalDependencies:
-      eslint-plugin-import: 2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.6.1))(typescript@5.8.3))(eslint-import-resolver-typescript@3.8.7(eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.6.1))(typescript@5.8.3))(eslint@9.28.0(jiti@2.6.1)))(eslint@9.28.0(jiti@2.6.1)))(eslint@9.28.0(jiti@2.6.1))
+      eslint-plugin-import: 2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.6.1))(typescript@5.8.3))(eslint-import-resolver-typescript@3.8.7)(eslint@9.28.0(jiti@2.6.1))
     transitivePeerDependencies:
       - supports-color
 
@@ -11504,7 +11512,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.6.1))(typescript@5.8.3))(eslint-import-resolver-typescript@3.8.7(eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.6.1))(typescript@5.8.3))(eslint@9.28.0(jiti@2.6.1)))(eslint@9.28.0(jiti@2.6.1)))(eslint@9.28.0(jiti@2.6.1)):
+  eslint-plugin-import@2.31.0(@typescript-eslint/parser@8.26.1(eslint@9.28.0(jiti@2.6.1))(typescript@5.8.3))(eslint-import-resolver-typescript@3.8.7)(eslint@9.28.0(jiti@2.6.1)):
     dependencies:
       '@rtsao/scc': 1.1.0
       array-includes: 3.1.8
@@ -14439,30 +14447,6 @@ snapshots:
     optionalDependencies:
       react-streaming: 0.4.15(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
       vite: 7.1.5(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)
-    transitivePeerDependencies:
-      - supports-color
-
-  vike@0.4.255(react-streaming@0.4.15(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(vite@7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)):
-    dependencies:
-      '@babel/core': 7.29.0
-      '@babel/types': 7.29.0
-      '@brillout/import': 0.2.6
-      '@brillout/json-serializer': 0.5.22
-      '@brillout/picocolors': 1.0.30
-      '@brillout/vite-plugin-server-entry': 0.7.18
-      cac: 6.7.14
-      es-module-lexer: 1.7.0
-      esbuild: 0.25.12
-      json5: 2.2.3
-      magic-string: 0.30.21
-      picomatch: 4.0.3
-      semver: 7.7.2
-      sirv: 3.0.1
-      source-map-support: 0.5.21
-      tinyglobby: 0.2.15
-    optionalDependencies:
-      react-streaming: 0.4.15(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
-      vite: 7.2.2(@types/node@24.0.10)(jiti@2.6.1)(lightningcss@1.31.1)
     transitivePeerDependencies:
       - supports-color
 
