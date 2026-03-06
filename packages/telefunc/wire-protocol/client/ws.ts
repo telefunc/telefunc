@@ -12,7 +12,7 @@ const PING_INTERVAL_MS = 5_000
 const PONG_TIMEOUT_MS = 10_000
 const RECONNECT_TIMEOUT_MS = 60_000
 const RECONNECT_INITIAL_DELAY_MS = 500
-const RECONNECT_MAX_DELAY_MS = 10_000
+const RECONNECT_MAX_DELAY_MS = 5_000
 const CLIENT_REPLAY_BYTES = 1024 * 1024
 
 /** Minimal interface that WsConnection needs from a channel.
@@ -360,7 +360,7 @@ class WsConnection {
       this.notifyAllClosed()
       return
     }
-    const delay = Math.min(RECONNECT_INITIAL_DELAY_MS * 1.5 ** this.reconnectAttempt, RECONNECT_MAX_DELAY_MS)
+    const delay = Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** this.reconnectAttempt, RECONNECT_MAX_DELAY_MS)
     this.reconnectAttempt++
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
