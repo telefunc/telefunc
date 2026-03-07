@@ -39,11 +39,14 @@ function ChannelDemo() {
 
     channel.listen((msg) => {
       addLog('in', JSON.stringify(msg))
+      // Return ack value to the server
+      return `client-ack:${msg.type}`
     })
 
     // Send a ping to get a welcome
-    channel.send({ type: 'ping' })
+    const ack = await channel.send({ type: 'ping' })
     addLog('out', JSON.stringify({ type: 'ping' }))
+    addLog('system', `ack from server: ${JSON.stringify(ack)}`)
   }, [addLog])
 
   const disconnect = useCallback(() => {
@@ -55,12 +58,13 @@ function ChannelDemo() {
     }
   }, [addLog])
 
-  const sendEcho = useCallback(() => {
+  const sendEcho = useCallback(async () => {
     if (channelRef.current?.isClosed !== false || !echoInput.trim()) return
     const msg = { type: 'echo' as const, text: echoInput.trim() }
-    channelRef.current.send(msg)
-    addLog('out', JSON.stringify(msg))
     setEchoInput('')
+    addLog('out', JSON.stringify(msg))
+    const ack = await channelRef.current.send(msg)
+    addLog('system', `ack from server: ${JSON.stringify(ack)}`)
   }, [echoInput, addLog])
 
   useEffect(() => {

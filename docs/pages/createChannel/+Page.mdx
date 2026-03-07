@@ -29,6 +29,44 @@ Return `channel.client` to the client — it serializes into a `ClientChannel` o
 
 The client channel has the types flipped automatically.
 
+### Acknowledgements
+
+Pass `{ ack: true }` to enable acknowledged sends:
+
+```ts
+// All sends return a Promise — listener return value is the ack
+const channel = createChannel<ServerMsg, ClientMsg>({ ack: true })
+```
+
+You can also opt in per-send without `{ ack: true }` on the channel:
+
+```ts
+const channel = createChannel<ServerMsg, ClientMsg>()
+await channel.send(data, { ack: true })
+```
+
+And opt out for a single send on an ack-default channel:
+
+```ts
+channel.send(data, { ack: false }) // void, no ack
+```
+
+For typed ack values, use 4 type parameters:
+
+```ts
+createChannel<TSend, TReceive, TAckSend, TAckReceive>()
+```
+
+> See <Link href="/channels#acknowledgements" /> for full examples.
+
+
+## Closing & aborting
+
+- `channel.close()` — clean shutdown, no error delivered.
+- `channel.abort(value?)` — closes with an abort value; the other side's `onClose` receives `{ isAbort: true, abortValue: value }`.
+
+> See <Link href="/channels#cancellation" /> for examples.
+
 
 ## See also
 

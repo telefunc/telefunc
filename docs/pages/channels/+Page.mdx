@@ -53,23 +53,49 @@ Both server and client channels share the same interface:
 
 | Method | Description |
 |---|---|
-| `send(data)` | Send a message |
+| `send(data)` | Send a message (returns `Promise` when channel has `ack: true`) |
+| `send(data, { ack: true })` | Send and await the receiver's ack value |
+| `send(data, { ack: false })` | Send without ack (opt-out on ack-default channels) |
 | `sendBinary(data)` | Send raw bytes (`Uint8Array`) |
-| `listen(cb)` | Receive messages |
+| `listen(cb)` | Receive messages (return a value to ack the sender) |
 | `listenBinary(cb)` | Receive raw bytes |
 | `onOpen(cb)` | Fires when the channel is connected |
 | `onClose(cb)` | Fires when the channel closes |
-| `close()` | Close the channel |
+| `close()` | Close the channel cleanly |
+| `abort(value?)` | Close the channel with an abort value (received as an error by the other side) |
 | `isClosed` | Whether the channel has been closed |
 
 
 ## Cancellation
 
-Close a channel from the client:
+### `close()`
+
+Closes the channel cleanly. The other side's `onClose` callback fires with no error.
 
 ```ts
+// client or server
 channel.close()
 ```
+
+### `abort(abortValue?)`
+
+Closes the channel and delivers an abort value to the other side. The other side's `onClose` callback receives an error with `isAbort: true` and the abort value.
+
+```ts
+// Environment: server
+channel.abort({ reason: 'unauthorized' })
+```
+
+```ts
+// Environment: client
+channel.onClose((err) => {
+  if (err?.isAbort) {
+    console.log(err.abortValue) // { reason: 'unauthorized' }
+  }
+})
+```
+
+> Use `abort()` to signal a known error condition (e.g. auth failure, rate limit). Use `close()` for a clean shutdown with no error.
 
 You can also close all channels returned by a telefunction using <Link text={<code>abort()</code>} href="/cancellation#abort" />:
 
@@ -81,7 +107,7 @@ const result = await onInit()
 abort(result)
 ```
 
-> `abort()` calls `close()` on each channel internally — the effect is the same. `abort()` is useful when a telefunction returns multiple channels or a mix of channels and streams.
+> `abort()` from `telefunc/client` calls `close()` on each channel — use it as a convenience when a telefunction returns multiple channels or a mix of channels and streams.
 
 
 ## WebSocket setup
@@ -140,6 +166,87 @@ channel.listen((msg) => {
   console.log(msg.count) // number
 })
 ```
+
+
+## Acknowledgements
+
+Channels support **acknowledged sends**: the sender awaits a value returned by the receiver's listener.
+
+This is useful for request/response patterns over a persistent channel — e.g. confirmed delivery, or getting a computed result back.
+
+### Per-send ack
+
+Pass `{ ack: true }` to a single `send()` call. The listener on the other side returns the ack value.
+
+```ts
+// Environment: server
+export async function onInit() {
+  const channel = createChannel<string, string>()
+
+  channel.listen((msg) => {
+    // Return value becomes the ack
+    return `processed: ${msg}`
+  })
+
+  return { channel: channel.client }
+}
+```
+
+```ts
+// Environment: client
+const { channel } = await onInit()
+
+const ack = await channel.send('hello', { ack: true })
+console.log(ack) // 'processed: hello'
+```
+
+### Channel-wide ack (default-on)
+
+Create the channel with `{ ack: true }` — every `send()` returns a Promise automatically.
+
+```ts
+// Environment: server
+export async function onInit() {
+  const channel = createChannel<string, string>({ ack: true })
+
+  channel.listen((msg) => `processed: ${msg}`)
+
+  // send() always returns Promise when channel has ack: true
+  const ack = await channel.send('hello from server')
+  console.log(ack) // client's ack value
+
+  return { channel: channel.client }
+}
+```
+
+```ts
+// Environment: client
+const { channel } = await onInit()
+
+channel.listen((msg) => `client-ack: ${msg}`)
+
+// Promise returned automatically
+const ack = await channel.send('hello from client')
+console.log(ack) // 'processed: hello from client'
+
+// Opt out for a single send
+channel.send('fire and forget', { ack: false })
+```
+
+### Typed ack values
+
+When you need typed ack values, use 4 type parameters:
+
+```ts
+type ServerMsg = string
+type ClientMsg = string
+type ServerAck = string // ack the server receives back from the client
+type ClientAck = string // ack the client receives back from the server
+
+const channel = createChannel<ServerMsg, ClientMsg, ServerAck, ClientAck>({ ack: true })
+```
+
+> Ack frames are included in the replay buffer. If the connection drops after the receiver processes a message but before the sender gets the ack, the ack is replayed on reconnect — the Promise will still resolve.
 
 
 ## Cross-instance pub/sub

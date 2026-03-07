@@ -6,7 +6,6 @@ import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../ws.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { telefunc } from '../../../node/server/telefunc.js'
-import { setCurrentShard } from '../channel.js'
 import { assertWarning } from '../../../utils/assert.js'
 import type { Telefunc } from '../../../node/server/getContext.js'
 
@@ -191,9 +190,7 @@ function telefuncWebSocket(options?: {
           if (request.headers.get('upgrade') === 'websocket') {
             return adapter.handleDurableUpgrade(this, request)
           }
-          // Set shard context so createChannel() prefixes IDs with the shard index.
           const shard = request.headers.get('x-telefunc-shard')
-          if (shard) setCurrentShard(shard)
           const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
           const httpResponse = await telefunc(context ? { request, context } : { request })
           const responseHeaders = new Headers(httpResponse.headers as HeadersInit)

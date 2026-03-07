@@ -24,6 +24,7 @@ interface WsChannel {
   _onWsOpen(): void
   _onWsMessage(data: string): void
   _onWsBinaryMessage(data: Uint8Array): void
+  _onWsAckReqMessage(data: string, seq: number): Promise<void>
   _onWsClose(err?: Error): void
 }
 
@@ -70,6 +71,9 @@ class WsConnection {
     connection.register(channel)
     return connection
   }
+
+  /** Per-channel pending ack promises. Key: `${channelIx}:${seq}`. */
+  private pendingAcks = new Map<string, (result: unknown) => void>()
 
   private wsUrl: string
   private ws: WebSocket | null = null
@@ -135,6 +139,18 @@ class WsConnection {
     this.trySend(frame, ix)
   }
 
+  /** Send a TEXT_ACK_REQ frame. Returns a Promise resolved when the server sends ACK_RES. */
+  sendTextAckReq(channel: WsChannel, data: string): Promise<unknown> {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return Promise.resolve(undefined)
+    const replay = this.replayBuffers.get(ix)!
+    const seq = replay.nextSeq()
+    const frame = encode.textAckReq(ix, data, seq)
+    replay.push(seq, frame)
+    this.trySend(frame, ix)
+    return new Promise<unknown>((resolve) => this.pendingAcks.set(`${ix}:${seq}`, resolve))
+  }
+
   /** Send a binary frame for the given channel. */
   sendBinary(channel: WsChannel, data: Uint8Array): void {
     const ix = this.channelIndex.get(channel)
@@ -143,6 +159,17 @@ class WsConnection {
     const seq = replay.nextSeq()
     const frame = encode.binary(ix, data, seq)
     replay.push(seq, frame)
+    this.trySend(frame, ix)
+  }
+
+  /** Send an acknowledgement response for a message received from the server. */
+  sendAckRes(channel: WsChannel, ackedSeq: number, result: string): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    const replay = this.replayBuffers.get(ix)!
+    const ownSeq = replay.nextSeq()
+    const frame = encode.ackRes(ix, ownSeq, ackedSeq, result)
+    replay.push(ownSeq, frame)
     this.trySend(frame, ix)
   }
 
@@ -212,8 +239,18 @@ class WsConnection {
           break
         case TAG.TEXT:
         case TAG.BINARY:
+        case TAG.TEXT_ACK_REQ:
           this.handleDataFrame(frame)
           break
+        case TAG.ACK_RES: {
+          const key = `${frame.index}:${frame.ackedSeq}`
+          const resolve = this.pendingAcks.get(key)
+          if (resolve) {
+            this.pendingAcks.delete(key)
+            resolve(parse(frame.text))
+          }
+          break
+        }
       }
     }
 
@@ -259,10 +296,12 @@ class WsConnection {
     return true
   }
 
-  /** Process a TEXT or BINARY data frame — dedup by seq, then deliver. */
+  /** Process a TEXT, BINARY, or TEXT_ACK_REQ data frame — dedup by seq, then deliver. */
   private handleDataFrame(frame: { tag: number; index: number; seq?: number; text?: string; data?: Uint8Array }): void {
     if (frame.seq && !this.trackSeq(frame.index, frame.seq)) return
-    if (frame.tag === TAG.TEXT) {
+    if (frame.tag === TAG.TEXT_ACK_REQ) {
+      this.channels.get(frame.index)?._onWsAckReqMessage(frame.text!, frame.seq ?? 0)
+    } else if (frame.tag === TAG.TEXT) {
       this.channels.get(frame.index)?._onWsMessage(frame.text!)
     } else if (frame.tag === TAG.BINARY) {
       this.channels.get(frame.index)?._onWsBinaryMessage(frame.data!)
@@ -449,6 +488,7 @@ class WsConnection {
     this.channelIndex.clear()
     this.lastSeqByChannel.clear()
     this.replayBuffers.clear()
+    this.pendingAcks.clear()
     WsConnection.cache.delete(this.wsUrl)
   }
 

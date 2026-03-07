@@ -23,8 +23,9 @@ import { WsConnection } from './ws.js'
  */
 class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSend, TReceive> {
   readonly id: string
+  readonly ackMode: boolean
   private _connection: WsConnection
-  private _listeners: Array<(data: TReceive) => void> = []
+  private _listeners: Array<(data: TReceive) => Promise<unknown> | void> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _openCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<(err?: Error) => void> = []
@@ -37,8 +38,9 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     return this as unknown as Channel<TReceive, TSend>
   }
 
-  constructor(channelId: string, shard?: string) {
+  constructor(channelId: string, ackMode = false, shard?: string) {
     this.id = channelId
+    this.ackMode = ackMode
     const config = resolveClientConfig()
     const wsUrl = shard ? appendShardParam(config.telefuncUrl, shard) : config.telefuncUrl
     this._connection = WsConnection.getOrCreate(wsUrl, this)
@@ -48,9 +50,15 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     return this._isClosed
   }
 
-  send(data: TSend): void {
+  send(data: TSend, opts?: { ack?: boolean }): Promise<unknown> | void {
     if (this._isClosed) return
-    this._connection.send(this, stringify(data, { forbidReactElements: false }))
+    const needsAck = opts?.ack !== false && (opts?.ack === true || this.ackMode === true)
+    const serialized = stringify(data, { forbidReactElements: false })
+    if (needsAck) {
+      return this._connection.sendTextAckReq(this, serialized)
+    } else {
+      this._connection.send(this, serialized)
+    }
   }
 
   sendBinary(data: Uint8Array): void {
@@ -58,7 +66,7 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._connection.sendBinary(this, data)
   }
 
-  listen(callback: (data: TReceive) => void): void {
+  listen(callback: (data: TReceive) => Promise<unknown> | void): void {
     this._listeners.push(callback)
   }
 
@@ -121,6 +129,20 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     for (const cb of this._listeners) {
       try {
         cb(parsed)
+      } catch (err) {
+        this._handleCallbackError(err)
+        return
+      }
+    }
+  }
+
+  /** @internal — Server sent TEXT_ACK_REQ; dispatch and send ACK_RES back. */
+  async _onWsAckReqMessage(data: string, seq: number): Promise<void> {
+    const parsed = parse(data) as TReceive
+    for (const cb of this._listeners) {
+      try {
+        const result = await cb(parsed)
+        this._connection.sendAckRes(this, seq, stringify(result, { forbidReactElements: false }))
       } catch (err) {
         this._handleCallbackError(err)
         return

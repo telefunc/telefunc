@@ -70,12 +70,26 @@ function getTelefuncChannelHooks() {
             entry.channel._onPeerMessage(frame.text)
             break
           }
+          case TAG.TEXT_ACK_REQ: {
+            const entry = state.ixMap.get(frame.index)
+            if (!entry) break
+            if (frame.seq && frame.seq <= entry.lastClientSeq) break
+            if (frame.seq) entry.lastClientSeq = frame.seq
+            entry.channel._onPeerAckReqMessage(frame.text, frame.seq)
+            break
+          }
           case TAG.BINARY: {
             const entry = state.ixMap.get(frame.index)
             if (!entry) break
             if (frame.seq && frame.seq <= entry.lastClientSeq) break
             if (frame.seq) entry.lastClientSeq = frame.seq
             entry.channel._onPeerBinaryMessage(frame.data)
+            break
+          }
+          case TAG.ACK_RES: {
+            const entry = state.ixMap.get(frame.index)
+            if (!entry) break
+            entry.channel._onPeerAckRes(frame.ackedSeq, frame.text)
             break
           }
         }

@@ -1,16 +1,16 @@
-export { ReplayBuffer }
-
 /**
  * High-performance replay buffer for outgoing WebSocket data frames.
  *
  * Stores encoded frames keyed by monotonic sequence number for replay
  * on reconnect. Bounded by byte size — oldest entries are evicted when full.
  *
+ * Oversized frames are stored as `null` gap markers. `getAfter` stops at the
+ * first gap so the peer only receives a continuous run.
  */
-class ReplayBuffer {
-  // Parallel arrays — seqs separate for cache-friendly binary search
+export class ReplayBuffer {
+  // Parallel arrays — seqs separate for cache-friendly access
   #seqs: number[] = []
-  #frames: Uint8Array[] = []
+  #frames: (Uint8Array | null)[] = []
   #head = 0
   #totalBytes = 0
   readonly #maxBytes: number
@@ -30,10 +30,17 @@ class ReplayBuffer {
 
   /**
    * Store an already-encoded frame.
-   * @returns `true` if the frame was stored, `false` if it was dropped (too large).
+   * Oversized frames are stored as a `null` gap marker so `getAfter` stops there.
+   * @returns `true` if the frame was stored, `false` if it was too large.
    */
   push(seq: number, frame: Uint8Array): boolean {
-    if (frame.byteLength > this.#maxBytes) return false // never store unstorable frames
+    if (frame.byteLength > this.#maxBytes) {
+      // Mark gap — replay must stop here
+      this.#seqs.push(seq)
+      this.#frames.push(null)
+      if (seq > this.seq) this.seq = seq
+      return false
+    }
 
     this.#seqs.push(seq)
     this.#frames.push(frame)
@@ -44,7 +51,8 @@ class ReplayBuffer {
 
     // Evict oldest entries until within budget
     while (this.#totalBytes > this.#maxBytes && this.#head < this.#frames.length) {
-      this.#totalBytes -= this.#frames[this.#head]!.byteLength
+      const f = this.#frames[this.#head]
+      if (f) this.#totalBytes -= f.byteLength
       this.#head++
     }
 
@@ -54,7 +62,7 @@ class ReplayBuffer {
       this.#frames.length = 0
       this.#head = 0
       this.#totalBytes = 0
-      return false
+      return true
     }
 
     // Compact when dead zone ≥ live zone (amortized O(1))
@@ -67,21 +75,26 @@ class ReplayBuffer {
     return true
   }
 
-  /** Get all frames with seq > afterSeq. O(log n) + O(1) slice. */
+  /** Get all frames with seq > afterSeq, stopping at the first gap. */
   getAfter(afterSeq: number): Uint8Array[] {
     const len = this.#frames.length
-    if (this.#head >= len) return []
-
-    // Binary search: first index where seq > afterSeq
     let lo = this.#head
-    let hi = len
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1
-      if (this.#seqs[mid]! <= afterSeq) lo = mid + 1
-      else hi = mid
+
+    // 1. Skip everything the client already received (ignore past gaps)
+    while (lo < len && this.#seqs[lo]! <= afterSeq) {
+      lo++
     }
 
-    return lo >= len ? [] : this.#frames.slice(lo)
+    // 2. Nothing left or the very next frame is unrecoverable → abort
+    if (lo >= len || this.#frames[lo] === null) {
+      return []
+    }
+
+    // 3. Collect continuous real frames (stop at next gap)
+    let hi = lo + 1
+    while (hi < len && this.#frames[hi] !== null) hi++
+
+    return this.#frames.slice(lo, hi) as Uint8Array[]
   }
 
   get length(): number {

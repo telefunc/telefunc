@@ -23,8 +23,9 @@ type ClientPlaceholderType<C extends PlaceholderTypeContract = PlaceholderTypeCo
   createValue(metadata: C['metadata'], shard?: string): C['result']
 }
 
+/** `ack: true` — ack is on by default for this channel. */
 type ChannelContract = {
   value: ServerChannel
   result: ClientChannel
-  metadata: { channelId: string }
+  metadata: { channelId: string; ack?: true }
 }

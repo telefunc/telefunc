@@ -53,7 +53,10 @@ async function parseResponse(response: Response, callContext: CallContext, shard
   const body = await response.text()
   const ws = extractFrameChannel(body)
   if (ws) {
-    const streamReader = new ChannelStreamReader(new ClientChannel(ws.metadata.channelId, shard), callContext)
+    const streamReader = new ChannelStreamReader(
+      new ClientChannel(ws.metadata.channelId, ws.metadata.ack, shard),
+      callContext,
+    )
     return reviveStreamingResponse(ws.strippedBody, callContext, streamReader, shard)
   }
   return revivePlainResponse(body, callContext, shard)

@@ -1,6 +1,8 @@
-export { createChannel, getChannelRegistry, ServerChannel, ChannelClosedError, setCurrentShard, getCurrentShard }
+export { createChannel, getChannelRegistry, ServerChannel, SERVER_CHANNEL_BRAND, ChannelClosedError }
 
-import type { Channel } from '../channel.js'
+const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
+
+import type { Channel, AckChannel } from '../channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
@@ -10,16 +12,7 @@ import { isAbort } from '../../node/server/Abort.js'
 
 const globalObject = getGlobalObject('channel.ts', {
   channelRegistry: new Map<string, ServerChannel<unknown, unknown>>(),
-  currentShard: undefined as string | undefined,
 })
-
-function setCurrentShard(shard: string): void {
-  globalObject.currentShard = shard
-}
-
-function getCurrentShard(): string | undefined {
-  return globalObject.currentShard
-}
 
 function getChannelRegistry(): Map<string, ServerChannel<unknown, unknown>> {
   return globalObject.channelRegistry
@@ -45,8 +38,20 @@ function getChannelRegistry(): Map<string, ServerChannel<unknown, unknown>> {
  * }
  * ```
  */
-function createChannel<TSend = unknown, TReceive = unknown>(): Channel<TSend, TReceive> {
-  return new ServerChannel<TSend, TReceive>()
+function createChannel<TSend = unknown, TReceive = unknown>(): Channel<TSend, TReceive>
+function createChannel<TSend, TReceive>(opts: { ack: true }): AckChannel<TSend, TReceive, unknown, unknown, true>
+function createChannel<TSend, TReceive, TAckSend, TAckReceive>(opts: {
+  ack: true
+}): AckChannel<TSend, TReceive, TAckSend, TAckReceive, true>
+function createChannel<TSend, TReceive, TAckSend, TAckReceive>(): AckChannel<
+  TSend,
+  TReceive,
+  TAckSend,
+  TAckReceive,
+  false
+>
+function createChannel(opts?: { ack?: true }): Channel | AckChannel<unknown, unknown, unknown, unknown, boolean> {
+  return new ServerChannel(opts?.ack === true)
 }
 
 const DEFAULT_TTL_MS = 30_000
@@ -60,21 +65,34 @@ class ChannelClosedError extends Error {
   }
 }
 class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSend, TReceive> {
+  readonly [SERVER_CHANNEL_BRAND] = true
   readonly id: string
+  /** Whether ack is on by default. Set via `createChannel({ ack: true })`. */
+  readonly ackMode: boolean
 
   /** Return this to the client — it serializes to a `ClientChannel` on the other side. */
   get client(): Channel<TReceive, TSend> {
     return this as unknown as Channel<TReceive, TSend>
   }
 
+  static isServerChannel(value: unknown): value is ServerChannel {
+    // Vite dev server can cause multiple instances of this module to be loaded,
+    // so instanceof checks don't work — use a unique brand property instead.
+    return hasProp(value, SERVER_CHANNEL_BRAND)
+  }
+
   private _isClosed = false
   private _peer: IndexedPeer | null = null
-  private _listeners: Array<(data: TReceive) => void> = []
+  private _listeners: Array<(data: TReceive) => Promise<unknown> | void> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _pauseCallbacks: Array<() => void> = []
   private _resumeCallbacks: Array<() => void> = []
   private _sendBuffer: string[] = []
   private _binarySendBuffer: Uint8Array[] = []
+  /** Buffered ack sends when peer not yet connected: { serialized, resolve }[]. */
+  private _ackSendBuffer: Array<{ data: string; resolve: (v: unknown) => void }> = []
+  /** Pending ack promises keyed by the seq of the outgoing frame. */
+  private _pendingAcks = new Map<number, (result: unknown) => void>()
   private _closeCallbacks: Array<(err?: Error) => void> = []
   private _openCallbacks: Array<() => void> = []
   private _closeError: Error | undefined
@@ -85,7 +103,8 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   private _disconnected = false
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-  constructor() {
+  constructor(ackMode = false) {
+    this.ackMode = ackMode
     this.id = crypto.randomUUID()
     getChannelRegistry().set(this.id, this as ServerChannel<unknown, unknown>)
     // If no peer connects within TTL, close automatically.
@@ -102,14 +121,29 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   }
 
   /** Send a message to the client.
+   *  @param opts.ack - When `true`, returns a Promise resolved with the client's ack value.
+   *                    Always `true` (and the overload returns Promise automatically) when the
+   *                    channel was created with `createChannel({ ack: true })`.
    *  @throws {ChannelClosedError} if the channel is closed. */
-  send(data: TSend): void {
+  send(data: TSend, opts?: { ack?: boolean }): Promise<unknown> | void {
     if (this._isClosed) throw new ChannelClosedError()
+    const needsAck = opts?.ack !== false && (opts?.ack === true || this.ackMode === true)
     const serialized = stringify(data, { forbidReactElements: false })
+    if (!needsAck) {
+      if (this._peer) {
+        this._peer.sendText(serialized)
+      } else {
+        this._sendBuffer.push(serialized)
+      }
+      return
+    }
     if (this._peer) {
-      this._peer.sendText(serialized)
+      const seq = this._peer.sendTextAckReq(serialized)
+      return new Promise<unknown>((resolve) => this._pendingAcks.set(seq, resolve))
     } else {
-      this._sendBuffer.push(serialized)
+      return new Promise<unknown>((resolve) => {
+        this._ackSendBuffer.push({ data: serialized, resolve })
+      })
     }
   }
 
@@ -124,7 +158,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     }
   }
 
-  listen(callback: (data: TReceive) => void): void {
+  listen(callback: (data: TReceive) => Promise<unknown> | void): void {
     this._listeners.push(callback)
   }
 
@@ -193,18 +227,39 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._sendBuffer = []
     for (const msg of this._binarySendBuffer) peer.sendBinary(msg)
     this._binarySendBuffer = []
+    // Flush buffered ack sends
+    for (const { data, resolve } of this._ackSendBuffer) {
+      const seq = peer.sendTextAckReq(data)
+      this._pendingAcks.set(seq, resolve)
+    }
+    this._ackSendBuffer = []
     this._fireOpen()
     if (wasDisconnected) {
       for (const cb of this._resumeCallbacks) cb()
     }
   }
 
-  /** @internal */
+  /** @internal — Called by ws.ts when a TEXT frame arrives (no ack expected). */
   _onPeerMessage(text: string): void {
     const data = parse(text) as TReceive
     for (const cb of this._listeners) {
       try {
         cb(data)
+      } catch (err) {
+        this._handleCallbackError(err)
+        return
+      }
+    }
+  }
+
+  /** @internal — Called by ws.ts when a TEXT_ACK_REQ frame arrives. Dispatches the
+   *  message and sends ACK_RES with the listener's resolved value. */
+  async _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
+    const data = parse(text) as TReceive
+    for (const cb of this._listeners) {
+      try {
+        const result = await cb(data)
+        this._peer?.sendAckRes(seq, stringify(result, { forbidReactElements: false }))
       } catch (err) {
         this._handleCallbackError(err)
         return
@@ -222,6 +277,14 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
         return
       }
     }
+  }
+
+  /** @internal — Client sent ACK_RES for a message we sent. */
+  _onPeerAckRes(ackedSeq: number, resultText: string): void {
+    const resolve = this._pendingAcks.get(ackedSeq)
+    if (!resolve) return
+    this._pendingAcks.delete(ackedSeq)
+    resolve(parse(resultText))
   }
 
   /** @internal — Connection dropped, keep channel alive for reconnection. */

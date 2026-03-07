@@ -20,11 +20,33 @@ class IndexedPeer {
     this.ws.send(frame)
   }
 
+  /** Send a text frame that requests an ack response from the receiver. Returns seq. */
+  sendTextAckReq(data: string): number {
+    const seq = this.replay.nextSeq()
+    const frame = encode.textAckReq(this.index, data, seq)
+    this.replay.push(seq, frame)
+    this.ws.send(frame)
+    return seq
+  }
+
   sendBinary(data: Uint8Array): void {
     const seq = this.replay.nextSeq()
     const frame = encode.binary(this.index, data, seq)
     this.replay.push(seq, frame)
     this.ws.send(frame)
+  }
+
+  /** Send an acknowledgement response for a message the client sent.
+   *  ACK_RES frames are NOT stored in the replay buffer \u2014 they are transient. */
+  sendAckRes(ackedSeq: number, result: string): void {
+    const seq = this.replay.nextSeq()
+    const frame = encode.ackRes(this.index, seq, ackedSeq, result)
+    this.replay.push(seq, frame)
+    try {
+      this.ws.send(frame)
+    } catch {
+      /* WS may already be closed */
+    }
   }
 
   close(): void {
