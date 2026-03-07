@@ -150,13 +150,13 @@ const headings = [
   },
   {
     level: 2,
-    title: 'Cancellation',
-    url: '/cancellation',
+    title: 'Real-time (WebSocket)',
+    url: '/channels',
   },
   {
     level: 2,
-    title: 'Real-time (WebSocket)',
-    url: '/channels',
+    title: 'Cancellation',
+    url: '/cancellation',
   },
   {
     level: 1,
