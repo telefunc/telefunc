@@ -118,6 +118,8 @@ For production, install the WebSocket adapter for your runtime — see <Link hre
 
 > All channels — and streaming values when using <Link text={<code>transport: 'ws'</code>} href="/transport" /> — share a single multiplexed WebSocket connection per server URL.
 
+The WebSocket connection is created on demand when the first channel is opened, and closed automatically after the last channel is closed (configurable via `idleTimeout`, default 60 seconds — see <Link href="/telefuncWebSocket#options" />).
+
 
 ## Reconnection
 
@@ -126,46 +128,6 @@ If the WebSocket connection drops (e.g. network issue), the client automatically
 > Reconnection is transparent: `onClose` and `onOpen` don't fire during a reconnect. They only fire when the channel is permanently closed or initially opened.
 
 If the client can't reconnect within 60 seconds, all channels are closed permanently.
-
-
-## TypeScript
-
-`createChannel<TSend, TReceive>()` is generic:
-- `TSend` — type of messages the server **sends**
-- `TReceive` — type of messages the server **receives**
-
-```ts
-// Environment: server
-
-import { createChannel } from 'telefunc'
-
-type ServerMessage = { type: 'tick'; count: number }
-type ClientMessage = { type: 'ping' }
-
-export async function onInit() {
-  const channel = createChannel<ServerMessage, ClientMessage>()
-
-  channel.send({ type: 'tick', count: 1 })
-  channel.listen((msg) => {
-    msg.type // 'ping'
-  })
-
-  return { channel: channel.client }
-}
-```
-
-The client channel has the types **flipped** — it sends `ClientMessage` and receives `ServerMessage`:
-
-```ts
-// Environment: client
-
-const { channel } = await onInit()
-
-channel.send({ type: 'ping' })
-channel.listen((msg) => {
-  console.log(msg.count) // number
-})
-```
 
 
 ## Acknowledgements
@@ -247,6 +209,46 @@ const channel = createChannel<ServerMsg, ClientMsg, ServerAck, ClientAck>({ ack:
 ```
 
 > Ack frames are included in the replay buffer. If the connection drops after the receiver processes a message but before the sender gets the ack, the ack is replayed on reconnect — the Promise will still resolve.
+
+
+## TypeScript
+
+`createChannel<TSend, TReceive>()` is generic:
+- `TSend` — type of messages the server **sends**
+- `TReceive` — type of messages the server **receives**
+
+```ts
+// Environment: server
+
+import { createChannel } from 'telefunc'
+
+type ServerMessage = { type: 'tick'; count: number }
+type ClientMessage = { type: 'ping' }
+
+export async function onInit() {
+  const channel = createChannel<ServerMessage, ClientMessage>()
+
+  channel.send({ type: 'tick', count: 1 })
+  channel.listen((msg) => {
+    msg.type // 'ping'
+  })
+
+  return { channel: channel.client }
+}
+```
+
+The client channel has the types **flipped** — it sends `ClientMessage` and receives `ServerMessage`:
+
+```ts
+// Environment: client
+
+const { channel } = await onInit()
+
+channel.send({ type: 'ping' })
+channel.listen((msg) => {
+  console.log(msg.count) // number
+})
+```
 
 
 ## Cross-instance pub/sub

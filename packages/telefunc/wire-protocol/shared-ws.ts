@@ -55,7 +55,14 @@ type CtrlError = { t: 'error'; ix: number }
 /** Client → server on every (re)connect: all open channels with client-owned indices. */
 type CtrlReconcile = { t: 'reconcile'; open: { id: string; ix: number; lastSeq: number }[] }
 /** Server → client after reconcile: all channels the server actually attached, with lastSeq the server received per channel. */
-type CtrlReconciled = { t: 'reconciled'; open: { id: string; ix: number; lastSeq: number }[] }
+type CtrlReconciled = {
+  t: 'reconciled'
+  open: { id: string; ix: number; lastSeq: number }[]
+  reconnectTimeout: number
+  idleTimeout: number
+  pingInterval: number
+  clientReplayBuffer: number
+}
 type CtrlMessage =
   | CtrlClose
   | CtrlAbort

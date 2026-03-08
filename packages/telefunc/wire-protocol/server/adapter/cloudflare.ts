@@ -4,6 +4,7 @@ export { telefuncWebSocket }
 import { DurableObject } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../ws.js'
+import type { TelefuncWebSocketOptions } from '../ws.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { telefunc } from '../../../node/server/telefunc.js'
 import { assertWarning } from '../../../utils/assert.js'
@@ -11,22 +12,25 @@ import type { Telefunc } from '../../../node/server/getContext.js'
 
 /** Return type of {@link telefuncWebSocket}. */
 interface TelefuncAdapter {
-  /**
-   * Add this to your worker's `fetch` handler. It intercepts Telefunc requests
-   * (both regular calls and WebSocket connections) and handles them automatically.
-   * Returns `undefined` for any request that isn't related to Telefunc.
-   */
+  /** Intercepts Telefunc requests (HTTP + WebSocket). Returns `undefined` for non-Telefunc requests. */
   handleTelefunc(request: Request, env: Cloudflare.Env, ctx: ExecutionContext): Promise<Response> | undefined
-  /**
-   * Creates the Durable Object class that powers real-time channels.
-   * Export the result from your worker and register it in `wrangler.toml`.
-   *
-   * @example
-   * ```ts
-   * export const $TelefuncDurableObject = ws.createDurableObjectClass()
-   * ```
-   */
+  /** Creates the Durable Object class. Export it from your worker and register it in `wrangler.toml`. */
   createDurableObjectClass(): new (ctx: DurableObjectState, env: Cloudflare.Env) => DurableObject
+}
+
+type CloudflareWebSocketOptions = TelefuncWebSocketOptions & {
+  /** Durable Object binding name. Default: `'$TelefuncDurableObject'`. */
+  bindingName?: string
+  /** Instance name for the DO. Default: `'telefunc'`. */
+  instanceName?: string
+  /** Returns the Telefunc context for each request (`getContext()`). */
+  context?: (request: Request, env: Cloudflare.Env) => Telefunc.Context | Promise<Telefunc.Context>
+  /** Number of parallel Durable Objects. Default: `1`. */
+  shards?: number
+  /** Pin each browser session to one shard. Default: `true`. Only relevant when `shards > 1`. */
+  stickyShards?: boolean
+  /** Location hint for initial DO placement. See CF docs for valid values (e.g. `'weur'`, `'enam'`). */
+  locationHint?: DurableObjectLocationHint
 }
 
 /**
@@ -60,67 +64,17 @@ interface TelefuncAdapter {
  * new_classes = ["$TelefuncDurableObject"]
  * ```
  */
-function telefuncWebSocket(options?: {
-  /**
-   * The name of the Durable Object binding in your `wrangler.toml`.
-   * Only change this if you used a custom name instead of `$TelefuncDurableObject`.
-   * Default: `$TelefuncDurableObject`.
-   */
-  bindingName?: string
-  /**
-   * A name to identify this Telefunc instance.
-   * Only relevant if you're running multiple independent Telefunc setups in the same Worker.
-   * Default: `telefunc`.
-   */
-  instanceName?: string
-  /**
-   * A function that returns the Telefunc context for each request.
-   * Use this to attach the logged-in user, auth token, or any other
-   * per-request data that your telefunctions can access via `getContext()`.
-   *
-   * @example
-   * ```ts
-   * telefuncWebSocket({
-   *   context: async (request, env) => ({
-   *     user: await getUserFromCookie(request, env),
-   *   })
-   * })
-   * ```
-   */
-  context?: (request: Request, env: Cloudflare.Env) => Telefunc.Context | Promise<Telefunc.Context>
-  /**
-   * How many parallel instances to run (default: `1`).
-   *
-   * Increase this if you have a large number of concurrent open channels and hit
-   * memory or CPU limits on a single instance. Each shard handles an independent
-   * subset of channels — Telefunc takes care of routing automatically.
-   *
-   * Start with `1` and only increase if you actually need it.
-   */
-  shards?: number
-  /**
-   * Pin each browser session to one shard (default: `true`).
-   *
-   * When enabled, the server tells the client which shard handled its request.
-   * The client then sends that shard back on every subsequent call, so a user's
-   * open channels and regular telefunction calls all land on the same Durable
-   * Object instance — avoiding redundant WebSocket connections and keeping
-   * per-user in-memory state in one place.
-   *
-   * Only relevant when `shards > 1`. Set to `false` if you intentionally want
-   * calls load-balanced across shards (e.g. stateless workers with no channels).
-   */
-  stickyShards?: boolean
-}): TelefuncAdapter {
+function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapter {
   const bindingName = options?.bindingName ?? '$TelefuncDurableObject'
   const baseInstanceName = options?.instanceName ?? 'telefunc'
   const shards = options?.shards ?? 1
   const stickyShards = options?.stickyShards ?? true
+  const locationHint = options?.locationHint
 
   const ws = crossws({
     bindingName,
     instanceName: baseInstanceName,
-    hooks: getTelefuncChannelHooks(),
+    hooks: getTelefuncChannelHooks(options),
   })
 
   function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
@@ -129,7 +83,7 @@ function telefuncWebSocket(options?: {
 
   function getStub(binding: DurableObjectNamespace, shardIndex: number): DurableObjectStub {
     const instanceName = shards > 1 ? `${baseInstanceName}-${shardIndex}` : baseInstanceName
-    return binding.get(binding.idFromName(instanceName))
+    return binding.get(binding.idFromName(instanceName), locationHint ? { locationHint } : undefined)
   }
 
   function randomShard(): number {

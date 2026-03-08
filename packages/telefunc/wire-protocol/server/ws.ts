@@ -1,4 +1,5 @@
 export { getTelefuncChannelHooks }
+export type { TelefuncWebSocketOptions }
 
 import { defineHooks, type Peer } from 'crossws'
 import type { ServerChannel } from './channel.js'
@@ -6,21 +7,62 @@ import { getChannelRegistry } from './channel.js'
 import { TAG, decode, encodeCtrl } from '../shared-ws.js'
 import type { CtrlMessage } from '../shared-ws.js'
 import { hasProp } from '../../utils/hasProp.js'
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { parse } from '@brillout/json-serializer/parse'
+import {
+  WS_PING_INTERVAL,
+  WS_PING_INTERVAL_MIN,
+  WS_SERVER_REPLAY_BUFFER,
+  WS_CLIENT_REPLAY_BUFFER,
+  WS_RECONNECT_TIMEOUT,
+  WS_IDLE_TIMEOUT,
+} from '../constants.js'
 
-// Client sends CTRL ping every 5s. If the server doesn't receive a ping
-// within PING_TIMEOUT_MS (2× the interval), the client is dead.
-const PING_TIMEOUT_MS = 10_000
-const SERVER_REPLAY_BYTES = 256 * 1024
-
-// ── Global state — flat map, persists across reconnects ──
-//
-// Keyed by channelId (each channel's own ID) for direct O(1) lookup.
-// Survives WS reconnects so replay buffers and seq tracking are preserved
-// regardless of which channelId appears in the WS URL.
+type TelefuncWebSocketOptions = {
+  /**
+   * How long (in milliseconds) to keep the connection alive after a client
+   * disconnects, waiting for a reconnect before permanently closing all channels.
+   *
+   * @default 60_000
+   */
+  reconnectTimeout?: number
+  /**
+   * How long (in milliseconds) to keep the WebSocket connection open after
+   * the last channel is closed, before closing it.
+   *
+   * A warm connection avoids the cost of a new WebSocket handshake when
+   * a new channel is opened shortly after.
+   *
+   * @default 60_000
+   */
+  idleTimeout?: number
+  /**
+   * How often (in milliseconds) the client sends a ping to the server.
+   * The server considers the client dead after 2× this interval without a ping.
+   *
+   * Clamped to a minimum of 1000ms.
+   *
+   * @default 5_000
+   */
+  pingInterval?: number
+  /**
+   * Size (in bytes) of the per-channel replay buffer on the server.
+   * Frames within this budget are replayed to a reconnecting client.
+   * Larger values survive more missed data at the cost of server memory.
+   *
+   * @default 262_144 (256 KB)
+   */
+  serverReplayBuffer?: number
+  /**
+   * Size (in bytes) of the per-channel replay buffer on the client.
+   * Frames within this budget are replayed to the server on reconnect.
+   * Larger values survive more missed data at the cost of client memory.
+   *
+   * @default 1_048_576 (1 MB)
+   */
+  clientReplayBuffer?: number
+}
 
 type ChannelEntry = { channel: ServerChannel; lastClientSeq: number; replay: ReplayBuffer }
 
@@ -30,23 +72,151 @@ type PeerState = {
   terminatePermanently: boolean | null
 }
 
-const globalObject = getGlobalObject('ws-state.ts', {
-  peerStates: new Map<string, PeerState>(),
-  wsChannels: new Map<string, ChannelEntry>(),
-})
+function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
+  const reconnectTimeout = opts?.reconnectTimeout ?? WS_RECONNECT_TIMEOUT
+  const idleTimeout = opts?.idleTimeout ?? WS_IDLE_TIMEOUT
+  const pingInterval = Math.max(opts?.pingInterval ?? WS_PING_INTERVAL, WS_PING_INTERVAL_MIN)
+  const pingDeadline = pingInterval * 2
+  const serverReplayBuffer = opts?.serverReplayBuffer ?? WS_SERVER_REPLAY_BUFFER
+  const clientReplayBuffer = opts?.clientReplayBuffer ?? WS_CLIENT_REPLAY_BUFFER
 
-const { peerStates, wsChannels } = globalObject
+  const peerStates = new Map<string, PeerState>()
+  const wsChannels = new Map<string, ChannelEntry>()
 
-function getOrCreatePeerState(peer: Peer): PeerState {
-  let s = peerStates.get(peer.id)
-  if (!s) {
-    s = { ixMap: new Map(), pingTimer: null, terminatePermanently: null }
-    peerStates.set(peer.id, s)
+  function getOrCreatePeerState(peer: Peer): PeerState {
+    let s = peerStates.get(peer.id)
+    if (!s) {
+      s = { ixMap: new Map(), pingTimer: null, terminatePermanently: null }
+      peerStates.set(peer.id, s)
+    }
+    return s
   }
-  return s
-}
 
-function getTelefuncChannelHooks() {
+  function resetPingTimer(peer: Peer): void {
+    const state = getOrCreatePeerState(peer)
+    clearPingTimer(peer)
+    state.pingTimer = setTimeout(() => {
+      state.pingTimer = null
+      peer.terminate()
+      state.terminatePermanently = false
+    }, pingDeadline)
+    if (hasProp(state.pingTimer, 'unref', 'function')) {
+      state.pingTimer.unref()
+    }
+  }
+
+  function clearPingTimer(peer: Peer): void {
+    const state = peerStates.get(peer.id)
+    if (state?.pingTimer) {
+      clearTimeout(state.pingTimer)
+      state.pingTimer = null
+    }
+  }
+
+  function handleCtrl(ctrl: CtrlMessage, peer: Peer): void {
+    const state = getOrCreatePeerState(peer)
+    switch (ctrl.t) {
+      // ── Heartbeat ──
+      case 'ping': {
+        peer.send(encodeCtrl({ t: 'pong' }))
+        resetPingTimer(peer)
+        break
+      }
+
+      // ── Channel lifecycle ──
+      case 'close': {
+        const entry = state.ixMap.get(ctrl.ix)
+        if (!entry) break
+        state.ixMap.delete(ctrl.ix)
+        entry.channel._onPeerClose()
+        break
+      }
+
+      case 'abort': {
+        const entry = state.ixMap.get(ctrl.ix)
+        if (!entry) break
+        state.ixMap.delete(ctrl.ix)
+        entry.channel.abort(parse(ctrl.abortValue))
+        break
+      }
+
+      // ── Reconciliation ──
+      //
+      // 1. Replay: send any frames the client missed (seq > lastSeq).
+      // 2. For each channel the client mentions:
+      //    - Alive in registry → attach at client's ix, include in response
+      //    - Dead → simply omit from response (client diffs to discover)
+      // 3. For channels in ixMap NOT mentioned by client → _onPeerClose()
+      // 4. Respond with reconciled { open } = all channels we actually attached
+      // 5. Client diffs its map against our response → closes its orphans
+      case 'reconcile': {
+        const registry = getChannelRegistry()
+        const reconciledIxs = new Set<number>()
+        const attached: { id: string; ix: number; lastSeq: number }[] = []
+
+        // Snapshot old ixMap for orphan detection, then rebuild
+        const prevIxMap = new Map(state.ixMap)
+        state.ixMap.clear()
+
+        // Replay missed frames and attach peers for alive channels
+        for (const { id, ix, lastSeq } of ctrl.open) {
+          reconciledIxs.add(ix)
+          const ch = registry.get(id)
+          if (!ch || ch.isClosed) continue
+
+          // Get existing entry (with replay buffer) or create new
+          const existing = wsChannels.get(id)
+          const replay = existing?.replay ?? new ReplayBuffer(serverReplayBuffer)
+          const lastClientSeq = existing?.lastClientSeq ?? 0
+
+          // Replay missed server→client frames
+          const missed = replay.getAfter(lastSeq)
+          for (const frame of missed) peer.send(frame)
+
+          const entry: ChannelEntry = { channel: ch, lastClientSeq, replay }
+          state.ixMap.set(ix, entry)
+
+          wsChannels.set(id, entry)
+          ch.onClose(() => wsChannels.delete(id))
+
+          ch.attachPeer(new IndexedPeer(peer, ix, replay))
+          attached.push({ id, ix, lastSeq: lastClientSeq })
+        }
+
+        // Channels in previous ixMap that client didn't mention → client closed them
+        for (const [ix, entry] of prevIxMap) {
+          if (reconciledIxs.has(ix)) continue
+          if (!entry.channel.isClosed) entry.channel._onPeerClose()
+        }
+
+        // Respond with what we attached — client diffs to find its own orphans
+        peer.send(
+          encodeCtrl({
+            t: 'reconciled',
+            open: attached,
+            reconnectTimeout,
+            idleTimeout,
+            pingInterval,
+            clientReplayBuffer,
+          }),
+        )
+        break
+      }
+
+      // ── Backpressure ──
+      case 'pause': {
+        const entry = state.ixMap.get(ctrl.ix)
+        if (entry) entry.channel._onPeerPause()
+        break
+      }
+      case 'resume': {
+        const entry = state.ixMap.get(ctrl.ix)
+        if (entry) entry.channel._onPeerResume()
+        break
+      }
+    }
+  }
+
   return defineHooks({
     open(peer) {
       getOrCreatePeerState(peer)
@@ -113,7 +283,7 @@ function getTelefuncChannelHooks() {
         state.ixMap.clear()
       } else {
         for (const entry of state.ixMap.values()) {
-          entry.channel._onPeerDisconnect()
+          entry.channel._onPeerDisconnect(reconnectTimeout)
         }
       }
       peerStates.delete(peer.id)
@@ -124,124 +294,4 @@ function getTelefuncChannelHooks() {
       peerStates.delete(peer.id)
     },
   })
-}
-
-// ── Ping timer ──
-
-function resetPingTimer(peer: Peer): void {
-  const state = getOrCreatePeerState(peer)
-  clearPingTimer(peer)
-  state.pingTimer = setTimeout(() => {
-    state.pingTimer = null
-    peer.terminate()
-    state.terminatePermanently = false
-  }, PING_TIMEOUT_MS)
-  if (hasProp(state.pingTimer, 'unref', 'function')) {
-    state.pingTimer.unref()
-  }
-}
-
-function clearPingTimer(peer: Peer): void {
-  const state = peerStates.get(peer.id)
-  if (state?.pingTimer) {
-    clearTimeout(state.pingTimer)
-    state.pingTimer = null
-  }
-}
-
-// ── CTRL handling ──
-
-function handleCtrl(ctrl: CtrlMessage, peer: Peer): void {
-  const state = getOrCreatePeerState(peer)
-  switch (ctrl.t) {
-    // ── Heartbeat ──
-    case 'ping': {
-      peer.send(encodeCtrl({ t: 'pong' }))
-      resetPingTimer(peer)
-      break
-    }
-
-    // ── Channel lifecycle ──
-    case 'close': {
-      const entry = state.ixMap.get(ctrl.ix)
-      if (!entry) break
-      state.ixMap.delete(ctrl.ix)
-      entry.channel._onPeerClose()
-      break
-    }
-
-    case 'abort': {
-      const entry = state.ixMap.get(ctrl.ix)
-      if (!entry) break
-      state.ixMap.delete(ctrl.ix)
-      entry.channel.abort(parse(ctrl.abortValue))
-      break
-    }
-
-    // ── Reconciliation ──
-    //
-    // 1. Replay: send any frames the client missed (seq > lastSeq).
-    // 2. For each channel the client mentions:
-    //    - Alive in registry → attach at client's ix, include in response
-    //    - Dead → simply omit from response (client diffs to discover)
-    // 3. For channels in ixMap NOT mentioned by client → _onPeerClose()
-    // 4. Respond with reconciled { open } = all channels we actually attached
-    // 5. Client diffs its map against our response → closes its orphans
-    case 'reconcile': {
-      const registry = getChannelRegistry()
-      const reconciledIxs = new Set<number>()
-      const attached: { id: string; ix: number; lastSeq: number }[] = []
-
-      // Snapshot old ixMap for orphan detection, then rebuild
-      const prevIxMap = new Map(state.ixMap)
-      state.ixMap.clear()
-
-      // Replay missed frames and attach peers for alive channels
-      for (const { id, ix, lastSeq } of ctrl.open) {
-        reconciledIxs.add(ix)
-        const ch = registry.get(id)
-        if (!ch || ch.isClosed) continue
-
-        // Get existing entry (with replay buffer) or create new
-        const existing = wsChannels.get(id)
-        const replay = existing?.replay ?? new ReplayBuffer(SERVER_REPLAY_BYTES)
-        const lastClientSeq = existing?.lastClientSeq ?? 0
-
-        // Replay missed server→client frames
-        const missed = replay.getAfter(lastSeq)
-        for (const frame of missed) peer.send(frame)
-
-        const entry: ChannelEntry = { channel: ch, lastClientSeq, replay }
-        state.ixMap.set(ix, entry)
-
-        wsChannels.set(id, entry)
-        ch.onClose(() => wsChannels.delete(id))
-
-        ch.attachPeer(new IndexedPeer(peer, ix, replay))
-        attached.push({ id, ix, lastSeq: lastClientSeq })
-      }
-
-      // Channels in previous ixMap that client didn't mention → client closed them
-      for (const [ix, entry] of prevIxMap) {
-        if (reconciledIxs.has(ix)) continue
-        if (!entry.channel.isClosed) entry.channel._onPeerClose()
-      }
-
-      // Respond with what we attached — client diffs to find its own orphans
-      peer.send(encodeCtrl({ t: 'reconciled', open: attached }))
-      break
-    }
-
-    // ── Backpressure ──
-    case 'pause': {
-      const entry = state.ixMap.get(ctrl.ix)
-      if (entry) entry.channel._onPeerPause()
-      break
-    }
-    case 'resume': {
-      const entry = state.ixMap.get(ctrl.ix)
-      if (entry) entry.channel._onPeerResume()
-      break
-    }
-  }
 }

@@ -84,6 +84,28 @@ new_classes = ["$TelefuncDurableObject"]
 
 Channels require a [Durable Object](https://developers.cloudflare.com/durable-objects/) so that the WebSocket and the telefunction that created the channel run in the same isolate. Telefunc handles this automatically — you just need to export the class and register the binding.
 
+> **[Durable Object hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#why-use-hibernation) while channels are open is not supported.**
+>
+> Channels are plain in-memory JavaScript — closures, local variables, callbacks. When the DO hibernates, the entire heap is wiped and there is nothing to restore them from. The DO therefore stays loaded in memory for the lifetime of each open channel.
+>
+> Once all channels are closed and no clients are connected, Telefunc has no pending work and the DO can hibernate freely. By default this happens within 60 seconds of the last disconnect (the `reconnectTimeout` + `idleTimeout` window). You can shorten it:
+>
+> ```ts
+> const ws = telefuncWebSocket({
+>   reconnectTimeout: 5_000,  // close channels 5s after disconnect (default: 60s)
+>   idleTimeout: 5_000,       // close WS 5s after last channel closes (default: 60s)
+>   pingInterval: 2_000,      // ping every 2s, dead detection in 4s (default: 5s)
+> })
+> ```
+>
+> - `reconnectTimeout` — how long to hold channels alive waiting for a dropped client to reconnect. Shorter = faster hibernate, but less tolerant of network blips.
+> - `idleTimeout` — how long to keep the WebSocket open after the last channel closes. Shorter = faster hibernate, but the next channel open pays the cost of a new handshake.
+> - `pingInterval` — how often the client pings. Shorter values speed up dead-client detection, which lets channels close sooner.
+>
+> The exception is user code: if your telefunction starts a `setInterval` or `setTimeout` and forgets to clear it in `channel.onClose()`, that timer will keep the DO awake.
+>
+> If hibernation support while channels are open is important to you, [open an issue](https://github.com/brillout/telefunc/issues) — use-case details help prioritise.
+
 ### Context
 
 To pass per-request data (logged-in user, auth token, etc.) to your telefunctions via `getContext()`, provide a `context` function:
@@ -117,6 +139,28 @@ The binding name defaults to `$TelefuncDurableObject`. To use a different name, 
 ```ts
 const ws = telefuncWebSocket({ bindingName: 'MyDurableObject' })
 ```
+
+### Location hint
+
+Durable Objects are pinned to the datacenter where they are first created. By default, that is wherever the first request arrives from. To control initial placement, pass a `locationHint`:
+
+```ts
+const ws = telefuncWebSocket({ locationHint: 'weur' })
+```
+
+Best-effort, only applies at creation time — once a DO exists, it stays in its datacenter. See [Cloudflare docs on data location](https://developers.cloudflare.com/durable-objects/reference/data-location/) for valid values.
+
+## Options
+
+All adapters accept the following options:
+
+| Option | Default | Description |
+|---|---|---|
+| `reconnectTimeout` | `60_000` | How long (ms) to hold channels open after a client disconnects, waiting for a reconnect. |
+| `idleTimeout` | `60_000` | How long (ms) to keep the WebSocket open after the last channel closes. |
+| `pingInterval` | `5_000` | How often (ms) the client sends a ping. The server considers the client dead after 2× this interval. Minimum: 1000ms. |
+| `serverReplayBuffer` | `262_144` | Per-channel replay buffer size (bytes) on the server. Frames within this budget are replayed to a reconnecting client. |
+| `clientReplayBuffer` | `1_048_576` | Per-channel replay buffer size (bytes) on the client. Frames within this budget are replayed to the server on reconnect. |
 
 ## See also
 

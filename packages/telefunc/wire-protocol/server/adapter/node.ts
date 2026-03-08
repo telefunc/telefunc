@@ -2,6 +2,7 @@ export { telefuncWebSocket }
 
 import crossws from 'crossws/adapters/node'
 import { getTelefuncChannelHooks } from '../ws.js'
+import type { TelefuncWebSocketOptions } from '../ws.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import type { Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
@@ -38,8 +39,8 @@ interface TelefuncAdapter {
  * telefuncWebSocket().install(server)
  * ```
  */
-function telefuncWebSocket(): TelefuncAdapter {
-  const ws = crossws({ hooks: getTelefuncChannelHooks() })
+function telefuncWebSocket(options?: TelefuncWebSocketOptions): TelefuncAdapter {
+  const ws = crossws({ hooks: getTelefuncChannelHooks(options) })
 
   return {
     install(server: HttpServerOrWrapper): void {

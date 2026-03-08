@@ -2,6 +2,7 @@ export { telefuncWebSocket }
 
 import crossws from 'crossws/adapters/bun'
 import { getTelefuncChannelHooks } from '../ws.js'
+import type { TelefuncWebSocketOptions } from '../ws.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 
 type BunWs = ReturnType<typeof crossws>
@@ -38,8 +39,8 @@ interface TelefuncAdapter {
  * })
  * ```
  */
-function telefuncWebSocket(): TelefuncAdapter {
-  const ws = crossws({ hooks: getTelefuncChannelHooks() })
+function telefuncWebSocket(options?: TelefuncWebSocketOptions): TelefuncAdapter {
+  const ws = crossws({ hooks: getTelefuncChannelHooks(options) })
 
   return {
     websocket: ws.websocket,

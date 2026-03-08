@@ -5,6 +5,7 @@ import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testStreaming } from './pages/streaming/e2e-test'
 import { testAbort } from './pages/abort/e2e-test'
+import { testChannel } from './pages/channel/e2e-test'
 
 function testRun(cmd: 'npm run dev' | 'npm run preview') {
   run(cmd, {
@@ -15,7 +16,10 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
         log.logText.includes('the server responded with a status of 500') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('The user aborted a request') ||
-        log.logText.includes('Telefunc call cancelled')
+        log.logText.includes('Telefunc call cancelled') ||
+        // Expected during reconnect test: WS fails while browser context is offline
+        log.logText.includes('ERR_INTERNET_DISCONNECTED') ||
+        (log.logText.includes('WebSocket connection to') && log.logText.includes('failed'))
       )
     },
   })
@@ -46,6 +50,8 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
   testStreaming()
 
   testAbort()
+
+  testChannel(isDev)
 
   if (!isDev) {
     test('shield() generation', async () => {

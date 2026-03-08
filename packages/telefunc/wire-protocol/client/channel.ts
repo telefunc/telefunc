@@ -5,6 +5,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../client/clientConfig.js'
 import { WsConnection } from './ws.js'
+import { ChannelClosedError } from '../channel-errors.js'
 
 /**
  * Client-side channel for bidirectional communication with the server.
@@ -50,8 +51,11 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     return this._isClosed
   }
 
+  send(data: TSend): void
+  send(data: TSend, opts: { ack: true }): Promise<unknown>
+  send(data: TSend, opts: { ack: false }): void
   send(data: TSend, opts?: { ack?: boolean }): Promise<unknown> | void {
-    if (this._isClosed) return
+    if (this._isClosed) throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ackMode === true)
     const serialized = stringify(data, { forbidReactElements: false })
     if (needsAck) {
@@ -62,7 +66,7 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   }
 
   sendBinary(data: Uint8Array): void {
-    if (this._isClosed) return
+    if (this._isClosed) throw new ChannelClosedError()
     this._connection.sendBinary(this, data)
   }
 
@@ -94,7 +98,6 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     if (this._isClosed) return
     this._isClosed = true
     this._connection.sendClose(this)
-    this._connection.unregister(this)
     this._fireClose()
   }
 
@@ -102,7 +105,6 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     if (this._isClosed) return
     this._isClosed = true
     this._connection.sendAbort(this, stringify(abortValue, { forbidReactElements: false }))
-    this._connection.unregister(this)
     this._fireClose()
   }
 
@@ -203,7 +205,6 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     if (this._isClosed) return
     this._isClosed = true
     this._connection.sendClose(this)
-    this._connection.unregister(this)
     this._fireClose(err instanceof Error ? err : new Error(String(err)))
   }
 }

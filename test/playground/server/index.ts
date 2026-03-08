@@ -16,9 +16,7 @@ function startServer() {
   return serve(app, {
     port: 3000,
     onCreate(server) {
-      const ws = telefuncWebSocket()
-      // @photonjs/hono's serve() returns a srvx NodeServer, not a plain http.Server.
-      // The actual Node.js http.Server is at .node.server.
+      const ws = telefuncWebSocket({ pingInterval: 1000 })
       // @ts-expect-error srvx types not exposed
       ws.install(server.node.server)
     },

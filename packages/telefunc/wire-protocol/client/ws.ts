@@ -5,17 +5,20 @@ import type { CtrlMessage } from '../shared-ws.js'
 import { assert } from '../../utils/assert.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
+import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import { parse } from '@brillout/json-serializer/parse'
+import {
+  WS_RECONNECT_TIMEOUT,
+  WS_IDLE_TIMEOUT,
+  WS_PING_INTERVAL,
+  WS_CLIENT_REPLAY_BUFFER,
+  WS_RECONNECT_INITIAL_DELAY,
+  WS_RECONNECT_MAX_DELAY,
+} from '../constants.js'
 
 // ── Constants ──
 
-const TTL_MS = 60_000
-const PING_INTERVAL_MS = 5_000
-const PONG_TIMEOUT_MS = 10_000
-const RECONNECT_TIMEOUT_MS = 60_000
-const RECONNECT_INITIAL_DELAY_MS = 500
-const RECONNECT_MAX_DELAY_MS = 5_000
-const CLIENT_REPLAY_BYTES = 1024 * 1024
+const PONG_TIMEOUT_MS = WS_PING_INTERVAL * 2
 
 /** Minimal interface that WsConnection needs from a channel.
  *  Implemented by ClientChannel. */
@@ -67,23 +70,26 @@ class WsConnection {
     let connection = WsConnection.cache.get(wsBaseUrl)
     if (!connection || connection.closed) {
       connection = new WsConnection(wsBaseUrl)
+      WsConnection.cache.set(wsBaseUrl, connection)
     }
     connection.register(channel)
     return connection
   }
 
   /** Per-channel pending ack promises. Key: `${channelIx}:${seq}`. */
-  private pendingAcks = new Map<string, (result: unknown) => void>()
+  private pendingAcks = new Map<string, { resolve: (result: unknown) => void; reject: (err: Error) => void }>()
 
   private wsUrl: string
   private ws: WebSocket | null = null
   private connected = false
   private nextIndex = 0
   private reconciling = false
+  /** Ixes sent in the current in-flight reconcile request. Cleared when reconciled arrives. */
+  private reconcileIxes = new Set<number>()
 
   private channels = new Map<number, WsChannel>()
   private channelIndex = new Map<WsChannel, number>()
-  private sendBuffer: Array<{ data: Uint8Array<ArrayBuffer>; channelIx: number | null }> = []
+  private sendBuffer: Array<{ frame: Uint8Array<ArrayBuffer>; channelIx: number }> = []
   /** Highest sequence number received from the server, per channel index. */
   private lastSeqByChannel = new Map<number, number>()
   /** Per-channel outgoing replay buffers (1 MB each). */
@@ -97,10 +103,14 @@ class WsConnection {
   private abandonedWs: WebSocket | null = null
   private reconnectAttempt = 0
   private reconnectStart = 0
+  private reconnectTimeoutMs = WS_RECONNECT_TIMEOUT
+  private idleTimeoutMs = WS_IDLE_TIMEOUT
+  private pingIntervalMs = WS_PING_INTERVAL
+  private pongTimeoutMs = PONG_TIMEOUT_MS
+  private clientReplayBufferBytes = WS_CLIENT_REPLAY_BUFFER
 
   private constructor(wsUrl: string) {
     this.wsUrl = wsUrl
-    WsConnection.cache.set(wsUrl, this)
   }
 
   /** Register a channel over this connection. */
@@ -125,6 +135,7 @@ class WsConnection {
     this.channelIndex.delete(channel)
     this.lastSeqByChannel.delete(ix)
     this.replayBuffers.delete(ix)
+    this.clearPendingAcks(ix, new ChannelClosedError())
     this.startTtlIfIdle()
   }
 
@@ -148,7 +159,7 @@ class WsConnection {
     const frame = encode.textAckReq(ix, data, seq)
     replay.push(seq, frame)
     this.trySend(frame, ix)
-    return new Promise<unknown>((resolve) => this.pendingAcks.set(`${ix}:${seq}`, resolve))
+    return new Promise<unknown>((resolve, reject) => this.pendingAcks.set(`${ix}:${seq}`, { resolve, reject }))
   }
 
   /** Send a binary frame for the given channel. */
@@ -173,18 +184,20 @@ class WsConnection {
     this.trySend(frame, ix)
   }
 
-  /** Send a CTRL close for the given channel. */
+  /** Send a CTRL close for the given channel and unregister it. */
   sendClose(channel: WsChannel): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.trySend(encodeCtrl({ t: 'close', ix }), ix)
+    this.trySend(encodeCtrl({ t: 'close', ix }), ix) // buffer before unregister so ix is valid
+    this.unregister(channel)
   }
 
-  /** Send a CTRL abort for the given channel. */
+  /** Send a CTRL abort for the given channel and unregister it. */
   sendAbort(channel: WsChannel, abortValue: string): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.trySend(encodeCtrl({ t: 'abort', ix, abortValue }), ix)
+    this.trySend(encodeCtrl({ t: 'abort', ix, abortValue }), ix) // buffer before unregister so ix is valid
+    this.unregister(channel)
   }
 
   /** Send a CTRL pause for the given channel. */
@@ -207,7 +220,7 @@ class WsConnection {
     const ix = this.nextIndex++
     this.channels.set(ix, channel)
     this.channelIndex.set(channel, ix)
-    this.replayBuffers.set(ix, new ReplayBuffer(CLIENT_REPLAY_BYTES))
+    this.replayBuffers.set(ix, new ReplayBuffer(this.clientReplayBufferBytes))
     return ix
   }
 
@@ -244,18 +257,18 @@ class WsConnection {
           break
         case TAG.ACK_RES: {
           const key = `${frame.index}:${frame.ackedSeq}`
-          const resolve = this.pendingAcks.get(key)
-          if (resolve) {
+          const pending = this.pendingAcks.get(key)
+          if (pending) {
             this.pendingAcks.delete(key)
-            resolve(parse(frame.text))
+            pending.resolve(parse(frame.text))
           }
           break
         }
       }
     }
 
-    this.ws.onclose = (ev) => {
-      console.log('[telefunc] WebSocket closed:', ev)
+    this.ws.onclose = () => {
+      if (this.closed) return
       const wasConnected = this.connected
       this.connected = false
       this.reconciling = false
@@ -265,7 +278,7 @@ class WsConnection {
 
       if (!wasConnected && this.reconnectAttempt === 0) {
         // Server rejected the upgrade (e.g. 403) — don't retry.
-        this.notifyAllClosed(new Error('Server rejected WebSocket connection'))
+        this.notifyAllClosed(new ChannelNetworkError('Server rejected WebSocket connection'))
       } else if (this.channels.size === 0) {
         this.dispose()
       } else {
@@ -278,8 +291,10 @@ class WsConnection {
 
   private startReconcile(): void {
     this.reconciling = true
+    this.reconcileIxes = new Set()
     const open: { id: string; ix: number; lastSeq: number }[] = []
     for (const [ix, ch] of this.channels) {
+      this.reconcileIxes.add(ix)
       const lastSeq = this.lastSeqByChannel.get(ix) ?? 0
       open.push({ id: ch.id, ix, lastSeq })
     }
@@ -308,11 +323,11 @@ class WsConnection {
     }
   }
 
-  private trySend(frame: Uint8Array<ArrayBuffer>, channelIx?: number): void {
+  private trySend(frame: Uint8Array<ArrayBuffer>, channelIx: number): void {
     if (this.ws && this.connected && !this.reconciling) {
       this.ws.send(frame)
     } else {
-      this.sendBuffer.push({ data: frame, channelIx: channelIx ?? null })
+      this.sendBuffer.push({ frame, channelIx })
     }
   }
 
@@ -324,17 +339,22 @@ class WsConnection {
     this.lastSeqByChannel.delete(ix)
     this.replayBuffers.delete(ix)
     ch._onWsClose(err)
+    this.clearPendingAcks(ix, err ?? new ChannelClosedError())
     this.startTtlIfIdle()
   }
 
-  private flushSendBuffer(): void {
+  // A frame is sent if the server acknowledged its channel in this reconcile round
+  // (serverAcknowledgedIxes) OR the channel is still live (this.channels).
+  // Close/abort frames for channels the server dropped are skipped —
+  // the server already cleaned them up and sending would be a no-op at best.
+  private flushSendBuffer(serverAcknowledgedIxes: Set<number>): void {
     const ws = this.ws
     assert(ws)
     const buf = this.sendBuffer
     this.sendBuffer = []
-    for (const { data, channelIx } of buf) {
-      if (channelIx !== null && !this.channels.has(channelIx)) continue
-      ws.send(data)
+    for (const { frame, channelIx } of buf) {
+      if (!this.channels.has(channelIx) && !serverAcknowledgedIxes.has(channelIx)) continue
+      ws.send(frame)
     }
   }
 
@@ -359,14 +379,31 @@ class WsConnection {
 
       case 'reconciled': {
         this.closeAbandonedWs()
+        if (ctrl.reconnectTimeout) this.reconnectTimeoutMs = ctrl.reconnectTimeout
+        if (ctrl.idleTimeout) this.idleTimeoutMs = ctrl.idleTimeout
+        if (ctrl.pingInterval) {
+          this.pingIntervalMs = ctrl.pingInterval
+          this.pongTimeoutMs = ctrl.pingInterval * 2
+        }
+        if (ctrl.clientReplayBuffer) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
         const serverMap = new Map(ctrl.open.map((c) => [c.ix, c.lastSeq]))
+        const serverAcknowledgedIxes = new Set(serverMap.keys())
+        const reconcileIxes = this.reconcileIxes
+        this.reconcileIxes = new Set()
         for (const [ix, ch] of this.channels) {
+          if (!reconcileIxes.has(ix)) {
+            // Registered after the reconcile was sent — server doesn't know about it yet;
+            // leave it in this.channels for the follow-up reconcile below.
+            continue
+          }
           if (!serverMap.has(ix)) {
             this.channels.delete(ix)
             this.channelIndex.delete(ch)
             this.lastSeqByChannel.delete(ix)
             this.replayBuffers.delete(ix)
-            ch._onWsClose(new Error('Channel not acknowledged by server after reconnect'))
+            const reconcileErr = new ChannelNetworkError('Channel not acknowledged by server after reconnect')
+            ch._onWsClose(reconcileErr)
+            this.clearPendingAcks(ix, reconcileErr)
           } else {
             // Replay missed client→server frames for this channel
             const lastSeq = serverMap.get(ix)!
@@ -380,8 +417,14 @@ class WsConnection {
           }
         }
         this.reconciling = false
-        this.flushSendBuffer()
-        this.startTtlIfIdle()
+        this.flushSendBuffer(serverAcknowledgedIxes)
+        // If new channels were registered while the reconcile was in-flight, introduce them now.
+        const hasNewChannels = [...this.channels.keys()].some((ix) => !serverAcknowledgedIxes.has(ix))
+        if (hasNewChannels) {
+          this.startReconcile()
+        } else {
+          this.startTtlIfIdle()
+        }
         break
       }
     }
@@ -393,7 +436,7 @@ class WsConnection {
     this.resetPongTimer()
     this.pingInterval = setInterval(() => {
       if (this.ws && this.connected) this.ws.send(encodeCtrl({ t: 'ping' }))
-    }, PING_INTERVAL_MS)
+    }, this.pingIntervalMs)
   }
 
   private stopPing(): void {
@@ -408,7 +451,7 @@ class WsConnection {
       this.connected = false
       this.abandonWs()
       this.scheduleReconnect()
-    }, PONG_TIMEOUT_MS)
+    }, this.pongTimeoutMs)
   }
 
   private abandonWs(): void {
@@ -448,11 +491,11 @@ class WsConnection {
   private scheduleReconnect(): void {
     if (this.closed) return
     if (!this.reconnectStart) this.reconnectStart = Date.now()
-    if (Date.now() - this.reconnectStart > RECONNECT_TIMEOUT_MS) {
-      this.notifyAllClosed(new Error('WebSocket reconnect timed out'))
+    if (Date.now() - this.reconnectStart > this.reconnectTimeoutMs) {
+      this.notifyAllClosed(new ChannelNetworkError('WebSocket reconnect timed out'))
       return
     }
-    const delay = Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** this.reconnectAttempt, RECONNECT_MAX_DELAY_MS)
+    const delay = Math.min(WS_RECONNECT_INITIAL_DELAY * 2 ** this.reconnectAttempt, WS_RECONNECT_MAX_DELAY)
     this.reconnectAttempt++
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
@@ -466,35 +509,45 @@ class WsConnection {
     if (this.channels.size > 0) return
     this.ttl = setTimeout(() => {
       if (this.channels.size === 0) this.closeGracefully()
-    }, TTL_MS)
+    }, this.idleTimeoutMs)
   }
 
   // ── Shutdown ──
 
   private closeGracefully(): void {
-    this.stopPing()
-    this.clearTimer('reconnectTimer')
-    if (this.ws) {
-      this.ws.close(1000)
-      this.ws = null
-    }
+    this.ws?.close(1000)
+    this.ws = null
     this.dispose()
   }
 
   private notifyAllClosed(err?: Error): void {
-    this.closed = true
     for (const ch of this.channels.values()) ch._onWsClose(err)
-    this.channels.clear()
-    this.channelIndex.clear()
-    this.lastSeqByChannel.clear()
-    this.replayBuffers.clear()
-    this.pendingAcks.clear()
-    WsConnection.cache.delete(this.wsUrl)
+    this.dispose()
   }
 
   private dispose(): void {
     this.closed = true
+    this.stopPing()
+    this.clearTimer('ttl')
+    this.clearTimer('reconnectTimer')
+    this.closeAbandonedWs()
+    this.channels.clear()
+    this.channelIndex.clear()
+    this.lastSeqByChannel.clear()
+    this.replayBuffers.clear()
+    this.clearPendingAcks(undefined, new ChannelNetworkError('Connection closed'))
+    this.reconcileIxes.clear()
+    this.sendBuffer = []
     WsConnection.cache.delete(this.wsUrl)
+  }
+
+  private clearPendingAcks(ix: number | undefined, err: Error): void {
+    for (const [key, { reject }] of this.pendingAcks) {
+      if (ix === undefined || key.startsWith(`${ix}:`)) {
+        this.pendingAcks.delete(key)
+        reject(err)
+      }
+    }
   }
 
   private clearTimer(name: 'ttl' | 'pongTimer' | 'pingInterval' | 'reconnectTimer'): void {

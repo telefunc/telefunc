@@ -46,3 +46,16 @@ export const TRANSPORT = {
 } as const
 export type Transport = (typeof TRANSPORT)[keyof typeof TRANSPORT]
 export const DEFAULT_TRANSPORT: Transport = TRANSPORT.STREAM
+
+// ===== WS connection defaults =====
+
+export const WS_RECONNECT_TIMEOUT = 60_000
+export const WS_IDLE_TIMEOUT = 60_000
+export const WS_PING_INTERVAL = 5_000
+export const WS_PING_INTERVAL_MIN = 1_000
+export const WS_SERVER_REPLAY_BUFFER = 256 * 1024
+export const WS_CLIENT_REPLAY_BUFFER = 1024 * 1024
+
+// Client-side WS connection defaults
+export const WS_RECONNECT_INITIAL_DELAY = 500
+export const WS_RECONNECT_MAX_DELAY = 5_000

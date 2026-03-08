@@ -6,5 +6,6 @@ export { onAbort, onTelefunctionRemoteCallError } from './remoteTelefunctionCall
 export { abort } from './abort.js'
 export { withContext } from './withContext.js'
 export type { TelefunctionError } from './TelefunctionError.js'
+export { ChannelClosedError, ChannelNetworkError } from '../wire-protocol/channel-errors.js'
 
 export { remoteTelefunctionCall as __remoteTelefunctionCall } from './remoteTelefunctionCall.js'
