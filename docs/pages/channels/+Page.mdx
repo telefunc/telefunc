@@ -350,6 +350,47 @@ await add(3)  // 18
 await add(2)  // 20
 ```
 
+### Validation
+
+When you pass a callback to a telefunction (e.g. `onProgress`), the server calls it — the arguments come from your own server code, so no validation is needed.
+
+When a telefunction returns a function (e.g. `onGetCounter` returns `add`), the client calls it — the arguments come from the client and are **not validated** by Telefunc's shield. Validate manually and use <Link text={<code>throw Abort()</code>} href="/Abort" /> to reject invalid input:
+
+```ts
+// Counter.telefunc.ts
+// Environment: server
+
+import { Abort } from 'telefunc'
+
+export async function onGetCounter(initial: number) {
+  let count = initial
+  return async (delta: number) => {
+    if (typeof delta !== 'number') throw Abort({ reason: 'expected a number' })
+    count += delta
+    return count
+  }
+}
+```
+
+The abort value is delivered to the client — the function call rejects with an error that has `isAbort: true` and `abortValue`:
+
+```ts
+// Counter.tsx
+// Environment: client
+
+import { onGetCounter } from './Counter.telefunc'
+
+const add = await onGetCounter(10)
+try {
+  await add('not a number' as any)
+} catch (err) {
+  err.isAbort    // true
+  err.abortValue // { reason: 'expected a number' }
+}
+```
+
+> This is the same trust model as WebSocket messages in general — the server should validate anything it receives from the client. See <Link href="/abort-vs-error" /> for when to use `throw Abort()` vs `throw new Error()`. Automatic shield validation for returned functions is planned for a future release.
+
 ### Lifecycle
 
 - The underlying WebSocket channel is created when the function is serialized and closed automatically when the function proxy is garbage collected.

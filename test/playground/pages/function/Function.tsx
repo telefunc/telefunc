@@ -1,6 +1,6 @@
 export { FunctionDemo }
 
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { onGetGreeter, onGetAdder, onGetEchoWithState, onMap, onReduce, onUpload } from './Function.telefunc'
 
 type FunctionState = {
@@ -88,8 +88,11 @@ function FunctionDemo() {
     setState((s) => ({ ...s, uploadResult: result }))
   }
 
+  const [hydrated, setHydrated] = useState(false)
+  useEffect(() => setHydrated(true), [])
+
   return (
-    <div id="hydrated" className="p-8 max-w-2xl space-y-8">
+    <div id={hydrated ? 'hydrated' : undefined} className="p-8 max-w-2xl space-y-8">
       <h1 className="text-xl font-semibold">Function passing demo</h1>
 
       {/* Greeter */}
