@@ -18,7 +18,7 @@ function Header() {
               margin: 0,
             }}
           >
-            Remote Functions.
+            Server functions.
           </div>
           <div
             id="tagline-secondary"
@@ -31,8 +31,8 @@ function Header() {
               maxWidth: 800,
             }}
           >
-            <span style={{ whiteSpace: 'nowrap' }}>Defined on the server,</span>{' '}
-            <span style={{ whiteSpace: 'nowrap' }}>callable in the browser.</span>
+            <span style={{ whiteSpace: 'nowrap' }}>Streaming, real-time,</span>{' '}
+            <span style={{ whiteSpace: 'nowrap' }}>file upload — just call a function.</span>
           </div>
         </CenterHorizontal>
       </h1>

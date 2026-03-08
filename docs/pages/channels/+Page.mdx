@@ -257,9 +257,9 @@ You can pass plain functions as telefunction arguments or return them as results
 
 > Function passing requires a WebSocket connection. See <Link href="/telefuncWebSocket" /> for setup.
 
-### Return a function
+### Pass a function as argument
 
-Return a function from a telefunction — the client receives a callable proxy. Each call is sent to the server and the return value comes back as a promise.
+Pass a callback to a telefunction — the server calls it during execution.
 
 ```ts
 // Upload.telefunc.ts
@@ -294,9 +294,7 @@ await onUpload(file, (percent) => {
 
 The `onProgress` callback runs on the client, called by the server — streaming upload progress in a single function call. See <Link href="/file-upload" /> for more on file uploads.
 
-### Pass a function as argument
-
-Pass a callback to a telefunction — the server calls it and awaits the result.
+The server can also await the callback's return value:
 
 ```ts
 // Compute.telefunc.ts
@@ -323,9 +321,9 @@ const squares = await onMap([1, 2, 3, 4, 5], async (n) => n * n)
 
 The `mapper` function runs on the client — the server sends each item, waits for the client's result, and continues.
 
-### Stateful closures
+### Return a function
 
-Returned functions keep their server-side closure state alive across calls:
+Return a function from a telefunction — the client receives a callable proxy. Each call is sent to the server and the return value comes back as a promise. Server-side closure state stays alive across calls.
 
 ```ts
 // Counter.telefunc.ts

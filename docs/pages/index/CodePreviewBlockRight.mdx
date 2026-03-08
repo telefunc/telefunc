@@ -1,24 +1,26 @@
 ```tsx ts-only
-// CreateTodo.tsx
+// Upload.tsx
 // Environment: client
 
-// CreateTodo.telefunc.ts isn't actually loaded;
-// Telefunc transforms it into a thin HTTP client.
-import { onNewTodo } from './CreateTodo.telefunc.ts'
+import { onUpload } from './Upload.telefunc'
 
-async function onClick(form) {
-  const text = form.input.value
-  // Behind the scenes, Telefunc makes an HTTP request
-  // to the server.
-  await onNewTodo(text)
-}
+function Upload() {
+  const [progress, setProgress] = useState(0)
 
-function CreateTodo() {
+  async function handleUpload(e) {
+    const file = e.target.files[0]
+    await onUpload(file, (percent) => {
+      // This callback runs in the browser,
+      // called by the server over WebSocket.
+      setProgress(percent)
+    })
+  }
+
   return (
-    <form>
-      <input input="text"></input>
-      <button onClick={onClick}>Add To-Do</button>
-    </form>
+    <div>
+      <input type="file" onChange={handleUpload} />
+      <div style={{ width: `${progress}%` }} />
+    </div>
   )
 }
 ```

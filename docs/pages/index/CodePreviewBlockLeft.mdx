@@ -1,25 +1,23 @@
 ```ts ts-only max-width=60
-// CreateTodo.telefunc.ts
+// Upload.telefunc.ts
 // Environment: server
 
-// Telefunc makes onNewTodo() remotely callable
-// from the browser.
-export { onNewTodo }
+import fs from 'node:fs'
 
-import { getContext } from 'telefunc'
-
-// Telefunction arguments are automatically validated
-// at runtime, so `text` is guaranteed to be a string.
-async function onNewTodo(text: string) {
-  const { user } = getContext()
-
-  // With an ORM
-  await Todo.create({ text, authorId: user.id })
-
-  // With SQL
-  await sql(
-    'INSERT INTO todo_items VALUES (:text, :authorId)',
-    { text, authorId: user.id }
+export async function onUpload(
+  file: File,
+  onProgress: (percent: number) => void
+) {
+  const total = file.size
+  let loaded = 0
+  const dest = fs.createWriteStream(
+    `./uploads/${file.name}`
   )
+  for await (const chunk of file.stream()) {
+    dest.write(chunk)
+    loaded += chunk.byteLength
+    onProgress(Math.round(loaded / total * 100))
+  }
+  dest.end()
 }
 ```
