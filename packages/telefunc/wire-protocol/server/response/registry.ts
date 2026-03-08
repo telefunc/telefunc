@@ -4,8 +4,9 @@ import { asyncGeneratorServerType } from './async-generator.js'
 import { readableStreamServerType } from './readable-stream.js'
 import { promiseServerType } from './promise.js'
 import { channelServerPlaceholderType } from './channel.js'
+import { functionServerPlaceholderType } from './function.js'
 import type { ServerStreamingType, StreamingValueServer } from '../../streaming-types.js'
-import type { ServerPlaceholderType } from '../../placeholder-types.js'
+import type { PlaceholderReplacerType } from '../../placeholder-types.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -15,7 +16,7 @@ const serverStreamingTypes: ServerStreamingType[] = [
   promiseServerType,
 ]
 
-const serverPlaceholderTypes: ServerPlaceholderType[] = [channelServerPlaceholderType]
+const serverPlaceholderTypes: PlaceholderReplacerType[] = [channelServerPlaceholderType, functionServerPlaceholderType]
 
 /**
  * Creates a JSON-serializer replacer that detects streaming values and placeholder

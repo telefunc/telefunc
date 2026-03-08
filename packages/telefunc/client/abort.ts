@@ -4,7 +4,7 @@ import { assertUsage } from '../utils/assert.js'
 
 const ABORT_CONTROLLER = Symbol.for('telefuncAbort')
 
-type TelefuncCall = object
+type TelefuncCall = object | Function
 
 type WithAbortController = { [ABORT_CONTROLLER]?: AbortController }
 

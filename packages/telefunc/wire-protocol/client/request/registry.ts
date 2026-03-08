@@ -3,21 +3,19 @@ export type { RequestFileEntry }
 
 import { fileClientType } from './file.js'
 import { blobClientType } from './blob.js'
+import { functionClientRequestType } from './function.js'
 import type { ClientRequestType } from '../../request-types.js'
+import type { PlaceholderReplacerType } from '../../placeholder-types.js'
 
 /** File before Blob — File extends Blob, so must be checked first. */
 const clientRequestTypes: ClientRequestType[] = [fileClientType, blobClientType]
+const clientRequestPlaceholderTypes: PlaceholderReplacerType[] = [functionClientRequestType]
 
 type RequestFileEntry = {
   index: number
   body: Blob
 }
 
-/**
- * Creates a JSON-serializer replacer that detects File/Blob values and replaces
- * them with prefixed metadata placeholders. Returns the replacer function and
- * the collected file bodies.
- */
 function createRequestReplacer() {
   const files: RequestFileEntry[] = []
   let nextIndex = 0
@@ -29,6 +27,14 @@ function createRequestReplacer() {
         files.push({ index, body: type.getBody(value) })
         return {
           replacement: type.prefix + serializer(meta),
+          resolved: true,
+        }
+      }
+    }
+    for (const type of clientRequestPlaceholderTypes) {
+      if (type.detect(value)) {
+        return {
+          replacement: type.prefix + serializer(type.getMetadata(value)),
           resolved: true,
         }
       }

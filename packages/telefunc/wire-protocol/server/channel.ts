@@ -1,4 +1,4 @@
-export { createChannel, getChannelRegistry, ServerChannel, SERVER_CHANNEL_BRAND }
+export { createChannel, getChannelRegistry, onChannelCreated, ServerChannel, SERVER_CHANNEL_BRAND }
 export { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
@@ -14,10 +14,19 @@ import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 
 const globalObject = getGlobalObject('channel.ts', {
   channelRegistry: new Map<string, ServerChannel<unknown, unknown>>(),
+  creationHooks: new Map<string, () => void>(),
 })
 
 function getChannelRegistry(): Map<string, ServerChannel<unknown, unknown>> {
   return globalObject.channelRegistry
+}
+
+/**
+ * Register a one-shot callback that fires when a `ServerChannel` with the given `id` is created.
+ * The callback fires synchronously inside the constructor, before any peer attachment.
+ */
+function onChannelCreated(id: string, cb: () => void): void {
+  globalObject.creationHooks.set(id, cb)
 }
 
 /**
@@ -51,15 +60,17 @@ function createChannel(opts?: { ack?: true }): any {
 }
 
 const DEFAULT_TTL_MS = 30_000
-class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSend, TReceive> {
+class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAckReceive = unknown>
+  implements Channel<TSend, TReceive, TAckSend, TAckReceive>
+{
   readonly [SERVER_CHANNEL_BRAND] = true
   readonly id: string
   /** Whether ack is on by default. Set via `createChannel({ ack: true })`. */
   readonly ackMode: boolean
 
   /** Return this to the client — it serializes to a `ClientChannel` on the other side. */
-  get client(): Channel<TReceive, TSend> {
-    return this as unknown as Channel<TReceive, TSend>
+  get client(): Channel<TReceive, TSend, TAckReceive, TAckSend> {
+    return this as unknown as Channel<TReceive, TSend, TAckReceive, TAckSend>
   }
 
   static isServerChannel(value: unknown): value is ServerChannel {
@@ -70,16 +81,16 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
 
   private _isClosed = false
   private _peer: IndexedPeer | null = null
-  private _listeners: Array<(data: TReceive) => Promise<unknown> | void> = []
+  private _listeners: Array<(data: TReceive) => TAckReceive | Promise<TAckReceive> | void> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _pauseCallbacks: Array<() => void> = []
   private _resumeCallbacks: Array<() => void> = []
   private _sendBuffer: string[] = []
   private _binarySendBuffer: Uint8Array[] = []
   /** Buffered ack sends when peer not yet connected: { serialized, resolve, reject }[]. */
-  private _ackSendBuffer: Array<{ data: string; resolve: (v: unknown) => void; reject: (err: Error) => void }> = []
+  private _ackSendBuffer: Array<{ data: string; resolve: (v: TAckSend) => void; reject: (err: Error) => void }> = []
   /** Pending ack promises keyed by the seq of the outgoing frame. */
-  private _pendingAcks = new Map<number, { resolve: (result: unknown) => void; reject: (err: Error) => void }>()
+  private _pendingAcks = new Map<number, { resolve: (result: TAckSend) => void; reject: (err: Error) => void }>()
   private _closeCallbacks: Array<(err?: Error) => void> = []
   private _openCallbacks: Array<() => void> = []
   private _closeError: Error | undefined
@@ -90,10 +101,16 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   private _disconnected = false
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-  constructor(ackMode = false) {
+  constructor(ackMode = false, id?: string) {
     this.ackMode = ackMode
-    this.id = crypto.randomUUID()
+    this.id = id ?? crypto.randomUUID()
     getChannelRegistry().set(this.id, this as ServerChannel<unknown, unknown>)
+    // Fire any waiter that registered before this channel was created.
+    const hook = globalObject.creationHooks.get(this.id)
+    if (hook) {
+      globalObject.creationHooks.delete(this.id)
+      hook()
+    }
     // If no peer connects within TTL, close automatically.
     this._ttlTimer = this._unrefTimer(
       setTimeout(() => {
@@ -113,9 +130,9 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
    *                    channel was created with `createChannel({ ack: true })`.
    *  @throws {ChannelClosedError} if the channel is closed. */
   send(data: TSend): void
-  send(data: TSend, opts: { ack: true }): Promise<unknown>
+  send(data: TSend, opts: { ack: true }): Promise<TAckSend>
   send(data: TSend, opts: { ack: false }): void
-  send(data: TSend, opts?: { ack?: boolean }): Promise<unknown> | void {
+  send(data: TSend, opts?: { ack?: boolean }): Promise<TAckSend> | void {
     if (this._isClosed) throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ackMode === true)
     const serialized = stringify(data, { forbidReactElements: false })
@@ -129,9 +146,9 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     }
     if (this._peer) {
       const seq = this._peer.sendTextAckReq(serialized)
-      return new Promise<unknown>((resolve, reject) => this._pendingAcks.set(seq, { resolve, reject }))
+      return new Promise<TAckSend>((resolve, reject) => this._pendingAcks.set(seq, { resolve, reject }))
     } else {
-      return new Promise<unknown>((resolve, reject) => {
+      return new Promise<TAckSend>((resolve, reject) => {
         this._ackSendBuffer.push({ data: serialized, resolve, reject })
       })
     }
@@ -148,7 +165,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     }
   }
 
-  listen(callback: (data: TReceive) => Promise<unknown> | void): void {
+  listen(callback: (data: TReceive) => TAckReceive | Promise<TAckReceive> | void): void {
     this._listeners.push(callback)
   }
 
@@ -274,7 +291,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     const pending = this._pendingAcks.get(ackedSeq)
     if (!pending) return
     this._pendingAcks.delete(ackedSeq)
-    pending.resolve(parse(resultText))
+    pending.resolve(parse(resultText) as TAckSend)
   }
 
   /** @internal — Connection dropped, keep channel alive for reconnection. */

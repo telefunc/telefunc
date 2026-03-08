@@ -3,7 +3,7 @@ export type { TelefuncWebSocketOptions }
 
 import { defineHooks, type Peer } from 'crossws'
 import type { ServerChannel } from './channel.js'
-import { getChannelRegistry } from './channel.js'
+import { getChannelRegistry, onChannelCreated } from './channel.js'
 import { TAG, decode, encodeCtrl } from '../shared-ws.js'
 import type { CtrlMessage } from '../shared-ws.js'
 import { hasProp } from '../../utils/hasProp.js'
@@ -70,6 +70,7 @@ type PeerState = {
   ixMap: Map<number, ChannelEntry>
   pingTimer: ReturnType<typeof setTimeout> | null
   terminatePermanently: boolean | null
+  reconciling: boolean
 }
 
 function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
@@ -86,7 +87,7 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
   function getOrCreatePeerState(peer: Peer): PeerState {
     let s = peerStates.get(peer.id)
     if (!s) {
-      s = { ixMap: new Map(), pingTimer: null, terminatePermanently: null }
+      s = { ixMap: new Map(), pingTimer: null, terminatePermanently: null, reconciling: false }
       peerStates.set(peer.id, s)
     }
     return s
@@ -97,6 +98,7 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
     clearPingTimer(peer)
     state.pingTimer = setTimeout(() => {
       state.pingTimer = null
+      if (state.reconciling) return
       peer.terminate()
       state.terminatePermanently = false
     }, pingDeadline)
@@ -113,7 +115,7 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
     }
   }
 
-  function handleCtrl(ctrl: CtrlMessage, peer: Peer): void {
+  async function handleCtrl(ctrl: CtrlMessage, peer: Peer): Promise<void> {
     const state = getOrCreatePeerState(peer)
     switch (ctrl.t) {
       // ── Heartbeat ──
@@ -145,11 +147,14 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
       // 1. Replay: send any frames the client missed (seq > lastSeq).
       // 2. For each channel the client mentions:
       //    - Alive in registry → attach at client's ix, include in response
-      //    - Dead → simply omit from response (client diffs to discover)
+      //    - Dead + defer → wait up to 5s for it to be created (in-flight POST)
+      //    - Dead + !ctrl.defer → omit from response (client diffs to discover)
       // 3. For channels in ixMap NOT mentioned by client → _onPeerClose()
       // 4. Respond with reconciled { open } = all channels we actually attached
       // 5. Client diffs its map against our response → closes its orphans
       case 'reconcile': {
+        state.reconciling = true
+        resetPingTimer(peer)
         const registry = getChannelRegistry()
         const reconciledIxs = new Set<number>()
         const attached: { id: string; ix: number; lastSeq: number }[] = []
@@ -157,6 +162,20 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
         // Snapshot old ixMap for orphan detection, then rebuild
         const prevIxMap = new Map(state.ixMap)
         state.ixMap.clear()
+
+        // If the reconcile contains deferred channels (client has in-flight POST), wait for
+        // each missing ServerChannel to be created before attaching.
+        await Promise.all(
+          ctrl.open
+            .filter(({ id, defer }) => defer && (!registry.get(id) || registry.get(id)!.isClosed))
+            .map(
+              ({ id }) =>
+                new Promise<void>((resolve) => {
+                  onChannelCreated(id, resolve)
+                  setTimeout(resolve, 5_000)
+                }),
+            ),
+        )
 
         // Replay missed frames and attach peers for alive channels
         for (const { id, ix, lastSeq } of ctrl.open) {
@@ -190,6 +209,8 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
         }
 
         // Respond with what we attached — client diffs to find its own orphans
+        state.reconciling = false
+        resetPingTimer(peer)
         peer.send(
           encodeCtrl({
             t: 'reconciled',
@@ -223,14 +244,14 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
       resetPingTimer(peer)
     },
 
-    message(peer, message) {
+    async message(peer, message) {
       const state = getOrCreatePeerState(peer)
       try {
         const frame = decode(message.uint8Array())
 
         switch (frame.tag) {
           case TAG.CTRL:
-            handleCtrl(frame.ctrl, peer)
+            await handleCtrl(frame.ctrl, peer)
             break
           case TAG.TEXT: {
             const entry = state.ixMap.get(frame.index)

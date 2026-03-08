@@ -33,8 +33,8 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
   const { replacer, files } = createRequestReplacer()
 
   const dataMainSerialized = serialize(dataMain, callContext, replacer)
-  if (files.length === 0) return dataMainSerialized
-  return encodeBinaryRequest(dataMainSerialized, files)
+  if (files.length > 0) return encodeBinaryRequest(dataMainSerialized, files)
+  return dataMainSerialized
 }
 
 type Replacer = Parameters<typeof stringify>[1] extends infer O ? (O extends { replacer?: infer R } ? R : never) : never

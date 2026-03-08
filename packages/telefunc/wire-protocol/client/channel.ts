@@ -22,11 +22,14 @@ import { ChannelClosedError } from '../channel-errors.js'
  *
  * Implements the shared `Channel` interface (see wire-protocol/channel.ts).
  */
-class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSend, TReceive> {
+class ClientChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAckReceive = unknown>
+  implements Channel<TSend, TReceive, TAckSend, TAckReceive>
+{
   readonly id: string
   readonly ackMode: boolean
+  readonly defer: boolean
   private _connection: WsConnection
-  private _listeners: Array<(data: TReceive) => Promise<unknown> | void> = []
+  private _listeners: Array<(data: TReceive) => TAckReceive | Promise<TAckReceive> | void> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _openCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<(err?: Error) => void> = []
@@ -35,13 +38,14 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   private _didFireClose = false
   private _didFireOpen = false
 
-  get client(): Channel<TReceive, TSend> {
-    return this as unknown as Channel<TReceive, TSend>
+  get client(): Channel<TReceive, TSend, TAckReceive, TAckSend> {
+    return this as unknown as Channel<TReceive, TSend, TAckReceive, TAckSend>
   }
 
-  constructor(channelId: string, ackMode = false, shard?: string) {
+  constructor(channelId: string, ackMode = false, shard?: string, defer = false) {
     this.id = channelId
     this.ackMode = ackMode
+    this.defer = defer
     const config = resolveClientConfig()
     const wsUrl = shard ? appendShardParam(config.telefuncUrl, shard) : config.telefuncUrl
     this._connection = WsConnection.getOrCreate(wsUrl, this)
@@ -52,14 +56,14 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
   }
 
   send(data: TSend): void
-  send(data: TSend, opts: { ack: true }): Promise<unknown>
+  send(data: TSend, opts: { ack: true }): Promise<TAckSend>
   send(data: TSend, opts: { ack: false }): void
-  send(data: TSend, opts?: { ack?: boolean }): Promise<unknown> | void {
+  send(data: TSend, opts?: { ack?: boolean }): Promise<TAckSend> | void {
     if (this._isClosed) throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ackMode === true)
     const serialized = stringify(data, { forbidReactElements: false })
     if (needsAck) {
-      return this._connection.sendTextAckReq(this, serialized)
+      return this._connection.sendTextAckReq(this, serialized) as Promise<TAckSend>
     } else {
       this._connection.send(this, serialized)
     }
@@ -70,7 +74,7 @@ class ClientChannel<TSend = unknown, TReceive = unknown> implements Channel<TSen
     this._connection.sendBinary(this, data)
   }
 
-  listen(callback: (data: TReceive) => Promise<unknown> | void): void {
+  listen(callback: (data: TReceive) => TAckReceive | Promise<TAckReceive> | void): void {
     this._listeners.push(callback)
   }
 

@@ -251,6 +251,121 @@ channel.listen((msg) => {
 ```
 
 
+## Function passing
+
+You can pass plain functions as telefunction arguments or return them as results — Telefunc transparently proxies each call over a WebSocket channel. Mix any number of functions with other values: objects, <Link href="/streaming" text="streams" />, <Link href="/streaming#promise" text="promises" />, channels, <Link href="/file-upload" text="files" /> — it all works together.
+
+> Function passing requires a WebSocket connection. See <Link href="/telefuncWebSocket" /> for setup.
+
+### Return a function
+
+Return a function from a telefunction — the client receives a callable proxy. Each call is sent to the server and the return value comes back as a promise.
+
+```ts
+// Upload.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+
+export async function onUpload(file: File, onProgress: (percent: number) => void) {
+  const total = file.size
+  let loaded = 0
+  const writable = fs.createWriteStream(`./uploads/${file.name}`)
+  for await (const chunk of file.stream()) {
+    writable.write(chunk)
+    loaded += chunk.byteLength
+    onProgress(Math.round((loaded / total) * 100))
+  }
+  writable.end()
+}
+```
+
+```ts
+// Upload.tsx
+// Environment: client
+
+import { onUpload } from './Upload.telefunc'
+
+const file = inputEl.files[0]
+await onUpload(file, (percent) => {
+  progressBar.style.width = `${percent}%`
+})
+```
+
+The `onProgress` callback runs on the client, called by the server — streaming upload progress in a single function call. See <Link href="/file-upload" /> for more on file uploads.
+
+### Pass a function as argument
+
+Pass a callback to a telefunction — the server calls it and awaits the result.
+
+```ts
+// Compute.telefunc.ts
+// Environment: server
+
+export async function onMap(items: number[], mapper: (n: number) => Promise<number>) {
+  const results: number[] = []
+  for (const item of items) {
+    results.push(await mapper(item))
+  }
+  return results
+}
+```
+
+```ts
+// Compute.tsx
+// Environment: client
+
+import { onMap } from './Compute.telefunc'
+
+const squares = await onMap([1, 2, 3, 4, 5], async (n) => n * n)
+// [1, 4, 9, 16, 25]
+```
+
+The `mapper` function runs on the client — the server sends each item, waits for the client's result, and continues.
+
+### Stateful closures
+
+Returned functions keep their server-side closure state alive across calls:
+
+```ts
+// Counter.telefunc.ts
+// Environment: server
+
+export async function onGetCounter(initial: number) {
+  let count = initial
+  return async (delta: number) => {
+    count += delta
+    return count
+  }
+}
+```
+
+```ts
+// Counter.tsx
+// Environment: client
+
+import { onGetCounter } from './Counter.telefunc'
+
+const add = await onGetCounter(10)
+await add(5)  // 15
+await add(3)  // 18
+await add(2)  // 20
+```
+
+### Lifecycle
+
+- The underlying WebSocket channel is created when the function is serialized and closed automatically when the function proxy is garbage collected.
+- You can also close it explicitly using `abort()`:
+
+```ts
+import { abort } from 'telefunc/client'
+
+const result = await onGetCounter(0)
+// ... use result ...
+abort(result) // closes the underlying channel
+```
+
+
 ## Cross-instance pub/sub
 
 > **Feedback welcome** — built-in pub/sub is not yet implemented. If this is blocking you, please open an issue.

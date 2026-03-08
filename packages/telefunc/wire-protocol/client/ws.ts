@@ -24,6 +24,7 @@ const PONG_TIMEOUT_MS = WS_PING_INTERVAL * 2
  *  Implemented by ClientChannel. */
 interface WsChannel {
   readonly id: string
+  readonly defer: boolean
   _onWsOpen(): void
   _onWsMessage(data: string): void
   _onWsBinaryMessage(data: Uint8Array): void
@@ -89,7 +90,7 @@ class WsConnection {
 
   private channels = new Map<number, WsChannel>()
   private channelIndex = new Map<WsChannel, number>()
-  private sendBuffer: Array<{ frame: Uint8Array<ArrayBuffer>; channelIx: number }> = []
+  private sendBuffer: Array<{ frame: Uint8Array<ArrayBuffer>; channelIx: number; seq?: number }> = []
   /** Highest sequence number received from the server, per channel index. */
   private lastSeqByChannel = new Map<number, number>()
   /** Per-channel outgoing replay buffers (1 MB each). */
@@ -146,8 +147,7 @@ class WsConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.text(ix, data, seq)
-    replay.push(seq, frame)
-    this.trySend(frame, ix)
+    this.trySend(frame, ix, seq)
   }
 
   /** Send a TEXT_ACK_REQ frame. Returns a Promise resolved when the server sends ACK_RES. */
@@ -157,8 +157,7 @@ class WsConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.textAckReq(ix, data, seq)
-    replay.push(seq, frame)
-    this.trySend(frame, ix)
+    this.trySend(frame, ix, seq)
     return new Promise<unknown>((resolve, reject) => this.pendingAcks.set(`${ix}:${seq}`, { resolve, reject }))
   }
 
@@ -169,8 +168,7 @@ class WsConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.binary(ix, data, seq)
-    replay.push(seq, frame)
-    this.trySend(frame, ix)
+    this.trySend(frame, ix, seq)
   }
 
   /** Send an acknowledgement response for a message received from the server. */
@@ -180,8 +178,7 @@ class WsConnection {
     const replay = this.replayBuffers.get(ix)!
     const ownSeq = replay.nextSeq()
     const frame = encode.ackRes(ix, ownSeq, ackedSeq, result)
-    replay.push(ownSeq, frame)
-    this.trySend(frame, ix)
+    this.trySend(frame, ix, ownSeq)
   }
 
   /** Send a CTRL close for the given channel and unregister it. */
@@ -241,7 +238,8 @@ class WsConnection {
       this.reconnectAttempt = 0
       this.reconnectStart = 0
       this.startReconcile()
-      this.startPing()
+      // startPing() is deferred to the 'reconciled' handler — pong deadlines
+      // must not run while the server may be blocked processing reconcile.
     }
 
     this.ws.onmessage = ({ data }: MessageEvent) => {
@@ -292,11 +290,11 @@ class WsConnection {
   private startReconcile(): void {
     this.reconciling = true
     this.reconcileIxes = new Set()
-    const open: { id: string; ix: number; lastSeq: number }[] = []
+    const open: { id: string; ix: number; lastSeq: number; defer?: boolean }[] = []
     for (const [ix, ch] of this.channels) {
       this.reconcileIxes.add(ix)
       const lastSeq = this.lastSeqByChannel.get(ix) ?? 0
-      open.push({ id: ch.id, ix, lastSeq })
+      open.push({ id: ch.id, ix, lastSeq, ...(ch.defer && { defer: true }) })
     }
     const ws = this.ws
     assert(ws)
@@ -323,11 +321,11 @@ class WsConnection {
     }
   }
 
-  private trySend(frame: Uint8Array<ArrayBuffer>, channelIx: number): void {
+  private trySend(frame: Uint8Array<ArrayBuffer>, channelIx: number, seq?: number): void {
     if (this.ws && this.connected && !this.reconciling) {
-      this.ws.send(frame)
+      this.wireSend(this.ws, frame, channelIx, seq)
     } else {
-      this.sendBuffer.push({ frame, channelIx })
+      this.sendBuffer.push({ frame, channelIx, seq })
     }
   }
 
@@ -352,10 +350,15 @@ class WsConnection {
     assert(ws)
     const buf = this.sendBuffer
     this.sendBuffer = []
-    for (const { frame, channelIx } of buf) {
+    for (const { frame, channelIx, seq } of buf) {
       if (!this.channels.has(channelIx) && !serverAcknowledgedIxes.has(channelIx)) continue
-      ws.send(frame)
+      this.wireSend(ws, frame, channelIx, seq)
     }
+  }
+
+  private wireSend(ws: WebSocket, frame: Uint8Array<ArrayBuffer>, channelIx: number, seq?: number): void {
+    if (seq !== undefined) this.replayBuffers.get(channelIx)?.push(seq, frame)
+    ws.send(frame)
   }
 
   private handleCtrl(ctrl: CtrlMessage): void {
@@ -386,6 +389,8 @@ class WsConnection {
           this.pongTimeoutMs = ctrl.pingInterval * 2
         }
         if (ctrl.clientReplayBuffer) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
+        this.startPing()
+
         const serverMap = new Map(ctrl.open.map((c) => [c.ix, c.lastSeq]))
         const serverAcknowledgedIxes = new Set(serverMap.keys())
         const reconcileIxes = this.reconcileIxes
@@ -418,6 +423,7 @@ class WsConnection {
         }
         this.reconciling = false
         this.flushSendBuffer(serverAcknowledgedIxes)
+
         // If new channels were registered while the reconcile was in-flight, introduce them now.
         const hasNewChannels = [...this.channels.keys()].some((ix) => !serverAcknowledgedIxes.has(ix))
         if (hasNewChannels) {
@@ -434,6 +440,7 @@ class WsConnection {
 
   private startPing(): void {
     this.resetPongTimer()
+    if (this.pingInterval) return
     this.pingInterval = setInterval(() => {
       if (this.ws && this.connected) this.ws.send(encodeCtrl({ t: 'ping' }))
     }, this.pingIntervalMs)

@@ -11,6 +11,7 @@ const nav = [
   { href: '/abort', label: 'Abort' },
   { href: '/chat', label: 'Chat' },
   { href: '/channel', label: 'Channel' },
+  { href: '/function', label: 'Function' },
   { href: '/kitchen-sink', label: 'Kitchen Sink' },
 ]
 

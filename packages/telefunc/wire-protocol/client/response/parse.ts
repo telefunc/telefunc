@@ -3,7 +3,7 @@ export { BaseStreamReader } from './BaseStreamReader.js'
 
 import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../../../utils/assert.js'
-import { isObject } from '../../../utils/isObject.js'
+import { isObject, isObjectOrFunction } from '../../../utils/isObject.js'
 import { createStreamingReviver } from './registry.js'
 import { setAbortController } from '../../../client/abort.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
@@ -125,7 +125,7 @@ function finalizeResponse(
   }
 
   const { ret } = parsed
-  if (isObject(ret)) {
+  if (isObjectOrFunction(ret)) {
     setAbortController(ret, callContext.abortController)
   }
 

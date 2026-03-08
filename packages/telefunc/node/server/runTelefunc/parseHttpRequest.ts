@@ -8,6 +8,7 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver } from '../../../wire-protocol/server/request/registry.js'
 import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
+import type { RequestBodyReader } from '../../../wire-protocol/request-types.js'
 import { TRANSPORT, DEFAULT_TRANSPORT, type Transport } from '../../../wire-protocol/constants.js'
 
 type ParseResult =
@@ -39,7 +40,8 @@ async function parseHttpRequest(runContext: {
   const isBinaryFrame = contentType.includes('application/octet-stream')
   if (!isBinaryFrame) {
     const text = await request.text()
-    return parseTelefuncPayload(text, runContext)
+    const reviver = createRequestReviver(noopReader)
+    return parseTelefuncPayload(text, runContext, reviver)
   } else {
     assert(request.body)
     return parseBinaryFrameBody(request.body, runContext)
@@ -47,6 +49,12 @@ async function parseHttpRequest(runContext: {
 }
 
 // ===== Main parsing =====
+
+/** No-op reader used when there is no binary frame (plain JSON requests). */
+const noopReader: RequestBodyReader = {
+  registerFile: () => {},
+  consumeFile: () => Promise.reject(new Error('No binary frame')),
+}
 
 /** Parse main payload, validate shape, and build a ParseResult. */
 function parseTelefuncPayload(

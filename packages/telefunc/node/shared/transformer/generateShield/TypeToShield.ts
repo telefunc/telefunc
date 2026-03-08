@@ -106,6 +106,8 @@ type Shield<T, Acc extends any[] = []> = SimpleType<T> extends ShieldRes<any>
   ? Shield<Exclude<T, null>, ['nullable', ...Acc]>
   : IsUnion<T> extends true
   ? ShieldUnion<T, Acc>
+  : T extends (...args: any[]) => any
+  ? ShieldRes<'__telefunc_t.function', Acc>
   : T extends any[]
   ? ArrayLike<T, Acc>
   : T extends Record<any, any>
