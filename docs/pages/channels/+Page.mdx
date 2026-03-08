@@ -62,7 +62,7 @@ Both server and client channels share the same interface:
 | `onOpen(cb)` | Fires when the channel is connected |
 | `onClose(cb)` | Fires when the channel closes |
 | `close()` | Close the channel cleanly |
-| `abort(value?)` | Close the channel with an abort value (received as an error by the other side) |
+| `abort(value?)` | Close the channel; when called from the server, delivers an abort value to the client's `onClose` |
 | `isClosed` | Whether the channel has been closed |
 
 
@@ -79,7 +79,7 @@ channel.close()
 
 ### `abort(abortValue?)`
 
-Closes the channel and delivers an abort value to the other side. The other side's `onClose` callback receives an error with `isAbort: true` and the abort value.
+Closes the channel. When called from the **server**, the `abortValue` is delivered to the client's `onClose` callback as an error with `isAbort: true`.
 
 ```ts
 // Environment: server
@@ -94,6 +94,8 @@ channel.onClose((err) => {
   }
 })
 ```
+
+> `abortValue` is only delivered when aborting from the server side. When the client calls `abort()`, the server's `onClose` fires with no error — use `close()` from the client for a clean shutdown.
 
 > Use `abort()` to signal a known error condition (e.g. auth failure, rate limit). Use `close()` for a clean shutdown with no error.
 
