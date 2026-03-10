@@ -121,7 +121,7 @@ export class ReplayBuffer {
     return this.#totalBytes
   }
 
-  clear(): void {
+  dispose(): void {
     this.#seqs.length = 0
     this.#frames.length = 0
     this.#times.length = 0
@@ -137,17 +137,25 @@ export class ReplayBuffer {
   // ── Private ──
 
   /**
-   * Debounced cleanup: reset the timer on every push so eviction fires
-   * maxAgeMs after the last push, not the first.
-   * The timer is unref'd so it never prevents process exit.
+   * Schedule (or reschedule) a cleanup timer to fire precisely when the oldest
+   * entry expires. Cancels any existing timer first so there is always at most
+   * one pending. After eviction, re-schedules for the new oldest entry if any
+   * remain.
    */
   #scheduleCleanup(): void {
     if (this.#maxAgeMs === undefined) return
-    if (this.#cleanupTimer !== null) clearTimeout(this.#cleanupTimer)
+    if (this.#head >= this.#frames.length) return
+    if (this.#cleanupTimer !== null) {
+      clearTimeout(this.#cleanupTimer)
+      this.#cleanupTimer = null
+    }
+    const oldestExpiry = this.#times[this.#head]! + this.#maxAgeMs
+    const delay = Math.max(0, oldestExpiry - Date.now())
     const timer = setTimeout(() => {
       this.#cleanupTimer = null
       this.evict()
-    }, this.#maxAgeMs)
+      this.#scheduleCleanup()
+    }, delay)
     unrefTimer(timer)
     this.#cleanupTimer = timer
   }

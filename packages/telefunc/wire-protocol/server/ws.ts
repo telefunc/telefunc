@@ -222,7 +222,10 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
           state.ixMap.set(ix, entry)
 
           wsChannels.set(id, entry)
-          ch.onClose(() => wsChannels.delete(id))
+          ch.onClose(() => {
+            wsChannels.delete(id)
+            replay.dispose()
+          })
 
           ch.attachPeer(new IndexedPeer(peer, ix, replay))
           attached.push({ id, ix, lastSeq: lastClientSeq })
