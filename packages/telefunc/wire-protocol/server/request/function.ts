@@ -12,6 +12,7 @@ const functionServerRequestType: PlaceholderReviverType<FunctionContract> = {
     // Client opened its ClientChannel eagerly (at serialization time) with this ID.
     // Server must use the same ID so the WS reconcile links both sides.
     const channel = new ServerChannel(/*ackMode=*/ true, channelId)
+    channel._registerChannel()
     return (...args) => channel.send(args, { ack: true })
   },
 }

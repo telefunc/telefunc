@@ -3,7 +3,7 @@ export type { TelefuncWebSocketOptions }
 
 import { defineHooks, type Peer } from 'crossws'
 import type { ServerChannel } from './channel.js'
-import { getChannelRegistry, onChannelCreated } from './channel.js'
+import { getChannelRegistry, onChannelCreated, setChannelDefaults } from './channel.js'
 import { TAG, decode, encodeCtrl } from '../shared-ws.js'
 import type { CtrlMessage } from '../shared-ws.js'
 import { hasProp } from '../../utils/hasProp.js'
@@ -17,6 +17,8 @@ import {
   WS_CLIENT_REPLAY_BUFFER,
   WS_RECONNECT_TIMEOUT,
   WS_IDLE_TIMEOUT,
+  WS_CHANNEL_CONNECT_TTL_MS,
+  WS_CHANNEL_SEND_BUFFER,
 } from '../constants.js'
 
 type TelefuncWebSocketOptions = {
@@ -62,6 +64,20 @@ type TelefuncWebSocketOptions = {
    * @default 1_048_576 (1 MB)
    */
   clientReplayBuffer?: number
+  /**
+   * How long (ms) the server waits for the client to connect to a newly created channel.
+   * If the client does not connect within this window, the channel is closed automatically.
+   *
+   * @default 5_000
+   */
+  channelConnectTtl?: number
+  /**
+   * Maximum bytes buffered per channel for messages sent before the client connects.
+   * Covers the same window as `channelConnectTtl`.
+   *
+   * @default 524_288 (512 KB)
+   */
+  channelSendBuffer?: number
 }
 
 type ChannelEntry = { channel: ServerChannel; lastClientSeq: number; replay: ReplayBuffer }
@@ -80,6 +96,16 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
   const pingDeadline = pingInterval * 2
   const serverReplayBuffer = opts?.serverReplayBuffer ?? WS_SERVER_REPLAY_BUFFER
   const clientReplayBuffer = opts?.clientReplayBuffer ?? WS_CLIENT_REPLAY_BUFFER
+  const channelConnectTtl = opts?.channelConnectTtl ?? WS_CHANNEL_CONNECT_TTL_MS
+  const channelSendBuffer = opts?.channelSendBuffer ?? WS_CHANNEL_SEND_BUFFER
+  // Frames must survive the full worst-case reconnect window:
+  //   pingDeadline     — both sides start their timer at the last ping; they fire concurrently
+  //   reconnectTimeout — client reconnect window after detection
+  //   1 000 ms         — RTT margin for the reconnect handshake + reconcile to arrive
+  const replayMaxAge = pingDeadline + reconnectTimeout + 1_000
+
+  // Propagate channel-level defaults so createChannel() picks them up automatically.
+  setChannelDefaults({ connectTtlMs: channelConnectTtl, sendBufferBytes: channelSendBuffer })
 
   const peerStates = new Map<string, PeerState>()
   const wsChannels = new Map<string, ChannelEntry>()
@@ -172,7 +198,7 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
               ({ id }) =>
                 new Promise<void>((resolve) => {
                   onChannelCreated(id, resolve)
-                  setTimeout(resolve, 5_000)
+                  setTimeout(resolve, channelConnectTtl)
                 }),
             ),
         )
@@ -185,7 +211,7 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
 
           // Get existing entry (with replay buffer) or create new
           const existing = wsChannels.get(id)
-          const replay = existing?.replay ?? new ReplayBuffer(serverReplayBuffer)
+          const replay = existing?.replay ?? new ReplayBuffer(serverReplayBuffer, replayMaxAge)
           const lastClientSeq = existing?.lastClientSeq ?? 0
 
           // Replay missed server→client frames

@@ -161,6 +161,8 @@ All adapters accept the following options:
 | `pingInterval` | `5_000` | How often (ms) the client sends a ping. The server considers the client dead after 2× this interval. Minimum: 1000ms. |
 | `serverReplayBuffer` | `262_144` | Per-channel replay buffer size (bytes) on the server. Frames within this budget are replayed to a reconnecting client. |
 | `clientReplayBuffer` | `1_048_576` | Per-channel replay buffer size (bytes) on the client. Frames within this budget are replayed to the server on reconnect. |
+| `channelConnectTtl` | `5_000` | How long (ms) the server waits for the client to connect to a newly created channel. If the client does not connect within this window, the channel is closed automatically. |
+| `channelSendBuffer` | `524_288` | Per-channel buffer size (bytes) for messages sent before the client connects. Covers the same window as `channelConnectTtl`.  |
 
 ## See also
 

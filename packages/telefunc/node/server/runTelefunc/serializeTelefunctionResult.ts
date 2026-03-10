@@ -68,6 +68,7 @@ function serializeTelefunctionResult(runContext: {
   // and start pumping data frames over the WebSocket in the background.
   if (runContext.transport === TRANSPORT.WS) {
     const serverChannel = new ServerChannel<never, never>()
+    serverChannel._registerChannel()
     serverChannel.onClose(() => requestContext.markComplete())
     httpResponseBody = injectFrameChannel(httpResponseBody, { channelId: serverChannel.id })
     buildChannelResponseBody(streamingValues, telefuncId, serverChannel, runContext)

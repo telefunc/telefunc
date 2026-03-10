@@ -1,4 +1,4 @@
-export { createChannel, getChannelRegistry, onChannelCreated, ServerChannel, SERVER_CHANNEL_BRAND }
+export { createChannel, getChannelRegistry, onChannelCreated, setChannelDefaults, ServerChannel, SERVER_CHANNEL_BRAND }
 export { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
@@ -9,13 +9,27 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
 import { isAbort } from '../../node/server/Abort.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
+import { WS_CHANNEL_SEND_BUFFER, WS_CHANNEL_CONNECT_TTL_MS } from '../constants.js'
+import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 
 const globalObject = getGlobalObject('channel.ts', {
   channelRegistry: new Map<string, ServerChannel<unknown, unknown>>(),
   creationHooks: new Map<string, () => void>(),
+  channelConnectTtlMs: WS_CHANNEL_CONNECT_TTL_MS,
+  channelSendBufferBytes: WS_CHANNEL_SEND_BUFFER,
 })
+
+/**
+ * @internal — Called by `getTelefuncChannelHooks` to propagate WS-level defaults to channels.
+ * Must be called before any `createChannel()` call to take effect on those channels.
+ */
+function setChannelDefaults(opts: { connectTtlMs: number; sendBufferBytes: number }): void {
+  globalObject.channelConnectTtlMs = opts.connectTtlMs
+  globalObject.channelSendBufferBytes = opts.sendBufferBytes
+}
 
 function getChannelRegistry(): Map<string, ServerChannel<unknown, unknown>> {
   return globalObject.channelRegistry
@@ -49,17 +63,35 @@ function onChannelCreated(id: string, cb: () => void): void {
  * }
  * ```
  */
-function createChannel<TSend = unknown, TReceive = unknown>(): Channel<TSend, TReceive>
-function createChannel<TSend, TReceive>(opts: { ack: true }): Channel<TSend, TReceive, unknown, unknown, true>
-function createChannel<TSend, TReceive, TAckSend, TAckReceive>(opts: {
-  ack: true
-}): Channel<TSend, TReceive, TAckSend, TAckReceive, true>
-function createChannel<TSend, TReceive, TAckSend, TAckReceive>(): Channel<TSend, TReceive, TAckSend, TAckReceive, false>
-function createChannel(opts?: { ack?: true }): any {
-  return new ServerChannel(opts?.ack === true)
+type CreateChannelOpts = {
+  /**
+   * Override the global send-buffer byte cap for this specific channel.
+   * Defaults to the value set via `getTelefuncChannelHooks` options (or 256 KB).
+   */
+  sendBufferBytes?: number
+}
+function createChannel<TSend = unknown, TReceive = unknown>(opts?: CreateChannelOpts): Channel<TSend, TReceive>
+function createChannel<TSend, TReceive>(
+  opts: CreateChannelOpts & { ack: true },
+): Channel<TSend, TReceive, unknown, unknown, true>
+function createChannel<TSend, TReceive, TAckSend, TAckReceive>(
+  opts: CreateChannelOpts & {
+    ack: true
+  },
+): Channel<TSend, TReceive, TAckSend, TAckReceive, true>
+function createChannel<TSend, TReceive, TAckSend, TAckReceive>(
+  opts?: CreateChannelOpts,
+): Channel<TSend, TReceive, TAckSend, TAckReceive, false>
+function createChannel(opts?: CreateChannelOpts & { ack?: true }): any {
+  return new ServerChannel(opts?.ack === true, undefined, opts?.sendBufferBytes)
 }
 
-const DEFAULT_TTL_MS = 30_000
+/**
+ * Safety TTL: if a channel is created but never serialized into a response
+ * (i.e. `_registerChannel` is never called), close it after this many ms.
+ * Should be large enough to cover any reasonable telefunction run time.
+ */
+const DEFAULT_TTL_MS = 5 * 60_000
 class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAckReceive = unknown>
   implements Channel<TSend, TReceive, TAckSend, TAckReceive>
 {
@@ -85,8 +117,8 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _pauseCallbacks: Array<() => void> = []
   private _resumeCallbacks: Array<() => void> = []
-  private _sendBuffer: string[] = []
-  private _binarySendBuffer: Uint8Array[] = []
+  /** Drop-oldest ring buffer for messages sent before a peer connects. */
+  private _prePeerBuffer: ServerChannelBuffer
   /** Buffered ack sends when peer not yet connected: { serialized, resolve, reject }[]. */
   private _ackSendBuffer: Array<{ data: string; resolve: (v: TAckSend) => void; reject: (err: Error) => void }> = []
   /** Pending ack promises keyed by the seq of the outgoing frame. */
@@ -101,18 +133,13 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
   private _disconnected = false
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-  constructor(ackMode = false, id?: string) {
+  constructor(ackMode = false, id?: string, maxSendBufferBytes?: number) {
     this.ackMode = ackMode
     this.id = id ?? crypto.randomUUID()
-    getChannelRegistry().set(this.id, this as ServerChannel<unknown, unknown>)
-    // Fire any waiter that registered before this channel was created.
-    const hook = globalObject.creationHooks.get(this.id)
-    if (hook) {
-      globalObject.creationHooks.delete(this.id)
-      hook()
-    }
-    // If no peer connects within TTL, close automatically.
-    this._ttlTimer = this._unrefTimer(
+    this._prePeerBuffer = new ServerChannelBuffer(maxSendBufferBytes ?? globalObject.channelSendBufferBytes)
+    // Safety TTL: if this channel is never serialized into a response, shut it down
+    // to prevent memory leaks. The registry entry is added in _registerChannel().
+    this._ttlTimer = unrefTimer(
       setTimeout(() => {
         this._ttlTimer = null
         this._shutdown(new ChannelNetworkError('Channel timed out: no peer connected within TTL'))
@@ -140,7 +167,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
       if (this._peer) {
         this._peer.sendText(serialized)
       } else {
-        this._sendBuffer.push(serialized)
+        this._prePeerBuffer.pushText(serialized)
       }
       return
     }
@@ -148,6 +175,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
       const seq = this._peer.sendTextAckReq(serialized)
       return new Promise<TAckSend>((resolve, reject) => this._pendingAcks.set(seq, { resolve, reject }))
     } else {
+      // Ack-buffered sends don't count against the byte cap (they await a response and are rare).
       return new Promise<TAckSend>((resolve, reject) => {
         this._ackSendBuffer.push({ data: serialized, resolve, reject })
       })
@@ -161,7 +189,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
     if (this._peer) {
       this._peer.sendBinary(data)
     } else {
-      this._binarySendBuffer.push(data)
+      this._prePeerBuffer.pushBinary(data)
     }
   }
 
@@ -223,17 +251,41 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
     this._shutdown()
   }
 
-  /** @internal — Called by WS hooks when a peer connects (or reconnects). */
+  /** @internal — Called by the response serializer when this channel is included in a
+   * telefunc response. Registers the channel in the registry (so reconcile can find it)
+   * and starts the short connect TTL from this moment.
+   */
+  _registerChannel(): void {
+    if (this._isClosed || this._peer) return
+    getChannelRegistry().set(this.id, this as ServerChannel<unknown, unknown>)
+    // Fire any waiter that was registered before this channel entered the registry.
+    // Must happen after the registry write so reconcile can immediately do registry.get(id).
+    const hook = globalObject.creationHooks.get(this.id)
+    if (hook) {
+      globalObject.creationHooks.delete(this.id)
+      hook()
+    }
+    this._clearTimer('_ttlTimer')
+    this._ttlTimer = unrefTimer(
+      setTimeout(() => {
+        this._ttlTimer = null
+        this._shutdown(
+          new ChannelNetworkError('Channel timed out: no peer connected within TTL after response was sent'),
+        )
+      }, globalObject.channelConnectTtlMs),
+    )
+  }
+
   attachPeer(peer: IndexedPeer): void {
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     const wasDisconnected = this._disconnected
     this._disconnected = false
     this._peer = peer
-    for (const msg of this._sendBuffer) peer.sendText(msg)
-    this._sendBuffer = []
-    for (const msg of this._binarySendBuffer) peer.sendBinary(msg)
-    this._binarySendBuffer = []
+    this._prePeerBuffer.flush(
+      (msg) => peer.sendText(msg),
+      (msg) => peer.sendBinary(msg),
+    )
     // Flush buffered ack sends
     for (const { data, resolve, reject } of this._ackSendBuffer) {
       const seq = peer.sendTextAckReq(data)
@@ -300,7 +352,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
     this._peer = null
     this._disconnected = true
     for (const cb of this._pauseCallbacks) cb()
-    this._reconnectTimer = this._unrefTimer(
+    this._reconnectTimer = unrefTimer(
       setTimeout(() => {
         this._reconnectTimer = null
         this._shutdown(new ChannelNetworkError('Channel timed out: peer did not reconnect within grace period'))
@@ -392,10 +444,5 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
       clearTimeout(timer)
       ;(this as any)[name] = null
     }
-  }
-
-  private _unrefTimer(timer: ReturnType<typeof setTimeout>): ReturnType<typeof setTimeout> {
-    if (hasProp(timer, 'unref', 'function')) timer.unref()
-    return timer
   }
 }

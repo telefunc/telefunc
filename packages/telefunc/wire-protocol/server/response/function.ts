@@ -2,7 +2,7 @@ export { functionServerPlaceholderType }
 
 import { SERIALIZER_PREFIX_FUNCTION } from '../../constants.js'
 import type { PlaceholderReplacerType, FunctionContract } from '../../placeholder-types.js'
-import { createChannel } from '../channel.js'
+import { ServerChannel } from '../channel.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -12,7 +12,8 @@ const functionServerPlaceholderType: PlaceholderReplacerType<FunctionContract> =
     return typeof value === 'function'
   },
   getMetadata(fn) {
-    const channel = createChannel({ ack: true })
+    const channel = new ServerChannel(true)
+    channel._registerChannel()
     channel.listen((args) => fn(...(args as unknown[])))
     return { channelId: channel.id }
   },

@@ -56,6 +56,23 @@ export const WS_PING_INTERVAL = 5_000
 export const WS_PING_INTERVAL_MIN = 1_000
 export const WS_SERVER_REPLAY_BUFFER = 256 * 1024
 export const WS_CLIENT_REPLAY_BUFFER = 1024 * 1024
+/**
+ * Maximum bytes buffered per channel for messages sent before a peer connects.
+ * When the budget is exceeded the oldest entries are evicted (FIFO) so the
+ * channel stays alive and memory stays bounded.
+ */
+export const WS_CHANNEL_SEND_BUFFER = 512 * 1024
+
+/**
+ * How long (ms) a channel waits for a peer to connect after the server→client
+ * HTTP response carrying `channel.client` has been serialized.
+ *
+ * This is intentionally the same as the reconcile defer timeout (`channelConnectTtl`
+ * in `getTelefuncChannelHooks` options): both cap the same real-world window —
+ * the time between the telefunction returning its result and the client completing
+ * its first WS reconcile for that channel.
+ */
+export const WS_CHANNEL_CONNECT_TTL_MS = 5_000
 
 // Client-side WS connection defaults
 export const WS_RECONNECT_INITIAL_DELAY = 500

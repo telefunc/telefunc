@@ -217,7 +217,7 @@ class WsConnection {
     const ix = this.nextIndex++
     this.channels.set(ix, channel)
     this.channelIndex.set(channel, ix)
-    this.replayBuffers.set(ix, new ReplayBuffer(this.clientReplayBufferBytes))
+    this.replayBuffers.set(ix, new ReplayBuffer(this.clientReplayBufferBytes, this.reconnectTimeoutMs))
     return ix
   }
 
