@@ -143,11 +143,12 @@ If the user's browser can't connect to your server:
   <body>
     <script type="module">
       import { hello } from './hello.telefunc.js'
+      import { ConnectionError } from 'telefunc/client'
 
       try {
         await hello('Eva')
       } catch(err) {
-        if (err.isConnectionError) {
+        if (err instanceof ConnectionError) {
           // There is a network problem:
           //  - the user isn't connected to the internet, or
           //  - your server is down.

@@ -8,6 +8,7 @@ import { functionServerPlaceholderType } from './function.js'
 import type { ServerStreamingType, StreamingValueServer } from '../../streaming-types.js'
 import type { PlaceholderReplacerType } from '../../placeholder-types.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
+import { ServerChannel } from '../channel.js'
 assertIsNotBrowser()
 
 const serverStreamingTypes: ServerStreamingType[] = [
@@ -31,6 +32,7 @@ const serverPlaceholderTypes: PlaceholderReplacerType[] = [channelServerPlacehol
  */
 function createStreamingReplacer() {
   const streamingValues: StreamingValueServer[] = []
+  const returnedChannels: ServerChannel[] = []
   let nextIndex = 0
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of serverStreamingTypes) {
@@ -46,6 +48,9 @@ function createStreamingReplacer() {
     }
     for (const type of serverPlaceholderTypes) {
       if (type.detect(value)) {
+        if (ServerChannel.isServerChannel(value)) {
+          returnedChannels.push(value)
+        }
         const pluginMeta = type.getMetadata(value)
         return {
           replacement: type.prefix + serializer(pluginMeta),
@@ -55,5 +60,5 @@ function createStreamingReplacer() {
     }
     return undefined
   }
-  return { replacer, streamingValues }
+  return { replacer, streamingValues, returnedChannels }
 }

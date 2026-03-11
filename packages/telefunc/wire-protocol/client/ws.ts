@@ -129,14 +129,14 @@ class WsConnection {
   }
 
   /** Remove a channel from the connection's maps and start the idle TTL if no channels remain. */
-  unregister(channel: WsChannel): void {
+  unregister(channel: WsChannel, err = new ChannelClosedError()): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     this.channels.delete(ix)
     this.channelIndex.delete(channel)
     this.lastSeqByChannel.delete(ix)
     this.replayBuffers.delete(ix)
-    this.clearPendingAcks(ix, new ChannelClosedError())
+    this.clearPendingAcks(ix, err)
     this.startTtlIfIdle()
   }
 
@@ -182,19 +182,11 @@ class WsConnection {
   }
 
   /** Send a CTRL close for the given channel and unregister it. */
-  sendClose(channel: WsChannel): void {
+  sendClose(channel: WsChannel, err?: Error): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     this.trySend(encodeCtrl({ t: 'close', ix }), ix) // buffer before unregister so ix is valid
-    this.unregister(channel)
-  }
-
-  /** Send a CTRL abort for the given channel and unregister it. */
-  sendAbort(channel: WsChannel, abortValue: string): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.trySend(encodeCtrl({ t: 'abort', ix, abortValue }), ix) // buffer before unregister so ix is valid
-    this.unregister(channel)
+    this.unregister(channel, err)
   }
 
   /** Send a CTRL pause for the given channel. */

@@ -19,9 +19,11 @@ import {
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
+  onAbortOneOfManyStreamingValues,
+  onChannelAbortDoesNotAbortStreamingValues,
   onUploadWithProgress,
 } from './Streaming.telefunc'
-import { abort } from 'telefunc/client'
+import { Abort as TelefuncAbort, abort } from 'telefunc/client'
 
 function Streaming() {
   const [result, setResult] = useState<string>('')
@@ -365,6 +367,7 @@ function Streaming() {
           setResult('')
           const res = await onReturnMixedEndless()
           const genValues: string[] = []
+          let slowErr: { isAbort: boolean; abortValue: unknown; error: string } | null = null
 
           // Read a couple of gen values
           for (let i = 0; i < 2; i++) {
@@ -375,12 +378,22 @@ function Streaming() {
           // Abort the entire multiplexed result
           abort(res)
 
-          // Next read should reject with isCancel
+          try {
+            await res.slow
+          } catch (e: any) {
+            slowErr = {
+              isAbort: e instanceof TelefuncAbort,
+              abortValue: e?.abortValue ?? null,
+              error: e?.message ?? String(e),
+            }
+          }
+
+          // Next read should reject with Abort
           try {
             await res.gen.next()
             setResult(JSON.stringify({ error: null, genValues }))
           } catch (e: any) {
-            setResult(JSON.stringify({ error: e.message, isCancel: !!e.isCancel, genValues }))
+            setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort, genValues, slowErr }))
           }
         }}
       >
@@ -401,7 +414,9 @@ function Streaming() {
             }
             setResult(JSON.stringify({ error: false, values }))
           } catch (e: any) {
-            setResult(JSON.stringify({ error: true, isAbort: !!e.isAbort, abortValue: e.abortValue, values }))
+            setResult(
+              JSON.stringify({ error: true, isAbort: e instanceof TelefuncAbort, abortValue: e.abortValue, values }),
+            )
           }
         }}
       >
@@ -420,7 +435,9 @@ function Streaming() {
             }
             setResult(JSON.stringify({ error: false, values }))
           } catch (e: any) {
-            setResult(JSON.stringify({ error: true, isAbort: !!e.isAbort, abortValue: e.abortValue, values }))
+            setResult(
+              JSON.stringify({ error: true, isAbort: e instanceof TelefuncAbort, abortValue: e.abortValue, values }),
+            )
           }
         }}
       >
@@ -439,11 +456,154 @@ function Streaming() {
             }
             setResult(JSON.stringify({ error: false, values }))
           } catch (e: any) {
-            setResult(JSON.stringify({ error: true, isBug: !e.isAbort, message: String(e), values }))
+            setResult(JSON.stringify({ error: true, isBug: !(e instanceof TelefuncAbort), message: String(e), values }))
           }
         }}
       >
         Generator Bug mid-stream
+      </button>
+
+      <button
+        id="test-abort-one-of-many-streaming-values"
+        onClick={async () => {
+          setResult('')
+          const res = await onAbortOneOfManyStreamingValues()
+          const abortingValues: string[] = []
+          const otherValues: string[] = []
+          const streamChunks: string[] = []
+          const decoder = new TextDecoder()
+          let abortingErr: { isAbort: boolean; abortValue: unknown } | null = null
+          let otherErr: { isAbort: boolean; abortValue: unknown } | null = null
+          let streamErr: { isAbort: boolean; abortValue: unknown } | null = null
+          let promiseErr: { isAbort: boolean; abortValue: unknown } | null = null
+
+          await Promise.all([
+            (async () => {
+              try {
+                for await (const v of res.aborting) {
+                  abortingValues.push(v)
+                }
+              } catch (e: any) {
+                abortingErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
+              }
+            })(),
+            (async () => {
+              try {
+                for await (const v of res.other) {
+                  otherValues.push(v)
+                }
+              } catch (e: any) {
+                otherErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
+              }
+            })(),
+            (async () => {
+              try {
+                const reader = res.stream.getReader()
+                while (true) {
+                  const { done, value } = await reader.read()
+                  if (done) break
+                  streamChunks.push(decoder.decode(value, { stream: true }))
+                }
+              } catch (e: any) {
+                streamErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
+              }
+            })(),
+            (async () => {
+              try {
+                await res.promise
+              } catch (e: any) {
+                promiseErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
+              }
+            })(),
+          ])
+
+          setResult(
+            JSON.stringify({ abortingValues, otherValues, streamChunks, abortingErr, otherErr, streamErr, promiseErr }),
+          )
+        }}
+      >
+        Abort one of many streaming values
+      </button>
+
+      <button
+        id="test-channel-abort-does-not-abort-streaming-values"
+        onClick={async () => {
+          setResult('')
+          const res = await onChannelAbortDoesNotAbortStreamingValues()
+          const firstValues: string[] = []
+          const secondValues: string[] = []
+          const streamChunks: string[] = []
+          const decoder = new TextDecoder()
+          let firstErr: { isAbort: boolean; abortValue: unknown } | null = null
+          let secondErr: { isAbort: boolean; abortValue: unknown } | null = null
+          let streamErr: { isAbort: boolean; abortValue: unknown } | null = null
+          let channelSendErr: { isAbort: boolean; abortValue: unknown } | null = null
+          let channelCloseErr: { isAbort: boolean; abortValue: unknown } | null = null
+
+          const channelCloseP = new Promise<void>((resolve) => {
+            res.channel.onClose((err: any) => {
+              channelCloseErr = { isAbort: err instanceof TelefuncAbort, abortValue: err?.abortValue ?? null }
+              resolve()
+            })
+          })
+
+          await Promise.all([
+            (async () => {
+              try {
+                for await (const v of res.first) {
+                  firstValues.push(v)
+                }
+              } catch (e: any) {
+                firstErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
+              }
+            })(),
+            (async () => {
+              try {
+                for await (const v of res.second) {
+                  secondValues.push(v)
+                }
+              } catch (e: any) {
+                secondErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
+              }
+            })(),
+            (async () => {
+              try {
+                const reader = res.stream.getReader()
+                while (true) {
+                  const { done, value } = await reader.read()
+                  if (done) break
+                  streamChunks.push(decoder.decode(value, { stream: true }))
+                }
+              } catch (e: any) {
+                streamErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
+              }
+            })(),
+            (async () => {
+              await new Promise<void>((resolve) => res.channel.onOpen(resolve))
+              try {
+                await res.channel.send('trigger', { ack: true })
+              } catch (e: any) {
+                channelSendErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
+              }
+            })(),
+            channelCloseP,
+          ])
+
+          setResult(
+            JSON.stringify({
+              firstValues,
+              secondValues,
+              streamChunks,
+              firstErr,
+              secondErr,
+              streamErr,
+              channelSendErr,
+              channelCloseErr,
+            }),
+          )
+        }}
+      >
+        Channel abort does not abort streaming values
       </button>
 
       <h2>Upload progress via streaming</h2>

@@ -194,14 +194,16 @@ export async function* onChat(prompt: string): AsyncGenerator<string> {
 }
 ```
 
-The client catches it with `isAbort: true`:
+The client catches it with `instanceof Abort`:
 
 ```ts
+import { Abort } from 'telefunc/client'
+
 const gen = onChat('bad prompt')
 try {
   for await (const token of gen) { /* ... */ }
 } catch (err) {
-  if (err.isAbort) {
+  if (err instanceof Abort) {
     console.log(err.abortValue) // { reason: 'content-policy', code: 403 }
   }
 }

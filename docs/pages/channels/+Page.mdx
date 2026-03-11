@@ -79,7 +79,7 @@ channel.close()
 
 ### `abort(abortValue?)`
 
-Closes the channel. When called from the **server**, the `abortValue` is delivered to the client's `onClose` callback as an error with `isAbort: true`.
+Closes the channel. When called from the **server**, the `abortValue` is delivered to the client's `onClose` callback as an `Abort` error.
 
 ```ts
 // Environment: server
@@ -88,8 +88,10 @@ channel.abort({ reason: 'unauthorized' })
 
 ```ts
 // Environment: client
+import { Abort } from 'telefunc/client'
+
 channel.onClose((err) => {
-  if (err?.isAbort) {
+  if (err instanceof Abort) {
     console.log(err.abortValue) // { reason: 'unauthorized' }
   }
 })
@@ -374,11 +376,13 @@ export async function onGetCounter(initial: number) {
 }
 ```
 
-The abort value is delivered to the client — the function call rejects with an error that has `isAbort: true` and `abortValue`:
+The abort value is delivered to the client — the function call rejects with an `Abort` error carrying `abortValue`:
 
 ```ts
 // Counter.tsx
 // Environment: client
+
+import { Abort } from 'telefunc/client'
 
 import { onGetCounter } from './Counter.telefunc'
 
@@ -386,8 +390,8 @@ const add = await onGetCounter(10)
 try {
   await add('not a number' as any)
 } catch (err) {
-  err.isAbort    // true
-  err.abortValue // { reason: 'expected a number' }
+  err instanceof Abort // true
+  err.abortValue       // { reason: 'expected a number' }
 }
 ```
 

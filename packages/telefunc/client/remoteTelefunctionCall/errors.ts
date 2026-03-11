@@ -1,27 +1,26 @@
-export { throwCancelError, throwAbortError, makeAbortError, throwBugError, makeBugError }
+export { throwAbortError, makeAbortError, throwBugError, makeBugError }
 
-import { objectAssign } from '../../utils/objectAssign.js'
+import { createAbortError } from '../../shared/Abort.js'
 import { callOnAbortListeners } from './onAbort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 
-function throwCancelError(): never {
-  const cancelError = new Error('Telefunc call cancelled')
-  objectAssign(cancelError, { isCancel: true as const })
-  throw cancelError
-}
-
-type AbortError = Error & { isAbort: true; abortValue: unknown }
-
-function makeAbortError(abortValue: unknown, message = 'Aborted'): AbortError {
-  const err = new Error(message)
-  objectAssign(err, { isAbort: true as const, abortValue })
-  return err as AbortError
+function makeAbortError(
+  abortValue: unknown,
+  messageOrContext?: string | { telefunctionName: string; telefuncFilePath: string },
+) {
+  return createAbortError(abortValue, getAbortMessage(messageOrContext))
 }
 
 function throwAbortError(telefunctionName: string, telefuncFilePath: string, abortValue: unknown): never {
-  const err = makeAbortError(abortValue, `Aborted telefunction call ${telefunctionName}() (${telefuncFilePath}).`)
+  const err = makeAbortError(abortValue, { telefunctionName, telefuncFilePath })
   callOnAbortListeners(err)
   throw err
+}
+
+function getAbortMessage(messageOrContext?: string | { telefunctionName: string; telefuncFilePath: string }) {
+  if (!messageOrContext) return undefined
+  if (typeof messageOrContext === 'string') return messageOrContext
+  return `Aborted telefunction call ${messageOrContext.telefunctionName}() (${messageOrContext.telefuncFilePath}).`
 }
 
 function makeBugError(errMsg = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`): Error {

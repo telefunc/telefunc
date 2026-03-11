@@ -2,14 +2,27 @@ export { createRequestContext }
 export { restoreRequestContext }
 export { getRequestContext }
 export { installAsyncRequestContext }
-export type { RequestContext }
+export type { RequestContext, ResponseAbortSource }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { Abort } from './Abort.js'
+import type { AbortError } from './Abort.js'
+
+type ResponseAbortSource = {
+  /** Abort the whole telefunc response with Abort semantics. Fires exactly once. */
+  abort: (abortValue?: unknown) => void
+  /** Register a callback fired when the response aborts. Fires exactly once. */
+  onAbort: (cb: (abortError: AbortError) => void) => void
+  /** Promise rejected with the Abort error once the response aborts. */
+  errorPromise: Promise<never>
+}
 
 /** Internal per-request state. */
 type RequestContext = {
   /** The request's AbortSignal — fires when the client disconnects. */
   abortSignal: AbortSignal
+  /** Response-wide abort source used by returned values and response transports. */
+  responseAbort: ResponseAbortSource
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onConnectionClose: (cb: () => void) => void
@@ -22,6 +35,8 @@ type RequestContext = {
 function createRequestContext(abortSignal: AbortSignal): RequestContext {
   const closeCallbacks: Array<() => void> = []
   let closed = false
+
+  const responseAbort = createResponseAbortSource(() => fireClose())
 
   const fireClose = () => {
     if (closed) return
@@ -38,6 +53,7 @@ function createRequestContext(abortSignal: AbortSignal): RequestContext {
 
   const ctx: RequestContext = {
     abortSignal,
+    responseAbort,
     onConnectionClose(cb) {
       if (closed) {
         cb()
@@ -56,6 +72,43 @@ function createRequestContext(abortSignal: AbortSignal): RequestContext {
   }
 
   return ctx
+}
+
+function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
+  const abortCallbacks: Array<(abortError: AbortError) => void> = []
+  let aborted = false
+  let abortError: AbortError | null = null
+  let rejectAbortPromise: ((err: unknown) => void) | null = null
+  const errorPromise = new Promise<never>((_resolve, reject) => {
+    rejectAbortPromise = reject
+  })
+  errorPromise.catch(() => {})
+
+  return {
+    abort(abortValue) {
+      if (aborted) return
+      aborted = true
+      abortError = Abort(abortValue)
+      rejectAbortPromise?.(abortError)
+      for (const cb of abortCallbacks) {
+        try {
+          cb(abortError)
+        } catch {
+          // Internal abort callbacks are silently swallowed
+        }
+      }
+      abortCallbacks.length = 0
+      onAbort()
+    },
+    onAbort(cb) {
+      if (abortError) {
+        cb(abortError)
+        return
+      }
+      abortCallbacks.push(cb)
+    },
+    errorPromise,
+  }
 }
 
 type GetRequestContext = () => RequestContext | null

@@ -38,13 +38,15 @@ abort(gen)
 
 ### Error handling
 
-When a call is aborted, the promise rejects (or the generator's next read rejects) with an error that has `isCancel: true`:
+When a call is aborted, the promise rejects (or the generator's next read rejects) with an `Abort` error:
 
 ```ts
+import { Abort } from 'telefunc/client'
+
 try {
   await promise
 } catch (err) {
-  if (err.isCancel) {
+  if (err instanceof Abort) {
     // Call was aborted by the client
   }
 }

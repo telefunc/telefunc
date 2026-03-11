@@ -1,4 +1,4 @@
-export type { Channel }
+export type { Channel, ChannelClient }
 
 /**
  * Bidirectional channel for real-time communication.
@@ -14,7 +14,7 @@ export type { Channel }
  *
  * The `.client` value has the send/receive and ack types flipped.
  */
-interface Channel<
+interface ChannelBase<
   TSend = unknown,
   TReceive = unknown,
   TAckSend = unknown,
@@ -22,8 +22,6 @@ interface Channel<
   TDefault extends boolean = false,
 > {
   readonly id: string
-  /** The other end of the channel with all types flipped. */
-  readonly client: Channel<TReceive, TSend, TAckReceive, TAckSend, TDefault>
   readonly isClosed: boolean
   /** Default send. Returns `Promise<TAckSend>` when `TDefault = true`, otherwise `void`. */
   send(data: TSend): TDefault extends true ? Promise<TAckSend> : void
@@ -38,5 +36,28 @@ interface Channel<
   onClose(callback: (err?: Error) => void): void
   onOpen(callback: () => void): void
   close(): void
+}
+
+interface Channel<
+  TSend = unknown,
+  TReceive = unknown,
+  TAckSend = unknown,
+  TAckReceive = unknown,
+  TDefault extends boolean = false,
+> extends ChannelBase<TSend, TReceive, TAckSend, TAckReceive, TDefault> {
+  /** The client-side end of the channel with all types flipped. */
+  readonly client: ChannelClient<TReceive, TSend, TAckReceive, TAckSend, TDefault>
   abort(abortValue?: unknown): void
+}
+
+interface ChannelClient<
+  TSend = unknown,
+  TReceive = unknown,
+  TAckSend = unknown,
+  TAckReceive = unknown,
+  TDefault extends boolean = false,
+> extends ChannelBase<TSend, TReceive, TAckSend, TAckReceive, TDefault> {
+  /** The server-side end of the channel with all types flipped. */
+  readonly client: Channel<TReceive, TSend, TAckReceive, TAckSend, TDefault>
+  abort(): void
 }

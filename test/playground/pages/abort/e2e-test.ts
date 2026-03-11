@@ -17,8 +17,8 @@ function testAbort() {
       const result = await getResult('#abort-result')
       expect(result.method).toBe('abort(gen)')
       expect(result.values).deep.equal(['token-0'])
-      expect(result.isCancel).toBe(true)
-      expect(result.error).toContain('Telefunc call cancelled')
+      expect(result.isAbort).toBe(true)
+      expect(result.error).toContain('Aborted telefunction call')
     })
     await autoRetry(async () => {
       const state = await getCleanupState()
@@ -61,8 +61,8 @@ function testAbort() {
       const result = await getResult('#abort-result')
       expect(result.method).toBe('withContext(gen, signal)')
       expect(result.values).deep.equal(['token-0'])
-      expect(result.isCancel).toBe(true)
-      expect(result.error).toContain('Telefunc call cancelled')
+      expect(result.isAbort).toBe(true)
+      expect(result.error).toContain('Aborted telefunction call')
     })
     await autoRetry(async () => {
       const state = await getCleanupState()
@@ -107,8 +107,8 @@ function testAbort() {
       const result = await getResult('#abort-result')
       expect(result.method).toBe('withContext(stream, signal)')
       expect(result.chunks).deep.equal(['chunk-0'])
-      expect(result.isCancel).toBe(true)
-      expect(result.error).toContain('Telefunc call cancelled')
+      expect(result.isAbort).toBe(true)
+      expect(result.error).toContain('Aborted telefunction call')
     })
     await autoRetry(async () => {
       const state = await getCleanupState()
@@ -128,8 +128,8 @@ function testAbort() {
     await page.click('#test-slow-normal-telefunc')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
-      expect(result.isCancel).toBe(true)
-      expect(result.error).toContain('Telefunc call cancelled')
+      expect(result.isAbort).toBe(true)
+      expect(result.error).toContain('Aborted telefunction call')
     })
     await autoRetry(async () => {
       const state = await getCleanupState()
@@ -151,8 +151,8 @@ function testAbort() {
     await page.click('#test-upload-abort-single')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
-      expect(result.isCancel).toBe(true)
-      expect(result.error).toContain('Telefunc call cancelled')
+      expect(result.isAbort).toBe(true)
+      expect(result.error).toContain('Aborted telefunction call')
     })
     await autoRetry(async () => {
       const state = await getCleanupState()
@@ -174,8 +174,8 @@ function testAbort() {
     await page.click('#test-upload-abort-multiple')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
-      expect(result.isCancel).toBe(true)
-      expect(result.error).toContain('Telefunc call cancelled')
+      expect(result.isAbort).toBe(true)
+      expect(result.error).toContain('Aborted telefunction call')
     })
     await autoRetry(async () => {
       const state = await getCleanupState()

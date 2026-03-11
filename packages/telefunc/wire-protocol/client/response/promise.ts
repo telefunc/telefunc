@@ -8,7 +8,7 @@ import type { ClientStreamingType, PromiseContract } from '../../streaming-types
 const promiseClientType: ClientStreamingType<PromiseContract> = {
   prefix: SERIALIZER_PREFIX_PROMISE,
   createValue: (_metadata, readNextChunk, cancel) => {
-    return readNextChunk().then((chunk) => {
+    const promise = readNextChunk().then((chunk) => {
       // Signal completion so the demuxer knows this consumer is done.
       // Critical for per-index cancel: upstream is only cancelled when ALL
       // consumers are done, so promises must report completion too.
@@ -16,5 +16,8 @@ const promiseClientType: ClientStreamingType<PromiseContract> = {
       if (!chunk) throw new Error('Stream ended before promise resolved')
       return parse(textDecoder.decode(chunk))
     })
+    // Suppress unhandled-rejection noise for multiplexed promises a caller never awaits.
+    promise.catch(() => {})
+    return promise
   },
 }

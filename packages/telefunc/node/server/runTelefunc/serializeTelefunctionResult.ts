@@ -35,7 +35,7 @@ function serializeTelefunctionResult(runContext: {
     ? { ret: runContext.telefunctionReturn, abort: true }
     : { ret: runContext.telefunctionReturn }
 
-  const { replacer, streamingValues } = createStreamingReplacer()
+  const { replacer, streamingValues, returnedChannels } = createStreamingReplacer()
 
   let httpResponseBody: string
   try {
@@ -53,6 +53,11 @@ function serializeTelefunctionResult(runContext: {
   }
 
   const { requestContext } = runContext
+
+  for (const channel of returnedChannels) {
+    channel._setResponseAbort(requestContext.responseAbort.abort)
+    requestContext.responseAbort.onAbort((abortError) => channel.abort(abortError.abortValue))
+  }
 
   if (streamingValues.length === 0) {
     requestContext.markComplete()
@@ -79,7 +84,14 @@ function serializeTelefunctionResult(runContext: {
 
   return {
     type: 'streaming',
-    body: buildFn(httpResponseBody, streamingValues, telefuncId, requestContext.markComplete, runContext.abortSignal),
+    body: buildFn(
+      httpResponseBody,
+      streamingValues,
+      telefuncId,
+      requestContext.markComplete,
+      runContext.abortSignal,
+      requestContext.responseAbort,
+    ),
     transport: runContext.transport === TRANSPORT.SSE ? TRANSPORT.SSE : TRANSPORT.STREAM,
   }
 }

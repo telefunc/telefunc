@@ -28,11 +28,13 @@ export async function* onChat(prompt: string): AsyncGenerator<string> {
 The client catches the abort — values yielded before `throw Abort()` are still delivered:
 
 ```ts
+import { Abort } from 'telefunc/client'
+
 const gen = onChat('hello')
 try {
   for await (const token of gen) { /* receives 'before-abort' */ }
 } catch (err) {
-  err.isAbort // true
+  err instanceof Abort // true
 }
 ```
 
@@ -48,11 +50,13 @@ export async function* onChat(prompt: string): AsyncGenerator<string> {
 ```
 
 ```ts
+import { Abort } from 'telefunc/client'
+
 try {
   for await (const token of onChat('hello')) { /* ... */ }
 } catch (err) {
-  err.isAbort    // true
-  err.abortValue // { reason: 'not-allowed', code: 403 }
+  err instanceof Abort // true
+  err.abortValue       // { reason: 'not-allowed', code: 403 }
 }
 ```
 

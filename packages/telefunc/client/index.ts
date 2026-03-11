@@ -4,8 +4,9 @@ export { config }
 export { config as telefuncConfig }
 export { onAbort, onTelefunctionRemoteCallError } from './remoteTelefunctionCall/onAbort.js'
 export { abort } from './abort.js'
+export { Abort } from '../shared/Abort.js'
 export { withContext } from './withContext.js'
-export type { TelefunctionError } from './TelefunctionError.js'
+export { ConnectionError } from './ConnectionError.js'
 export { ChannelClosedError, ChannelNetworkError } from '../wire-protocol/channel-errors.js'
 
 export { remoteTelefunctionCall as __remoteTelefunctionCall } from './remoteTelefunctionCall.js'

@@ -27,8 +27,10 @@ onAbort((err) => {
 When the server uses `throw Abort(someValue)`, the value is available on `err.abortValue`:
 
 ```ts
+import { Abort } from 'telefunc/client'
+
 onAbort((err) => {
-  // err.isAbort === true
+  // err instanceof Abort === true
   console.log(err.abortValue) // The value passed to Abort()
 })
 ```

@@ -207,8 +207,10 @@ function testStreaming() {
     await page.click('#test-abort-multiplexed')
     await autoRetry(async () => {
       const result = await getResult('#streaming-result')
-      expect(result.isCancel).toBe(true)
-      expect(result.error).toContain('Telefunc call cancelled')
+      expect(result.isAbort).toBe(true)
+      expect(result.error).toContain('Aborted telefunction call')
+      expect(result.slowErr?.isAbort).toBe(true)
+      expect(result.slowErr?.error).toContain('Aborted telefunction call')
       expect(result.genValues).lengthOf(2)
     })
     await autoRetry(async () => {
@@ -247,6 +249,41 @@ function testStreaming() {
       expect(result.isBug).toBe(true)
       expect(result.message).toContain('Internal Server Error')
       expect(result.values).deep.equal(['before-bug'])
+    })
+  })
+
+  test('streaming: Abort in one producer aborts all multiplexed streaming values', async () => {
+    await page.click('#test-abort-one-of-many-streaming-values')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result.abortingValues).deep.equal(['abort-0'])
+      expect(result.otherValues.length).greaterThan(0)
+      expect(result.streamChunks.length).greaterThan(0)
+      expect(result.abortingErr?.isAbort).toBe(true)
+      expect(result.otherErr?.isAbort).toBe(true)
+      expect(result.streamErr?.isAbort).toBe(true)
+      expect(result.promiseErr?.isAbort).toBe(true)
+      expect(result.abortingErr?.abortValue).deep.equal({ reason: 'stream-abort', code: 101 })
+      expect(result.otherErr?.abortValue).deep.equal({ reason: 'stream-abort', code: 101 })
+      expect(result.streamErr?.abortValue).deep.equal({ reason: 'stream-abort', code: 101 })
+      expect(result.promiseErr?.abortValue).deep.equal({ reason: 'stream-abort', code: 101 })
+    })
+  })
+
+  test('streaming: channel listener Abort aborts sibling streaming values too', async () => {
+    await page.click('#test-channel-abort-does-not-abort-streaming-values')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result.firstErr?.isAbort).toBe(true)
+      expect(result.secondErr?.isAbort).toBe(true)
+      expect(result.streamErr?.isAbort).toBe(true)
+      expect(result.firstErr?.abortValue).deep.equal({ reason: 'channel-listener-abort', code: 7 })
+      expect(result.secondErr?.abortValue).deep.equal({ reason: 'channel-listener-abort', code: 7 })
+      expect(result.streamErr?.abortValue).deep.equal({ reason: 'channel-listener-abort', code: 7 })
+      expect(result.channelSendErr?.isAbort).toBe(true)
+      expect(result.channelSendErr?.abortValue).deep.equal({ reason: 'channel-listener-abort', code: 7 })
+      expect(result.channelCloseErr?.isAbort).toBe(true)
+      expect(result.channelCloseErr?.abortValue).deep.equal({ reason: 'channel-listener-abort', code: 7 })
     })
   })
 

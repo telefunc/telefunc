@@ -1,9 +1,10 @@
 export { ClientChannel }
 
-import type { Channel } from '../channel.js'
+import type { Channel, ChannelClient } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../client/clientConfig.js'
+import { createAbortError } from '../../shared/Abort.js'
 import { WsConnection } from './ws.js'
 import { ChannelClosedError } from '../channel-errors.js'
 
@@ -23,7 +24,7 @@ import { ChannelClosedError } from '../channel-errors.js'
  * Implements the shared `Channel` interface (see wire-protocol/channel.ts).
  */
 class ClientChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAckReceive = unknown>
-  implements Channel<TSend, TReceive, TAckSend, TAckReceive>
+  implements ChannelClient<TSend, TReceive, TAckSend, TAckReceive>
 {
   readonly id: string
   readonly ackMode: boolean
@@ -105,11 +106,21 @@ class ClientChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
     this._fireClose()
   }
 
-  abort(abortValue?: unknown): void {
+  abort(): void {
     if (this._isClosed) return
     this._isClosed = true
-    this._connection.sendAbort(this, stringify(abortValue, { forbidReactElements: false }))
-    this._fireClose()
+    const abortError = createAbortError()
+    this._connection.sendClose(this, abortError)
+    this._fireClose(abortError)
+  }
+
+  /** @internal */
+  _abortLocally(abortValue?: unknown, message?: string): void {
+    if (this._isClosed) return
+    this._isClosed = true
+    const abortError = createAbortError(abortValue, message)
+    this._connection.sendClose(this, abortError)
+    this._fireClose(abortError)
   }
 
   /** @internal */

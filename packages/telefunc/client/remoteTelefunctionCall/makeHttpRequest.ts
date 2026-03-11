@@ -3,9 +3,9 @@ export { makeHttpRequest }
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
-import { objectAssign } from '../../utils/objectAssign.js'
 import { parseResponse } from '../../wire-protocol/client/response/parse.js'
-import { throwCancelError, throwAbortError, throwBugError } from './errors.js'
+import { throwAbortError, throwBugError } from './errors.js'
+import { ConnectionError } from '../ConnectionError.js'
 import { setShardInfo } from '../../wire-protocol/client/shard-registry.js'
 import { assertWarning } from '../../utils/assert.js'
 import {
@@ -48,11 +48,9 @@ async function makeHttpRequest(callContext: {
     })
   } catch (err) {
     if (callContext.abortController.signal.aborted) {
-      throwCancelError()
+      throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
     }
-    const telefunctionCallError = new Error('No Server Connection')
-    objectAssign(telefunctionCallError, { isConnectionError: true as const })
-    throw telefunctionCallError
+    throw new ConnectionError()
   }
 
   const statusCode = response.status

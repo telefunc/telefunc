@@ -63,7 +63,7 @@ createChannel<TSend, TReceive, TAckSend, TAckReceive>()
 ## Closing & aborting
 
 - `channel.close()` — clean shutdown, no error delivered.
-- `channel.abort(value?)` — closes the channel; when called from the server, delivers the abort value to the client's `onClose` as `{ isAbort: true, abortValue: value }`. When called from the client, the server's `onClose` fires with no error.
+- `channel.abort()` on the client closes the channel locally with `Abort` semantics. `channel.abort(value?)` on the server delivers the abort value to the client's `onClose` as an `Abort` error carrying `abortValue`. The server does not receive any client abort value.
 
 > See <Link href="/channels#cancellation" /> for examples.
 

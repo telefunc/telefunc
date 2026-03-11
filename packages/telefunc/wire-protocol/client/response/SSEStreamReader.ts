@@ -3,7 +3,7 @@ export { SSEStreamReader }
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { concat } from '../../frame.js'
 import { base64urlToUint8Array } from '../../base64url.js'
-import { throwCancelError } from '../../../client/remoteTelefunctionCall/errors.js'
+import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 
 const EMPTY = new Uint8Array(0)
 
@@ -52,7 +52,9 @@ class SSEStreamReader extends BaseStreamReader {
         done = true
       }
       if (done) {
-        if (this.callContext.abortController.signal.aborted) throwCancelError()
+        if (this.callContext.abortController.signal.aborted) {
+          throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, undefined)
+        }
         if (this.cancelled) return EMPTY
         throw readError ?? new Error('Connection lost — server closed the SSE stream before all data was received.')
       }

@@ -112,7 +112,7 @@ async function onChannelHookInstrument() {
     cleanupState[`hook_${id}_serverOnClose`] = 'true'
     const e = err as any
     cleanupState[`hook_${id}_serverOnCloseErr`] = err
-      ? e?.isAbort
+      ? e instanceof Abort
         ? `abort:${JSON.stringify(e.abortValue)}`
         : err.message
       : 'none'
@@ -147,7 +147,7 @@ async function onChannelClientAbortInstrument() {
     const e = err as any
     cleanupState[`clientAbort_${id}_serverOnClose`] = 'true'
     cleanupState[`clientAbort_${id}_serverOnCloseErr`] = err
-      ? e?.isAbort
+      ? e instanceof Abort
         ? `abort:${JSON.stringify(e.abortValue)}`
         : err.message
       : 'none'
@@ -193,7 +193,7 @@ async function onChannelServerPendingAckAbort() {
       await channel.send('awaiting-ack', { ack: true })
     } catch (err: any) {
       cleanupState[`serverPendingAck_${id}_rejected`] = 'true'
-      cleanupState[`serverPendingAck_${id}_isAbort`] = err?.isAbort ? 'true' : 'false'
+      cleanupState[`serverPendingAck_${id}_isAbort`] = err instanceof Abort ? 'true' : 'false'
     }
   })
 

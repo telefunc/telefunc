@@ -43,7 +43,10 @@ function buildChannelResponseBody(
   })
 
   const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
-  const gen = generateResponseBody('', producers, telefuncId, { skipMetadata: true })
+  const gen = generateResponseBody('', producers, telefuncId, {
+    skipMetadata: true,
+    responseAbort: runContext.requestContext.responseAbort,
+  })
 
   let cancelled = false
   const doCancel = () => {

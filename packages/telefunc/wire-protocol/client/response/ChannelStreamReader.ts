@@ -2,7 +2,7 @@ export { ChannelStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { concat } from '../../frame.js'
-import { throwCancelError } from '../../../client/remoteTelefunctionCall/errors.js'
+import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ClientChannel } from '../channel.js'
 
 const EMPTY = new Uint8Array(0)
@@ -56,7 +56,9 @@ class ChannelStreamReader extends BaseStreamReader {
 
   async readExact(n: number): Promise<Uint8Array> {
     while (this.buffer.length < n) {
-      if (this.callContext.abortController.signal.aborted) throwCancelError()
+      if (this.callContext.abortController.signal.aborted) {
+        throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, undefined)
+      }
       if (this.cancelled) return EMPTY
       await new Promise<void>((r) => {
         this.wake = r

@@ -8,7 +8,7 @@ import {
   onUploadAbortSingle,
   onUploadAbortMultiple,
 } from './Abort.telefunc'
-import { abort, withContext } from 'telefunc/client'
+import { Abort as TelefuncAbort, abort, withContext } from 'telefunc/client'
 
 function Abort() {
   const [hydrated, setHydrated] = useState(false)
@@ -38,7 +38,9 @@ function Abort() {
               JSON.stringify({ method: 'abort(gen)', values, nextValue: r.value, nextDone: r.done, error: null }),
             )
           } catch (e: any) {
-            setResult(JSON.stringify({ method: 'abort(gen)', values, error: e.message, isCancel: !!e.isCancel }))
+            setResult(
+              JSON.stringify({ method: 'abort(gen)', values, error: e.message, isAbort: e instanceof TelefuncAbort }),
+            )
           }
         }}
       >
@@ -61,7 +63,9 @@ function Abort() {
               JSON.stringify({ method: 'gen.return()', values, nextValue: r.value, nextDone: r.done, error: null }),
             )
           } catch (e: any) {
-            setResult(JSON.stringify({ method: 'gen.return()', values, error: e.message, isCancel: !!e.isCancel }))
+            setResult(
+              JSON.stringify({ method: 'gen.return()', values, error: e.message, isAbort: e instanceof TelefuncAbort }),
+            )
           }
         }}
       >
@@ -92,7 +96,12 @@ function Abort() {
             )
           } catch (e: any) {
             setResult(
-              JSON.stringify({ method: 'withContext(gen, signal)', values, error: e.message, isCancel: !!e.isCancel }),
+              JSON.stringify({
+                method: 'withContext(gen, signal)',
+                values,
+                error: e.message,
+                isAbort: e instanceof TelefuncAbort,
+              }),
             )
           }
         }}
@@ -147,7 +156,7 @@ function Abort() {
                 method: 'withContext(stream, signal)',
                 chunks,
                 error: e.message,
-                isCancel: !!e.isCancel,
+                isAbort: e instanceof TelefuncAbort,
               }),
             )
           }
@@ -168,7 +177,7 @@ function Abort() {
             const res = await promise
             setResult(JSON.stringify({ result: res, error: null }))
           } catch (e: any) {
-            setResult(JSON.stringify({ error: e.message, isCancel: !!e.isCancel }))
+            setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort }))
           }
         }}
       >
@@ -191,7 +200,7 @@ function Abort() {
             const res = await promise
             setResult(JSON.stringify({ result: res, error: null }))
           } catch (e: any) {
-            setResult(JSON.stringify({ error: e.message, isCancel: !!e.isCancel }))
+            setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort }))
           }
         }}
       >
@@ -214,7 +223,7 @@ function Abort() {
             const res = await promise
             setResult(JSON.stringify({ result: res, error: null }))
           } catch (e: any) {
-            setResult(JSON.stringify({ error: e.message, isCancel: !!e.isCancel }))
+            setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort }))
           }
         }}
       >

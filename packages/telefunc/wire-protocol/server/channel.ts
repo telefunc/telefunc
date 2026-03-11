@@ -3,7 +3,7 @@ export { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
 
-import type { Channel } from '../channel.js'
+import type { Channel, ChannelClient } from '../channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
@@ -11,6 +11,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { isAbort } from '../../node/server/Abort.js'
+import type { AbortError } from '../../shared/Abort.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import { WS_CHANNEL_SEND_BUFFER, WS_CHANNEL_CONNECT_TTL_MS } from '../constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
@@ -101,8 +102,8 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
   readonly ackMode: boolean
 
   /** Return this to the client — it serializes to a `ClientChannel` on the other side. */
-  get client(): Channel<TReceive, TSend, TAckReceive, TAckSend> {
-    return this as unknown as Channel<TReceive, TSend, TAckReceive, TAckSend>
+  get client(): ChannelClient<TReceive, TSend, TAckReceive, TAckSend> {
+    return this as unknown as ChannelClient<TReceive, TSend, TAckReceive, TAckSend>
   }
 
   static isServerChannel(value: unknown): value is ServerChannel {
@@ -132,6 +133,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
   /** True when peer is gone but we're waiting for reconnection. */
   private _disconnected = false
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private _responseAbort: ((abortValue?: unknown) => void) | null = null
 
   constructor(ackMode = false, id?: string, maxSendBufferBytes?: number) {
     this.ackMode = ackMode
@@ -228,6 +230,11 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
   /** @internal — Register a callback for backpressure resume from the transport layer. */
   _onResume(callback: () => void): void {
     this._resumeCallbacks.push(callback)
+  }
+
+  /** @internal — Bind this channel to the telefunc response-wide abort path. */
+  _setResponseAbort(abortResponse: (abortValue?: unknown) => void): void {
+    this._responseAbort = abortResponse
   }
 
   /** Close the channel from the server side with an abort value.
@@ -427,7 +434,12 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
 
   private _handleCallbackError(err: unknown): void {
     if (isAbort(err)) {
-      this.abort(err.abortValue)
+      const abortError: AbortError = err
+      if (this._responseAbort) {
+        this._responseAbort(abortError.abortValue)
+      } else {
+        this.abort(abortError.abortValue)
+      }
     } else {
       // Non-Abort error — send bug signal to client (no details leaked) then close
       if (this._peer) {

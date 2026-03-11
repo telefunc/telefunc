@@ -16,10 +16,12 @@ export {
   onGeneratorAbortMidStream,
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
+  onAbortOneOfManyStreamingValues,
+  onChannelAbortDoesNotAbortStreamingValues,
   onUploadWithProgress,
 }
 
-import { Abort, getContext } from 'telefunc'
+import { Abort, createChannel, getContext } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -221,6 +223,70 @@ async function* onGeneratorAbortWithValue(): AsyncGenerator<string> {
 async function* onGeneratorBugMidStream(): AsyncGenerator<string> {
   yield 'before-bug'
   throw new Error('Unexpected generator error')
+}
+
+const onAbortOneOfManyStreamingValues = async () => {
+  async function* aborting(): AsyncGenerator<string> {
+    yield 'abort-0'
+    await sleep(80)
+    throw Abort({ reason: 'stream-abort', code: 101 })
+  }
+
+  async function* other(): AsyncGenerator<string> {
+    let i = 0
+    while (true) {
+      await sleep(20)
+      yield `other-${i++}`
+    }
+  }
+
+  const encoder = new TextEncoder()
+  let streamIndex = 0
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      await sleep(20)
+      controller.enqueue(encoder.encode(`stream-${streamIndex++}`))
+    },
+  })
+
+  const promise = new Promise<string>((resolve) => setTimeout(() => resolve('promise-done'), 200))
+
+  return { aborting: aborting(), other: other(), stream, promise }
+}
+
+const onChannelAbortDoesNotAbortStreamingValues = async () => {
+  const channel = createChannel<never, string>()
+  channel.listen(() => {
+    throw Abort({ reason: 'channel-listener-abort', code: 7 })
+  })
+
+  async function* first(): AsyncGenerator<string> {
+    for (const value of ['first-0', 'first-1', 'first-2']) {
+      await sleep(30)
+      yield value
+    }
+  }
+
+  async function* second(): AsyncGenerator<string> {
+    for (const value of ['second-0', 'second-1', 'second-2']) {
+      await sleep(45)
+      yield value
+    }
+  }
+
+  const encoder = new TextEncoder()
+  const chunks = ['chunk-0', 'chunk-1', 'chunk-2']
+  let i = 0
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (i >= chunks.length) return controller.close()
+      await sleep(35)
+      controller.enqueue(encoder.encode(chunks[i]!))
+      i++
+    },
+  })
+
+  return { first: first(), second: second(), stream, channel: channel.client }
 }
 
 // ── Upload progress via streaming ────────────────────────────────────

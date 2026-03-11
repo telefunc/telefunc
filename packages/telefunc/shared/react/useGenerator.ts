@@ -98,8 +98,7 @@ function useGenerator<T, Args extends unknown[]>(
             optionsRef.current?.onValue?.(value)
           }
         } catch (err: unknown) {
-          // isCancel means abort() was called — not a real error.
-          if (err && typeof err === 'object' && 'isCancel' in err) return
+          if (callRef.current !== call) return
           const generatorError = toGeneratorError(err)
           setError(generatorError)
           optionsRef.current?.onError?.(generatorError)

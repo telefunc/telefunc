@@ -9,7 +9,6 @@ import type { CtrlMessage } from '../shared-ws.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import { parse } from '@brillout/json-serializer/parse'
 import {
   WS_PING_INTERVAL,
   WS_PING_INTERVAL_MIN,
@@ -164,7 +163,7 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
         const entry = state.ixMap.get(ctrl.ix)
         if (!entry) break
         state.ixMap.delete(ctrl.ix)
-        entry.channel.abort(parse(ctrl.abortValue))
+        entry.channel._onPeerClose()
         break
       }
 

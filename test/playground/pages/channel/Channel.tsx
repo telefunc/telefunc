@@ -1,7 +1,7 @@
 export { ChannelDemo }
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { abort } from 'telefunc/client'
+import { Abort as TelefuncAbort, abort } from 'telefunc/client'
 import {
   onChannelInit,
   onChannelAbortTest,
@@ -257,7 +257,9 @@ function ChannelDemo() {
       addLog('system', 'No active connection to abort')
       return
     }
-    ch.onClose(() => setChannelState((s) => ({ ...s, clientAbortClosed: ch.isClosed })))
+    ch.onClose((err) =>
+      setChannelState((s) => ({ ...s, clientAbortClosed: ch.isClosed && err instanceof TelefuncAbort })),
+    )
     addLog('system', 'Calling abort(result)...')
     initResultRef.current = null
     abort(result)
@@ -272,10 +274,13 @@ function ChannelDemo() {
     abortChannelRef.current = channel
     channel.onClose((err) => {
       const e = err as any
-      addLog('system', `server-abort onClose: isAbort=${e?.isAbort} abortValue=${JSON.stringify(e?.abortValue)}`)
+      addLog(
+        'system',
+        `server-abort onClose: isAbort=${e instanceof TelefuncAbort} abortValue=${JSON.stringify(e?.abortValue)}`,
+      )
       setChannelState((s) => ({
         ...s,
-        serverAbortReceived: { isAbort: e?.isAbort === true, abortValue: e?.abortValue ?? null },
+        serverAbortReceived: { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null },
       }))
     })
   }, [addLog])
@@ -349,7 +354,7 @@ function ChannelDemo() {
     const { channel, channelId } = await onChannelClientAbortInstrument()
     clientAbortServerChannelRef.current = channel
     setChannelState((s) => ({ ...s, clientAbortServerChannelId: channelId }))
-    channel.abort({ code: 99 })
+    channel.abort()
     clientAbortServerChannelRef.current = null
     addLog('system', `client abort() sent for channel ${channelId}`)
   }, [addLog])
@@ -401,11 +406,11 @@ function ChannelDemo() {
     } catch (err: any) {
       addLog(
         'system',
-        `ack-listener-abort: send() rejected — isAbort=${err?.isAbort} abortValue=${JSON.stringify(err?.abortValue)}`,
+        `ack-listener-abort: send() rejected — isAbort=${err instanceof TelefuncAbort} abortValue=${JSON.stringify(err?.abortValue)}`,
       )
       setChannelState((s) => ({
         ...s,
-        ackListenerAbortErr: { isAbort: err?.isAbort === true, abortValue: err?.abortValue ?? null },
+        ackListenerAbortErr: { isAbort: err instanceof TelefuncAbort, abortValue: err?.abortValue ?? null },
       }))
     } finally {
       ackListenerAbortChannelRef.current = null
@@ -419,7 +424,7 @@ function ChannelDemo() {
     setChannelState((s) => ({ ...s, serverPendingAckAbortChannelId: channelId }))
     channel.onClose((err) => {
       const e = err as any
-      addLog('system', `server-pending-ack-abort onClose: isAbort=${e?.isAbort}`)
+      addLog('system', `server-pending-ack-abort onClose: isAbort=${e instanceof TelefuncAbort}`)
       serverPendingAckAbortChannelRef.current = null
     })
   }, [addLog])

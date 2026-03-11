@@ -1,6 +1,6 @@
 export { executeTelefunction }
 
-import { isAbort, Abort } from '../Abort.js'
+import { isAbort } from '../Abort.js'
 import { restoreContext, Telefunc } from '../getContext.js'
 import { createRequestContext, restoreRequestContext } from '../requestContext.js'
 import type { Telefunction } from '../types.js'

@@ -6,6 +6,7 @@ import { assert } from '../../../utils/assert.js'
 import { isObject, isObjectOrFunction } from '../../../utils/isObject.js'
 import { createStreamingReviver } from './registry.js'
 import { setAbortController } from '../../../client/abort.js'
+import { makeAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
@@ -118,7 +119,8 @@ function finalizeResponse(
     callContext.abortController.signal.addEventListener(
       'abort',
       () => {
-        for (const ch of channels) ch.close()
+        const abortError = makeAbortError(undefined, callContext)
+        for (const ch of channels) ch._abortLocally(abortError.abortValue, abortError.message)
       },
       { once: true },
     )

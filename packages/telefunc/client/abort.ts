@@ -20,7 +20,7 @@ function getAbortController(call: TelefuncCall): AbortController | undefined {
 
 /** Immediately abort a pending telefunc call.
  *
- *  Aborts the underlying fetch. Rejects with a cancel error (`isCancel: true`);
+ *  Aborts the underlying fetch. Rejects with an `Abort` error;
  *  for streaming calls mid-stream, the next read rejects instead.
  *
  *  Works with promises, async generators, or multiplexed return objects

@@ -6,10 +6,12 @@ import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../consta
 import type { StreamingErrorFrameAbort, StreamingErrorFrameBug } from '../../constants.js'
 import type { StreamingValueServer, StreamingProducer } from '../../streaming-types.js'
 import { isAbort } from '../../../node/server/Abort.js'
+import type { AbortError } from '../../../shared/Abort.js'
 import {
   handleTelefunctionBug,
   validateTelefunctionError,
 } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import type { ResponseAbortSource } from '../../../node/server/requestContext.js'
 import type { TelefuncIdentifier } from '../../../shared/constants.js'
 import { uint8ArrayToBase64url } from '../../base64url.js'
 
@@ -25,6 +27,7 @@ function buildStreamingResponseBody(
   telefuncId: TelefuncIdentifier,
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
+  responseAbort: ResponseAbortSource,
 ): ReadableStream<Uint8Array> {
   return buildResponseBodyStream(
     metadataSerialized,
@@ -32,6 +35,7 @@ function buildStreamingResponseBody(
     telefuncId,
     onStreamComplete,
     abortSignal,
+    responseAbort,
     (frame) => frame,
   )
 }
@@ -46,6 +50,7 @@ function buildSSEResponseBody(
   telefuncId: TelefuncIdentifier,
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
+  responseAbort: ResponseAbortSource,
 ): ReadableStream<Uint8Array> {
   return buildResponseBodyStream(
     metadataSerialized,
@@ -53,6 +58,7 @@ function buildSSEResponseBody(
     telefuncId,
     onStreamComplete,
     abortSignal,
+    responseAbort,
     (frame) => textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`),
   )
 }
@@ -66,6 +72,7 @@ function buildResponseBodyStream(
   telefuncId: TelefuncIdentifier,
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
+  responseAbort: Pick<ResponseAbortSource, 'errorPromise'>,
   encodeFrame: (frame: Uint8Array) => Uint8Array,
 ): ReadableStream<Uint8Array> {
   let cancelled = false
@@ -76,7 +83,7 @@ function buildResponseBodyStream(
   // a suspended reader.read(); reader.cancel() resolves it immediately.
   const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
 
-  const gen = generateResponseBody(metadataSerialized, producers, telefuncId)
+  const gen = generateResponseBody(metadataSerialized, producers, telefuncId, { responseAbort })
 
   const doCancel = (controller?: ReadableStreamDefaultController<Uint8Array> | null) => {
     if (cancelled) return
@@ -135,7 +142,7 @@ async function* generateResponseBody(
   metadataSerialized: string,
   producerEntries: Array<{ producer: StreamingProducer; index: number }>,
   telefuncId: TelefuncIdentifier,
-  options?: { skipMetadata?: boolean },
+  options?: { skipMetadata?: boolean; responseAbort?: Pick<ResponseAbortSource, 'errorPromise'> },
 ): AsyncGenerator<Uint8Array> {
   // Metadata header (skipped for WS transport — metadata is in the HTTP body)
   if (!options?.skipMetadata) {
@@ -171,7 +178,11 @@ async function* generateResponseBody(
     // Without this, a fast producer at index 0 would always win Promise.race
     // (which picks the first resolved promise in array order), starving others.
     while (active.length > 0) {
-      const { entry, result } = await Promise.race(active.map((e) => e.pending))
+      const { entry, result } = await Promise.race(
+        options?.responseAbort
+          ? [...active.map((e) => e.pending), options.responseAbort.errorPromise]
+          : active.map((e) => e.pending),
+      )
 
       if (result.done) {
         // Send empty-payload frame to signal this index is done.
@@ -207,10 +218,11 @@ function encodeErrorFrame(err: unknown, telefuncId: TelefuncIdentifier): Uint8Ar
   validateTelefunctionError(err, telefuncId)
   let errorPayload: string
   if (isAbort(err)) {
+    const abortError: AbortError = err
     try {
       const payload: StreamingErrorFrameAbort = {
         type: STREAMING_ERROR_TYPE.ABORT,
-        abortValue: err.abortValue,
+        abortValue: abortError.abortValue,
       }
       errorPayload = stringify(payload)
     } catch {
