@@ -21,6 +21,13 @@ import { cleanupState } from '../../cleanup-state'
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
 type ClientMessage = { type: 'ping' } | { type: 'echo'; text: string }
 type Ack = string
+type CloseError = { message?: string; abortValue?: unknown } | undefined
+
+function formatCloseError(err: CloseError): string {
+  if (!err) return 'none'
+  if (err instanceof Abort) return `abort:${JSON.stringify(err.abortValue)}`
+  return err.message ?? 'unknown'
+}
 
 async function onChannelInit() {
   const channel = createChannel<ServerMessage, ClientMessage, Ack, Ack>({ ack: true })
@@ -110,12 +117,7 @@ async function onChannelHookInstrument() {
 
   channel.onClose((err) => {
     cleanupState[`hook_${id}_serverOnClose`] = 'true'
-    const e = err as any
-    cleanupState[`hook_${id}_serverOnCloseErr`] = err
-      ? e instanceof Abort
-        ? `abort:${JSON.stringify(e.abortValue)}`
-        : err.message
-      : 'none'
+    cleanupState[`hook_${id}_serverOnCloseErr`] = formatCloseError(err as CloseError)
   })
 
   return { channel: channel.client, channelId: id }
@@ -144,13 +146,8 @@ async function onChannelClientAbortInstrument() {
   cleanupState[`clientAbort_${id}_serverOnClose`] = 'false'
   cleanupState[`clientAbort_${id}_serverOnCloseErr`] = 'pending'
   channel.onClose((err) => {
-    const e = err as any
     cleanupState[`clientAbort_${id}_serverOnClose`] = 'true'
-    cleanupState[`clientAbort_${id}_serverOnCloseErr`] = err
-      ? e instanceof Abort
-        ? `abort:${JSON.stringify(e.abortValue)}`
-        : err.message
-      : 'none'
+    cleanupState[`clientAbort_${id}_serverOnCloseErr`] = formatCloseError(err as CloseError)
   })
   return { channel: channel.client, channelId: id }
 }
