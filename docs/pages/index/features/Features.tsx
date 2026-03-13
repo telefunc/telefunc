@@ -26,7 +26,7 @@ function Features() {
             With Telefunc, you get a <b>simple frontend-backend relationship</b>: it's just a set of remote functions.
           </p>
           <p>
-            Your frontend can <b>directly use any SQL/ORM query</b> to retrieve and mutate data.
+            Your frontend can <b>directly use any SQL/ORM query</b> to retrieve & mutate data.
           </p>
         </>
       </div>

@@ -1,6 +1,6 @@
 export { handleAll as default }
 export { TodoListDurableObject } from '../database/todoItems'
-export { $TelefuncDurableObject } from './telefunc'
+export { TelefuncDurableObject } from './telefunc'
 
 import { handleSsr } from './ssr'
 import { handleTelefunc } from './telefunc'

@@ -7,16 +7,17 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
 
   test('HTML', async () => {
     const html = await fetchHtml('/')
-    expect(html).toMatch(partRegex`<h2>${/[^\/]+/}Zero boilerplate</h2>`)
-    expect(html).toMatch(partRegex`<h2>${/[^\/]+/}Streaming</h2>`)
-    expect(html).toMatch(partRegex`<h2>${/[^\/]+/}Any stack</h2>`)
+    expect(html).toContain('<meta name="description" content="Remote Functions." />')
+    expect(html).toMatch(partRegex`<h2>${/[^\/]+/}Simple</h2>`)
+    expect(html).toMatch(partRegex`<h2>${/[^\/]+/}Rock-solid</h2>`)
+    expect(html).toContain('no known bug')
   })
   test('DOM', async () => {
     await page.goto(getServerUrl() + '/')
     await autoRetry(async () => {
       const body = await page.textContent('body')
-      expect(body).toContain('No routers, no procedure builders, no link chains.')
-      expect(body).toContain('Bidirectional WebSocket channels')
+      expect(body).toContain('Seamless TypeScript support')
+      expect(body).toContain("Telefunc enables programmatically defined permissions. It's both simple and flexible.")
     })
   })
 }

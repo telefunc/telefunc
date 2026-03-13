@@ -1,55 +1,43 @@
-#header-logo h1 {
-  font-size: 4.4em;
-  margin: 0;
-  margin-left: 0.3em;
+#header {
+  margin-top: 24px;
 }
-#header-logo img {
-  height: 110px;
-  margin-right: 20;
-}
-#header-tagline {
+#tagline-primary {
   font-size: 2em;
   margin: 20px 0;
 }
-#header-tagline-newline {
-  display: none;
+#tagline-secondary {
+  font-size: 27px;
+  margin-bottom: 53px;
 }
-@container (max-width: 799px) {
-  #header-logo {
-    display: none !important;
+
+@media screen and (max-width: 700px) {
+  #header {
+    margin-top: 24px;
   }
-  #header-tagline {
-    margin-top: -20px;
-    margin-bottom: 20px;
-    font-size: 2.5em;
-    font-weight: 800;
+  #hero-badge {
+    font-size: 10px !important;
   }
-}
-@container (max-width: 699px) {
-  #header-tagline {
-    font-size: 2.2em;
+  #tagline-primary {
+    font-size: 1.3em;
   }
-}
-@container (max-width: 550px) {
-  #header-tagline {
-    font-size: 1.8em;
+  #tagline-secondary {
+    font-size: 22px;
+    margin-bottom: 53px;
   }
 }
-@container (max-width: 520px) {
-  #header-tagline {
-    font-size: 1.6em;
+@media screen and (max-width: 500px) {
+  #header {
+    margin-top: 5px;
   }
-}
-@container (max-width: 450px) {
-  #header-tagline {
-    font-size: 2.4em;
+  #hero-badge {
+    font-size: 9px !important;
+    zoom: 0.8;
   }
-  #header-tagline-newline {
-    display: block;
+  #tagline-primary {
+    font-size: 0.9em;
   }
-}
-@container (max-width: 400px) {
-  #header-tagline {
-    font-size: 2.1em;
+  #tagline-secondary {
+    font-size: 22px;
+    margin-bottom: 33px;
   }
 }

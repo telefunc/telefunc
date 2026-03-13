@@ -11,8 +11,8 @@
         "class_name": "TodoListDurableObject"
       },
       {
-        "name": "$TelefuncDurableObject",
-        "class_name": "$TelefuncDurableObject"
+        "name": "TelefuncDurableObject",
+        "class_name": "TelefuncDurableObject"
       }
     ]
   },
@@ -20,7 +20,7 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["TodoListDurableObject"],
-      "new_classes": ["$TelefuncDurableObject"]
+      "new_classes": ["TelefuncDurableObject"]
     }
   ]
 }
