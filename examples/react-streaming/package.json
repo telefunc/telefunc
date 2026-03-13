@@ -17,7 +17,7 @@
     "react-streaming": "^0.4.15",
     "telefunc": "0.2.19",
     "typescript": "^5.8.3",
-    "vike": "^0.4.253",
+    "vike": "^0.4.255",
     "vite": "^7.0.2"
   }
 }
