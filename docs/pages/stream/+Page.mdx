@@ -1,11 +1,19 @@
 import { Link } from '@brillout/docpress'
 
-Telefunctions can return streams via [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator), [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream), or [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise).
+Telefunctions can stream values with [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator), [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream), or `Promise`s nested inside the returned value.
 
-> A single telefunction can return multiple streams using a mix of `AsyncGenerator`, `ReadableStream`, and `Promise`.
+> A single telefunction can return a mix of `AsyncGenerator`, `ReadableStream`, and `Promise` values.
+
+## Which one should you use?
+
+- Use `AsyncGenerator` for progressive app-level values such as AI tokens, notifications, or progress updates.
+- Use `ReadableStream` for raw bytes such as downloads or media.
+- Use nested `Promise`s when part of the result can arrive later but you still want the rest of the response immediately.
 
 
 ## `AsyncGenerator`
+
+`AsyncGenerator` is the usual choice for incremental values.
 
 ```ts
 // Chat.telefunc.ts
@@ -34,19 +42,17 @@ for await (const token of gen) {
 
 ## `ReadableStream`
 
+Use `ReadableStream` when you want to stream bytes instead of structured values.
+
 ```ts
 // Download.telefunc.ts
 // Environment: server
 
-export async function onDownload(fileName: string): Promise<ReadableStream<Uint8Array>> {
-  const fileStream = fs.createReadStream(`./files/${fileName}`)
-  return new ReadableStream({
-    async pull(controller) {
-      const { done, value } = await fileStream.read()
-      if (done) return controller.close()
-      controller.enqueue(value)
-    },
-  })
+import fs from 'node:fs'
+import { Readable } from 'node:stream'
+
+export function onDownload(fileName: string): ReadableStream<Uint8Array> {
+  return Readable.toWeb(fs.createReadStream(`./files/${fileName}`)) as ReadableStream<Uint8Array>
 }
 ```
 
@@ -67,7 +73,7 @@ while (true) {
 
 ## `Promise`
 
-Returning a `Promise` inside a telefunction's return value enables lazy streaming — the server sends the response immediately and resolves the promise concurrently. The client receives the resolved values as they arrive, without blocking other return values.
+A `Promise` nested inside the returned value is delivered lazily: the server can send the surrounding response immediately while that promise resolves in parallel.
 
 ```ts
 // Dashboard.telefunc.ts
@@ -95,9 +101,9 @@ const res = await onLoadDashboard()
 // Plain values are available right away
 console.log(res.title) // 'Dashboard'
 
-// Await each promise when you need it — they resolve independently
-const summary = await res.summary  // Resolves first (fast)
-const report = await res.report    // Resolves when ready (slow)
+// Await each promise when you need it
+const summary = await res.summary
+const report = await res.report
 ```
 
 > Awaiting a promise blocks the entire telefunction call:
@@ -114,7 +120,7 @@ const report = await res.report    // Resolves when ready (slow)
 > If that isn't what you want, then return the `prepare()` promise instead of awaiting it:
 > ```ts
 > export async function onLoadDashboard() {
->   const promise = prepare() // Blocks the entire telefunction call
+>   const promise = prepare() // Starts immediately without delaying the response
 >   return {
 >     // ✅ Delivered immediately
 >     title: 'Dashboard',
@@ -128,7 +134,7 @@ const report = await res.report    // Resolves when ready (slow)
 
 A telefunction can return an object containing any combination of generators, streams, and promises.
 
-> All streams are multiplexed over a single HTTP response — delivered concurrently and eagerly as they resolve.
+> All streamed values are multiplexed over a single response and delivered concurrently as they become available.
 
 ```ts
 // Dashboard.telefunc.ts
@@ -176,13 +182,17 @@ const slow = await res.slow  // Resolves when ready
 
 ## Transport
 
-By default, streaming values are sent as raw binary chunks over HTTP (`application/octet-stream`). You can change the transport globally or per-call:
+By default, streamed values are sent as raw binary chunks over HTTP (`application/octet-stream`). You can switch transport globally or per call:
 
 | Transport | Description |
 |---|---|
 | `'stream'` (default) | Raw binary chunked HTTP response |
 | `'sse'` | Base64url-encoded Server-Sent Events — works through proxies that buffer binary responses |
 | `'ws'` | WebSocket binary frames |
+
+- Prefer `'stream'` unless you have a concrete reason to change it.
+- Use `'sse'` when a proxy or CDN buffers binary HTTP responses.
+- Use `'ws'` when you already installed <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> and want streamed values over the same WebSocket transport.
 
 ```ts
 // Environment: client
@@ -197,14 +207,16 @@ See <Link href="/transport" /> for details.
 
 ## Error handling
 
-If a generator throws a regular error, the client receives an error with message `'Internal Server Error'`. Values yielded before the error are preserved.
+If a generator or stream throws a regular error, the client receives an error and any values already delivered remain available.
 
 See <Link href="/error-handling" /> for details.
 
 
 ## Cleanup
 
-Use `onClose()` to detect when the connection ends (client disconnect, stream complete, or response sent) — for example to cancel upstream work or release resources. See <Link href="/getContext" />.
+Use `onClose()` to detect when the stream lifecycle ends, for example when the client disconnects, the stream finishes, or the response closes. This is the right place to cancel upstream work or release resources.
+
+See <Link href="/getContext" /> for details.
 
 
 ## See also
@@ -212,4 +224,4 @@ Use `onClose()` to detect when the connection ends (client disconnect, stream co
 - <Link href="/getContext" />
 - <Link href="/error-handling" />
 - <Link href="/transport" />
-- <Link href="/channels" />
+- <Link href="/real-time" />

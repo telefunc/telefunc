@@ -3,7 +3,7 @@ import { ConfigWhereClient } from '../../components'
 
 **Environment**: client.
 
-Choose the transport for <Link href="/streaming">streaming</Link> values.
+Choose how Telefunc carries <Link href="/stream">stream</Link> values from server to client.
 
 ```ts
 // Environment: client
@@ -21,9 +21,13 @@ config.transport = 'sse'
 |---|---|---|
 | `'stream'` (default) | `application/octet-stream` | Raw binary chunked HTTP response. Lowest overhead. |
 | `'sse'` | `text/event-stream` | Base64url-encoded Server-Sent Events. Works through proxies/CDNs that buffer binary responses but pass SSE events. |
-| `'ws'` | WebSocket | Binary frames over a multiplexed WebSocket connection. See <Link href="/channels" />. |
+| `'ws'` | WebSocket | Binary frames over a multiplexed WebSocket connection. See <Link href="/real-time" />. |
 
 > Plain (non-streaming) telefunction calls are always `text/plain` JSON regardless of the `transport` setting.
+
+- Prefer `'stream'` by default.
+- Use `'sse'` if an intermediary buffers binary responses.
+- Use `'ws'` only if you already installed <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> and want streaming over the same WebSocket transport.
 
 
 ## Per-call override
@@ -43,5 +47,5 @@ for await (const token of gen) {
 
 ## See also
 
-- <Link href="/streaming" />
-- <Link href="/channels" />
+- <Link href="/stream" />
+- <Link href="/real-time" />

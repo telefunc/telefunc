@@ -4,6 +4,12 @@ Telefunc can handle real-time flows such as chat, upload progress, and live upda
 
 In production, install <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />. In Vite dev mode, this is wired automatically.
 
+## Which primitive should you use?
+
+- Use function passing for short-lived callback-style interactions such as progress updates.
+- Use <Link text={<code>createChannel()</code>} href="/createChannel" /> when both sides keep sending messages over time.
+- Use `config.transport = 'ws'` only when you want streamed values over WebSocket instead of HTTP.
+
 ## Function passing
 
 Telefunc can pass functions between client and server.
@@ -164,16 +170,22 @@ console.log(reply) // 'Ticket #482 created'
 ```
 
 If every message should expect a reply, make acknowledgements the default for the whole channel:
+
+```ts
+const channel = createChannel<ClientToServer, ServerToClient>({ ack: true })
+const reply = await channel.send('refund')
+```
+
 See <Link href="/createChannel" /> for typing details.
 
 
 ## Setup
 
-For setup details, see <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
+For production setup details, see <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
 
 ## See also
 
 - <Link text={<code>createChannel()</code>} href="/createChannel" />
 - <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />
 - <Link href="/file-upload" />
-- <Link href="/streaming" />
+- <Link href="/stream" />

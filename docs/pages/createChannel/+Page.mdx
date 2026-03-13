@@ -4,6 +4,9 @@ import { Link } from '@brillout/docpress'
 
 Create a bidirectional channel for real-time communication with the client.
 
+- Use a channel when both sides keep sending messages after the initial telefunction call.
+- If you only need a short-lived callback, function passing is usually simpler. See <Link href="/real-time" />.
+
 ```ts
 import { createChannel } from 'telefunc'
 
@@ -37,7 +40,7 @@ Return `channel.client` to the client — it serializes into a `ClientChannel` o
 | `listenBinary(cb)` | Receive binary messages. |
 | `onOpen(cb)` | Run when the channel becomes usable. |
 | `onClose(cb)` | Run when the channel closes. |
-| `close()` | Cleanly close the channel. |
+| `close()` | Cleanly close the channel from either side. |
 | `isClosed` | Whether the channel is already closed. |
 
 
@@ -46,8 +49,8 @@ Return `channel.client` to the client — it serializes into a `ClientChannel` o
 `createChannel<ClientToServer, ServerToClient>()` is generic.
 
 Each type is a function signature:
-- its argument is the message type
-- its return type is the acknowledgement type
+- Its argument is the message type.
+- Its return type is the acknowledgement type.
 
 The client channel is inferred automatically with both directions flipped.
 
@@ -147,16 +150,17 @@ channel.send(data, { ack: false }) // void, no ack
 
 Acknowledgement types come from the function return types.
 
-> See <Link href="/channels#acknowledgements" /> for full examples.
+> See <Link href="/real-time#acknowledgements" /> for full examples.
 
 
 ## Closing
 
-- `channel.close()` — clean shutdown.
+- `channel.close()` cleanly shuts down the channel.
+- `onClose()` runs when either side closes or when the connection is lost.
 
-> See <Link href="/channels" /> for examples.
+> See <Link href="/real-time" /> for examples.
 
 ## See also
 
-- <Link href="/channels" />
+- <Link href="/real-time" />
 - <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />

@@ -4,6 +4,16 @@ import { Link } from '@brillout/docpress'
 
 Install the Telefunc WebSocket upgrade handler on your server. This is what powers <Link text={<code>createChannel()</code>} href="/createChannel" />, returned function proxies, and WebSocket transport.
 
+## When do you need this?
+
+You need <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> in production if you use any of the following:
+
+- <Link text={<code>createChannel()</code>} href="/createChannel" />
+- Passed or returned function proxies that are called after the initial response
+- `config.transport = 'ws'`
+
+You do not need it for plain telefunction calls, or for streamed values sent over the default HTTP transport or SSE.
+
 Pick the adapter for your runtime:
 
 ## Node.js
@@ -17,9 +27,9 @@ const ws = telefuncWebSocket()
 ws.install(server)
 ```
 
-Works with any Node.js HTTP server — Express, Fastify, Hono with `@hono/node-server`, etc.
+Works with any Node.js HTTP server such as Express, Fastify, or Hono with `@hono/node-server`.
 
-Idempotent — safe to call multiple times on the same server.
+`install()` is idempotent, so calling it more than once on the same server is safe.
 
 ## Bun
 
@@ -53,7 +63,7 @@ Deno.serve({ port: 3000 }, (request, info) => {
 })
 ```
 
-In Vite dev mode, the WebSocket handler is set up automatically by Telefunc's Vite plugin — you only need an adapter for production (or when running outside Vite).
+In Vite dev mode, Telefunc's Vite plugin sets this up automatically. You only need an adapter in production or when running outside Vite.
 
 ## Cloudflare Workers
 
@@ -96,13 +106,13 @@ Cloudflare channels require a [Durable Object](https://developers.cloudflare.com
 
 See <Link text="Cloudflare Workers" href="/telefuncWebSocketCloudflare" /> for Cloudflare-specific details such as `context`, shards, `locationHint`, and Durable Object hibernation.
 
-## Delivery guarantees
+## Connection behavior
 
 Messages within a channel keep their order.
 
 If the connection briefly drops, Telefunc tries to reconnect and continue where it left off.
 
-This recovery is best-effort within the reconnect timeout and buffer limits configured below.
+This recovery is best-effort within the reconnect timeout and replay-buffer limits configured below.
 
 If Telefunc cannot recover the channel, then the channel closes and `onClose()` receives a `ChannelNetworkError`.
 
@@ -124,6 +134,6 @@ All adapters accept the following options:
 
 ## See also
 
-- <Link href="/channels" />
+- <Link href="/real-time" />
 - <Link href="/createChannel" />
 - <Link text="Cloudflare Workers" href="/telefuncWebSocketCloudflare" />

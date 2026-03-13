@@ -5,7 +5,7 @@ import { Link } from '@brillout/docpress'
 This page covers the Cloudflare-specific setup for <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
 
 
-## Default binding
+## Minimal setup
 
 This works out of the box:
 
@@ -24,6 +24,8 @@ export default {
   },
 }
 ```
+
+Call `ws.handleTelefunc()` before the rest of your application logic so Telefunc can intercept its own RPC and WebSocket requests.
 
 ```jsonc
 {
@@ -100,11 +102,11 @@ const ws = telefuncWebSocket({
 })
 ```
 
-If your own code leaves timers running after a channel closes, those timers can also keep the Durable Object awake.
+Your own timers or background work can also keep the Durable Object awake after channels close.
 
 
 ## See also
 
 - <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />
-- <Link href="/channels" />
+- <Link href="/real-time" />
 - <Link href="/createChannel" />

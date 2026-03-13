@@ -152,13 +152,13 @@ const headings = [
   },
   {
     level: 2,
-    title: 'Streaming',
-    url: '/streaming',
+    title: 'Stream',
+    url: '/stream',
   },
   {
     level: 2,
     title: 'Real-Time',
-    url: '/channels',
+    url: '/real-time',
   },
   {
     level: 1,
