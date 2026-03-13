@@ -38,17 +38,17 @@ function getContext<Context extends object = Telefunc.Context>(): Context & Tele
 type TelefuncBuiltins = {
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
-  onConnectionClose: (cb: () => void) => void
+  onClose: (cb: () => void) => void
 }
 
 function augmentContext(context: Record<string, unknown>): void {
   const reqCtx = getRequestContext()
   if (!reqCtx) {
     // SSR implementation not trivial
-    context.onConnectionClose = () => {}
+    context.onClose = () => {}
     return
   }
-  context.onConnectionClose = (cb: () => void) => reqCtx.onConnectionClose(cb)
+  context.onClose = (cb: () => void) => reqCtx.onClose(cb)
 }
 
 function provideTelefuncContext<Context extends object = Telefunc.Context>(context: Context): void {

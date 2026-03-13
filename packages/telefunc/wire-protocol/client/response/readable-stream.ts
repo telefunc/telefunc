@@ -6,7 +6,7 @@ import type { ClientStreamingType, ReadableStreamContract } from '../../streamin
 const readableStreamClientType: ClientStreamingType<ReadableStreamContract> = {
   prefix: SERIALIZER_PREFIX_STREAM,
   createValue: (_metadata, readNextChunk, cancel) => {
-    return new ReadableStream<Uint8Array>({
+    const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
           const chunk = await readNextChunk()
@@ -17,9 +17,11 @@ const readableStreamClientType: ClientStreamingType<ReadableStreamContract> = {
           controller.error(err)
         }
       },
-      cancel() {
-        cancel()
-      },
+      cancel,
     })
+    return {
+      value: stream,
+      close: cancel,
+    }
   },
 }

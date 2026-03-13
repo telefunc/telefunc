@@ -21,7 +21,26 @@ import { cleanupState } from '../../cleanup-state'
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
 type ClientMessage = { type: 'ping' } | { type: 'echo'; text: string }
 type Ack = string
+type ClientToServer = (msg: ClientMessage) => Ack
+type ServerToClient = (msg: ServerMessage) => Ack
 type CloseError = { message?: string; abortValue?: unknown } | undefined
+
+function exerciseChannelTypeApi() {
+  const channel = createChannel<(msg: string) => undefined, (msg: number) => Promise<void>>({ ack: true })
+
+  const ackFromClient: Promise<void> = channel.send(1)
+  void ackFromClient
+
+  channel.listen((msg) => {
+    const text: string = msg
+    void text
+    return undefined
+  })
+
+  const oneWay = createChannel<never, (msg: string) => void>()
+  const ackFromServer: Promise<void> = oneWay.send('hello', { ack: true })
+  void ackFromServer
+}
 
 function formatCloseError(err: CloseError): string {
   if (!err) return 'none'
@@ -30,7 +49,7 @@ function formatCloseError(err: CloseError): string {
 }
 
 async function onChannelInit() {
-  const channel = createChannel<ServerMessage, ClientMessage, Ack, Ack>({ ack: true })
+  const channel = createChannel<ClientToServer, ServerToClient>({ ack: true })
 
   channel.onClose(() => {
     clearInterval(intervalId)
@@ -70,7 +89,7 @@ async function onChannelInit() {
  * Tests: server-side abort(value) -> client onClose receives { isAbort: true, abortValue }.
  */
 async function onChannelAbortTest() {
-  const channel = createChannel<string, never>()
+  const channel = createChannel<never, (msg: string) => void>()
   setTimeout(() => {
     channel.abort({ reason: 'test-abort', code: 42 })
   }, 400)
@@ -82,7 +101,7 @@ async function onChannelAbortTest() {
  * Server listener returns an ack string so the client can test per-send { ack: true }.
  */
 async function onChannelPerSendAck() {
-  const channel = createChannel<string, string>()
+  const channel = createChannel<(msg: string) => string, (msg: string) => void>()
   channel.listen((msg) => `ack:${msg}`)
   return { channel: channel.client }
 }
@@ -102,7 +121,7 @@ async function onChannelPerSendAck() {
 type HookServerMsg = { type: 'server-hook'; hook: string }
 
 async function onChannelHookInstrument() {
-  const channel = createChannel<HookServerMsg, never>()
+  const channel = createChannel<never, (msg: HookServerMsg) => void>()
   const id = channel.id
 
   cleanupState[`hook_${id}_serverOnOpen`] = 'false'
@@ -158,7 +177,7 @@ async function onChannelClientAbortInstrument() {
  * { isAbort: true, abortValue } when the server listener aborts mid-ack.
  */
 async function onChannelAckListenerAbort() {
-  const channel = createChannel<never, string>()
+  const channel = createChannel<(msg: string) => void, never>()
   channel.listen(() => {
     throw Abort({ reason: 'listener-abort', code: 7 })
   })
@@ -177,7 +196,7 @@ async function onChannelAckListenerAbort() {
  *   serverPendingAck_<id>_isAbort   = 'false' | 'true'
  */
 async function onChannelServerPendingAckAbort() {
-  const channel = createChannel<string, never>()
+  const channel = createChannel<never, (msg: string) => void>()
   const id = channel.id
 
   cleanupState[`serverPendingAck_${id}_rejected`] = 'false'
@@ -205,7 +224,7 @@ async function onChannelServerPendingAckAbort() {
  *   abortThenSend_<id>_isClosedErr  = 'false' | 'true'
  */
 async function onChannelAbortThenSend() {
-  const channel = createChannel<string, never>()
+  const channel = createChannel<never, (msg: string) => void>()
   const id = channel.id
   cleanupState[`abortThenSend_${id}_thrown`] = 'false'
   cleanupState[`abortThenSend_${id}_isClosedErr`] = 'false'
@@ -231,7 +250,7 @@ async function onChannelAbortThenSend() {
  *   pendingAbort_<id>_isClosedErr     = 'false' | 'true'
  */
 async function onChannelPendingAckAbort() {
-  const channel = createChannel<string, never>()
+  const channel = createChannel<never, (msg: string) => void>()
   const id = channel.id
   cleanupState[`pendingAbort_${id}_rejected`] = 'false'
   cleanupState[`pendingAbort_${id}_isClosedErr`] = 'false'
@@ -255,7 +274,7 @@ async function onChannelPendingAckAbort() {
  * The client connects, calls abort() then send() to verify ChannelClosedError is thrown.
  */
 async function onChannelClientAbortThenSend() {
-  const channel = createChannel<never, string>()
+  const channel = createChannel<(msg: string) => void, never>()
   return { channel: channel.client }
 }
 
@@ -265,7 +284,7 @@ async function onChannelClientAbortThenSend() {
  * The awaited promise must reject with ChannelClosedError.
  */
 async function onChannelClientPendingAckClose() {
-  const channel = createChannel<never, string>()
+  const channel = createChannel<(msg: string) => void, never>()
   return { channel: channel.client }
 }
 
@@ -282,7 +301,7 @@ async function onChannelClientPendingAckClose() {
  *   upstream_<id>_hasGap         = 'true' if any value arrived out of order or skipped
  */
 async function onChannelUpstreamReconnect() {
-  const channel = createChannel<never, number>()
+  const channel = createChannel<(msg: number) => void, never>()
   const id = channel.id
   cleanupState[`upstream_${id}_receivedCount`] = '0'
   cleanupState[`upstream_${id}_lastSeq`] = '0'
@@ -309,8 +328,8 @@ async function onChannelUpstreamReconnect() {
  * Used to verify ix-level multiplexing over a shared WS connection.
  */
 async function onChannelMulti() {
-  const ch1 = createChannel<number, never>()
-  const ch2 = createChannel<number, never>()
+  const ch1 = createChannel<never, (msg: number) => void>()
+  const ch2 = createChannel<never, (msg: number) => void>()
 
   let n1 = 0
   const t1 = setInterval(() => ch1.send(++n1), 200)

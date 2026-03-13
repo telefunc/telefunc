@@ -18,6 +18,11 @@ const promiseClientType: ClientStreamingType<PromiseContract> = {
     })
     // Suppress unhandled-rejection noise for multiplexed promises a caller never awaits.
     promise.catch(() => {})
-    return promise
+    return {
+      value: promise,
+      // A promise has no post-resolution live resource to tear down.
+      // Pre-settlement interruption is handled by abort(), not close(res).
+      close: undefined,
+    }
   },
 }

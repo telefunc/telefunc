@@ -19,7 +19,7 @@ interface TelefuncAdapter {
 }
 
 type CloudflareWebSocketOptions = TelefuncWebSocketOptions & {
-  /** Durable Object binding name. Default: `'$TelefuncDurableObject'`. */
+  /** Durable Object binding name. Default: `'TelefuncDurableObject'`. */
   bindingName?: string
   /** Instance name for the DO. Default: `'telefunc'`. */
   instanceName?: string
@@ -42,7 +42,7 @@ type CloudflareWebSocketOptions = TelefuncWebSocketOptions & {
  *
  * const ws = telefuncWebSocket()
  *
- * export const $TelefuncDurableObject = ws.createDurableObjectClass()
+ * export const TelefuncDurableObject = ws.createDurableObjectClass()
  *
  * export default {
  *   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
@@ -53,19 +53,18 @@ type CloudflareWebSocketOptions = TelefuncWebSocketOptions & {
  * }
  * ```
  *
- * In `wrangler.toml`:
- * ```toml
- * [[durable_objects.bindings]]
- * name = "$TelefuncDurableObject"
- * class_name = "$TelefuncDurableObject"
- *
- * [[migrations]]
- * tag = "v1"
- * new_classes = ["$TelefuncDurableObject"]
+ * In `wrangler.jsonc`:
+ * ```jsonc
+ * {
+ *   "durable_objects": {
+ *     "bindings": [{ "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }]
+ *   },
+ *   "migrations": [{ "tag": "v1", "new_classes": ["TelefuncDurableObject"] }]
+ * }
  * ```
  */
 function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapter {
-  const bindingName = options?.bindingName ?? '$TelefuncDurableObject'
+  const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
   const baseInstanceName = options?.instanceName ?? 'telefunc'
   const shards = options?.shards ?? 1
   const stickyShards = options?.stickyShards ?? true

@@ -24,6 +24,9 @@ const asyncGeneratorClientType: ClientStreamingType<AsyncGeneratorContract> = {
       cancel()
       return origReturn(...args)
     }
-    return gen
+    return {
+      value: gen,
+      close: () => gen.return(),
+    }
   },
 }

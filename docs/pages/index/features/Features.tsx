@@ -19,68 +19,72 @@ function Features() {
     >
       <div>
         <h2>
-          <Emoji name="dizzy" /> Zero boilerplate
+          <Emoji name="dizzy" /> Simple
         </h2>
         <>
           <p>
-            Export a function from a <code>.telefunc.ts</code> file, import and call it from the client.{' '}
-            <b>No routers, no procedure builders, no link chains.</b>
+            With Telefunc, you get a <b>simple frontend-backend relationship</b>: it's just a set of remote functions.
           </p>
-          <p>End-to-end type safety and automatic runtime validation — no codegen needed.</p>
-        </>
-      </div>
-      <div>
-        <h2>
-          <Emoji name="sparkles" /> Streaming
-        </h2>
-        <>
           <p>
-            Return <b>async generators</b>, <b>ReadableStreams</b>, and <b>promises</b> — mix multiple streams and plain
-            values in a single return. AI chat, live feeds, progressive loading.
+            Your frontend can <b>directly use any SQL/ORM query</b> to retrieve and mutate data.
           </p>
         </>
       </div>
       <div>
         <h2>
-          <Emoji name="high-voltage" /> Real-time channels
+          <Emoji name="shield" /> Permissions
         </h2>
         <>
           <p>
-            <b>Bidirectional WebSocket channels</b> with acknowledged sends, auto-reconnect, and frame replay.
-            Multiplexed over a single connection.
+            Telefunc enables <b>programmatically defined permissions</b>. It's both <b>simple</b> and <b>flexible</b>.
+          </p>
+          <p>Telefunc introduces new techniques to define advanced permissions and increase safety.</p>
+        </>
+      </div>
+      <div>
+        <h2>
+          <Emoji name="plug" /> Any Stack
+        </h2>
+        <>
+          <p>
+            Telefunc supports <b>Next.js</b>, <b>Nuxt</b>, <b>Vite</b>, <b>Vike</b>, <b>React Native</b>,{' '}
+            <b>SvelteKit</b> and other frameworks based on Webpack, Babel, Parcel or Vite.
           </p>
         </>
       </div>
       <div>
         <h2>
-          <Emoji name="gear" /> Function passing
+          <Emoji name="high-voltage" /> Performance
         </h2>
         <>
           <p>
-            Pass <b>callbacks across the wire</b> — the server calls your client function, the client calls a server
-            function. Both directions, transparently proxied over WebSocket.
+            The frontend can directly tap into the <b>full power of the server</b>. Use tailored SQL/ORM queries for
+            highly performant data retrieval and mutations.
           </p>
         </>
       </div>
       <div>
         <h2>
-          <Emoji name="package" /> File upload
+          <Emoji name="typescript" /> TypeScript
         </h2>
         <>
           <p>
-            Pass <code>File</code> and <code>Blob</code> as <b>regular arguments</b> mixed with any other types. Files
-            stream lazily from the HTTP body — <b>constant memory</b>, no FormData ceremony.
+            <b>Seamless TypeScript support</b> out-of-the-box including all your favorite IDE features such as
+            auto-import, replace-all-occurrences, etc.
+          </p>
+          <p>
+            <b>Automatic runtime validation</b> for end-to-end type safety.
           </p>
         </>
       </div>
       <div>
         <h2>
-          <Emoji name="plug" /> Any stack
+          <Emoji name="gem-stone" /> Rock-solid
         </h2>
         <>
           <p>
-            Works with <b>Next.js</b>, <b>Vike</b>, <b>Nuxt</b>, <b>SvelteKit</b>, <b>React Native</b>, and any
-            framework built on Vite, Webpack, or Babel. Deploy to Node.js, Cloudflare Workers, or Deno.
+            The source code of Telefunc has <b>no known bug</b> (bugs are fixed swiftly) and every release is assailed
+            against a heavy suite of <b>automated tests</b>.
           </p>
         </>
       </div>

@@ -106,7 +106,7 @@ const onReturnStreamWithMeta = async () => {
 const onReturnTwoGenerators = async () => {
   cleanupState.twoGeneratorsClosed = ''
   const context = getContext()
-  context.onConnectionClose(() => {
+  context.onClose(() => {
     cleanupState.twoGeneratorsClosed = String(Date.now())
   })
   async function* gen1(): AsyncGenerator<number> {
@@ -121,7 +121,7 @@ const onReturnTwoGenerators = async () => {
 const onReturnStreamAndGenerator = async () => {
   cleanupState.streamAndGeneratorClosed = ''
   const context = getContext()
-  context.onConnectionClose(() => {
+  context.onClose(() => {
     cleanupState.streamAndGeneratorClosed = String(Date.now())
   })
   const encoder = new TextEncoder()
@@ -140,7 +140,7 @@ const onReturnStreamAndGenerator = async () => {
 const onReturnMultiplePromises = async () => {
   cleanupState.multiplePromisesClosed = ''
   const context = getContext()
-  context.onConnectionClose(() => {
+  context.onClose(() => {
     cleanupState.multiplePromisesClosed = String(Date.now())
   })
   const fast = Promise.resolve('quick')
@@ -175,7 +175,7 @@ const onReturnMixedEndless = async () => {
   cleanupState.mixedEndless = 'running'
   cleanupState.mixedEndlessClosed = ''
   const context = getContext()
-  context.onConnectionClose(() => {
+  context.onClose(() => {
     cleanupState.mixedEndless = 'cleaned-up'
     cleanupState.mixedEndlessClosed = String(Date.now())
   })
@@ -255,7 +255,7 @@ const onAbortOneOfManyStreamingValues = async () => {
 }
 
 const onChannelAbortDoesNotAbortStreamingValues = async () => {
-  const channel = createChannel<never, string>()
+  const channel = createChannel<(msg: string) => void, never>()
   channel.listen(() => {
     throw Abort({ reason: 'channel-listener-abort', code: 7 })
   })

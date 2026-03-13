@@ -4,9 +4,11 @@ import { createChannel } from 'telefunc'
 
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
 type ClientMessage = { type: 'ping' } | { type: 'echo'; text: string }
+type ClientToServer = (msg: ClientMessage) => void
+type ServerToClient = (msg: ServerMessage) => void
 
 async function onChannelInit() {
-  const channel = createChannel<ServerMessage, ClientMessage>()
+  const channel = createChannel<ClientToServer, ServerToClient>()
   channel.onClose(() => {
     clearInterval(intervalId)
     console.log('[server] channel closed')

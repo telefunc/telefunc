@@ -146,16 +146,17 @@ function testChannel(isDev: boolean) {
     })
   })
 
-  // ── abort() from telefunc/client closes all channels in result ────────
+  // ── abort(result) from telefunc/client — abort semantics on all channels ──
 
-  test('channel: abort(result) from telefunc/client — calls close() on all channels in result object', async () => {
-    // abort(result) triggers the AbortController signal listener that calls ch.close()
-    // on each channel contained in the telefunction return value.
+  test('channel: abort(result) from telefunc/client — every channel in result receives Abort error via onClose', async () => {
+    // abort(result) fires abort semantics everywhere: every channel in the result
+    // gets closed and its onClose callback receives a TelefuncAbort error.
     await page.click('#channel-test-client-abort')
 
     await autoRetry(async () => {
       const state = await getResult<ChannelState>('#channel-state')
-      // ch.isClosed was true when onClose fired (confirms close() was called)
+      // true only when ch.isClosed === true AND err instanceof TelefuncAbort
+      // (proves the channel was closed with abort error, not a clean close)
       expect(state.clientAbortClosed).toBe(true)
     })
 

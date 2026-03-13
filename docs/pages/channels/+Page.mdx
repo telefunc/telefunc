@@ -1,269 +1,21 @@
 import { Link } from '@brillout/docpress'
 
-Telefunc supports persistent, bidirectional communication channels over WebSocket using <Link text={<code>createChannel()</code>} href="/createChannel" />.
+Telefunc can handle real-time flows such as chat, upload progress, and live updates.
 
-> Channels are useful for real-time features like chat, live dashboards, or any scenario where the server and client need to exchange messages continuously.
-
-
-## Example
-
-```ts
-// Chat.telefunc.ts
-// Environment: server
-
-import { createChannel } from 'telefunc'
-
-export async function onChat() {
-  const channel = createChannel<string, string>()
-
-  channel.listen((msg) => {
-    console.log('from client:', msg)
-    channel.send(`echo: ${msg}`)
-  })
-
-  channel.onClose(() => {
-    console.log('channel closed')
-  })
-
-  return { channel: channel.client }
-}
-```
-
-```tsx
-// Chat.tsx
-// Environment: client
-
-import { onChat } from './Chat.telefunc'
-
-const { channel } = await onChat()
-
-channel.listen((msg) => {
-  console.log('from server:', msg) // 'echo: hello'
-})
-
-channel.send('hello')
-```
-
-Return `channel.client` to the client — it transparently serializes into a `ClientChannel` connected over WebSocket.
-
-
-## Channel interface
-
-Both server and client channels share the same interface:
-
-| Method | Description |
-|---|---|
-| `send(data)` | Send a message (returns `Promise` when channel has `ack: true`) |
-| `send(data, { ack: true })` | Send and await the receiver's ack value |
-| `send(data, { ack: false })` | Send without ack (opt-out on ack-default channels) |
-| `sendBinary(data)` | Send raw bytes (`Uint8Array`) |
-| `listen(cb)` | Receive messages (return a value to ack the sender) |
-| `listenBinary(cb)` | Receive raw bytes |
-| `onOpen(cb)` | Fires when the channel is connected |
-| `onClose(cb)` | Fires when the channel closes |
-| `close()` | Close the channel cleanly |
-| `abort(value?)` | Close the channel; when called from the server, delivers an abort value to the client's `onClose` |
-| `isClosed` | Whether the channel has been closed |
-
-
-## Cancellation
-
-### `close()`
-
-Closes the channel cleanly. The other side's `onClose` callback fires with no error.
-
-```ts
-// client or server
-channel.close()
-```
-
-### `abort(abortValue?)`
-
-Closes the channel. When called from the **server**, the `abortValue` is delivered to the client's `onClose` callback as an `Abort` error.
-
-```ts
-// Environment: server
-channel.abort({ reason: 'unauthorized' })
-```
-
-```ts
-// Environment: client
-import { Abort } from 'telefunc/client'
-
-channel.onClose((err) => {
-  if (err instanceof Abort) {
-    console.log(err.abortValue) // { reason: 'unauthorized' }
-  }
-})
-```
-
-> `abortValue` is only delivered when aborting from the server side. When the client calls `abort()`, the server's `onClose` fires with no error — use `close()` from the client for a clean shutdown.
-
-> Use `abort()` to signal a known error condition (e.g. auth failure, rate limit). Use `close()` for a clean shutdown with no error.
-
-You can also close all channels returned by a telefunction using <Link text={<code>abort()</code>} href="/cancellation#abort" />:
-
-```ts
-import { abort } from 'telefunc/client'
-
-const result = await onInit()
-// Closes all channels in the result
-abort(result)
-```
-
-> `abort()` from `telefunc/client` calls `close()` on each channel — use it as a convenience when a telefunction returns multiple channels or a mix of channels and streams.
-
-
-## WebSocket setup
-
-Channels require a WebSocket connection. In Vite dev mode, this is handled automatically.
-
-For production, install the WebSocket adapter for your runtime — see <Link href="/telefuncWebSocket" />.
-
-> All channels — and streaming values when using <Link text={<code>transport: 'ws'</code>} href="/transport" /> — share a single multiplexed WebSocket connection per server URL.
-
-The WebSocket connection is created on demand when the first channel is opened, and closed automatically after the last channel is closed (configurable via `idleTimeout`, default 60 seconds — see <Link href="/telefuncWebSocket#options" />).
-
-
-## Reconnection
-
-If the WebSocket connection drops (e.g. network issue), the client automatically reconnects with exponential backoff. Open channels are reconciled — both sides replay missed frames — so the channel resumes without data loss.
-
-> Reconnection is transparent: `onClose` and `onOpen` don't fire during a reconnect. They only fire when the channel is permanently closed or initially opened.
-
-If the client can't reconnect within 60 seconds, all channels are closed permanently.
-
-
-## Acknowledgements
-
-Channels support **acknowledged sends**: the sender awaits a value returned by the receiver's listener.
-
-This is useful for request/response patterns over a persistent channel — e.g. confirmed delivery, or getting a computed result back.
-
-### Per-send ack
-
-Pass `{ ack: true }` to a single `send()` call. The listener on the other side returns the ack value.
-
-```ts
-// Environment: server
-export async function onInit() {
-  const channel = createChannel<string, string>()
-
-  channel.listen((msg) => {
-    // Return value becomes the ack
-    return `processed: ${msg}`
-  })
-
-  return { channel: channel.client }
-}
-```
-
-```ts
-// Environment: client
-const { channel } = await onInit()
-
-const ack = await channel.send('hello', { ack: true })
-console.log(ack) // 'processed: hello'
-```
-
-### Channel-wide ack (default-on)
-
-Create the channel with `{ ack: true }` — every `send()` returns a Promise automatically.
-
-```ts
-// Environment: server
-export async function onInit() {
-  const channel = createChannel<string, string>({ ack: true })
-
-  channel.listen((msg) => `processed: ${msg}`)
-
-  // send() always returns Promise when channel has ack: true
-  const ack = await channel.send('hello from server')
-  console.log(ack) // client's ack value
-
-  return { channel: channel.client }
-}
-```
-
-```ts
-// Environment: client
-const { channel } = await onInit()
-
-channel.listen((msg) => `client-ack: ${msg}`)
-
-// Promise returned automatically
-const ack = await channel.send('hello from client')
-console.log(ack) // 'processed: hello from client'
-
-// Opt out for a single send
-channel.send('fire and forget', { ack: false })
-```
-
-### Typed ack values
-
-When you need typed ack values, use 4 type parameters:
-
-```ts
-type ServerMsg = string
-type ClientMsg = string
-type ServerAck = string // ack the server receives back from the client
-type ClientAck = string // ack the client receives back from the server
-
-const channel = createChannel<ServerMsg, ClientMsg, ServerAck, ClientAck>({ ack: true })
-```
-
-> Ack frames are included in the replay buffer. If the connection drops after the receiver processes a message but before the sender gets the ack, the ack is replayed on reconnect — the Promise will still resolve.
-
-
-## TypeScript
-
-`createChannel<TSend, TReceive>()` is generic:
-- `TSend` — type of messages the server **sends**
-- `TReceive` — type of messages the server **receives**
-
-```ts
-// Environment: server
-
-import { createChannel } from 'telefunc'
-
-type ServerMessage = { type: 'tick'; count: number }
-type ClientMessage = { type: 'ping' }
-
-export async function onInit() {
-  const channel = createChannel<ServerMessage, ClientMessage>()
-
-  channel.send({ type: 'tick', count: 1 })
-  channel.listen((msg) => {
-    msg.type // 'ping'
-  })
-
-  return { channel: channel.client }
-}
-```
-
-The client channel has the types **flipped** — it sends `ClientMessage` and receives `ServerMessage`:
-
-```ts
-// Environment: client
-
-const { channel } = await onInit()
-
-channel.send({ type: 'ping' })
-channel.listen((msg) => {
-  console.log(msg.count) // number
-})
-```
-
+In production, install <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />. In Vite dev mode, this is wired automatically.
 
 ## Function passing
 
-You can pass plain functions as telefunction arguments or return them as results — Telefunc transparently proxies each call over a WebSocket channel. Mix any number of functions with other values: objects, <Link href="/streaming" text="streams" />, <Link href="/streaming#promise" text="promises" />, channels, <Link href="/file-upload" text="files" /> — it all works together.
+Telefunc can pass functions between client and server.
 
-> Function passing requires a WebSocket connection. See <Link href="/telefuncWebSocket" /> for setup.
+- Pass a function argument from the client and the server can call it.
+- Return a function from a telefunction and call it later from the client.
 
-### Pass a function as argument
+This is useful for progress callbacks and other small interactive flows where a full channel would be overkill.
 
-Pass a callback to a telefunction — the server calls it during execution.
+## File upload progress
+
+You can combine file upload with a callback to report progress while the server reads the file stream.
 
 ```ts
 // Upload.telefunc.ts
@@ -274,176 +26,154 @@ import fs from 'node:fs'
 export async function onUpload(file: File, onProgress: (percent: number) => void) {
   const total = file.size
   let loaded = 0
-  const writable = fs.createWriteStream(`./uploads/${file.name}`)
+
+  const dest = fs.createWriteStream(`./uploads/${file.name}`)
+
   for await (const chunk of file.stream()) {
-    writable.write(chunk)
+    dest.write(chunk)
     loaded += chunk.byteLength
     onProgress(Math.round((loaded / total) * 100))
   }
-  writable.end()
+
+  dest.end()
 }
 ```
 
-```ts
+```tsx
 // Upload.tsx
 // Environment: client
 
+import { useState } from 'react'
 import { onUpload } from './Upload.telefunc'
 
-const file = inputEl.files[0]
-await onUpload(file, (percent) => {
-  progressBar.style.width = `${percent}%`
-})
-```
+function Upload() {
+  const [progress, setProgress] = useState(0)
 
-The `onProgress` callback runs on the client, called by the server — streaming upload progress in a single function call. See <Link href="/file-upload" /> for more on file uploads.
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
 
-The server can also await the callback's return value:
-
-```ts
-// Compute.telefunc.ts
-// Environment: server
-
-export async function onMap(items: number[], mapper: (n: number) => Promise<number>) {
-  const results: number[] = []
-  for (const item of items) {
-    results.push(await mapper(item))
+    await onUpload(file, (percent) => {
+      setProgress(percent)
+    })
   }
-  return results
+
+  return (
+    <div>
+      <input type="file" onChange={handleUpload} />
+      <div style={{ width: `${progress}%` }} />
+    </div>
+  )
 }
 ```
 
-```ts
-// Compute.tsx
-// Environment: client
+The file bytes still stream normally while `onProgress()` updates the client.
 
-import { onMap } from './Compute.telefunc'
+If you only need callback-style interaction, function passing is usually simpler than creating a dedicated channel.
 
-const squares = await onMap([1, 2, 3, 4, 5], async (n) => n * n)
-// [1, 4, 9, 16, 25]
-```
 
-The `mapper` function runs on the client — the server sends each item, waits for the client's result, and continues.
+## Channels
 
-### Return a function
+Use <Link text={<code>createChannel()</code>} href="/createChannel" /> when server and client both need to keep sending messages over time.
 
-Return a function from a telefunction — the client receives a callable proxy. Each call is sent to the server and the return value comes back as a promise. Server-side closure state stays alive across calls.
+### Example
 
 ```ts
-// Counter.telefunc.ts
-// Environment: server
-
-export async function onGetCounter(initial: number) {
-  let count = initial
-  return async (delta: number) => {
-    count += delta
-    return count
-  }
-}
-```
-
-```ts
-// Counter.tsx
-// Environment: client
-
-import { onGetCounter } from './Counter.telefunc'
-
-const add = await onGetCounter(10)
-await add(5)  // 15
-await add(3)  // 18
-await add(2)  // 20
-```
-
-### Validation
-
-When you pass a callback to a telefunction (e.g. `onProgress`), the server calls it — the arguments come from your own server code, so no validation is needed.
-
-When a telefunction returns a function (e.g. `onGetCounter` returns `add`), the client calls it — the arguments come from the client and are **not validated** by Telefunc's shield. Validate manually and use <Link text={<code>throw Abort()</code>} href="/Abort" /> to reject invalid input:
-
-```ts
-// Counter.telefunc.ts
-// Environment: server
-
-import { Abort } from 'telefunc'
-
-export async function onGetCounter(initial: number) {
-  let count = initial
-  return async (delta: number) => {
-    if (typeof delta !== 'number') throw Abort({ reason: 'expected a number' })
-    count += delta
-    return count
-  }
-}
-```
-
-The abort value is delivered to the client — the function call rejects with an `Abort` error carrying `abortValue`:
-
-```ts
-// Counter.tsx
-// Environment: client
-
-import { Abort } from 'telefunc/client'
-
-import { onGetCounter } from './Counter.telefunc'
-
-const add = await onGetCounter(10)
-try {
-  await add('not a number' as any)
-} catch (err) {
-  err instanceof Abort // true
-  err.abortValue       // { reason: 'expected a number' }
-}
-```
-
-> This is the same trust model as WebSocket messages in general — the server should validate anything it receives from the client. See <Link href="/abort-vs-error" /> for when to use `throw Abort()` vs `throw new Error()`. Automatic shield validation for returned functions is planned for a future release.
-
-### Lifecycle
-
-- The underlying WebSocket channel is created when the function is serialized and closed automatically when the function proxy is garbage collected.
-- You can also close it explicitly using `abort()`:
-
-```ts
-import { abort } from 'telefunc/client'
-
-const result = await onGetCounter(0)
-// ... use result ...
-abort(result) // closes the underlying channel
-```
-
-
-## Cross-instance pub/sub
-
-> **Feedback welcome** — built-in pub/sub is not yet implemented. If this is blocking you, please open an issue.
-
-When you run multiple server instances (e.g. <Link text="Cloudflare shards" href="/telefuncWebSocket#scaling-with-shards" /> or multiple Node processes behind a load balancer), channels on different instances cannot directly message each other. Each channel lives in the process that created it.
-
-You can implement cross-instance pub/sub today by wiring channels to a shared message bus (Redis, Cloudflare Durable Objects, etc.) yourself:
-
-```ts
+// Chat.telefunc.ts
 // Environment: server
 
 import { createChannel } from 'telefunc'
 
-export async function onJoinRoom(roomId: string) {
-  const channel = createChannel<string, string>()
+type ClientToServer = (message: string) => void
+type ServerToClient = (message: string) => void
 
-  // Subscribe this channel to the shared topic
-  const unsubscribe = pubSub.subscribe(roomId, (msg) => channel.send(msg))
+export async function onChat() {
+  const channel = createChannel<ClientToServer, ServerToClient>()
 
-  // Forward client messages to the shared topic
-  channel.listen((msg) => pubSub.publish(roomId, msg))
+  channel.listen((message) => {
+    channel.send(`echo: ${message}`)
+  })
 
-  channel.onClose(unsubscribe)
+  channel.onClose(() => {
+    console.log('chat closed')
+  })
 
   return { channel: channel.client }
 }
 ```
 
-In the future, Telefunc plans to expose built-in `channel.publish(topic, msg)` / `channel.subscribe(topic, cb)` APIs that handle cross-instance routing automatically — using a central Durable Object on Cloudflare and pluggable adapters (Redis, etc.) elsewhere.
+```ts
+// Chat.tsx
+// Environment: client
+
+import { onChat } from './Chat.telefunc'
+
+const { channel } = await onChat()
+
+channel.listen((message) => {
+  console.log(message)
+})
+
+channel.send('hello')
+```
+
+See <Link href="/createChannel" /> for the full API and TypeScript surface.
+
+### Core API
+
+Both sides can `send()`, `listen()`, and `close()` the channel.
+
+
+### Acknowledgements
+
+Channels can also confirm that a message was received and processed.
+
+For example, a support chat can acknowledge that a refund request was handled:
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+import { createChannel } from 'telefunc'
+
+type ClientToServer = (message: string) => string
+type ServerToClient = (message: string) => void
+
+export async function onSupportChat() {
+  const channel = createChannel<ClientToServer, ServerToClient>()
+
+  channel.listen((message) => {
+    if (message === 'refund') {
+      return 'Ticket #482 created'
+    }
+    return 'How can I help?'
+  })
+
+  return { channel: channel.client }
+}
+```
+
+```ts
+// Chat.tsx
+// Environment: client
+
+const { channel } = await onSupportChat()
+
+const reply = await channel.send('refund', { ack: true })
+console.log(reply) // 'Ticket #482 created'
+```
+
+If every message should expect a reply, make acknowledgements the default for the whole channel:
+See <Link href="/createChannel" /> for typing details.
+
+
+## Setup
+
+For setup details, see <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
 
 ## See also
 
-- <Link href="/createChannel" />
-- <Link href="/telefuncWebSocket" />
+- <Link text={<code>createChannel()</code>} href="/createChannel" />
+- <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />
+- <Link href="/file-upload" />
 - <Link href="/streaming" />
-- <Link href="/cancellation" />

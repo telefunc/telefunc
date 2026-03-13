@@ -4,6 +4,7 @@ export { config }
 export { config as telefuncConfig }
 export { onAbort, onTelefunctionRemoteCallError } from './remoteTelefunctionCall/onAbort.js'
 export { abort } from './abort.js'
+export { close } from './close.js'
 export { Abort } from '../shared/Abort.js'
 export { withContext } from './withContext.js'
 export { ConnectionError } from './ConnectionError.js'

@@ -13,8 +13,6 @@ function Page() {
           background: 'var(--color-bg-gray)',
           paddingTop: 50,
           paddingBottom: 80,
-          position: 'relative',
-          zIndex: 0,
         }}
       >
         <Header />
@@ -26,8 +24,6 @@ function Page() {
           marginTop: 'var(--block-margin)',
           paddingTop: 60,
           paddingBottom: 120,
-          position: 'relative',
-          zIndex: 0,
         }}
       >
         <Features />

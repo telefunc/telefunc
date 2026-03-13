@@ -213,21 +213,19 @@ export async function someTelefunction() {
 }
 ```
 
-## `onConnectionClose()`
+## `onClose()`
 
-The context object returned by `getContext()` also includes `onConnectionClose()` — a callback that fires when the request lifecycle ends for any reason (response sent, stream complete, or client disconnect). Fires exactly once. Use it to release resources.
+The context object returned by `getContext()` also includes `onClose()` — a callback that fires when the request lifecycle ends for any reason. Fires exactly once. Use it to release resources.
 
 ```ts
 const context = getContext()
-context.onConnectionClose(() => {
+context.onClose(() => {
   // Clean up server-side resources
 })
 ```
-
-See <Link href="/cancellation" /> for full documentation.
 
 
 ## See also
 
 - <Link href="/server" />
-- <Link href="/cancellation" />
+- <Link href="/getContext" />

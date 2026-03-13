@@ -25,9 +25,9 @@ type RequestContext = {
   responseAbort: ResponseAbortSource
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
-  onConnectionClose: (cb: () => void) => void
+  onClose: (cb: () => void) => void
   /** Mark the response as complete.
-   *  Fires onConnectionClose callbacks. */
+   *  Fires onClose callbacks. */
   markComplete: () => void
 }
 
@@ -54,7 +54,7 @@ function createRequestContext(abortSignal: AbortSignal): RequestContext {
   const ctx: RequestContext = {
     abortSignal,
     responseAbort,
-    onConnectionClose(cb) {
+    onClose(cb) {
       if (closed) {
         cb()
         return

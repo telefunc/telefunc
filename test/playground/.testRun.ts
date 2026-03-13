@@ -5,6 +5,7 @@ import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testStreaming } from './pages/streaming/e2e-test'
 import { testAbort } from './pages/abort/e2e-test'
+import { testClose } from './pages/close/e2e-test'
 import { testChannel } from './pages/channel/e2e-test'
 import { testFunction } from './pages/function/e2e-test'
 
@@ -51,6 +52,8 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
   testStreaming()
 
   testAbort()
+
+  testClose()
 
   testChannel(isDev)
 

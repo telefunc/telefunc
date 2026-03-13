@@ -9,13 +9,3 @@ TO-DO/next-major-release:
 
 
 
-Dani:
-1. remove channel abort > close(Abort | undefined)
-2. onConnectionClose > onClose
-3. abort() > cancel()
-4. WebSocket > Live objects (Real-time)
-
-
-
-if (err instanceof Cancelled)
-if (err instanceof Abort)

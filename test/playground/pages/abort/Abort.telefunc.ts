@@ -5,14 +5,14 @@ import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
 // Simulates a slow AI upstream: each "token" takes 1 second.
-// Client disconnects after first token — onConnectionClose should fire
+// Client disconnects after first token — onClose should fire
 // immediately, not after waiting 1s for the next token.
 async function* onSlowAIGenerator(): AsyncGenerator<string> {
   try {
     cleanupState.slowAI = 'running'
     cleanupState.slowAIClosedAt = ''
     const context = getContext()
-    context.onConnectionClose(() => {
+    context.onClose(() => {
       cleanupState.slowAI = 'cleaned-up'
       cleanupState.slowAIClosedAt = String(Date.now())
     })
@@ -27,13 +27,13 @@ async function* onSlowAIGenerator(): AsyncGenerator<string> {
 }
 
 // Simulates a slow ReadableStream: each chunk takes 1 second.
-// Client cancels after first chunk — onConnectionClose should fire quickly.
+// Client cancels after first chunk — onClose should fire quickly.
 const onSlowStreamForAbort = async (): Promise<ReadableStream<Uint8Array>> => {
   cleanupState.slowStream = 'running'
   cleanupState.slowStreamClosedAt = ''
   cleanupState.slowStreamCancelled = ''
   const context = getContext()
-  context.onConnectionClose(() => {
+  context.onClose(() => {
     cleanupState.slowStream = 'cleaned-up'
     cleanupState.slowStreamClosedAt = String(Date.now())
   })
@@ -53,14 +53,14 @@ const onSlowStreamForAbort = async (): Promise<ReadableStream<Uint8Array>> => {
 }
 
 // Non-streaming telefunc with many slow steps.
-// Client aborts — onConnectionClose fires, and the telefunc
+// Client aborts — onClose fires, and the telefunc
 // checks an `aborted` flag to bail out early.
 async function onSlowNormalTelefunc(): Promise<{ stepsCompleted: number }> {
   cleanupState.slowNormal = 'running'
   cleanupState.slowNormalSteps = '0'
   const context = getContext()
   let aborted = false
-  context.onConnectionClose(() => {
+  context.onClose(() => {
     aborted = true
     cleanupState.slowNormal = 'cleaned-up'
   })
@@ -83,7 +83,7 @@ async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; err
   cleanupState.uploadAbortSingle = 'running'
   cleanupState.uploadAbortSingleError = ''
   const context = getContext()
-  context.onConnectionClose(() => {
+  context.onClose(() => {
     cleanupState.uploadAbortSingle = 'cleaned-up'
   })
   let bytesRead = 0
@@ -117,7 +117,7 @@ async function onUploadAbortMultiple(
   cleanupState.uploadAbortMulti = 'running'
   cleanupState.uploadAbortMultiConnectionClose = ''
   const context = getContext()
-  context.onConnectionClose(() => {
+  context.onClose(() => {
     cleanupState.uploadAbortMulti = 'cleaned-up'
     cleanupState.uploadAbortMultiConnectionClose = 'fired'
   })

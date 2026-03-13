@@ -34,7 +34,7 @@ function getContext_async(): Telefunc.Context {
   const context = globalObject.asyncStore.getStore()
   assert(context === undefined || isObject(context))
   // context is always set inside a telefunc execution — restoreContext_async initializes it with {}
-  // if no user context was provided, so augmentContext() can attach onConnectionClose().
+  // if no user context was provided, so augmentContext() can attach onClose().
   assertUsage(context, errMsg)
   return context
 }
@@ -53,7 +53,7 @@ function restoreContext_async(context: null | Telefunc.Context): any {
     { onlyOnce: true },
   )
   // Always initialize the store with at least an empty object so getContext() works inside
-  // a telefunc execution even without provideTelefuncContext() — needed for onConnectionClose().
+  // a telefunc execution even without provideTelefuncContext() — needed for onClose().
   globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
   globalObject.asyncStore.enterWith(context ?? ({} as Telefunc.Context))
 }

@@ -1,5 +1,7 @@
 export type {
   StreamingTypeContract,
+  ClientRevivedValue,
+  ClientReviveClose,
   AsyncGeneratorContract,
   ReadableStreamContract,
   PromiseContract,
@@ -53,9 +55,20 @@ type ServerStreamingType<C extends StreamingTypeContract = StreamingTypeContract
 }
 
 /** Client-side plugin: how to reconstruct a live value from metadata + chunk reader. */
+type ClientReviveClose = (() => void) | undefined
+
+type ClientRevivedValue<T> = {
+  value: T
+  close: ClientReviveClose
+}
+
 type ClientStreamingType<C extends StreamingTypeContract = StreamingTypeContract> = {
   prefix: string
-  createValue(metadata: C['metadata'], readNextChunk: () => Promise<Uint8Array | null>, cancel: () => void): C['result']
+  createValue(
+    metadata: C['metadata'],
+    readNextChunk: () => Promise<Uint8Array | null>,
+    cancel: () => void,
+  ): ClientRevivedValue<C['result']>
 }
 
 // ===== Concrete contracts =====

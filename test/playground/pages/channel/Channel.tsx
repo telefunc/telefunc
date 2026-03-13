@@ -551,7 +551,7 @@ function ChannelDemo() {
             disabled={!connected}
             className="px-3 py-1.5 text-sm rounded bg-orange-600 text-white disabled:opacity-40 hover:bg-orange-700"
           >
-            Test Client abort()
+            Test Client abort(result)
           </button>
           <button
             id="channel-test-per-send-ack"

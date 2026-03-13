@@ -1,6 +1,6 @@
 export { ClientChannel }
 
-import type { Channel, ChannelClient } from '../channel.js'
+import type { Channel, ChannelClient, ChannelData, ChannelAck } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../client/clientConfig.js'
@@ -23,14 +23,16 @@ import { ChannelClosedError } from '../channel-errors.js'
  *
  * Implements the shared `Channel` interface (see wire-protocol/channel.ts).
  */
-class ClientChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAckReceive = unknown>
-  implements ChannelClient<TSend, TReceive, TAckSend, TAckReceive>
+class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
+  implements ChannelClient<ClientToServer, ServerToClient>
 {
   readonly id: string
   readonly ackMode: boolean
   readonly defer: boolean
   private _connection: WsConnection
-  private _listeners: Array<(data: TReceive) => TAckReceive | Promise<TAckReceive> | void> = []
+  private _listeners: Array<
+    (data: ChannelData<ServerToClient>) => ChannelAck<ServerToClient> | Promise<ChannelAck<ServerToClient>> | void
+  > = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _openCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<(err?: Error) => void> = []
@@ -39,8 +41,8 @@ class ClientChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
   private _didFireClose = false
   private _didFireOpen = false
 
-  get client(): Channel<TReceive, TSend, TAckReceive, TAckSend> {
-    return this as unknown as Channel<TReceive, TSend, TAckReceive, TAckSend>
+  get client(): Channel<ServerToClient, ClientToServer> {
+    return this as unknown as Channel<ServerToClient, ClientToServer>
   }
 
   constructor(channelId: string, ackMode = false, shard?: string, defer = false) {
@@ -56,15 +58,15 @@ class ClientChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
     return this._isClosed
   }
 
-  send(data: TSend): void
-  send(data: TSend, opts: { ack: true }): Promise<TAckSend>
-  send(data: TSend, opts: { ack: false }): void
-  send(data: TSend, opts?: { ack?: boolean }): Promise<TAckSend> | void {
+  send(data: ChannelData<ClientToServer>): void
+  send(data: ChannelData<ClientToServer>, opts: { ack: true }): Promise<ChannelAck<ClientToServer>>
+  send(data: ChannelData<ClientToServer>, opts: { ack: false }): void
+  send(data: ChannelData<ClientToServer>, opts?: { ack?: boolean }): Promise<ChannelAck<ClientToServer>> | void {
     if (this._isClosed) throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ackMode === true)
     const serialized = stringify(data, { forbidReactElements: false })
     if (needsAck) {
-      return this._connection.sendTextAckReq(this, serialized) as Promise<TAckSend>
+      return this._connection.sendTextAckReq(this, serialized) as Promise<ChannelAck<ClientToServer>>
     } else {
       this._connection.send(this, serialized)
     }
@@ -75,7 +77,11 @@ class ClientChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
     this._connection.sendBinary(this, data)
   }
 
-  listen(callback: (data: TReceive) => TAckReceive | Promise<TAckReceive> | void): void {
+  listen(
+    callback: (
+      data: ChannelData<ServerToClient>,
+    ) => ChannelAck<ServerToClient> | Promise<ChannelAck<ServerToClient>> | void,
+  ): void {
     this._listeners.push(callback)
   }
 
@@ -142,7 +148,7 @@ class ClientChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
 
   /** @internal */
   _onWsMessage(data: string): void {
-    const parsed = parse(data) as TReceive
+    const parsed = parse(data) as ChannelData<ServerToClient>
     for (const cb of this._listeners) {
       try {
         cb(parsed)
@@ -155,7 +161,7 @@ class ClientChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
 
   /** @internal — Server sent TEXT_ACK_REQ; dispatch and send ACK_RES back. */
   async _onWsAckReqMessage(data: string, seq: number): Promise<void> {
-    const parsed = parse(data) as TReceive
+    const parsed = parse(data) as ChannelData<ServerToClient>
     for (const cb of this._listeners) {
       try {
         const result = await cb(parsed)

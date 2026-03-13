@@ -327,7 +327,7 @@ function Streaming() {
           // Ensure promise has resolved before cancelling
           await promiseP
 
-          // Cancel generator — all consumers done → onConnectionClose fires
+          // Cancel generator — all consumers done → onClose fires
           await res.gen.return(undefined)
           steps.push('gen-cancelled')
           render()

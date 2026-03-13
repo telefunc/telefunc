@@ -1,43 +1,55 @@
-#header {
-  margin-top: 24px;
+#header-logo h1 {
+  font-size: 4.4em;
+  margin: 0;
+  margin-left: 0.3em;
 }
-#tagline-primary {
+#header-logo img {
+  height: 110px;
+  margin-right: 20;
+}
+#header-tagline {
   font-size: 2em;
   margin: 20px 0;
 }
-#tagline-secondary {
-  font-size: 27px;
-  margin-bottom: 53px;
+#header-tagline-newline {
+  display: none;
 }
-
-@media screen and (max-width: 700px) {
-  #header {
-    margin-top: 24px;
+@container (max-width: 799px) {
+  #header-logo {
+    display: none !important;
   }
-  #hero-badge {
-    font-size: 10px !important;
-  }
-  #tagline-primary {
-    font-size: 1.3em;
-  }
-  #tagline-secondary {
-    font-size: 22px;
-    margin-bottom: 53px;
+  #header-tagline {
+    margin-top: -20px;
+    margin-bottom: 20px;
+    font-size: 2.5em;
+    font-weight: 800;
   }
 }
-@media screen and (max-width: 500px) {
-  #header {
-    margin-top: 5px;
+@container (max-width: 699px) {
+  #header-tagline {
+    font-size: 2.2em;
   }
-  #hero-badge {
-    font-size: 9px !important;
-    zoom: 0.8;
+}
+@container (max-width: 550px) {
+  #header-tagline {
+    font-size: 1.8em;
   }
-  #tagline-primary {
-    font-size: 0.9em;
+}
+@container (max-width: 520px) {
+  #header-tagline {
+    font-size: 1.6em;
   }
-  #tagline-secondary {
-    font-size: 22px;
-    margin-bottom: 33px;
+}
+@container (max-width: 450px) {
+  #header-tagline {
+    font-size: 2.4em;
+  }
+  #header-tagline-newline {
+    display: block;
+  }
+}
+@container (max-width: 400px) {
+  #header-tagline {
+    font-size: 2.1em;
   }
 }

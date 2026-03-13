@@ -51,7 +51,7 @@ function provide(context: null | Telefunc.Context) {
     globalObject.neverProvided = false
   }
   // Always initialize context — use {} if no user context provided so getContext() works
-  // inside a telefunc execution for built-in methods like onConnectionClose().
+  // inside a telefunc execution for built-in methods like onClose().
   globalObject.context = context ?? ({} as Telefunc.Context)
   globalObject.hasRestoreAccess = true
   // We don't use process.nextTick() to avoid dependency on Node.js

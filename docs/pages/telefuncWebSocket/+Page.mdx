@@ -2,7 +2,9 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Install the Telefunc WebSocket upgrade handler on your server. Pick the adapter for your runtime:
+Install the Telefunc WebSocket upgrade handler on your server. This is what powers <Link text={<code>createChannel()</code>} href="/createChannel" />, returned function proxies, and WebSocket transport.
+
+Pick the adapter for your runtime:
 
 ## Node.js
 
@@ -60,7 +62,7 @@ import { telefuncWebSocket } from 'telefunc/websocket/cloudflare'
 
 const ws = telefuncWebSocket()
 
-export const $TelefuncDurableObject = ws.createDurableObjectClass()
+export const TelefuncDurableObject = ws.createDurableObjectClass()
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
@@ -71,84 +73,40 @@ export default {
 }
 ```
 
-```toml
-# wrangler.toml
-[[durable_objects.bindings]]
-name = "$TelefuncDurableObject"
-class_name = "$TelefuncDurableObject"
-
-[[migrations]]
-tag = "v1"
-new_classes = ["$TelefuncDurableObject"]
+```jsonc
+{
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TelefuncDurableObject",
+        "class_name": "TelefuncDurableObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["TelefuncDurableObject"]
+    }
+  ]
+}
 ```
 
-Channels require a [Durable Object](https://developers.cloudflare.com/durable-objects/) so that the WebSocket and the telefunction that created the channel run in the same isolate. Telefunc handles this automatically — you just need to export the class and register the binding.
+Cloudflare channels require a [Durable Object](https://developers.cloudflare.com/durable-objects/) because channel state is in-memory and must stay colocated with the WebSocket connection.
 
-> **[Durable Object hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#why-use-hibernation) while channels are open is not supported.**
->
-> Channels are plain in-memory JavaScript — closures, local variables, callbacks. When the DO hibernates, the entire heap is wiped and there is nothing to restore them from. The DO therefore stays loaded in memory for the lifetime of each open channel.
->
-> Once all channels are closed and no clients are connected, Telefunc has no pending work and the DO can hibernate freely. By default this happens within 60 seconds of the last disconnect (the `reconnectTimeout` + `idleTimeout` window). You can shorten it:
->
-> ```ts
-> const ws = telefuncWebSocket({
->   reconnectTimeout: 5_000,  // close channels 5s after disconnect (default: 60s)
->   idleTimeout: 5_000,       // close WS 5s after last channel closes (default: 60s)
->   pingInterval: 2_000,      // ping every 2s, dead detection in 4s (default: 5s)
-> })
-> ```
->
-> - `reconnectTimeout` — how long to hold channels alive waiting for a dropped client to reconnect. Shorter = faster hibernate, but less tolerant of network blips.
-> - `idleTimeout` — how long to keep the WebSocket open after the last channel closes. Shorter = faster hibernate, but the next channel open pays the cost of a new handshake.
-> - `pingInterval` — how often the client pings. Shorter values speed up dead-client detection, which lets channels close sooner.
->
-> The exception is user code: if your telefunction starts a `setInterval` or `setTimeout` and forgets to clear it in `channel.onClose()`, that timer will keep the DO awake.
->
-> If hibernation support while channels are open is important to you, [open an issue](https://github.com/brillout/telefunc/issues) — use-case details help prioritise.
+See <Link text="Cloudflare Workers" href="/telefuncWebSocketCloudflare" /> for Cloudflare-specific details such as `context`, shards, `locationHint`, and Durable Object hibernation.
 
-### Context
+## Delivery guarantees
 
-To pass per-request data (logged-in user, auth token, etc.) to your telefunctions via `getContext()`, provide a `context` function:
+Messages within a channel keep their order.
 
-```ts
-const ws = telefuncWebSocket({
-  context: async (request, env: Env) => ({
-    user: await getUserFromCookie(request, env),
-  }),
-})
-```
+If the connection briefly drops, Telefunc tries to reconnect and continue where it left off.
 
-The function receives the incoming `Request` and your `env` bindings, and its return value is available inside telefunctions via `getContext()`.
+This recovery is best-effort within the reconnect timeout and buffer limits configured below.
 
-### Scaling with shards
+If Telefunc cannot recover the channel, then the channel closes and `onClose()` receives a `ChannelNetworkError`.
 
-By default all channels share a single Durable Object instance. If you have a large number of concurrent open channels and run into memory or CPU limits, you can increase the number of instances:
-
-```ts
-const ws = telefuncWebSocket({ shards: 4 })
-```
-
-Telefunc distributes traffic across the instances automatically.
-
-Each browser session is pinned to one shard (`stickyShards: true` by default): the server tells the client which shard handled its request, and the client sends that shard back on every subsequent call. This keeps a user's open channels and regular telefunction calls on the same Durable Object instance, avoiding redundant WebSocket connections and keeping per-user in-memory state in one place.
-
-### Custom binding name
-
-The binding name defaults to `$TelefuncDurableObject`. To use a different name, pass `bindingName`:
-
-```ts
-const ws = telefuncWebSocket({ bindingName: 'MyDurableObject' })
-```
-
-### Location hint
-
-Durable Objects are pinned to the datacenter where they are first created. By default, that is wherever the first request arrives from. To control initial placement, pass a `locationHint`:
-
-```ts
-const ws = telefuncWebSocket({ locationHint: 'weur' })
-```
-
-Best-effort, only applies at creation time — once a DO exists, it stays in its datacenter. See [Cloudflare docs on data location](https://developers.cloudflare.com/durable-objects/reference/data-location/) for valid values.
+Use acknowledgements when the sender needs confirmation that the other side received and processed a message.
 
 ## Options
 
@@ -168,3 +126,4 @@ All adapters accept the following options:
 
 - <Link href="/channels" />
 - <Link href="/createChannel" />
+- <Link text="Cloudflare Workers" href="/telefuncWebSocketCloudflare" />

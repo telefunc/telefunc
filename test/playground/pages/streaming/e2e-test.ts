@@ -129,7 +129,7 @@ function testStreaming() {
       expect(result.label).toBe('promises')
       expect(result.updates).deep.equal(['fast', 'slow'])
     })
-    // onConnectionClose fires after all streams complete
+    // onClose fires after all streams complete
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.multiplePromisesClosed).not.toBe('')
@@ -184,7 +184,7 @@ function testStreaming() {
     expect(result.steps).toContain('promise-resolved')
     expect(result.steps).toContain('gen-cancelled')
 
-    // After all consumers done, onConnectionClose should fire
+    // After all consumers done, onClose should fire
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.mixedEndless).toBe('cleaned-up')

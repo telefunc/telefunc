@@ -6,6 +6,7 @@ import { assert } from '../../../utils/assert.js'
 import { isObject, isObjectOrFunction } from '../../../utils/isObject.js'
 import { createStreamingReviver } from './registry.js'
 import { setAbortController } from '../../../client/abort.js'
+import { setCloseHandlers } from '../../../client/close.js'
 import { makeAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { StreamReader } from './StreamReader.js'
@@ -83,11 +84,11 @@ function reviveStreamingResponse(
   }
   const getCancelIndex = (index: number) => () => demuxer.cancelIndex(index)
 
-  const { reviver, channels } = createStreamingReviver(getChunkReader, getCancelIndex, shard)
+  const { reviver, channels, closeHandlers } = createStreamingReviver(getChunkReader, getCancelIndex, shard)
   const parsed: unknown = parse(metadataText, { reviver })
   if (!isObject(parsed)) return parsed
 
-  return finalizeResponse(parsed, channels, callContext)
+  return finalizeResponse(parsed, channels, closeHandlers, callContext)
 }
 
 // ===== Plain text response =====
@@ -97,7 +98,7 @@ function revivePlainResponse(body: string, callContext: CallContext, shard?: str
   const unreachable = (): never => {
     assert(false, 'Unexpected streaming value in plain response')
   }
-  const { reviver, channels } = createStreamingReviver(
+  const { reviver, channels, closeHandlers } = createStreamingReviver(
     () => unreachable,
     () => unreachable,
     shard,
@@ -105,7 +106,7 @@ function revivePlainResponse(body: string, callContext: CallContext, shard?: str
   const parsed: unknown = parse(body, { reviver })
   if (!isObject(parsed)) return parsed
 
-  return finalizeResponse(parsed, channels, callContext)
+  return finalizeResponse(parsed, channels, closeHandlers, callContext)
 }
 
 // ===== Shared cleanup =====
@@ -113,6 +114,7 @@ function revivePlainResponse(body: string, callContext: CallContext, shard?: str
 function finalizeResponse(
   parsed: Record<string, unknown>,
   channels: ClientChannel[],
+  closeHandlers: WeakMap<object, () => void>,
   callContext: CallContext,
 ): Record<string, unknown> {
   if (channels.length > 0) {
@@ -129,6 +131,7 @@ function finalizeResponse(
   const { ret } = parsed
   if (isObjectOrFunction(ret)) {
     setAbortController(ret, callContext.abortController)
+    setCloseHandlers(ret, closeHandlers)
   }
 
   return { ret }

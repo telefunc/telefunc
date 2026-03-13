@@ -18,22 +18,16 @@ function getAbortController(call: TelefuncCall): AbortController | undefined {
   return p[ABORT_CONTROLLER]
 }
 
-/** Immediately abort a pending telefunc call.
+/** Immediately abort a telefunc call.
  *
- *  Aborts the underlying fetch. Rejects with an `Abort` error;
- *  for streaming calls mid-stream, the next read rejects instead.
+ *  Aborts the underlying request. Rejects with an `Abort` error;
+ *  for streaming results mid-stream, the next read rejects instead.
  *
- *  Works with promises, async generators, or multiplexed return objects
- *  (objects containing generators/streams/promises).
  *
  *  ```ts
  *  import { abort } from 'telefunc/client'
  *  const call = onSlowTelefunc()
  *  abort(call)
- *
- *  // Also works on awaited multiplexed returns:
- *  const res = await onDashboard()
- *  abort(res)
  *  ```
  */
 function abort(call: TelefuncCall): void {

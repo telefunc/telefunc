@@ -22,24 +22,7 @@ onAbort((err) => {
 > The `onAbort()` hook is usually used for implementing `getContext()` permission wrappers, see <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={true} />.
 
 
-## `abortValue`
-
-When the server uses `throw Abort(someValue)`, the value is available on `err.abortValue`:
-
-```ts
-import { Abort } from 'telefunc/client'
-
-onAbort((err) => {
-  // err instanceof Abort === true
-  console.log(err.abortValue) // The value passed to Abort()
-})
-```
-
-This works for both regular and streaming telefunctions. For streaming, the hook fires when a generator calls `throw Abort(value)` mid-stream — see <Link href="/Abort#mid-stream-abort" doNotInferSectionTitle={true} />.
-
-
 ## See also
 
  - <Link href="/permissions" />
  - <Link href="/Abort" />
- - <Link href="/streaming" />

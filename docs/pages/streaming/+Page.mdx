@@ -174,44 +174,6 @@ const slow = await res.slow  // Resolves when ready
 ```
 
 
-## `throw Abort()` mid-stream
-
-You can `throw Abort()` inside a generator to stop streaming and signal the client. See <Link href="/Abort" />.
-
-```ts
-// Chat.telefunc.ts
-// Environment: server
-
-import { Abort } from 'telefunc'
-
-export async function* onChat(prompt: string): AsyncGenerator<string> {
-  if (isFlagged(prompt)) {
-    throw Abort({ reason: 'content-policy', code: 403 })
-  }
-  for await (const token of ai.streamText({ prompt })) {
-    yield token
-  }
-}
-```
-
-The client catches it with `instanceof Abort`:
-
-```ts
-import { Abort } from 'telefunc/client'
-
-const gen = onChat('bad prompt')
-try {
-  for await (const token of gen) { /* ... */ }
-} catch (err) {
-  if (err instanceof Abort) {
-    console.log(err.abortValue) // { reason: 'content-policy', code: 403 }
-  }
-}
-```
-
-> Values yielded before the `throw Abort()` are delivered to the client. Only subsequent values are dropped.
-
-
 ## Transport
 
 By default, streaming values are sent as raw binary chunks over HTTP (`application/octet-stream`). You can change the transport globally or per-call:
@@ -235,20 +197,19 @@ See <Link href="/transport" /> for details.
 
 ## Error handling
 
-If a generator throws a regular error (not `Abort()`), the client receives an error with message `'Internal Server Error'`. Values yielded before the error are preserved.
+If a generator throws a regular error, the client receives an error with message `'Internal Server Error'`. Values yielded before the error are preserved.
 
 See <Link href="/error-handling" /> for details.
 
 
 ## Cleanup
 
-Use `onConnectionClose()` to detect when the connection ends (client disconnect, stream complete, or response sent) — for example to cancel upstream work or release resources. See <Link href="/cancellation" />.
+Use `onClose()` to detect when the connection ends (client disconnect, stream complete, or response sent) — for example to cancel upstream work or release resources. See <Link href="/getContext" />.
 
 
 ## See also
 
-- <Link href="/cancellation" />
-- <Link href="/Abort" />
+- <Link href="/getContext" />
 - <Link href="/error-handling" />
 - <Link href="/transport" />
 - <Link href="/channels" />

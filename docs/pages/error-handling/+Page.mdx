@@ -161,38 +161,40 @@ If the user's browser can't connect to your server:
 ```
 
 
-## Streaming errors
-
-If a generator throws a regular error (not <Link text={<code>Abort()</code>} href="/Abort" />) mid-stream, the client receives an error with message `'Internal Server Error'`. Values yielded before the error are preserved.
-
-```ts
-// AI.telefunc.ts
-// Environment: server
-
-export async function* onChat(prompt: string): AsyncGenerator<string> {
-  yield 'partial-data'
-  throw new Error('upstream failure')
-}
-```
-
-```ts
-// Environment: client
-
-const gen = onChat('hello')
-const values = []
-try {
-  for await (const v of gen) values.push(v)
-} catch (err) {
-  // values === ['partial-data']
-  // err.message === 'Internal Server Error'
-}
-```
-
-> To avoid leaking sensitive information, Telefunc replaces the original error with a generic `'Internal Server Error'` message — same as with non-streaming telefunctions.
-
-
 ## See also
 
 - <Link href="/onBug" />
 - <Link href="/abort-vs-error" />
-- <Link href="/streaming" />
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

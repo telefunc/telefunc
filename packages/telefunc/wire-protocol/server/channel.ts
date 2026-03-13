@@ -3,7 +3,7 @@ export { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
 
-import type { Channel, ChannelClient } from '../channel.js'
+import type { Channel, ChannelClient, ChannelData, ChannelAck } from '../channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
@@ -56,7 +56,9 @@ function onChannelCreated(id: string, cb: () => void): void {
  * import { createChannel } from 'telefunc'
  *
  * export async function onChat() {
- *   const channel = createChannel<string, string>()
+ *   type ClientToServer = (msg: string) => void
+ *   type ServerToClient = (msg: string) => void
+ *   const channel = createChannel<ClientToServer, ServerToClient>()
  *   channel.listen((msg) => console.log('from client:', msg))
  *   channel.send('hello from server')
  *   channel.onClose(() => console.log('channel closed'))
@@ -71,18 +73,17 @@ type CreateChannelOpts = {
    */
   sendBufferBytes?: number
 }
-function createChannel<TSend = unknown, TReceive = unknown>(opts?: CreateChannelOpts): Channel<TSend, TReceive>
-function createChannel<TSend, TReceive>(
-  opts: CreateChannelOpts & { ack: true },
-): Channel<TSend, TReceive, unknown, unknown, true>
-function createChannel<TSend, TReceive, TAckSend, TAckReceive>(
-  opts: CreateChannelOpts & {
-    ack: true
-  },
-): Channel<TSend, TReceive, TAckSend, TAckReceive, true>
-function createChannel<TSend, TReceive, TAckSend, TAckReceive>(
+type UntypedChannelHandler = (data: unknown) => unknown
+
+function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(
   opts?: CreateChannelOpts,
-): Channel<TSend, TReceive, TAckSend, TAckReceive, false>
+): Channel<ServerToClient, ClientToServer>
+function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(
+  opts: CreateChannelOpts & { ack: true },
+): Channel<ServerToClient, ClientToServer, true>
+function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(
+  opts?: CreateChannelOpts,
+): Channel<ServerToClient, ClientToServer, false>
 function createChannel(opts?: CreateChannelOpts & { ack?: true }): any {
   return new ServerChannel(opts?.ack === true, undefined, opts?.sendBufferBytes)
 }
@@ -93,8 +94,8 @@ function createChannel(opts?: CreateChannelOpts & { ack?: true }): any {
  * Should be large enough to cover any reasonable telefunction run time.
  */
 const DEFAULT_TTL_MS = 5 * 60_000
-class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAckReceive = unknown>
-  implements Channel<TSend, TReceive, TAckSend, TAckReceive>
+class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
+  implements Channel<ServerToClient, ClientToServer>
 {
   readonly [SERVER_CHANNEL_BRAND] = true
   readonly id: string
@@ -102,8 +103,8 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
   readonly ackMode: boolean
 
   /** Return this to the client — it serializes to a `ClientChannel` on the other side. */
-  get client(): ChannelClient<TReceive, TSend, TAckReceive, TAckSend> {
-    return this as unknown as ChannelClient<TReceive, TSend, TAckReceive, TAckSend>
+  get client(): ChannelClient<ClientToServer, ServerToClient> {
+    return this as unknown as ChannelClient<ClientToServer, ServerToClient>
   }
 
   static isServerChannel(value: unknown): value is ServerChannel {
@@ -114,16 +115,25 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
 
   private _isClosed = false
   private _peer: IndexedPeer | null = null
-  private _listeners: Array<(data: TReceive) => TAckReceive | Promise<TAckReceive> | void> = []
+  private _listeners: Array<
+    (data: ChannelData<ClientToServer>) => ChannelAck<ClientToServer> | Promise<ChannelAck<ClientToServer>> | void
+  > = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _pauseCallbacks: Array<() => void> = []
   private _resumeCallbacks: Array<() => void> = []
   /** Drop-oldest ring buffer for messages sent before a peer connects. */
   private _prePeerBuffer: ServerChannelBuffer
   /** Buffered ack sends when peer not yet connected: { serialized, resolve, reject }[]. */
-  private _ackSendBuffer: Array<{ data: string; resolve: (v: TAckSend) => void; reject: (err: Error) => void }> = []
+  private _ackSendBuffer: Array<{
+    data: string
+    resolve: (v: ChannelAck<ServerToClient>) => void
+    reject: (err: Error) => void
+  }> = []
   /** Pending ack promises keyed by the seq of the outgoing frame. */
-  private _pendingAcks = new Map<number, { resolve: (result: TAckSend) => void; reject: (err: Error) => void }>()
+  private _pendingAcks = new Map<
+    number,
+    { resolve: (result: ChannelAck<ServerToClient>) => void; reject: (err: Error) => void }
+  >()
   private _closeCallbacks: Array<(err?: Error) => void> = []
   private _openCallbacks: Array<() => void> = []
   private _closeError: Error | undefined
@@ -158,10 +168,10 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
    *                    Always `true` (and the overload returns Promise automatically) when the
    *                    channel was created with `createChannel({ ack: true })`.
    *  @throws {ChannelClosedError} if the channel is closed. */
-  send(data: TSend): void
-  send(data: TSend, opts: { ack: true }): Promise<TAckSend>
-  send(data: TSend, opts: { ack: false }): void
-  send(data: TSend, opts?: { ack?: boolean }): Promise<TAckSend> | void {
+  send(data: ChannelData<ServerToClient>): void
+  send(data: ChannelData<ServerToClient>, opts: { ack: true }): Promise<ChannelAck<ServerToClient>>
+  send(data: ChannelData<ServerToClient>, opts: { ack: false }): void
+  send(data: ChannelData<ServerToClient>, opts?: { ack?: boolean }): Promise<ChannelAck<ServerToClient>> | void {
     if (this._isClosed) throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ackMode === true)
     const serialized = stringify(data, { forbidReactElements: false })
@@ -175,10 +185,12 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
     }
     if (this._peer) {
       const seq = this._peer.sendTextAckReq(serialized)
-      return new Promise<TAckSend>((resolve, reject) => this._pendingAcks.set(seq, { resolve, reject }))
+      return new Promise<ChannelAck<ServerToClient>>((resolve, reject) =>
+        this._pendingAcks.set(seq, { resolve, reject }),
+      )
     } else {
       // Ack-buffered sends don't count against the byte cap (they await a response and are rare).
-      return new Promise<TAckSend>((resolve, reject) => {
+      return new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
         this._ackSendBuffer.push({ data: serialized, resolve, reject })
       })
     }
@@ -195,7 +207,11 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
     }
   }
 
-  listen(callback: (data: TReceive) => TAckReceive | Promise<TAckReceive> | void): void {
+  listen(
+    callback: (
+      data: ChannelData<ClientToServer>,
+    ) => ChannelAck<ClientToServer> | Promise<ChannelAck<ClientToServer>> | void,
+  ): void {
     this._listeners.push(callback)
   }
 
@@ -238,7 +254,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
   }
 
   /** Close the channel from the server side with an abort value.
-   *  The client's `onClose` callback will receive an error with `isAbort: true` and `abortValue`. */
+   *  The client's `onClose` callback will receive an `Abort` error carrying `abortValue`. */
   abort(abortValue?: unknown): void {
     if (this._isClosed) return
     if (this._peer) {
@@ -307,7 +323,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
 
   /** @internal — Called by ws.ts when a TEXT frame arrives (no ack expected). */
   _onPeerMessage(text: string): void {
-    const data = parse(text) as TReceive
+    const data = parse(text) as ChannelData<ClientToServer>
     for (const cb of this._listeners) {
       try {
         cb(data)
@@ -321,7 +337,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
   /** @internal — Called by ws.ts when a TEXT_ACK_REQ frame arrives. Dispatches the
    *  message and sends ACK_RES with the listener's resolved value. */
   async _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
-    const data = parse(text) as TReceive
+    const data = parse(text) as ChannelData<ClientToServer>
     for (const cb of this._listeners) {
       try {
         const result = await cb(data)
@@ -350,7 +366,7 @@ class ServerChannel<TSend = unknown, TReceive = unknown, TAckSend = unknown, TAc
     const pending = this._pendingAcks.get(ackedSeq)
     if (!pending) return
     this._pendingAcks.delete(ackedSeq)
-    pending.resolve(parse(resultText) as TAckSend)
+    pending.resolve(parse(resultText) as ChannelAck<ServerToClient>)
   }
 
   /** @internal — Connection dropped, keep channel alive for reconnection. */

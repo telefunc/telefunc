@@ -1,0 +1,110 @@
+import { Link } from '@brillout/docpress'
+
+**Environment**: server.
+
+This page covers the Cloudflare-specific setup for <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
+
+
+## Default binding
+
+This works out of the box:
+
+```ts
+import { telefuncWebSocket } from 'telefunc/websocket/cloudflare'
+
+const ws = telefuncWebSocket()
+
+export const TelefuncDurableObject = ws.createDurableObjectClass()
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const resp = ws.handleTelefunc(request, env, ctx)
+    if (resp) return resp
+    // ... rest of your fetch handler
+  },
+}
+```
+
+```jsonc
+{
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TelefuncDurableObject",
+        "class_name": "TelefuncDurableObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["TelefuncDurableObject"]
+    }
+  ]
+}
+```
+
+
+## Context
+
+To pass per-request data to your telefunctions via <Link text={<code>getContext()</code>} href="/getContext" />, provide a `context` function:
+
+```ts
+const ws = telefuncWebSocket({
+  context: async (request, env: Env) => ({
+    user: await getUserFromCookie(request, env),
+  }),
+})
+```
+
+The function receives the incoming `Request` and your `env` bindings, and its return value is available inside telefunctions via `getContext()`.
+
+
+## Shards
+
+By default all channels share a single Durable Object instance. If you need more capacity, increase the number of instances:
+
+```ts
+const ws = telefuncWebSocket({ shards: 4 })
+```
+
+Each browser session is pinned to one shard (`stickyShards: true` by default), so a user's open channels and regular telefunction calls stay on the same Durable Object instance.
+
+
+## Location hint
+
+To influence where the Durable Object is first created, pass `locationHint`:
+
+```ts
+const ws = telefuncWebSocket({ locationHint: 'weur' })
+```
+
+This is best-effort and only applies at creation time. See [Cloudflare's data-location docs](https://developers.cloudflare.com/durable-objects/reference/data-location/) for valid values.
+
+
+## Hibernation
+
+> **[Durable Object hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#why-use-hibernation) while channels are open is not supported.**
+>
+> Channels are plain in-memory JavaScript: closures, local variables, callbacks. If the Durable Object hibernates, that heap state is gone. Telefunc therefore keeps the Durable Object alive for the lifetime of each open channel.
+
+Once all channels are closed and no clients are connected, the Durable Object can hibernate again. By default this happens after the reconnect and idle windows expire.
+
+You can shorten those windows:
+
+```ts
+const ws = telefuncWebSocket({
+  reconnectTimeout: 5_000,
+  idleTimeout: 5_000,
+  pingInterval: 2_000,
+})
+```
+
+If your own code leaves timers running after a channel closes, those timers can also keep the Durable Object awake.
+
+
+## See also
+
+- <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />
+- <Link href="/channels" />
+- <Link href="/createChannel" />

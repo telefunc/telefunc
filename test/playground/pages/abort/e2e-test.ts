@@ -120,7 +120,7 @@ function testAbort() {
 
   // ── Non-streaming abort ─────────────────────────────────────────────
 
-  test('abort: non-streaming telefunc — client gets cancel error', async () => {
+  test('abort: non-streaming telefunc — client call throws Abort', async () => {
     await page.goto(`${getServerUrl()}/abort`)
     await waitForHydration()
     await resetCleanupState()

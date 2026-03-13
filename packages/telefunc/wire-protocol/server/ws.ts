@@ -159,14 +159,6 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
         break
       }
 
-      case 'abort': {
-        const entry = state.ixMap.get(ctrl.ix)
-        if (!entry) break
-        state.ixMap.delete(ctrl.ix)
-        entry.channel._onPeerClose()
-        break
-      }
-
       // ── Reconciliation ──
       //
       // 1. Replay: send any frames the client missed (seq > lastSeq).
