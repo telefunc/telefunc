@@ -1,6 +1,6 @@
 export { ClientChannel }
 
-import type { Channel, ChannelClient, ChannelData, ChannelAck } from '../channel.js'
+import type { Channel, ChannelClient, ChannelData, ChannelAck, ChannelListener } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../client/clientConfig.js'
@@ -30,9 +30,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   readonly ackMode: boolean
   readonly defer: boolean
   private _connection: WsConnection
-  private _listeners: Array<
-    (data: ChannelData<ServerToClient>) => ChannelAck<ServerToClient> | Promise<ChannelAck<ServerToClient>> | void
-  > = []
+  private _listeners: Array<ChannelListener<ServerToClient>> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _openCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<(err?: Error) => void> = []
@@ -77,11 +75,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._connection.sendBinary(this, data)
   }
 
-  listen(
-    callback: (
-      data: ChannelData<ServerToClient>,
-    ) => ChannelAck<ServerToClient> | Promise<ChannelAck<ServerToClient>> | void,
-  ): void {
+  listen(callback: ChannelListener<ServerToClient>): void {
     this._listeners.push(callback)
   }
 

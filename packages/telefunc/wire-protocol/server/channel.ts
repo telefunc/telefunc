@@ -3,7 +3,7 @@ export { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
 
-import type { Channel, ChannelClient, ChannelData, ChannelAck } from '../channel.js'
+import type { Channel, ChannelClient, ChannelData, ChannelAck, ChannelListener } from '../channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
@@ -115,9 +115,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 
   private _isClosed = false
   private _peer: IndexedPeer | null = null
-  private _listeners: Array<
-    (data: ChannelData<ClientToServer>) => ChannelAck<ClientToServer> | Promise<ChannelAck<ClientToServer>> | void
-  > = []
+  private _listeners: Array<ChannelListener<ClientToServer>> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _pauseCallbacks: Array<() => void> = []
   private _resumeCallbacks: Array<() => void> = []
@@ -207,11 +205,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     }
   }
 
-  listen(
-    callback: (
-      data: ChannelData<ClientToServer>,
-    ) => ChannelAck<ClientToServer> | Promise<ChannelAck<ClientToServer>> | void,
-  ): void {
+  listen(callback: ChannelListener<ClientToServer>): void {
     this._listeners.push(callback)
   }
 

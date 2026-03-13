@@ -1,7 +1,13 @@
-export type { Channel, ChannelClient, ChannelData, ChannelAck }
+export type { Channel, ChannelClient, ChannelData, ChannelAck, ChannelListenReturn, ChannelListener }
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
+type ChannelListenReturn<T> = [T] extends [never]
+  ? void
+  : T extends (data: any) => infer R
+    ? Awaited<R> | Promise<Awaited<R>>
+    : unknown | Promise<unknown> | void
+type ChannelListener<T> = (data: ChannelData<T>) => ChannelListenReturn<T>
 
 /**
  * Internal base — `TOut` is what this side sends, `TIn` is what this side receives.
@@ -19,7 +25,7 @@ interface ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = 
   send(data: ChannelData<TOut>, opts: { ack: false }): void
   sendBinary(data: Uint8Array): void
   /** Receive messages. Return a value to ack the sender. */
-  listen(callback: (data: ChannelData<TIn>) => ChannelAck<TIn> | Promise<ChannelAck<TIn>> | void): void
+  listen(callback: ChannelListener<TIn>): void
   listenBinary(callback: (data: Uint8Array) => void): void
   onClose(callback: (err?: Error) => void): void
   onOpen(callback: () => void): void
@@ -37,7 +43,5 @@ interface Channel<ServerToClient = unknown, ClientToServer = unknown, TDefault e
 /** Client-side channel. `ClientToServer` = messages the client sends; `ServerToClient` = messages the client receives. */
 interface ChannelClient<ClientToServer = unknown, ServerToClient = unknown, TDefault extends boolean = false>
   extends ChannelBase<ClientToServer, ServerToClient, TDefault> {
-  /** The server-side end of the channel. */
-  readonly client: Channel<ServerToClient, ClientToServer, TDefault>
   abort(): void
 }
