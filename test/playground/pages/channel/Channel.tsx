@@ -58,6 +58,7 @@ type ChannelState = {
   /** ch2 values are strictly +100 each time. */
   multiCh2IsMonotonic: boolean | null
   clientAbortServerChannelId: string | null
+  clientAbortServerOnOpenFired: boolean | null
   earlyCloseChannelId: string | null
   ackListenerAbortErr: { isAbort: boolean; abortValue: unknown } | null
   serverPendingAckAbortChannelId: string | null
@@ -95,6 +96,7 @@ const initialState: ChannelState = {
   multiCh1IsMonotonic: null,
   multiCh2IsMonotonic: null,
   clientAbortServerChannelId: null,
+  clientAbortServerOnOpenFired: null,
   earlyCloseChannelId: null,
   ackListenerAbortErr: null,
   serverPendingAckAbortChannelId: null,
@@ -350,6 +352,14 @@ function ChannelDemo() {
   }, [addLog])
 
   const testClientAbortServer = useCallback(async () => {
+    if (clientAbortServerChannelRef.current && !clientAbortServerChannelRef.current.isClosed) {
+      const channelId = channelState.clientAbortServerChannelId
+      clientAbortServerChannelRef.current.abort()
+      clientAbortServerChannelRef.current = null
+      addLog('system', `client abort() sent for channel ${channelId}`)
+      return
+    }
+
     addLog('system', 'Starting client-abort-server test...')
     const { channel, channelId } = await onChannelClientAbortInstrument()
     clientAbortServerChannelRef.current = channel
@@ -357,6 +367,18 @@ function ChannelDemo() {
     channel.abort()
     clientAbortServerChannelRef.current = null
     addLog('system', `client abort() sent for channel ${channelId}`)
+  }, [addLog, channelState.clientAbortServerChannelId])
+
+  const openClientAbortServerChannel = useCallback(async () => {
+    addLog('system', 'Starting client-abort-server test...')
+    const { channel, channelId } = await onChannelClientAbortInstrument()
+    channel.onOpen(() => {
+      addLog('system', `client-abort-server channel acknowledged: ${channelId}`)
+      setChannelState((s) => ({ ...s, clientAbortServerOnOpenFired: true }))
+    })
+    clientAbortServerChannelRef.current = channel
+    setChannelState((s) => ({ ...s, clientAbortServerChannelId: channelId, clientAbortServerOnOpenFired: false }))
+    addLog('system', `client-abort-server channel opened: ${channelId}`)
   }, [addLog])
 
   const testEarlyClose = useCallback(async () => {
@@ -586,12 +608,20 @@ function ChannelDemo() {
             Test Multi Channel
           </button>
           <button
+            id="channel-test-client-abort-server-open"
+            type="button"
+            onClick={openClientAbortServerChannel}
+            className="px-3 py-1.5 text-sm rounded bg-rose-500 text-white hover:bg-rose-600"
+          >
+            Open Client Abort → Server
+          </button>
+          <button
             id="channel-test-client-abort-server"
             type="button"
             onClick={testClientAbortServer}
             className="px-3 py-1.5 text-sm rounded bg-rose-600 text-white hover:bg-rose-700"
           >
-            Test Client Abort → Server
+            Abort Client Abort → Server
           </button>
           <button
             id="channel-test-early-close"

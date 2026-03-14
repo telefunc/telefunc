@@ -53,10 +53,15 @@ type CtrlAbort = { t: 'abort'; ix: number; abortValue: string }
 /** Server → client: channel closed due to an unhandled server error (no details sent, analogous to BUG in streaming). */
 type CtrlError = { t: 'error'; ix: number }
 /** Client → server on every (re)connect: all open channels with client-owned indices. */
-type CtrlReconcile = { t: 'reconcile'; open: { id: string; ix: number; lastSeq: number; defer?: boolean }[] }
+type CtrlReconcile = {
+  t: 'reconcile'
+  sessionId?: string
+  open: { id: string; ix: number; lastSeq: number; defer?: boolean }[]
+}
 /** Server → client after reconcile: all channels the server actually attached, with lastSeq the server received per channel. */
 type CtrlReconciled = {
   t: 'reconciled'
+  sessionId: string
   open: { id: string; ix: number; lastSeq: number }[]
   reconnectTimeout: number
   idleTimeout: number

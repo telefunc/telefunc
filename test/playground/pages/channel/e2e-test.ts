@@ -29,6 +29,7 @@ type ChannelState = {
   multiCh1IsMonotonic: boolean | null
   multiCh2IsMonotonic: boolean | null
   clientAbortServerChannelId: string | null
+  clientAbortServerOnOpenFired: boolean | null
   earlyCloseChannelId: string | null
   ackListenerAbortErr: { isAbort: boolean; abortValue: unknown } | null
   serverPendingAckAbortChannelId: string | null
@@ -341,9 +342,9 @@ function testChannel(isDev: boolean) {
     })
   }
 
-  // ── Client abort(value) → server onClose ────────────────────────────
+  // ── Client abort(value) → server onClose (clean close) ─────────────
 
-  test('channel: client abort(value) — server onClose fires with err=undefined (abort is server→client only)', async () => {
+  test('channel: client abort(value) — server onClose fires cleanly when client aborts while still connected', async () => {
     await page.click('#channel-test-client-abort-server')
 
     let channelId: string | null = null
@@ -356,10 +357,49 @@ function testChannel(isDev: boolean) {
     await autoRetry(async () => {
       const ss = await getCleanupState()
       expect(ss[`clientAbort_${channelId}_serverOnClose`]).toBe('true')
-      // abort values travel server→client only; from the server’s perspective this is a clean close.
       expect(ss[`clientAbort_${channelId}_serverOnCloseErr`]).toBe('none')
     })
   })
+
+  if (!isDev) {
+    test('channel: reconnect omission — server onClose fires with ChannelNetworkError when client drops channel while offline', async () => {
+      await page.click('#channel-connect')
+      await autoRetry(async () => {
+        const state = await getResult<ChannelState>('#channel-state')
+        expect(state.connected).toBe(true)
+      })
+
+      await page.click('#channel-test-client-abort-server-open')
+
+      let channelId: string | null = null
+      await autoRetry(async () => {
+        const state = await getResult<ChannelState>('#channel-state')
+        expect(state.clientAbortServerChannelId).not.toBe(null)
+        expect(state.clientAbortServerOnOpenFired).toBe(true)
+        channelId = state.clientAbortServerChannelId
+      })
+
+      await page.context().setOffline(true)
+      await page.waitForTimeout(3000)
+
+      await page.click('#channel-test-client-abort-server')
+
+      const wsReconnectPromise = page.waitForEvent('websocket', {
+        predicate: (ws) => ws.url().includes('/_telefunc'),
+        timeout: 15000,
+      })
+      await page.context().setOffline(false)
+      await wsReconnectPromise
+
+      await autoRetry(async () => {
+        const ss = await getCleanupState()
+        expect(ss[`clientAbort_${channelId}_serverOnClose`]).toBe('true')
+        expect(ss[`clientAbort_${channelId}_serverOnCloseErr`]).toBe(
+          'Channel not acknowledged by client after reconnect',
+        )
+      })
+    })
+  }
 
   // ── Multiple concurrent channels (ix multiplexing) ────────────────────
 

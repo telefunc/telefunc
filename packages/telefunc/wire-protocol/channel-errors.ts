@@ -1,4 +1,4 @@
-export { ChannelClosedError, ChannelNetworkError }
+export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError }
 
 /** Thrown synchronously by `send()` when the channel is already closed.
  *  Also used to reject pending ack promises when the channel shuts down. */
@@ -16,5 +16,13 @@ class ChannelNetworkError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'ChannelNetworkError'
+  }
+}
+
+/** Used when a buffered channel send is dropped in order to keep memory usage hard-capped. */
+class ChannelOverflowError extends Error {
+  constructor(message = 'Channel send buffer overflow') {
+    super(message)
+    this.name = 'ChannelOverflowError'
   }
 }

@@ -1,5 +1,5 @@
 export { createChannel, getChannelRegistry, onChannelCreated, setChannelDefaults, ServerChannel, SERVER_CHANNEL_BRAND }
-export { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
+export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../channel-errors.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
 
@@ -38,7 +38,7 @@ function getChannelRegistry(): Map<string, ServerChannel<unknown, unknown>> {
 
 /**
  * Register a one-shot callback that fires when a `ServerChannel` with the given `id` is created.
- * The callback fires synchronously inside the constructor, before any peer attachment.
+ * The callback fires synchronously inside the constructor, before any client connection.
  */
 function onChannelCreated(id: string, cb: () => void): void {
   globalObject.creationHooks.set(id, cb)
@@ -119,14 +119,8 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _pauseCallbacks: Array<() => void> = []
   private _resumeCallbacks: Array<() => void> = []
-  /** Drop-oldest ring buffer for messages sent before a peer connects. */
-  private _prePeerBuffer: ServerChannelBuffer
-  /** Buffered ack sends when peer not yet connected: { serialized, resolve, reject }[]. */
-  private _ackSendBuffer: Array<{
-    data: string
-    resolve: (v: ChannelAck<ServerToClient>) => void
-    reject: (err: Error) => void
-  }> = []
+  /** Hard-capped buffer for outgoing messages while no client is connected. */
+  private _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
   /** Pending ack promises keyed by the seq of the outgoing frame. */
   private _pendingAcks = new Map<
     number,
@@ -138,7 +132,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _didFireClose = false
   private _didFireOpen = false
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null
-  /** True when peer is gone but we're waiting for reconnection. */
+  /** True when the client is gone but we're waiting for reconnection. */
   private _disconnected = false
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
@@ -146,13 +140,15 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   constructor(ackMode = false, id?: string, maxSendBufferBytes?: number) {
     this.ackMode = ackMode
     this.id = id ?? crypto.randomUUID()
-    this._prePeerBuffer = new ServerChannelBuffer(maxSendBufferBytes ?? globalObject.channelSendBufferBytes)
+    this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
+      maxSendBufferBytes ?? globalObject.channelSendBufferBytes,
+    )
     // Safety TTL: if this channel is never serialized into a response, shut it down
     // to prevent memory leaks. The registry entry is added in _registerChannel().
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
         this._ttlTimer = null
-        this._shutdown(new ChannelNetworkError('Channel timed out: no peer connected within TTL'))
+        this._shutdown(new ChannelNetworkError('Channel timed out: no client connected within TTL'))
       }, DEFAULT_TTL_MS),
     )
   }
@@ -187,9 +183,8 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         this._pendingAcks.set(seq, { resolve, reject }),
       )
     } else {
-      // Ack-buffered sends don't count against the byte cap (they await a response and are rare).
       return new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-        this._ackSendBuffer.push({ data: serialized, resolve, reject })
+        this._prePeerBuffer.pushTextAck(serialized, resolve, reject)
       })
     }
   }
@@ -223,7 +218,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._closeCallbacks.push(callback)
   }
 
-  /** Register a callback that fires when a peer connects for the first time. Fires exactly once. */
+  /** Register a callback that fires when the client connects for the first time. Fires exactly once. */
   onOpen(callback: () => void): void {
     if (this._didFireOpen) {
       callback()
@@ -287,7 +282,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       setTimeout(() => {
         this._ttlTimer = null
         this._shutdown(
-          new ChannelNetworkError('Channel timed out: no peer connected within TTL after response was sent'),
+          new ChannelNetworkError('Channel timed out: no client connected within TTL after response was sent'),
         )
       }, globalObject.channelConnectTtlMs),
     )
@@ -302,13 +297,11 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._prePeerBuffer.flush(
       (msg) => peer.sendText(msg),
       (msg) => peer.sendBinary(msg),
+      (data, { resolve, reject }) => {
+        const seq = peer.sendTextAckReq(data)
+        this._pendingAcks.set(seq, { resolve, reject })
+      },
     )
-    // Flush buffered ack sends
-    for (const { data, resolve, reject } of this._ackSendBuffer) {
-      const seq = peer.sendTextAckReq(data)
-      this._pendingAcks.set(seq, { resolve, reject })
-    }
-    this._ackSendBuffer = []
     this._fireOpen()
     if (wasDisconnected) {
       for (const cb of this._resumeCallbacks) cb()
@@ -372,12 +365,19 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._reconnectTimer = unrefTimer(
       setTimeout(() => {
         this._reconnectTimer = null
-        this._shutdown(new ChannelNetworkError('Channel timed out: peer did not reconnect within grace period'))
+        this._shutdown(new ChannelNetworkError('Channel timed out: client did not reconnect within grace period'))
       }, reconnectTimeout),
     )
   }
 
-  /** @internal — Permanent close from peer side. */
+  /** @internal — Reconnect failed because the client no longer acknowledged this channel. */
+  _onPeerRecoveryFailure(): void {
+    if (this._isClosed) return
+    this._peer = null
+    this._shutdown(new ChannelNetworkError('Channel not acknowledged by client after reconnect'))
+  }
+
+  /** @internal — Permanent close from the client side. */
   _onPeerClose(): void {
     if (this._isClosed) return
     this._peer = null
@@ -408,8 +408,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     const ackErr = new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
-    for (const { reject } of this._ackSendBuffer) reject(ackErr)
-    this._ackSendBuffer = []
+    this._prePeerBuffer.clear(ackErr)
   }
 
   private _fireClose(err?: Error): void {

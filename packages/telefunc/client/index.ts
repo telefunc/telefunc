@@ -8,6 +8,6 @@ export { close } from './close.js'
 export { Abort } from '../shared/Abort.js'
 export { withContext } from './withContext.js'
 export { ConnectionError } from './ConnectionError.js'
-export { ChannelClosedError, ChannelNetworkError } from '../wire-protocol/channel-errors.js'
+export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../wire-protocol/channel-errors.js'
 
 export { remoteTelefunctionCall as __remoteTelefunctionCall } from './remoteTelefunctionCall.js'

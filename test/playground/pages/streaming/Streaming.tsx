@@ -20,7 +20,7 @@ import {
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
   onAbortOneOfManyStreamingValues,
-  onChannelAbortDoesNotAbortStreamingValues,
+  onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
 } from './Streaming.telefunc'
 import { Abort as TelefuncAbort, abort } from 'telefunc/client'
@@ -526,10 +526,10 @@ function Streaming() {
       </button>
 
       <button
-        id="test-channel-abort-does-not-abort-streaming-values"
+        id="test-channel-abort-aborts-sibling-streaming-values"
         onClick={async () => {
           setResult('')
-          const res = await onChannelAbortDoesNotAbortStreamingValues()
+          const res = await onChannelAbortAbortsSiblingStreamingValues()
           const firstValues: string[] = []
           const secondValues: string[] = []
           const streamChunks: string[] = []
@@ -603,7 +603,7 @@ function Streaming() {
           )
         }}
       >
-        Channel abort does not abort streaming values
+        Channel abort aborts sibling streaming values
       </button>
 
       <h2>Upload progress via streaming</h2>

@@ -17,7 +17,7 @@ export {
   onGeneratorAbortWithValue,
   onGeneratorBugMidStream,
   onAbortOneOfManyStreamingValues,
-  onChannelAbortDoesNotAbortStreamingValues,
+  onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
 }
 
@@ -254,7 +254,7 @@ const onAbortOneOfManyStreamingValues = async () => {
   return { aborting: aborting(), other: other(), stream, promise }
 }
 
-const onChannelAbortDoesNotAbortStreamingValues = async () => {
+const onChannelAbortAbortsSiblingStreamingValues = async () => {
   const channel = createChannel<(msg: string) => void, never>()
   channel.listen(() => {
     throw Abort({ reason: 'channel-listener-abort', code: 7 })

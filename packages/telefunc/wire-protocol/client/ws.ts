@@ -81,6 +81,7 @@ class WsConnection {
   private pendingAcks = new Map<string, { resolve: (result: unknown) => void; reject: (err: Error) => void }>()
 
   private wsUrl: string
+  private sessionId: string | null = null
   private ws: WebSocket | null = null
   private connected = false
   private nextIndex = 0
@@ -290,7 +291,7 @@ class WsConnection {
     }
     const ws = this.ws
     assert(ws)
-    ws.send(encodeCtrl({ t: 'reconcile', open }))
+    ws.send(encodeCtrl({ t: 'reconcile', open, ...(this.sessionId && { sessionId: this.sessionId }) }))
   }
 
   /** Track seq for a channel. Returns false if this is a duplicate (already seen). */
@@ -374,6 +375,7 @@ class WsConnection {
 
       case 'reconciled': {
         this.closeAbandonedWs()
+        this.sessionId = ctrl.sessionId
         if (ctrl.reconnectTimeout) this.reconnectTimeoutMs = ctrl.reconnectTimeout
         if (ctrl.idleTimeout) this.idleTimeoutMs = ctrl.idleTimeout
         if (ctrl.pingInterval) {

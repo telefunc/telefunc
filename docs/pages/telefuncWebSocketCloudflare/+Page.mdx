@@ -72,6 +72,16 @@ const ws = telefuncWebSocket({ shards: 4 })
 
 Each browser session is pinned to one shard (`stickyShards: true` by default), so a user's open channels and regular telefunction calls stay on the same Durable Object instance.
 
+Keep `stickyShards: true` unless you have a specific reason to spread a single browser session across multiple Durable Objects.
+
+## Custom binding name
+
+The default binding name is `TelefuncDurableObject`. To use a different name:
+
+```ts
+const ws = telefuncWebSocket({ bindingName: 'MyDurableObject' })
+```
+
 
 ## Location hint
 
@@ -91,6 +101,8 @@ This is best-effort and only applies at creation time. See [Cloudflare's data-lo
 > Channels are plain in-memory JavaScript: closures, local variables, callbacks. If the Durable Object hibernates, that heap state is gone. Telefunc therefore keeps the Durable Object alive for the lifetime of each open channel.
 
 Once all channels are closed and no clients are connected, the Durable Object can hibernate again. By default this happens after the reconnect and idle windows expire.
+
+Shorter reconnect and idle windows let the Durable Object hibernate sooner, but reduce tolerance for temporary disconnects.
 
 You can shorten those windows:
 

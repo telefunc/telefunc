@@ -52,8 +52,6 @@ Each type is a function signature:
 - Its argument is the message type.
 - Its return type is the acknowledgement type.
 
-The client channel is inferred automatically with both directions flipped.
-
 ```ts
 // Room.telefunc.ts
 // Environment: server
@@ -135,11 +133,12 @@ You can also opt in per-send without `{ ack: true }` on the channel:
 type ClientMsg = { type: 'refund' }
 type ServerMsg = { type: 'status'; text: string }
 
-type ClientToServer = (data: ClientMsg) => { accepted: true }
-type ServerToClient = (data: ServerMsg) => void
+type ClientToServer = (data: ClientMsg) => void
+type ServerToClient = (data: ServerMsg) => { delivered: true }
 
 const channel = createChannel<ClientToServer, ServerToClient>()
-await channel.send(data, { ack: true })
+const ack = await channel.send({ type: 'status', text: 'Refund approved' }, { ack: true })
+ack.delivered // true
 ```
 
 And opt out for a single send on an ack-default channel:
@@ -150,15 +149,6 @@ channel.send(data, { ack: false }) // void, no ack
 
 Acknowledgement types come from the function return types.
 
-> See <Link href="/real-time#acknowledgements" /> for full examples.
-
-
-## Closing
-
-- `channel.close()` cleanly shuts down the channel.
-- `onClose()` runs when either side closes or when the connection is lost.
-
-> See <Link href="/real-time" /> for examples.
 
 ## See also
 

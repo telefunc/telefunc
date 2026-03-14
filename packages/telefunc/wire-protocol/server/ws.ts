@@ -20,6 +20,12 @@ import {
   WS_CHANNEL_SEND_BUFFER,
 } from '../constants.js'
 
+declare module 'crossws' {
+  interface PeerContext {
+    telefuncSessionId?: string
+  }
+}
+
 type TelefuncWebSocketOptions = {
   /**
    * How long (in milliseconds) to keep the connection alive after a client
@@ -81,12 +87,17 @@ type TelefuncWebSocketOptions = {
 
 type ChannelEntry = { channel: ServerChannel; lastClientSeq: number; replay: ReplayBuffer }
 
-type PeerState = {
+type SessionState = {
   ixMap: Map<number, ChannelEntry>
+}
+
+type PeerState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   terminatePermanently: boolean | null
   reconciling: boolean
 }
+
+class ProtocolViolationError extends Error {}
 
 function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
   const reconnectTimeout = opts?.reconnectTimeout ?? WS_RECONNECT_TIMEOUT
@@ -106,16 +117,55 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
   // Propagate channel-level defaults so createChannel() picks them up automatically.
   setChannelDefaults({ connectTtlMs: channelConnectTtl, sendBufferBytes: channelSendBuffer })
 
+  const sessionStates = new Map<string, SessionState>()
   const peerStates = new Map<string, PeerState>()
   const wsChannels = new Map<string, ChannelEntry>()
 
-  function getOrCreatePeerState(peer: Peer): PeerState {
-    let s = peerStates.get(peer.id)
-    if (!s) {
-      s = { ixMap: new Map(), pingTimer: null, terminatePermanently: null, reconciling: false }
-      peerStates.set(peer.id, s)
+  function getSessionId(peer: Peer): string | undefined {
+    return peer.context.telefuncSessionId
+  }
+
+  function setSessionId(peer: Peer, sessionId: string): void {
+    peer.context.telefuncSessionId = sessionId
+  }
+
+  function getSessionState(peer: Peer): SessionState | undefined {
+    const sessionId = getSessionId(peer)
+    return sessionId ? sessionStates.get(sessionId) : undefined
+  }
+
+  function getSessionStateOrThrow(peer: Peer): SessionState {
+    const sessionState = getSessionState(peer)
+    if (!sessionState) {
+      throw new ProtocolViolationError()
     }
-    return s
+    return sessionState
+  }
+
+  function getSessionStateForReconcile(prevSessionId: string | undefined): SessionState {
+    if (!prevSessionId) return { ixMap: new Map<number, ChannelEntry>() }
+    const sessionState = sessionStates.get(prevSessionId)
+    if (!sessionState) {
+      throw new ProtocolViolationError()
+    }
+    return sessionState
+  }
+
+  function rotateSessionId(peer: Peer, sessionState: SessionState, prevSessionId?: string): string {
+    const sessionId = crypto.randomUUID()
+    if (prevSessionId) sessionStates.delete(prevSessionId)
+    sessionStates.set(sessionId, sessionState)
+    setSessionId(peer, sessionId)
+    return sessionId
+  }
+
+  function getOrCreatePeerState(peer: Peer): PeerState {
+    let peerState = peerStates.get(peer.id)
+    if (!peerState) {
+      peerState = { pingTimer: null, terminatePermanently: null, reconciling: false }
+      peerStates.set(peer.id, peerState)
+    }
+    return peerState
   }
 
   function resetPingTimer(peer: Peer): void {
@@ -142,6 +192,88 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
 
   async function handleCtrl(ctrl: CtrlMessage, peer: Peer): Promise<void> {
     const state = getOrCreatePeerState(peer)
+    if (ctrl.t === 'reconcile') {
+      const prevSessionId = ctrl.sessionId
+      const sessionState = getSessionStateForReconcile(prevSessionId)
+      state.reconciling = true
+      resetPingTimer(peer)
+      const registry = getChannelRegistry()
+      const reconciledIxs = new Set<number>()
+      const attached: { id: string; ix: number; lastSeq: number }[] = []
+
+      // Snapshot old ixMap for orphan detection, then rebuild
+      const prevIxMap = new Map(sessionState.ixMap)
+      sessionState.ixMap.clear()
+
+      // If the reconcile contains deferred channels (client has in-flight POST), wait for
+      // each missing ServerChannel to be created before attaching.
+      await Promise.all(
+        ctrl.open
+          .filter(({ id, defer }) => defer && (!registry.get(id) || registry.get(id)!.isClosed))
+          .map(
+            ({ id }) =>
+              new Promise<void>((resolve) => {
+                onChannelCreated(id, resolve)
+                setTimeout(resolve, channelConnectTtl)
+              }),
+          ),
+      )
+
+      // Replay missed frames and attach peers for alive channels
+      for (const { id, ix, lastSeq } of ctrl.open) {
+        reconciledIxs.add(ix)
+        const ch = registry.get(id)
+        if (!ch || ch.isClosed) continue
+
+        // Get existing entry (with replay buffer) or create new
+        const existing = wsChannels.get(id)
+        const replay = existing?.replay ?? new ReplayBuffer(serverReplayBuffer, replayMaxAge)
+        const lastClientSeq = existing?.lastClientSeq ?? 0
+
+        // Replay missed server→client frames
+        const missed = replay.getAfter(lastSeq)
+        for (const frame of missed) peer.send(frame)
+
+        const entry: ChannelEntry = { channel: ch, lastClientSeq, replay }
+        sessionState.ixMap.set(ix, entry)
+
+        wsChannels.set(id, entry)
+        ch.onClose(() => {
+          wsChannels.delete(id)
+          replay.dispose()
+        })
+
+        ch.attachPeer(new IndexedPeer(peer, ix, replay))
+        attached.push({ id, ix, lastSeq: lastClientSeq })
+      }
+
+      // Channels in previous ixMap that client didn't mention → client no longer acknowledges them
+      for (const [ix, entry] of prevIxMap) {
+        if (reconciledIxs.has(ix)) continue
+        if (!entry.channel.isClosed) {
+          entry.channel._onPeerRecoveryFailure()
+        }
+      }
+
+      // Respond with what we attached — client diffs to find its own orphans
+      const sessionId = rotateSessionId(peer, sessionState, prevSessionId)
+      state.reconciling = false
+      resetPingTimer(peer)
+      peer.send(
+        encodeCtrl({
+          t: 'reconciled',
+          sessionId,
+          open: attached,
+          reconnectTimeout,
+          idleTimeout,
+          pingInterval,
+          clientReplayBuffer,
+        }),
+      )
+      return
+    }
+
+    const sessionState = getSessionStateOrThrow(peer)
     switch (ctrl.t) {
       // ── Heartbeat ──
       case 'ping': {
@@ -152,106 +284,21 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
 
       // ── Channel lifecycle ──
       case 'close': {
-        const entry = state.ixMap.get(ctrl.ix)
+        const entry = sessionState.ixMap.get(ctrl.ix)
         if (!entry) break
-        state.ixMap.delete(ctrl.ix)
+        sessionState.ixMap.delete(ctrl.ix)
         entry.channel._onPeerClose()
-        break
-      }
-
-      // ── Reconciliation ──
-      //
-      // 1. Replay: send any frames the client missed (seq > lastSeq).
-      // 2. For each channel the client mentions:
-      //    - Alive in registry → attach at client's ix, include in response
-      //    - Dead + defer → wait up to 5s for it to be created (in-flight POST)
-      //    - Dead + !ctrl.defer → omit from response (client diffs to discover)
-      // 3. For channels in ixMap NOT mentioned by client → _onPeerClose()
-      // 4. Respond with reconciled { open } = all channels we actually attached
-      // 5. Client diffs its map against our response → closes its orphans
-      case 'reconcile': {
-        state.reconciling = true
-        resetPingTimer(peer)
-        const registry = getChannelRegistry()
-        const reconciledIxs = new Set<number>()
-        const attached: { id: string; ix: number; lastSeq: number }[] = []
-
-        // Snapshot old ixMap for orphan detection, then rebuild
-        const prevIxMap = new Map(state.ixMap)
-        state.ixMap.clear()
-
-        // If the reconcile contains deferred channels (client has in-flight POST), wait for
-        // each missing ServerChannel to be created before attaching.
-        await Promise.all(
-          ctrl.open
-            .filter(({ id, defer }) => defer && (!registry.get(id) || registry.get(id)!.isClosed))
-            .map(
-              ({ id }) =>
-                new Promise<void>((resolve) => {
-                  onChannelCreated(id, resolve)
-                  setTimeout(resolve, channelConnectTtl)
-                }),
-            ),
-        )
-
-        // Replay missed frames and attach peers for alive channels
-        for (const { id, ix, lastSeq } of ctrl.open) {
-          reconciledIxs.add(ix)
-          const ch = registry.get(id)
-          if (!ch || ch.isClosed) continue
-
-          // Get existing entry (with replay buffer) or create new
-          const existing = wsChannels.get(id)
-          const replay = existing?.replay ?? new ReplayBuffer(serverReplayBuffer, replayMaxAge)
-          const lastClientSeq = existing?.lastClientSeq ?? 0
-
-          // Replay missed server→client frames
-          const missed = replay.getAfter(lastSeq)
-          for (const frame of missed) peer.send(frame)
-
-          const entry: ChannelEntry = { channel: ch, lastClientSeq, replay }
-          state.ixMap.set(ix, entry)
-
-          wsChannels.set(id, entry)
-          ch.onClose(() => {
-            wsChannels.delete(id)
-            replay.dispose()
-          })
-
-          ch.attachPeer(new IndexedPeer(peer, ix, replay))
-          attached.push({ id, ix, lastSeq: lastClientSeq })
-        }
-
-        // Channels in previous ixMap that client didn't mention → client closed them
-        for (const [ix, entry] of prevIxMap) {
-          if (reconciledIxs.has(ix)) continue
-          if (!entry.channel.isClosed) entry.channel._onPeerClose()
-        }
-
-        // Respond with what we attached — client diffs to find its own orphans
-        state.reconciling = false
-        resetPingTimer(peer)
-        peer.send(
-          encodeCtrl({
-            t: 'reconciled',
-            open: attached,
-            reconnectTimeout,
-            idleTimeout,
-            pingInterval,
-            clientReplayBuffer,
-          }),
-        )
         break
       }
 
       // ── Backpressure ──
       case 'pause': {
-        const entry = state.ixMap.get(ctrl.ix)
+        const entry = sessionState.ixMap.get(ctrl.ix)
         if (entry) entry.channel._onPeerPause()
         break
       }
       case 'resume': {
-        const entry = state.ixMap.get(ctrl.ix)
+        const entry = sessionState.ixMap.get(ctrl.ix)
         if (entry) entry.channel._onPeerResume()
         break
       }
@@ -268,13 +315,13 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
       const state = getOrCreatePeerState(peer)
       try {
         const frame = decode(message.uint8Array())
-
         switch (frame.tag) {
           case TAG.CTRL:
             await handleCtrl(frame.ctrl, peer)
             break
           case TAG.TEXT: {
-            const entry = state.ixMap.get(frame.index)
+            const sessionState = getSessionStateOrThrow(peer)
+            const entry = sessionState.ixMap.get(frame.index)
             if (!entry) break
             if (frame.seq && frame.seq <= entry.lastClientSeq) break
             if (frame.seq) entry.lastClientSeq = frame.seq
@@ -282,7 +329,8 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
             break
           }
           case TAG.TEXT_ACK_REQ: {
-            const entry = state.ixMap.get(frame.index)
+            const sessionState = getSessionStateOrThrow(peer)
+            const entry = sessionState.ixMap.get(frame.index)
             if (!entry) break
             if (frame.seq && frame.seq <= entry.lastClientSeq) break
             if (frame.seq) entry.lastClientSeq = frame.seq
@@ -290,7 +338,8 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
             break
           }
           case TAG.BINARY: {
-            const entry = state.ixMap.get(frame.index)
+            const sessionState = getSessionStateOrThrow(peer)
+            const entry = sessionState.ixMap.get(frame.index)
             if (!entry) break
             if (frame.seq && frame.seq <= entry.lastClientSeq) break
             if (frame.seq) entry.lastClientSeq = frame.seq
@@ -298,7 +347,8 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
             break
           }
           case TAG.ACK_RES: {
-            const entry = state.ixMap.get(frame.index)
+            const sessionState = getSessionStateOrThrow(peer)
+            const entry = sessionState.ixMap.get(frame.index)
             if (!entry) break
             entry.channel._onPeerAckRes(frame.ackedSeq, frame.text)
             break
@@ -314,16 +364,27 @@ function getTelefuncChannelHooks(opts?: TelefuncWebSocketOptions) {
     close(peer, details) {
       const state = getOrCreatePeerState(peer)
       clearPingTimer(peer)
+      const sessionId = getSessionId(peer)
+      if (!sessionId) {
+        peerStates.delete(peer.id)
+        return
+      }
+      const sessionState = sessionStates.get(sessionId)
+      if (!sessionState) {
+        peerStates.delete(peer.id)
+        return
+      }
       const isPermanent =
         state.terminatePermanently === true ||
         (state.terminatePermanently === null && (details?.code === 1000 || details?.code === 1001))
       if (isPermanent) {
-        for (const entry of state.ixMap.values()) {
+        for (const entry of sessionState.ixMap.values()) {
           if (!entry.channel.isClosed) entry.channel._onPeerClose()
         }
-        state.ixMap.clear()
+        sessionState.ixMap.clear()
+        sessionStates.delete(sessionId)
       } else {
-        for (const entry of state.ixMap.values()) {
+        for (const entry of sessionState.ixMap.values()) {
           entry.channel._onPeerDisconnect(reconnectTimeout)
         }
       }

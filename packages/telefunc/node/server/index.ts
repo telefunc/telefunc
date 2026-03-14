@@ -7,7 +7,7 @@ export { Abort } from './Abort.js'
 export { shield } from './shield.js'
 export { onBug } from './runTelefunc/onBug.js'
 export { createChannel } from '../../wire-protocol/server/channel.js'
-export { ChannelClosedError, ChannelNetworkError } from '../../wire-protocol/channel-errors.js'
+export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'
 export type { Channel } from '../../wire-protocol/channel.js'
 
 // In order to allow users to override `Telefunc.Context`, we need to export `Telefunc` (even if the user never imports `Telefunc`)

@@ -18,8 +18,8 @@ type FrameChannel = Pick<ServerChannel, 'onOpen' | '_onPause' | '_onResume' | 'o
  *  Backpressure: honors `onPause` / `onResume` callbacks fired by the transport
  *  layer (works for both direct WS and shared/multiplexed WS).
  *
- *  The pump waits for the peer to connect before starting.
- *  If the channel closes before the peer connects, the pump exits cleanly. */
+ *  The pump waits for the client to connect before starting.
+ *  If the channel closes before the client connects, the pump exits cleanly. */
 function buildChannelResponseBody(
   streamingValues: StreamingValueServer[],
   telefuncId: TelefuncIdentifier,

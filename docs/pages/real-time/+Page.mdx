@@ -8,7 +8,7 @@ In production, install <Link text={<code>telefuncWebSocket()</code>} href="/tele
 
 - Use function passing for short-lived callback-style interactions such as progress updates.
 - Use <Link text={<code>createChannel()</code>} href="/createChannel" /> when both sides keep sending messages over time.
-- Use `config.transport = 'ws'` only when you want streamed values over WebSocket instead of HTTP.
+- Use <Link href="/transport">WebSocket transport</Link> only when you want <Link href="/stream">streamed values</Link> over WebSocket instead of HTTP.
 
 ## Function passing
 
@@ -16,8 +16,6 @@ Telefunc can pass functions between client and server.
 
 - Pass a function argument from the client and the server can call it.
 - Return a function from a telefunction and call it later from the client.
-
-This is useful for progress callbacks and other small interactive flows where a full channel would be overkill.
 
 ## File upload progress
 
@@ -132,56 +130,24 @@ Both sides can `send()`, `listen()`, and `close()` the channel.
 
 ### Acknowledgements
 
-Channels can also confirm that a message was received and processed.
+Use acknowledgements when the sender needs confirmation that the other side received and processed a message.
 
-For example, a support chat can acknowledge that a refund request was handled:
+You can opt in per send with `{ ack: true }`, or make the whole channel ack-default with `createChannel({ ack: true })`.
 
-```ts
-// Chat.telefunc.ts
-// Environment: server
+See <Link href="/createChannel" /> for concrete examples and typing details.
 
-import { createChannel } from 'telefunc'
+## Reconnection
 
-type ClientToServer = (message: string) => string
-type ServerToClient = (message: string) => void
+If the connection briefly drops, Telefunc reconnects automatically and attempts to resume existing channels.
 
-export async function onSupportChat() {
-  const channel = createChannel<ClientToServer, ServerToClient>()
-
-  channel.listen((message) => {
-    if (message === 'refund') {
-      return 'Ticket #482 created'
-    }
-    return 'How can I help?'
-  })
-
-  return { channel: channel.client }
-}
-```
-
-```ts
-// Chat.tsx
-// Environment: client
-
-const { channel } = await onSupportChat()
-
-const reply = await channel.send('refund', { ack: true })
-console.log(reply) // 'Ticket #482 created'
-```
-
-If every message should expect a reply, make acknowledgements the default for the whole channel:
-
-```ts
-const channel = createChannel<ClientToServer, ServerToClient>({ ack: true })
-const reply = await channel.send('refund')
-```
-
-See <Link href="/createChannel" /> for typing details.
+`onOpen()` fires only for the initial open, and `onClose()` fires only when the channel is permanently closed.
 
 
 ## Setup
 
 For production setup details, see <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
+
+All channels — and <Link href="/stream">streamed values</Link> when using <Link href="/transport">WebSocket transport</Link> — share a single multiplexed WebSocket connection per server URL.
 
 ## See also
 

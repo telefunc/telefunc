@@ -37,7 +37,7 @@ class IndexedPeer {
   }
 
   /** Send an acknowledgement response for a message the client sent.
-   *  ACK_RES frames are NOT stored in the replay buffer \u2014 they are transient. */
+   *  ACK_RES frames use the normal sequenced send path and are replayable on reconnect. */
   sendAckRes(ackedSeq: number, result: string): void {
     const seq = this.replay.nextSeq()
     const frame = encode.ackRes(this.index, seq, ackedSeq, result)
