@@ -24,7 +24,7 @@ export async function onChat() {
 
 Return `channel.client` to the client — it serializes into a `ClientChannel` on the other side. Use `channel` directly on the server for `send()`, `listen()`, and other operations.
 
-> Channels require a WebSocket connection. See <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> for setup.
+By default, channels use SSE and work without extra server setup. Use `config.channel.transport = 'ws'` only if you want the WebSocket backend. See <Link href="/transport" /> and <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
 
 
 ## Methods

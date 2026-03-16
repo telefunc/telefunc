@@ -7,6 +7,8 @@ export {
   onChannelClientAbortInstrument,
   onChannelMulti,
   onChannelAckListenerAbort,
+  onChannelAckListenerBug,
+  onChannelClientAckListenerBug,
   onChannelServerPendingAckAbort,
   onChannelAbortThenSend,
   onChannelPendingAckAbort,
@@ -50,6 +52,10 @@ function formatCloseError(err: CloseError): string {
 
 async function onChannelInit() {
   const channel = createChannel<ClientToServer, ServerToClient>({ ack: true })
+  const swallowClosedChannel = (err: any) => {
+    if (channel.isClosed && err?.name === 'ChannelClosedError') return
+    throw err
+  }
 
   channel.onClose(() => {
     clearInterval(intervalId)
@@ -62,10 +68,10 @@ async function onChannelInit() {
   channel.listen((msg) => {
     console.log('[server] received:', msg)
     if (msg.type === 'echo') {
-      channel.send({ type: 'echo', text: msg.text })
+      void channel.send({ type: 'echo', text: msg.text }).catch(swallowClosedChannel)
     }
     if (msg.type === 'ping') {
-      channel.send({ type: 'welcome' })
+      void channel.send({ type: 'welcome' }).catch(swallowClosedChannel)
     }
     // Return ack value to the client
     return `server-ack:${msg.type}`
@@ -74,8 +80,13 @@ async function onChannelInit() {
   let count = 0
   const intervalId = setInterval(async () => {
     const n = ++count
-    const ack = await channel.send({ type: 'tick', count: n })
-    console.log(`[server] tick #${n} acked by client:`, ack)
+    try {
+      const ack = await channel.send({ type: 'tick', count: n })
+      console.log(`[server] tick #${n} acked by client:`, ack)
+    } catch (err: any) {
+      if (channel.isClosed && err?.name === 'ChannelClosedError') return
+      throw err
+    }
   }, 1000)
 
   return {
@@ -182,6 +193,39 @@ async function onChannelAckListenerAbort() {
     throw Abort({ reason: 'listener-abort', code: 7 })
   })
   return { channel: channel.client }
+}
+
+async function onChannelAckListenerBug() {
+  const channel = createChannel<(msg: string) => string, never>()
+  channel.listen((msg) => {
+    if (msg === 'bug') throw new Error('server-listener-bug')
+    return `ack:${msg}`
+  })
+  return { channel: channel.client }
+}
+
+async function onChannelClientAckListenerBug() {
+  const channel = createChannel<never, (msg: string) => string>()
+  const id = channel.id
+  cleanupState[`clientAckBug_${id}_rejected`] = 'false'
+  cleanupState[`clientAckBug_${id}_followupAck`] = 'pending'
+
+  channel.onOpen(async () => {
+    try {
+      await channel.send('bug', { ack: true })
+    } catch {
+      cleanupState[`clientAckBug_${id}_rejected`] = 'true'
+    }
+
+    try {
+      const ack = await channel.send('ok', { ack: true })
+      cleanupState[`clientAckBug_${id}_followupAck`] = String(ack)
+    } catch (err: any) {
+      cleanupState[`clientAckBug_${id}_followupAck`] = err?.message ?? err?.name ?? 'unknown'
+    }
+  })
+
+  return { channel: channel.client, channelId: id }
 }
 
 /**

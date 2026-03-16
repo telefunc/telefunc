@@ -8,8 +8,15 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver } from '../../../wire-protocol/server/request/registry.js'
 import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
+import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
 import type { RequestBodyReader } from '../../../wire-protocol/request-types.js'
-import { TRANSPORT, DEFAULT_TRANSPORT, type Transport } from '../../../wire-protocol/constants.js'
+import {
+  CHANNEL_TRANSPORT,
+  STREAM_TRANSPORT,
+  type ChannelTransport,
+  type StreamTransport,
+} from '../../../wire-protocol/constants.js'
+import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
 
 type ParseResult =
   | {
@@ -17,8 +24,15 @@ type ParseResult =
       telefunctionName: string
       telefunctionKey: string
       telefunctionArgs: unknown[]
-      transport: Transport
+      streamTransport: StreamTransport
+      channelTransport: ChannelTransport
+      isSseRequest: false
       isMalformedRequest: false
+    }
+  | {
+      isMalformedRequest: false
+      isSseRequest: true
+      sseResponse: SseChannelHttpResponse
     }
   | { isMalformedRequest: true }
 
@@ -27,6 +41,12 @@ async function parseHttpRequest(runContext: {
   logMalformedRequests: boolean
   serverConfig: {
     telefuncUrl: string
+    stream: {
+      transport: StreamTransport
+    }
+    channel: {
+      transport: ChannelTransport
+    }
   }
 }): Promise<ParseResult> {
   assertUrl(runContext)
@@ -36,15 +56,24 @@ async function parseHttpRequest(runContext: {
   }
 
   const { request } = runContext
-  const contentType = request.headers.get('content-type') || ''
-  const isBinaryFrame = contentType.includes('application/octet-stream')
-  if (!isBinaryFrame) {
-    const text = await request.text()
-    const reviver = createRequestReviver(noopReader)
-    return parseTelefuncPayload(text, runContext, reviver)
-  } else {
-    assert(request.body)
-    return parseBinaryFrameBody(request.body, runContext)
+  const requestKind = getRequestKind(request, runContext.serverConfig.telefuncUrl)
+  switch (requestKind) {
+    case REQUEST_KIND.MISMATCH:
+      return { isMalformedRequest: true }
+    case REQUEST_KIND.SSE: {
+      const sseResponse = await handleSseChannelRequest(request)
+      if (!sseResponse) return { isMalformedRequest: true }
+      return { isMalformedRequest: false, isSseRequest: true, sseResponse }
+    }
+    case REQUEST_KIND.BINARY:
+      assert(request.body)
+      return parseBinaryFrameBody(request.body, runContext)
+    case REQUEST_KIND.TEXT:
+    case null: {
+      const text = await request.text()
+      const reviver = createRequestReviver(noopReader)
+      return parseTelefuncPayload(text, runContext, reviver)
+    }
   }
 }
 
@@ -59,7 +88,13 @@ const noopReader: RequestBodyReader = {
 /** Parse main payload, validate shape, and build a ParseResult. */
 function parseTelefuncPayload(
   text: string,
-  runContext: { logMalformedRequests: boolean },
+  runContext: {
+    logMalformedRequests: boolean
+    serverConfig?: {
+      stream: { transport: StreamTransport }
+      channel: { transport: ChannelTransport }
+    }
+  },
   reviver?: Reviver,
 ): ParseResult {
   let parsed: unknown
@@ -85,16 +120,32 @@ function parseTelefuncPayload(
   }
 
   const telefunctionKey = getTelefunctionKey(parsed.file, parsed.name)
-  const transport: Transport =
-    hasProp(parsed, 'transport', 'string') && (parsed.transport === TRANSPORT.SSE || parsed.transport === TRANSPORT.WS)
-      ? parsed.transport
-      : DEFAULT_TRANSPORT
+
+  const defaultStreamTransport = runContext.serverConfig?.stream.transport ?? STREAM_TRANSPORT.BINARY_INLINE
+  const defaultChannelTransport = runContext.serverConfig?.channel.transport ?? CHANNEL_TRANSPORT.SSE
+
+  const streamTransport: StreamTransport =
+    hasProp(parsed, 'stream', 'object') &&
+    hasProp(parsed.stream, 'transport', 'string') &&
+    (parsed.stream.transport === STREAM_TRANSPORT.BINARY_INLINE ||
+      parsed.stream.transport === STREAM_TRANSPORT.SSE_INLINE ||
+      parsed.stream.transport === STREAM_TRANSPORT.CHANNEL)
+      ? parsed.stream.transport
+      : defaultStreamTransport
+  const channelTransport: ChannelTransport =
+    hasProp(parsed, 'channel', 'object') &&
+    hasProp(parsed.channel, 'transport', 'string') &&
+    (parsed.channel.transport === CHANNEL_TRANSPORT.SSE || parsed.channel.transport === CHANNEL_TRANSPORT.WS)
+      ? parsed.channel.transport
+      : defaultChannelTransport
   return {
     telefuncFilePath: parsed.file,
     telefunctionName: parsed.name,
     telefunctionKey,
     telefunctionArgs: parsed.args,
-    transport,
+    streamTransport,
+    channelTransport,
+    isSseRequest: false,
     isMalformedRequest: false,
   }
 }

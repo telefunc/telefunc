@@ -4,18 +4,18 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
+import { getChannelTransport } from '../clientConfig.js'
 import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
 import { encodeBinaryRequest } from '../../wire-protocol/client/request/serialize.js'
 
-import type { TelefuncTransport } from '../withContext.js'
-import { DEFAULT_TRANSPORT } from '../../wire-protocol/constants.js'
+import { type ChannelTransport, type StreamTransport } from '../../wire-protocol/constants.js'
 
 type CallContext = {
   telefuncFilePath: string
   telefunctionName: string
   telefunctionArgs: unknown[]
-  telefuncUrl: string
-  transport: TelefuncTransport
+  stream?: { transport?: StreamTransport }
+  channel?: { transport?: ChannelTransport }
 }
 
 function serializeTelefunctionArguments(callContext: CallContext): string | Blob {
@@ -25,12 +25,15 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
     args: callContext.telefunctionArgs,
   }
 
-  // Only include transport when it's not the default
-  if (callContext.transport !== DEFAULT_TRANSPORT) {
-    dataMain.transport = callContext.transport
+  if (callContext.stream?.transport) {
+    dataMain.stream = { transport: callContext.stream.transport }
   }
 
-  const { replacer, files } = createRequestReplacer()
+  if (callContext.channel?.transport) {
+    dataMain.channel = { transport: callContext.channel.transport }
+  }
+
+  const { replacer, files } = createRequestReplacer(getChannelTransport(callContext))
 
   const dataMainSerialized = serialize(dataMain, callContext, replacer)
   if (files.length > 0) return encodeBinaryRequest(dataMainSerialized, files)

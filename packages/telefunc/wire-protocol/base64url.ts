@@ -1,7 +1,7 @@
 export { uint8ArrayToBase64url, base64urlToUint8Array }
 
 /** Encode a Uint8Array to a base64url string (no padding). */
-function uint8ArrayToBase64url(bytes: Uint8Array): string {
+function uint8ArrayToBase64url(bytes: Uint8Array<ArrayBuffer>): string {
   // Build a binary string from the byte array, then use btoa() to get base64.
   // btoa() is available in browsers and Node.js 16+.
   let binary = ''
@@ -12,7 +12,7 @@ function uint8ArrayToBase64url(bytes: Uint8Array): string {
 }
 
 /** Decode a base64url string (no padding) to a Uint8Array. */
-function base64urlToUint8Array(s: string): Uint8Array {
+function base64urlToUint8Array(s: string): Uint8Array<ArrayBuffer> {
   // Restore standard base64: replace url-safe chars and add padding.
   const base64 = s.replace(/-/g, '+').replace(/_/g, '/') + '===='.slice(s.length % 4 || 4)
   const binary = atob(base64)

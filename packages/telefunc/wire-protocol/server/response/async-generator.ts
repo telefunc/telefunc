@@ -5,11 +5,12 @@ import { isAsyncGenerator } from '../../../utils/isAsyncGenerator.js'
 import { textEncoder } from '../../frame.js'
 import { SERIALIZER_PREFIX_GENERATOR } from '../../constants.js'
 import type { ServerStreamingType, AsyncGeneratorContract } from '../../streaming-types.js'
+import type { ServerResponseContext } from './registry.js'
 
-const asyncGeneratorServerType: ServerStreamingType<AsyncGeneratorContract> = {
+const asyncGeneratorServerType: ServerStreamingType<AsyncGeneratorContract, ServerResponseContext> = {
   prefix: SERIALIZER_PREFIX_GENERATOR,
   detect: (value): value is AsyncGenerator<unknown> => isAsyncGenerator(value),
-  getMetadata: () => ({}),
+  getMetadata: (_value, _context) => ({}),
   createProducer: (value) => {
     const chunks = (async function* () {
       try {

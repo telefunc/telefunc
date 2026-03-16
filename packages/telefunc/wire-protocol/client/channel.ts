@@ -3,9 +3,12 @@ export { ClientChannel }
 import type { Channel, ChannelClient, ChannelData, ChannelAck, ChannelListener } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { resolveClientConfig } from '../../client/clientConfig.js'
-import { createAbortError } from '../../shared/Abort.js'
-import { WsConnection } from './ws.js'
+import { getChannelTransport, resolveClientConfig } from '../../client/clientConfig.js'
+import { createAbortError, isAbort } from '../../shared/Abort.js'
+import { assert } from '../../utils/assert.js'
+import { ClientConnection } from './connection.js'
+import { CHANNEL_TRANSPORT, type ChannelTransport } from '../constants.js'
+import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError } from '../channel-errors.js'
 
 /**
@@ -24,14 +27,14 @@ import { ChannelClosedError } from '../channel-errors.js'
  * Implements the shared `Channel` interface (see wire-protocol/channel.ts).
  */
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
-  implements ChannelClient<ClientToServer, ServerToClient>
+  implements ChannelClient<ClientToServer, ServerToClient>, MuxChannel
 {
   readonly id: string
   readonly ackMode: boolean
   readonly defer: boolean
-  private _connection: WsConnection
+  private _connection: MuxConnection
   private _listeners: Array<ChannelListener<ServerToClient>> = []
-  private _binaryListeners: Array<(data: Uint8Array) => void> = []
+  private _binaryListeners: Array<(data: Uint8Array<ArrayBuffer>) => void> = []
   private _openCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<(err?: Error) => void> = []
   private _closeError: Error | undefined
@@ -43,13 +46,33 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this as unknown as Channel<ServerToClient, ClientToServer>
   }
 
-  constructor(channelId: string, ackMode = false, shard?: string, defer = false) {
+  constructor({
+    channelId,
+    ackMode = false,
+    channelTransport,
+    shard,
+    defer = false,
+  }: {
+    channelId: string
+    ackMode?: boolean
+    channelTransport?: ChannelTransport
+    shard?: string
+    defer?: boolean
+  }) {
     this.id = channelId
     this.ackMode = ackMode
     this.defer = defer
     const config = resolveClientConfig()
-    const wsUrl = shard ? appendShardParam(config.telefuncUrl, shard) : config.telefuncUrl
-    this._connection = WsConnection.getOrCreate(wsUrl, this)
+    const url = shard ? appendShardParam(config.telefuncUrl, shard) : config.telefuncUrl
+    const resolvedTransport = channelTransport ?? getChannelTransport(config)
+    assert(
+      resolvedTransport === CHANNEL_TRANSPORT.SSE || resolvedTransport === CHANNEL_TRANSPORT.WS,
+      `Unknown channel transport: ${String(resolvedTransport)}`,
+    )
+    this._connection = ClientConnection.getOrCreate(url, this, {
+      transport: resolvedTransport,
+      fetchImpl: config.fetch ?? globalThis.fetch,
+    })
   }
 
   get isClosed(): boolean {
@@ -79,7 +102,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._listeners.push(callback)
   }
 
-  listenBinary(callback: (data: Uint8Array) => void): void {
+  listenBinary(callback: (data: Uint8Array<ArrayBuffer>) => void): void {
     this._binaryListeners.push(callback)
   }
 
@@ -133,54 +156,53 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._connection.sendResume(this)
   }
 
-  // ── Called by WsConnection ──
+  // ── Called by transport connection ──
 
   /** @internal */
-  _onWsOpen(): void {
+  _onTransportOpen(): void {
     this._fireOpen()
   }
 
   /** @internal */
-  _onWsMessage(data: string): void {
+  _onTransportMessage(data: string): void {
     const parsed = parse(data) as ChannelData<ServerToClient>
     for (const cb of this._listeners) {
       try {
         cb(parsed)
       } catch (err) {
-        this._handleCallbackError(err)
-        return
+        if (this._handleCallbackError(err)) return
       }
     }
   }
 
   /** @internal — Server sent TEXT_ACK_REQ; dispatch and send ACK_RES back. */
-  async _onWsAckReqMessage(data: string, seq: number): Promise<void> {
+  async _onTransportAckReqMessage(data: string, seq: number): Promise<void> {
     const parsed = parse(data) as ChannelData<ServerToClient>
     for (const cb of this._listeners) {
       try {
         const result = await cb(parsed)
         this._connection.sendAckRes(this, seq, stringify(result, { forbidReactElements: false }))
       } catch (err) {
-        this._handleCallbackError(err)
+        if (this._handleCallbackError(err)) return
+        this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', 'error')
         return
       }
     }
   }
 
   /** @internal */
-  _onWsBinaryMessage(data: Uint8Array): void {
+  _onTransportBinaryMessage(data: Uint8Array<ArrayBuffer>): void {
     for (const cb of this._binaryListeners) {
       try {
         cb(data)
       } catch (err) {
-        this._handleCallbackError(err)
-        return
+        if (this._handleCallbackError(err)) return
       }
     }
   }
 
   /** @internal */
-  _onWsClose(err?: Error): void {
+  _onTransportClose(err?: Error): void {
     this._isClosed = true
     this._closeError = err
     this._fireClose(err)
@@ -195,8 +217,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       try {
         cb()
       } catch (err) {
-        this._handleCallbackError(err)
-        return
+        if (this._handleCallbackError(err)) return
       }
     }
     this._openCallbacks.length = 0
@@ -208,20 +229,31 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     for (const cb of this._closeCallbacks) {
       try {
         cb(err)
-      } catch {
-        /* swallow */
+      } catch (callbackErr) {
+        reportLocalChannelCallbackError(callbackErr)
       }
     }
     this._closeCallbacks.length = 0
     this._openCallbacks.length = 0
   }
 
-  private _handleCallbackError(err: unknown): void {
-    if (this._isClosed) return
-    this._isClosed = true
-    this._connection.sendClose(this)
-    this._fireClose(err instanceof Error ? err : new Error(String(err)))
+  private _handleCallbackError(err: unknown): boolean {
+    if (isAbort(err)) {
+      const abortError = err
+      this._abortLocally(abortError.abortValue, abortError.message)
+      return true
+    }
+    reportLocalChannelCallbackError(err)
+    return false
   }
+}
+
+function reportLocalChannelCallbackError(err: unknown): void {
+  console.error('[telefunc:channel-callback-error]', normalizeCallbackError(err))
+}
+
+function normalizeCallbackError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err))
 }
 
 /** Append ?shard=N (or &shard=N) to a URL string. */

@@ -6,10 +6,12 @@ import type { ClientRequestType, BlobRequestContract } from '../../request-types
 const blobClientType: ClientRequestType<BlobRequestContract> = {
   prefix: SERIALIZER_PREFIX_BLOB,
   detect: (value: unknown): value is Blob => value instanceof Blob,
-  getMetadata: (value, index) => ({
-    index,
-    size: value.size,
-    type: value.type,
-  }),
-  getBody: (value) => value,
+  getMetadata: (value, context) => {
+    const index = context.registerFile(value)
+    return {
+      index,
+      size: value.size,
+      type: value.type,
+    }
+  },
 }

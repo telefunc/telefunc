@@ -11,25 +11,28 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { isAbort } from '../../node/server/Abort.js'
-import type { AbortError } from '../../shared/Abort.js'
+import { createAbortError, type AbortError } from '../../shared/Abort.js'
+import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
-import { WS_CHANNEL_SEND_BUFFER, WS_CHANNEL_CONNECT_TTL_MS } from '../constants.js'
+import { type ChannelTransport, CHANNEL_BUFFER_LIMIT_BYTES, CHANNEL_CONNECT_TTL_MS } from '../constants.js'
+import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
+import type { AckResultStatus } from '../shared-ws.js'
 
 const globalObject = getGlobalObject('channel.ts', {
   channelRegistry: new Map<string, ServerChannel<unknown, unknown>>(),
   creationHooks: new Map<string, () => void>(),
-  channelConnectTtlMs: WS_CHANNEL_CONNECT_TTL_MS,
-  channelSendBufferBytes: WS_CHANNEL_SEND_BUFFER,
+  connectTtlMs: CHANNEL_CONNECT_TTL_MS,
+  bufferLimit: CHANNEL_BUFFER_LIMIT_BYTES,
 })
 
 /**
- * @internal — Called by `getTelefuncChannelHooks` to propagate WS-level defaults to channels.
+ * @internal — Called by the shared channel transport server to propagate global defaults.
  * Must be called before any `createChannel()` call to take effect on those channels.
  */
-function setChannelDefaults(opts: { connectTtlMs: number; sendBufferBytes: number }): void {
-  globalObject.channelConnectTtlMs = opts.connectTtlMs
-  globalObject.channelSendBufferBytes = opts.sendBufferBytes
+function setChannelDefaults(opts: { connectTtl: number; bufferLimit: number }): void {
+  globalObject.connectTtlMs = opts.connectTtl
+  globalObject.bufferLimit = opts.bufferLimit
 }
 
 function getChannelRegistry(): Map<string, ServerChannel<unknown, unknown>> {
@@ -66,26 +69,21 @@ function onChannelCreated(id: string, cb: () => void): void {
  * }
  * ```
  */
-type CreateChannelOpts = {
-  /**
-   * Override the global send-buffer byte cap for this specific channel.
-   * Defaults to the value set via `getTelefuncChannelHooks` options (or 256 KB).
-   */
-  sendBufferBytes?: number
-}
 type UntypedChannelHandler = (data: unknown) => unknown
 
-function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(
-  opts?: CreateChannelOpts,
-): Channel<ServerToClient, ClientToServer>
-function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(
-  opts: CreateChannelOpts & { ack: true },
-): Channel<ServerToClient, ClientToServer, true>
-function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(
-  opts?: CreateChannelOpts,
-): Channel<ServerToClient, ClientToServer, false>
-function createChannel(opts?: CreateChannelOpts & { ack?: true }): any {
-  return new ServerChannel(opts?.ack === true, undefined, opts?.sendBufferBytes)
+function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts?: {
+  ack?: false
+}): Channel<ServerToClient, ClientToServer>
+function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts: {
+  ack: true
+}): Channel<ServerToClient, ClientToServer, true>
+function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts?: {
+  ack?: boolean
+}): Channel<ServerToClient, ClientToServer, false>
+function createChannel(opts?: { ack?: boolean }): any {
+  return new ServerChannel({
+    ackMode: opts?.ack === true,
+  })
 }
 
 /**
@@ -101,6 +99,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   readonly id: string
   /** Whether ack is on by default. Set via `createChannel({ ack: true })`. */
   readonly ackMode: boolean
+  readonly channelTransport?: ChannelTransport
 
   /** Return this to the client — it serializes to a `ClientChannel` on the other side. */
   get client(): ChannelClient<ClientToServer, ServerToClient> {
@@ -117,8 +116,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _peer: IndexedPeer | null = null
   private _listeners: Array<ChannelListener<ClientToServer>> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
-  private _pauseCallbacks: Array<() => void> = []
-  private _resumeCallbacks: Array<() => void> = []
   /** Hard-capped buffer for outgoing messages while no client is connected. */
   private _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
   /** Pending ack promises keyed by the seq of the outgoing frame. */
@@ -134,15 +131,26 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null
   /** True when the client is gone but we're waiting for reconnection. */
   private _disconnected = false
+  private _sendPaused = false
+  private _sendWaiters: Array<() => void> = []
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
 
-  constructor(ackMode = false, id?: string, maxSendBufferBytes?: number) {
+  constructor({
+    ackMode = false,
+    id,
+    bufferLimit,
+    channelTransport,
+  }: {
+    ackMode?: boolean
+    id?: string
+    bufferLimit?: number
+    channelTransport?: ChannelTransport
+  } = {}) {
     this.ackMode = ackMode
     this.id = id ?? crypto.randomUUID()
-    this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
-      maxSendBufferBytes ?? globalObject.channelSendBufferBytes,
-    )
+    this.channelTransport = channelTransport
+    this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(bufferLimit ?? globalObject.bufferLimit)
     // Safety TTL: if this channel is never serialized into a response, shut it down
     // to prevent memory leaks. The registry entry is added in _registerChannel().
     this._ttlTimer = unrefTimer(
@@ -178,10 +186,11 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       return
     }
     if (this._peer) {
-      const seq = this._peer.sendTextAckReq(serialized)
-      return new Promise<ChannelAck<ServerToClient>>((resolve, reject) =>
-        this._pendingAcks.set(seq, { resolve, reject }),
-      )
+      return new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
+        this._peer!.sendTextAckReq(serialized, (seq) => {
+          this._pendingAcks.set(seq, { resolve, reject })
+        })
+      })
     } else {
       return new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
         this._prePeerBuffer.pushTextAck(serialized, resolve, reject)
@@ -194,10 +203,10 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   sendBinary(data: Uint8Array): void {
     if (this._isClosed) throw new ChannelClosedError()
     if (this._peer) {
-      this._peer.sendBinary(data)
-    } else {
-      this._prePeerBuffer.pushBinary(data)
+      void this._peer.sendBinary(data)
+      return
     }
+    this._prePeerBuffer.pushBinary(data)
   }
 
   listen(callback: ChannelListener<ClientToServer>): void {
@@ -225,16 +234,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       return
     }
     this._openCallbacks.push(callback)
-  }
-
-  /** @internal — Register a callback for backpressure pause from the transport layer. */
-  _onPause(callback: () => void): void {
-    this._pauseCallbacks.push(callback)
-  }
-
-  /** @internal — Register a callback for backpressure resume from the transport layer. */
-  _onResume(callback: () => void): void {
-    this._resumeCallbacks.push(callback)
   }
 
   /** @internal — Bind this channel to the telefunc response-wide abort path. */
@@ -284,15 +283,15 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         this._shutdown(
           new ChannelNetworkError('Channel timed out: no client connected within TTL after response was sent'),
         )
-      }, globalObject.channelConnectTtlMs),
+      }, globalObject.connectTtlMs),
     )
   }
 
   attachPeer(peer: IndexedPeer): void {
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
-    const wasDisconnected = this._disconnected
     this._disconnected = false
+    this._sendPaused = false
     this._peer = peer
     this._prePeerBuffer.flush(
       (msg) => peer.sendText(msg),
@@ -303,9 +302,45 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       },
     )
     this._fireOpen()
-    if (wasDisconnected) {
-      for (const cb of this._resumeCallbacks) cb()
+    this._notifySendReady()
+  }
+
+  /** @internal — Channel-scoped binary send gate used by streaming response pumps.
+   *
+   *  This method is responsible only for readiness rules that are local to this
+   *  `ServerChannel`, before the frame reaches the shared transport connection:
+   *  - if the channel is paused by the client, it waits for `_onPeerResume()`;
+   *  - if the channel is temporarily disconnected, it waits for `attachPeer()` on reconnect;
+   *  - if no peer is attached yet but the channel is otherwise sendable, it buffers into
+   *    `_prePeerBuffer` and returns synchronously.
+   *
+   *  Once the channel is ready to hand the frame to its peer, the returned value from
+   *  `IndexedPeer.sendBinary()` is propagated unchanged:
+   *  - `void` means the send completed synchronously all the way down;
+   *  - `Promise<void>` means the underlying transport or connection-wide send gate needs waiting.
+   *
+   *  Ordering and transport backpressure after the frame leaves this channel are handled by
+   *  `MuxServer.send()`. This method does not serialize different channels against each other;
+   *  it only enforces this channel's paused/disconnected readiness rules.
+   */
+  _sendBinaryAwaitable(data: Uint8Array): void | Promise<void> {
+    if (this._isClosed) throw new ChannelClosedError()
+    if (this._sendPaused || this._disconnected) return this._sendBinaryWhenReady(data)
+    return this._sendBinaryNow(data)
+  }
+
+  private _sendBinaryNow(data: Uint8Array): void | Promise<void> {
+    if (this._peer) return this._peer.sendBinary(data)
+    this._prePeerBuffer.pushBinary(data)
+  }
+
+  private async _sendBinaryWhenReady(data: Uint8Array): Promise<void> {
+    while ((this._sendPaused || this._disconnected) && !this._isClosed) {
+      await this._waitUntilSendReady()
     }
+    if (this._isClosed) throw new ChannelClosedError()
+    const pending = this._sendBinaryNow(data)
+    if (pending) await pending
   }
 
   /** @internal — Called by ws.ts when a TEXT frame arrives (no ack expected). */
@@ -315,8 +350,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       try {
         cb(data)
       } catch (err) {
-        this._handleCallbackError(err)
-        return
+        if (this._handleCallbackError(err)) return
       }
     }
   }
@@ -330,7 +364,8 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         const result = await cb(data)
         this._peer?.sendAckRes(seq, stringify(result, { forbidReactElements: false }))
       } catch (err) {
-        this._handleCallbackError(err)
+        if (this._handleCallbackError(err)) return
+        this._peer?.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
         return
       }
     }
@@ -342,18 +377,26 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       try {
         cb(data)
       } catch (err) {
-        this._handleCallbackError(err)
-        return
+        if (this._handleCallbackError(err)) return
       }
     }
   }
 
   /** @internal — Client sent ACK_RES for a message we sent. */
-  _onPeerAckRes(ackedSeq: number, resultText: string): void {
+  _onPeerAckRes(ackedSeq: number, resultText: string, status: AckResultStatus = 'ok'): void {
     const pending = this._pendingAcks.get(ackedSeq)
     if (!pending) return
     this._pendingAcks.delete(ackedSeq)
-    pending.resolve(parse(resultText) as ChannelAck<ServerToClient>)
+    switch (status) {
+      case 'ok':
+        pending.resolve(parse(resultText) as ChannelAck<ServerToClient>)
+        return
+      case 'abort':
+        pending.reject(createAbortError(parse(resultText)))
+        return
+      case 'error':
+        pending.reject(new Error(resultText || 'Internal client channel error — see client logs'))
+    }
   }
 
   /** @internal — Connection dropped, keep channel alive for reconnection. */
@@ -361,7 +404,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     if (this._isClosed || this._disconnected) return
     this._peer = null
     this._disconnected = true
-    for (const cb of this._pauseCallbacks) cb()
     this._reconnectTimer = unrefTimer(
       setTimeout(() => {
         this._reconnectTimer = null
@@ -386,12 +428,13 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 
   /** @internal */
   _onPeerPause(): void {
-    for (const cb of this._pauseCallbacks) cb()
+    this._sendPaused = true
   }
 
   /** @internal */
   _onPeerResume(): void {
-    for (const cb of this._resumeCallbacks) cb()
+    this._sendPaused = false
+    this._notifySendReady()
   }
 
   // ── Private ──
@@ -405,6 +448,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._clearTimer('_reconnectTimer')
     getChannelRegistry().delete(this.id)
     this._fireClose(err)
+    this._notifySendReady()
     const ackErr = new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
@@ -417,14 +461,12 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     for (const cb of this._closeCallbacks) {
       try {
         cb(err)
-      } catch {
-        /* swallow */
+      } catch (callbackErr) {
+        this._reportCallbackError(callbackErr)
       }
     }
     this._closeCallbacks.length = 0
     this._openCallbacks.length = 0
-    this._pauseCallbacks.length = 0
-    this._resumeCallbacks.length = 0
   }
 
   private _fireOpen(): void {
@@ -434,14 +476,13 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       try {
         cb()
       } catch (err) {
-        this._handleCallbackError(err)
-        return
+        if (this._handleCallbackError(err)) return
       }
     }
     this._openCallbacks.length = 0
   }
 
-  private _handleCallbackError(err: unknown): void {
+  private _handleCallbackError(err: unknown): boolean {
     if (isAbort(err)) {
       const abortError: AbortError = err
       if (this._responseAbort) {
@@ -449,14 +490,14 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       } else {
         this.abort(abortError.abortValue)
       }
-    } else {
-      // Non-Abort error — send bug signal to client (no details leaked) then close
-      if (this._peer) {
-        this._peer.error()
-        this._peer = null
-      }
-      this._shutdown()
+      return true
     }
+    this._reportCallbackError(err)
+    return false
+  }
+
+  private _reportCallbackError(err: unknown): void {
+    handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
   }
 
   private _clearTimer(name: '_ttlTimer' | '_reconnectTimer'): void {
@@ -465,5 +506,16 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       clearTimeout(timer)
       ;(this as any)[name] = null
     }
+  }
+
+  private _waitUntilSendReady(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this._sendWaiters.push(resolve)
+    })
+  }
+
+  private _notifySendReady(): void {
+    const waiters = this._sendWaiters.splice(0)
+    for (const waiter of waiters) waiter()
   }
 }

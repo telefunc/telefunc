@@ -5,11 +5,12 @@ import { isPromise } from '../../../utils/isPromise.js'
 import { textEncoder } from '../../frame.js'
 import { SERIALIZER_PREFIX_PROMISE } from '../../constants.js'
 import type { ServerStreamingType, PromiseContract } from '../../streaming-types.js'
+import type { ServerResponseContext } from './registry.js'
 
-const promiseServerType: ServerStreamingType<PromiseContract> = {
+const promiseServerType: ServerStreamingType<PromiseContract, ServerResponseContext> = {
   prefix: SERIALIZER_PREFIX_PROMISE,
   detect: (value): value is Promise<unknown> => isPromise(value),
-  getMetadata: () => ({}),
+  getMetadata: (_value, _context) => ({}),
   createProducer: (value) => {
     return {
       chunks: (async function* () {

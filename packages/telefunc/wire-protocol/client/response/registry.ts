@@ -36,7 +36,7 @@ const clientPlaceholderTypes: PlaceholderReviverType[] = [
  * Placeholder types are reconstructed from metadata only — no chunk consumption.
  */
 function createStreamingReviver(
-  getChunkReader: (index: number) => () => Promise<Uint8Array | null>,
+  getChunkReader: (index: number) => () => Promise<Uint8Array<ArrayBuffer> | null>,
   getCancelIndex: (index: number) => () => void,
   shard?: string,
 ) {
@@ -72,16 +72,17 @@ function revivePlaceholder(
   registerClose: (revived: { value: unknown; close: (() => void) | undefined }) => void,
   shard?: string,
 ) {
+  const context = {
+    shard,
+    registerChannel(channel: ClientChannel) {
+      channels.push(channel)
+    },
+  }
   for (const type of clientPlaceholderTypes) {
     if (value.startsWith(type.prefix)) {
       const metadata = parser(value.slice(type.prefix.length))
       assert(isObject(metadata))
-      const revived = type.createValue(metadata, {
-        shard,
-        registerChannel(channel) {
-          channels.push(channel)
-        },
-      })
+      const revived = type.createValue(metadata, context)
       registerClose(revived)
       return { replacement: revived.value }
     }

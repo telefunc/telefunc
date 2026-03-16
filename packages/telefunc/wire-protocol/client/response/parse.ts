@@ -51,15 +51,19 @@ async function parseResponse(response: Response, callContext: CallContext, shard
     return reviveStreamingResponse(metaText, callContext, streamReader, shard)
   }
 
-  // Text response: WS streaming or plain
+  // Text response: channel streaming or plain
   const body = await response.text()
-  const ws = extractFrameChannel(body)
-  if (ws) {
-    const streamReader = new ChannelStreamReader(
-      new ClientChannel(ws.metadata.channelId, ws.metadata.ack, shard),
-      callContext,
-    )
-    return reviveStreamingResponse(ws.strippedBody, callContext, streamReader, shard)
+  const frameChannel = extractFrameChannel(body)
+  if (frameChannel) {
+    const channel = new ClientChannel({
+      channelId: frameChannel.metadata.channelId,
+      ackMode: frameChannel.metadata.ack,
+      channelTransport: frameChannel.metadata.channelTransport,
+      shard,
+      defer: false,
+    })
+    const streamReader = new ChannelStreamReader(channel, callContext)
+    return reviveStreamingResponse(frameChannel.strippedBody, callContext, streamReader, shard)
   }
   return revivePlainResponse(body, callContext, shard)
 }
@@ -157,9 +161,12 @@ function finalizeResponse(
 class FrameDemuxer {
   private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
   private streamReader: BaseStreamReader
-  private pendingFrames = new Map<number, Uint8Array[]>()
+  private pendingFrames = new Map<number, Uint8Array<ArrayBuffer>[]>()
   private pendingBytes = new Map<number, number>()
-  private indexWaiters = new Map<number, { resolve: (v: Uint8Array | null) => void; reject: (e: unknown) => void }>()
+  private indexWaiters = new Map<
+    number,
+    { resolve: (v: Uint8Array<ArrayBuffer> | null) => void; reject: (e: unknown) => void }
+  >()
   private reading = false
   private ended = false
   private streamError: unknown = null
@@ -195,7 +202,7 @@ class FrameDemuxer {
     }
   }
 
-  async readNextChunkForIndex(index: number): Promise<Uint8Array | null> {
+  async readNextChunkForIndex(index: number): Promise<Uint8Array<ArrayBuffer> | null> {
     if (this.cancelledIndices.has(index)) return null
     if (this.streamError) throw this.streamError
 
@@ -209,9 +216,9 @@ class FrameDemuxer {
     if (this.doneIndices.has(index)) return null
     if (this.ended) return null
 
-    let resolve: (v: Uint8Array | null) => void
+    let resolve: (v: Uint8Array<ArrayBuffer> | null) => void
     let reject: (e: unknown) => void
-    const promise = new Promise<Uint8Array | null>((res, rej) => {
+    const promise = new Promise<Uint8Array<ArrayBuffer> | null>((res, rej) => {
       resolve = res
       reject = rej
     })

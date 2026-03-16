@@ -274,6 +274,9 @@ function testStreaming() {
     await page.click('#test-channel-abort-aborts-sibling-streaming-values')
     await autoRetry(async () => {
       const result = await getResult('#streaming-result')
+      expect(result.firstValues.length).greaterThan(0)
+      expect(result.secondValues.length).greaterThan(0)
+      expect(result.streamChunks.length).greaterThan(0)
       expect(result.firstErr?.isAbort).toBe(true)
       expect(result.secondErr?.isAbort).toBe(true)
       expect(result.streamErr?.isAbort).toBe(true)
@@ -293,7 +296,7 @@ function testStreaming() {
   // and the assertion below should be inverted.
   if (false)
     test('streaming: upload with progress (half duplex)', async () => {
-      if (process.env.PUBLIC_ENV__TRANSPORT === 'ws') {
+      if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORT === 'ws') {
         return skip(
           'WS transport returns the HTTP response before the request body is fully consumed, breaking lazy file streaming (ERR_CONNECTION_RESET)',
         )

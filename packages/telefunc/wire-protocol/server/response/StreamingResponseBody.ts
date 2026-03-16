@@ -28,7 +28,7 @@ function buildStreamingResponseBody(
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
   responseAbort: ResponseAbortSource,
-): ReadableStream<Uint8Array> {
+): ReadableStream<Uint8Array<ArrayBuffer>> {
   return buildResponseBodyStream(
     metadataSerialized,
     streamingValues,
@@ -51,7 +51,7 @@ function buildSSEResponseBody(
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
   responseAbort: ResponseAbortSource,
-): ReadableStream<Uint8Array> {
+): ReadableStream<Uint8Array<ArrayBuffer>> {
   return buildResponseBodyStream(
     metadataSerialized,
     streamingValues,
@@ -63,8 +63,8 @@ function buildSSEResponseBody(
   )
 }
 
-/** Shared core: both `'stream'` and `'sse'` transports use this. The only
- *  difference is the `encodeFrame` closure — identity for raw binary,
+/** Shared core: both `'binary-inline'` and `'sse-inline'` transports use this.
+ *  The only difference is the `encodeFrame` closure — identity for raw binary,
  *  base64url SSE wrapping for `text/event-stream`. */
 function buildResponseBodyStream(
   metadataSerialized: string,
@@ -73,10 +73,10 @@ function buildResponseBodyStream(
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
   responseAbort: Pick<ResponseAbortSource, 'errorPromise'>,
-  encodeFrame: (frame: Uint8Array) => Uint8Array,
-): ReadableStream<Uint8Array> {
+  encodeFrame: (frame: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>,
+): ReadableStream<Uint8Array<ArrayBuffer>> {
   let cancelled = false
-  let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+  let streamController: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | null = null
 
   // Create all producers upfront so doCancel can call cancel() on each.
   // This is critical for ReadableStream: gen.return() alone can't interrupt
@@ -85,7 +85,7 @@ function buildResponseBodyStream(
 
   const gen = generateResponseBody(metadataSerialized, producers, telefuncId, { responseAbort })
 
-  const doCancel = (controller?: ReadableStreamDefaultController<Uint8Array> | null) => {
+  const doCancel = (controller?: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | null) => {
     if (cancelled) return
     cancelled = true
     // cancel() interrupts suspended reads (reader.read() / gen.next()) —
@@ -102,7 +102,7 @@ function buildResponseBodyStream(
 
   abortSignal.addEventListener('abort', () => doCancel(streamController), { once: true })
 
-  return new ReadableStream<Uint8Array>({
+  return new ReadableStream<Uint8Array<ArrayBuffer>>({
     start(controller) {
       streamController = controller
     },
@@ -143,7 +143,7 @@ async function* generateResponseBody(
   producerEntries: Array<{ producer: StreamingProducer; index: number }>,
   telefuncId: TelefuncIdentifier,
   options?: { skipMetadata?: boolean; responseAbort?: Pick<ResponseAbortSource, 'errorPromise'> },
-): AsyncGenerator<Uint8Array> {
+): AsyncGenerator<Uint8Array<ArrayBuffer>> {
   // Metadata header (skipped for WS transport — metadata is in the HTTP body)
   if (!options?.skipMetadata) {
     const metadataBytes = textEncoder.encode(metadataSerialized)
@@ -153,8 +153,8 @@ async function* generateResponseBody(
 
   type RaceEntry = {
     index: number
-    iter: AsyncIterator<Uint8Array>
-    pending: Promise<{ entry: RaceEntry; result: IteratorResult<Uint8Array> }>
+    iter: AsyncIterator<Uint8Array<ArrayBuffer>>
+    pending: Promise<{ entry: RaceEntry; result: IteratorResult<Uint8Array<ArrayBuffer>> }>
   }
 
   const advance = (entry: RaceEntry) => {
@@ -173,14 +173,16 @@ async function* generateResponseBody(
 
   try {
     // Merge loop: yield one frame per pull().
-    // After a producer wins the race, it's moved to the end of the array
-    // so other already-resolved producers get priority next iteration.
+    // Response abort is checked with priority over producer readiness so a
+    // response-wide abort preempts any further unresolved work immediately.
+    // After a producer wins the race, it's moved to the end of the array so
+    // other already-resolved producers get priority next iteration.
     // Without this, a fast producer at index 0 would always win Promise.race
     // (which picks the first resolved promise in array order), starving others.
     while (active.length > 0) {
       const { entry, result } = await Promise.race(
         options?.responseAbort
-          ? [...active.map((e) => e.pending), options.responseAbort.errorPromise]
+          ? [options.responseAbort.errorPromise, ...active.map((e) => e.pending)]
           : active.map((e) => e.pending),
       )
 
@@ -190,7 +192,7 @@ async function* generateResponseBody(
         yield encodeIndexedFrame(entry.index, EMPTY)
         active.splice(active.indexOf(entry), 1)
       } else {
-        yield encodeIndexedFrame(entry.index, result.value)
+        yield encodeIndexedFrame(entry.index, result.value as Uint8Array<ArrayBuffer>)
         advance(entry)
         // Move to end for fair round-robin scheduling
         active.splice(active.indexOf(entry), 1)
@@ -214,7 +216,7 @@ async function* generateResponseBody(
 // ===== Frame encoding helpers =====
 
 /** Encode an error as an error frame: [ERROR_MARKER][u32 payload_len][payload_bytes] */
-function encodeErrorFrame(err: unknown, telefuncId: TelefuncIdentifier): Uint8Array[] {
+function encodeErrorFrame(err: unknown, telefuncId: TelefuncIdentifier): Uint8Array<ArrayBuffer>[] {
   validateTelefunctionError(err, telefuncId)
   let errorPayload: string
   if (isAbort(err)) {

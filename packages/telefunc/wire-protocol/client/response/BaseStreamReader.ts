@@ -29,7 +29,7 @@ abstract class BaseStreamReader {
   abstract cancel(): void
 
   /** Implemented by each transport — pull exactly n bytes from the wire source. */
-  abstract readExact(n: number): Promise<Uint8Array>
+  abstract readExact(n: number): Promise<Uint8Array<ArrayBuffer>>
 
   async readU32(): Promise<number> {
     const buf = await this.readExact(4) // sizeof uint32
@@ -38,7 +38,7 @@ abstract class BaseStreamReader {
 
   /** Read the next indexed frame from the wire.
    *  Returns { index, payload } or null on terminator. Throws on error frames. */
-  async readNextFrame(): Promise<{ index: number; payload: Uint8Array } | null> {
+  async readNextFrame(): Promise<{ index: number; payload: Uint8Array<ArrayBuffer> } | null> {
     const len = await this.readU32()
     if (this.cancelled) return null
     if (len === 0) return null

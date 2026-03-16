@@ -255,33 +255,53 @@ const onAbortOneOfManyStreamingValues = async () => {
 }
 
 const onChannelAbortAbortsSiblingStreamingValues = async () => {
+  let markFirstStarted!: () => void
+  let markSecondStarted!: () => void
+  let markStreamStarted!: () => void
+  const firstStarted = new Promise<void>((resolve) => {
+    markFirstStarted = resolve
+  })
+  const secondStarted = new Promise<void>((resolve) => {
+    markSecondStarted = resolve
+  })
+  const streamStarted = new Promise<void>((resolve) => {
+    markStreamStarted = resolve
+  })
   const channel = createChannel<(msg: string) => void, never>()
-  channel.listen(() => {
+  channel.listen(async () => {
+    await Promise.all([firstStarted, secondStarted, streamStarted])
     throw Abort({ reason: 'channel-listener-abort', code: 7 })
   })
 
   async function* first(): AsyncGenerator<string> {
-    for (const value of ['first-0', 'first-1', 'first-2']) {
+    let i = 0
+    while (true) {
       await sleep(30)
-      yield value
+      yield `first-${i}`
+      if (i === 0) markFirstStarted()
+      i++
     }
   }
 
   async function* second(): AsyncGenerator<string> {
-    for (const value of ['second-0', 'second-1', 'second-2']) {
+    let i = 0
+    while (true) {
       await sleep(45)
-      yield value
+      yield `second-${i}`
+      if (i === 0) markSecondStarted()
+      i++
     }
   }
 
   const encoder = new TextEncoder()
-  const chunks = ['chunk-0', 'chunk-1', 'chunk-2']
   let i = 0
+  let firstChunkSent = false
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
-      if (i >= chunks.length) return controller.close()
       await sleep(35)
-      controller.enqueue(encoder.encode(chunks[i]!))
+      if (firstChunkSent) markStreamStarted()
+      controller.enqueue(encoder.encode(`chunk-${i}`))
+      firstChunkSent = true
       i++
     },
   })

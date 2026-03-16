@@ -182,27 +182,30 @@ const slow = await res.slow  // Resolves when ready
 
 ## Transport
 
-By default, streamed values are sent as raw binary chunks over HTTP (`application/octet-stream`). You can switch transport globally or per call:
+By default, streamed values are sent as raw binary chunks over HTTP (`application/octet-stream`). You can switch streamed-value transport globally or per call:
 
 | Transport | Description |
 |---|---|
-| `'stream'` (default) | Raw binary chunked HTTP response |
-| `'sse'` | Base64url-encoded Server-Sent Events — works through proxies that buffer binary responses |
-| `'ws'` | WebSocket binary frames |
+| `'binary-inline'` (default) | Raw binary chunked HTTP response. Usually the best default. |
+| `'sse-inline'` | Base64url-encoded Server-Sent Events — works through proxies that buffer binary responses |
+| `'channel'` | Send streamed values using the configured channel transport (`'sse'` or `'ws'`) |
 
-- Prefer `'stream'` unless you have a concrete reason to change it.
-- Use `'sse'` when a proxy or CDN buffers binary HTTP responses.
-- Use `'ws'` when you already installed <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> and want streamed values over the same WebSocket transport.
+- Prefer `'binary-inline'` unless you have a concrete reason to change it.
+- Use `'sse-inline'` when a proxy or CDN buffers binary HTTP responses, or when you need a more proxy-friendly inline transport.
+- Use `'channel'` when you want streamed values to use the same transport as Telefunc channels. The channel backend is `'sse'` or `'ws'` depending on `config.channel.transport` (or, when unset, Telefunc's runtime default).
 
 ```ts
 // Environment: client
 
 import { config } from 'telefunc/client'
 
-config.transport = 'sse'
+config.stream.transport = 'channel'
+config.channel.transport = 'ws'
 ```
 
 See <Link href="/transport" /> for details.
+
+For a side-by-side strengths and weaknesses comparison, see <Link href="/transport" />.
 
 
 ## Error handling

@@ -16,14 +16,14 @@ const EMPTY = new Uint8Array(0)
  *  bytes are needed — preserving the full pull chain through
  *  `FrameDemuxer.ensureReading` to the server generator. No separate pump. */
 class SSEStreamReader extends BaseStreamReader {
-  private reader: ReadableStreamDefaultReader<Uint8Array>
-  private binary: Uint8Array = EMPTY
+  private reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
+  private binary: Uint8Array<ArrayBuffer> = EMPTY
   private decoder = new TextDecoder()
   private lineBuf = ''
   private pendingData = ''
 
   constructor(
-    reader: ReadableStreamDefaultReader<Uint8Array>,
+    reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
     callContext: {
       telefunctionName: string
       telefuncFilePath: string
@@ -40,10 +40,10 @@ class SSEStreamReader extends BaseStreamReader {
     this.reader.cancel()
   }
 
-  async readExact(n: number): Promise<Uint8Array> {
+  async readExact(n: number): Promise<Uint8Array<ArrayBuffer>> {
     while (this.binary.length < n) {
       let done: boolean
-      let value: Uint8Array | undefined
+      let value: Uint8Array<ArrayBuffer> | undefined
       let readError: unknown
       try {
         ;({ done, value } = await this.reader.read())

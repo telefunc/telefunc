@@ -1,7 +1,11 @@
-import { Hono } from 'hono'
 import { apply, serve } from '@photonjs/hono'
+import { Hono } from 'hono'
+import { config } from 'telefunc'
 import { telefuncWebSocket } from 'telefunc/websocket/node'
 import { cleanupState, resetCleanupState } from '../cleanup-state'
+config.channel = {
+  pingInterval: 1000,
+}
 
 function startServer() {
   const app = new Hono()
@@ -16,7 +20,7 @@ function startServer() {
   return serve(app, {
     port: 3000,
     onCreate(server) {
-      const ws = telefuncWebSocket({ pingInterval: 1000 })
+      const ws = telefuncWebSocket()
       // @ts-expect-error srvx types not exposed
       ws.install(server.node.server)
     },

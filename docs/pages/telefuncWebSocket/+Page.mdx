@@ -2,17 +2,19 @@ import { Link, NoteWithoutIcon } from '@brillout/docpress'
 
 **Environment**: server.
 
-Install the Telefunc WebSocket upgrade handler on your server. This is what powers <Link text={<code>createChannel()</code>} href="/createChannel" />, returned function proxies, and WebSocket transport.
+Install the Telefunc WebSocket upgrade handler on your server when you want Telefunc to use the WebSocket backend.
 
 ## When do you need this?
 
 You need <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> in production if you use any of the following:
 
-- <Link text={<code>createChannel()</code>} href="/createChannel" />
-- <Link href="/real-time#function-passing">Function passing</Link>
-- <Link href="/transport">WebSocket transport</Link> for <Link href="/stream">streamed values</Link>
+- <Link text={<code>createChannel()</code>} href="/createChannel" /> with `config.channel.transport = 'ws'`
+- <Link href="/real-time#function-passing">Function passing</Link> with `config.channel.transport = 'ws'`
+- <Link href="/transport">`config.stream.transport = 'channel'`</Link> together with `config.channel.transport = 'ws'`
 
-You do not need it for plain telefunction calls, or for <Link href="/stream">streamed values</Link> sent over the default HTTP transport or SSE.
+If `config.channel.transport` is unset, installing <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> makes `'ws'` the default channel backend.
+
+You do not need it for plain telefunction calls, for SSE channels, or for <Link href="/stream">streamed values</Link> sent over `'binary-inline'` or `'sse-inline'`.
 
 Pick the adapter for your runtime:
 
@@ -102,7 +104,7 @@ export default {
 }
 ```
 
-Cloudflare channels require a [Durable Object](https://developers.cloudflare.com/durable-objects/) because channel state is in-memory and must stay colocated with the WebSocket connection.
+Cloudflare WebSocket transport requires a [Durable Object](https://developers.cloudflare.com/durable-objects/) because channel state is in-memory and must stay colocated with the WebSocket connection.
 
 See <Link text="Cloudflare Workers" href="/telefuncWebSocketCloudflare" /> for Cloudflare-specific details such as `context`, shards, `locationHint`, and Durable Object hibernation.
 
@@ -119,13 +121,13 @@ Messages within a channel keep their order.
 
 1. Before the other side is connected and ready for the channel, new outgoing messages are buffered.
 
-On the server, that buffer is capped by `channelSendBuffer`. When the channel is first created, the server waits up to `channelConnectTtl`. During a reconnect, it waits up to `reconnectTimeout`.
+On the server, that buffer is capped by `config.channel.bufferLimit`. When the channel is first created, the server waits up to `config.channel.connectTtl`. During a reconnect, it waits up to `config.channel.reconnectTimeout`.
 
 2. While the channel is connected, both sides keep a short replay history of what they already sent.
 
-The client keeps `clientReplayBuffer`. The server keeps `serverReplayBuffer`.
+The client keeps `config.channel.clientReplayBuffer`. The server keeps `config.channel.serverReplayBuffer`.
 
-3. If the connection drops, Telefunc detects that using `pingInterval`, reconnects, compares which channels are still alive, and replays whatever frames are still present in those replay histories.
+3. If the connection drops, Telefunc detects that using `config.channel.pingInterval`, reconnects, compares which channels are still alive, and replays whatever frames are still present in those replay histories.
 
 Duplicate replayed frames are ignored.
 
@@ -133,7 +135,7 @@ Duplicate replayed frames are ignored.
 
 If older data has already fallen out of the buffers, those messages are lost.
 
-The channel closes with `ChannelNetworkError` only if Telefunc cannot recover the channel itself, for example when `reconnectTimeout` is exceeded or one side no longer acknowledges the channel after reconnect.
+The channel closes with `ChannelNetworkError` only if Telefunc cannot recover the channel itself, for example when `config.channel.reconnectTimeout` is exceeded or one side no longer acknowledges the channel after reconnect.
 
 Buffered sends with acknowledgements reject when they are dropped.
 </NoteWithoutIcon>
@@ -141,7 +143,7 @@ Buffered sends with acknowledgements reject when they are dropped.
 ### Connection lifecycle
 
 - The shared WebSocket opens on demand.
-- After the last channel closes, it stays open for `idleTimeout` and then closes automatically.
+- After the last channel closes, it stays open for `config.channel.idleTimeout` and then closes automatically.
 - If the connection briefly drops, Telefunc tries to reconnect and resume the active channels.
 - Temporary reconnects do not fire `onOpen()` or `onClose()`. Those callbacks are for the initial open and permanent close.
 
@@ -151,19 +153,39 @@ Recovery handles short network interruptions, not application-level confirmation
 
 Use acknowledgements when the sender needs confirmation that the other side received and processed a message. See <Link href="/createChannel" />.
 
-## Options
+## Channel config
 
-All adapters accept the following options:
+Set shared channel runtime settings on the server with `config.channel`:
 
 | Option | Default | Description |
 |---|---|---|
+| `transport` | `'sse'`* | Channel backend: `'sse'` or `'ws'`. |
 | `reconnectTimeout` | `60_000` | How long (ms) to hold channels open after a client disconnects, waiting for a reconnect. |
-| `idleTimeout` | `60_000` | How long (ms) to keep the WebSocket open after the last channel closes. |
+| `idleTimeout` | `60_000` | How long (ms) to keep the shared connection open after the last channel closes. |
 | `pingInterval` | `5_000` | How often (ms) the client sends a ping. The server considers the client dead after 2× this interval. Minimum: 1000ms. |
-| `serverReplayBuffer` | `262_144` | Per-channel replay buffer size (bytes) on the server. Frames within this budget are replayed to a reconnecting client. |
-| `clientReplayBuffer` | `1_048_576` | Per-channel replay buffer size (bytes) on the client. Frames within this budget are replayed to the server on reconnect. |
-| `channelConnectTtl` | `5_000` | How long (ms) the server waits for the client to connect to a newly created channel. If the client does not connect within this window, the channel is closed automatically. |
-| `channelSendBuffer` | `524_288` | Per-channel buffer size (bytes) for server-side messages while the client is not currently connected to the channel. Applies both when the channel is first created and during reconnect gaps. |
+| `serverReplayBuffer` | `262_144` | Per-channel replay buffer size on the server. Frames within this budget are replayed to a reconnecting client. |
+| `clientReplayBuffer` | `1_048_576` | Per-channel replay buffer size on the client. Frames within this budget are replayed to the server on reconnect. |
+| `connectTtl` | `5_000` | How long (ms) the server waits for the client to connect to a newly created channel. If the client does not connect within this window, the channel is closed automatically. |
+| `bufferLimit` | `524_288` | Per-channel buffer size for server-side messages while the client is not currently connected to the channel. Applies both when the channel is first created and during reconnect gaps. |
+
+```ts
+// Environment: server
+
+import { config } from 'telefunc'
+
+config.channel = {
+  transport: 'ws',
+  reconnectTimeout: 60_000,
+  idleTimeout: 60_000,
+  pingInterval: 5_000,
+  serverReplayBuffer: 262_144,
+  clientReplayBuffer: 1_048_576,
+  connectTtl: 5_000,
+  bufferLimit: 524_288,
+}
+```
+
+`*` When `config.channel.transport` is unset and <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> is installed, Telefunc defaults to `'ws'`.
 
 ## See also
 

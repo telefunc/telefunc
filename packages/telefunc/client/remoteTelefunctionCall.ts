@@ -10,6 +10,20 @@ import { setAbortController } from './abort.js'
 import type { ClientCallContext } from './withContext.js'
 import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/async-generator-interface.js'
 import { getStickyShardForPost } from '../wire-protocol/client/shard-registry.js'
+import type { ChannelTransport, StreamTransport } from '../wire-protocol/constants.js'
+
+type CallContext = {
+  telefuncFilePath: string
+  telefunctionName: string
+  telefunctionArgs: unknown[]
+  telefuncUrl: string
+  baseTelefuncUrl: string
+  headers: Record<string, string> | null
+  fetch: typeof globalThis.fetch | null
+  abortController: AbortController
+  stream?: { transport?: StreamTransport }
+  channel?: { transport?: ChannelTransport }
+}
 
 function remoteTelefunctionCall(
   telefuncFilePath: string,
@@ -21,19 +35,18 @@ function remoteTelefunctionCall(
 
   const callContext = {}
 
-  {
-    objectAssign(callContext, {
-      telefuncFilePath,
-      telefunctionName,
-      telefunctionArgs,
-    })
-  }
+  objectAssign(callContext, {
+    telefuncFilePath,
+    telefunctionName,
+    telefunctionArgs,
+  })
 
   const clientConfig = resolveClientConfig()
   objectAssign(callContext, clientConfig)
 
   const baseTelefuncUrl = clientConfig.telefuncUrl
   objectAssign(callContext, { baseTelefuncUrl })
+
   const stickyShardForPost = getStickyShardForPost(baseTelefuncUrl)
   if (stickyShardForPost) {
     objectAssign(callContext, {
@@ -44,23 +57,28 @@ function remoteTelefunctionCall(
   }
 
   if (callClientContext?.headers) {
-    const merged = { ...callContext.headers, ...callClientContext.headers }
-    objectAssign(callContext, { headers: merged })
+    objectAssign(callContext, {
+      headers: { ...callContext.headers, ...callClientContext.headers },
+    })
   }
 
-  // Per-call transport overrides global config.transport
-  if (callClientContext?.transport) {
-    objectAssign(callContext, { transport: callClientContext.transport })
+  if (callClientContext?.stream?.transport) {
+    objectAssign(callContext, {
+      stream: { transport: callClientContext.stream.transport },
+    })
+  }
+
+  if (callClientContext?.channel?.transport) {
+    objectAssign(callContext, {
+      channel: { transport: callClientContext.channel.transport },
+    })
   }
 
   const abortController = createAbortController(callClientContext?.signal)
-
   objectAssign(callContext, { abortController })
 
-  {
-    const httpRequestBody = serializeTelefunctionArguments(callContext)
-    objectAssign(callContext, { httpRequestBody })
-  }
+  const httpRequestBody = serializeTelefunctionArguments(callContext)
+  objectAssign(callContext, { httpRequestBody })
 
   const telefunctionReturnPromise = makeHttpRequest(callContext)
 

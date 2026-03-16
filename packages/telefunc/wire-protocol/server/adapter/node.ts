@@ -2,10 +2,10 @@ export { telefuncWebSocket }
 
 import crossws from 'crossws/adapters/node'
 import { getTelefuncChannelHooks } from '../ws.js'
-import type { TelefuncWebSocketOptions } from '../ws.js'
-import { getServerConfig } from '../../../node/server/serverConfig.js'
+import { getServerConfig, setDefaultChannelTransport } from '../../../node/server/serverConfig.js'
 import type { Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
+import { CHANNEL_TRANSPORT } from '../../constants.js'
 
 type HttpServer = Server | Http2SecureServer
 // Accept either a plain Node.js server or a srvx-style wrapper ({ node: { server } })
@@ -39,11 +39,12 @@ interface TelefuncAdapter {
  * telefuncWebSocket().install(server)
  * ```
  */
-function telefuncWebSocket(options?: TelefuncWebSocketOptions): TelefuncAdapter {
-  const ws = crossws({ hooks: getTelefuncChannelHooks(options) })
+function telefuncWebSocket(): TelefuncAdapter {
+  const ws = crossws({ hooks: getTelefuncChannelHooks() })
 
   return {
     install(server: HttpServerOrWrapper): void {
+      setDefaultChannelTransport(CHANNEL_TRANSPORT.WS)
       // Unwrap srvx-style wrappers (e.g. from @photonjs/hono or srvx directly)
       const httpServer: HttpServer = (server as any)?.node?.server ?? (server as HttpServer)
       if (typeof (httpServer as any)?.on !== 'function') {

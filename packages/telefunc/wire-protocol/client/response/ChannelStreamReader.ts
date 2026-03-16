@@ -20,15 +20,17 @@ const EMPTY = new Uint8Array(0)
 const HIGH = 2 * 1024 * 1024
 const LOW = 512 * 1024
 
-/** WS transport reader — receives binary frames pushed by the server
- *  via WebSocket, with watermark-based backpressure signaling.
- *
- *  Uses `channel._pause()` / `channel._resume()` for backpressure. */
+/** Transport reader — receives binary frames pushed by the server
+ *  with watermark-based backpressure signaling.
+ *  Uses `channel._pause()` / `channel._resume()` when the transport supports it.
+ *  SSE currently leaves those hooks as no-ops. */
 class ChannelStreamReader extends BaseStreamReader {
-  private buffer: Uint8Array = EMPTY
+  private buffer: Uint8Array<ArrayBuffer> = EMPTY
   private wake: (() => void) | null = null
   private paused = false
   private channel: ClientChannel
+  private transportClosed = false
+  private transportCloseError: Error | null = null
 
   constructor(
     channel: ClientChannel,
@@ -41,9 +43,14 @@ class ChannelStreamReader extends BaseStreamReader {
     super(callContext)
     this.channel = channel
     callContext.abortController.signal.addEventListener('abort', () => this.cancel(), { once: true })
-    channel.onClose(() => this.cancel())
+    channel.onClose((err) => {
+      this.transportClosed = true
+      this.transportCloseError = err ?? null
+      this.wake?.()
+      this.wake = null
+    })
 
-    channel.listenBinary((frame: Uint8Array) => {
+    channel.listenBinary((frame) => {
       this.buffer = concat(this.buffer, frame)
       this.wake?.()
       this.wake = null
@@ -54,12 +61,16 @@ class ChannelStreamReader extends BaseStreamReader {
     })
   }
 
-  async readExact(n: number): Promise<Uint8Array> {
+  async readExact(n: number): Promise<Uint8Array<ArrayBuffer>> {
     while (this.buffer.length < n) {
       if (this.callContext.abortController.signal.aborted) {
         throwAbortError(this.callContext.telefunctionName, this.callContext.telefuncFilePath, undefined)
       }
       if (this.cancelled) return EMPTY
+      if (this.transportClosed && this.buffer.length === 0) {
+        if (this.transportCloseError) throw this.transportCloseError
+        return EMPTY
+      }
       await new Promise<void>((r) => {
         this.wake = r
       })

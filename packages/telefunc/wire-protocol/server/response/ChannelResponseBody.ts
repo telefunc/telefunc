@@ -8,15 +8,12 @@ import { restoreContext, Telefunc } from '../../../node/server/getContext.js'
 import { RequestContext, restoreRequestContext } from '../../../node/server/requestContext.js'
 
 /** Narrow interface: only what the frame pump needs from a ServerChannel. */
-type FrameChannel = Pick<ServerChannel, 'onOpen' | '_onPause' | '_onResume' | 'onClose' | 'sendBinary' | 'close'>
+type FrameChannel = Pick<ServerChannel, 'onOpen' | 'onClose' | 'close' | '_sendBinaryAwaitable'>
 
 /** Pump indexed data frames from streaming producers into a channel.
  *
  *  Metadata is NOT sent over the channel — it's in the HTTP response body.
  *  Only indexed frames + terminator are pumped.
- *
- *  Backpressure: honors `onPause` / `onResume` callbacks fired by the transport
- *  layer (works for both direct WS and shared/multiplexed WS).
  *
  *  The pump waits for the client to connect before starting.
  *  If the channel closes before the client connects, the pump exits cleanly. */
@@ -29,19 +26,6 @@ function buildChannelResponseBody(
     providedContext: Telefunc.Context | null
   },
 ): void {
-  let paused = false
-  let pauseResolve: (() => void) | null = null
-
-  channel._onPause(() => {
-    paused = true
-  })
-
-  channel._onResume(() => {
-    paused = false
-    pauseResolve?.()
-    pauseResolve = null
-  })
-
   const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
   const gen = generateResponseBody('', producers, telefuncId, {
     skipMetadata: true,
@@ -54,8 +38,6 @@ function buildChannelResponseBody(
     cancelled = true
     for (const { producer } of producers) producer.cancel()
     gen.return(undefined)
-    pauseResolve?.()
-    pauseResolve = null
   }
 
   channel.onClose(doCancel)
@@ -69,12 +51,8 @@ function buildChannelResponseBody(
       restoreRequestContext(runContext.requestContext)
       for await (const frame of gen) {
         if (cancelled) break
-        if (paused)
-          await new Promise<void>((r) => {
-            pauseResolve = r
-          })
-        if (cancelled) break
-        channel.sendBinary(frame)
+        const pending = channel._sendBinaryAwaitable(frame)
+        if (pending) await pending
       }
     } catch {
       // ChannelClosedError from onClose rejection or sendBinary — pump exits cleanly

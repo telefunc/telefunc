@@ -32,6 +32,9 @@ type ChannelState = {
   clientAbortServerOnOpenFired: boolean | null
   earlyCloseChannelId: string | null
   ackListenerAbortErr: { isAbort: boolean; abortValue: unknown } | null
+  ackListenerBugErr: string | null
+  ackListenerBugRecoveryAck: string | null
+  clientAckListenerBugChannelId: string | null
   serverPendingAckAbortChannelId: string | null
   abortThenSendChannelId: string | null
   pendingAckAbortChannelId: string | null
@@ -41,6 +44,32 @@ type ChannelState = {
 }
 
 function testChannel(isDev: boolean) {
+  const channelTransport = process.env.PUBLIC_ENV__CHANNEL_TRANSPORT ?? 'sse'
+
+  async function waitForTransportReconnectSignal() {
+    if (channelTransport === 'ws') {
+      await page.waitForEvent('websocket', {
+        predicate: (ws) => ws.url().includes('/_telefunc'),
+        timeout: 15000,
+      })
+      return
+    }
+
+    if (channelTransport === 'sse') {
+      await page.waitForResponse(
+        (response) => {
+          if (response.request().method() !== 'POST') return false
+          const url = new URL(response.url())
+          return url.pathname.endsWith('/_telefunc') && url.searchParams.get('_telefunc') === 'sse'
+        },
+        { timeout: 15000 },
+      )
+      return
+    }
+
+    throw new Error(`Unsupported channel transport in e2e: ${channelTransport}`)
+  }
+
   // ── Basic connection ─────────────────────────────────────────────────
 
   test('channel: connect — client onOpen fires, server responds with welcome via ping', async () => {
@@ -263,18 +292,14 @@ function testChannel(isDev: boolean) {
       // Wait long enough for the ping timeout to fire and the client to mark the socket dead.
       await page.waitForTimeout(3000)
 
-      // Arm the reconnect interceptor while still offline — catches the new WebSocket
-      // the client opens after coming back online, proving it actually reconnected.
-      const wsReconnectPromise = page.waitForEvent('websocket', {
-        predicate: (ws) => ws.url().includes('/_telefunc'),
-        timeout: 15000,
-      })
+      // Arm transport-specific reconnect signal while still offline.
+      const reconnectSignalPromise = waitForTransportReconnectSignal()
 
       // Come back online — client reconnects.
       await page.context().setOffline(false)
 
-      // Block here until the reconnect WS handshake is observed.
-      await wsReconnectPromise
+      // Block until reconnect signal is observed for the active transport.
+      await reconnectSignalPromise
 
       // Ticks resume and the server count continues strictly forward — no duplicates, no replay, no data loss.
       // tickCount === lastTickServerCount proves every sent tick was received exactly once:
@@ -324,13 +349,10 @@ function testChannel(isDev: boolean) {
       await page.click('#channel-test-upstream-send')
       await page.click('#channel-test-upstream-send')
 
-      // Arm reconnect watcher, then come back online
-      const wsReconnectPromise = page.waitForEvent('websocket', {
-        predicate: (ws) => ws.url().includes('/_telefunc'),
-        timeout: 15000,
-      })
+      // Arm reconnect watcher, then come back online.
+      const reconnectSignalPromise = waitForTransportReconnectSignal()
       await page.context().setOffline(false)
-      await wsReconnectPromise
+      await reconnectSignalPromise
 
       // Server must have received all 5 messages exactly once, in order, with no gaps
       await autoRetry(async () => {
@@ -384,19 +406,14 @@ function testChannel(isDev: boolean) {
 
       await page.click('#channel-test-client-abort-server')
 
-      const wsReconnectPromise = page.waitForEvent('websocket', {
-        predicate: (ws) => ws.url().includes('/_telefunc'),
-        timeout: 15000,
-      })
+      const reconnectSignalPromise = waitForTransportReconnectSignal()
       await page.context().setOffline(false)
-      await wsReconnectPromise
+      await reconnectSignalPromise
 
       await autoRetry(async () => {
         const ss = await getCleanupState()
         expect(ss[`clientAbort_${channelId}_serverOnClose`]).toBe('true')
-        expect(ss[`clientAbort_${channelId}_serverOnCloseErr`]).toBe(
-          'Channel not acknowledged by client after reconnect',
-        )
+        expect(ss[`clientAbort_${channelId}_serverOnCloseErr`]).toBe('none')
       })
     })
   }
@@ -448,6 +465,33 @@ function testChannel(isDev: boolean) {
       expect(state.ackListenerAbortErr).not.toBe(null)
       expect(state.ackListenerAbortErr!.isAbort).toBe(true)
       expect(state.ackListenerAbortErr!.abortValue).deep.equal({ reason: 'listener-abort', code: 7 })
+    })
+  })
+
+  test('channel: ack listener bug — send({ ack: true }) rejects but channel stays open for a follow-up ack', async () => {
+    await page.click('#channel-test-ack-listener-bug')
+
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+      expect(state.ackListenerBugErr).toBe('Internal Server Error — see server logs')
+      expect(state.ackListenerBugRecoveryAck).toBe('ack:ok')
+    })
+  })
+
+  test('channel: client ack listener bug — server pending ack rejects but follow-up ack still succeeds', async () => {
+    await page.click('#channel-test-client-ack-listener-bug')
+
+    let channelId: string | null = null
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+      expect(state.clientAckListenerBugChannelId).not.toBe(null)
+      channelId = state.clientAckListenerBugChannelId
+    })
+
+    await autoRetry(async () => {
+      const ss = await getCleanupState()
+      expect(ss[`clientAckBug_${channelId}_rejected`]).toBe('true')
+      expect(ss[`clientAckBug_${channelId}_followupAck`]).toBe('client-ack:ok')
     })
   })
 

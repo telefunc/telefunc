@@ -4,11 +4,11 @@ export { telefuncWebSocket }
 import { DurableObject } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../ws.js'
-import type { TelefuncWebSocketOptions } from '../ws.js'
-import { getServerConfig } from '../../../node/server/serverConfig.js'
+import { getServerConfig, setDefaultChannelTransport } from '../../../node/server/serverConfig.js'
 import { telefunc } from '../../../node/server/telefunc.js'
 import { assertWarning } from '../../../utils/assert.js'
 import type { Telefunc } from '../../../node/server/getContext.js'
+import { CHANNEL_TRANSPORT } from '../../constants.js'
 
 /** Return type of {@link telefuncWebSocket}. */
 interface TelefuncAdapter {
@@ -18,7 +18,7 @@ interface TelefuncAdapter {
   createDurableObjectClass(): new (ctx: DurableObjectState, env: Cloudflare.Env) => DurableObject
 }
 
-type CloudflareWebSocketOptions = TelefuncWebSocketOptions & {
+type CloudflareWebSocketOptions = {
   /** Durable Object binding name. Default: `'TelefuncDurableObject'`. */
   bindingName?: string
   /** Instance name for the DO. Default: `'telefunc'`. */
@@ -73,7 +73,7 @@ function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapte
   const ws = crossws({
     bindingName,
     instanceName: baseInstanceName,
-    hooks: getTelefuncChannelHooks(options),
+    hooks: getTelefuncChannelHooks(),
   })
 
   function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
@@ -98,6 +98,7 @@ function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapte
 
   return {
     handleTelefunc(request: Request, env: Cloudflare.Env, _ctx: ExecutionContext) {
+      setDefaultChannelTransport(CHANNEL_TRANSPORT.WS)
       const url = new URL(request.url)
       const telefuncUrl = getServerConfig().telefuncUrl
       if (!url.pathname.startsWith(telefuncUrl)) return undefined

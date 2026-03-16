@@ -18,7 +18,12 @@ const globalObject = getGlobalObject('wire-protocol/client/response/function.ts'
 const functionClientPlaceholderType: PlaceholderReviverType<FunctionContract> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
   createValue(metadata, context) {
-    const channel = new ClientChannel(metadata.channelId, /*ackMode=*/ true, context.shard)
+    const channel = new ClientChannel({
+      channelId: metadata.channelId,
+      ackMode: true,
+      channelTransport: metadata.channelTransport,
+      shard: context.shard,
+    })
     const fn = (...args: unknown[]) => channel.send(args, { ack: true })
     // fn is the weak target; channel is the held value — no cycle, no GC blocker
     globalObject.gcRegistry.register(fn, channel)

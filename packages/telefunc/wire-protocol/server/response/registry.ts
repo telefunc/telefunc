@@ -1,23 +1,37 @@
 export { serverStreamingTypes, createStreamingReplacer }
+export type { ServerResponseContext }
 
 import { asyncGeneratorServerType } from './async-generator.js'
 import { readableStreamServerType } from './readable-stream.js'
 import { promiseServerType } from './promise.js'
 import { channelServerPlaceholderType } from './channel.js'
 import { functionServerPlaceholderType } from './function.js'
-import type { ServerStreamingType, StreamingValueServer } from '../../streaming-types.js'
-import type { PlaceholderReplacerType } from '../../placeholder-types.js'
+import type { PlaceholderReplacerType, PlaceholderTypeContract } from '../../placeholder-types.js'
+import type { ServerStreamingType, StreamingTypeContract, StreamingValueServer } from '../../streaming-types.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { ServerChannel } from '../channel.js'
+import { DEFAULT_CHANNEL_TRANSPORT, type ChannelTransport } from '../../constants.js'
 assertIsNotBrowser()
 
-const serverStreamingTypes: ServerStreamingType[] = [
+type ResponseAbortableChannel = {
+  _setResponseAbort(abortResponse: (abortValue?: unknown) => void): void
+  abort(abortValue?: unknown): void
+}
+
+type ServerResponseContext = {
+  channelTransport: ChannelTransport
+  registerChannel(channel: ResponseAbortableChannel): void
+}
+
+const serverStreamingTypes: ServerStreamingType<StreamingTypeContract, ServerResponseContext>[] = [
   asyncGeneratorServerType,
   readableStreamServerType,
   promiseServerType,
 ]
 
-const serverPlaceholderTypes: PlaceholderReplacerType[] = [channelServerPlaceholderType, functionServerPlaceholderType]
+const serverPlaceholderTypes: PlaceholderReplacerType<PlaceholderTypeContract, ServerResponseContext>[] = [
+  channelServerPlaceholderType,
+  functionServerPlaceholderType,
+]
 
 /**
  * Creates a JSON-serializer replacer that detects streaming values and placeholder
@@ -30,16 +44,22 @@ const serverPlaceholderTypes: PlaceholderReplacerType[] = [channelServerPlacehol
  * client can deterministically reconstruct chunk readers without relying on
  * JSON traversal order.
  */
-function createStreamingReplacer() {
+function createStreamingReplacer(
+  channelTransport: ChannelTransport = DEFAULT_CHANNEL_TRANSPORT,
+  registerChannel: (channel: ResponseAbortableChannel) => void = () => {},
+) {
   const streamingValues: StreamingValueServer[] = []
-  const returnedChannels: ServerChannel[] = []
+  const context: ServerResponseContext = {
+    channelTransport,
+    registerChannel,
+  }
   let nextIndex = 0
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of serverStreamingTypes) {
       if (type.detect(value)) {
         const index = nextIndex++
         streamingValues.push({ createProducer: () => type.createProducer(value), index })
-        const pluginMeta = type.getMetadata(value)
+        const pluginMeta = type.getMetadata(value, context)
         return {
           replacement: type.prefix + serializer({ ...pluginMeta, __index: index }),
           resolved: true,
@@ -48,17 +68,13 @@ function createStreamingReplacer() {
     }
     for (const type of serverPlaceholderTypes) {
       if (type.detect(value)) {
-        if (ServerChannel.isServerChannel(value)) {
-          returnedChannels.push(value)
-        }
-        const pluginMeta = type.getMetadata(value)
         return {
-          replacement: type.prefix + serializer(pluginMeta),
+          replacement: type.prefix + serializer(type.getMetadata(value, context)),
           resolved: true,
         }
       }
     }
     return undefined
   }
-  return { replacer, streamingValues, returnedChannels }
+  return { replacer, streamingValues }
 }

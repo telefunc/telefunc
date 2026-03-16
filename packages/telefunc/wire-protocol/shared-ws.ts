@@ -1,5 +1,5 @@
 export { TAG, encode, decode, encodeCtrl }
-export type { CtrlMessage }
+export type { AckResultStatus, CtrlMessage, CtrlReconcile, CtrlReconciled }
 
 import { assert } from '../utils/assert.js'
 
@@ -67,6 +67,8 @@ type CtrlReconciled = {
   idleTimeout: number
   pingInterval: number
   clientReplayBuffer: number
+  sseFlushThrottle: number
+  ssePostIdleFlushDelay: number
 }
 type CtrlMessage =
   | CtrlClose
@@ -79,14 +81,46 @@ type CtrlMessage =
   | CtrlReconcile
   | CtrlReconciled
 
+type AckResultStatus = 'ok' | 'error' | 'abort'
+
 // ===== Decoded frame =====
 
 type DecodedFrame =
   | { tag: typeof TAG.CTRL; ctrl: CtrlMessage }
   | { tag: typeof TAG.TEXT; index: number; seq: number; text: string }
   | { tag: typeof TAG.BINARY; index: number; seq: number; data: Uint8Array }
-  | { tag: typeof TAG.ACK_RES; index: number; seq: number; ackedSeq: number; text: string }
+  | { tag: typeof TAG.ACK_RES; index: number; seq: number; ackedSeq: number; status: AckResultStatus; text: string }
   | { tag: typeof TAG.TEXT_ACK_REQ; index: number; seq: number; text: string }
+
+const ACK_RESULT_STATUS = {
+  ok: 0x00,
+  error: 0x01,
+  abort: 0x02,
+} as const
+
+function encodeAckResultStatus(status: AckResultStatus): number {
+  switch (status) {
+    case 'ok':
+      return ACK_RESULT_STATUS.ok
+    case 'error':
+      return ACK_RESULT_STATUS.error
+    case 'abort':
+      return ACK_RESULT_STATUS.abort
+  }
+}
+
+function decodeAckResultStatus(value: number): AckResultStatus {
+  switch (value) {
+    case ACK_RESULT_STATUS.ok:
+      return 'ok'
+    case ACK_RESULT_STATUS.error:
+      return 'error'
+    case ACK_RESULT_STATUS.abort:
+      return 'abort'
+    default:
+      assert(false, 'ACK_RES status is invalid')
+  }
+}
 
 // ===== Encode =====
 
@@ -130,23 +164,30 @@ const encode = {
     const frame = new Uint8Array(HEADER_DATA + payload.byteLength)
     writeDataHeader(frame, TAG.TEXT_ACK_REQ, index, seq)
     frame.set(payload, HEADER_DATA)
-    return frame as Uint8Array<ArrayBuffer>
+    return frame
   },
 
   /** Acknowledgement response frame.
-   *  Wire: [u8 TAG.ACK_RES][u16 LE index][u32 LE own_seq][u32 LE ack_seq][result bytes...]
+   *  Wire: [u8 TAG.ACK_RES][u16 LE index][u32 LE own_seq][u32 LE ack_seq][u8 status][result bytes...]
    *  `ownSeq`  — this frame's own replay sequence number.
    *  `ackedSeq` — the seq of the TEXT_ACK_REQ frame being acknowledged. */
-  ackRes(index: number, ownSeq: number, ackedSeq: number, result: string): Uint8Array<ArrayBuffer> {
+  ackRes(
+    index: number,
+    ownSeq: number,
+    ackedSeq: number,
+    result: string,
+    status: AckResultStatus = 'ok',
+  ): Uint8Array<ArrayBuffer> {
     const payload = textEncoder.encode(result)
-    const frame = new Uint8Array(HEADER_DATA + 4 + payload.byteLength)
+    const frame = new Uint8Array(HEADER_DATA + 5 + payload.byteLength)
     writeDataHeader(frame, TAG.ACK_RES, index, ownSeq)
     frame[7] = ackedSeq & 0xff
     frame[8] = (ackedSeq >> 8) & 0xff
     frame[9] = (ackedSeq >> 16) & 0xff
     frame[10] = (ackedSeq >> 24) & 0xff
-    frame.set(payload, HEADER_DATA + 4)
-    return frame as Uint8Array<ArrayBuffer>
+    frame[11] = encodeAckResultStatus(status)
+    frame.set(payload, HEADER_DATA + 5)
+    return frame
   },
 }
 
@@ -177,13 +218,14 @@ function decode(frame: Uint8Array): DecodedFrame {
     return { tag: TAG.TEXT_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
   }
   if (tag === TAG.ACK_RES) {
-    assert(payload.length >= 4, 'ACK_RES frame payload too short')
+    assert(payload.length >= 5, 'ACK_RES frame payload too short')
     const ackedSeq =
       (payload[0] as number) |
       ((payload[1] as number) << 8) |
       ((payload[2] as number) << 16) |
       ((payload[3] as number) << 24)
-    return { tag: TAG.ACK_RES, index, seq, ackedSeq, text: textDecoder.decode(payload.subarray(4)) }
+    const status = decodeAckResultStatus(payload[4] as number)
+    return { tag: TAG.ACK_RES, index, seq, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
   }
   return { tag: TAG.BINARY, index, seq, data: payload }
 }

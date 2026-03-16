@@ -4,6 +4,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { parseResponse } from '../../wire-protocol/client/response/parse.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire-protocol/request-kind.js'
 import { throwAbortError, throwBugError } from './errors.js'
 import { ConnectionError } from '../ConnectionError.js'
 import { setShardInfo } from '../../wire-protocol/client/shard-registry.js'
@@ -32,16 +33,20 @@ async function makeHttpRequest(callContext: {
   abortController: AbortController
 }): Promise<unknown> {
   const isBinaryFrame = typeof callContext.httpRequestBody !== 'string'
+  const requestKind = isBinaryFrame ? REQUEST_KIND.BINARY : REQUEST_KIND.TEXT
+  const requestUrl = getMarkedRequestUrl(callContext.telefuncUrl, requestKind)
   const contentType = isBinaryFrame ? { 'Content-Type': 'application/octet-stream' } : { 'Content-Type': 'text/plain' }
+  const requestKindHeader = { [REQUEST_KIND_HEADER]: requestKind }
   let response: Response
   try {
     const fetch = callContext.fetch ?? window.fetch
-    response = await fetch(callContext.telefuncUrl, {
+    response = await fetch(requestUrl, {
       method,
       body: callContext.httpRequestBody,
       credentials: 'same-origin',
       headers: {
         ...contentType,
+        ...requestKindHeader,
         ...callContext.headers,
       },
       signal: callContext.abortController.signal,

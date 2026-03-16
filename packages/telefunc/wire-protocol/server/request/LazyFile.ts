@@ -92,15 +92,17 @@ class LazyBlob extends BaseStreamBlob {
   stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
     assertUsage(!this.#consumed, 'Stream has already been consumed. Each streaming Blob/File can only be read once.')
     this.#consumed = true
-    let inner: ReadableStreamDefaultReader<Uint8Array>
+    let inner: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
     return new ReadableStream<Uint8Array<ArrayBuffer>>({
       start: async () => {
-        inner = (await this.#reader.consumeFile(this.#index, this.size)).getReader()
+        inner = (await this.#reader.consumeFile(this.#index, this.size)).getReader() as ReadableStreamDefaultReader<
+          Uint8Array<ArrayBuffer>
+        >
       },
       pull: async (controller) => {
         const { done, value } = await inner.read()
         if (done) controller.close()
-        else controller.enqueue(value as Uint8Array<ArrayBuffer>)
+        else controller.enqueue(value)
       },
       cancel: async () => {
         await inner?.cancel()
@@ -126,7 +128,7 @@ class SlicedBlob extends BaseStreamBlob {
   }
 
   stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
-    let parentReader: ReadableStreamDefaultReader<Uint8Array>
+    let parentReader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
     let pos = 0
     const start = this.#start
     const end = start + this.size
@@ -144,7 +146,7 @@ class SlicedBlob extends BaseStreamBlob {
         const to = Math.min(end - pos, value.byteLength)
         pos += value.byteLength
         if (to > from) {
-          controller.enqueue(value.subarray(from, to) as Uint8Array<ArrayBuffer>)
+          controller.enqueue(value.subarray(from, to))
         }
         if (pos >= end) {
           controller.close()

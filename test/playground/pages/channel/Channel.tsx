@@ -11,6 +11,8 @@ import {
   onChannelClientAbortInstrument,
   onChannelMulti,
   onChannelAckListenerAbort,
+  onChannelAckListenerBug,
+  onChannelClientAckListenerBug,
   onChannelServerPendingAckAbort,
   onChannelAbortThenSend,
   onChannelPendingAckAbort,
@@ -61,6 +63,9 @@ type ChannelState = {
   clientAbortServerOnOpenFired: boolean | null
   earlyCloseChannelId: string | null
   ackListenerAbortErr: { isAbort: boolean; abortValue: unknown } | null
+  ackListenerBugErr: string | null
+  ackListenerBugRecoveryAck: string | null
+  clientAckListenerBugChannelId: string | null
   serverPendingAckAbortChannelId: string | null
   abortThenSendChannelId: string | null
   pendingAckAbortChannelId: string | null
@@ -99,6 +104,9 @@ const initialState: ChannelState = {
   clientAbortServerOnOpenFired: null,
   earlyCloseChannelId: null,
   ackListenerAbortErr: null,
+  ackListenerBugErr: null,
+  ackListenerBugRecoveryAck: null,
+  clientAckListenerBugChannelId: null,
   serverPendingAckAbortChannelId: null,
   abortThenSendChannelId: null,
   pendingAckAbortChannelId: null,
@@ -138,6 +146,10 @@ function ChannelDemo() {
   const ackListenerAbortChannelRef = useRef<Awaited<ReturnType<typeof onChannelAckListenerAbort>>['channel'] | null>(
     null,
   )
+  const ackListenerBugChannelRef = useRef<Awaited<ReturnType<typeof onChannelAckListenerBug>>['channel'] | null>(null)
+  const clientAckListenerBugChannelRef = useRef<
+    Awaited<ReturnType<typeof onChannelClientAckListenerBug>>['channel'] | null
+  >(null)
   const serverPendingAckAbortChannelRef = useRef<
     Awaited<ReturnType<typeof onChannelServerPendingAckAbort>>['channel'] | null
   >(null)
@@ -171,6 +183,8 @@ function ChannelDemo() {
       multiCh2Ref.current?.close()
       clientAbortServerChannelRef.current?.close()
       ackListenerAbortChannelRef.current?.close()
+      ackListenerBugChannelRef.current?.close()
+      clientAckListenerBugChannelRef.current?.close()
       serverPendingAckAbortChannelRef.current?.close()
       abortThenSendChannelRef.current?.close()
       pendingAckAbortChannelRef.current?.close()
@@ -218,10 +232,15 @@ function ChannelDemo() {
       if (msg.type === 'echo') setChannelState((s) => ({ ...s, lastEchoText: msg.text }))
       return `client-ack:${msg.type}`
     })
-    const ack = await channel.send({ type: 'ping' })
-    addLog('out', JSON.stringify({ type: 'ping' }))
-    addLog('system', `ack from server: ${JSON.stringify(ack)}`)
-    setChannelState((s) => ({ ...s, pingAck: ack as string }))
+    try {
+      const ack = await channel.send({ type: 'ping' })
+      addLog('out', JSON.stringify({ type: 'ping' }))
+      addLog('system', `ack from server: ${JSON.stringify(ack)}`)
+      setChannelState((s) => ({ ...s, pingAck: ack as string }))
+    } catch (err: any) {
+      if (channel.isClosed && err?.name === 'ChannelClosedError') return
+      throw err
+    }
   }, [addLog])
 
   const disconnect = useCallback(() => {
@@ -439,6 +458,38 @@ function ChannelDemo() {
     }
   }, [addLog])
 
+  const testAckListenerBug = useCallback(async () => {
+    addLog('system', 'Starting ack-listener-bug test...')
+    const { channel } = await onChannelAckListenerBug()
+    ackListenerBugChannelRef.current = channel
+    try {
+      await channel.send('bug', { ack: true })
+      addLog('system', 'ack-listener-bug: send() unexpectedly resolved')
+    } catch (err: any) {
+      addLog('system', `ack-listener-bug: send() rejected — ${err?.message ?? err?.name ?? 'unknown'}`)
+      setChannelState((s) => ({ ...s, ackListenerBugErr: err?.message ?? err?.name ?? 'unknown' }))
+    }
+    const followupAck = await channel.send('ok', { ack: true })
+    addLog('system', `ack-listener-bug follow-up ack: ${JSON.stringify(followupAck)}`)
+    setChannelState((s) => ({ ...s, ackListenerBugRecoveryAck: String(followupAck) }))
+    channel.close()
+    ackListenerBugChannelRef.current = null
+  }, [addLog])
+
+  const testClientAckListenerBug = useCallback(async () => {
+    addLog('system', 'Starting client-ack-listener-bug test...')
+    const { channel, channelId } = await onChannelClientAckListenerBug()
+    clientAckListenerBugChannelRef.current = channel
+    setChannelState((s) => ({ ...s, clientAckListenerBugChannelId: channelId }))
+    channel.listen((msg) => {
+      if (msg === 'bug') throw new Error('client-listener-bug')
+      return `client-ack:${msg}`
+    })
+    channel.onClose(() => {
+      clientAckListenerBugChannelRef.current = null
+    })
+  }, [addLog])
+
   const testServerPendingAckAbort = useCallback(async () => {
     addLog('system', 'Starting server-pending-ack-abort test...')
     const { channel, channelId } = await onChannelServerPendingAckAbort()
@@ -638,6 +689,22 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-fuchsia-600 text-white hover:bg-fuchsia-700"
           >
             Test Ack Listener Abort
+          </button>
+          <button
+            id="channel-test-ack-listener-bug"
+            type="button"
+            onClick={testAckListenerBug}
+            className="px-3 py-1.5 text-sm rounded bg-fuchsia-500 text-white hover:bg-fuchsia-600"
+          >
+            Test Ack Listener Bug
+          </button>
+          <button
+            id="channel-test-client-ack-listener-bug"
+            type="button"
+            onClick={testClientAckListenerBug}
+            className="px-3 py-1.5 text-sm rounded bg-violet-500 text-white hover:bg-violet-600"
+          >
+            Test Client Ack Listener Bug
           </button>
           <button
             id="channel-test-server-pending-ack-abort"

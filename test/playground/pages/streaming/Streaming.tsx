@@ -42,8 +42,7 @@ function Streaming() {
       <button
         id="test-readable-stream"
         onClick={async () => {
-          const stream = await onReturnReadableStream()
-          const reader = stream.getReader()
+          const reader = (await onReturnReadableStream()).getReader()
           const chunks: string[] = []
           const decoder = new TextDecoder()
           while (true) {
@@ -588,7 +587,6 @@ function Streaming() {
             })(),
             channelCloseP,
           ])
-
           setResult(
             JSON.stringify({
               firstValues,

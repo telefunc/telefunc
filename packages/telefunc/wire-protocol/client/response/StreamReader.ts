@@ -6,13 +6,13 @@ import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.j
 
 const EMPTY = new Uint8Array(0)
 
-/** Buffered reader for the HTTP response body stream (`'stream'` transport).
+/** Buffered reader for the inline binary HTTP response body (`'binary-inline'` transport).
  *
  *  readExact: read N bytes (low-level byte I/O with buffering).
  *  readU32 + readNextFrame: inherited from BaseStreamReader. */
 class StreamReader extends BaseStreamReader {
-  private reader: ReadableStreamDefaultReader<Uint8Array>
-  private buffer: Uint8Array = EMPTY
+  private reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
+  private buffer: Uint8Array<ArrayBuffer> = EMPTY
 
   constructor(
     reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -23,7 +23,7 @@ class StreamReader extends BaseStreamReader {
     },
   ) {
     super(callContext)
-    this.reader = reader
+    this.reader = reader as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
 
     // When the fetch is aborted, cancel the reader first to prevent the browser
     // from generating a spurious unhandled "BodyStreamBuffer was aborted" rejection.
@@ -35,10 +35,10 @@ class StreamReader extends BaseStreamReader {
     this.reader.cancel()
   }
 
-  async readExact(n: number): Promise<Uint8Array> {
+  async readExact(n: number): Promise<Uint8Array<ArrayBuffer>> {
     while (this.buffer.length < n) {
       let done: boolean
-      let value: Uint8Array | undefined
+      let value: Uint8Array<ArrayBuffer> | undefined
       let readError: unknown
       try {
         ;({ done, value } = await this.reader.read())

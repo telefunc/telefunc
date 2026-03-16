@@ -48,7 +48,7 @@ function testClose() {
 
   // ── Targeted: channel ────────────────────────────────────────────────
 
-  test('close: channel — close(channel) fires clean onClose on client; server sees no-client TTL timeout', async () => {
+  test('close: channel — close(channel) fires clean onClose on client and server, even before channel acknowledgement', async () => {
     await page.goto(`${getServerUrl()}/close`)
     await waitForHydration()
     await resetCleanupState()
@@ -62,10 +62,7 @@ function testClose() {
     })
     await autoRetry(async () => {
       const state = await getCleanupState()
-      // Server channel never got a client connection (WS not yet connected when close() was called) → TTL timeout
-      expect(state.closeChannel_onCloseErr).toBe(
-        'Channel timed out: no client connected within TTL after response was sent',
-      )
+      expect(state.closeChannel_onCloseErr).toBe('none')
     })
   })
 

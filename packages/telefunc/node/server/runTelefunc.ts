@@ -28,7 +28,7 @@ import {
   STATUS_BODY_MALFORMED_REQUEST,
   STATUS_CODE_SUCCESS,
 } from '../../shared/constants.js'
-import { TRANSPORT } from '../../wire-protocol/constants.js'
+import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
 import { createRequestContext } from './requestContext.js'
 
 type StreamWritableWeb = WritableStream
@@ -263,11 +263,7 @@ async function runTelefunc_({
     const serverConfig = getServerConfig()
     objectAssign(runContext, {
       request,
-      serverConfig: {
-        disableNamingConvention: serverConfig.disableNamingConvention,
-        telefuncUrl: serverConfig.telefuncUrl,
-        log: serverConfig.log,
-      },
+      serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,
     })
@@ -286,13 +282,18 @@ async function runTelefunc_({
     if (parsed.isMalformedRequest) {
       return createHttpResponse({ ...malformedRequest })
     }
-    const { telefunctionKey, telefunctionArgs, telefuncFilePath, telefunctionName, transport } = parsed
+    if (parsed.isSseRequest) {
+      return createHttpResponse(parsed.sseResponse)
+    }
+    const { telefunctionKey, telefunctionArgs, telefuncFilePath, telefunctionName, streamTransport, channelTransport } =
+      parsed
     objectAssign(runContext, {
       telefunctionKey,
       telefunctionArgs,
       telefuncFilePath,
       telefunctionName,
-      transport,
+      streamTransport,
+      channelTransport,
     })
   }
 
@@ -345,7 +346,8 @@ async function runTelefunc_({
     const result = serializeTelefunctionResult(runContext)
 
     if (result.type === 'streaming') {
-      const contentType = result.transport === TRANSPORT.SSE ? 'text/event-stream' : 'application/octet-stream'
+      const contentType =
+        result.streamTransport === STREAM_TRANSPORT.SSE_INLINE ? 'text/event-stream' : 'application/octet-stream'
       return createHttpResponse({
         statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
         contentType,

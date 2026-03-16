@@ -4,10 +4,13 @@ export type {
   BlobRequestContract,
   FileMetadata,
   BlobMetadata,
+  ClientRequestContext,
   ClientRequestType,
   ServerRequestType,
   RequestBodyReader,
 }
+
+import type { ChannelTransport } from './constants.js'
 
 type FileMetadata = { index: number; name: string; size: number; type: string; lastModified: number }
 type BlobMetadata = { index: number; size: number; type: string }
@@ -30,12 +33,16 @@ type RequestTypeContract<V = unknown, R = unknown, M extends Record<string, unkn
   metadata: M
 }
 
+type ClientRequestContext = {
+  channelTransport: ChannelTransport
+  registerFile(body: Blob): number
+}
+
 /** Client-side plugin: detect a value, extract metadata + blob body for the binary request frame. */
 type ClientRequestType<C extends RequestTypeContract = RequestTypeContract> = {
   prefix: string
   detect(value: unknown): value is C['value']
-  getMetadata(value: C['value'], index: number): C['metadata']
-  getBody(value: C['value']): Blob
+  getMetadata(value: C['value'], context: ClientRequestContext): C['metadata']
 }
 
 /** Server-side plugin: reconstruct a live value from metadata + body reader. */

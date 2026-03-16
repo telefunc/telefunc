@@ -33,18 +33,18 @@ type StreamingValueServer = {
  *  The cancel function is critical for ReadableStream: gen.return() alone can't
  *  interrupt a suspended reader.read() — reader.cancel() resolves it immediately. */
 type StreamingProducer = {
-  chunks: AsyncIterator<Uint8Array>
+  chunks: AsyncIterator<Uint8Array<ArrayBuffer>>
   /** Immediately cancel the underlying resource (e.g., reader.cancel()).
    *  Called by the framework on abort/disconnect. */
   cancel: () => void
 }
 
 /** Server-side plugin: how to detect, serialize metadata, and encode chunks for a streaming type. */
-type ServerStreamingType<C extends StreamingTypeContract = StreamingTypeContract> = {
+type ServerStreamingType<C extends StreamingTypeContract, Context> = {
   prefix: string
   detect(value: unknown): value is C['value']
   /** Return plugin-specific metadata */
-  getMetadata(value: C['value']): C['metadata']
+  getMetadata(value: C['value'], context: Context): C['metadata']
   /** Create a producer for the given value. Returns an async iterable of chunk payloads
    *  and a cancel function for immediate cleanup.
    *
@@ -66,7 +66,7 @@ type ClientStreamingType<C extends StreamingTypeContract = StreamingTypeContract
   prefix: string
   createValue(
     metadata: C['metadata'],
-    readNextChunk: () => Promise<Uint8Array | null>,
+    readNextChunk: () => Promise<Uint8Array<ArrayBuffer> | null>,
     cancel: () => void,
   ): ClientRevivedValue<C['result']>
 }
@@ -75,8 +75,8 @@ type ClientStreamingType<C extends StreamingTypeContract = StreamingTypeContract
 
 type AsyncGeneratorContract = StreamingTypeContract<AsyncGenerator<unknown>, AsyncGenerator<unknown>, StreamingMetadata>
 type ReadableStreamContract = StreamingTypeContract<
-  ReadableStream<Uint8Array>,
-  ReadableStream<Uint8Array>,
+  ReadableStream<Uint8Array<ArrayBuffer>>,
+  ReadableStream<Uint8Array<ArrayBuffer>>,
   StreamingMetadata
 >
 type PromiseContract = StreamingTypeContract<Promise<unknown>, Promise<unknown>, StreamingMetadata>

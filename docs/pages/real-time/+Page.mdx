@@ -8,7 +8,7 @@ In production, install <Link text={<code>telefuncWebSocket()</code>} href="/tele
 
 - Use function passing for short-lived callback-style interactions such as progress updates.
 - Use <Link text={<code>createChannel()</code>} href="/createChannel" /> when both sides keep sending messages over time.
-- Use <Link href="/transport">WebSocket transport</Link> only when you want <Link href="/stream">streamed values</Link> over WebSocket instead of HTTP.
+- Use <Link href="/transport">`config.stream.transport = 'channel'`</Link> when you want <Link href="/stream">streamed values</Link> to use the same transport as Telefunc channels.
 
 ## Function passing
 
@@ -145,9 +145,9 @@ If the connection briefly drops, Telefunc reconnects automatically and attempts 
 
 ## Setup
 
-For production setup details, see <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
+For production setup details for the WebSocket backend, see <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
 
-All channels — and <Link href="/stream">streamed values</Link> when using <Link href="/transport">WebSocket transport</Link> — share a single multiplexed WebSocket connection per server URL.
+When the channel backend resolves to `'ws'` (either because you set `config.channel.transport = 'ws'` or because <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> is installed and `config.channel.transport` is unset), all channels — and <Link href="/stream">streamed values</Link> when using <Link href="/transport">`config.stream.transport = 'channel'`</Link> — share a single multiplexed WebSocket connection per server URL.
 
 ## See also
 

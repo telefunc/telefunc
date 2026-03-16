@@ -17,7 +17,7 @@ import { unrefTimer } from '../utils/unrefTimer.js'
 export class ReplayBuffer {
   // Parallel arrays — seqs separate for cache-friendly access
   #seqs: number[] = []
-  #frames: (Uint8Array | null)[] = []
+  #frames: (Uint8Array<ArrayBuffer> | null)[] = []
   #times: number[] = []
   #head = 0
   #totalBytes = 0
@@ -47,7 +47,7 @@ export class ReplayBuffer {
    * Convenience wrapper: advance the internal seq and push the frame.
    * Equivalent to `push(buf.nextSeq(), frame)`.
    */
-  pushFrame(frame: Uint8Array): boolean {
+  pushFrame(frame: Uint8Array<ArrayBuffer>): boolean {
     return this.push(this.nextSeq(), frame)
   }
 
@@ -56,7 +56,7 @@ export class ReplayBuffer {
    * Oversized frames are stored as a `null` gap marker so `getAfter` stops there.
    * @returns `true` if the frame was stored, `false` if it was too large.
    */
-  push(seq: number, frame: Uint8Array): boolean {
+  push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
     const now = Date.now()
     if (seq > this.#seq) this.#seq = seq
 
@@ -80,7 +80,7 @@ export class ReplayBuffer {
   }
 
   /** Get all frames with seq > afterSeq, stopping at the first gap. */
-  getAfter(afterSeq: number): Uint8Array[] {
+  getAfter(afterSeq: number): Uint8Array<ArrayBuffer>[] {
     const len = this.#frames.length
     let lo = this.#head
 
@@ -94,7 +94,7 @@ export class ReplayBuffer {
     let hi = lo + 1
     while (hi < len && this.#frames[hi] !== null) hi++
 
-    return this.#frames.slice(lo, hi) as Uint8Array[]
+    return this.#frames.slice(lo, hi) as Uint8Array<ArrayBuffer>[]
   }
 
   /**
