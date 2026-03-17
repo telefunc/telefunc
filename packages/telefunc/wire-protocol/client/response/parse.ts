@@ -147,10 +147,10 @@ function finalizeResponse(
 /** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
  *  Best-effort backpressure: stops reading when an idle consumer's buffer hits
- *  MAX_BUFFER_PER_INDEX, resumes when drained. Active consumers (registered as
+ *  MAX_BUFFER_BYTES_PER_INDEX, resumes when drained. Active consumers (registered as
  *  waiters) receive frames via direct dispatch — zero buffering, zero delay.
  *
- *  Note: an index's buffer may briefly exceed MAX_BUFFER_PER_INDEX. This happens when
+ *  Note: an index's buffer may briefly exceed MAX_BUFFER_BYTES_PER_INDEX. This happens when
  *  another consumer's drain restarts the read loop, and the next frame on the wire
  *  is for the already-full index. Each restart adds at most 1 frame of overshoot.
  *  This is the unavoidable cost of multiplexing over a single stream — we can't
