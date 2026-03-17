@@ -13,7 +13,7 @@ import { buildChannelResponseBody } from '../../../wire-protocol/server/response
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { injectFrameChannel } from '../../../wire-protocol/frame-channel.js'
 import { STREAM_TRANSPORT, type ChannelTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
-import type { TelefuncIdentifier, TelefuncResponseBody } from '../../../shared/constants.js'
+import type { TelefuncIdentifier } from '../../../shared/constants.js'
 import type { RequestContext } from '../requestContext.js'
 import type { Telefunc } from '../getContext.js'
 
@@ -108,4 +108,17 @@ function serializeTelefunctionResult(runContext: {
     ),
     streamTransport: runContext.streamTransport,
   }
+}
+
+// ===== Response body (JSON path + streaming metadata) =====
+/** Wire format of the JSON response body / streaming metadata. */
+type TelefuncResponseBody = TelefuncResponseBodySuccess | TelefuncResponseBodyAbort
+/** Successful telefunction return value. */
+type TelefuncResponseBodySuccess = {
+  ret: unknown
+}
+/** Aborted telefunction return value. */
+type TelefuncResponseBodyAbort = {
+  ret: unknown
+  abort: true
 }
