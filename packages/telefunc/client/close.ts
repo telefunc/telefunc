@@ -1,7 +1,7 @@
 export { close, setCloseHandlers, getCloseHandlers }
 
 import { assertUsage } from '../utils/assert.js'
-import { isObjectOrFunction } from '../utils/isObject.js'
+import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
 
 const CLOSE_HANDLERS = Symbol.for('telefuncCloseHandlers')
 
