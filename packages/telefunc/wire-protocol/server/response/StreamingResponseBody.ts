@@ -12,7 +12,7 @@ import {
   validateTelefunctionError,
 } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import type { ResponseAbortSource } from '../../../node/server/requestContext.js'
-import type { TelefuncIdentifier } from '../../../shared/constants.js'
+import type { TelefuncIdentifier } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { uint8ArrayToBase64url } from '../../base64url.js'
 
 const EMPTY = new Uint8Array(0)

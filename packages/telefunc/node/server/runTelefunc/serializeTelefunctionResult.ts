@@ -1,4 +1,5 @@
 export { serializeTelefunctionResult }
+export type { TelefuncIdentifier }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../../utils/assert.js'
@@ -13,9 +14,13 @@ import { buildChannelResponseBody } from '../../../wire-protocol/server/response
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { injectFrameChannel } from '../../../wire-protocol/frame-channel.js'
 import { STREAM_TRANSPORT, type ChannelTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
-import type { TelefuncIdentifier } from '../../../shared/constants.js'
 import type { RequestContext } from '../requestContext.js'
 import type { Telefunc } from '../getContext.js'
+
+type TelefuncIdentifier = {
+  telefunctionName: string
+  telefuncFilePath: string
+}
 
 type SerializeResult =
   | { type: 'text'; body: string }
@@ -109,8 +114,6 @@ function serializeTelefunctionResult(runContext: {
     streamTransport: runContext.streamTransport,
   }
 }
-
-// TODO/ai move `export type TelefuncIdentifier` here
 
 // ===== Response body (JSON path + streaming metadata) =====
 /** Wire format of the JSON response body / streaming metadata. */

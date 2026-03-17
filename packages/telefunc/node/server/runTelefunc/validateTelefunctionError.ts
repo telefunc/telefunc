@@ -1,7 +1,7 @@
 export { validateTelefunctionError }
 export { handleTelefunctionBug }
 
-import type { TelefuncIdentifier } from '../../../shared/constants.js'
+import type { TelefuncIdentifier } from './serializeTelefunctionResult.js'
 import { Abort } from '../Abort.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { callBugListeners } from './onBug.js'

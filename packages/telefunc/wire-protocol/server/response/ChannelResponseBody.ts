@@ -2,7 +2,7 @@ export { buildChannelResponseBody }
 
 import type { StreamingValueServer } from '../../streaming-types.js'
 import { generateResponseBody } from './StreamingResponseBody.js'
-import type { TelefuncIdentifier } from '../../../shared/constants.js'
+import type { TelefuncIdentifier } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { ChannelClosedError, type ServerChannel } from '../channel.js'
 import { restoreContext, Telefunc } from '../../../node/server/getContext.js'
 import { RequestContext, restoreRequestContext } from '../../../node/server/requestContext.js'
