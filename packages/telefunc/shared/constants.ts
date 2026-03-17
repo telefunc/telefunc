@@ -16,12 +16,12 @@ export type TelefuncIdentifier = {
 // ===== Response body (JSON path + streaming metadata) =====
 
 /** Successful telefunction return value. */
-export type TelefuncResponseBodySuccess = {
+type TelefuncResponseBodySuccess = {
   ret: unknown
 }
 
 /** Aborted telefunction return value. */
-export type TelefuncResponseBodyAbort = {
+type TelefuncResponseBodyAbort = {
   ret: unknown
   abort: true
 }
