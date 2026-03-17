@@ -26,11 +26,13 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
   }
 
   if (callContext.stream?.transport) {
-    dataMain.stream = { transport: callContext.stream.transport }
+    const { transport } = callContext.stream
+    dataMain.stream = { transport }
   }
 
   if (callContext.channel?.transport) {
-    dataMain.channel = { transport: callContext.channel.transport }
+    const { transport } = callContext.channel
+    dataMain.channel = { transport }
   }
 
   const { replacer, files } = createRequestReplacer(getChannelTransport(callContext))
