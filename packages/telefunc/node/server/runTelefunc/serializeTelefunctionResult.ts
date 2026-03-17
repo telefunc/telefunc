@@ -110,6 +110,8 @@ function serializeTelefunctionResult(runContext: {
   }
 }
 
+// TODO/ai move `export type TelefuncIdentifier` here
+
 // ===== Response body (JSON path + streaming metadata) =====
 /** Wire format of the JSON response body / streaming metadata. */
 type TelefuncResponseBody = TelefuncResponseBodySuccess | TelefuncResponseBodyAbort
