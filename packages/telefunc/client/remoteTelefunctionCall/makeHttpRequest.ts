@@ -8,7 +8,6 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wi
 import { throwAbortError, throwBugError } from './errors.js'
 import { ConnectionError } from '../ConnectionError.js'
 import { setShardInfo } from '../../wire-protocol/client/shard-registry.js'
-import { assertWarning } from '../../utils/assert.js'
 import {
   STATUS_CODE_SUCCESS,
   STATUS_CODE_THROW_ABORT,
