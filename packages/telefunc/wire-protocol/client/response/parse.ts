@@ -1,4 +1,4 @@
-export { parseResponse, FrameDemuxer }
+export { parseResponse }
 export { BaseStreamReader } from './BaseStreamReader.js'
 
 import { parse } from '@brillout/json-serializer/parse'
