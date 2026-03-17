@@ -8,6 +8,8 @@ const DEFAULT_ABORT_MESSAGE = 'Aborted'
 class AbortError extends Error {
   readonly abortValue: unknown
   readonly [abortBrand] = true as const
+  // TO-DO/eventually deprecate this in favor of `instanceof Abort` — can we rename `class AbortError` to `class Abort`?
+  readonly isAbort = true as const
 
   constructor(abortValue?: unknown, message?: string) {
     super(message ?? getAbortMessage(abortValue))
