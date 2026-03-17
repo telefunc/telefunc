@@ -2,7 +2,7 @@ export { buildChannelResponseBody }
 
 import type { StreamingValueServer } from '../../streaming-types.js'
 import { generateResponseBody } from './StreamingResponseBody.js'
-import type { TelefuncIdentifier } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
+import type { TelefuncId } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { ChannelClosedError, type ServerChannel } from '../channel.js'
 import { restoreContext, Telefunc } from '../../../node/server/getContext.js'
 import { RequestContext, restoreRequestContext } from '../../../node/server/requestContext.js'
@@ -19,7 +19,7 @@ type FrameChannel = Pick<ServerChannel, 'onOpen' | 'onClose' | 'close' | '_sendB
  *  If the channel closes before the client connects, the pump exits cleanly. */
 function buildChannelResponseBody(
   streamingValues: StreamingValueServer[],
-  telefuncId: TelefuncIdentifier,
+  telefuncId: TelefuncId,
   channel: FrameChannel,
   runContext: {
     requestContext: RequestContext

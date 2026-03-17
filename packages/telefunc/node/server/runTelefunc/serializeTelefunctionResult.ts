@@ -1,5 +1,5 @@
 export { serializeTelefunctionResult }
-export type { TelefuncIdentifier }
+export type { TelefuncId }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../../utils/assert.js'
@@ -17,7 +17,7 @@ import { STREAM_TRANSPORT, type ChannelTransport, type StreamTransport } from '.
 import type { RequestContext } from '../requestContext.js'
 import type { Telefunc } from '../getContext.js'
 
-type TelefuncIdentifier = {
+type TelefuncId = {
   telefunctionName: string
   telefuncFilePath: string
 }
@@ -72,7 +72,7 @@ function serializeTelefunctionResult(runContext: {
     return { type: 'text', body: httpResponseBody }
   }
 
-  const telefuncId: TelefuncIdentifier = {
+  const telefuncId: TelefuncId = {
     telefunctionName: runContext.telefunctionName,
     telefuncFilePath: runContext.telefuncFilePath,
   }

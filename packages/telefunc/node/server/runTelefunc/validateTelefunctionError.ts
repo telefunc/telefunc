@@ -1,13 +1,13 @@
 export { validateTelefunctionError }
 export { handleTelefunctionBug }
 
-import type { TelefuncIdentifier } from './serializeTelefunctionResult.js'
+import type { TelefuncId } from './serializeTelefunctionResult.js'
 import { Abort } from '../Abort.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { callBugListeners } from './onBug.js'
 import { handleError } from './handleError.js'
 
-function validateTelefunctionError(err: unknown, telefuncId: TelefuncIdentifier): void {
+function validateTelefunctionError(err: unknown, telefuncId: TelefuncId): void {
   assertUsage(
     typeof err === 'object' && err !== null,
     `The telefunction ${telefuncId.telefunctionName}() (${telefuncId.telefuncFilePath}) threw a non-object error: \`${err}\`. Make sure the telefunction does \`throw new Error(${err})\` instead.`,

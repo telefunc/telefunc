@@ -12,7 +12,7 @@ import {
   validateTelefunctionError,
 } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import type { ResponseAbortSource } from '../../../node/server/requestContext.js'
-import type { TelefuncIdentifier } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
+import type { TelefuncId } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { uint8ArrayToBase64url } from '../../base64url.js'
 
 const EMPTY = new Uint8Array(0)
@@ -24,7 +24,7 @@ const EMPTY = new Uint8Array(0)
 function buildStreamingResponseBody(
   metadataSerialized: string,
   streamingValues: StreamingValueServer[],
-  telefuncId: TelefuncIdentifier,
+  telefuncId: TelefuncId,
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
   responseAbort: ResponseAbortSource,
@@ -47,7 +47,7 @@ function buildStreamingResponseBody(
 function buildSSEResponseBody(
   metadataSerialized: string,
   streamingValues: StreamingValueServer[],
-  telefuncId: TelefuncIdentifier,
+  telefuncId: TelefuncId,
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
   responseAbort: ResponseAbortSource,
@@ -69,7 +69,7 @@ function buildSSEResponseBody(
 function buildResponseBodyStream(
   metadataSerialized: string,
   streamingValues: StreamingValueServer[],
-  telefuncId: TelefuncIdentifier,
+  telefuncId: TelefuncId,
   onStreamComplete: () => void,
   abortSignal: AbortSignal,
   responseAbort: Pick<ResponseAbortSource, 'errorPromise'>,
@@ -141,7 +141,7 @@ function buildResponseBodyStream(
 async function* generateResponseBody(
   metadataSerialized: string,
   producerEntries: Array<{ producer: StreamingProducer; index: number }>,
-  telefuncId: TelefuncIdentifier,
+  telefuncId: TelefuncId,
   options?: { skipMetadata?: boolean; responseAbort?: Pick<ResponseAbortSource, 'errorPromise'> },
 ): AsyncGenerator<Uint8Array<ArrayBuffer>> {
   // Metadata header (skipped for WS transport — metadata is in the HTTP body)
@@ -216,7 +216,7 @@ async function* generateResponseBody(
 // ===== Frame encoding helpers =====
 
 /** Encode an error as an error frame: [ERROR_MARKER][u32 payload_len][payload_bytes] */
-function encodeErrorFrame(err: unknown, telefuncId: TelefuncIdentifier): Uint8Array<ArrayBuffer>[] {
+function encodeErrorFrame(err: unknown, telefuncId: TelefuncId): Uint8Array<ArrayBuffer>[] {
   validateTelefunctionError(err, telefuncId)
   let errorPayload: string
   if (isAbort(err)) {
