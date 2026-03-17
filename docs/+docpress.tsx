@@ -28,6 +28,8 @@ const config: Config = {
     indexName: 'telefunc',
   },
 
+  umamiId: 'd03d0873-19dc-42c4-a250-cf8500171a9e',
+
   topNavigation: <TopNavigation />,
   navMaxWidth: 950 + 20 * 2,
   navLogoSize: 36,
