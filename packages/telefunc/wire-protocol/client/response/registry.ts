@@ -1,5 +1,4 @@
-// TODO/ai The export clientStreamingTypes isn't used — this PR (git diff origin/main...HEAD) seem to have a lot of un-used export. Check each individually and remove all unused exports.
-export { clientStreamingTypes, createStreamingReviver }
+export { createStreamingReviver }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
 import { asyncGeneratorClientType } from './async-generator.js'
