@@ -30,15 +30,15 @@ function remoteTelefunctionCall(
   const clientConfig = resolveClientConfig()
   objectAssign(callContext, clientConfig)
 
-  const baseTelefuncUrl = clientConfig.telefuncUrl
-  objectAssign(callContext, { baseTelefuncUrl })
+  const telefuncUrlBase = clientConfig.telefuncUrl
+  objectAssign(callContext, { telefuncUrlBase })
 
-  const stickyShardForPost = getStickyShardForPost(baseTelefuncUrl)
+  const stickyShardForPost = getStickyShardForPost(telefuncUrlBase)
   if (stickyShardForPost) {
     objectAssign(callContext, {
-      telefuncUrl: baseTelefuncUrl.includes('?')
-        ? `${baseTelefuncUrl}&shard=${stickyShardForPost}`
-        : `${baseTelefuncUrl}?shard=${stickyShardForPost}`,
+      telefuncUrl: telefuncUrlBase.includes('?')
+        ? `${telefuncUrlBase}&shard=${stickyShardForPost}`
+        : `${telefuncUrlBase}?shard=${stickyShardForPost}`,
     })
   }
 

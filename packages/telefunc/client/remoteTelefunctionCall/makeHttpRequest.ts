@@ -23,7 +23,7 @@ const method = 'POST'
 
 async function makeHttpRequest(callContext: {
   telefuncUrl: string
-  baseTelefuncUrl: string
+  telefuncUrlBase: string
   httpRequestBody: string | Blob
   telefunctionName: string
   telefuncFilePath: string
@@ -63,7 +63,7 @@ async function makeHttpRequest(callContext: {
 
   // Always record shard + stickiness so channels can open to the right DO
   // and POST URLs can be pinned when the server opts in to sticky sharding.
-  if (shard) setShardInfo(callContext.baseTelefuncUrl, shard, sticky)
+  if (shard) setShardInfo(callContext.telefuncUrlBase, shard, sticky)
 
   if (statusCode === STATUS_CODE_SUCCESS) {
     const parsed = await parseResponse(response, callContext, shard)
