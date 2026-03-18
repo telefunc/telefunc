@@ -1,11 +1,12 @@
 export { close, setCloseHandlers, getCloseHandlers }
 
+import type { ChannelCloseResult } from '../wire-protocol/channel.js'
 import { assertUsage } from '../utils/assert.js'
 import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
 
 const CLOSE_HANDLERS = Symbol.for('telefuncCloseHandlers')
 
-type CloseHandlers = WeakMap<object, () => void>
+type CloseHandlers = WeakMap<object, () => void | Promise<ChannelCloseResult>>
 type WithCloseHandlers = { [CLOSE_HANDLERS]?: CloseHandlers }
 
 function setCloseHandlers(value: object, closeHandlers: CloseHandlers): void {
@@ -13,36 +14,49 @@ function setCloseHandlers(value: object, closeHandlers: CloseHandlers): void {
   p[CLOSE_HANDLERS] = closeHandlers
 }
 
-function close(value: object): void {
+async function close(value: object): Promise<void> {
   assertUsage(isObjectOrFunction(value), '`close()`: the argument must be a telefunc return value')
   const closeHandlers = getCloseHandlers(value)
   assertUsage(closeHandlers, '`close()`: the argument is not a closable telefunc return value')
-  const closedAny = closeRecursively(value, closeHandlers, new WeakSet<object>())
+  const closedAny = await closeRecursively(value, closeHandlers, new WeakSet<object>())
   assertUsage(closedAny, '`close()`: the argument is not a closable telefunc return value')
 }
 
-function closeRecursively(value: object, closeHandlers: CloseHandlers, seen: WeakSet<object>): boolean {
+async function closeRecursively(value: object, closeHandlers: CloseHandlers, seen: WeakSet<object>): Promise<boolean> {
   if (seen.has(value)) return false
   seen.add(value)
 
   let closedAny = false
+  const pending: Promise<void>[] = []
   const closeHandler = closeHandlers.get(value)
   if (closeHandler) {
-    closeHandler()
+    pending.push(Promise.resolve(closeHandler()).then(() => undefined))
     closedAny = true
   }
 
   if (Array.isArray(value)) {
     for (const item of value) {
-      if (isObjectOrFunction(item) && closeRecursively(item, closeHandlers, seen)) closedAny = true
+      if (!isObjectOrFunction(item)) continue
+      pending.push(
+        closeRecursively(item, closeHandlers, seen).then((didClose) => {
+          if (didClose) closedAny = true
+        }),
+      )
     }
+    await Promise.all(pending)
     return closedAny
   }
 
   for (const item of Object.values(value)) {
-    if (isObjectOrFunction(item) && closeRecursively(item, closeHandlers, seen)) closedAny = true
+    if (!isObjectOrFunction(item)) continue
+    pending.push(
+      closeRecursively(item, closeHandlers, seen).then((didClose) => {
+        if (didClose) closedAny = true
+      }),
+    )
   }
 
+  await Promise.all(pending)
   return closedAny
 }
 

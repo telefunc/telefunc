@@ -1,4 +1,14 @@
-export type { Channel, ChannelClient, ChannelData, ChannelAck, ChannelListenReturn, ChannelListener }
+export type {
+  Channel,
+  ChannelClient,
+  ChannelCloseCallback,
+  ChannelCloseOptions,
+  ChannelCloseResult,
+  ChannelData,
+  ChannelAck,
+  ChannelListenReturn,
+  ChannelListener,
+}
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
@@ -8,6 +18,11 @@ type ChannelListenReturn<T> = [T] extends [never]
     ? Awaited<R> | Promise<Awaited<R>>
     : unknown | Promise<unknown> | void
 type ChannelListener<T> = (data: ChannelData<T>) => ChannelListenReturn<T>
+type ChannelCloseOptions = {
+  timeout?: number
+}
+type ChannelCloseResult = 0 | 1
+type ChannelCloseCallback = (err?: Error) => void | Promise<void>
 
 /**
  * Internal base — `TOut` is what this side sends, `TIn` is what this side receives.
@@ -27,9 +42,9 @@ interface ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = 
   /** Receive messages. Return a value to ack the sender. */
   listen(callback: ChannelListener<TIn>): void
   listenBinary(callback: (data: Uint8Array) => void): void
-  onClose(callback: (err?: Error) => void): void
+  onClose(callback: ChannelCloseCallback): void
   onOpen(callback: () => void): void
-  close(): void
+  close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
 }
 
 /** Server-side channel. `ServerToClient` = messages the server sends; `ClientToServer` = messages the server receives. */

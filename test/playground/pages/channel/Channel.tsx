@@ -17,6 +17,7 @@ import {
   onChannelAbortThenSend,
   onChannelPendingAckAbort,
   onChannelClientAbortThenSend,
+  onChannelClientPendingAckCloseReconnect,
   onChannelClientPendingAckClose,
   onChannelUpstreamReconnect,
 } from './Channel.telefunc'
@@ -71,6 +72,9 @@ type ChannelState = {
   pendingAckAbortChannelId: string | null
   clientAbortThenSendErr: string | null
   clientPendingAckCloseErr: string | null
+  clientPendingAckCloseReconnectChannelId: string | null
+  clientPendingAckCloseReconnectOnOpenFired: boolean | null
+  clientPendingAckCloseReconnectErr: string | null
   /** Channel ID for the upstream reconnect test channel. */
   upstreamReconnectChannelId: string | null
 }
@@ -112,6 +116,9 @@ const initialState: ChannelState = {
   pendingAckAbortChannelId: null,
   clientAbortThenSendErr: null,
   clientPendingAckCloseErr: null,
+  clientPendingAckCloseReconnectChannelId: null,
+  clientPendingAckCloseReconnectOnOpenFired: null,
+  clientPendingAckCloseReconnectErr: null,
   upstreamReconnectChannelId: null,
 }
 
@@ -161,6 +168,9 @@ function ChannelDemo() {
   const clientPendingAckCloseChannelRef = useRef<
     Awaited<ReturnType<typeof onChannelClientPendingAckClose>>['channel'] | null
   >(null)
+  const clientPendingAckCloseReconnectChannelRef = useRef<
+    Awaited<ReturnType<typeof onChannelClientPendingAckCloseReconnect>>['channel'] | null
+  >(null)
   const upstreamReconnectChannelRef = useRef<Awaited<ReturnType<typeof onChannelUpstreamReconnect>>['channel'] | null>(
     null,
   )
@@ -190,6 +200,7 @@ function ChannelDemo() {
       pendingAckAbortChannelRef.current?.close()
       clientAbortThenSendChannelRef.current?.close()
       clientPendingAckCloseChannelRef.current?.close()
+      clientPendingAckCloseReconnectChannelRef.current?.close()
       upstreamReconnectChannelRef.current?.close()
     }
   }, [])
@@ -555,6 +566,42 @@ function ChannelDemo() {
     })
   }, [addLog])
 
+  const openClientPendingAckCloseReconnectChannel = useCallback(async () => {
+    addLog('system', 'Starting client pending-ack-close reconnect test...')
+    const { channel, channelId } = await onChannelClientPendingAckCloseReconnect()
+    channel.onOpen(() => {
+      addLog('system', `client-pending-ack-close reconnect channel acknowledged: ${channelId}`)
+      setChannelState((s) => ({ ...s, clientPendingAckCloseReconnectOnOpenFired: true }))
+    })
+    clientPendingAckCloseReconnectChannelRef.current = channel
+    setChannelState((s) => ({
+      ...s,
+      clientPendingAckCloseReconnectChannelId: channelId,
+      clientPendingAckCloseReconnectOnOpenFired: false,
+      clientPendingAckCloseReconnectErr: null,
+    }))
+    addLog('system', `client-pending-ack-close reconnect channel opened: ${channelId}`)
+  }, [addLog])
+
+  const testClientPendingAckCloseReconnect = useCallback(async () => {
+    const channel = clientPendingAckCloseReconnectChannelRef.current
+    const channelId = channelState.clientPendingAckCloseReconnectChannelId
+    if (!channel || channel.isClosed) return
+    addLog('system', `queueing send({ ack: true }) + close() for channel ${channelId}`)
+    const ackPromise = channel.send('offline-close', { ack: true })
+    const closePromise = channel.close({ timeout: 10_000 })
+    void closePromise.finally(() => {
+      clientPendingAckCloseReconnectChannelRef.current = null
+    })
+    try {
+      await ackPromise
+      await closePromise
+      setChannelState((s) => ({ ...s, clientPendingAckCloseReconnectErr: 'none' }))
+    } catch (err: any) {
+      setChannelState((s) => ({ ...s, clientPendingAckCloseReconnectErr: err?.name ?? 'unknown' }))
+    }
+  }, [addLog, channelState.clientPendingAckCloseReconnectChannelId])
+
   const testUpstreamReconnectOpen = useCallback(async () => {
     addLog('system', 'Opening upstream-reconnect channel...')
     const { channel, channelId } = await onChannelUpstreamReconnect()
@@ -745,6 +792,22 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-600 text-white hover:bg-sky-700"
           >
             Test Client Pending Ack Close
+          </button>
+          <button
+            id="channel-test-client-pending-ack-close-reconnect-open"
+            type="button"
+            onClick={openClientPendingAckCloseReconnectChannel}
+            className="px-3 py-1.5 text-sm rounded bg-cyan-700 text-white hover:bg-cyan-800"
+          >
+            Open Client Pending Ack Close Reconnect
+          </button>
+          <button
+            id="channel-test-client-pending-ack-close-reconnect"
+            type="button"
+            onClick={testClientPendingAckCloseReconnect}
+            className="px-3 py-1.5 text-sm rounded bg-cyan-600 text-white hover:bg-cyan-700"
+          >
+            Test Client Pending Ack Close Reconnect
           </button>
           <button
             id="channel-test-upstream-open"

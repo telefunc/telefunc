@@ -13,6 +13,7 @@ export {
   onChannelAbortThenSend,
   onChannelPendingAckAbort,
   onChannelClientAbortThenSend,
+  onChannelClientPendingAckCloseReconnect,
   onChannelClientPendingAckClose,
   onChannelUpstreamReconnect,
 }
@@ -287,17 +288,17 @@ async function onChannelAbortThenSend() {
 }
 
 /**
- * Case 2: const p = send() → abort() → await p — promise must reject with ChannelClosedError.
+ * Case 2: const p = send() → abort() → await p — promise must reject with abort semantics.
  *
  * cleanupState keys:
  *   pendingAbort_<id>_rejected        = 'false' | 'true'
- *   pendingAbort_<id>_isClosedErr     = 'false' | 'true'
+ *   pendingAbort_<id>_isAbortErr      = 'false' | 'true'
  */
 async function onChannelPendingAckAbort() {
   const channel = createChannel<never, (msg: string) => void>()
   const id = channel.id
   cleanupState[`pendingAbort_${id}_rejected`] = 'false'
-  cleanupState[`pendingAbort_${id}_isClosedErr`] = 'false'
+  cleanupState[`pendingAbort_${id}_isAbortErr`] = 'false'
 
   channel.onOpen(async () => {
     const p = channel.send('awaiting-ack', { ack: true })
@@ -306,7 +307,7 @@ async function onChannelPendingAckAbort() {
       await p
     } catch (err: any) {
       cleanupState[`pendingAbort_${id}_rejected`] = 'true'
-      cleanupState[`pendingAbort_${id}_isClosedErr`] = err?.message === 'Channel is closed' ? 'true' : 'false'
+      cleanupState[`pendingAbort_${id}_isAbortErr`] = err instanceof Abort ? 'true' : 'false'
     }
   })
 
@@ -325,11 +326,34 @@ async function onChannelClientAbortThenSend() {
 /**
  * Minimal channel for client-side pending-ack close test.
  * The client connects, calls send({ ack: true }) to create a pending ack, then close().
- * The awaited promise must reject with ChannelClosedError.
+ * With graceful close semantics, the pending send waits for an ack until close timeout,
+ * then rejects with ChannelClosedError carrying the timeout message.
  */
 async function onChannelClientPendingAckClose() {
   const channel = createChannel<(msg: string) => void, never>()
   return { channel: channel.client }
+}
+
+/**
+ * Channel for reconnect-tolerant client close semantics.
+ * The client may go offline, call send({ ack: true }) + close(), then reconnect.
+ * The buffered ack request is delivered after reconcile, the server replies,
+ * and the server observes a clean onClose.
+ * cleanupState keys:
+ *   clientClose_<id>_serverOnClose = 'false' | 'true'
+ *   clientClose_<id>_serverOnCloseErr = 'pending' | 'none' | 'abort:<json>' | error message
+ */
+async function onChannelClientPendingAckCloseReconnect() {
+  const channel = createChannel<(msg: string) => string, never>()
+  const id = channel.id
+  cleanupState[`clientClose_${id}_serverOnClose`] = 'false'
+  cleanupState[`clientClose_${id}_serverOnCloseErr`] = 'pending'
+  channel.listen((msg) => `ack:${msg}`)
+  channel.onClose((err) => {
+    cleanupState[`clientClose_${id}_serverOnClose`] = 'true'
+    cleanupState[`clientClose_${id}_serverOnCloseErr`] = formatCloseError(err as CloseError)
+  })
+  return { channel: channel.client, channelId: id }
 }
 
 /**

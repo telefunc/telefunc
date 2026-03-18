@@ -55,15 +55,23 @@ class IndexedPeer {
     }
   }
 
-  close(): void {
+  sendCloseRequest(timeoutMs: number): void {
     try {
-      this.sender.send(encodeCtrl({ t: 'close', ix: this.index }))
+      this.sender.send(encodeCtrl({ t: 'close', ix: this.index, timeoutMs }))
     } catch {
       /* transport may already be closed */
     }
   }
 
-  abort(abortValue: string): void {
+  sendCloseAck(): void {
+    try {
+      this.sender.send(encodeCtrl({ t: 'close-ack', ix: this.index }))
+    } catch {
+      /* transport may already be closed */
+    }
+  }
+
+  sendAbort(abortValue: string): void {
     try {
       this.sender.send(encodeCtrl({ t: 'abort', ix: this.index, abortValue }))
     } catch {
@@ -71,7 +79,7 @@ class IndexedPeer {
     }
   }
 
-  error(): void {
+  sendError(): void {
     try {
       this.sender.send(encodeCtrl({ t: 'error', ix: this.index }))
     } catch {

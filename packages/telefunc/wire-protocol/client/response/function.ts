@@ -6,7 +6,7 @@ import { ClientChannel } from '../channel.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 
 const globalObject = getGlobalObject('wire-protocol/client/response/function.ts', {
-  /** Close the channel when the proxy is GC'd. `fn` is weak target — no retention cycle. */
+  /** Close the channel when the proxy is GC'd. `fn` is weak target. */
   gcRegistry: new FinalizationRegistry<ClientChannel>((channel) => channel.close()),
 })
 
@@ -25,7 +25,6 @@ const functionClientPlaceholderType: PlaceholderReviverType<FunctionContract> = 
       shard: context.shard,
     })
     const fn = (...args: unknown[]) => channel.send(args, { ack: true })
-    // fn is the weak target; channel is the held value — no cycle, no GC blocker
     globalObject.gcRegistry.register(fn, channel)
     context.registerChannel(channel)
     return {

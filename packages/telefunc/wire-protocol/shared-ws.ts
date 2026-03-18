@@ -17,9 +17,10 @@ import { assert } from '../utils/assert.js'
 //   TAG_TEXT   (0x02) — user channel text data, index = channel
 //   TAG_BINARY (0x03) — user channel binary data, index = channel
 //
-// Sequence numbers are assigned by the server for server→client data frames.
-// Client→server data frames use seq=0 (unused). The client tracks the highest
-// seq received and sends it in reconcile for replay on reconnect.
+// Sequence numbers are assigned by the sender for replayable data frames in
+// both directions. Each side tracks the highest seq received and sends it in
+// reconcile so the peer can replay missed data after reconnect.
+// CTRL frames remain unsequenced.
 //
 // Channel indices are client-owned and stable for the channel's lifetime.
 
@@ -43,7 +44,8 @@ const TAG = {
 
 // ===== Control message types =====
 
-type CtrlClose = { t: 'close'; ix: number }
+type CtrlClose = { t: 'close'; ix: number; timeoutMs: number }
+type CtrlCloseAck = { t: 'close-ack'; ix: number }
 type CtrlPause = { t: 'pause'; ix: number }
 type CtrlResume = { t: 'resume'; ix: number }
 type CtrlPing = { t: 'ping' }
@@ -72,6 +74,7 @@ type CtrlReconciled = {
 }
 type CtrlMessage =
   | CtrlClose
+  | CtrlCloseAck
   | CtrlAbort
   | CtrlError
   | CtrlPause

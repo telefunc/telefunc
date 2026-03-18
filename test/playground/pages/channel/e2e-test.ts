@@ -40,6 +40,9 @@ type ChannelState = {
   pendingAckAbortChannelId: string | null
   clientAbortThenSendErr: string | null
   clientPendingAckCloseErr: string | null
+  clientPendingAckCloseReconnectChannelId: string | null
+  clientPendingAckCloseReconnectOnOpenFired: boolean | null
+  clientPendingAckCloseReconnectErr: string | null
   upstreamReconnectChannelId: string | null
 }
 
@@ -384,36 +387,38 @@ function testChannel(isDev: boolean) {
   })
 
   if (!isDev) {
-    test('channel: reconnect omission — server onClose fires with ChannelNetworkError when client drops channel while offline', async () => {
+    test('channel: reconnect + close — server onClose stays clean when client closes with pending ack while offline', async () => {
       await page.click('#channel-connect')
       await autoRetry(async () => {
         const state = await getResult<ChannelState>('#channel-state')
         expect(state.connected).toBe(true)
       })
 
-      await page.click('#channel-test-client-abort-server-open')
+      await page.click('#channel-test-client-pending-ack-close-reconnect-open')
 
       let channelId: string | null = null
       await autoRetry(async () => {
         const state = await getResult<ChannelState>('#channel-state')
-        expect(state.clientAbortServerChannelId).not.toBe(null)
-        expect(state.clientAbortServerOnOpenFired).toBe(true)
-        channelId = state.clientAbortServerChannelId
+        expect(state.clientPendingAckCloseReconnectChannelId).not.toBe(null)
+        expect(state.clientPendingAckCloseReconnectOnOpenFired).toBe(true)
+        channelId = state.clientPendingAckCloseReconnectChannelId
       })
 
       await page.context().setOffline(true)
       await page.waitForTimeout(3000)
 
-      await page.click('#channel-test-client-abort-server')
+      await page.click('#channel-test-client-pending-ack-close-reconnect')
 
       const reconnectSignalPromise = waitForTransportReconnectSignal()
       await page.context().setOffline(false)
       await reconnectSignalPromise
 
       await autoRetry(async () => {
+        const state = await getResult<ChannelState>('#channel-state')
+        expect(state.clientPendingAckCloseReconnectErr).toBe('none')
         const ss = await getCleanupState()
-        expect(ss[`clientAbort_${channelId}_serverOnClose`]).toBe('true')
-        expect(ss[`clientAbort_${channelId}_serverOnCloseErr`]).toBe('none')
+        expect(ss[`clientClose_${channelId}_serverOnClose`]).toBe('true')
+        expect(ss[`clientClose_${channelId}_serverOnCloseErr`]).toBe('none')
       })
     })
   }
@@ -536,9 +541,9 @@ function testChannel(isDev: boolean) {
     })
   })
 
-  // ── Case 2: send() then abort() then await — rejects with ChannelClosedError ─
+  // ── Case 2: send() then abort() then await — rejects with abort semantics ─
 
-  test('channel: pending ack abort — await send({ ack: true }) rejects with ChannelClosedError when abort() fires after send()', async () => {
+  test('channel: pending ack abort — await send({ ack: true }) rejects with abort semantics when abort() fires after send()', async () => {
     await page.click('#channel-test-pending-ack-abort')
 
     let channelId: string | null = null
@@ -551,7 +556,7 @@ function testChannel(isDev: boolean) {
     await autoRetry(async () => {
       const ss = await getCleanupState()
       expect(ss[`pendingAbort_${channelId}_rejected`]).toBe('true')
-      expect(ss[`pendingAbort_${channelId}_isClosedErr`]).toBe('true')
+      expect(ss[`pendingAbort_${channelId}_isAbortErr`]).toBe('true')
     })
   })
 
@@ -566,9 +571,9 @@ function testChannel(isDev: boolean) {
     })
   })
 
-  // ── Client Case 2: send({ack:true}) then close() then await rejects ───
+  // ── Client Case 2: send({ack:true}) then close() then await rejects on timeout ───
 
-  test('channel: client pending ack close — await send({ ack: true }) rejects with ChannelClosedError after close()', async () => {
+  test('channel: client pending ack close — await send({ ack: true }) rejects with ChannelClosedError after close timeout', async () => {
     await page.click('#channel-test-client-pending-ack-close')
 
     await autoRetry(async () => {

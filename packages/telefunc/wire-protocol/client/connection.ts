@@ -48,10 +48,13 @@ type OutboundFrame = {
 interface MuxChannel {
   readonly id: string
   readonly defer: boolean
+  readonly isClosed: boolean
   _onTransportOpen(): void
   _onTransportMessage(data: string): void
   _onTransportBinaryMessage(data: Uint8Array): void
   _onTransportAckReqMessage(data: string, seq: number): Promise<void>
+  _onTransportCloseRequest(timeoutMs: number): void
+  _onTransportCloseAck(): void
   _onTransportClose(err?: Error): void
 }
 
@@ -60,7 +63,9 @@ interface MuxConnection {
   sendTextAckReq(channel: MuxChannel, data: string): Promise<unknown>
   sendBinary(channel: MuxChannel, data: Uint8Array): void
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
-  sendClose(channel: MuxChannel, err?: Error): void
+  sendAbort(channel: MuxChannel): void
+  sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
+  sendCloseAck(channel: MuxChannel): void
   sendPause(channel: MuxChannel): void
   sendResume(channel: MuxChannel): void
   unregister(channel: MuxChannel, err?: Error): void
@@ -139,7 +144,6 @@ class ClientConnection implements MuxConnection {
   private reconcileIxes = new Set<number>()
   private channels = new Map<number, MuxChannel>()
   private channelIndex = new Map<MuxChannel, number>()
-  private pendingClose = new Set<number>()
   private sendBuffer: BufferedFrame[] = []
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
@@ -252,20 +256,37 @@ class ClientConnection implements MuxConnection {
     this.transport.sendFrame({ kind: 'ack', frame })
   }
 
-  sendClose(channel: MuxChannel, err?: Error): void {
+  sendAbort(channel: MuxChannel): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const closeErr = err ?? new ChannelClosedError()
-    const frame = encodeCtrl({ t: 'close', ix })
-    this.clearPendingAcks(ix, closeErr)
+    const frame = encodeCtrl({ t: 'close', ix, timeoutMs: 0 })
     if (this.canSendImmediately()) {
-      this.releaseChannel(ix, channel, closeErr)
       this.transport.sendFrame({ kind: 'control', frame })
     } else {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
-      this.pendingClose.add(ix)
     }
-    this.startTtlIfIdle()
+  }
+
+  sendCloseRequest(channel: MuxChannel, timeoutMs: number): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    const frame = encodeCtrl({ t: 'close', ix, timeoutMs })
+    if (!this.canSendImmediately()) {
+      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+      return
+    }
+    this.transport.sendFrame({ kind: 'control', frame })
+  }
+
+  sendCloseAck(channel: MuxChannel): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    const frame = encodeCtrl({ t: 'close-ack', ix })
+    if (!this.canSendImmediately()) {
+      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+      return
+    }
+    this.transport.sendFrame({ kind: 'control', frame })
   }
 
   sendPause(channel: MuxChannel): void {
@@ -335,8 +356,10 @@ class ClientConnection implements MuxConnection {
         this.resetPongTimer()
         return
       case 'close':
-        this.closeRemoteChannel(ctrl.ix)
-        this.startTtlIfIdle()
+        this.channels.get(ctrl.ix)?._onTransportCloseRequest(ctrl.timeoutMs)
+        return
+      case 'close-ack':
+        this.channels.get(ctrl.ix)?._onTransportCloseAck()
         return
       case 'abort':
         this.closeRemoteChannel(ctrl.ix, makeAbortError(parse(ctrl.abortValue)))
@@ -447,7 +470,6 @@ class ClientConnection implements MuxConnection {
     for (const [, pending] of this.pendingAcks) pending.reject(new ChannelNetworkError('Connection closed'))
     this.channels.clear()
     this.channelIndex.clear()
-    this.pendingClose.clear()
     this.sendBuffer = []
     this.lastSeqByChannel.clear()
     this.replayBuffers.clear()
@@ -528,16 +550,15 @@ class ClientConnection implements MuxConnection {
       }
       if (!serverMap.has(ix)) {
         const err = new ChannelNetworkError('Channel not acknowledged by server after reconnect')
-        const wasPendingClose = this.pendingClose.has(ix)
         this.releaseChannel(ix, channel, err)
-        if (!wasPendingClose) channel._onTransportClose(err)
+        channel._onTransportClose(err)
         continue
       }
       const replay = this.replayBuffers.get(ix)
       if (replay)
         for (const frame of replay.getAfter(serverMap.get(ix)!))
           releaseFrames.push({ kind: 'reconcile-release', frame })
-      if (!this.pendingClose.has(ix)) channelsToOpen.push(channel)
+      if (!channel.isClosed) channelsToOpen.push(channel)
     }
 
     for (const frame of this.drainBufferedFrames(serverMap, this.channels, 'reconcile-release'))
@@ -610,7 +631,6 @@ class ClientConnection implements MuxConnection {
     retainedChannels: Set<number> | Map<number, unknown> | undefined,
     kind: 'reconcile' | 'reconcile-release',
   ): OutboundFrame[] {
-    const releasedChannelIxs = new Set<number>()
     const frames: OutboundFrame[] = []
     const sendBuffer = this.sendBuffer
     let writeIx = 0
@@ -623,16 +643,10 @@ class ClientConnection implements MuxConnection {
         if (retainedChannels?.has(channelIx)) sendBuffer[writeIx++] = entry
         continue
       }
-      releasedChannelIxs.add(channelIx)
       if (seq !== undefined) this.replayBuffers.get(channelIx)?.push(seq, frame)
       frames.push({ kind, frame })
     }
     sendBuffer.length = writeIx
-    for (const ix of releasedChannelIxs) {
-      if (!this.pendingClose.has(ix)) continue
-      const channel = this.channels.get(ix)
-      if (channel) this.releaseChannel(ix, channel, new ChannelClosedError())
-    }
     return frames
   }
 
@@ -646,7 +660,6 @@ class ClientConnection implements MuxConnection {
   }
 
   private releaseChannel(ix: number, channel: MuxChannel, err: Error): void {
-    this.pendingClose.delete(ix)
     this.channels.delete(ix)
     this.channelIndex.delete(channel)
     this.lastSeqByChannel.delete(ix)
@@ -783,6 +796,7 @@ class SseTransport implements ClientChannelTransport {
   private lastPostStartedAt = 0
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
+  private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
 
   constructor(
     private readonly telefuncUrl: string,
@@ -827,7 +841,6 @@ class SseTransport implements ClientChannelTransport {
     const abortController = new AbortController()
     this.streamAbort = abortController
     const stage = this.stageInitialBatch()
-
     let response: Response
     try {
       response = await this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
@@ -952,7 +965,7 @@ class SseTransport implements ClientChannelTransport {
       case 'control':
         return now
       case 'heartbeat':
-        return now + Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
+        return now + this.heartbeatFlushDelayMs
       case 'ack':
       case 'data':
         return (
@@ -981,6 +994,7 @@ class SseTransport implements ClientChannelTransport {
   applyReconciledSettings(ctrl: CtrlReconciled): void {
     if (ctrl.sseFlushThrottle) this.flushThrottleMs = ctrl.sseFlushThrottle
     if (ctrl.ssePostIdleFlushDelay) this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
+    this.heartbeatFlushDelayMs = Math.floor(ctrl.pingInterval / 2)
   }
 
   dispose(): void {

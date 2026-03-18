@@ -194,7 +194,7 @@ class ServerConnection<TConnection> {
 
     if (permanent) {
       for (const entry of sessionState.ixMap.values()) {
-        if (!entry.channel.isClosed) entry.channel._onPeerClose()
+        if (!entry.channel._isTransportTerminated) entry.channel._onPeerClose()
       }
       sessionState.ixMap.clear()
       this.sessionStates.delete(sessionId)
@@ -230,8 +230,13 @@ class ServerConnection<TConnection> {
       case 'close': {
         const entry = sessionState.ixMap.get(ctrl.ix)
         if (!entry) return null
-        sessionState.ixMap.delete(ctrl.ix)
-        entry.channel._onPeerClose()
+        entry.channel._onPeerCloseRequest(ctrl.timeoutMs)
+        return null
+      }
+      case 'close-ack': {
+        const entry = sessionState.ixMap.get(ctrl.ix)
+        if (!entry) return null
+        entry.channel._onPeerCloseAck()
         return null
       }
       case 'pause': {
@@ -263,7 +268,7 @@ class ServerConnection<TConnection> {
 
     await Promise.all(
       ctrl.open
-        .filter(({ id, defer }) => defer && (!registry.get(id) || registry.get(id)!.isClosed))
+        .filter(({ id, defer }) => defer && (!registry.get(id) || registry.get(id)!._isTransportTerminated))
         .map(
           ({ id }) =>
             new Promise<void>((resolve) => {
@@ -280,7 +285,7 @@ class ServerConnection<TConnection> {
     for (const { id, ix, lastSeq } of ctrl.open) {
       reconciledIxs.add(ix)
       const channel = registry.get(id)
-      if (!channel || channel.isClosed) continue
+      if (!channel || channel._isTransportTerminated) continue
 
       const existing = this.transportChannels.get(id)
       const replay = existing?.replay ?? new ReplayBuffer(this.options.serverReplayBuffer, this.options.replayMaxAge)
@@ -294,17 +299,19 @@ class ServerConnection<TConnection> {
       const entry: ChannelEntry = { channel, lastClientSeq, replay }
       sessionState.ixMap.set(ix, entry)
       this.transportChannels.set(id, entry)
-      channel.onClose(() => {
-        this.transportChannels.delete(id)
-        replay.dispose()
-      })
+      if (!existing) {
+        channel.onClose(() => {
+          this.transportChannels.delete(id)
+          replay.dispose()
+        })
+      }
 
       channel.attachPeer(new IndexedPeer(sender, ix, replay))
     }
 
     for (const [ix, entry] of prevIxMap) {
       if (reconciledIxs.has(ix)) continue
-      if (!entry.channel.isClosed) entry.channel._onPeerRecoveryFailure()
+      if (!entry.channel._isTransportTerminated) entry.channel._onPeerRecoveryFailure()
     }
 
     const sessionId = crypto.randomUUID()

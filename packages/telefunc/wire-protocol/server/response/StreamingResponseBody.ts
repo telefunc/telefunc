@@ -25,7 +25,7 @@ function buildStreamingResponseBody(
   metadataSerialized: string,
   streamingValues: StreamingValueServer[],
   telefuncId: TelefuncId,
-  onStreamComplete: () => void,
+  onStreamClose: () => void,
   abortSignal: AbortSignal,
   responseAbort: ResponseAbortSource,
 ): ReadableStream<Uint8Array<ArrayBuffer>> {
@@ -33,7 +33,7 @@ function buildStreamingResponseBody(
     metadataSerialized,
     streamingValues,
     telefuncId,
-    onStreamComplete,
+    onStreamClose,
     abortSignal,
     responseAbort,
     (frame) => frame,
@@ -48,7 +48,7 @@ function buildSSEResponseBody(
   metadataSerialized: string,
   streamingValues: StreamingValueServer[],
   telefuncId: TelefuncId,
-  onStreamComplete: () => void,
+  onStreamClose: () => void,
   abortSignal: AbortSignal,
   responseAbort: ResponseAbortSource,
 ): ReadableStream<Uint8Array<ArrayBuffer>> {
@@ -56,7 +56,7 @@ function buildSSEResponseBody(
     metadataSerialized,
     streamingValues,
     telefuncId,
-    onStreamComplete,
+    onStreamClose,
     abortSignal,
     responseAbort,
     (frame) => textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`),
@@ -70,7 +70,7 @@ function buildResponseBodyStream(
   metadataSerialized: string,
   streamingValues: StreamingValueServer[],
   telefuncId: TelefuncId,
-  onStreamComplete: () => void,
+  onStreamClose: () => void,
   abortSignal: AbortSignal,
   responseAbort: Pick<ResponseAbortSource, 'errorPromise'>,
   encodeFrame: (frame: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>,
@@ -88,6 +88,7 @@ function buildResponseBodyStream(
   const doCancel = (controller?: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | null) => {
     if (cancelled) return
     cancelled = true
+    onStreamClose()
     // cancel() interrupts suspended reads (reader.read() / gen.next()) —
     // iter.return() alone can't do this since it waits for the pending await to settle.
     for (const { producer } of producers) producer.cancel()
@@ -111,14 +112,14 @@ function buildResponseBodyStream(
         const { done, value } = await gen.next()
         if (cancelled) return
         if (done) {
-          onStreamComplete()
+          onStreamClose()
           controller.close()
         } else {
           controller.enqueue(encodeFrame(value))
         }
       } catch (err) {
         if (cancelled) return
-        onStreamComplete()
+        onStreamClose()
         try {
           controller.error(err)
         } catch {}

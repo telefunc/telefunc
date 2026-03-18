@@ -2,6 +2,11 @@ export { readableStreamClientType }
 
 import { SERIALIZER_PREFIX_STREAM } from '../../constants.js'
 import type { ClientStreamingType, ReadableStreamContract } from '../../streaming-types.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+
+const globalObject = getGlobalObject('wire-protocol/client/response/readable-stream.ts', {
+  gcRegistry: new FinalizationRegistry<() => void>((cancel) => cancel()),
+})
 
 const readableStreamClientType: ClientStreamingType<ReadableStreamContract> = {
   prefix: SERIALIZER_PREFIX_STREAM,
@@ -19,6 +24,7 @@ const readableStreamClientType: ClientStreamingType<ReadableStreamContract> = {
       },
       cancel,
     })
+    globalObject.gcRegistry.register(stream, cancel)
     return {
       value: stream,
       close: cancel,

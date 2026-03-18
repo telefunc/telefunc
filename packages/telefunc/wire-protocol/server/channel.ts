@@ -3,7 +3,16 @@ export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '.
 
 const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
 
-import type { Channel, ChannelClient, ChannelData, ChannelAck, ChannelListener } from '../channel.js'
+import type {
+  Channel,
+  ChannelAck,
+  ChannelClient,
+  ChannelCloseCallback,
+  ChannelCloseOptions,
+  ChannelCloseResult,
+  ChannelData,
+  ChannelListener,
+} from '../channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
@@ -14,7 +23,13 @@ import { isAbort } from '../../node/server/Abort.js'
 import { createAbortError, type AbortError } from '../../shared/Abort.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
-import { type ChannelTransport, CHANNEL_BUFFER_LIMIT_BYTES, CHANNEL_CONNECT_TTL_MS } from '../constants.js'
+import { isPromise } from '../../utils/isPromise.js'
+import {
+  type ChannelTransport,
+  CHANNEL_BUFFER_LIMIT_BYTES,
+  CHANNEL_CLOSE_TIMEOUT_MS,
+  CHANNEL_CONNECT_TTL_MS,
+} from '../constants.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import type { AckResultStatus } from '../shared-ws.js'
@@ -26,10 +41,6 @@ const globalObject = getGlobalObject('channel.ts', {
   bufferLimit: CHANNEL_BUFFER_LIMIT_BYTES,
 })
 
-/**
- * @internal — Called by the shared channel transport server to propagate global defaults.
- * Must be called before any `createChannel()` call to take effect on those channels.
- */
 function setChannelDefaults(opts: { connectTtl: number; bufferLimit: number }): void {
   globalObject.connectTtlMs = opts.connectTtl
   globalObject.bufferLimit = opts.bufferLimit
@@ -39,36 +50,10 @@ function getChannelRegistry(): Map<string, ServerChannel<unknown, unknown>> {
   return globalObject.channelRegistry
 }
 
-/**
- * Register a one-shot callback that fires when a `ServerChannel` with the given `id` is created.
- * The callback fires synchronously inside the constructor, before any client connection.
- */
 function onChannelCreated(id: string, cb: () => void): void {
   globalObject.creationHooks.set(id, cb)
 }
 
-/**
- * Create a bidirectional channel for real-time communication with the client.
- *
- * Returns a `ServerChannel` — use it directly for `send()`/`listen()`.
- * Return `channel.client` to the client — it serializes to a `ClientChannel`
- * on the other side.
- *
- * @example
- * ```ts
- * import { createChannel } from 'telefunc'
- *
- * export async function onChat() {
- *   type ClientToServer = (msg: string) => void
- *   type ServerToClient = (msg: string) => void
- *   const channel = createChannel<ClientToServer, ServerToClient>()
- *   channel.listen((msg) => console.log('from client:', msg))
- *   channel.send('hello from server')
- *   channel.onClose(() => console.log('channel closed'))
- *   return { channel: channel.client }
- * }
- * ```
- */
 type UntypedChannelHandler = (data: unknown) => unknown
 
 function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts?: {
@@ -86,55 +71,55 @@ function createChannel(opts?: { ack?: boolean }): any {
   })
 }
 
-/**
- * Safety TTL: if a channel is created but never serialized into a response
- * (i.e. `_registerChannel` is never called), close it after this many ms.
- * Should be large enough to cover any reasonable telefunction run time.
- */
 const DEFAULT_TTL_MS = 5 * 60_000
+
 class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   implements Channel<ServerToClient, ClientToServer>
 {
   readonly [SERVER_CHANNEL_BRAND] = true
   readonly id: string
-  /** Whether ack is on by default. Set via `createChannel({ ack: true })`. */
   readonly ackMode: boolean
   readonly channelTransport?: ChannelTransport
 
-  /** Return this to the client — it serializes to a `ClientChannel` on the other side. */
   get client(): ChannelClient<ClientToServer, ServerToClient> {
     return this as unknown as ChannelClient<ClientToServer, ServerToClient>
   }
 
   static isServerChannel(value: unknown): value is ServerChannel {
-    // Vite dev server can cause multiple instances of this module to be loaded,
-    // so instanceof checks don't work — use a unique brand property instead.
     return hasProp(value, SERVER_CHANNEL_BRAND)
   }
 
   private _isClosed = false
+  private _didShutdown = false
+  private _didRegister = false
   private _peer: IndexedPeer | null = null
   private _listeners: Array<ChannelListener<ClientToServer>> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
-  /** Hard-capped buffer for outgoing messages while no client is connected. */
   private _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
-  /** Pending ack promises keyed by the seq of the outgoing frame. */
   private _pendingAcks = new Map<
     number,
     { resolve: (result: ChannelAck<ServerToClient>) => void; reject: (err: Error) => void }
   >()
-  private _closeCallbacks: Array<(err?: Error) => void> = []
+  private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _openCallbacks: Array<() => void> = []
   private _closeError: Error | undefined
   private _didFireClose = false
   private _didFireOpen = false
+  private _closePromise: Promise<ChannelCloseResult> | null = null
+  private _closeDeadline = 0
+  private _closeWaiters: Array<() => void> = []
+  private _didReceiveCloseAck = false
+  private _expectCloseAck = false
+  private _pendingCloseCallbacks = 0
+  private _inflightAcks = 0
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null
-  /** True when the client is gone but we're waiting for reconnection. */
   private _disconnected = false
   private _sendPaused = false
   private _sendWaiters: Array<() => void> = []
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
+  private _pendingCloseAck = false
+  private _pendingCloseRequest = false
 
   constructor({
     ackMode = false,
@@ -151,8 +136,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this.id = id ?? crypto.randomUUID()
     this.channelTransport = channelTransport
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(bufferLimit ?? globalObject.bufferLimit)
-    // Safety TTL: if this channel is never serialized into a response, shut it down
-    // to prevent memory leaks. The registry entry is added in _registerChannel().
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
         this._ttlTimer = null
@@ -165,11 +148,11 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     return this._isClosed
   }
 
-  /** Send a message to the client.
-   *  @param opts.ack - When `true`, returns a Promise resolved with the client's ack value.
-   *                    Always `true` (and the overload returns Promise automatically) when the
-   *                    channel was created with `createChannel({ ack: true })`.
-   *  @throws {ChannelClosedError} if the channel is closed. */
+  /** @internal */
+  get _isTransportTerminated(): boolean {
+    return this._didShutdown
+  }
+
   send(data: ChannelData<ServerToClient>): void
   send(data: ChannelData<ServerToClient>, opts: { ack: true }): Promise<ChannelAck<ServerToClient>>
   send(data: ChannelData<ServerToClient>, opts: { ack: false }): void
@@ -186,20 +169,21 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       return
     }
     if (this._peer) {
-      return new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-        this._peer!.sendTextAckReq(serialized, (seq) => {
-          this._pendingAcks.set(seq, { resolve, reject })
-        })
-      })
-    } else {
-      return new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-        this._prePeerBuffer.pushTextAck(serialized, resolve, reject)
-      })
+      return this._trackAck(
+        new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
+          this._peer!.sendTextAckReq(serialized, (seq) => {
+            this._pendingAcks.set(seq, { resolve, reject })
+          })
+        }),
+      )
     }
+    return this._trackAck(
+      new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
+        this._prePeerBuffer.pushTextAck(serialized, resolve, reject)
+      }),
+    )
   }
 
-  /** Send a binary message to the client.
-   *  @throws {ChannelClosedError} if the channel is closed. */
   sendBinary(data: Uint8Array): void {
     if (this._isClosed) throw new ChannelClosedError()
     if (this._peer) {
@@ -217,17 +201,14 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._binaryListeners.push(callback)
   }
 
-  /** Register a callback that fires when the channel closes for any reason. Fires exactly once.
-   *  `err` is set when the close was caused by a network/timeout error; `undefined` for clean closes. */
-  onClose(callback: (err?: Error) => void): void {
+  onClose(callback: ChannelCloseCallback): void {
     if (this._didFireClose) {
-      callback(this._closeError)
+      this._invokeCloseCallback(callback, this._closeError, false)
       return
     }
     this._closeCallbacks.push(callback)
   }
 
-  /** Register a callback that fires when the client connects for the first time. Fires exactly once. */
   onOpen(callback: () => void): void {
     if (this._didFireOpen) {
       callback()
@@ -236,41 +217,38 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._openCallbacks.push(callback)
   }
 
-  /** @internal — Bind this channel to the telefunc response-wide abort path. */
   _setResponseAbort(abortResponse: (abortValue?: unknown) => void): void {
     this._responseAbort = abortResponse
   }
 
-  /** Close the channel from the server side with an abort value.
-   *  The client's `onClose` callback will receive an `Abort` error carrying `abortValue`. */
   abort(abortValue?: unknown): void {
-    if (this._isClosed) return
+    if (this._didShutdown || this._isClosed) return
+    this._isClosed = true
+    const serializedAbortValue = stringify(abortValue, { forbidReactElements: false })
     if (this._peer) {
-      this._peer.abort(stringify(abortValue, { forbidReactElements: false }))
+      this._peer.sendAbort(serializedAbortValue)
       this._peer = null
     }
-    this._shutdown()
+    this._shutdown(createAbortError(abortValue))
   }
 
-  /** Close the channel from the server side. */
-  close(): void {
-    if (this._isClosed) return
-    if (this._peer) {
-      this._peer.close()
-      this._peer = null
-    }
-    this._shutdown()
+  close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
+    if (this._closePromise) return this._closePromise
+    if (this._didShutdown) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
+    const timeout = normalizeCloseTimeout(opts?.timeout)
+    this._closeDeadline = Date.now() + timeout
+    this._expectCloseAck = true
+    this._pendingCloseRequest = true
+    this._startClose()
+    if (this._peer) this._peer.sendCloseRequest(timeout)
+    this._closePromise = this._runFinalizationLoop()
+    return this._closePromise
   }
 
-  /** @internal — Called by the response serializer when this channel is included in a
-   * telefunc response. Registers the channel in the registry (so reconcile can find it)
-   * and starts the short connect TTL from this moment.
-   */
   _registerChannel(): void {
-    if (this._isClosed || this._peer) return
+    if (this._didShutdown || this._peer || this._didRegister) return
+    this._didRegister = true
     getChannelRegistry().set(this.id, this as ServerChannel<unknown, unknown>)
-    // Fire any waiter that was registered before this channel entered the registry.
-    // Must happen after the registry write so reconcile can immediately do registry.get(id).
     const hook = globalObject.creationHooks.get(this.id)
     if (hook) {
       globalObject.creationHooks.delete(this.id)
@@ -288,6 +266,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   }
 
   attachPeer(peer: IndexedPeer): void {
+    if (this._didShutdown) return
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     this._disconnected = false
@@ -296,33 +275,21 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._prePeerBuffer.flush(
       (msg) => peer.sendText(msg),
       (msg) => peer.sendBinary(msg),
-      (data, { resolve, reject }) => {
+      (data, ackEntry) => {
         const seq = peer.sendTextAckReq(data)
-        this._pendingAcks.set(seq, { resolve, reject })
+        this._pendingAcks.set(seq, ackEntry)
       },
     )
+    if (this._pendingCloseAck) peer.sendCloseAck()
+    if (this._pendingCloseRequest) peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
+    if (this._isClosed) {
+      this._notifyCloseProgress()
+      return
+    }
     this._fireOpen()
     this._notifySendReady()
   }
 
-  /** @internal — Channel-scoped binary send gate used by streaming response pumps.
-   *
-   *  This method is responsible only for readiness rules that are local to this
-   *  `ServerChannel`, before the frame reaches the shared transport connection:
-   *  - if the channel is paused by the client, it waits for `_onPeerResume()`;
-   *  - if the channel is temporarily disconnected, it waits for `attachPeer()` on reconnect;
-   *  - if no peer is attached yet but the channel is otherwise sendable, it buffers into
-   *    `_prePeerBuffer` and returns synchronously.
-   *
-   *  Once the channel is ready to hand the frame to its peer, the returned value from
-   *  `IndexedPeer.sendBinary()` is propagated unchanged:
-   *  - `void` means the send completed synchronously all the way down;
-   *  - `Promise<void>` means the underlying transport or connection-wide send gate needs waiting.
-   *
-   *  Ordering and transport backpressure after the frame leaves this channel are handled by
-   *  `MuxServer.send()`. This method does not serialize different channels against each other;
-   *  it only enforces this channel's paused/disconnected readiness rules.
-   */
   _sendBinaryAwaitable(data: Uint8Array): void | Promise<void> {
     if (this._isClosed) throw new ChannelClosedError()
     if (this._sendPaused || this._disconnected) return this._sendBinaryWhenReady(data)
@@ -343,7 +310,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     if (pending) await pending
   }
 
-  /** @internal — Called by ws.ts when a TEXT frame arrives (no ack expected). */
   _onPeerMessage(text: string): void {
     const data = parse(text) as ChannelData<ClientToServer>
     for (const cb of this._listeners) {
@@ -355,23 +321,10 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     }
   }
 
-  /** @internal — Called by ws.ts when a TEXT_ACK_REQ frame arrives. Dispatches the
-   *  message and sends ACK_RES with the listener's resolved value. */
-  async _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
-    const data = parse(text) as ChannelData<ClientToServer>
-    for (const cb of this._listeners) {
-      try {
-        const result = await cb(data)
-        this._peer?.sendAckRes(seq, stringify(result, { forbidReactElements: false }))
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-        this._peer?.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
-        return
-      }
-    }
+  _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
+    return this._trackAck(this._dispatchAckReq(text, seq))
   }
 
-  /** @internal */
   _onPeerBinaryMessage(data: Uint8Array): void {
     for (const cb of this._binaryListeners) {
       try {
@@ -382,7 +335,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     }
   }
 
-  /** @internal — Client sent ACK_RES for a message we sent. */
   _onPeerAckRes(ackedSeq: number, resultText: string, status: AckResultStatus = 'ok'): void {
     const pending = this._pendingAcks.get(ackedSeq)
     if (!pending) return
@@ -399,9 +351,30 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     }
   }
 
-  /** @internal — Connection dropped, keep channel alive for reconnection. */
+  _onPeerCloseRequest(timeoutMs: number): void {
+    if (this._didShutdown) return
+    const peerDeadline = Date.now() + normalizeCloseTimeout(timeoutMs)
+    if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
+    this._pendingCloseAck = true
+    if (this._peer) this._peer.sendCloseAck()
+    if (this._isClosed) {
+      this._notifyCloseProgress()
+      return
+    }
+    this._startClose()
+    void this._runFinalizationLoop()
+  }
+
+  _onPeerCloseAck(): void {
+    if (this._didShutdown) return
+    this._didReceiveCloseAck = true
+    this._expectCloseAck = false
+    this._pendingCloseRequest = false
+    this._notifyCloseProgress()
+  }
+
   _onPeerDisconnect(reconnectTimeout: number): void {
-    if (this._isClosed || this._disconnected) return
+    if (this._didShutdown || this._disconnected) return
     this._peer = null
     this._disconnected = true
     this._reconnectTimer = unrefTimer(
@@ -412,44 +385,119 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     )
   }
 
-  /** @internal — Reconnect failed because the client no longer acknowledged this channel. */
   _onPeerRecoveryFailure(): void {
-    if (this._isClosed) return
+    if (this._didShutdown) return
     this._peer = null
     this._shutdown(new ChannelNetworkError('Channel not acknowledged by client after reconnect'))
   }
 
-  /** @internal — Permanent close from the client side. */
   _onPeerClose(): void {
-    if (this._isClosed) return
+    if (this._didShutdown) return
     this._peer = null
     this._shutdown()
   }
 
-  /** @internal */
   _onPeerPause(): void {
     this._sendPaused = true
   }
 
-  /** @internal */
   _onPeerResume(): void {
     this._sendPaused = false
     this._notifySendReady()
   }
 
-  // ── Private ──
-
-  /** Single close path — every close route funnels here. */
-  private _shutdown(err?: Error): void {
+  private _startClose(err?: Error): void {
     if (this._isClosed) return
     this._isClosed = true
+    this._fireClose(err)
+  }
+
+  private async _runFinalizationLoop(): Promise<ChannelCloseResult> {
+    while (!this._didShutdown) {
+      if (this._isCloseWorkComplete()) {
+        this._shutdown()
+        break
+      }
+      const remaining = this._closeDeadline - Date.now()
+      if (remaining <= 0) {
+        this._shutdown(new ChannelClosedError('Channel close timed out'))
+        break
+      }
+      await this._waitForCloseProgress(remaining)
+    }
+    return this._didReceiveCloseAck ? 0 : 1
+  }
+
+  private _waitForCloseProgress(timeoutMs: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        const index = this._closeWaiters.indexOf(wake)
+        if (index >= 0) this._closeWaiters.splice(index, 1)
+        resolve()
+      }, timeoutMs)
+      const wake = () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve()
+      }
+      this._closeWaiters.push(wake)
+    })
+  }
+
+  private _notifyCloseProgress(): void {
+    const waiters = this._closeWaiters.splice(0)
+    for (const waiter of waiters) waiter()
+  }
+
+  private async _dispatchAckReq(text: string, seq: number): Promise<void> {
+    const data = parse(text) as ChannelData<ClientToServer>
+    for (const cb of this._listeners) {
+      try {
+        const result = await cb(data)
+        this._peer?.sendAckRes(seq, stringify(result, { forbidReactElements: false }))
+      } catch (err) {
+        if (this._handleCallbackError(err)) return
+        this._peer?.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
+        return
+      }
+    }
+  }
+
+  private _trackAck<T>(promise: Promise<T>): Promise<T> {
+    this._inflightAcks++
+    return promise.finally(() => {
+      this._inflightAcks--
+      this._notifyCloseProgress()
+    })
+  }
+
+  private _isCloseWorkComplete(): boolean {
+    return (
+      this._inflightAcks === 0 &&
+      this._pendingCloseCallbacks === 0 &&
+      (!this._expectCloseAck || this._didReceiveCloseAck)
+    )
+  }
+
+  private _shutdown(err?: Error): void {
+    if (this._didShutdown) return
+    this._didShutdown = true
+    this._isClosed = true
     this._closeError = err
+    this._peer = null
+    this._pendingCloseAck = false
+    this._pendingCloseRequest = false
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     getChannelRegistry().delete(this.id)
     this._fireClose(err)
     this._notifySendReady()
-    const ackErr = new ChannelClosedError()
+    this._notifyCloseProgress()
+    const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
     this._prePeerBuffer.clear(ackErr)
@@ -459,14 +507,31 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     if (this._didFireClose) return
     this._didFireClose = true
     for (const cb of this._closeCallbacks) {
-      try {
-        cb(err)
-      } catch (callbackErr) {
-        this._reportCallbackError(callbackErr)
-      }
+      this._invokeCloseCallback(cb, err, true)
     }
     this._closeCallbacks.length = 0
     this._openCallbacks.length = 0
+    this._notifyCloseProgress()
+  }
+
+  private _invokeCloseCallback(callback: ChannelCloseCallback, err: Error | undefined, track: boolean): void {
+    try {
+      const pending = callback(err)
+      if (!isPromise(pending)) return
+      if (track) {
+        this._pendingCloseCallbacks++
+        void pending
+          .catch((e) => this._reportCallbackError(e))
+          .finally(() => {
+            this._pendingCloseCallbacks--
+            this._notifyCloseProgress()
+          })
+      } else {
+        void pending.catch((e) => this._reportCallbackError(e))
+      }
+    } catch (callbackErr) {
+      this._reportCallbackError(callbackErr)
+    }
   }
 
   private _fireOpen(): void {
@@ -502,10 +567,9 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 
   private _clearTimer(name: '_ttlTimer' | '_reconnectTimer'): void {
     const timer = this[name]
-    if (timer) {
-      clearTimeout(timer)
-      ;(this as any)[name] = null
-    }
+    if (!timer) return
+    clearTimeout(timer)
+    ;(this as Record<typeof name, ReturnType<typeof setTimeout> | null>)[name] = null
   }
 
   private _waitUntilSendReady(): Promise<void> {
@@ -518,4 +582,11 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     const waiters = this._sendWaiters.splice(0)
     for (const waiter of waiters) waiter()
   }
+}
+
+function normalizeCloseTimeout(timeout: number | undefined): number {
+  if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
+  if (!Number.isFinite(timeout) || timeout < 0)
+    throw new Error('Channel close timeout must be a non-negative finite number')
+  return timeout
 }

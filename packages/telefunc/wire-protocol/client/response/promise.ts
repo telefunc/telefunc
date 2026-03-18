@@ -4,6 +4,11 @@ import { parse } from '@brillout/json-serializer/parse'
 import { textDecoder } from '../../frame.js'
 import { SERIALIZER_PREFIX_PROMISE } from '../../constants.js'
 import type { ClientStreamingType, PromiseContract } from '../../streaming-types.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+
+const globalObject = getGlobalObject('wire-protocol/client/response/promise.ts', {
+  gcRegistry: new FinalizationRegistry<() => void>((cancel) => cancel()),
+})
 
 const promiseClientType: ClientStreamingType<PromiseContract> = {
   prefix: SERIALIZER_PREFIX_PROMISE,
@@ -18,6 +23,7 @@ const promiseClientType: ClientStreamingType<PromiseContract> = {
     })
     // Suppress unhandled-rejection noise for multiplexed promises a caller never awaits.
     promise.catch(() => {})
+    globalObject.gcRegistry.register(promise, cancel)
     return {
       value: promise,
       // A promise has no post-resolution live resource to tear down.
