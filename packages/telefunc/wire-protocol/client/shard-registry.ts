@@ -5,7 +5,9 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 /**
  * Client-side shard registry.
  *
- * TODO/ai add comment here explain *high-level* function of this file.
+ * This file keeps the client's latest shard assignment in memory for each
+ * `telefuncUrl`, so follow-up requests stay routed to the same server-side
+ * Durable Object shard after the first response tells us where it lives.
  *
  * Records the shard and stickiness preference from the server's response headers
  * (`x-telefunc-shard` and `x-telefunc-sticky`), keyed by `telefuncUrl`.
