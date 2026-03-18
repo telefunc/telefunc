@@ -14,7 +14,7 @@ function addAsyncGeneratorInterface(promise: Promise<unknown>, abortController: 
     const returnValue = await promise
     assertUsage(
       isAsyncGenerator(returnValue),
-      '`for await...of` can only be used with telefunctions that return an async generator',
+      '`for await...of` can only be used for an async generator telefunction',
     )
     setAbortController(returnValue, abortController)
     return returnValue
