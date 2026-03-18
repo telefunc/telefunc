@@ -12,10 +12,7 @@ function addAsyncGeneratorInterface(promise: Promise<unknown>, abortController: 
   // Single execution path: resolves to the real generator once the HTTP response is parsed.
   const resolvedGen: Promise<AsyncGenerator<unknown>> = (async () => {
     const returnValue = await promise
-    assertUsage(
-      isAsyncGenerator(returnValue),
-      '`for await...of` can only be used for an async generator telefunction',
-    )
+    assertUsage(isAsyncGenerator(returnValue), '`for await...of` can only be used for an async generator telefunction')
     setAbortController(returnValue, abortController)
     return returnValue
   })()
