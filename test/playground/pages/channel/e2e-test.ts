@@ -43,6 +43,9 @@ type ChannelState = {
   clientPendingAckCloseReconnectChannelId: string | null
   clientPendingAckCloseReconnectOnOpenFired: boolean | null
   clientPendingAckCloseReconnectErr: string | null
+  serverPendingAckCloseReconnectChannelId: string | null
+  serverPendingAckCloseReconnectOnOpenFired: boolean | null
+  serverPendingAckCloseReconnectClientOnCloseClean: boolean | null
   upstreamReconnectChannelId: string | null
 }
 
@@ -387,7 +390,53 @@ function testChannel(isDev: boolean) {
   })
 
   if (!isDev) {
+    test('channel: reconnect + close — client onClose stays clean when server closes with pending ack while client is offline', async () => {
+      await page.goto(`${getServerUrl()}/channel`)
+      await waitForHydration()
+      await page.click('#channel-connect')
+      await autoRetry(async () => {
+        const state = await getResult<ChannelState>('#channel-state')
+        expect(state.connected).toBe(true)
+      })
+
+      await page.click('#channel-server-pending-ack-close-reconnect-open')
+
+      let channelId: string | null = null
+      await autoRetry(async () => {
+        const state = await getResult<ChannelState>('#channel-state')
+        expect(state.serverPendingAckCloseReconnectChannelId).not.toBe(null)
+        expect(state.serverPendingAckCloseReconnectOnOpenFired).toBe(true)
+        channelId = state.serverPendingAckCloseReconnectChannelId
+      })
+
+      await page.context().setOffline(true)
+      await page.waitForTimeout(3000)
+
+      // Trigger from the test-runner process directly — browser is offline so it can't do this
+      const triggerRes = await fetch(`${getServerUrl()}/api/server-close-trigger?channelId=${channelId}`, {
+        method: 'POST',
+      })
+      expect(triggerRes.ok).toBe(true)
+
+      const reconnectSignalPromise = waitForTransportReconnectSignal()
+      await page.context().setOffline(false)
+      await reconnectSignalPromise
+
+      await autoRetry(async () => {
+        const state = await getResult<ChannelState>('#channel-state')
+        expect(state.serverPendingAckCloseReconnectClientOnCloseClean).toBe(true)
+        const ss = await getCleanupState()
+        expect(ss[`serverClose_${channelId}_ackResult`]).toBe('ack:offline-close')
+        expect(ss[`serverClose_${channelId}_closeResult`]).toBe('0')
+        expect(ss[`serverClose_${channelId}_serverOnCloseErr`]).toBe('none')
+      })
+    })
+  }
+
+  if (!isDev) {
     test('channel: reconnect + close — server onClose stays clean when client closes with pending ack while offline', async () => {
+      await page.goto(`${getServerUrl()}/channel`)
+      await waitForHydration()
       await page.click('#channel-connect')
       await autoRetry(async () => {
         const state = await getResult<ChannelState>('#channel-state')

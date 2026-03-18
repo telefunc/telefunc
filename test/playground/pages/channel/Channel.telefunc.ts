@@ -15,6 +15,7 @@ export {
   onChannelClientAbortThenSend,
   onChannelClientPendingAckCloseReconnect,
   onChannelClientPendingAckClose,
+  onChannelServerPendingAckCloseReconnectOpen,
   onChannelUpstreamReconnect,
 }
 
@@ -352,6 +353,35 @@ async function onChannelClientPendingAckCloseReconnect() {
   channel.onClose((err) => {
     cleanupState[`clientClose_${id}_serverOnClose`] = 'true'
     cleanupState[`clientClose_${id}_serverOnCloseErr`] = formatCloseError(err as CloseError)
+  })
+  return { channel: channel.client, channelId: id }
+}
+
+// Global store keyed by channel id — survives across telefunc invocations.
+const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
+function getServerCloseReconnectStore(): Map<string, ReturnType<typeof createChannel<(msg: string) => string, never>>> {
+  return ((globalThis as any)[SERVER_CLOSE_RECONNECT_STORE_KEY] ??= new Map())
+}
+
+/**
+ * Channel for reconnect-tolerant server-initiated close semantics.
+ * After opening, the test triggers send({ack:true}) + close() via /api/server-close-trigger
+ * while the client is offline.  The buffered frames are replayed after reconnect; the
+ * client acks; both sides close cleanly.
+ *
+ * cleanupState keys:
+ *   serverClose_<id>_closeResult     = 'pending' | '0' | '1'
+ *   serverClose_<id>_serverOnCloseErr = 'pending' | 'none' | error message
+ */
+async function onChannelServerPendingAckCloseReconnectOpen() {
+  const channel = createChannel<(msg: string) => string, never>()
+  const id = channel.id
+  cleanupState[`serverClose_${id}_closeResult`] = 'pending'
+  cleanupState[`serverClose_${id}_serverOnCloseErr`] = 'pending'
+  getServerCloseReconnectStore().set(id, channel)
+  channel.onClose((err) => {
+    getServerCloseReconnectStore().delete(id)
+    cleanupState[`serverClose_${id}_serverOnCloseErr`] = formatCloseError(err as CloseError)
   })
   return { channel: channel.client, channelId: id }
 }

@@ -214,13 +214,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didTerminate) return
     const peerDeadline = Date.now() + normalizeCloseTimeout(timeoutMs)
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
+    this._connection.sendCloseAck(this)
     if (this._isClosed) {
       this._notifyCloseProgress()
     } else {
       this._startClose()
       void this._runFinalizationLoop()
     }
-    this._connection.sendCloseAck(this)
   }
 
   /** @internal */

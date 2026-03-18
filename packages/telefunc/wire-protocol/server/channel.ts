@@ -90,7 +90,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   }
 
   private _isClosed = false
-  private _didShutdown = false
+  /** @internal */ _didShutdown = false
   private _didRegister = false
   private _peer: IndexedPeer | null = null
   private _listeners: Array<ChannelListener<ClientToServer>> = []
@@ -118,6 +118,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _sendWaiters: Array<() => void> = []
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
+  private _shutdownCallback: (() => void) | null = null
   private _pendingCloseAck = false
   private _pendingCloseRequest = false
 
@@ -148,9 +149,10 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     return this._isClosed
   }
 
-  /** @internal */
-  get _isTransportTerminated(): boolean {
-    return this._didShutdown
+  /** @internal — Register a one-shot callback that fires when the transport shuts down.
+   *  Replaces any previously registered callback (does not accumulate). */
+  _onShutdown(cb: () => void): void {
+    this._shutdownCallback = cb
   }
 
   send(data: ChannelData<ServerToClient>): void
@@ -494,6 +496,9 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     getChannelRegistry().delete(this.id)
+    const shutdownCb = this._shutdownCallback
+    this._shutdownCallback = null
+    shutdownCb?.()
     this._fireClose(err)
     this._notifySendReady()
     this._notifyCloseProgress()

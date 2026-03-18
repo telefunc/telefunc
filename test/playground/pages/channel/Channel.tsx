@@ -19,6 +19,7 @@ import {
   onChannelClientAbortThenSend,
   onChannelClientPendingAckCloseReconnect,
   onChannelClientPendingAckClose,
+  onChannelServerPendingAckCloseReconnectOpen,
   onChannelUpstreamReconnect,
 } from './Channel.telefunc'
 
@@ -75,6 +76,9 @@ type ChannelState = {
   clientPendingAckCloseReconnectChannelId: string | null
   clientPendingAckCloseReconnectOnOpenFired: boolean | null
   clientPendingAckCloseReconnectErr: string | null
+  serverPendingAckCloseReconnectChannelId: string | null
+  serverPendingAckCloseReconnectOnOpenFired: boolean | null
+  serverPendingAckCloseReconnectClientOnCloseClean: boolean | null
   /** Channel ID for the upstream reconnect test channel. */
   upstreamReconnectChannelId: string | null
 }
@@ -119,6 +123,9 @@ const initialState: ChannelState = {
   clientPendingAckCloseReconnectChannelId: null,
   clientPendingAckCloseReconnectOnOpenFired: null,
   clientPendingAckCloseReconnectErr: null,
+  serverPendingAckCloseReconnectChannelId: null,
+  serverPendingAckCloseReconnectOnOpenFired: null,
+  serverPendingAckCloseReconnectClientOnCloseClean: null,
   upstreamReconnectChannelId: null,
 }
 
@@ -171,6 +178,9 @@ function ChannelDemo() {
   const clientPendingAckCloseReconnectChannelRef = useRef<
     Awaited<ReturnType<typeof onChannelClientPendingAckCloseReconnect>>['channel'] | null
   >(null)
+  const serverPendingAckCloseReconnectChannelRef = useRef<
+    Awaited<ReturnType<typeof onChannelServerPendingAckCloseReconnectOpen>>['channel'] | null
+  >(null)
   const upstreamReconnectChannelRef = useRef<Awaited<ReturnType<typeof onChannelUpstreamReconnect>>['channel'] | null>(
     null,
   )
@@ -201,6 +211,7 @@ function ChannelDemo() {
       clientAbortThenSendChannelRef.current?.close()
       clientPendingAckCloseChannelRef.current?.close()
       clientPendingAckCloseReconnectChannelRef.current?.close()
+      serverPendingAckCloseReconnectChannelRef.current?.close()
       upstreamReconnectChannelRef.current?.close()
     }
   }, [])
@@ -602,6 +613,29 @@ function ChannelDemo() {
     }
   }, [addLog, channelState.clientPendingAckCloseReconnectChannelId])
 
+  const openServerPendingAckCloseReconnectChannel = useCallback(async () => {
+    addLog('system', 'Starting server pending-ack-close reconnect test...')
+    const { channel, channelId } = await onChannelServerPendingAckCloseReconnectOpen()
+    channel.onOpen(() => {
+      addLog('system', `server-pending-ack-close reconnect channel acknowledged: ${channelId}`)
+      setChannelState((s) => ({ ...s, serverPendingAckCloseReconnectOnOpenFired: true }))
+    })
+    channel.listen((msg) => `ack:${msg}`)
+    channel.onClose((err) => {
+      serverPendingAckCloseReconnectChannelRef.current = null
+      setChannelState((s) => ({ ...s, serverPendingAckCloseReconnectClientOnCloseClean: err === undefined }))
+      addLog('system', `server-pending-ack-close reconnect channel closed — err=${err ? err.message : 'none'}`)
+    })
+    serverPendingAckCloseReconnectChannelRef.current = channel
+    setChannelState((s) => ({
+      ...s,
+      serverPendingAckCloseReconnectChannelId: channelId,
+      serverPendingAckCloseReconnectOnOpenFired: false,
+      serverPendingAckCloseReconnectClientOnCloseClean: null,
+    }))
+    addLog('system', `server-pending-ack-close reconnect channel opened: ${channelId}`)
+  }, [addLog])
+
   const testUpstreamReconnectOpen = useCallback(async () => {
     addLog('system', 'Opening upstream-reconnect channel...')
     const { channel, channelId } = await onChannelUpstreamReconnect()
@@ -808,6 +842,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-cyan-600 text-white hover:bg-cyan-700"
           >
             Test Client Pending Ack Close Reconnect
+          </button>
+          <button
+            id="channel-server-pending-ack-close-reconnect-open"
+            type="button"
+            onClick={openServerPendingAckCloseReconnectChannel}
+            className="px-3 py-1.5 text-sm rounded bg-violet-700 text-white hover:bg-violet-800"
+          >
+            Open Server Pending Ack Close Reconnect
           </button>
           <button
             id="channel-test-upstream-open"
