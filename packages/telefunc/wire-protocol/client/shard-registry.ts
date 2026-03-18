@@ -5,6 +5,8 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 /**
  * Client-side shard registry.
  *
+ * TODO/ai add comment here explain *high-level* function of this file.
+ *
  * Records the shard and stickiness preference from the server's response headers
  * (`x-telefunc-shard` and `x-telefunc-sticky`), keyed by `telefuncUrl`.
  *
