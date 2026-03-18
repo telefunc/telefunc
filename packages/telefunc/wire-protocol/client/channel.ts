@@ -17,7 +17,7 @@ import { assert } from '../../utils/assert.js'
 import { ClientConnection } from './connection.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_TRANSPORT, type ChannelTransport } from '../constants.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
-import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
+import { ChannelClosedError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
 
 /**
