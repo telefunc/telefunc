@@ -14,7 +14,10 @@ const REQUEST_KIND = {
 type RequestKind = Exclude<(typeof REQUEST_KIND)[keyof typeof REQUEST_KIND], 'mismatch'>
 
 function getMarkedRequestUrl(telefuncUrl: string, requestKind: RequestKind): string {
-  return withRequestKind(telefuncUrl, requestKind).href
+  const base = typeof window === 'undefined' ? undefined : window.location.href
+  const url = new URL(telefuncUrl, base)
+  url.searchParams.set(REQUEST_KIND_PARAM, requestKind)
+  return url.href
 }
 
 function getRequestKind(
@@ -30,13 +33,6 @@ function getRequestKind(
   if (urlKind === REQUEST_KIND.MISMATCH || headerKind === REQUEST_KIND.MISMATCH) return REQUEST_KIND.MISMATCH
   if (urlKind && headerKind && urlKind !== headerKind) return REQUEST_KIND.MISMATCH
   return urlKind ?? headerKind ?? null
-}
-
-function withRequestKind(telefuncUrl: string, requestKind: RequestKind): URL {
-  const base = typeof window === 'undefined' ? undefined : window.location.href
-  const url = new URL(telefuncUrl, base)
-  url.searchParams.set(REQUEST_KIND_PARAM, requestKind)
-  return url
 }
 
 function parseRequestKind(value: string | null): RequestKind | 'mismatch' | null {
