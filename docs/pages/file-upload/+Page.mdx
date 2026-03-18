@@ -170,3 +170,12 @@ Telefunc uses a custom binary stream parser — files are **not** buffered into 
 3. When your telefunction calls `file.stream()`, `file.text()`, or `file.arrayBuffer()`, the bytes are pulled directly from the HTTP stream on demand.
 
 This means **file bytes only flow through memory when you read them** — and if you stream to disk, memory consumption is constant regardless of file size.
+
+
+## See also
+
+- <Link href="/stream" />
+- <Link href="/real-time" />
+- <Link href="/createChannel" />
+- <Link href="/telefuncWebSocket" />
+- <Link href="/transport" />
