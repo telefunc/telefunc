@@ -38,7 +38,7 @@ type SessionState = {
   /** Sends a fin ctrl frame on the current transport. Set at end of each reconcile. */
   sendFin: (() => void | Promise<void>) | null
 }
-type ReconcileResult = { sessionId: string }
+type ReconcileResult = { sessionId: string; finalizeUpgrade?: () => void }
 
 const globalObject = getGlobalObject('wire-protocol/server/connection.ts', {
   sessionStates: new Map<string, SessionState>(),
@@ -225,9 +225,10 @@ class ServerConnection<TConnection> {
     deferReconciled: boolean,
   ): Promise<string | null> {
     if (ctrl.t === 'reconcile') {
-      const { sessionId } = await this.reconcile(connection, ctrl)
+      const { sessionId, finalizeUpgrade } = await this.reconcile(connection, ctrl)
       if (!deferReconciled) {
         this.sendReconciled(connection, sessionId)
+        finalizeUpgrade?.()
         return null
       }
       return sessionId
@@ -277,20 +278,20 @@ class ServerConnection<TConnection> {
     const reconciledIxs = new Set<number>()
     const prevIxMap = new Map(sessionState.ixMap)
     sessionState.ixMap.clear()
+    let finalizeUpgrade: (() => void) | undefined
 
-    // On upgrade: SSE peer is still attached. Detach it now so app frames during the async
-    // drain window go to the channel pre-peer buffer instead of racing to SSE.
-    // attachPeer() at the end of the loop below releases the handoff gate.
-    // (Normal reconnect: handleConnectionClose already called _onPeerDisconnect when SSE dropped.)
     if (ctrl.upgrade) {
-      for (const entry of prevIxMap.values()) {
-        if (!entry.channel._didShutdown) entry.channel._onPeerHandoff()
-      }
-      if (sessionState.drainActiveTransport) await sessionState.drainActiveTransport()
-      const finPending = sessionState.sendFin?.()
-      if (finPending) await finPending
+      const drainPreviousTransport = sessionState.drainActiveTransport
+      const sendPreviousFin = sessionState.sendFin
       sessionState.drainActiveTransport = null
       sessionState.sendFin = null
+      finalizeUpgrade = () => {
+        void (async () => {
+          if (drainPreviousTransport) await drainPreviousTransport()
+          const finPending = sendPreviousFin?.()
+          if (finPending) await finPending
+        })()
+      }
     }
 
     await Promise.all(
@@ -352,7 +353,7 @@ class ServerConnection<TConnection> {
     sessionState.sendFin = () => this.send(connection, encodeCtrl({ t: 'fin' }))
     state.reconciling = false
     this.resetPingTimer(connection)
-    return { sessionId }
+    return { sessionId, finalizeUpgrade }
   }
 
   sendReconciled(connection: TConnection, sessionId: string): void | Promise<void> {

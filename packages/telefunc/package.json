@@ -90,6 +90,22 @@
       "types": "./dist/node/server/runTelefunc/loadTelefuncFilesUsingVite/loadBuildEntry.d.ts",
       "default": "./dist/node/server/runTelefunc/loadTelefuncFilesUsingVite/loadBuildEntry.js"
     },
+    "./node": {
+      "types": "./dist/serve/node.d.ts",
+      "default": "./dist/serve/node.js"
+    },
+    "./bun": {
+      "types": "./dist/serve/bun.d.ts",
+      "default": "./dist/serve/bun.js"
+    },
+    "./deno": {
+      "types": "./dist/serve/deno.d.ts",
+      "default": "./dist/serve/deno.js"
+    },
+    "./cloudflare": {
+      "types": "./dist/serve/cloudflare.d.ts",
+      "default": "./dist/serve/cloudflare.js"
+    },
     "./websocket/node": {
       "types": "./dist/wire-protocol/server/adapter/node.d.ts",
       "default": "./dist/wire-protocol/server/adapter/node.js"

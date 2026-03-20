@@ -1,15 +1,17 @@
 export { handleAll as default }
 export { TodoListDurableObject } from '../database/todoItems'
-export { TelefuncDurableObject } from './telefunc'
 
+import { telefunc } from 'telefunc/cloudflare'
 import { handleSsr } from './ssr'
-import { handleTelefunc } from './telefunc'
+
+const tf = telefunc({ shards: 5 })
+export const TelefuncDurableObject = tf.TelefuncDurableObject
 
 const handleAll = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url)
 
-    const resp = await handleTelefunc(request, env, ctx)
+    const resp = await tf.serve({ request, env, ctx })
     if (resp) return resp
 
     return await handleSsr(url)

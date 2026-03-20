@@ -378,13 +378,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     )
   }
 
-  _onPeerHandoff(): void {
-    if (this._didShutdown) return
-    this._peer = null
-    this._clearTimer('_reconnectTimer')
-    this._disconnected = false
-  }
-
   _onPeerRecoveryFailure(): void {
     if (this._didShutdown) return
     this._peer = null

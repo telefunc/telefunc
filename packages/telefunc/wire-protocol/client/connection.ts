@@ -194,9 +194,15 @@ class ClientConnection implements MuxConnection {
     }
   }
   private readonly bufferFrameDuringHandoff = (raw: Uint8Array<ArrayBuffer>, frame: InboundFrame): void => {
-    if (frame.tag === TAG.CTRL && frame.ctrl.t === 'fin') {
-      this.handleHandoffFin()
-      return
+    if (frame.tag === TAG.CTRL) {
+      if (frame.ctrl.t === 'fin') {
+        this.handleHandoffFin()
+        return
+      }
+      if (frame.ctrl.t === 'reconciled') {
+        this.handleReconciled(frame.ctrl)
+        return
+      }
     }
     const { handoffBuffer } = this.upgrade
     assert(handoffBuffer)
@@ -453,10 +459,6 @@ class ClientConnection implements MuxConnection {
     this.transport.applyReconciledSettings(ctrl)
     const outcome = this.applyReconciled(ctrl)
     this.transport.closeAbandonedTransport()
-    if (this.upgrade.handoffTransport) {
-      this.upgrade.handoffBuffer = []
-      this.handleTransportFrame = this.bufferFrameDuringHandoff
-    }
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
     for (const channel of outcome.channelsToOpen) channel._onTransportOpen()
     if (outcome.reconcileComplete) {
@@ -524,6 +526,8 @@ class ClientConnection implements MuxConnection {
     // Keep SSE alive: server drains it before replaying. SSE is closed in handleReconciled()
     // once the server has confirmed it switched to WS.
     this.upgrade.handoffTransport = from
+    this.upgrade.handoffBuffer = []
+    this.handleTransportFrame = this.bufferFrameDuringHandoff
     to.start()
   }
 

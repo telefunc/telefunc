@@ -34,11 +34,11 @@ interface TelefuncAdapter {
  * ```
  */
 function telefuncWebSocket(): TelefuncAdapter {
+  enableChannelTransports([CHANNEL_TRANSPORT.WS])
   const ws = crossws({ hooks: getTelefuncChannelHooks() })
 
   return {
     handleUpgrade(request: Request, info: DenoInfo): Response | Promise<Response> | undefined {
-      enableChannelTransports([CHANNEL_TRANSPORT.WS])
       const url = new URL(request.url)
       const config = getServerConfig()
       if (url.pathname !== config.telefuncUrl || request.headers.get('upgrade') !== 'websocket') {

@@ -1,5 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export { telefuncWebSocket }
+export type { CloudflareWebSocketOptions }
 
 import { DurableObject } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
@@ -64,6 +65,7 @@ type CloudflareWebSocketOptions = {
  * ```
  */
 function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapter {
+  enableChannelTransports([CHANNEL_TRANSPORT.WS])
   const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
   const baseInstanceName = options?.instanceName ?? 'telefunc'
   const shards = options?.shards ?? 1
@@ -98,7 +100,6 @@ function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapte
 
   return {
     handleTelefunc(request: Request, env: Cloudflare.Env, _ctx: ExecutionContext) {
-      enableChannelTransports([CHANNEL_TRANSPORT.WS])
       const url = new URL(request.url)
       const config = getServerConfig()
       if (!url.pathname.startsWith(config.telefuncUrl)) return undefined
