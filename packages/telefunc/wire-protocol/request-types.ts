@@ -10,7 +10,7 @@ export type {
   RequestBodyReader,
 }
 
-import type { ChannelTransport } from './constants.js'
+import type { ChannelTransports } from './constants.js'
 
 type FileMetadata = { index: number; name: string; size: number; type: string; lastModified: number }
 type BlobMetadata = { index: number; size: number; type: string }
@@ -34,7 +34,7 @@ type RequestTypeContract<V = unknown, R = unknown, M extends Record<string, unkn
 }
 
 type ClientRequestContext = {
-  channelTransport: ChannelTransport
+  channelTransports: ChannelTransports
   registerFile(body: Blob): number
 }
 

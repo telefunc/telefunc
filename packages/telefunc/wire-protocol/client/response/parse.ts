@@ -15,6 +15,7 @@ import { SSEStreamReader } from './SSEStreamReader.js'
 import { ChannelStreamReader } from './ChannelStreamReader.js'
 import { ClientChannel } from '../channel.js'
 import { extractFrameChannel } from '../../frame-channel.js'
+import type { ChannelTransports } from '../../constants.js'
 
 // ===== Types =====
 
@@ -22,6 +23,7 @@ type CallContext = {
   telefunctionName: string
   telefuncFilePath: string
   abortController: AbortController
+  channel: { transports: ChannelTransports }
 }
 
 // ===== Public entry point =====
@@ -37,6 +39,7 @@ type CallContext = {
  *  - text with `__frameChannel` → WS streaming
  *  - text without               → plain (placeholder-only) */
 async function parseResponse(response: Response, callContext: CallContext, shard?: string): Promise<unknown> {
+  const transports = callContext.channel.transports
   const contentType = response.headers.get('content-type') ?? ''
   const isStreaming = contentType.includes('application/octet-stream') || contentType.includes('text/event-stream')
 
@@ -49,7 +52,7 @@ async function parseResponse(response: Response, callContext: CallContext, shard
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
     const metaText = new TextDecoder().decode(metaBytes)
-    return reviveStreamingResponse(metaText, callContext, streamReader, shard)
+    return reviveStreamingResponse(metaText, callContext, streamReader, transports, shard)
   }
 
   // Text response: channel streaming or plain
@@ -59,14 +62,14 @@ async function parseResponse(response: Response, callContext: CallContext, shard
     const channel = new ClientChannel({
       channelId: frameChannel.metadata.channelId,
       ackMode: frameChannel.metadata.ack,
-      channelTransport: frameChannel.metadata.channelTransport,
+      transports,
       shard,
       defer: false,
     })
     const streamReader = new ChannelStreamReader(channel, callContext)
-    return reviveStreamingResponse(frameChannel.strippedBody, callContext, streamReader, shard)
+    return reviveStreamingResponse(frameChannel.strippedBody, callContext, streamReader, transports, shard)
   }
-  return revivePlainResponse(body, callContext, shard)
+  return revivePlainResponse(body, callContext, transports, shard)
 }
 
 // ===== Streaming response (HTTP / WS) =====
@@ -79,6 +82,7 @@ function reviveStreamingResponse(
   metadataText: string,
   callContext: CallContext,
   streamReader: BaseStreamReader,
+  transports: ChannelTransports,
   shard?: string,
 ): unknown {
   const demuxer = new FrameDemuxer(streamReader)
@@ -89,7 +93,7 @@ function reviveStreamingResponse(
   }
   const getCancelIndex = (index: number) => () => demuxer.cancelIndex(index)
 
-  const { reviver, channels, closeHandlers } = createStreamingReviver(getChunkReader, getCancelIndex, shard)
+  const { reviver, channels, closeHandlers } = createStreamingReviver(getChunkReader, getCancelIndex, transports, shard)
   const parsed: unknown = parse(metadataText, { reviver })
   if (!isObject(parsed)) return parsed
 
@@ -99,13 +103,19 @@ function reviveStreamingResponse(
 // ===== Plain text response =====
 
 /** Revive a non-streaming response. Only placeholder types (e.g. Channel) are revived. */
-function revivePlainResponse(body: string, callContext: CallContext, shard?: string): unknown {
+function revivePlainResponse(
+  body: string,
+  callContext: CallContext,
+  transports: ChannelTransports,
+  shard?: string,
+): unknown {
   const unreachable = (): never => {
     assert(false, 'Unexpected streaming value in plain response')
   }
   const { reviver, channels, closeHandlers } = createStreamingReviver(
     () => unreachable,
     () => unreachable,
+    transports,
     shard,
   )
   const parsed: unknown = parse(body, { reviver })

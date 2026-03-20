@@ -3,6 +3,9 @@ export { testStreaming }
 import { page, test, expect, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
 import { resetCleanupState, getCleanupState, waitForHydration, getResult } from '../../e2e-utils'
 
+const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
+const channelTransport = channelTransports[channelTransports.length - 1]!
+
 function testStreaming() {
   test('streaming: ReadableStream return', async () => {
     await page.goto(`${getServerUrl()}/streaming`)
@@ -16,7 +19,7 @@ function testStreaming() {
     })
   })
 
-  test('streaming: AsyncGenerator<number> return', async () => {
+  test('streaming: AsyncGenerator return', async () => {
     await page.click('#test-async-generator')
     await autoRetry(async () => {
       const result = await getResult('#streaming-result')
@@ -296,7 +299,7 @@ function testStreaming() {
   // and the assertion below should be inverted.
   if (false)
     test('streaming: upload with progress (half duplex)', async () => {
-      if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORT === 'ws') {
+      if (channelTransport === 'ws') {
         return skip(
           'WS transport returns the HTTP response before the request body is fully consumed, breaking lazy file streaming (ERR_CONNECTION_RESET)',
         )
@@ -322,4 +325,16 @@ function testStreaming() {
         expect(lastMs - firstMs).lessThan(last.duration)
       })
     })
+}
+
+function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
+  const parsed: unknown = JSON.parse(value ?? '["sse"]')
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    !parsed.every((transport) => transport === 'sse' || transport === 'ws')
+  ) {
+    throw new Error(`Invalid PUBLIC_ENV__CHANNEL_TRANSPORTS: ${value ?? '(unset)'}`)
+  }
+  return parsed
 }

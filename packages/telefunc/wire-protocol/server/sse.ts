@@ -3,6 +3,8 @@ export type { SseChannelHttpResponse }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { getServerConfig } from '../../node/server/serverConfig.js'
+import { CHANNEL_TRANSPORT } from '../constants.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 import { parseSseRequestMetadata } from '../sse-request.js'
 import { ServerConnection } from './connection.js'
@@ -42,6 +44,9 @@ class SseConnectionTransport {
   })
 
   async handleRequest(request: Request): Promise<SseChannelHttpResponse | null> {
+    if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) {
+      return { statusCode: 400, contentType: 'text/plain', headers: [], body: '' }
+    }
     if (request.method !== 'POST') return { statusCode: 400, contentType: 'text/plain', headers: [], body: '' }
     const { body } = request
     assert(body)

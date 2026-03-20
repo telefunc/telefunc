@@ -5,7 +5,7 @@ import { fileClientType } from './file.js'
 import { blobClientType } from './blob.js'
 import { functionClientRequestType } from './function.js'
 import type { ClientRequestContext, ClientRequestType } from '../../request-types.js'
-import type { ChannelTransport } from '../../constants.js'
+import type { ChannelTransports } from '../../constants.js'
 
 /** File before Blob — File extends Blob, so must be checked first. */
 const clientRequestTypes: ClientRequestType[] = [fileClientType, blobClientType, functionClientRequestType]
@@ -15,11 +15,11 @@ type RequestFileEntry = {
   body: Blob
 }
 
-function createRequestReplacer(channelTransport: ChannelTransport) {
+function createRequestReplacer(channelTransports: ChannelTransports) {
   const files: RequestFileEntry[] = []
   let nextIndex = 0
   const context: ClientRequestContext = {
-    channelTransport,
+    channelTransports,
     registerFile(body) {
       const index = nextIndex++
       files.push({ index, body })

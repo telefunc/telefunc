@@ -10,12 +10,7 @@ import { createRequestReviver } from '../../../wire-protocol/server/request/regi
 import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
 import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
 import type { RequestBodyReader } from '../../../wire-protocol/request-types.js'
-import {
-  CHANNEL_TRANSPORT,
-  STREAM_TRANSPORT,
-  type ChannelTransport,
-  type StreamTransport,
-} from '../../../wire-protocol/constants.js'
+import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
 
 type ParseResult =
@@ -25,7 +20,6 @@ type ParseResult =
       telefunctionKey: string
       telefunctionArgs: unknown[]
       streamTransport: StreamTransport
-      channelTransport: ChannelTransport
       isSseRequest: false
       isMalformedRequest: false
     }
@@ -43,9 +37,6 @@ async function parseHttpRequest(runContext: {
     telefuncUrl: string
     stream: {
       transport: StreamTransport
-    }
-    channel: {
-      transport: ChannelTransport
     }
   }
 }): Promise<ParseResult> {
@@ -92,7 +83,6 @@ function parseTelefuncPayload(
     logMalformedRequests: boolean
     serverConfig?: {
       stream: { transport: StreamTransport }
-      channel: { transport: ChannelTransport }
     }
   },
   reviver?: Reviver,
@@ -121,9 +111,6 @@ function parseTelefuncPayload(
 
   const telefunctionKey = getTelefunctionKey(parsed.file, parsed.name)
 
-  const defaultStreamTransport = runContext.serverConfig?.stream.transport ?? STREAM_TRANSPORT.BINARY_INLINE
-  const defaultChannelTransport = runContext.serverConfig?.channel.transport ?? CHANNEL_TRANSPORT.SSE
-
   const streamTransport: StreamTransport =
     hasProp(parsed, 'stream', 'object') &&
     hasProp(parsed.stream, 'transport', 'string') &&
@@ -131,20 +118,13 @@ function parseTelefuncPayload(
       parsed.stream.transport === STREAM_TRANSPORT.SSE_INLINE ||
       parsed.stream.transport === STREAM_TRANSPORT.CHANNEL)
       ? parsed.stream.transport
-      : defaultStreamTransport
-  const channelTransport: ChannelTransport =
-    hasProp(parsed, 'channel', 'object') &&
-    hasProp(parsed.channel, 'transport', 'string') &&
-    (parsed.channel.transport === CHANNEL_TRANSPORT.SSE || parsed.channel.transport === CHANNEL_TRANSPORT.WS)
-      ? parsed.channel.transport
-      : defaultChannelTransport
+      : (runContext.serverConfig?.stream.transport ?? STREAM_TRANSPORT.BINARY_INLINE)
   return {
     telefuncFilePath: parsed.file,
     telefunctionName: parsed.name,
     telefunctionKey,
     telefunctionArgs: parsed.args,
     streamTransport,
-    channelTransport,
     isSseRequest: false,
     isMalformedRequest: false,
   }

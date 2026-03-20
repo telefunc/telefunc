@@ -50,7 +50,8 @@ type ChannelState = {
 }
 
 function testChannel(isDev: boolean) {
-  const channelTransport = process.env.PUBLIC_ENV__CHANNEL_TRANSPORT ?? 'sse'
+  const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
+  const channelTransport = channelTransports[channelTransports.length - 1]!
 
   async function waitForTransportReconnectSignal() {
     if (channelTransport === 'ws') {
@@ -630,4 +631,16 @@ function testChannel(isDev: boolean) {
       expect(state.clientPendingAckCloseErr).toBe('ChannelClosedError')
     })
   })
+}
+
+function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
+  const parsed: unknown = JSON.parse(value ?? '["sse"]')
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    !parsed.every((transport) => transport === 'sse' || transport === 'ws')
+  ) {
+    throw new Error(`Invalid PUBLIC_ENV__CHANNEL_TRANSPORTS: ${value ?? '(unset)'}`)
+  }
+  return parsed
 }

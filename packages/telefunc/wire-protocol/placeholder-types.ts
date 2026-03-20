@@ -13,7 +13,7 @@ export type {
 import type { ServerChannel } from './server/channel.js'
 import type { ClientChannel } from './client/channel.js'
 import type { ClientReviveClose } from './streaming-types.js'
-import type { ChannelTransport } from './constants.js'
+import type { ChannelTransports } from './constants.js'
 
 /** Shared contract tying server and client plugins for one placeholder type. */
 type PlaceholderTypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = Record<string, unknown>> = {
@@ -30,6 +30,7 @@ type PlaceholderReplacerType<C extends PlaceholderTypeContract, Context> = {
 }
 
 type PlaceholderReviverContext = {
+  channelTransports: ChannelTransports
   shard?: string
   registerChannel(channel: ClientChannel): void
 }
@@ -53,15 +54,11 @@ type PlaceholderServerReviverType<C extends PlaceholderTypeContract = Placeholde
 }
 
 /** `ack: true` — ack is on by default for this channel. */
-type ChannelContract = PlaceholderTypeContract<
-  ServerChannel,
-  ClientChannel,
-  { channelId: string; ack?: true; channelTransport: ChannelTransport }
->
+type ChannelContract = PlaceholderTypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
 
 /** A plain function returned from a telefunction — transparently proxied over an ack channel. */
 type FunctionContract = PlaceholderTypeContract<
   (...args: readonly unknown[]) => unknown,
   (...args: readonly unknown[]) => Promise<unknown>,
-  { channelId: string; channelTransport: ChannelTransport }
+  { channelId: string }
 >

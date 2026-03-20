@@ -4,7 +4,7 @@ export { telefuncWebSocket }
 import { DurableObject } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../ws.js'
-import { getServerConfig, setDefaultChannelTransport } from '../../../node/server/serverConfig.js'
+import { getServerConfig, enableChannelTransports } from '../../../node/server/serverConfig.js'
 import { telefunc } from '../../../node/server/telefunc.js'
 import { assertWarning } from '../../../utils/assert.js'
 import type { Telefunc } from '../../../node/server/getContext.js'
@@ -98,10 +98,10 @@ function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapte
 
   return {
     handleTelefunc(request: Request, env: Cloudflare.Env, _ctx: ExecutionContext) {
-      setDefaultChannelTransport(CHANNEL_TRANSPORT.WS)
+      enableChannelTransports([CHANNEL_TRANSPORT.WS])
       const url = new URL(request.url)
-      const telefuncUrl = getServerConfig().telefuncUrl
-      if (!url.pathname.startsWith(telefuncUrl)) return undefined
+      const config = getServerConfig()
+      if (!url.pathname.startsWith(config.telefuncUrl)) return undefined
       const binding = getBinding(env)
       if (!binding) return undefined
 
@@ -109,6 +109,9 @@ function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapte
       const shardParam = parseShardParam(rawShardParam)
 
       if (request.headers.get('upgrade') === 'websocket') {
+        if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
+          return Promise.resolve(new Response(null, { status: 400 }))
+        }
         assertWarning(
           shardParam !== null,
           'WebSocket upgrade received without a valid ?shard= param — falling back to shard 0. This usually means a proxy stripped the query string. Check that your infrastructure forwards the full URL.',

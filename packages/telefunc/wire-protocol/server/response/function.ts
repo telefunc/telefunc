@@ -12,14 +12,11 @@ const functionServerPlaceholderType: PlaceholderReplacerType<FunctionContract, S
   detect(value): value is FunctionContract['value'] {
     return typeof value === 'function'
   },
-  getMetadata(fn, { channelTransport, registerChannel }) {
-    const channel = new ServerChannel<unknown, readonly unknown[]>({
-      ackMode: true,
-      channelTransport,
-    })
+  getMetadata(fn, { registerChannel }) {
+    const channel = new ServerChannel<unknown, readonly unknown[]>({ ackMode: true })
     channel._registerChannel()
     registerChannel(channel)
     channel.listen((args) => fn(...args))
-    return { channelId: channel.id, channelTransport }
+    return { channelId: channel.id }
   },
 }

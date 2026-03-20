@@ -2,6 +2,7 @@ export { getTelefuncChannelHooks }
 
 import { defineHooks, type Peer } from 'crossws'
 import { ServerConnection } from './connection.js'
+import { enableChannelTransports } from '../../node/server/serverConfig.js'
 
 declare module 'crossws' {
   interface PeerContext {
@@ -10,6 +11,7 @@ declare module 'crossws' {
 }
 
 function getTelefuncChannelHooks() {
+  enableChannelTransports(['ws'])
   const connection = new ServerConnection<Peer>({
     getSessionId(peer) {
       return peer.context.telefuncSessionId

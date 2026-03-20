@@ -1,20 +1,16 @@
 export { withContext }
-export type { ClientCallContext, TelefuncStreamTransport, TelefuncChannelTransport }
+export type { ClientCallContext, StreamTransport }
 
-import type { StreamTransport, ChannelTransport } from '../wire-protocol/constants.js'
-
-/** Transport type for streaming values. */
-type TelefuncStreamTransport = StreamTransport
-type TelefuncChannelTransport = ChannelTransport
+import type { StreamTransport, ChannelTransports } from '../wire-protocol/constants.js'
 
 type StreamCallContext = {
   /** Streamed-value transport — overrides `config.stream.transport` for this call. */
-  transport?: TelefuncStreamTransport
+  transport?: StreamTransport
 }
 
 type ChannelCallContext = {
-  /** Channel backend used by `stream.transport = 'channel'` and `createChannel()`. */
-  transport?: TelefuncChannelTransport
+  /** Channel transports — overrides `config.channel.transports` for this call. */
+  transports?: ChannelTransports
 }
 
 /** Per-call context options for the HTTP transport layer. */

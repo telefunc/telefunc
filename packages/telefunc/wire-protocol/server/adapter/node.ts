@@ -2,7 +2,7 @@ export { telefuncWebSocket }
 
 import crossws from 'crossws/adapters/node'
 import { getTelefuncChannelHooks } from '../ws.js'
-import { getServerConfig, setDefaultChannelTransport } from '../../../node/server/serverConfig.js'
+import { getServerConfig, enableChannelTransports } from '../../../node/server/serverConfig.js'
 import type { Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
@@ -44,7 +44,7 @@ function telefuncWebSocket(): TelefuncAdapter {
 
   return {
     install(server: HttpServerOrWrapper): void {
-      setDefaultChannelTransport(CHANNEL_TRANSPORT.WS)
+      enableChannelTransports([CHANNEL_TRANSPORT.WS])
       // Unwrap srvx-style wrappers (e.g. from @photonjs/hono or srvx directly)
       const httpServer: HttpServer = (server as any)?.node?.server ?? (server as HttpServer)
       if (typeof (httpServer as any)?.on !== 'function') {
@@ -57,8 +57,13 @@ function telefuncWebSocket(): TelefuncAdapter {
 
       httpServer.on('upgrade', (req, socket, head) => {
         const url = new URL(req.url ?? '', 'http://localhost')
-        const telefuncUrl = getServerConfig().telefuncUrl
-        if (url.pathname !== telefuncUrl) return
+        const config = getServerConfig()
+        if (url.pathname !== config.telefuncUrl) return
+        if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
+          socket.once('finish', socket.destroy)
+          socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+          return
+        }
         ws.handleUpgrade(req, socket, head)
       })
     },

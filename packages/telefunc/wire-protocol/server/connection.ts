@@ -2,6 +2,7 @@ export { ServerConnection, ProtocolViolationError }
 export type { ServerTransport }
 
 import { unrefTimer } from '../../utils/unrefTimer.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import type { ServerChannel } from './channel.js'
 import { getChannelRegistry, onChannelCreated, setChannelDefaults } from './channel.js'
@@ -10,16 +11,7 @@ import { IndexedPeer } from './IndexedPeer.js'
 import type { PeerSender } from './IndexedPeer.js'
 import { TAG, decode, encodeCtrl } from '../shared-ws.js'
 import type { CtrlMessage, CtrlReconcile } from '../shared-ws.js'
-import {
-  CHANNEL_BUFFER_LIMIT_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_CONNECT_TTL_MS,
-  CHANNEL_IDLE_TIMEOUT_MS,
-  CHANNEL_PING_INTERVAL_MIN_MS,
-  CHANNEL_PING_INTERVAL_MS,
-  CHANNEL_RECONNECT_TIMEOUT_MS,
-  CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-} from '../constants.js'
+import { CHANNEL_PING_INTERVAL_MIN_MS, type ChannelTransports } from '../constants.js'
 
 type DecodedFrame = ReturnType<typeof decode>
 
@@ -35,26 +27,39 @@ type MuxServerOptions = {
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   replayMaxAge: number
+  transports: ChannelTransports
 }
 
 type ChannelEntry = { channel: ServerChannel; lastClientSeq: number; replay: ReplayBuffer }
-type SessionState = { ixMap: Map<number, ChannelEntry> }
+type SessionState = {
+  ixMap: Map<number, ChannelEntry>
+  /** Waits until the currently attached transport has fully drained its send chain. */
+  drainActiveTransport: (() => Promise<void>) | null
+  /** Sends a fin ctrl frame on the current transport. Set at end of each reconcile. */
+  sendFin: (() => void | Promise<void>) | null
+}
 type ReconcileResult = { sessionId: string }
+
+const globalObject = getGlobalObject('wire-protocol/server/connection.ts', {
+  sessionStates: new Map<string, SessionState>(),
+  transportChannels: new Map<string, ChannelEntry>(),
+})
 
 class ProtocolViolationError extends Error {}
 
 function resolveMuxServerOptions(): MuxServerOptions {
   const channelConfig = getServerConfig().channel
-  const reconnectTimeout = channelConfig.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS
-  const idleTimeout = channelConfig.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
-  const pingInterval = Math.max(channelConfig.pingInterval ?? CHANNEL_PING_INTERVAL_MS, CHANNEL_PING_INTERVAL_MIN_MS)
+  const reconnectTimeout = channelConfig.reconnectTimeout
+  const idleTimeout = channelConfig.idleTimeout
+  const pingInterval = Math.max(channelConfig.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS)
   const pingDeadline = pingInterval * 2
-  const serverReplayBuffer = channelConfig.serverReplayBuffer ?? CHANNEL_SERVER_REPLAY_BUFFER_BYTES
-  const clientReplayBuffer = channelConfig.clientReplayBuffer ?? CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
-  const connectTtl = channelConfig.connectTtl ?? CHANNEL_CONNECT_TTL_MS
-  const bufferLimit = channelConfig.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES
+  const serverReplayBuffer = channelConfig.serverReplayBuffer
+  const clientReplayBuffer = channelConfig.clientReplayBuffer
+  const connectTtl = channelConfig.connectTtl
+  const bufferLimit = channelConfig.bufferLimit
   const sseFlushThrottle = channelConfig.sseFlushThrottle
   const ssePostIdleFlushDelay = channelConfig.ssePostIdleFlushDelay
+  const transports = channelConfig.transports
   return {
     reconnectTimeout,
     idleTimeout,
@@ -67,6 +72,7 @@ function resolveMuxServerOptions(): MuxServerOptions {
     sseFlushThrottle,
     ssePostIdleFlushDelay,
     replayMaxAge: pingDeadline + reconnectTimeout + 1_000,
+    transports,
   }
 }
 
@@ -87,8 +93,8 @@ type ServerTransport<TConnection> = {
 class ServerConnection<TConnection> {
   private readonly options: MuxServerOptions
   private readonly transport: ServerTransport<TConnection>
-  private readonly sessionStates = new Map<string, SessionState>()
-  private readonly transportChannels = new Map<string, ChannelEntry>()
+  private readonly sessionStates = globalObject.sessionStates
+  private readonly transportChannels = globalObject.transportChannels
   private readonly connectionStates = new Map<TConnection, ConnectionState>()
 
   constructor(transport: ServerTransport<TConnection>) {
@@ -166,9 +172,10 @@ class ServerConnection<TConnection> {
    *  - ws sends synchronously once the channel has already been deemed sendable;
    *  - sse may return a promise here when stream backpressure requires waiting.
    */
-  protected send(connection: TConnection, frame: Uint8Array<ArrayBuffer>): void | Promise<void> {
+  protected send(connection: TConnection, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void | Promise<void> {
     const state = this.getOrCreateConnectionState(connection)
     if (!state.sendChain) {
+      onCommit?.()
       const pending = this.transport.sendNow(connection, frame)
       if (!pending) return
       const chain = pending.finally(() => {
@@ -178,7 +185,10 @@ class ServerConnection<TConnection> {
       return chain
     }
     const chain = state.sendChain
-      .then(() => this.transport.sendNow(connection, frame))
+      .then(() => {
+        onCommit?.()
+        return this.transport.sendNow(connection, frame)
+      })
       .finally(() => {
         if (state.sendChain === chain) state.sendChain = null
       })
@@ -191,6 +201,9 @@ class ServerConnection<TConnection> {
     if (!sessionId) return
     const sessionState = this.sessionStates.get(sessionId)
     if (!sessionState) return
+
+    sessionState.drainActiveTransport = null
+    sessionState.sendFin = null
 
     if (permanent) {
       for (const entry of sessionState.ixMap.values()) {
@@ -214,19 +227,18 @@ class ServerConnection<TConnection> {
     if (ctrl.t === 'reconcile') {
       const { sessionId } = await this.reconcile(connection, ctrl)
       if (!deferReconciled) {
-        const pending = this.sendReconciled(connection, sessionId)
-        if (pending) await pending
+        this.sendReconciled(connection, sessionId)
         return null
       }
       return sessionId
     }
+    if (ctrl.t === 'ping') {
+      this.resetPingTimer(connection)
+      this.send(connection, encodeCtrl({ t: 'pong' }))
+      return null
+    }
     const sessionState = this.getSessionStateOrThrow(this.transport.getSessionId(connection))
     switch (ctrl.t) {
-      case 'ping':
-        const pending = this.send(connection, encodeCtrl({ t: 'pong' }))
-        if (pending) await pending
-        this.resetPingTimer(connection)
-        return null
       case 'close': {
         const entry = sessionState.ixMap.get(ctrl.ix)
         if (!entry) return null
@@ -258,13 +270,28 @@ class ServerConnection<TConnection> {
     const prevSessionId = ctrl.sessionId
     const sessionState = prevSessionId
       ? this.getSessionStateOrThrow(prevSessionId)
-      : { ixMap: new Map<number, ChannelEntry>() }
+      : { ixMap: new Map<number, ChannelEntry>(), drainActiveTransport: null, sendFin: null }
     state.reconciling = true
     this.resetPingTimer(connection)
     const registry = getChannelRegistry()
     const reconciledIxs = new Set<number>()
     const prevIxMap = new Map(sessionState.ixMap)
     sessionState.ixMap.clear()
+
+    // On upgrade: SSE peer is still attached. Detach it now so app frames during the async
+    // drain window go to the channel pre-peer buffer instead of racing to SSE.
+    // attachPeer() at the end of the loop below releases the handoff gate.
+    // (Normal reconnect: handleConnectionClose already called _onPeerDisconnect when SSE dropped.)
+    if (ctrl.upgrade) {
+      for (const entry of prevIxMap.values()) {
+        if (!entry.channel._didShutdown) entry.channel._onPeerHandoff()
+      }
+      if (sessionState.drainActiveTransport) await sessionState.drainActiveTransport()
+      const finPending = sessionState.sendFin?.()
+      if (finPending) await finPending
+      sessionState.drainActiveTransport = null
+      sessionState.sendFin = null
+    }
 
     await Promise.all(
       ctrl.open
@@ -279,7 +306,7 @@ class ServerConnection<TConnection> {
     )
 
     const sender: PeerSender = {
-      send: (frame) => this.send(connection, frame as Uint8Array<ArrayBuffer>),
+      send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
     }
 
     for (const { id, ix, lastSeq } of ctrl.open) {
@@ -317,7 +344,12 @@ class ServerConnection<TConnection> {
     if (prevSessionId) this.sessionStates.delete(prevSessionId)
     this.sessionStates.set(sessionId, sessionState)
     this.transport.setSessionId(connection, sessionId)
+    sessionState.drainActiveTransport = async () => {
+      const pending = state.sendChain
+      if (pending) await pending
+    }
 
+    sessionState.sendFin = () => this.send(connection, encodeCtrl({ t: 'fin' }))
     state.reconciling = false
     this.resetPingTimer(connection)
     return { sessionId }
@@ -341,6 +373,7 @@ class ServerConnection<TConnection> {
         clientReplayBuffer: this.options.clientReplayBuffer,
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
+        transports: this.options.transports,
       }),
     )
   }

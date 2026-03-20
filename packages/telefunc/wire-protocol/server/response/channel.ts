@@ -12,16 +12,14 @@ const channelServerPlaceholderType: PlaceholderReplacerType<ChannelContract, Ser
   detect(value): value is ChannelContract['value'] {
     return ServerChannel.isServerChannel(value)
   },
-  getMetadata(channel, { channelTransport: defaultChannelTransport, registerChannel }) {
+  getMetadata(channel, { registerChannel }) {
     // Reset the connect TTL to CHANNEL_CONNECT_TTL_MS from now — the client is about
     // to receive this channel reference in the HTTP response and has that window to
     // connect and reconcile.
     channel._registerChannel()
     registerChannel(channel)
-    const channelTransport = channel.channelTransport ?? defaultChannelTransport
     return {
       channelId: channel.id,
-      channelTransport,
       ...(channel.ackMode && { ack: channel.ackMode }),
     }
   },

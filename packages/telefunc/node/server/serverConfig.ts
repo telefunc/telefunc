@@ -1,6 +1,6 @@
 export { configUser as config }
 export { getServerConfig }
-export { setDefaultChannelTransport }
+export { enableChannelTransports }
 export type { ConfigUser, ConfigResolved, StreamConfigUser, ChannelConfigUser, ChannelConfigResolved }
 
 import { assertUsage } from '../../utils/assert.js'
@@ -16,11 +16,11 @@ import {
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-  DEFAULT_CHANNEL_TRANSPORT,
+  DEFAULT_SERVER_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
-  type ChannelTransport,
+  type ChannelTransports,
   type StreamTransport,
 } from '../../wire-protocol/constants.js'
 
@@ -37,12 +37,16 @@ type StreamConfigUser = {
 
 type ChannelConfigUser = {
   /**
-   * Transport backend for Telefunc channels.
+   * Transports enabled on this server for Telefunc channels.
+   * Determines which transport(s) clients may connect with or upgrade to.
    *
-   * - `'sse'` (default): standard HTTP + SSE, no extra server setup
-   * - `'ws'`: multiplexed WebSocket backend
+   * - `['sse']` (default): SSE only
+   * - `['sse', 'ws']`: SSE and WebSocket — clients may upgrade to WS
+   * - `['ws']`: WebSocket only
+   *
+   * Connections arriving on a transport not listed here are immediately rejected.
    */
-  transport?: ChannelTransport
+  transports?: ChannelTransports
   /**
    * How long, in milliseconds, the server keeps channel state after a client
    * disconnects while waiting for a reconnect.
@@ -97,7 +101,7 @@ type ChannelConfigUser = {
 }
 
 type ChannelConfigResolved = {
-  transport: ChannelTransport
+  transports: ChannelTransports
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
@@ -153,9 +157,9 @@ type ConfigUser = {
         }
   }
   /** Default transport for streamed telefunction results when the client doesn't specify one. */
-  stream?: StreamConfigUser
-  /** Default transport and runtime settings for Telefunc channels. */
-  channel?: ChannelConfigUser
+  stream: StreamConfigUser
+  /** Enabled transports and runtime settings for Telefunc channels. */
+  channel: ChannelConfigUser
 }
 
 type ConfigResolved = {
@@ -174,39 +178,38 @@ type ConfigResolved = {
   channel: ChannelConfigResolved
 }
 
-const configState: ConfigUser = {}
+type ConfigState = Omit<ConfigUser, 'stream' | 'channel'> & { stream: StreamConfigUser; channel: ChannelConfigUser }
 
-const streamConfig = new Proxy<StreamConfigUser>({} as StreamConfigUser, {
-  get(_target, prop) {
-    if (prop === 'transport') return configState.stream?.transport
-    return undefined
-  },
-  set(_target, prop, val) {
-    if (prop !== 'transport') {
-      assertUsage(false, `Unknown config.stream.${String(prop)}`)
-    }
-    configState.stream ??= {}
-    configState.stream.transport = validateStreamTransport(val, 'config.stream.transport')
-    return true
-  },
-})
-
-const channelConfig = new Proxy<ChannelConfigUser>({} as ChannelConfigUser, {
-  get(_target, prop) {
-    return configState.channel?.[prop as keyof ChannelConfigUser]
-  },
-  set(_target, prop, val) {
-    if (typeof prop !== 'string') return true
-    configState.channel ??= {}
-    setChannelConfigValue(configState.channel, prop, val, 'config.channel')
-    return true
-  },
-})
+const configState: ConfigState = { stream: {}, channel: {} }
 
 const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   get(_target, prop) {
-    if (prop === 'stream') return streamConfig
-    if (prop === 'channel') return channelConfig
+    if (prop === 'stream') {
+      return new Proxy({} as StreamConfigUser, {
+        get(_t, subProp) {
+          return configState.stream[subProp as keyof StreamConfigUser]
+        },
+        set(_t, subProp, val) {
+          if (typeof subProp !== 'string') return true
+          configState.stream = validateStreamConfig({ ...configState.stream, [subProp]: val })
+          return true
+        },
+      })
+    }
+    if (prop === 'channel') {
+      return new Proxy({} as ChannelConfigUser, {
+        get(_t, subProp) {
+          return configState.channel[subProp as keyof ChannelConfigUser]
+        },
+        set(_t, subProp, val) {
+          if (typeof subProp !== 'string') return true
+          const channelConfigNext = { ...configState.channel }
+          setChannelConfigValue(channelConfigNext, subProp, val, 'config.channel')
+          configState.channel = channelConfigNext
+          return true
+        },
+      })
+    }
     return configState[prop as keyof ConfigUser]
   },
   set(_target, prop, val) {
@@ -248,27 +251,30 @@ function getServerConfig(): ConfigResolved {
       return toPosixPath(process.cwd())
     })(),
     stream: {
-      transport: configState.stream?.transport ?? DEFAULT_STREAM_TRANSPORT,
+      transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
     channel: {
-      transport: configState.channel?.transport ?? DEFAULT_CHANNEL_TRANSPORT,
-      reconnectTimeout: configState.channel?.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
-      idleTimeout: configState.channel?.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
-      pingInterval: configState.channel?.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
-      serverReplayBuffer: configState.channel?.serverReplayBuffer ?? CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-      clientReplayBuffer: configState.channel?.clientReplayBuffer ?? CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-      connectTtl: configState.channel?.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
-      bufferLimit: configState.channel?.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
-      sseFlushThrottle: configState.channel?.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
-      ssePostIdleFlushDelay: configState.channel?.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
+      transports: configState.channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS],
+      reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
+      idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
+      pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
+      serverReplayBuffer: configState.channel.serverReplayBuffer ?? CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
+      clientReplayBuffer: configState.channel.clientReplayBuffer ?? CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
+      connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
+      bufferLimit: configState.channel.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
+      sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
+      ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
   }
 }
 
-/** @internal Set a channel transport default only if the user hasn't set one. */
-function setDefaultChannelTransport(transport: ChannelTransport): void {
-  configState.channel ??= {}
-  configState.channel.transport ??= transport
+/** @internal Push additional transports into the default only if the user hasn't set one. */
+function enableChannelTransports(transports: ChannelTransports): void {
+  if (!configState.channel.transports) {
+    configState.channel.transports = [
+      ...new Set([...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...transports]),
+    ] as ChannelTransports
+  }
 }
 
 function validateUserConfig(prop: string | symbol, val: unknown) {
@@ -376,8 +382,8 @@ function validateChannelConfig(val: unknown): ChannelConfigUser {
 function setChannelConfigValue(channelConfigNext: ChannelConfigUser, key: string, value: unknown, basePath: string) {
   const configPath = `${basePath}.${key}`
   switch (key) {
-    case 'transport':
-      channelConfigNext.transport = validateChannelTransport(value, configPath)
+    case 'transports':
+      channelConfigNext.transports = validateChannelTransports(value, configPath)
       return
     case 'reconnectTimeout':
     case 'idleTimeout':
@@ -405,7 +411,10 @@ function validateStreamTransport(val: unknown, configPath: string): StreamTransp
   return val
 }
 
-function validateChannelTransport(val: unknown, configPath: string): ChannelTransport {
-  assertUsage(val === 'sse' || val === 'ws', `\`${configPath}\` should be 'sse' or 'ws'`)
-  return val
+function validateChannelTransports(val: unknown, configPath: string): ChannelTransports {
+  assertUsage(
+    Array.isArray(val) && val.length > 0 && val.every((v) => v === 'sse' || v === 'ws'),
+    `\`${configPath}\` should be an array of transports, e.g. ['sse'] or ['ws']`,
+  )
+  return val as ChannelTransports
 }

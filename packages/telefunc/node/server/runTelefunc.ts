@@ -285,15 +285,13 @@ async function runTelefunc_({
     if (parsed.isSseRequest) {
       return createHttpResponse(parsed.sseResponse)
     }
-    const { telefunctionKey, telefunctionArgs, telefuncFilePath, telefunctionName, streamTransport, channelTransport } =
-      parsed
+    const { telefunctionKey, telefunctionArgs, telefuncFilePath, telefunctionName, streamTransport } = parsed
     objectAssign(runContext, {
       telefunctionKey,
       telefunctionArgs,
       telefuncFilePath,
       telefunctionName,
       streamTransport,
-      channelTransport,
     })
   }
 

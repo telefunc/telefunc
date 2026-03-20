@@ -3,9 +3,7 @@ import { Hono } from 'hono'
 import { config } from 'telefunc'
 import { telefuncWebSocket } from 'telefunc/websocket/node'
 import { cleanupState, resetCleanupState } from '../cleanup-state'
-config.channel = {
-  pingInterval: 1000,
-}
+config.channel.pingInterval = 1000
 
 const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
 

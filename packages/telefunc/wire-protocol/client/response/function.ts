@@ -4,7 +4,6 @@ import { SERIALIZER_PREFIX_FUNCTION } from '../../constants.js'
 import type { PlaceholderReviverType, FunctionContract } from '../../placeholder-types.js'
 import { ClientChannel } from '../channel.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-
 const globalObject = getGlobalObject('wire-protocol/client/response/function.ts', {
   /** Close the channel when the proxy is GC'd. `fn` is weak target. */
   gcRegistry: new FinalizationRegistry<ClientChannel>((channel) => channel.close()),
@@ -21,7 +20,7 @@ const functionClientPlaceholderType: PlaceholderReviverType<FunctionContract> = 
     const channel = new ClientChannel({
       channelId: metadata.channelId,
       ackMode: true,
-      channelTransport: metadata.channelTransport,
+      transports: context.channelTransports,
       shard: context.shard,
     })
     const fn = (...args: unknown[]) => channel.send(args, { ack: true })

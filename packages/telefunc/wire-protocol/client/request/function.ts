@@ -14,16 +14,16 @@ const globalObject = getGlobalObject('wire-protocol/client/request/function.ts',
 const functionClientRequestType: PlaceholderReplacerType<FunctionContract, ClientRequestContext> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
   detect: (value): value is FunctionContract['value'] => typeof value === 'function',
-  getMetadata: (fn, { channelTransport }) => {
+  getMetadata: (fn, { channelTransports }) => {
     // Connect eagerly — the server will block reconcile until ServerChannel is created.
     const channel = new ClientChannel<unknown, readonly unknown[]>({
       channelId: crypto.randomUUID(),
       ackMode: true,
-      channelTransport,
+      transports: channelTransports,
       defer: true,
     })
     channel.listen((args) => fn(...args))
     globalObject.gcRegistry.register(fn, channel)
-    return { channelId: channel.id, channelTransport }
+    return { channelId: channel.id }
   },
 }

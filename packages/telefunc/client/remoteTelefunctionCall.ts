@@ -54,9 +54,9 @@ function remoteTelefunctionCall(
     })
   }
 
-  if (callClientContext?.channel?.transport) {
+  if (callClientContext?.channel?.transports) {
     objectAssign(callContext, {
-      channel: { transport: callClientContext.channel.transport },
+      channel: { transports: callClientContext.channel.transports },
     })
   }
 

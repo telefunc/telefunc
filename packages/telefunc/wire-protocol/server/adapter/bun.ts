@@ -2,7 +2,7 @@ export { telefuncWebSocket }
 
 import crossws from 'crossws/adapters/bun'
 import { getTelefuncChannelHooks } from '../ws.js'
-import { getServerConfig, setDefaultChannelTransport } from '../../../node/server/serverConfig.js'
+import { getServerConfig, enableChannelTransports } from '../../../node/server/serverConfig.js'
 import { CHANNEL_TRANSPORT } from '../../constants.js'
 
 type BunWs = ReturnType<typeof crossws>
@@ -46,11 +46,14 @@ function telefuncWebSocket(): TelefuncAdapter {
     websocket: ws.websocket,
 
     handleUpgrade(request: Request, server: BunServer): Response | Promise<Response> | undefined {
-      setDefaultChannelTransport(CHANNEL_TRANSPORT.WS)
+      enableChannelTransports([CHANNEL_TRANSPORT.WS])
       const url = new URL(request.url)
-      const telefuncUrl = getServerConfig().telefuncUrl
-      if (url.pathname !== telefuncUrl || request.headers.get('upgrade') !== 'websocket') {
+      const config = getServerConfig()
+      if (url.pathname !== config.telefuncUrl || request.headers.get('upgrade') !== 'websocket') {
         return undefined
+      }
+      if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
+        return new Response(null, { status: 400 })
       }
       return ws.handleUpgrade(request, server) as Response | Promise<Response>
     },

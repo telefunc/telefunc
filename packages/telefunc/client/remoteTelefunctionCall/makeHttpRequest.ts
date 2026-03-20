@@ -8,6 +8,7 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wi
 import { throwAbortError, throwBugError } from './errors.js'
 import { ConnectionError } from '../ConnectionError.js'
 import { setShardInfo } from '../../wire-protocol/client/shard-registry.js'
+import type { ChannelTransports } from '../../wire-protocol/constants.js'
 import {
   STATUS_CODE_SUCCESS,
   STATUS_CODE_THROW_ABORT,
@@ -30,6 +31,7 @@ async function makeHttpRequest(callContext: {
   headers: Record<string, string> | null
   fetch: typeof globalThis.fetch | null
   abortController: AbortController
+  channel: { transports: ChannelTransports }
 }): Promise<unknown> {
   const isBinaryFrame = typeof callContext.httpRequestBody !== 'string'
   const requestKind = isBinaryFrame ? REQUEST_KIND.BINARY : REQUEST_KIND.TEXT

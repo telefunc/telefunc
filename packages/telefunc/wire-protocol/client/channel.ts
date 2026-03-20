@@ -11,11 +11,10 @@ import type {
 } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { getChannelTransport, resolveClientConfig } from '../../client/clientConfig.js'
+import { resolveClientConfig } from '../../client/clientConfig.js'
 import { createAbortError, isAbort } from '../../shared/Abort.js'
-import { assert } from '../../utils/assert.js'
 import { ClientConnection } from './connection.js'
-import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_TRANSPORT, type ChannelTransport } from '../constants.js'
+import { CHANNEL_CLOSE_TIMEOUT_MS, type ChannelTransports } from '../constants.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
@@ -62,13 +61,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   constructor({
     channelId,
     ackMode = false,
-    channelTransport,
+    transports,
     shard,
     defer = false,
   }: {
     channelId: string
     ackMode?: boolean
-    channelTransport?: ChannelTransport
+    transports: ChannelTransports
     shard?: string
     defer?: boolean
   }) {
@@ -77,13 +76,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.defer = defer
     const config = resolveClientConfig()
     const url = shard ? appendShardParam(config.telefuncUrl, shard) : config.telefuncUrl
-    const resolvedTransport = channelTransport ?? getChannelTransport(config)
-    assert(
-      resolvedTransport === CHANNEL_TRANSPORT.SSE || resolvedTransport === CHANNEL_TRANSPORT.WS,
-      `Unknown channel transport: ${String(resolvedTransport)}`,
-    )
     this._connection = ClientConnection.getOrCreate(url, this, {
-      transport: resolvedTransport,
+      transports,
       fetchImpl: config.fetch ?? globalThis.fetch,
     })
   }

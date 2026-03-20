@@ -8,14 +8,10 @@ assertIsNotBrowser()
 
 const functionServerRequestType: PlaceholderServerReviverType<FunctionContract> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
-  createValue: ({ channelId, channelTransport }) => {
+  createValue: ({ channelId }) => {
     // Client opened its ClientChannel eagerly (at serialization time) with this ID.
     // Server must use the same ID so the WS reconcile links both sides.
-    const channel = new ServerChannel({
-      ackMode: true,
-      id: channelId,
-      channelTransport,
-    })
+    const channel = new ServerChannel({ ackMode: true, id: channelId })
     channel._registerChannel()
     return {
       value: (...args: unknown[]) => channel.send(args, { ack: true }),

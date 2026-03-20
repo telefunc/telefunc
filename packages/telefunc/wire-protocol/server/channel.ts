@@ -24,12 +24,7 @@ import { createAbortError, type AbortError } from '../../shared/Abort.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
-import {
-  type ChannelTransport,
-  CHANNEL_BUFFER_LIMIT_BYTES,
-  CHANNEL_CLOSE_TIMEOUT_MS,
-  CHANNEL_CONNECT_TTL_MS,
-} from '../constants.js'
+import { CHANNEL_BUFFER_LIMIT_BYTES, CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_CONNECT_TTL_MS } from '../constants.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import type { AckResultStatus } from '../shared-ws.js'
@@ -79,7 +74,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   readonly [SERVER_CHANNEL_BRAND] = true
   readonly id: string
   readonly ackMode: boolean
-  readonly channelTransport?: ChannelTransport
 
   get client(): ChannelClient<ClientToServer, ServerToClient> {
     return this as unknown as ChannelClient<ClientToServer, ServerToClient>
@@ -126,16 +120,13 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     ackMode = false,
     id,
     bufferLimit,
-    channelTransport,
   }: {
     ackMode?: boolean
     id?: string
     bufferLimit?: number
-    channelTransport?: ChannelTransport
   } = {}) {
     this.ackMode = ackMode
     this.id = id ?? crypto.randomUUID()
-    this.channelTransport = channelTransport
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(bufferLimit ?? globalObject.bufferLimit)
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
@@ -385,6 +376,13 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         this._shutdown(new ChannelNetworkError('Channel timed out: client did not reconnect within grace period'))
       }, reconnectTimeout),
     )
+  }
+
+  _onPeerHandoff(): void {
+    if (this._didShutdown) return
+    this._peer = null
+    this._clearTimer('_reconnectTimer')
+    this._disconnected = false
   }
 
   _onPeerRecoveryFailure(): void {

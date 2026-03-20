@@ -13,7 +13,7 @@ import {
 import { buildChannelResponseBody } from '../../../wire-protocol/server/response/ChannelResponseBody.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { injectFrameChannel } from '../../../wire-protocol/frame-channel.js'
-import { STREAM_TRANSPORT, type ChannelTransport, type StreamTransport } from '../../../wire-protocol/constants.js'
+import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import type { RequestContext } from '../requestContext.js'
 import type { Telefunc } from '../getContext.js'
 
@@ -39,7 +39,6 @@ function serializeTelefunctionResult(runContext: {
   requestContext: RequestContext
   abortSignal: AbortSignal
   streamTransport: StreamTransport
-  channelTransport: ChannelTransport
 }): SerializeResult {
   const { requestContext } = runContext
 
@@ -47,7 +46,7 @@ function serializeTelefunctionResult(runContext: {
     ? { ret: runContext.telefunctionReturn, abort: true }
     : { ret: runContext.telefunctionReturn }
 
-  const { replacer, streamingValues } = createStreamingReplacer(runContext.channelTransport, (channel) => {
+  const { replacer, streamingValues } = createStreamingReplacer((channel) => {
     channel._setResponseAbort(requestContext.responseAbort.abort)
     requestContext.responseAbort.onAbort((abortError) => channel.abort(abortError.abortValue))
   })
@@ -78,12 +77,11 @@ function serializeTelefunctionResult(runContext: {
   }
 
   if (runContext.streamTransport === STREAM_TRANSPORT.CHANNEL) {
-    const serverChannel = new ServerChannel<never, never>({ channelTransport: runContext.channelTransport })
+    const serverChannel = new ServerChannel<never, never>()
     serverChannel._registerChannel()
     serverChannel.onClose(() => requestContext.markComplete())
     httpResponseBody = injectFrameChannel(httpResponseBody, {
       channelId: serverChannel.id,
-      channelTransport: runContext.channelTransport,
     })
     buildChannelResponseBody(streamingValues, telefuncId, serverChannel, runContext)
     return { type: 'text', body: httpResponseBody }

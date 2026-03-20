@@ -4,7 +4,6 @@ import { SERIALIZER_PREFIX_CHANNEL } from '../../constants.js'
 import type { PlaceholderReviverType, ChannelContract } from '../../placeholder-types.js'
 import { ClientChannel } from '../channel.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-
 const globalObject = getGlobalObject('wire-protocol/client/response/channel.ts', {
   gcRegistry: new FinalizationRegistry<ClientChannel>((channel) => channel.close()),
 })
@@ -15,7 +14,7 @@ const channelClientPlaceholderType: PlaceholderReviverType<ChannelContract> = {
     const channel = new ClientChannel({
       channelId: metadata.channelId,
       ackMode: metadata.ack,
-      channelTransport: metadata.channelTransport,
+      transports: context.channelTransports,
       shard: context.shard,
     })
     const value = new Proxy({} as ClientChannel, {

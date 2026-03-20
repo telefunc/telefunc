@@ -2,6 +2,7 @@ export { TAG, encode, decode, encodeCtrl }
 export type { AckResultStatus, CtrlMessage, CtrlReconcile, CtrlReconciled }
 
 import { assert } from '../utils/assert.js'
+import type { ChannelTransports } from './constants.js'
 
 // ===== WebSocket Wire Protocol =====
 //
@@ -58,6 +59,9 @@ type CtrlError = { t: 'error'; ix: number }
 type CtrlReconcile = {
   t: 'reconcile'
   sessionId?: string
+  /** Set when the client is upgrading from SSE to WS and has kept SSE alive.
+   *  Server should drain the SSE send chain before replaying and attaching. */
+  upgrade?: true
   open: { id: string; ix: number; lastSeq: number; defer?: boolean }[]
 }
 /** Server → client after reconcile: all channels the server actually attached, with lastSeq the server received per channel. */
@@ -71,7 +75,10 @@ type CtrlReconciled = {
   clientReplayBuffer: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
+  transports: ChannelTransports
 }
+/** Server → client on old transport after upgrade drain: signals the client that this is the last frame on this transport. */
+type CtrlFin = { t: 'fin' }
 type CtrlMessage =
   | CtrlClose
   | CtrlCloseAck
@@ -83,6 +90,7 @@ type CtrlMessage =
   | CtrlPong
   | CtrlReconcile
   | CtrlReconciled
+  | CtrlFin
 
 type AckResultStatus = 'ok' | 'error' | 'abort'
 

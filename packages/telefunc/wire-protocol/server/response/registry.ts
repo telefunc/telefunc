@@ -9,7 +9,6 @@ import { functionServerPlaceholderType } from './function.js'
 import type { PlaceholderReplacerType, PlaceholderTypeContract } from '../../placeholder-types.js'
 import type { ServerStreamingType, StreamingTypeContract, StreamingValueServer } from '../../streaming-types.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { DEFAULT_CHANNEL_TRANSPORT, type ChannelTransport } from '../../constants.js'
 assertIsNotBrowser()
 
 type ResponseAbortableChannel = {
@@ -18,7 +17,6 @@ type ResponseAbortableChannel = {
 }
 
 type ServerResponseContext = {
-  channelTransport: ChannelTransport
   registerChannel(channel: ResponseAbortableChannel): void
 }
 
@@ -44,13 +42,9 @@ const serverPlaceholderTypes: PlaceholderReplacerType<PlaceholderTypeContract, S
  * client can deterministically reconstruct chunk readers without relying on
  * JSON traversal order.
  */
-function createStreamingReplacer(
-  channelTransport: ChannelTransport = DEFAULT_CHANNEL_TRANSPORT,
-  registerChannel: (channel: ResponseAbortableChannel) => void = () => {},
-) {
+function createStreamingReplacer(registerChannel: (channel: ResponseAbortableChannel) => void = () => {}) {
   const streamingValues: StreamingValueServer[] = []
   const context: ServerResponseContext = {
-    channelTransport,
     registerChannel,
   }
   let nextIndex = 0

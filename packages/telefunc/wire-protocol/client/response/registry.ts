@@ -12,6 +12,7 @@ import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { ClientChannel } from '../channel.js'
+import type { ChannelTransports } from '../../constants.js'
 
 const clientStreamingTypes: ClientStreamingType[] = [
   asyncGeneratorClientType,
@@ -38,6 +39,7 @@ const clientPlaceholderTypes: PlaceholderReviverType[] = [
 function createStreamingReviver(
   getChunkReader: (index: number) => () => Promise<Uint8Array<ArrayBuffer> | null>,
   getCancelIndex: (index: number) => () => void,
+  transports: ChannelTransports,
   shard?: string,
 ) {
   const channels: ClientChannel[] = []
@@ -60,7 +62,7 @@ function createStreamingReviver(
         return { replacement: revived.value }
       }
     }
-    return revivePlaceholder(value, parser, channels, registerClose, shard)
+    return revivePlaceholder(value, parser, channels, registerClose, transports, shard)
   }
   return { reviver, channels, closeHandlers }
 }
@@ -70,9 +72,11 @@ function revivePlaceholder(
   parser: (str: string) => unknown,
   channels: ClientChannel[],
   registerClose: (revived: { value: unknown; close: (() => void) | undefined }) => void,
+  transports: ChannelTransports,
   shard?: string,
 ) {
   const context = {
+    channelTransports: transports,
     shard,
     registerChannel(channel: ClientChannel) {
       channels.push(channel)

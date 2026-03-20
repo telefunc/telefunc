@@ -6,11 +6,12 @@ import type { AckResultStatus } from '../shared-ws.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 
 interface PeerSender {
-  send(frame: Uint8Array): void | Promise<void>
+  send(frame: Uint8Array, onCommit?: () => void): void | Promise<void>
 }
 
 /** Wraps a crossws peer, encodes frames with a fixed channel index.
- *  Assigns sequence numbers and stores frames in the replay buffer. */
+ *  Assigns sequence numbers. Frames are added to the replay buffer only once
+ *  they are committed to a transport send path. */
 class IndexedPeer {
   constructor(
     private sender: PeerSender,
@@ -21,25 +22,22 @@ class IndexedPeer {
   sendText(data: string): void {
     const seq = this.replay.nextSeq()
     const frame = encode.text(this.index, data, seq)
-    this.replay.push(seq, frame)
-    this.sender.send(frame)
+    this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 
   /** Send a text frame that requests an ack response from the receiver. Returns seq. */
   sendTextAckReq(data: string, onQueued?: (seq: number) => void): number {
     const seq = this.replay.nextSeq()
     const frame = encode.textAckReq(this.index, data, seq)
-    this.replay.push(seq, frame)
     onQueued?.(seq)
-    this.sender.send(frame)
+    this.sender.send(frame, () => this.replay.push(seq, frame))
     return seq
   }
 
   sendBinary(data: Uint8Array): void | Promise<void> {
     const seq = this.replay.nextSeq()
     const frame = encode.binary(this.index, data, seq)
-    this.replay.push(seq, frame)
-    return this.sender.send(frame)
+    return this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 
   /** Send an acknowledgement response for a message the client sent.
@@ -47,9 +45,8 @@ class IndexedPeer {
   sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = 'ok'): void {
     const seq = this.replay.nextSeq()
     const frame = encode.ackRes(this.index, seq, ackedSeq, result, status)
-    this.replay.push(seq, frame)
     try {
-      this.sender.send(frame)
+      this.sender.send(frame, () => this.replay.push(seq, frame))
     } catch {
       /* transport may already be closed */
     }
