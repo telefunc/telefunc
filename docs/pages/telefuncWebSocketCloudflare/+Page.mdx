@@ -45,7 +45,7 @@ export default {
 }
 ```
 
-> `compatibility_flags: ["nodejs_als"]` is required — Telefunc uses `AsyncLocalStorage` for request context.
+> `compatibility_flags: ["nodejs_als"]` is required for channels and pub/sub — Telefunc uses `AsyncLocalStorage` to preserve request context across async boundaries (e.g. routing pub/sub messages to the correct bucket).
 
 
 ## Context
