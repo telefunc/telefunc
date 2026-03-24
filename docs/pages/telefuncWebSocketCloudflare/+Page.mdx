@@ -2,150 +2,232 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-This page covers the Cloudflare-specific setup for <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
+Cloudflare-specific setup, architecture, and delivery guarantees for Telefunc channels and pub/sub.
 
 
-## Minimal setup
-
-This works out of the box:
+## Setup
 
 ```ts
-import { telefuncWebSocket } from 'telefunc/websocket/cloudflare'
+// worker.ts
+// Environment: server
 
-const ws = telefuncWebSocket()
+import { telefunc } from 'telefunc/cloudflare'
 
-export const TelefuncDurableObject = ws.createDurableObjectClass()
+const tf = telefunc()
+
+export const TelefuncDurableObject = tf.TelefuncDurableObject
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const resp = ws.handleTelefunc(request, env, ctx)
-    if (resp) return resp
-    // ... rest of your fetch handler
+    const response = await tf.serve({ request, env, ctx })
+    if (response) return response
+
+    return new Response('Not found', { status: 404 })
   },
 }
 ```
 
-Call `ws.handleTelefunc()` before the rest of your application logic so Telefunc can intercept its own RPC and WebSocket requests.
-
 ```jsonc
+// wrangler.jsonc
 {
+  "compatibility_flags": ["nodejs_als"],
   "durable_objects": {
     "bindings": [
-      {
-        "name": "TelefuncDurableObject",
-        "class_name": "TelefuncDurableObject"
-      }
+      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
     ]
   },
+  "kv_namespaces": [
+    { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
+  ],
   "migrations": [
-    {
-      "tag": "v1",
-      "new_classes": ["TelefuncDurableObject"]
-    }
+    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] }
   ]
 }
 ```
 
+> `compatibility_flags: ["nodejs_als"]` is required — Telefunc uses `AsyncLocalStorage` for request context.
+
 
 ## Context
 
-To pass per-request data to your telefunctions via <Link text={<code>getContext()</code>} href="/getContext" />, provide a `context` function:
+Pass per-request data to telefunctions via <Link text={<code>getContext()</code>} href="/getContext" />:
 
 ```ts
-const ws = telefuncWebSocket({
+const tf = telefunc({
   context: async (request, env: Env) => ({
     user: await getUserFromCookie(request, env),
   }),
 })
 ```
 
-The function receives the incoming `Request` and your `env` bindings, and its return value is available inside telefunctions via `getContext()`.
+
+## Architecture
+
+Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for channel state and pub/sub coordination. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object instance as the WebSocket connection.
+
+[KV](https://developers.cloudflare.com/kv/) stores two things:
+- **Shard routing tokens** — pins a browser session to the same Durable Object across requests.
+- **Pub/sub presence** — tracks which Durable Objects have active subscribers for each key.
 
 
-## Scale
+## Scaling
 
-By default all channels share a single Durable Object instance per location bucket. If you need more capacity, increase the number of instances:
-
-```ts
-const ws = telefuncWebSocket({ scale: 4 })
-```
-
-Each browser session is pinned to one shard via an opaque token stored in KV, so a user's open channels and regular telefunction calls stay on the same Durable Object instance.
-
-You can also set a per-bucket scale:
-
-```ts
-const ws = telefuncWebSocket({ scale: { weur: 4, enam: 2, apac: 1 } })
-```
-
-## KV namespace
-
-Telefunc uses a KV namespace for shard routing tokens and pub/sub presence. Add the binding to your `wrangler.jsonc`:
-
-```jsonc
-{
-  "kv_namespaces": [
-    { "binding": "TelefuncKV", "id": "..." }
-  ]
-}
-```
-
-The default binding name is `TelefuncKV`. To use a different name:
+By default, Telefunc creates one Durable Object instance per location bucket. Increase capacity with `scale`:
 
 ```ts
-const ws = telefuncWebSocket({ kvBindingName: 'MyKV' })
+const tf = telefunc({ scale: 4 })
 ```
 
-## Custom binding name
+This creates 4 session shards per bucket. Each browser session is pinned to one shard via a KV-backed routing token (TTL: 24 hours), so a user's channels and telefunction calls stay on the same instance.
 
-The default binding name is `TelefuncDurableObject`. To use a different name:
+### Per-region scale
 
 ```ts
-const ws = telefuncWebSocket({ bindingName: 'MyDurableObject' })
+const tf = telefunc({
+  scale: { weur: 5, enam: 3, apac: 2 },
+})
 ```
 
+Only specified regions get session shards. The six canonical location buckets are:
 
-## Location fallback
+| Bucket | Region |
+|---|---|
+| `wnam` | West North America |
+| `enam` | East North America |
+| `weur` | West Europe |
+| `eeur` | East Europe |
+| `apac` | Asia Pacific |
+| `oc` | Oceania |
 
-To control the canonical Durable Object placement bucket when Cloudflare cannot map the request precisely, pass `locationFallback`:
+Telefunc maps each incoming request to a bucket using the Cloudflare colocation point, then continent, then `locationFallback`.
+
+
+## Distributed pub/sub
+
+Keyed channels (<Link href="/createChannel" />) use a three-tier fanout architecture to broadcast across edge locations:
+
+### Publish flow
+
+```
+Publisher (session shard)
+  → Authority DO (one per key — sequences and timestamps)
+    → Bucket coordinators (one per active region)
+      → Session shards (deliver to local subscribers)
+```
+
+1. The publisher's session shard forwards to the **authority** Durable Object for the key.
+2. The authority serializes publishes through an exclusive dispatch chain, assigns a monotonic sequence number, reads active presence from KV, and forwards to each **bucket coordinator**.
+3. Each bucket coordinator delivers to the listed **session shards** in its region.
+4. Each session shard delivers to its local subscribers (skipping the original sender).
+
+### Ordering
+
+Publishes for a given key are serialized through a single authority instance. The authority assigns a monotonic sequence number (`seq`) that increases by 1 for each publish, then fans out to bucket coordinators in order. Subscribers receive messages in publish order.
 
 ```ts
-const ws = telefuncWebSocket({ locationFallback: 'weur' })
+const receipt = await channel.publish({ user: 'Alice', text: 'Hello!', ts: Date.now() })
+receipt.key  // 'chat:lobby'
+receipt.seq  // monotonic sequence number for this key
+receipt.ts   // server timestamp
 ```
 
-Telefunc first tries to resolve a canonical bucket from the incoming Cloudflare colo or continent. If that fails, it falls back to `locationFallback`, which defaults to `'weur'`.
+### Presence
 
-Valid values are the canonical Telefunc buckets: `'wnam'`, `'enam'`, `'weur'`, `'eeur'`, `'apac'`, and `'oc'`.
+Telefunc tracks which Durable Objects have active subscribers using KV presence entries:
+
+| Setting | Value |
+|---|---|
+| TTL | 90 seconds |
+| Refresh interval | 30 seconds |
+
+Presence entries are created when a channel subscribes to a key and deleted when it unsubscribes. The refresh timer keeps the entry alive as long as the channel is open. If a Durable Object crashes without unsubscribing, the entry expires after 90 seconds and the bucket is no longer included in fanout.
+
+### Coordinator shards
+
+Bucket coordinator count derives from session scale: `ceil(sessionScale / 2)` per bucket. Keys are deterministically mapped to a coordinator shard using a hash, so the same key always routes through the same coordinator in a given bucket.
+
+
+## Delivery guarantees
+
+### Channel messages (`send` / `listen`)
+
+| Guarantee | Details |
+|---|---|
+| Ordering | Messages within a channel are delivered in order. |
+| Buffering | The server buffers messages while the client is disconnected, up to `config.channel.bufferLimit` (default: 512 KB). |
+| Replay | Both sides keep a bounded replay buffer. On reconnect, missing frames are replayed and duplicates are ignored. |
+| Acknowledgements | `send(data, { ack: true })` returns a `Promise` that resolves when the other side processes the message. |
+| Loss | If the disconnect exceeds `config.channel.reconnectTimeout`, the channel closes with `ChannelNetworkError`. Older frames evicted from the replay buffer before reconnect are lost. |
+
+### Pub/sub messages (`publish` / `subscribe`)
+
+| Guarantee | Details |
+|---|---|
+| Ordering | Publishes for a given key are serialized through a single authority and delivered in order. |
+| Delivery | `publish()` resolves after all active session shards have received the message. This confirms server-side fanout completed — delivery to the client happens over the channel wire and is not awaited. |
+| Presence lag | Up to 90 seconds. A crashed session shard may still receive fanout attempts until its KV entry expires. A new subscriber may miss publishes during the initial presence setup (buffered locally up to 512 KB). |
+
+> Once a pub/sub message reaches a session shard, it participates in the same replay and recovery semantics as regular channel messages — buffered if the client is disconnected, replayed on reconnect.
+
+
+## Configuration
+
+```ts
+const tf = telefunc({
+  // Durable Object binding name (default: 'TelefuncDurableObject')
+  bindingName: 'TelefuncDurableObject',
+
+  // KV binding name for shard tokens and pub/sub presence (default: 'TelefuncKV')
+  kvBindingName: 'TelefuncKV',
+
+  // Instance base name for Durable Objects (default: 'telefunc')
+  instanceName: 'telefunc',
+
+  // Session shards per location bucket (default: 1)
+  scale: 1,
+
+  // Fallback location when the request can't be mapped (default: 'weur')
+  locationFallback: 'weur',
+
+  // Restrict Durable Objects to a jurisdiction
+  jurisdiction: 'eu',
+})
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `bindingName` | `'TelefuncDurableObject'` | Durable Object binding name in `wrangler.jsonc`. |
+| `kvBindingName` | `'TelefuncKV'` | KV namespace binding name. |
+| `instanceName` | `'telefunc'` | Base name for Durable Object instance IDs. |
+| `scale` | `1` | Session shards per bucket. Number or per-bucket map. |
+| `locationFallback` | `'weur'` | Canonical bucket for unmapped requests. |
+| `jurisdiction` | — | Cloudflare [jurisdiction](https://developers.cloudflare.com/durable-objects/reference/data-location/#restrict-durable-objects-to-a-jurisdiction) such as `'eu'` or `'fedramp'`. |
 
 
 ## Hibernation
 
 > **[Durable Object hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#why-use-hibernation) while channels are open is not supported.**
 >
-> Channels are plain in-memory JavaScript: closures, local variables, callbacks. If the Durable Object hibernates, that heap state is gone. Telefunc therefore keeps the Durable Object alive for the lifetime of each open channel.
+> Channels are plain in-memory JavaScript: closures, local variables, callbacks. If the Durable Object hibernates, that heap state is gone. Telefunc keeps the Durable Object alive for the lifetime of each open channel.
 
-Once all channels are closed and no clients are connected, the Durable Object can hibernate again. By default this happens after the reconnect and idle windows expire.
+Once all channels close and no clients are connected, the Durable Object can hibernate again — after the reconnect and idle windows expire.
 
-Shorter reconnect and idle windows let the Durable Object hibernate sooner, but reduce tolerance for temporary disconnects.
-
-You can shorten those windows:
+Shorter windows let the Durable Object hibernate sooner but reduce tolerance for disconnects:
 
 ```ts
-const ws = telefuncWebSocket({
+import { config } from 'telefunc'
+
+config.channel = {
   reconnectTimeout: 5_000,
   idleTimeout: 5_000,
   pingInterval: 2_000,
-})
+}
 ```
-
-Your own timers or background work can also keep the Durable Object awake after channels close.
 
 
 ## See also
 
-- <Link href="/stream" />
-- <Link href="/real-time" />
-- <Link href="/file-upload" />
-- <Link href="/createChannel" />
-- <Link href="/telefuncWebSocket" />
-- <Link href="/transport" />
+- <Link href="/server" /> — serve API for all runtimes
+- <Link href="/createChannel" /> — channel and pub/sub API
+- <Link href="/transport" /> — transport configuration
+- <Link href="/real-time" /> — real-time patterns

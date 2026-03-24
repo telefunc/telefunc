@@ -28,9 +28,7 @@ It's most commonly used for implementing permissions, see <Link href="/permissio
 
 ## Provide
 
-Before you can use `getContext()`, you must provide the `context` object to your Telefunc server middleware, see:
-- <Link href="/server" />
-- <Link href="/telefunc" />
+Before you can use `getContext()`, you must provide the `context` object when calling `tf.serve()`, see <Link href="/server" />.
 
 For example:
 
@@ -48,22 +46,20 @@ For example:
 // Server entry (Hono)
 
 import { Hono } from 'hono'
-import { telefunc } from 'telefunc'
+import { telefunc } from 'telefunc/node'
 
 const app = new Hono()
+const tf = telefunc()
 
 app.all('/_telefunc', async (c) => {
-  const httpResponse = await telefunc({
+  const response = await tf.serve({
     request: c.req.raw,
     // Provide the context object here:
     context: {
       user: c.get('user')
     }
   })
-  return new Response(httpResponse.getReadableWebStream(), {
-    status: httpResponse.statusCode,
-    headers: httpResponse.headers,
-  })
+  return response ?? c.notFound()
 })
 
 // Some authentication middleware — sets the user on Hono's context
@@ -94,12 +90,13 @@ app.use(async (c, next) => {
 // Server entry (Express.js)
 
 import express from 'express'
-import { telefunc } from 'telefunc'
+import { telefunc } from 'telefunc/node'
 
 const app = express()
+const tf = telefunc()
 
 // Telefunc middleware
-app.all('/_telefunc', async (req: Request, res: Response) => {
+app.all('/_telefunc', async (req, res, next) => {
   // Authentication middlewares (e.g. Passport.js or Grant) usually provide information
   // about the logged-in user on the `req` object:
   const user = req.user
@@ -108,19 +105,13 @@ app.all('/_telefunc', async (req: Request, res: Response) => {
   // @docpress-replace user2 user
   const user2 = await authProviderApi.getUser(req.headers)
 
-  const httpResponse = await telefunc({
-    // Provide the context object here:
-    context: {
-      user
-    },
-    url: req.url,
-    method: req.method,
-    body: req.body
+  // Provide the context object here:
+  const handled = await tf.serve({
+    req,
+    res,
+    context: { user }
   })
-
-  const { body, statusCode, headers } = httpResponse
-  headers.forEach(([name, value]) => res.setHeader(name, value))
-  res.status(statusCode).send(body)
+  if (!handled) next()
 })
 ```
 

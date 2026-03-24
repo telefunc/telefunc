@@ -109,18 +109,15 @@ See also: <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={
 
 **2. Handle the error on the server-side.**
 
-You can handle the thrown error at your Telefunc server middleware:
+You can handle the thrown error using the <Link text="low-level API" href="/telefunc" />:
 
 ```ts
 // server.ts
 
-// Server (Express.js/Fastify/...)
-
 import { telefunc } from 'telefunc'
 
-// Telefunc middleware
-app.all('/_telefunc', async (req: Request, res: Response) => {
-  const httpResponse = await telefunc(/* ... */)
+app.all('/_telefunc', async (c) => {
+  const httpResponse = await telefunc({ request: c.req.raw })
   // Telefunc exposes any error thrown by a telefunction at httpResponse.err
   if (httpResponse.err) {
     // Error handling

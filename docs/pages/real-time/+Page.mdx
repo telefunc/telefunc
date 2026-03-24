@@ -1,25 +1,26 @@
 import { Link } from '@brillout/docpress'
 
-Telefunc can handle real-time flows such as chat, upload progress, and live updates.
+Telefunc handles real-time flows — chat, upload progress, live updates — using the same function model as ordinary calls.
 
-In production, install <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />. In Vite dev mode, this is wired automatically.
+## Which primitive should I use?
 
-## Which primitive should you use?
+| Primitive | Best for | Setup |
+|---|---|---|
+| **Function passing** | Short-lived callbacks — progress updates, one-off server-to-client pushes | None |
+| **Channels** | Ongoing real-time messaging — direct or broadcast | None (SSE) or <Link text={<code>tf.installWebSocket()</code>} href="/server" /> (WS) |
+| **`config.stream.transport = 'channel'`** | <Link href="/stream">Streamed values</Link> over the same reconnecting transport as channels | Same as channels |
 
-- Use function passing for short-lived callback-style interactions such as progress updates.
-- Use <Link text={<code>createChannel()</code>} href="/createChannel" /> when both sides keep sending messages over time.
-- Use <Link href="/transport">`config.stream.transport = 'channel'`</Link> when you want <Link href="/stream">streamed values</Link> to use the same transport as Telefunc channels.
 
 ## Function passing
 
-Telefunc can pass functions between client and server.
+Telefunc can pass functions between client and server:
 
-- Pass a function argument from the client and the server can call it.
-- Return a function from a telefunction and call it later from the client.
+- **Client → server**: Pass a callback as an argument — the server can call it.
+- **Server → client**: Return a function from a telefunction — call it later from the client.
 
-## File upload progress
+### File upload progress
 
-You can combine file upload with a callback to report progress while the server reads the file stream.
+A callback argument reporting progress while the server reads the file stream:
 
 ```ts
 // Upload.telefunc.ts
@@ -56,31 +57,29 @@ function Upload() {
   async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
-
-    await onUpload(file, (percent) => {
-      setProgress(percent)
-    })
+    await onUpload(file, (percent) => setProgress(percent))
   }
 
   return (
     <div>
       <input type="file" onChange={handleUpload} />
-      <div style={{ width: `${progress}%` }} />
+      <div style={{ width: `${progress}%`, height: 4, background: '#3b82f6' }} />
     </div>
   )
 }
 ```
 
-The file bytes still stream normally while `onProgress()` updates the client.
-
-If you only need callback-style interaction, function passing is usually simpler than creating a dedicated channel.
+If you only need callback-style interaction, function passing is simpler than a dedicated channel.
 
 
 ## Channels
 
-Use <Link text={<code>createChannel()</code>} href="/createChannel" /> when server and client both need to keep sending messages over time.
+Use <Link text={<code>createChannel()</code>} href="/createChannel" /> when both sides keep sending messages over time. Channels have two modes:
 
-### Example
+- **Point-to-point** (`send` / `listen`) — direct messages between one server and one client. Good for commands, request-response, or controlling a specific session.
+- **Pub/sub** (`publish` / `subscribe`) — broadcast to all channels sharing a key. Good for chat rooms, live feeds, notifications.
+
+### Chat room
 
 ```ts
 // Chat.telefunc.ts
@@ -88,18 +87,14 @@ Use <Link text={<code>createChannel()</code>} href="/createChannel" /> when serv
 
 import { createChannel } from 'telefunc'
 
-type ClientToServer = (message: string) => void
-type ServerToClient = (message: string) => void
+type ChatMessage = { user: string; text: string; ts: number }
+type Message = (msg: ChatMessage) => void
 
-export async function onChat() {
-  const channel = createChannel<ClientToServer, ServerToClient>()
+export async function onJoinChat(username: string) {
+  const channel = createChannel<Message, Message>({ key: 'chat:lobby' })
 
-  channel.listen((message) => {
-    channel.send(`echo: ${message}`)
-  })
-
-  channel.onClose(() => {
-    console.log('chat closed')
+  channel.onOpen(() => {
+    channel.publish({ user: 'system', text: `${username} joined`, ts: Date.now() })
   })
 
   return { channel: channel.client }
@@ -110,49 +105,79 @@ export async function onChat() {
 // Chat.tsx
 // Environment: client
 
-import { onChat } from './Chat.telefunc'
+import { onJoinChat } from './Chat.telefunc'
 
-const { channel } = await onChat()
+const { channel } = await onJoinChat('Alice')
 
-channel.listen((message) => {
-  console.log(message)
+channel.subscribe((msg) => {
+  console.log(`${msg.user}: ${msg.text}`)
 })
 
-channel.send('hello')
+channel.publish({ user: 'Alice', text: 'Hello!', ts: Date.now() })
 ```
 
-See <Link href="/createChannel" /> for the full API and TypeScript surface.
+### Game session
 
-### Core API
+```ts
+// Game.telefunc.ts
+// Environment: server
 
-Both sides can `send()`, `listen()`, and `close()` the channel.
+import { createChannel } from 'telefunc'
 
+type Command = (cmd: { action: string }) => { ok: boolean }
+type Event = (event: { type: string; data: unknown }) => void
 
-### Acknowledgements
+export async function onJoinGame(gameId: string) {
+  const channel = createChannel<Command, Event>({ ack: true })
 
-Use acknowledgements when the sender needs confirmation that the other side received and processed a message.
+  channel.listen((cmd) => {
+    // Process player command, push game state
+    channel.send({ type: 'state', data: getGameState(gameId) })
+    return { ok: true }
+  })
 
-You can opt in per send with `{ ack: true }`, or make the whole channel ack-default with `createChannel({ ack: true })`.
+  return { channel: channel.client }
+}
+```
 
-See <Link href="/createChannel" /> for concrete examples and typing details.
+See <Link href="/createChannel" /> for the full API — <Link href="/createChannel#typescript">TypeScript</Link>, <Link href="/createChannel#acknowledgements">acknowledgements</Link>, <Link href="/createChannel#keyed-channels-pubsub">pub/sub</Link>, <Link href="/createChannel#binary-data">binary data</Link>, and <Link href="/createChannel#lifecycle">lifecycle</Link>.
+
 
 ## Reconnection
 
-If the connection briefly drops, Telefunc reconnects automatically and attempts to resume existing channels.
+If the connection drops, Telefunc reconnects automatically and resumes existing channels. Messages sent while offline are buffered and delivered in order on reconnect.
 
-`onOpen()` fires only for the initial open, and `onClose()` fires only when the channel is permanently closed.
+- `onOpen()` fires only for the initial open.
+- `onClose()` fires only when the channel is permanently closed.
+
+> Both sides keep a bounded replay buffer. After reconnect, missing frames are replayed and duplicates are ignored.
 
 
-## Setup
+## Transport
 
-For production setup details for the WebSocket backend, see <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
+By default channels use **SSE** — no extra setup required. For full-duplex WebSocket transport, call `tf.installWebSocket()` (see <Link href="/server" />).
 
-When the channel backend resolves to `'ws'` (either because you set `config.channel.transport = 'ws'` or because <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> is installed and `config.channel.transport` is unset), all channels — and <Link href="/stream">streamed values</Link> when using <Link href="/transport">`config.stream.transport = 'channel'`</Link> — share a single multiplexed WebSocket connection per server URL.
+| Transport | Throughput | Recovery | CDN-friendly | Setup |
+|---|---|---|---|---|
+| SSE (default) | 🟡 | ✅ | ✅ | None |
+| WebSocket | ✅ | ✅ | 🟡 | <Link text={<code>tf.installWebSocket()</code>} href="/server" /> |
+
+All channels share a single multiplexed connection per server URL.
+
+```ts
+// Environment: client
+
+import { config } from 'telefunc/client'
+
+config.channel.transport = 'ws'
+```
+
+See <Link href="/transport" /> for the full comparison.
+
 
 ## See also
 
-- <Link href="/stream" />
-- <Link href="/file-upload" />
-- <Link href="/createChannel" />
-- <Link href="/telefuncWebSocket" />
-- <Link href="/transport" />
+- <Link href="/stream" /> — streaming server values
+- <Link href="/file-upload" /> — file uploads
+- <Link href="/createChannel" /> — full channel API reference
+- <Link href="/transport" /> — transport configuration

@@ -28,8 +28,25 @@ describe('keyed channel pubsub', () => {
     expect(received).toEqual([{ text: 'hello' }])
   })
 
-  it('does not loop published messages back to the source channel', () => {
+  it('delivers published messages back to the source channel by default (selfDelivery: true)', () => {
     const channel = createChannel<{ text: string }, { text: string }>({ key: 'room:test:self' })
+    ;(channel as any)._registerChannel()
+
+    const received: Array<{ text: string }> = []
+    channel.subscribe((message) => {
+      received.push(message)
+    })
+
+    channel.publish({ text: 'hello' })
+
+    expect(received).toEqual([{ text: 'hello' }])
+  })
+
+  it('does not loop published messages back to the source channel when selfDelivery is false', () => {
+    const channel = createChannel<{ text: string }, { text: string }>({
+      key: 'room:test:self-off',
+      selfDelivery: false,
+    })
     ;(channel as any)._registerChannel()
 
     const received: Array<{ text: string }> = []
@@ -135,7 +152,7 @@ describe('keyed channel pubsub', () => {
       key: 'room:test:ack',
       seq: 1,
       meta: {
-        delivered: 1,
+        delivered: 2,
         transport: 'in-memory',
       },
     })

@@ -29,15 +29,14 @@ export default defineConfig({
 // src/routes/_telefunc/+server.ts
 // Environment: server
 
-import { telefunc } from 'telefunc'
+import { telefunc } from 'telefunc/node'
 import type { RequestHandler } from './$types'
 
+const tf = telefunc()
+
 const handler: RequestHandler = async (event) => {
-  const httpResponse = await telefunc({ request: event.request })
-  return new Response(httpResponse.getReadableWebStream(), {
-    headers: httpResponse.headers,
-    status: httpResponse.statusCode,
-  })
+  const response = await tf.serve({ request: event.request })
+  return response ?? new Response('Not found', { status: 404 })
 }
 export { handler as GET, handler as POST }
 ```

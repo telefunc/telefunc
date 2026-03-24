@@ -245,7 +245,7 @@ class CloudflarePubSubRegistry {
     const members = this.localKeyBuckets.get(key)?.get(locationBucket)
     if (!members) return
     for (const subscription of members) {
-      if (subscription.id === sourceChannelId) continue
+      if (subscription.id === sourceChannelId && !subscription.selfDelivery) continue
       subscription.onMessage(serialized, sourceChannelId)
     }
   }

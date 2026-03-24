@@ -57,26 +57,32 @@ type UntypedChannelHandler = (data: unknown) => unknown
 
 function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts?: {
   ack?: false
+  selfDelivery?: boolean
 }): Channel<ServerToClient, ClientToServer>
 function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts: {
   ack?: false
   key: string
+  selfDelivery?: boolean
 }): Channel<ServerToClient, ClientToServer, false, true>
 function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts: {
   ack: true
+  selfDelivery?: boolean
 }): Channel<ServerToClient, ClientToServer, true>
 function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts: {
   ack: true
   key: string
+  selfDelivery?: boolean
 }): Channel<ServerToClient, ClientToServer, true, true>
 function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts?: {
   ack?: boolean
   key?: string
+  selfDelivery?: boolean
 }): Channel<ServerToClient, ClientToServer, false>
-function createChannel(opts?: { ack?: boolean; key?: string }): any {
+function createChannel(opts?: { ack?: boolean; key?: string; selfDelivery?: boolean }): any {
   return new ServerChannel({
     ackMode: opts?.ack === true,
     key: opts?.key,
+    selfDelivery: opts?.selfDelivery,
   })
 }
 
@@ -89,6 +95,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   readonly id: string
   readonly ackMode: boolean
   readonly key: string | undefined
+  readonly selfDelivery: boolean
 
   get client(): ChannelClient<ClientToServer, ServerToClient> {
     return this as unknown as ChannelClient<ClientToServer, ServerToClient>
@@ -137,16 +144,19 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   constructor({
     ackMode = false,
     key,
+    selfDelivery = true,
     id,
     bufferLimit,
   }: {
     ackMode?: boolean
     key?: string
+    selfDelivery?: boolean
     id?: string
     bufferLimit?: number
   } = {}) {
     this.ackMode = ackMode
     this.key = key
+    this.selfDelivery = selfDelivery
     this.id = id ?? crypto.randomUUID()
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(bufferLimit ?? globalObject.bufferLimit)
   }
@@ -576,6 +586,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._pubSubSubscription = {
       id: this.id,
       key: this.key,
+      selfDelivery: this.selfDelivery,
       onMessage: (serialized, sourceChannelId) => {
         this._deliverPubSubMessage(serialized, sourceChannelId)
       },

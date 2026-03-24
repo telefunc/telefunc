@@ -1,32 +1,184 @@
 import { Link } from '@brillout/docpress'
 
-You can integrate Telefunc into any server, most notably servers that use:
-- The [standard `Request` object](https://developer.mozilla.org/en-US/docs/Web/API/Request)
-- The [Node.js `req` object](https://nodejs.org/api/http.html#http_class_http_incomingmessage)
+Telefunc integrates with any server. For production deployments with streaming, channels, and WebSocket support, use the runtime-specific `telefunc()` factory.
 
 
-## Standard `Request`
+## Node.js
 
-You can integrate Telefunc into any server that uses the standard `Request` object such as [Hono](https://hono.dev), [Next.js](https://nextjs.org), [Nitro](https://nitro.build), [Nuxt](https://nuxt.com), and [SvelteKit](https://svelte.dev/docs/kit).
-
-For example Hono:
+### With Hono, Fastify, or any `Request`-based server
 
 ```ts
 // server.ts
 // Environment: server
 
 import { Hono } from 'hono'
-import { telefunc } from 'telefunc'
+import { serve } from '@hono/node-server'
+import { telefunc } from 'telefunc/node'
 
 const app = new Hono()
+const tf = telefunc()
 
 app.all('/_telefunc', async (c) => {
-  const httpResponse = await telefunc({
+  const response = await tf.serve({ request: c.req.raw })
+  return response ?? c.notFound()
+})
+
+const server = serve({ fetch: app.fetch, port: 3000 })
+
+// Enable WebSocket support for channels
+tf.installWebSocket(server)
+```
+
+### With Express
+
+```ts
+// server.ts
+// Environment: server
+
+import express from 'express'
+import { telefunc } from 'telefunc/node'
+
+const app = express()
+const tf = telefunc()
+
+app.all('/_telefunc', async (req, res, next) => {
+  const handled = await tf.serve({ req, res })
+  if (!handled) next()
+})
+
+const server = app.listen(3000)
+
+// Enable WebSocket support for channels
+tf.installWebSocket(server)
+```
+
+> The Node.js adapter auto-detects your HTTP server from the request socket. `installWebSocket()` is idempotent — calling it multiple times is safe.
+
+### With context
+
+```ts
+app.all('/_telefunc', async (c) => {
+  const response = await tf.serve({
     request: c.req.raw,
     context: {
-      // You can add any arbitrary contextual information here
+      user: await getUser(c.req),
     },
   })
+  return response ?? c.notFound()
+})
+```
+
+> Access `context` inside telefunctions via <Link href="/getContext">`getContext()`</Link>.
+
+
+## Bun
+
+```ts
+// server.ts
+// Environment: server
+
+import { telefunc } from 'telefunc/bun'
+
+const tf = telefunc()
+
+Bun.serve({
+  port: 3000,
+  // Pass tf.websocket to enable WebSocket channels
+  websocket: tf.websocket,
+  async fetch(request, server) {
+    const response = await tf.serve({ request, server })
+    if (response) return response
+
+    return new Response('Not found', { status: 404 })
+  },
+})
+```
+
+
+## Deno
+
+```ts
+// server.ts
+// Environment: server
+
+import { telefunc } from 'telefunc/deno'
+
+const tf = telefunc()
+
+Deno.serve({ port: 3000 }, async (request, info) => {
+  const response = await tf.serve({ request, info })
+  if (response) return response
+
+  return new Response('Not found', { status: 404 })
+})
+```
+
+
+## Cloudflare Workers
+
+```ts
+// worker.ts
+// Environment: server
+
+import { telefunc } from 'telefunc/cloudflare'
+
+const tf = telefunc()
+
+export const TelefuncDurableObject = tf.TelefuncDurableObject
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const response = tf.serve({ request, env, ctx })
+    if (response) return response
+
+    return new Response('Not found', { status: 404 })
+  },
+}
+```
+
+Add the Durable Object and KV bindings to your `wrangler.jsonc`:
+
+```jsonc
+{
+  "compatibility_flags": ["nodejs_als"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
+    ]
+  },
+  "kv_namespaces": [
+    { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
+  ]
+}
+```
+
+> See <Link text="Cloudflare Workers" href="/telefuncWebSocketCloudflare" /> for scaling, distributed pub/sub, delivery guarantees, and Durable Object configuration.
+
+
+## Return value
+
+`tf.serve()` returns:
+
+| Runtime | Returns | Meaning |
+|---|---|---|
+| Node.js (`{ request }`) | `Response \| undefined` | `undefined` if not a Telefunc request |
+| Node.js (`{ req, res }`) | `boolean` | `true` if handled, `false` if not a Telefunc request |
+| Bun | `Response \| undefined` | `undefined` if not a Telefunc request |
+| Deno | `Response \| undefined` | `undefined` if not a Telefunc request |
+| Cloudflare | `Promise<Response> \| undefined` | `undefined` if not a Telefunc request |
+
+> `tf.serve()` returns `undefined` (or `false`) for non-Telefunc requests, allowing you to chain it with other handlers.
+
+
+## Low-level API
+
+If you need direct control over the HTTP response, you can use the core `telefunc()` function:
+
+```ts
+import { telefunc } from 'telefunc'
+
+app.all('/_telefunc', async (c) => {
+  const httpResponse = await telefunc({ request: c.req.raw })
   return new Response(httpResponse.getReadableWebStream(), {
     status: httpResponse.statusCode,
     headers: httpResponse.headers,
@@ -34,43 +186,10 @@ app.all('/_telefunc', async (c) => {
 })
 ```
 
-> You can access `context` inside your telefunctions via <Link href="/getContext">`getContext()`</Link>.
-
-
-## Node.js `req`
-
-You can integrate Telefunc into any server that uses the Node.js `req` readable stream, such as [Express](https://expressjs.com) and [Fastify](https://fastify.dev).
-
-For example Express:
-
-```ts
-// Environment: server
-
-import express from 'express'
-import { telefunc } from 'telefunc'
-
-const app = express()
-
-app.all('/_telefunc', async (req, res) => {
-  const httpResponse = await telefunc({
-    url: req.originalUrl,
-    method: req.method,
-    readable: req,
-    headers: req.headers,
-    context: {
-      // You can add any arbitrary contextual information here
-    },
-  })
-  httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
-  res.status(httpResponse.statusCode)
-  httpResponse.pipe(res)
-})
-```
-
-> You can access `context` inside your telefunctions via <Link href="/getContext">`getContext()`</Link>.
+See <Link href="/telefunc" /> for details.
 
 
 ## See also
 
-- <Link href="/telefunc" />
-- <Link href="/getContext" />
+- <Link href="/telefunc" /> — core `telefunc()` function reference
+- <Link href="/getContext" /> — request context

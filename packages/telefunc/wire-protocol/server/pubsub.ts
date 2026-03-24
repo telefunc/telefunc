@@ -7,6 +7,7 @@ import type { ChannelPublishAck } from '../channel.js'
 type PubSubSubscription = {
   readonly id: string
   readonly key: string
+  readonly selfDelivery: boolean
   onMessage(serialized: string, sourceChannelId: string): void
 }
 
@@ -44,7 +45,7 @@ class InMemoryPubSubTransport implements PubSubTransport {
 
     if (subscriptions) {
       for (const target of subscriptions) {
-        if (target.id === subscription.id) continue
+        if (target.id === subscription.id && !subscription.selfDelivery) continue
         delivered++
         target.onMessage(serialized, subscription.id)
       }

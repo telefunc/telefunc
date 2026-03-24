@@ -2,21 +2,9 @@ import { Link, NoteWithoutIcon } from '@brillout/docpress'
 
 **Environment**: server.
 
-Install the Telefunc WebSocket upgrade handler on your server when you want Telefunc to use the WebSocket backend.
+> This is a low-level API. For most setups, use `tf.installWebSocket()` from the runtime adapter instead — see <Link href="/server" />.
 
-## When do you need this?
-
-You need <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> in production if you use any of the following:
-
-- <Link text={<code>createChannel()</code>} href="/createChannel" /> with `config.channel.transport = 'ws'`
-- <Link href="/real-time#function-passing">Function passing</Link> with `config.channel.transport = 'ws'`
-- <Link href="/transport">`config.stream.transport = 'channel'`</Link> together with `config.channel.transport = 'ws'`
-
-If `config.channel.transport` is unset, installing <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> makes `'ws'` the default channel backend.
-
-You do not need it for plain telefunction calls, for SSE channels, or for <Link href="/stream">streamed values</Link> sent over `'binary-inline'` or `'sse-inline'`.
-
-Pick the adapter for your runtime:
+Low-level WebSocket upgrade handler. Use this only if you need standalone WebSocket support without the runtime adapter.
 
 ## Node.js
 
@@ -106,7 +94,7 @@ export default {
 
 Cloudflare WebSocket transport requires a [Durable Object](https://developers.cloudflare.com/durable-objects/) because channel state is in-memory and must stay colocated with the WebSocket connection.
 
-See <Link text="Cloudflare Workers" href="/telefuncWebSocketCloudflare" /> for Cloudflare-specific details such as `context`, shards, `locationHint`, and Durable Object hibernation.
+See <Link text="Cloudflare Workers" href="/telefuncWebSocketCloudflare" /> for scaling, distributed pub/sub, delivery guarantees, and Durable Object configuration.
 
 ## Delivery guarantees
 
@@ -185,7 +173,7 @@ config.channel = {
 }
 ```
 
-`*` When `config.channel.transport` is unset and <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> is installed, Telefunc defaults to `'ws'`.
+`*` When <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" /> is installed, the server enables both SSE and WS. The client starts on SSE and seamlessly upgrades to WebSocket in the background.
 
 ## See also
 

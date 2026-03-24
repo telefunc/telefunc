@@ -2,53 +2,80 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-The `telefunc()` function enables you to <Link href="/server">install a Telefunc middleware into any server</Link>.
+Low-level function that processes telefunction requests and returns an HTTP response. It's a pure function with no side effects.
 
-> It's a pure function (no side effects).
+> For most setups, use the runtime adapter instead — `telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare`. See <Link href="/server" />.
 
-You can pass the [web standard `Request` object](https://developer.mozilla.org/en-US/docs/Web/API/Request):
+## Basic usage
 
-```js
-const httpResponse = await telefunc({
-  // Required
-  request,
+Pass the web standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
 
-  // Optional
-  context: {
-    /* Some context */
-  }
-})
+```ts
+import { telefunc } from 'telefunc'
+
+const httpResponse = await telefunc({ request })
 ```
 
-> The `context` parameter is optional and is only needed if you use `getContext()`, see <Link href="/getContext#provide" />.
+Convert the result to a [`Response`](https://developer.mozilla.org/en-US:Web/API/Response):
 
-Or the [Node.js `req` readable stream](https://nodejs.org/api/http.html#http_class_http_incomingmessage):
-
-```js
-const httpResponse = await telefunc({
-  // Required
-  url: req.originalUrl,
-  method: req.method,
-  readable: req,
-  headers: req.headers,
-
-  // Optional
-  context: {
-    /* Some context */
-  }
-})
-```
-
-The return value `httpResponse` is a plain JavaScript object with all the information needed to generate the HTTP response, for exampe using the [web standard `Response` object](https://developer.mozilla.org/en-US/docs/Web/API/Response):
-
-```js
+```ts
 const response = new Response(httpResponse.getReadableWebStream(), {
   status: httpResponse.statusCode,
   headers: httpResponse.headers,
 })
 ```
 
+
+## With context
+
+Pass a `context` object to make request-scoped data available inside telefunctions via <Link href="/getContext">`getContext()`</Link>:
+
+```ts
+const httpResponse = await telefunc({
+  request,
+  context: {
+    user: await getUser(request),
+  },
+})
+```
+
+> The `context` parameter is optional — only needed if you use `getContext()`. See <Link href="/getContext#provide" />.
+
+
+## Node.js `req`
+
+For [Express](https://expressjs.com), [Fastify](https://fastify.dev), or any Node.js framework, pass the `req` readable stream:
+
+```ts
+const httpResponse = await telefunc({
+  url: req.originalUrl,
+  method: req.method,
+  readable: req,
+  headers: req.headers,
+  context: { /* ... */ },
+})
+```
+
+
+## Response object
+
+`httpResponse` contains everything needed to send the response:
+
+| Property | Type | Description |
+|---|---|---|
+| `statusCode` | `200 \| 400 \| 403 \| 422 \| 500` | HTTP status code |
+| `headers` | `[string, string][]` | Response headers |
+| `getReadableWebStream()` | `ReadableStream` | Web standard stream (Hono, Cloudflare, Deno, etc.) |
+| `pipe(writable)` | `void` | Pipe to Node.js writable (Express, Fastify) |
+| `getBody()` | `Promise<string>` | Full body as string (non-streaming only) |
+
+
+## Runtime adapters
+
+For production deployments with channels and WebSocket support, use the runtime-specific `telefunc()` factory from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare`. See <Link href="/server" /> for examples.
+
+
 ## See also
 
-- <Link href="/server" />
-- <Link href="/getContext" />
+- <Link href="/server" /> — server integration examples
+- <Link href="/getContext" /> — request context

@@ -2,55 +2,63 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Create a bidirectional channel for real-time communication with the client.
+Create a channel for real-time communication. Channels have two modes:
 
-- Use a channel when both sides keep sending messages after the initial telefunction call.
-- If you only need a short-lived callback, function passing is usually simpler. See <Link href="/real-time" />.
+| Mode | Methods | Use case |
+|---|---|---|
+| **Point-to-point** | `send()` / `listen()` | Direct messages between one server and one client — commands, acks, request-response over a persistent connection. |
+| **Pub/sub** | `publish()` / `subscribe()` | Broadcast to all channels sharing a `key` — chat rooms, live feeds, collaborative editing. |
+
+Both modes work on the same channel and can be combined.
 
 ```ts
 import { createChannel } from 'telefunc'
 
-type ClientToServer = (message: string) => void
-type ServerToClient = (message: string) => void
+// Point-to-point — one server, one client
+const channel = createChannel<ClientToServer, ServerToClient>()
 
-export async function onChat() {
-  const channel = createChannel<ClientToServer, ServerToClient>()
-  channel.listen((msg) => {
-    channel.send(`echo: ${msg}`)
-  })
-  return { channel: channel.client }
-}
+// Pub/sub — broadcast to all channels with the same key
+const channel = createChannel<Message, Message>({ key: 'chat:lobby' })
 ```
 
-Return `channel.client` to the client — it serializes into a `ClientChannel` on the other side. Use `channel` directly on the server for `send()`, `listen()`, and other operations.
+Return `channel.client` from a telefunction — it serializes into a client-side channel automatically.
 
-By default, channels use SSE and work without extra server setup. Use `config.channel.transport = 'ws'` only if you want the WebSocket backend. See <Link href="/transport" /> and <Link text={<code>telefuncWebSocket()</code>} href="/telefuncWebSocket" />.
+By default, channels use **SSE** and work without extra server setup. When `tf.installWebSocket()` is called (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background. See <Link href="/transport" />.
+
+> For short-lived callbacks (e.g. progress updates), <Link href="/real-time">function passing</Link> is usually simpler.
 
 
 ## Methods
 
+### Server
+
 | Method | Description |
 |---|---|
-| `channel.client` | The client-side end of the channel. Return this from a telefunction. |
-| `send(data)` | Send a message. |
-| `send(data, { ack: true })` | Send a message and wait for the receiver to acknowledge it. |
-| `send(data, { ack: false })` | Opt out of acknowledgements for a single send on an ack-default channel. |
-| `sendBinary(data)` | Send binary data as `Uint8Array`. |
+| `channel.client` | Client-side end of the channel. Return this from a telefunction. |
+| `send(data)` | Send a message to the client. |
+| `send(data, { ack: true })` | Send and wait for the client to acknowledge. |
+| `send(data, { ack: false })` | Opt out of ack for a single send on an ack-default channel. |
+| `sendBinary(data)` | Send binary data (`Uint8Array`). |
 | `listen(cb)` | Receive messages. Return a value to acknowledge the sender. |
 | `listenBinary(cb)` | Receive binary messages. |
-| `onOpen(cb)` | Run when the channel becomes usable. |
-| `onClose(cb)` | Run when the channel closes. |
-| `close()` | Cleanly close the channel from either side. |
-| `isClosed` | Whether the channel is already closed. |
+| `onOpen(cb)` | Fires when the client connects. Safe to start sending. |
+| `onClose(cb)` | Fires when the channel closes. `cb` receives an error for abnormal close. |
+| `close()` | Cleanly close the channel. Returns a `Promise` that resolves when the other side acknowledges. |
+| `close({ timeout })` | Close with a timeout in ms. |
+| `abort(value?)` | Terminate immediately. Rejects all pending `send()` promises. The client receives the abort value in `onClose`. |
+| `id` | Unique channel identifier. |
+| `isClosed` | Whether the channel is closed. |
+
+### Client
+
+The client channel has the same `send`, `listen`, `sendBinary`, `listenBinary`, `onOpen`, `onClose`, `close`, `abort`, `id`, and `isClosed` members — with the message directions flipped.
 
 
 ## TypeScript
 
-`createChannel<ClientToServer, ServerToClient>()` is generic.
-
-Each type is a function signature:
-- Its argument is the message type.
-- Its return type is the acknowledgement type.
+`createChannel<ClientToServer, ServerToClient>()` takes two generic type parameters. Each is a function signature:
+- The **argument** is the message type.
+- The **return type** is the acknowledgement type (`void` if no ack).
 
 ```ts
 // Room.telefunc.ts
@@ -77,7 +85,6 @@ export async function onJoinRoom() {
       channel.send({ type: 'system', text: `Joined ${message.roomId}` })
       return { accepted: true }
     }
-
     channel.send({ type: 'chat', text: `echo: ${message.text}` })
     return { accepted: true }
   })
@@ -95,11 +102,6 @@ import { onJoinRoom } from './Room.telefunc'
 const { channel } = await onJoinRoom()
 
 channel.listen((message) => {
-  if (message.type === 'system') {
-    console.log(message.text)
-    return { delivered: true }
-  }
-
   console.log(message.text)
   return { delivered: true }
 })
@@ -108,52 +110,194 @@ const ack = await channel.send({ type: 'join', roomId: 'general' })
 ack.accepted // true
 ```
 
-On the server, `channel.send()` uses `ServerMessage` and resolves to `{ delivered: true }`, while `channel.listen()` receives `ClientMessage` and returns `{ accepted: true }`.
+On the server, `send()` uses `ServerMessage` and resolves to `{ delivered: true }`. On the client, the types are flipped automatically.
 
-On the client, the same channel is inferred with both directions flipped automatically.
 
-### Acknowledgements
+## Acknowledgements
 
-Pass `{ ack: true }` to enable acknowledged sends:
+### Channel-wide
 
 ```ts
-// All sends return a Promise — listener return value is the ack
-type ClientMsg = { type: 'refund' }
-type ServerMsg = { type: 'status'; text: string }
-
-type ClientToServer = (data: ClientMsg) => void
-type ServerToClient = (data: ServerMsg) => { delivered: true }
-
 const channel = createChannel<ClientToServer, ServerToClient>({ ack: true })
+
+// Every send() now returns a Promise with the listener's return value
+const ack = await channel.send({ type: 'status', text: 'OK' })
 ```
 
-You can also opt in per-send without `{ ack: true }` on the channel:
+### Per-send
 
 ```ts
-type ClientMsg = { type: 'refund' }
-type ServerMsg = { type: 'status'; text: string }
-
-type ClientToServer = (data: ClientMsg) => void
-type ServerToClient = (data: ServerMsg) => { delivered: true }
-
 const channel = createChannel<ClientToServer, ServerToClient>()
-const ack = await channel.send({ type: 'status', text: 'Refund approved' }, { ack: true })
-ack.delivered // true
+
+// Opt in for a single send
+const ack = await channel.send(data, { ack: true })
+
+// On an ack-default channel, opt out for a single send
+channel.send(data, { ack: false }) // void, not Promise
 ```
 
-And opt out for a single send on an ack-default channel:
+
+## Binary data
+
+Send and receive raw binary alongside structured messages:
 
 ```ts
-channel.send(data, { ack: false }) // void, no ack
+// Server
+channel.sendBinary(new Uint8Array([1, 2, 3]))
+channel.listenBinary((data) => {
+  console.log(data.byteLength)
+})
+
+// Client — same API
+channel.sendBinary(new Uint8Array(buffer))
+channel.listenBinary((data) => {
+  console.log(data.byteLength)
+})
 ```
 
-Acknowledgement types come from the function return types.
+
+## Keyed channels (pub/sub)
+
+Pass a `key` to `createChannel()` to enable pub/sub. All channels with the same key share a broadcast group. Both server and client can `publish()` and `subscribe()`.
+
+### Chat example
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+import { createChannel } from 'telefunc'
+
+type ChatMessage = { user: string; text: string; ts: number }
+type Message = (msg: ChatMessage) => void
+
+export async function onJoinChat(username: string) {
+  const channel = createChannel<Message, Message>({ key: 'chat:lobby' })
+
+  channel.onOpen(() => {
+    channel.publish({ user: 'system', text: `${username} joined`, ts: Date.now() })
+  })
+
+  channel.onClose(() => {
+    channel.publish({ user: 'system', text: `${username} left`, ts: Date.now() })
+  })
+
+  return { channel: channel.client }
+}
+```
+
+```ts
+// Chat.tsx
+// Environment: client
+
+import { onJoinChat } from './Chat.telefunc'
+
+const { channel } = await onJoinChat('Alice')
+
+// Receive messages published by other channels with the same key
+channel.subscribe((msg) => {
+  console.log(`${msg.user}: ${msg.text}`)
+})
+
+// Publish to all other channels with the same key
+channel.publish({ user: 'Alice', text: 'Hello!', ts: Date.now() })
+```
+
+### Server-only pub/sub
+
+Keyed channels also work without a client — useful for broadcasting from server-side logic:
+
+```ts
+// notifications.telefunc.ts
+// Environment: server
+
+import { createChannel } from 'telefunc'
+
+// Server-side broadcast — no channel.client returned
+export async function onNotify(roomId: string, text: string) {
+  const channel = createChannel<(msg: string) => void, never>({ key: `room:${roomId}` })
+  channel.publish(text)
+}
+```
+
+### API
+
+| Method | Description |
+|---|---|
+| `publish(data)` | Send to all channels with the same key, including the sender. Returns a receipt. |
+| `subscribe(cb)` | Receive messages published by any channel with the same key. Returns an unsubscribe function. |
+
+`publish()` returns a `Promise<ChannelPublishAck>`:
+
+```ts
+const receipt = await channel.publish({ user: 'Alice', text: 'Hello!', ts: Date.now() })
+receipt.key  // 'chat:lobby' — the channel key
+receipt.seq  // 1 — monotonic sequence number for this key
+receipt.ts   // 1711234567890 — server timestamp
+```
+
+The sequence number is monotonically increasing per key — useful for ordering.
+
+By default, the sender receives its own published messages in `subscribe()`. This means the client can render all messages from `subscribe()` in order without special-casing its own publishes. To opt out:
+
+```ts
+const channel = createChannel<Message, Message>({ key: 'chat:lobby', selfDelivery: false })
+```
+
+> In-memory pub/sub works out of the box for single-server deployments. On Cloudflare Workers, Telefunc uses Durable Objects for distributed pub/sub across edge locations.
+
+
+## Lifecycle
+
+```ts
+channel.onOpen(() => {
+  // Connection established — safe to send
+})
+
+channel.onClose((err) => {
+  if (!err) {
+    // Clean close
+  } else if (err instanceof Abort) {
+    // Server called channel.abort(value)
+    console.log(err.abortValue)
+  } else {
+    // Network error or timeout
+  }
+})
+
+// Clean close from either side
+await channel.close()
+
+// Immediate termination with abort value
+channel.abort({ reason: 'session-expired' })
+```
+
+> After `close()` or `abort()`, calling `send()` throws `ChannelClosedError` synchronously.
+
+
+## Reconnection
+
+If the connection drops, Telefunc reconnects automatically and resumes existing channels:
+
+- Messages sent while offline are buffered and delivered in order on reconnect.
+- Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed.
+- `onOpen()` fires only on initial open, `onClose()` only on permanent close.
+
+> Reconnection is transparent — you don't need to handle it in your application code.
+
+
+## Error handling
+
+| Error | When | Recovery |
+|---|---|---|
+| `Abort` | Server called `abort()` | Terminal — inspect `err.abortValue` |
+| `ChannelClosedError` | `send()` after close/abort | Terminal — recreate channel if needed |
+| `ChannelNetworkError` | Connection lost beyond timeout | Terminal — channel auto-closed |
 
 
 ## See also
 
-- <Link href="/stream" />
-- <Link href="/real-time" />
-- <Link href="/file-upload" />
-- <Link href="/telefuncWebSocket" />
-- <Link href="/transport" />
+- <Link href="/real-time" /> — choosing between function passing and channels
+- <Link href="/stream" /> — streaming server values
+- <Link href="/file-upload" /> — file uploads with progress
+- <Link href="/transport" /> — transport configuration
