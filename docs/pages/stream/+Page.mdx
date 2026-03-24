@@ -9,9 +9,9 @@ Telefunctions can stream values to the client using `AsyncGenerator`, `ReadableS
 
 | Type | Best for | Values |
 |---|---|---|
-| `AsyncGenerator` | AI tokens, notifications, progress updates | Structured (JSON-serializable) |
-| `ReadableStream` | File downloads, media, raw bytes | Binary (`Uint8Array`) |
-| Nested `Promise` | Lazy parts of a response that resolve independently | Any serializable value |
+| [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) | AI tokens, notifications, progress updates | Structured (JSON-serializable) |
+| [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) | File downloads, media, raw bytes | Binary (`Uint8Array`) |
+| Nested [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise) | Lazy parts of a response that resolve independently | Any serializable value |
 
 
 ## `AsyncGenerator`
