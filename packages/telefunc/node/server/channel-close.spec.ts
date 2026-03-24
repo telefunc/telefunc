@@ -47,7 +47,7 @@ describe('self-initiated close', () => {
       closeErr = err
     })
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
     const closePromise = channel.close()
 
     // Immediately synchronous — before any await
@@ -65,7 +65,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
     const closePromise = channel.close()
 
     expect(frames).toHaveLength(1)
@@ -82,7 +82,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
     const closePromise = channel.close({ timeout: 10 })
 
     expect(channel.isClosed).toBe(true)
@@ -97,7 +97,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<(v: string) => Promise<string>, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
     channel.listen(
       () =>
         new Promise<string>((resolve) => {
@@ -126,7 +126,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<(v: string) => string, never>({ ackMode: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
 
     const sendPromise = channel.send('hello', { ack: true })
     const closePromise = channel.close({ timeout: 100 })
@@ -153,7 +153,7 @@ describe('self-initiated close', () => {
     const frames: Uint8Array[] = []
     let didFinishOnClose = false
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
     channel.onClose(async () => {
       await new Promise((resolve) => setTimeout(resolve, 30))
       didFinishOnClose = true
@@ -181,7 +181,7 @@ describe('self-initiated close', () => {
     const closePromise = channel.close()
 
     channel._registerChannel()
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
     await Promise.resolve()
 
     expect(frames).toHaveLength(2)
@@ -199,7 +199,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<(v: string) => string, never>({ ackMode: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
 
     const sendPromise = channel.send('hello', { ack: true })
     const closePromise = channel.close({ timeout: 100 })
@@ -217,7 +217,7 @@ describe('self-initiated close', () => {
     const channel = new ServerChannel<(v: string) => string, never>({ ackMode: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
 
     const sendPromise = channel.send('hello', { ack: true })
     const sendOutcome = sendPromise.then(
@@ -249,7 +249,7 @@ describe('peer-initiated close', () => {
     let didFireClose = false
     let closeErr: Error | undefined | null = null
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
     channel.onClose((err) => {
       didFireClose = true
       closeErr = err
@@ -269,7 +269,7 @@ describe('peer-initiated close', () => {
     const channel = new ServerChannel<(v: string) => Promise<string>, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
     channel.listen(
       () =>
         new Promise<string>((resolve) => {
@@ -294,7 +294,7 @@ describe('peer-initiated close', () => {
     const channel = new ServerChannel<(v: string) => Promise<string>, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
     channel.listen(
       () =>
         new Promise<string>((resolve) => {
@@ -316,7 +316,7 @@ describe('peer-initiated close', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     let didFinishOnClose = false
 
-    channel.attachPeer(createPeer([]))
+    channel._attachPeer(createPeer([]))
     channel.onClose(async () => {
       await new Promise((resolve) => setTimeout(resolve, 25))
       didFinishOnClose = true
@@ -341,7 +341,7 @@ describe('cross-close', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
 
     // Server calls close
     const closePromise = channel.close({ timeout: 100 })
@@ -367,7 +367,7 @@ describe('cross-close', () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
-    channel.attachPeer(createPeer(frames))
+    channel._attachPeer(createPeer(frames))
 
     const closePromise = channel.close({ timeout: 10 })
 

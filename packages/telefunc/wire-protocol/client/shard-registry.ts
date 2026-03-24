@@ -1,40 +1,30 @@
-export { setShardInfo, getLastShard, getStickyShardForPost }
+export { setShardInfo, getShardForPost, getLastShard }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 
 /**
  * Client-side shard registry.
  *
- * This file keeps the client's latest shard assignment in memory for each
- * `telefuncUrl`, so follow-up requests stay routed to the same server-side
- * Durable Object shard after the first response tells us where it lives.
+ * Keeps the client's latest shard token in memory for each `telefuncUrl`,
+ * so follow-up requests stay routed to the same server-side Durable Object shard.
  *
- * Records the shard and stickiness preference from the server's response headers
- * (`x-telefunc-shard` and `x-telefunc-sticky`), keyed by `telefuncUrl`.
- *
- * - `getLastShard` — always returns the last known shard; used by `ClientChannel`
+ * - `getLastShard` — returns the last known shard; used by `ClientChannel`
  *   to open the WS connection to the correct Durable Object.
- * - `getStickyShardForPost` — returns the shard only when the server opted in to
- *   stickiness; used by `remoteTelefunctionCall` to append `?shard=N` to POST URLs.
+ * - `getShardForPost` — returns the shard for appending as an advisory `?shard=` token to POST URLs.
  */
 
-type ShardInfo = { shard: string; sticky: boolean }
-
-const globalObject = getGlobalObject<{ registry: Map<string, ShardInfo> }>('shard-registry.ts', {
-  registry: new Map<string, ShardInfo>(),
+const globalObject = getGlobalObject<{ registry: Map<string, string> }>('shard-registry.ts', {
+  registry: new Map<string, string>(),
 })
 
-function setShardInfo(telefuncUrl: string, shard: string, sticky: boolean): void {
-  globalObject.registry.set(telefuncUrl, { shard, sticky })
+function setShardInfo(telefuncUrl: string, shard: string): void {
+  globalObject.registry.set(telefuncUrl, shard)
 }
 
-/** Always returns the last known shard (for WS/channel routing). */
 function getLastShard(telefuncUrl: string): string | undefined {
-  return globalObject.registry.get(telefuncUrl)?.shard
+  return globalObject.registry.get(telefuncUrl)
 }
 
-/** Returns the shard only when the server has opted in to sticky sharding (for POST URL pinning). */
-function getStickyShardForPost(telefuncUrl: string): string | undefined {
-  const info = globalObject.registry.get(telefuncUrl)
-  return info?.sticky ? info.shard : undefined
+function getShardForPost(telefuncUrl: string): string | undefined {
+  return globalObject.registry.get(telefuncUrl)
 }

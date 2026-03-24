@@ -1,6 +1,7 @@
 export { ServerChannelBuffer }
 
 import { ChannelOverflowError } from '../channel-errors.js'
+import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 
 type BufferedAckEntry<TAck> = {
   resolve: (value: TAck) => void
@@ -10,7 +11,7 @@ type BufferedAckEntry<TAck> = {
 /**
  * Hard-capped ring buffer for channel messages sent before the client connects.
  *
- * Buffers text, binary, and ack-request messages sent before the client connects.
+ * Buffers text, publish, binary, and ack-request messages sent before the client connects.
  * After every push, oldest entries are evicted (FIFO) until the byte
  * total is within the cap. Ack requests rejected by eviction are failed
  * immediately so channel memory stays hard-capped.
@@ -24,7 +25,7 @@ type BufferedAckEntry<TAck> = {
  * in insertion order. There are no gaps or null markers.
  */
 class ServerChannelBuffer<TAck = never> {
-  // Parallel arrays for cache-friendly access: 0 = text, 1 = binary, 2 = text+ack
+  // Parallel arrays for cache-friendly access: 0 = text, 1 = binary, 2 = text+ack, 3 = publish
   #tags: number[] = []
   #data: (string | Uint8Array)[] = []
   #sizes: number[] = []
@@ -56,12 +57,17 @@ class ServerChannelBuffer<TAck = never> {
     this.#push(1, data, bytes, null)
   }
 
+  pushPublish(data: string): void {
+    const bytes = utf8ByteLength(data)
+    this.#push(3, data, bytes, null)
+  }
+
   pushTextAck(data: string, resolve: (value: TAck) => void, reject: (err: Error) => void): void {
     const bytes = utf8ByteLength(data)
     this.#push(2, data, bytes, { resolve, reject })
   }
 
-  #push(tag: 0 | 1 | 2, data: string | Uint8Array, bytes: number, ackEntry: BufferedAckEntry<TAck> | null): void {
+  #push(tag: 0 | 1 | 2 | 3, data: string | Uint8Array, bytes: number, ackEntry: BufferedAckEntry<TAck> | null): void {
     const overflowErr = new ChannelOverflowError()
     if (bytes > this.#maxBytes) {
       this.clear(overflowErr)
@@ -103,12 +109,15 @@ class ServerChannelBuffer<TAck = never> {
    */
   flush(
     sendText: (data: string) => void,
+    sendPublish: (data: string) => void,
     sendBinary: (data: Uint8Array) => void,
     sendTextAck: (data: string, ackEntry: BufferedAckEntry<TAck>) => void,
   ): void {
     for (let i = this.#head; i < this.#data.length; i++) {
       if (this.#tags[i] === 0) {
         sendText(this.#data[i] as string)
+      } else if (this.#tags[i] === 3) {
+        sendPublish(this.#data[i] as string)
       } else if (this.#tags[i] === 1) {
         sendBinary(this.#data[i] as Uint8Array)
       } else {
@@ -136,27 +145,4 @@ class ServerChannelBuffer<TAck = never> {
     this.#head = 0
     this.#totalBytes = 0
   }
-}
-
-/**
- * Exact UTF-8 byte length of a string — allocation-free.
- * Matches what WebSocket actually transmits on the wire.
- *
- * Surrogate pairs are detected via bitmask: (c & 0xfc00) === 0xd800 catches
- * high surrogates (0xD800–0xDBFF); the same mask with 0xdc00 catches low
- * surrogates (0xDC00–0xDFFF).  No bounds check needed: charCodeAt past end
- * returns NaN, NaN & 0xfc00 === 0, which never matches 0xdc00.
- */
-function utf8ByteLength(s: string): number {
-  let n = 0
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i)
-    if (c < 0x80) n += 1
-    else if (c < 0x800) n += 2
-    else if ((c & 0xfc00) === 0xd800 && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
-      n += 4
-      i++
-    } else n += 3 // BMP char or lone surrogate (CESU-8, matching Node.js Buffer)
-  }
-  return n
 }

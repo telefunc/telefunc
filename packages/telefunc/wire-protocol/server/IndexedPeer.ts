@@ -83,4 +83,14 @@ class IndexedPeer {
       /* transport may already be closed */
     }
   }
+
+  sendPublish(data: string): void {
+    const seq = this.replay.nextSeq()
+    const frame = encode.publish(this.index, data, seq)
+    try {
+      this.sender.send(frame, () => this.replay.push(seq, frame))
+    } catch {
+      /* transport may already be closed */
+    }
+  }
 }

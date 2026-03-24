@@ -255,7 +255,7 @@ async function runTelefunc_({
   request: Request
   context?: Telefunc.Context
 }): Promise<HttpResponse> {
-  const requestContext = createRequestContext(request.signal)
+  const requestContext = createRequestContext(request)
   const runContext = { requestContext }
 
   {

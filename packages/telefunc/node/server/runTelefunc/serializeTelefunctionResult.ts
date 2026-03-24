@@ -14,7 +14,7 @@ import { buildChannelResponseBody } from '../../../wire-protocol/server/response
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { injectFrameChannel } from '../../../wire-protocol/frame-channel.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import type { RequestContext } from '../requestContext.js'
+import { restoreRequestContext, type RequestContext } from '../requestContext.js'
 import type { Telefunc } from '../getContext.js'
 
 type TelefuncId = {
@@ -53,7 +53,11 @@ function serializeTelefunctionResult(runContext: {
 
   let httpResponseBody: string
   try {
-    httpResponseBody = stringify(bodyValue, { forbidReactElements: true, replacer })
+    // Placeholder serialization may register channels synchronously, so restore
+    // the request context immediately before stringification.
+    httpResponseBody = restoreRequestContext(requestContext, () =>
+      stringify(bodyValue, { forbidReactElements: true, replacer }),
+    )
   } catch (err: unknown) {
     assert(hasProp(err, 'message', 'string'))
     assertUsage(

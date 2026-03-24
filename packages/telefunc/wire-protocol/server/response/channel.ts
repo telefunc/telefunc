@@ -21,6 +21,7 @@ const channelServerPlaceholderType: PlaceholderReplacerType<ChannelContract, Ser
     return {
       channelId: channel.id,
       ...(channel.ackMode && { ack: channel.ackMode }),
+      ...(channel.key && { key: channel.key }),
     }
   },
 }

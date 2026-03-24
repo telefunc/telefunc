@@ -4,7 +4,7 @@ export { TodoListDurableObject } from '../database/todoItems'
 import { telefunc } from 'telefunc/cloudflare'
 import { handleSsr } from './ssr'
 
-const tf = telefunc({ shards: 5 })
+const tf = telefunc({ scale: 5 })
 export const TelefuncDurableObject = tf.TelefuncDurableObject
 
 const handleAll = {

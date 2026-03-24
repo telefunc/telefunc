@@ -54,7 +54,11 @@ type PlaceholderServerReviverType<C extends PlaceholderTypeContract = Placeholde
 }
 
 /** `ack: true` — ack is on by default for this channel. */
-type ChannelContract = PlaceholderTypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
+type ChannelContract = PlaceholderTypeContract<
+  ServerChannel,
+  ClientChannel,
+  { channelId: string; ack?: true; key?: string }
+>
 
 /** A plain function returned from a telefunction — transparently proxied over an ack channel. */
 type FunctionContract = PlaceholderTypeContract<

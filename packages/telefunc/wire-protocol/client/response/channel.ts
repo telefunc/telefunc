@@ -14,6 +14,7 @@ const channelClientPlaceholderType: PlaceholderReviverType<ChannelContract> = {
     const channel = new ClientChannel({
       channelId: metadata.channelId,
       ackMode: metadata.ack,
+      key: metadata.key,
       transports: context.channelTransports,
       shard: context.shard,
     })

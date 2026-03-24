@@ -15,16 +15,17 @@ const globalObject = getGlobalObject<{ asyncStore?: AsyncLocalStorage<Telefunc.C
 
 // Also install async request context
 import type { RequestContext } from '../requestContext.js'
-const reqCtxGlobal = getGlobalObject<{ asyncStore?: AsyncLocalStorage<RequestContext> }>('requestContext/async.ts', {})
+const reqCtxGlobal = getGlobalObject<{ asyncStore?: AsyncLocalStorage<RequestContext | null> }>(
+  'requestContext/async.ts',
+  {},
+)
 installAsyncRequestContext({
   getRequestContext_async() {
     return reqCtxGlobal.asyncStore?.getStore() ?? null
   },
-  restoreRequestContext_async(ctx) {
+  restoreRequestContext_async<T>(ctx: RequestContext | null, fn: () => T): T {
     reqCtxGlobal.asyncStore = reqCtxGlobal.asyncStore ?? new AsyncLocalStorage()
-    if (ctx) {
-      reqCtxGlobal.asyncStore.enterWith(ctx)
-    }
+    return reqCtxGlobal.asyncStore.run(ctx ?? null, fn)
   },
 })
 
@@ -42,10 +43,14 @@ function getContext_async(): Telefunc.Context {
 function provideTelefuncContext_async(context: Telefunc.Context): void {
   assertUsage(isObject(context), '[provideTelefuncContext(context)] Argument `context` should be an object')
   globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
+  assertUsage(
+    typeof globalObject.asyncStore.enterWith === 'function',
+    '[provideTelefuncContext()] This runtime does not support AsyncLocalStorage.enterWith(). Pass context directly to telefunc() instead.',
+  )
   globalObject.asyncStore.enterWith(context)
 }
 
-function restoreContext_async(context: null | Telefunc.Context): any {
+function restoreContext_async<T>(context: null | Telefunc.Context, fn: () => T): T {
   assert(context === null || isObject(context))
   assertWarning(
     !context,
@@ -55,5 +60,5 @@ function restoreContext_async(context: null | Telefunc.Context): any {
   // Always initialize the store with at least an empty object so getContext() works inside
   // a telefunc execution even without provideTelefuncContext() — needed for onClose().
   globalObject.asyncStore = globalObject.asyncStore ?? new AsyncLocalStorage()
-  globalObject.asyncStore.enterWith(context ?? ({} as Telefunc.Context))
+  return globalObject.asyncStore.run(context ?? ({} as Telefunc.Context), fn)
 }

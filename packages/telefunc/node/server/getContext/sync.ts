@@ -35,9 +35,10 @@ function getContext_sync(): Telefunc.Context {
   return globalObject.context
 }
 
-function restoreContext_sync(context: null | Telefunc.Context) {
+function restoreContext_sync<T>(context: null | Telefunc.Context, fn: () => T): T {
   globalObject.neverRestored = false
   provide(context)
+  return fn()
 }
 
 function provideTelefuncContext_sync(context: Telefunc.Context) {

@@ -19,6 +19,8 @@ type ResponseAbortSource = {
 
 /** Internal per-request state. */
 type RequestContext = {
+  /** The current Web Request for this telefunc execution. */
+  request: Request
   /** The request's AbortSignal — fires when the client disconnects. */
   abortSignal: AbortSignal
   /** Response-wide abort source used by returned values and response transports. */
@@ -32,7 +34,7 @@ type RequestContext = {
 }
 
 /** Create a RequestContext and wire the abort signal to markComplete(). */
-function createRequestContext(abortSignal: AbortSignal): RequestContext {
+function createRequestContext(request: Request): RequestContext {
   const closeCallbacks: Array<() => void> = []
   let closed = false
 
@@ -52,7 +54,8 @@ function createRequestContext(abortSignal: AbortSignal): RequestContext {
   }
 
   const ctx: RequestContext = {
-    abortSignal,
+    request,
+    abortSignal: request.signal,
     responseAbort,
     onClose(cb) {
       if (closed) {
@@ -65,10 +68,10 @@ function createRequestContext(abortSignal: AbortSignal): RequestContext {
   }
 
   // Wire abort signal → markComplete
-  if (abortSignal.aborted) {
+  if (request.signal.aborted) {
     fireClose()
   } else {
-    abortSignal.addEventListener('abort', () => fireClose(), { once: true })
+    request.signal.addEventListener('abort', () => fireClose(), { once: true })
   }
 
   return ctx
@@ -112,7 +115,7 @@ function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
 }
 
 type GetRequestContext = () => RequestContext | null
-type RestoreRequestContext = (ctx: RequestContext | null) => void
+type RestoreRequestContext = <T>(ctx: RequestContext | null, fn: () => T) => T
 
 const globalObject = getGlobalObject<{
   getRequestContext: GetRequestContext
@@ -132,12 +135,13 @@ function getRequestContext_sync(): RequestContext | null {
   return syncState.requestContext
 }
 
-function restoreRequestContext_sync(ctx: RequestContext | null): void {
+function restoreRequestContext_sync<T>(ctx: RequestContext | null, fn: () => T): T {
   syncState.requestContext = ctx
   // Same lifecycle as user context: cleared on next macrotask
   setTimeout(() => {
     syncState.requestContext = null
   }, 0)
+  return fn()
 }
 
 // ── Async mode (AsyncLocalStorage) ──────────────────────────────────
@@ -155,8 +159,8 @@ function installAsyncRequestContext({
 
 // ── Internal accessors ──────────────────────────────────────────────
 
-function restoreRequestContext(ctx: RequestContext | null): void {
-  globalObject.restoreRequestContext(ctx)
+function restoreRequestContext<T>(ctx: RequestContext | null, fn: () => T): T {
+  return globalObject.restoreRequestContext(ctx, fn)
 }
 
 function getRequestContext(): RequestContext | null {

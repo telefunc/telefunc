@@ -52,6 +52,7 @@ interface MuxChannel {
   readonly isClosed: boolean
   _onTransportOpen(): void
   _onTransportMessage(data: string): void
+  _onTransportPublish(data: string): void
   _onTransportBinaryMessage(data: Uint8Array): void
   _onTransportAckReqMessage(data: string, seq: number): Promise<void>
   _onTransportCloseRequest(timeoutMs: number): void
@@ -61,6 +62,7 @@ interface MuxChannel {
 
 interface MuxConnection {
   send(channel: MuxChannel, data: string): void
+  sendPublishAckReq(channel: MuxChannel, data: string): Promise<unknown>
   sendTextAckReq(channel: MuxChannel, data: string): Promise<unknown>
   sendBinary(channel: MuxChannel, data: Uint8Array): void
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
@@ -185,6 +187,8 @@ class ClientConnection implements MuxConnection {
         this.handleCtrl(frame.ctrl)
         return
       case TAG.TEXT:
+      case TAG.PUBLISH:
+      case TAG.PUBLISH_ACK_REQ:
       case TAG.TEXT_ACK_REQ:
       case TAG.BINARY:
         this.handleDataFrame(frame)
@@ -258,6 +262,24 @@ class ClientConnection implements MuxConnection {
     }
     replay.push(seq, frame)
     this.transport.sendFrame({ kind: 'data', frame })
+  }
+
+  sendPublishAckReq(channel: MuxChannel, data: string): Promise<unknown> {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return Promise.reject(new ChannelClosedError())
+    const replay = this.replayBuffers.get(ix)!
+    const seq = replay.nextSeq()
+    const promise = new Promise<unknown>((resolve, reject) => {
+      this.pendingAcks.set(`${ix}:${seq}`, { resolve, reject })
+    })
+    const frame = encode.publishAckReq(ix, data, seq)
+    if (!this.canSendImmediately()) {
+      this.sendBuffer.push({ frame, channelIx: ix, seq })
+      return promise
+    }
+    replay.push(seq, frame)
+    this.transport.sendFrame({ kind: 'ack', frame })
+    return promise
   }
 
   sendTextAckReq(channel: MuxChannel, data: string): Promise<unknown> {
@@ -763,6 +785,10 @@ class ClientConnection implements MuxConnection {
       void this.channels.get(frame.index)?._onTransportAckReqMessage(frame.text!, frame.seq)
       return
     }
+    if (frame.tag === TAG.PUBLISH) {
+      this.channels.get(frame.index)?._onTransportPublish(frame.text!)
+      return
+    }
     if (frame.tag === TAG.TEXT) {
       this.channels.get(frame.index)?._onTransportMessage(frame.text!)
       return
@@ -973,7 +999,7 @@ class WsTransport implements ClientChannelTransport {
     ws.onopen = ws.onerror = ws.onclose = null
     ws.onmessage = ({ data }: MessageEvent) => {
       const frame = decode(new Uint8Array(data as ArrayBuffer))
-      if (frame.tag === TAG.TEXT || frame.tag === TAG.BINARY) {
+      if (frame.tag === TAG.TEXT || frame.tag === TAG.PUBLISH || frame.tag === TAG.BINARY) {
         this.owner._onTransportFrame(new Uint8Array(data as ArrayBuffer))
       }
     }

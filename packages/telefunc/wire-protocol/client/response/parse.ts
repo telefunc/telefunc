@@ -61,7 +61,6 @@ async function parseResponse(response: Response, callContext: CallContext, shard
   if (frameChannel) {
     const channel = new ClientChannel({
       channelId: frameChannel.metadata.channelId,
-      ackMode: frameChannel.metadata.ack,
       transports,
       shard,
       defer: false,

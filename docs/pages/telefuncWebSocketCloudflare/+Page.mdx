@@ -62,17 +62,39 @@ const ws = telefuncWebSocket({
 The function receives the incoming `Request` and your `env` bindings, and its return value is available inside telefunctions via `getContext()`.
 
 
-## Shards
+## Scale
 
-By default all channels share a single Durable Object instance. If you need more capacity, increase the number of instances:
+By default all channels share a single Durable Object instance per location bucket. If you need more capacity, increase the number of instances:
 
 ```ts
-const ws = telefuncWebSocket({ shards: 4 })
+const ws = telefuncWebSocket({ scale: 4 })
 ```
 
-Each browser session is pinned to one shard (`stickyShards: true` by default), so a user's open channels and regular telefunction calls stay on the same Durable Object instance.
+Each browser session is pinned to one shard via an opaque token stored in KV, so a user's open channels and regular telefunction calls stay on the same Durable Object instance.
 
-Keep `stickyShards: true` unless you have a specific reason to spread a single browser session across multiple Durable Objects.
+You can also set a per-bucket scale:
+
+```ts
+const ws = telefuncWebSocket({ scale: { weur: 4, enam: 2, apac: 1 } })
+```
+
+## KV namespace
+
+Telefunc uses a KV namespace for shard routing tokens and pub/sub presence. Add the binding to your `wrangler.jsonc`:
+
+```jsonc
+{
+  "kv_namespaces": [
+    { "binding": "TelefuncKV", "id": "..." }
+  ]
+}
+```
+
+The default binding name is `TelefuncKV`. To use a different name:
+
+```ts
+const ws = telefuncWebSocket({ kvBindingName: 'MyKV' })
+```
 
 ## Custom binding name
 
@@ -83,15 +105,17 @@ const ws = telefuncWebSocket({ bindingName: 'MyDurableObject' })
 ```
 
 
-## Location hint
+## Location fallback
 
-To influence where the Durable Object is first created, pass `locationHint`:
+To control the canonical Durable Object placement bucket when Cloudflare cannot map the request precisely, pass `locationFallback`:
 
 ```ts
-const ws = telefuncWebSocket({ locationHint: 'weur' })
+const ws = telefuncWebSocket({ locationFallback: 'weur' })
 ```
 
-This is best-effort and only applies at creation time. See [Cloudflare's data-location docs](https://developers.cloudflare.com/durable-objects/reference/data-location/) for valid values.
+Telefunc first tries to resolve a canonical bucket from the incoming Cloudflare colo or continent. If that fails, it falls back to `locationFallback`, which defaults to `'weur'`.
+
+Valid values are the canonical Telefunc buckets: `'wnam'`, `'enam'`, `'weur'`, `'eeur'`, `'apac'`, and `'oc'`.
 
 
 ## Hibernation

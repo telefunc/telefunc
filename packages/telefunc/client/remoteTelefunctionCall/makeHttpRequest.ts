@@ -61,11 +61,8 @@ async function makeHttpRequest(callContext: {
 
   const statusCode = response.status
   const shard = response.headers.get('x-telefunc-shard') ?? undefined
-  const sticky = response.headers.get('x-telefunc-sticky') === 'true'
 
-  // Always record shard + stickiness so channels can open to the right DO
-  // and POST URLs can be pinned when the server opts in to sticky sharding.
-  if (shard) setShardInfo(callContext.telefuncUrlBase, shard, sticky)
+  if (shard) setShardInfo(callContext.telefuncUrlBase, shard)
 
   if (statusCode === STATUS_CODE_SUCCESS) {
     const parsed = await parseResponse(response, callContext, shard)

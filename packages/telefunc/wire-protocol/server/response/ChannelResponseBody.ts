@@ -47,13 +47,15 @@ function buildChannelResponseBody(
         channel.onOpen(resolve)
         channel.onClose(() => reject(new ChannelClosedError()))
       })
-      restoreContext(runContext.providedContext)
-      restoreRequestContext(runContext.requestContext)
-      for await (const frame of gen) {
-        if (cancelled) break
-        const pending = channel._sendBinaryAwaitable(frame)
-        if (pending) await pending
-      }
+      await restoreContext(runContext.providedContext, () =>
+        restoreRequestContext(runContext.requestContext, async () => {
+          for await (const frame of gen) {
+            if (cancelled) break
+            const pending = channel._sendBinaryAwaitable(frame)
+            if (pending) await pending
+          }
+        }),
+      )
     } catch {
       // ChannelClosedError from onClose rejection or sendBinary — pump exits cleanly
     } finally {

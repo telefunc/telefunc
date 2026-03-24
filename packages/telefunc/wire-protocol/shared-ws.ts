@@ -11,12 +11,14 @@ import type { ChannelTransports } from './constants.js'
 // CTRL frames (lifecycle & flow control) — 3-byte header, no seq:
 //   [u8 TAG_CTRL][u16 LE 0][JSON payload...]
 //
-// Data frames (TEXT / BINARY) — 7-byte header with sequence number:
+// Data frames (TEXT / PUBLISH / BINARY) — 7-byte header with sequence number:
 //   [u8 tag][u16 LE index][u32 LE seq][payload...]
 //
 //   TAG_CTRL   (0x01) — lifecycle & flow control, index unused (0)
 //   TAG_TEXT   (0x02) — user channel text data, index = channel
 //   TAG_BINARY (0x03) — user channel binary data, index = channel
+//   TAG_PUBLISH (0x06) — keyed-channel pub/sub text data, index = channel
+//   TAG_PUBLISH_ACK_REQ (0x07) — keyed-channel pub/sub text data that requests an ACK_RES receipt
 //
 // Sequence numbers are assigned by the sender for replayable data frames in
 // both directions. Each side tracks the highest seq received and sends it in
@@ -41,6 +43,10 @@ const TAG = {
   ACK_RES: 0x04 as const,
   /** Text frame that requests an acknowledgement from the receiver. */
   TEXT_ACK_REQ: 0x05 as const,
+  /** Replayable publish frame delivered to keyed-channel subscribers. */
+  PUBLISH: 0x06 as const,
+  /** Replayable keyed publish frame that requests an acknowledgement receipt. */
+  PUBLISH_ACK_REQ: 0x07 as const,
 }
 
 // ===== Control message types =====
@@ -99,6 +105,8 @@ type AckResultStatus = 'ok' | 'error' | 'abort'
 type DecodedFrame =
   | { tag: typeof TAG.CTRL; ctrl: CtrlMessage }
   | { tag: typeof TAG.TEXT; index: number; seq: number; text: string }
+  | { tag: typeof TAG.PUBLISH; index: number; seq: number; text: string }
+  | { tag: typeof TAG.PUBLISH_ACK_REQ; index: number; seq: number; text: string }
   | { tag: typeof TAG.BINARY; index: number; seq: number; data: Uint8Array }
   | { tag: typeof TAG.ACK_RES; index: number; seq: number; ackedSeq: number; status: AckResultStatus; text: string }
   | { tag: typeof TAG.TEXT_ACK_REQ; index: number; seq: number; text: string }
@@ -158,6 +166,22 @@ const encode = {
     const payload = textEncoder.encode(text)
     const frame = new Uint8Array(HEADER_DATA + payload.byteLength)
     writeDataHeader(frame, TAG.TEXT, index, seq)
+    frame.set(payload, HEADER_DATA)
+    return frame
+  },
+
+  publish(index: number, text: string, seq = 0): Uint8Array<ArrayBuffer> {
+    const payload = textEncoder.encode(text)
+    const frame = new Uint8Array(HEADER_DATA + payload.byteLength)
+    writeDataHeader(frame, TAG.PUBLISH, index, seq)
+    frame.set(payload, HEADER_DATA)
+    return frame
+  },
+
+  publishAckReq(index: number, text: string, seq = 0): Uint8Array<ArrayBuffer> {
+    const payload = textEncoder.encode(text)
+    const frame = new Uint8Array(HEADER_DATA + payload.byteLength)
+    writeDataHeader(frame, TAG.PUBLISH_ACK_REQ, index, seq)
     frame.set(payload, HEADER_DATA)
     return frame
   },
@@ -224,6 +248,12 @@ function decode(frame: Uint8Array): DecodedFrame {
 
   if (tag === TAG.TEXT) {
     return { tag: TAG.TEXT, index, seq, text: textDecoder.decode(payload) }
+  }
+  if (tag === TAG.PUBLISH) {
+    return { tag: TAG.PUBLISH, index, seq, text: textDecoder.decode(payload) }
+  }
+  if (tag === TAG.PUBLISH_ACK_REQ) {
+    return { tag: TAG.PUBLISH_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
   }
   if (tag === TAG.TEXT_ACK_REQ) {
     return { tag: TAG.TEXT_ACK_REQ, index, seq, text: textDecoder.decode(payload) }

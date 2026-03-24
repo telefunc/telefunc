@@ -48,31 +48,22 @@ const globalObject = getGlobalObject('wire-protocol/server/connection.ts', {
 class ProtocolViolationError extends Error {}
 
 function resolveMuxServerOptions(): MuxServerOptions {
-  const channelConfig = getServerConfig().channel
-  const reconnectTimeout = channelConfig.reconnectTimeout
-  const idleTimeout = channelConfig.idleTimeout
-  const pingInterval = Math.max(channelConfig.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS)
+  const c = getServerConfig().channel
+  const pingInterval = Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS)
   const pingDeadline = pingInterval * 2
-  const serverReplayBuffer = channelConfig.serverReplayBuffer
-  const clientReplayBuffer = channelConfig.clientReplayBuffer
-  const connectTtl = channelConfig.connectTtl
-  const bufferLimit = channelConfig.bufferLimit
-  const sseFlushThrottle = channelConfig.sseFlushThrottle
-  const ssePostIdleFlushDelay = channelConfig.ssePostIdleFlushDelay
-  const transports = channelConfig.transports
   return {
-    reconnectTimeout,
-    idleTimeout,
+    reconnectTimeout: c.reconnectTimeout,
+    idleTimeout: c.idleTimeout,
     pingInterval,
     pingDeadline,
-    serverReplayBuffer,
-    clientReplayBuffer,
-    connectTtl,
-    bufferLimit,
-    sseFlushThrottle,
-    ssePostIdleFlushDelay,
-    replayMaxAge: pingDeadline + reconnectTimeout + 1_000,
-    transports,
+    serverReplayBuffer: c.serverReplayBuffer,
+    clientReplayBuffer: c.clientReplayBuffer,
+    connectTtl: c.connectTtl,
+    bufferLimit: c.bufferLimit,
+    sseFlushThrottle: c.sseFlushThrottle,
+    ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
+    replayMaxAge: pingDeadline + c.reconnectTimeout + 1_000,
+    transports: c.transports,
   }
 }
 
@@ -333,7 +324,7 @@ class ServerConnection<TConnection> {
         replay.dispose()
       })
 
-      channel.attachPeer(new IndexedPeer(sender, ix, replay))
+      channel._attachPeer(new IndexedPeer(sender, ix, replay))
     }
 
     for (const [ix, entry] of prevIxMap) {
@@ -431,6 +422,14 @@ class ServerConnection<TConnection> {
         entry.channel._onPeerMessage(frame.text)
         return null
       }
+      case TAG.PUBLISH_ACK_REQ: {
+        const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
+        if (!entry) return null
+        if (frame.seq && frame.seq <= entry.lastClientSeq) return null
+        if (frame.seq) entry.lastClientSeq = frame.seq
+        entry.channel._onPeerPublishAckReqMessage(frame.text, frame.seq)
+        return null
+      }
       case TAG.TEXT_ACK_REQ: {
         const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
         if (!entry) return null
@@ -453,6 +452,8 @@ class ServerConnection<TConnection> {
         entry.channel._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
         return null
       }
+      default:
+        return null
     }
   }
 }

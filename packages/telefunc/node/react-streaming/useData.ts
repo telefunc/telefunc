@@ -8,7 +8,7 @@ import { useTelefuncContext } from './useTelefuncContext.js'
 const useData: typeof useData_ = (...args) => {
   if (!isAsyncMode()) {
     const context = useTelefuncContext()
-    restoreContext(context)
+    return restoreContext(context, () => useData_(...args))
   }
   return useData_(...args)
 }

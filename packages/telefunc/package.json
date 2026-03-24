@@ -119,8 +119,8 @@
       "default": "./dist/wire-protocol/server/adapter/deno.js"
     },
     "./websocket/cloudflare": {
-      "types": "./dist/wire-protocol/server/adapter/cloudflare.d.ts",
-      "default": "./dist/wire-protocol/server/adapter/cloudflare.js"
+      "types": "./dist/wire-protocol/server/adapter/cloudflare/index.d.ts",
+      "default": "./dist/wire-protocol/server/adapter/cloudflare/index.js"
     }
   },
   "type": "module",

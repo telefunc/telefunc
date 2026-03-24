@@ -12,6 +12,7 @@ import type {
   ChannelCloseResult,
   ChannelData,
   ChannelListener,
+  ChannelPublishAck,
 } from '../channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -19,6 +20,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
+import { assert, assertUsage } from '../../utils/assert.js'
 import { isAbort } from '../../node/server/Abort.js'
 import { createAbortError, type AbortError } from '../../shared/Abort.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
@@ -28,6 +30,8 @@ import { CHANNEL_BUFFER_LIMIT_BYTES, CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_CONNECT_T
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import type { AckResultStatus } from '../shared-ws.js'
+import { getPubSubTransport } from './pubsub.js'
+import type { PubSubSubscription, PubSubTransport } from './pubsub.js'
 
 const globalObject = getGlobalObject('channel.ts', {
   channelRegistry: new Map<string, ServerChannel<unknown, unknown>>(),
@@ -55,14 +59,24 @@ function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = 
   ack?: false
 }): Channel<ServerToClient, ClientToServer>
 function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts: {
+  ack?: false
+  key: string
+}): Channel<ServerToClient, ClientToServer, false, true>
+function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts: {
   ack: true
 }): Channel<ServerToClient, ClientToServer, true>
+function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts: {
+  ack: true
+  key: string
+}): Channel<ServerToClient, ClientToServer, true, true>
 function createChannel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts?: {
   ack?: boolean
+  key?: string
 }): Channel<ServerToClient, ClientToServer, false>
-function createChannel(opts?: { ack?: boolean }): any {
+function createChannel(opts?: { ack?: boolean; key?: string }): any {
   return new ServerChannel({
     ackMode: opts?.ack === true,
+    key: opts?.key,
   })
 }
 
@@ -74,6 +88,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   readonly [SERVER_CHANNEL_BRAND] = true
   readonly id: string
   readonly ackMode: boolean
+  readonly key: string | undefined
 
   get client(): ChannelClient<ClientToServer, ServerToClient> {
     return this as unknown as ChannelClient<ClientToServer, ServerToClient>
@@ -88,6 +103,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _didRegister = false
   private _peer: IndexedPeer | null = null
   private _listeners: Array<ChannelListener<ClientToServer>> = []
+  private _pubSubListeners: Array<ChannelListener<ClientToServer>> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
   private _pendingAcks = new Map<
@@ -103,7 +119,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _closeDeadline = 0
   private _closeWaiters: Array<() => void> = []
   private _didReceiveCloseAck = false
-  private _expectCloseAck = false
+  private _awaitingCloseAck = false
   private _pendingCloseCallbacks = 0
   private _inflightAcks = 0
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null
@@ -114,26 +130,25 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _shutdownCallback: (() => void) | null = null
   private _pendingCloseAck = false
-  private _pendingCloseRequest = false
+  private _didRegisterPubSub = false
+  private _pubSubTransport: PubSubTransport | null = null
+  private _pubSubSubscription: PubSubSubscription | null = null
 
   constructor({
     ackMode = false,
+    key,
     id,
     bufferLimit,
   }: {
     ackMode?: boolean
+    key?: string
     id?: string
     bufferLimit?: number
   } = {}) {
     this.ackMode = ackMode
+    this.key = key
     this.id = id ?? crypto.randomUUID()
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(bufferLimit ?? globalObject.bufferLimit)
-    this._ttlTimer = unrefTimer(
-      setTimeout(() => {
-        this._ttlTimer = null
-        this._shutdown(new ChannelNetworkError('Channel timed out: no client connected within TTL'))
-      }, DEFAULT_TTL_MS),
-    )
   }
 
   get isClosed(): boolean {
@@ -186,8 +201,29 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._prePeerBuffer.pushBinary(data)
   }
 
+  publish(data: ChannelData<ServerToClient>): Promise<ChannelPublishAck> {
+    assertUsage(this.key, 'Channel.publish() requires createChannel({ key })')
+    this._registerPubSub()
+    if (!this._pubSubSubscription) throw new ChannelClosedError()
+    const serialized = stringify(data, { forbidReactElements: false })
+    const ret = this._trackAck(Promise.resolve(this._publishPubSub(serialized)))
+    ret.catch((e) => reportServerChannelError(e))
+    return ret
+  }
+
   listen(callback: ChannelListener<ClientToServer>): void {
     this._listeners.push(callback)
+  }
+
+  subscribe(callback: ChannelListener<ClientToServer>): () => void {
+    assertUsage(this.key, 'Channel.subscribe() requires createChannel({ key })')
+    // Pure server-side keyed pub/sub registers lazily here; Cloudflare needs async request context on this path.
+    this._registerPubSub()
+    this._pubSubListeners.push(callback)
+    return () => {
+      const index = this._pubSubListeners.indexOf(callback)
+      if (index >= 0) this._pubSubListeners.splice(index, 1)
+    }
   }
 
   listenBinary(callback: (data: Uint8Array) => void): void {
@@ -230,8 +266,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     if (this._didShutdown) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
     const timeout = normalizeCloseTimeout(opts?.timeout)
     this._closeDeadline = Date.now() + timeout
-    this._expectCloseAck = true
-    this._pendingCloseRequest = true
+    this._awaitingCloseAck = true
     this._startClose()
     if (this._peer) this._peer.sendCloseRequest(timeout)
     this._closePromise = this._runFinalizationLoop()
@@ -242,6 +277,8 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     if (this._didShutdown || this._peer || this._didRegister) return
     this._didRegister = true
     getChannelRegistry().set(this.id, this as ServerChannel<unknown, unknown>)
+    // Returned keyed channels register pub/sub here while serialization has restored sync request context.
+    this._registerPubSub()
     const hook = globalObject.creationHooks.get(this.id)
     if (hook) {
       globalObject.creationHooks.delete(this.id)
@@ -258,7 +295,28 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     )
   }
 
-  attachPeer(peer: IndexedPeer): void {
+  /** @internal */
+  _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
+    return this._trackAck(this._dispatchPublishAckReq(text, seq))
+  }
+
+  /** @internal */
+  _deliverPubSubMessage(serialized: string, _sourceChannelId: string): void {
+    for (const cb of this._pubSubListeners) {
+      try {
+        cb(parse(serialized) as ChannelData<ClientToServer>)
+      } catch (err) {
+        if (this._handleCallbackError(err)) return
+      }
+    }
+    if (this._peer) {
+      this._peer.sendPublish(serialized)
+      return
+    }
+    this._prePeerBuffer.pushPublish(serialized)
+  }
+
+  _attachPeer(peer: IndexedPeer): void {
     if (this._didShutdown) return
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
@@ -267,6 +325,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._peer = peer
     this._prePeerBuffer.flush(
       (msg) => peer.sendText(msg),
+      (msg) => peer.sendPublish(msg),
       (msg) => peer.sendBinary(msg),
       (data, ackEntry) => {
         const seq = peer.sendTextAckReq(data)
@@ -274,7 +333,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       },
     )
     if (this._pendingCloseAck) peer.sendCloseAck()
-    if (this._pendingCloseRequest) peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
+    if (this._awaitingCloseAck) peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) {
       this._notifyCloseProgress()
       return
@@ -361,8 +420,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   _onPeerCloseAck(): void {
     if (this._didShutdown) return
     this._didReceiveCloseAck = true
-    this._expectCloseAck = false
-    this._pendingCloseRequest = false
+    this._awaitingCloseAck = false
     this._notifyCloseProgress()
   }
 
@@ -455,8 +513,19 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       } catch (err) {
         if (this._handleCallbackError(err)) return
         this._peer?.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
-        return
       }
+    }
+  }
+
+  private async _dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
+    assert(this.key)
+    try {
+      this._registerPubSub()
+      const result = await this._publishPubSub(serialized)
+      this._peer?.sendAckRes(seq, stringify(result, { forbidReactElements: false }))
+    } catch (err) {
+      if (this._handleCallbackError(err)) return
+      this._peer?.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
     }
   }
 
@@ -472,7 +541,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     return (
       this._inflightAcks === 0 &&
       this._pendingCloseCallbacks === 0 &&
-      (!this._expectCloseAck || this._didReceiveCloseAck)
+      (!this._awaitingCloseAck || this._didReceiveCloseAck)
     )
   }
 
@@ -483,7 +552,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._closeError = err
     this._peer = null
     this._pendingCloseAck = false
-    this._pendingCloseRequest = false
+    this._awaitingCloseAck = false
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     getChannelRegistry().delete(this.id)
@@ -491,12 +560,43 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._shutdownCallback = null
     shutdownCb?.()
     this._fireClose(err)
+    this._unregisterPubSub()
     this._notifySendReady()
     this._notifyCloseProgress()
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
     this._prePeerBuffer.clear(ackErr)
+  }
+
+  private _registerPubSub(): void {
+    if (!this.key || this._didRegisterPubSub) return
+    this._didRegisterPubSub = true
+    this._pubSubTransport = getPubSubTransport()
+    this._pubSubSubscription = {
+      id: this.id,
+      key: this.key,
+      onMessage: (serialized, sourceChannelId) => {
+        this._deliverPubSubMessage(serialized, sourceChannelId)
+      },
+    }
+    void this._pubSubTransport.subscribe(this._pubSubSubscription)
+  }
+
+  private _unregisterPubSub(): void {
+    if (!this.key || !this._didRegisterPubSub) return
+    this._didRegisterPubSub = false
+    assert(this._pubSubTransport)
+    assert(this._pubSubSubscription)
+    void this._pubSubTransport.unsubscribe(this._pubSubSubscription)
+    this._pubSubSubscription = null
+  }
+
+  private _publishPubSub(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
+    assert(this.key)
+    assert(this._pubSubTransport)
+    assert(this._pubSubSubscription)
+    return this._pubSubTransport.publish(this._pubSubSubscription, serialized)
   }
 
   private _fireClose(err?: Error): void {
@@ -517,16 +617,16 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       if (track) {
         this._pendingCloseCallbacks++
         void pending
-          .catch((e) => this._reportCallbackError(e))
+          .catch((e) => reportServerChannelError(e))
           .finally(() => {
             this._pendingCloseCallbacks--
             this._notifyCloseProgress()
           })
       } else {
-        void pending.catch((e) => this._reportCallbackError(e))
+        void pending.catch((e) => reportServerChannelError(e))
       }
     } catch (callbackErr) {
-      this._reportCallbackError(callbackErr)
+      reportServerChannelError(callbackErr)
     }
   }
 
@@ -553,19 +653,19 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       }
       return true
     }
-    this._reportCallbackError(err)
+    reportServerChannelError(err)
     return false
-  }
-
-  private _reportCallbackError(err: unknown): void {
-    handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
   }
 
   private _clearTimer(name: '_ttlTimer' | '_reconnectTimer'): void {
     const timer = this[name]
     if (!timer) return
     clearTimeout(timer)
-    ;(this as Record<typeof name, ReturnType<typeof setTimeout> | null>)[name] = null
+    if (name === '_ttlTimer') {
+      this._ttlTimer = null
+      return
+    }
+    this._reconnectTimer = null
   }
 
   private _waitUntilSendReady(): Promise<void> {
@@ -580,9 +680,12 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   }
 }
 
+function reportServerChannelError(err: unknown): void {
+  handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
+}
+
 function normalizeCloseTimeout(timeout: number | undefined): number {
   if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
-  if (!Number.isFinite(timeout) || timeout < 0)
-    throw new Error('Channel close timeout must be a non-negative finite number')
+  assertUsage(Number.isFinite(timeout) && timeout >= 0, 'Channel close timeout must be a non-negative finite number')
   return timeout
 }

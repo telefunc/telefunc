@@ -2,8 +2,8 @@
 
 export { telefunc }
 
-import { telefuncWebSocket } from '../wire-protocol/server/adapter/cloudflare.js'
-import type { CloudflareWebSocketOptions } from '../wire-protocol/server/adapter/cloudflare.js'
+import { telefuncWebSocket } from '../wire-protocol/server/adapter/cloudflare/index.js'
+import type { CloudflareWebSocketOptions } from '../wire-protocol/server/adapter/cloudflare/index.js'
 
 type ServeOptions = CloudflareWebSocketOptions
 type ServeInput = {

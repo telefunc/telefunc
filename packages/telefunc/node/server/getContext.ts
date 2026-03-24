@@ -14,7 +14,7 @@ import type { Telefunc } from './getContext/TelefuncNamespace.js'
 
 type GetContext = () => Telefunc.Context
 type ProvideTelefuncContext = (context: Telefunc.Context) => void
-type RestoreContext = (context: null | Telefunc.Context) => void
+type RestoreContext = <T>(context: null | Telefunc.Context, fn: () => T) => T
 
 const globalObject = getGlobalObject<{
   getContext: GetContext
@@ -59,9 +59,9 @@ function provideTelefuncContext<Context extends object = Telefunc.Context>(conte
   globalObject.provideTelefuncContext(context)
 }
 
-function restoreContext(context: null | Telefunc.Context): void {
+function restoreContext<T>(context: null | Telefunc.Context, fn: () => T): T {
   assert(context === null || isObject(context))
-  globalObject.restoreContext(context)
+  return globalObject.restoreContext(context, fn)
 }
 
 function installAsyncMode({
