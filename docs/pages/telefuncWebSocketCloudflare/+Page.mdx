@@ -161,7 +161,7 @@ Telefunc tracks which Durable Objects have active subscribers using KV presence 
 | TTL | 90 seconds |
 | Refresh interval | 30 seconds |
 
-Presence entries are created when a channel subscribes to a key and deleted when it unsubscribes. The refresh timer keeps the entry alive as long as the channel is open. If a Durable Object crashes without unsubscribing, the entry expires after 90 seconds and the bucket is no longer included in fanout.
+Presence entries are created when a channel subscribes to a key and deleted when it unsubscribes. The refresh timer keeps the entry alive as long as the channel is open. If a Durable Object is evicted by the runtime without unsubscribing (e.g. during a deployment), the entry expires after 90 seconds and the bucket is no longer included in fanout.
 
 
 ## Delivery guarantees
@@ -182,7 +182,7 @@ Presence entries are created when a channel subscribes to a key and deleted when
 |---|---|
 | Ordering | Publishes for a given key are serialized through a single authority and delivered in order. |
 | Delivery | `publish()` resolves after all active session shards have received the message. This confirms server-side fanout completed — delivery to the client happens over the channel wire and is not awaited. |
-| Presence lag | Up to 90 seconds. A crashed session shard may still receive fanout attempts until its KV entry expires. A new subscriber may miss publishes during the initial presence setup (buffered locally up to 512 KB). |
+| Presence lag | Up to 90 seconds. An evicted Durable Object may still receive fanout attempts until its KV presence entry expires. A new subscriber may miss publishes from other publishers until its KV presence entry is written (typically a few milliseconds). |
 
 > Once a pub/sub message reaches a session shard, it participates in the same replay and recovery semantics as regular channel messages — buffered if the client is disconnected, replayed on reconnect.
 
