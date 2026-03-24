@@ -8,7 +8,7 @@ Telefunc has two transport settings:
 | Setting | Controls |
 |---|---|
 | `config.stream.transport` | How <Link href="/stream">streamed values</Link> (`AsyncGenerator`, `ReadableStream`, `Promise`) are delivered |
-| `config.channel.transport` | How <Link text={<code>createChannel()</code>} href="/createChannel" /> connections work |
+| `config.channel.transports` | How <Link text={<code>createChannel()</code>} href="/createChannel" /> connections work |
 
 Plain telefunction calls are always `text/plain` JSON — these settings only affect streaming and channels.
 
@@ -18,7 +18,7 @@ Plain telefunction calls are always `text/plain` JSON — these settings only af
 import { config } from 'telefunc/client'
 
 config.stream.transport = 'binary-inline'   // default
-config.channel.transport = 'sse'            // default
+config.channel.transports = ['sse']            // default
 ```
 
 <ConfigWhereClient />
@@ -79,8 +79,8 @@ Controls how <Link text={<code>createChannel()</code>} href="/createChannel" /> 
 | Best default | `config.stream.transport = 'binary-inline'` |
 | Proxy buffers binary | `config.stream.transport = 'sse-inline'` |
 | Streams with reconnection | `config.stream.transport = 'channel'` |
-| Channels without WS | `config.channel.transport = 'sse'` |
-| Full-duplex channels | `config.channel.transport = 'ws'` + <Link text="Server setup" href="/server" /> |
+| Channels without WS | `config.channel.transports = ['sse']` |
+| Full-duplex channels | `config.channel.transports = ['sse', 'ws']` + <Link text="Server setup" href="/server" /> |
 
 
 ## Per-call override
@@ -93,7 +93,7 @@ import { withContext } from 'telefunc/client'
 
 const gen = withContext(onAIChat, {
   stream: { transport: 'channel' },
-  channel: { transport: 'ws' },
+  channel: { transports: ['ws'] },
 })('Tell me a joke')
 
 for await (const token of gen) {

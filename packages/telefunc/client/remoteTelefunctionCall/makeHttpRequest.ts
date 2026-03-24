@@ -7,8 +7,8 @@ import { parseResponse } from '../../wire-protocol/client/response/parse.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire-protocol/request-kind.js'
 import { throwAbortError, throwBugError } from './errors.js'
 import { ConnectionError } from '../ConnectionError.js'
-import { setShardInfo } from '../../wire-protocol/client/shard-registry.js'
-import type { ChannelTransports } from '../../wire-protocol/constants.js'
+import { setSessionToken } from '../../wire-protocol/client/session-registry.js'
+import { TELEFUNC_SESSION_HEADER, type ChannelTransports } from '../../wire-protocol/constants.js'
 import {
   STATUS_CODE_SUCCESS,
   STATUS_CODE_THROW_ABORT,
@@ -60,12 +60,12 @@ async function makeHttpRequest(callContext: {
   }
 
   const statusCode = response.status
-  const shard = response.headers.get('x-telefunc-shard') ?? undefined
+  const sessionToken = response.headers.get(TELEFUNC_SESSION_HEADER) ?? undefined
 
-  if (shard) setShardInfo(callContext.telefuncUrlBase, shard)
+  if (sessionToken) setSessionToken(callContext.telefuncUrlBase, sessionToken)
 
   if (statusCode === STATUS_CODE_SUCCESS) {
-    const parsed = await parseResponse(response, callContext, shard)
+    const parsed = await parseResponse(response, callContext, sessionToken)
     assertUsage(isObject(parsed) && 'ret' in parsed, wrongInstallation({ method, callContext }))
     return parsed.ret
   } else if (statusCode === STATUS_CODE_THROW_ABORT) {

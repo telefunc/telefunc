@@ -69,26 +69,9 @@ Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-object
 - **Shard routing tokens** — pins a browser session to the same Durable Object across requests.
 - **Pub/sub presence** — tracks which Durable Objects have active subscribers for each key.
 
+### Buckets
 
-## Scaling
-
-By default, Telefunc creates one Durable Object instance per location bucket. Increase capacity with `scale`:
-
-```ts
-const tf = telefunc({ scale: 4 })
-```
-
-This creates 4 session shards per bucket. Each browser session is pinned to one shard via a KV-backed routing token (TTL: 24 hours), so a user's channels and telefunction calls stay on the same instance.
-
-### Per-region scale
-
-```ts
-const tf = telefunc({
-  scale: { weur: 5, enam: 3, apac: 2 },
-})
-```
-
-Only specified regions get session shards. The six canonical location buckets are:
+A **bucket** is one of six geographic regions. Each bucket runs its own set of Durable Object instances so that channel state stays close to the users it serves:
 
 | Bucket | Region |
 |---|---|
@@ -99,12 +82,48 @@ Only specified regions get session shards. The six canonical location buckets ar
 | `apac` | Asia Pacific |
 | `oc` | Oceania |
 
-Telefunc maps each incoming request to a bucket using the Cloudflare colocation point, then continent, then `locationFallback`.
+Telefunc maps each incoming request to a bucket using the Cloudflare colocation point (`request.cf.colo`), then continent (`request.cf.continent`), then `locationFallback`.
+
+### Sticky routing
+
+Every telefunction call and channel message from a browser must reach the **same session shard** — otherwise the Durable Object holding the channel state wouldn't see it.
+
+On the first request, Telefunc resolves the shard from the bucket and scale config, stores a routing token in KV (TTL: 24 hours), and returns it to the client via the `x-telefunc-session` response header. The token includes the shard name so you can inspect which region and shard a session is pinned to (e.g. `telefunc-shard-weur-0:a1b2c3d4-...`). Subsequent requests send this token back so Telefunc can look up the same shard.
+
+> **CDN / reverse proxy note**: If you place a CDN or reverse proxy in front of your Worker, make sure `x-telefunc-session` is not stripped from responses or requests. Telefunc uses this header to maintain session affinity — without it, each request would be routed to a random shard and channel state would be lost.
+
+### Durable Object types
+
+Within a bucket, there are two kinds of Durable Object:
+
+- **Session shards** hold WebSocket connections and channel state. Browser sessions are pinned to one shard via the KV routing token.
+- **Bucket coordinators** aggregate pub/sub fanout within a region so the authority doesn't need to address every session shard individually. Each channel key is deterministically hashed to one coordinator per bucket.
+
+
+## Scaling
+
+By default, Telefunc creates one session shard per bucket. Increase capacity with `scale`:
+
+```ts
+const tf = telefunc({ scale: 4 })
+```
+
+This creates 4 session shards and 2 bucket coordinators (`ceil(4 / 2)`) per bucket.
+
+### Per-region scale
+
+```ts
+const tf = telefunc({
+  scale: { weur: 5, enam: 3, apac: 2 },
+})
+```
+
+Only specified regions get session shards. Unspecified regions have no Durable Object instances — requests from those regions fall back via `locationFallback`.
 
 
 ## Distributed pub/sub
 
-Keyed channels (<Link href="/createChannel" />) use a three-tier fanout architecture to broadcast across edge locations:
+Keyed channels (<Link href="/createChannel" />) use a three-tier fanout architecture to broadcast across edge locations.
 
 ### Publish flow
 
@@ -116,9 +135,11 @@ Publisher (session shard)
 ```
 
 1. The publisher's session shard forwards to the **authority** Durable Object for the key.
-2. The authority serializes publishes through an exclusive dispatch chain, assigns a monotonic sequence number, reads active presence from KV, and forwards to each **bucket coordinator**.
-3. Each bucket coordinator delivers to the listed **session shards** in its region.
+2. The authority serializes publishes through an exclusive dispatch chain, assigns a monotonic sequence number (starting from 1), reads active presence from KV, and selectively forwards to each **bucket coordinator** in regions with active subscribers.
+3. Each bucket coordinator fans out to the **session shards** in its region.
 4. Each session shard delivers to its local subscribers (including the sender when `selfDelivery` is enabled — the default).
+
+The authority is a single point of serialization — it sees every publish for a key and assigns a globally monotonic `seq`. Bucket coordinators exist so this one authority only needs to send `O(buckets)` messages instead of `O(session shards)`.
 
 ### Ordering
 
@@ -141,10 +162,6 @@ Telefunc tracks which Durable Objects have active subscribers using KV presence 
 | Refresh interval | 30 seconds |
 
 Presence entries are created when a channel subscribes to a key and deleted when it unsubscribes. The refresh timer keeps the entry alive as long as the channel is open. If a Durable Object crashes without unsubscribing, the entry expires after 90 seconds and the bucket is no longer included in fanout.
-
-### Coordinator shards
-
-Bucket coordinator count derives from session scale: `ceil(sessionScale / 2)` per bucket. Keys are deterministically mapped to a coordinator shard using a hash, so the same key always routes through the same coordinator in a given bucket.
 
 
 ## Delivery guarantees

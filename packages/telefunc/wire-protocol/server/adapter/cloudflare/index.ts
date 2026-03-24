@@ -11,7 +11,12 @@ import { telefunc } from '../../../../node/server/telefunc.js'
 import { setPubSubTransport } from '../../pubsub.js'
 import { CloudflarePubSubRegistry, CloudflarePubSubTransport } from './pubsub.js'
 import type { PubSubDeliverRequest, PubSubPublishRequest } from './pubsub.js'
-import { TELEFUNC_PUBSUB_BUCKET_HEADER, TELEFUNC_SHARD_HEADER, resolveSessionRoutingTarget } from './routing.js'
+import {
+  TELEFUNC_PUBSUB_BUCKET_HEADER,
+  TELEFUNC_SESSION_HEADER,
+  TELEFUNC_SHARD_HEADER,
+  resolveSessionRoutingTarget,
+} from './routing.js'
 import { assertUsage } from '../../../../utils/assert.js'
 import type { Telefunc } from '../../../../node/server/getContext.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
@@ -135,15 +140,16 @@ function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapte
 
     const kv = getKVBinding(env)
     assertUsage(kv, `Missing Cloudflare KV namespace binding "${kvBindingName}". Add it to your wrangler.jsonc.`)
-    const shardToken = new URL(request.url).searchParams.get('shard')
+    const sessionToken =
+      request.headers.get(TELEFUNC_SESSION_HEADER) || new URL(request.url).searchParams.get('session')
 
     let sessionInstanceName: string | undefined
     let locationBucket: LocationBucket | undefined
-    let token = shardToken
+    let token = sessionToken
 
-    // Resolve shard from KV token
+    // Resolve shard from KV session token
     if (token) {
-      const stored = await kv.get<StoredShardToken>(`shard:${token}`, 'json')
+      const stored = await kv.get<StoredShardToken>(`session:${token}`, 'json')
       if (stored) {
         sessionInstanceName = stored.s
         locationBucket = stored.b
@@ -155,9 +161,9 @@ function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapte
       const target = resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback)
       sessionInstanceName = target.sessionInstanceName
       locationBucket = target.locationBucket
-      token = crypto.randomUUID()
+      token = `${sessionInstanceName}:${crypto.randomUUID()}`
       const value: StoredShardToken = { s: sessionInstanceName, b: locationBucket }
-      ctx.waitUntil(kv.put(`shard:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }))
+      ctx.waitUntil(kv.put(`session:${token}`, JSON.stringify(value), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }))
     }
 
     const forwardedHeaders = new Headers(request.headers as Headers)
@@ -169,10 +175,10 @@ function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapte
       .get(binding.idFromName(sessionInstanceName), { locationHint: locationBucket })
       .fetch(forwardedRequest)
 
-    // For HTTP responses, set the opaque shard token header
+    // For HTTP responses, return the session token to the client
     if (!isWebSocketRequest && token) {
       const headers = new Headers(doResponse.headers)
-      headers.set(TELEFUNC_SHARD_HEADER, token)
+      headers.set(TELEFUNC_SESSION_HEADER, token)
       return new Response(doResponse.body, { status: doResponse.status, headers })
     }
 

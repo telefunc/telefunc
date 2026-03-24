@@ -8,6 +8,7 @@ import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute } from '../../utils/path.js'
+import { setPubSubAdapter, type PubSubAdapter } from '../../wire-protocol/server/pubsub.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
@@ -98,6 +99,8 @@ type ChannelConfigUser = {
    * `sseFlushThrottle` window.
    */
   ssePostIdleFlushDelay?: number
+  /** Adapter for cross-node pub/sub. See https://telefunc.com/createChannel#keyed-channels-pubsub */
+  adapter?: PubSubAdapter
 }
 
 type ChannelConfigResolved = {
@@ -178,9 +181,7 @@ type ConfigResolved = {
   channel: ChannelConfigResolved
 }
 
-type ConfigState = Omit<ConfigUser, 'stream' | 'channel'> & { stream: StreamConfigUser; channel: ChannelConfigUser }
-
-const configState: ConfigState = { stream: {}, channel: {} }
+const configState: ConfigUser = { stream: {}, channel: {} }
 
 const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   get(_target, prop) {
@@ -384,6 +385,16 @@ function setChannelConfigValue(channelConfigNext: ChannelConfigUser, key: string
   switch (key) {
     case 'transports':
       channelConfigNext.transports = validateChannelTransports(value, configPath)
+      return
+    case 'adapter':
+      assertUsage(
+        isObject(value) &&
+          typeof (value as any).subscribe === 'function' &&
+          typeof (value as any).publish === 'function',
+        `\`${configPath}\` must be an object with subscribe(), unsubscribe(), and publish() methods`,
+      )
+      channelConfigNext.adapter = value as PubSubAdapter
+      setPubSubAdapter(value as PubSubAdapter)
       return
     case 'reconnectTimeout':
     case 'idleTimeout':

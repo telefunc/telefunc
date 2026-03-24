@@ -147,7 +147,7 @@ Set shared channel runtime settings on the server with `config.channel`:
 
 | Option | Default | Description |
 |---|---|---|
-| `transport` | `'sse'`* | Channel backend: `'sse'` or `'ws'`. |
+| `transports` | `['sse']`* | Channel transports: `['sse']`, `['sse', 'ws']`, or `['ws']`. |
 | `reconnectTimeout` | `60_000` | How long (ms) to hold channels open after a client disconnects, waiting for a reconnect. |
 | `idleTimeout` | `60_000` | How long (ms) to keep the shared connection open after the last channel closes. |
 | `pingInterval` | `5_000` | How often (ms) the client sends a ping. The server considers the client dead after 2× this interval. Minimum: 1000ms. |
@@ -162,7 +162,7 @@ Set shared channel runtime settings on the server with `config.channel`:
 import { config } from 'telefunc'
 
 config.channel = {
-  transport: 'ws',
+  transports: ['ws'],
   reconnectTimeout: 60_000,
   idleTimeout: 60_000,
   pingInterval: 5_000,

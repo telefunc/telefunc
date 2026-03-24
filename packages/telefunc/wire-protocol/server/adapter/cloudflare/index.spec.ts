@@ -91,6 +91,7 @@ vi.mock('./pubsub.js', () => ({
 
 vi.mock('./routing.js', () => ({
   TELEFUNC_PUBSUB_BUCKET_HEADER: 'x-telefunc-pubsub-bucket',
+  TELEFUNC_SESSION_HEADER: 'x-telefunc-session',
   TELEFUNC_SHARD_HEADER: 'x-telefunc-shard',
   resolveSessionRoutingTarget: vi.fn(
     (baseInstanceName: string, scale: unknown, request: Request, locationFallback: string) => {
@@ -170,8 +171,8 @@ describe('cloudflare adapter entrypoint', () => {
     const { binding, get, fetch } = createBinding()
     const ws = telefuncWebSocket()
     const kv = createMockKV()
-    await kv.put('shard:my-token', JSON.stringify({ s: 'telefunc-shard-weur-1', b: 'weur' }))
-    const request = new Request('https://telefunc.test/_telefunc?shard=my-token')
+    await kv.put('session:my-token', JSON.stringify({ s: 'telefunc-shard-weur-1', b: 'weur' }))
+    const request = new Request('https://telefunc.test/_telefunc?session=my-token')
 
     const response = await ws.handleTelefunc(
       request,
@@ -191,7 +192,7 @@ describe('cloudflare adapter entrypoint', () => {
     expect(forwardedRequest.headers.get('x-telefunc-pubsub-bucket')).toBe('weur')
 
     // Response carries the same opaque token back
-    expect(response?.headers.get('x-telefunc-shard')).toBe('my-token')
+    expect(response?.headers.get('x-telefunc-session')).toBe('my-token')
   })
 
   it('derives a new shard and stores a KV token when no token is provided', async () => {
@@ -213,12 +214,14 @@ describe('cloudflare adapter entrypoint', () => {
     expect(fetch).toHaveBeenCalledTimes(1)
 
     // A new opaque token is returned in the response header
-    const token = response?.headers.get('x-telefunc-shard')
+    const token = response?.headers.get('x-telefunc-session')
     expect(token).toBeTruthy()
+    // Token is prefixed with the instance name
+    expect(token).toMatch(/^telefunc-shard-weur-0:/)
 
     // The token is stored in KV via waitUntil
     await Promise.all(waitUntilFns)
-    const stored = await kv.get(`shard:${token}`, 'json')
+    const stored = await kv.get(`session:${token}`, 'json')
     expect(stored).toEqual({ s: 'telefunc-shard-weur-0', b: 'weur' })
   })
 

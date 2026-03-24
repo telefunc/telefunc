@@ -16,7 +16,7 @@ const channelClientPlaceholderType: PlaceholderReviverType<ChannelContract> = {
       ackMode: metadata.ack,
       key: metadata.key,
       transports: context.channelTransports,
-      shard: context.shard,
+      sessionToken: context.sessionToken,
     })
     const value = new Proxy({} as ClientChannel, {
       get(_target, prop) {

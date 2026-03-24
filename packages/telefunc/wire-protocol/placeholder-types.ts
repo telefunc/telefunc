@@ -31,7 +31,7 @@ type PlaceholderReplacerType<C extends PlaceholderTypeContract, Context> = {
 
 type PlaceholderReviverContext = {
   channelTransports: ChannelTransports
-  shard?: string
+  sessionToken?: string
   registerChannel(channel: ClientChannel): void
 }
 

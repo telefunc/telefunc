@@ -15,6 +15,7 @@ import {
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   SSE_RECONCILE_DEADLINE_MS,
+  TELEFUNC_SESSION_HEADER,
   WS_PROBE_TIMEOUT_MS,
   type ChannelTransports,
 } from '../constants.js'
@@ -90,6 +91,7 @@ type ReconcileBufferedFramesMode = 'batch-on-reconcile' | 'release-after-reconci
 type ClientConnectionOptions = {
   transports: ChannelTransports
   fetchImpl: typeof fetch
+  sessionToken?: string
 }
 
 type ClientChannelTransport = {
@@ -1069,13 +1071,10 @@ class SseTransport implements ClientChannelTransport {
 
   constructor(
     private readonly telefuncUrl: string,
-    fetchImpl: typeof fetch,
+    private readonly fetchImpl: typeof fetch,
+    private readonly sessionToken: string | undefined,
     private readonly owner: ClientConnection,
-  ) {
-    this.fetchImpl = fetchImpl.bind(globalThis)
-  }
-
-  private readonly fetchImpl: typeof fetch
+  ) {}
 
   prepareForUpgrade(): Promise<void> {
     if (!this.flushing && this.outboxFrames.length === 0) return Promise.resolve()
@@ -1125,6 +1124,7 @@ class SseTransport implements ClientChannelTransport {
           Accept: 'text/event-stream',
           'Content-Type': 'application/octet-stream',
           [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
+          ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
         },
         body: encodeSseRequest({
           connId: this.connId,
@@ -1209,6 +1209,7 @@ class SseTransport implements ClientChannelTransport {
           headers: {
             'Content-Type': 'application/octet-stream',
             [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
+            ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
           },
           body: encodeSseRequest({ connId: this.connId, batch: encodeLengthPrefixedFrames(queuedFrames) }),
         })
@@ -1305,7 +1306,8 @@ const TRANSPORT_REGISTRY: Record<
   (telefuncUrl: string, options: ClientConnectionOptions, owner: ClientConnection) => ClientChannelTransport
 > = {
   [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport(telefuncUrl, owner),
-  [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) => new SseTransport(telefuncUrl, options.fetchImpl, owner),
+  [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>
+    new SseTransport(telefuncUrl, options.fetchImpl, options.sessionToken, owner),
 }
 
 /** Defines which transport can upgrade to which. */

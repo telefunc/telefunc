@@ -103,3 +103,8 @@ export const CHANNEL_CONNECT_TTL_MS = 5_000
 // Client-side channel reconnect defaults
 export const CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500
 export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
+
+// ===== Session routing =====
+
+/** User-facing header for sticky session routing (opaque token). */
+export const TELEFUNC_SESSION_HEADER = 'x-telefunc-session'

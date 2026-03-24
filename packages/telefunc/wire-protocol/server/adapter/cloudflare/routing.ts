@@ -3,6 +3,7 @@ export {
   DEFAULT_PUBSUB_BUCKETS,
   KNOWN_PUBSUB_BUCKETS,
   TELEFUNC_PUBSUB_BUCKET_HEADER,
+  TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
@@ -13,6 +14,7 @@ export {
 export type { CloudflareScale, LocationBucket, SessionRoutingTarget }
 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
+import { TELEFUNC_SESSION_HEADER } from '../../../constants.js'
 import { assert } from '../../../../utils/assert.js'
 
 /**
@@ -30,6 +32,7 @@ const DEFAULT_PUBSUB_BUCKETS = [
   'oc',
 ] as const satisfies readonly DurableObjectLocationHint[]
 const TELEFUNC_PUBSUB_BUCKET_HEADER = 'x-telefunc-pubsub-bucket'
+/** Internal: forwarded to the DO so it knows its own instance name. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
 const KNOWN_PUBSUB_BUCKETS = new Set<string>(DEFAULT_PUBSUB_BUCKETS as readonly string[])
 

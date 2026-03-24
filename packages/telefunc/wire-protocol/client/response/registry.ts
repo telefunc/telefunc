@@ -40,7 +40,7 @@ function createStreamingReviver(
   getChunkReader: (index: number) => () => Promise<Uint8Array<ArrayBuffer> | null>,
   getCancelIndex: (index: number) => () => void,
   transports: ChannelTransports,
-  shard?: string,
+  sessionToken?: string,
 ) {
   const channels: ClientChannel[] = []
   const closeHandlers = new WeakMap<object, () => void>()
@@ -62,7 +62,7 @@ function createStreamingReviver(
         return { replacement: revived.value }
       }
     }
-    return revivePlaceholder(value, parser, channels, registerClose, transports, shard)
+    return revivePlaceholder(value, parser, channels, registerClose, transports, sessionToken)
   }
   return { reviver, channels, closeHandlers }
 }
@@ -73,11 +73,11 @@ function revivePlaceholder(
   channels: ClientChannel[],
   registerClose: (revived: { value: unknown; close: (() => void) | undefined }) => void,
   transports: ChannelTransports,
-  shard?: string,
+  sessionToken?: string,
 ) {
   const context = {
     channelTransports: transports,
-    shard,
+    sessionToken,
     registerChannel(channel: ClientChannel) {
       channels.push(channel)
     },

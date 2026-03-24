@@ -38,7 +38,7 @@ type CallContext = {
  *  - `text/event-stream`        → SSE stream
  *  - text with `__frameChannel` → WS streaming
  *  - text without               → plain (placeholder-only) */
-async function parseResponse(response: Response, callContext: CallContext, shard?: string): Promise<unknown> {
+async function parseResponse(response: Response, callContext: CallContext, sessionToken?: string): Promise<unknown> {
   const transports = callContext.channel.transports
   const contentType = response.headers.get('content-type') ?? ''
   const isStreaming = contentType.includes('application/octet-stream') || contentType.includes('text/event-stream')
@@ -52,7 +52,7 @@ async function parseResponse(response: Response, callContext: CallContext, shard
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
     const metaText = new TextDecoder().decode(metaBytes)
-    return reviveStreamingResponse(metaText, callContext, streamReader, transports, shard)
+    return reviveStreamingResponse(metaText, callContext, streamReader, transports, sessionToken)
   }
 
   // Text response: channel streaming or plain
@@ -62,13 +62,13 @@ async function parseResponse(response: Response, callContext: CallContext, shard
     const channel = new ClientChannel({
       channelId: frameChannel.metadata.channelId,
       transports,
-      shard,
+      sessionToken,
       defer: false,
     })
     const streamReader = new ChannelStreamReader(channel, callContext)
-    return reviveStreamingResponse(frameChannel.strippedBody, callContext, streamReader, transports, shard)
+    return reviveStreamingResponse(frameChannel.strippedBody, callContext, streamReader, transports, sessionToken)
   }
-  return revivePlainResponse(body, callContext, transports, shard)
+  return revivePlainResponse(body, callContext, transports, sessionToken)
 }
 
 // ===== Streaming response (HTTP / WS) =====
@@ -82,7 +82,7 @@ function reviveStreamingResponse(
   callContext: CallContext,
   streamReader: BaseStreamReader,
   transports: ChannelTransports,
-  shard?: string,
+  sessionToken?: string,
 ): unknown {
   const demuxer = new FrameDemuxer(streamReader)
 
@@ -92,7 +92,12 @@ function reviveStreamingResponse(
   }
   const getCancelIndex = (index: number) => () => demuxer.cancelIndex(index)
 
-  const { reviver, channels, closeHandlers } = createStreamingReviver(getChunkReader, getCancelIndex, transports, shard)
+  const { reviver, channels, closeHandlers } = createStreamingReviver(
+    getChunkReader,
+    getCancelIndex,
+    transports,
+    sessionToken,
+  )
   const parsed: unknown = parse(metadataText, { reviver })
   if (!isObject(parsed)) return parsed
 
@@ -106,7 +111,7 @@ function revivePlainResponse(
   body: string,
   callContext: CallContext,
   transports: ChannelTransports,
-  shard?: string,
+  sessionToken?: string,
 ): unknown {
   const unreachable = (): never => {
     assert(false, 'Unexpected streaming value in plain response')
@@ -115,7 +120,7 @@ function revivePlainResponse(
     () => unreachable,
     () => unreachable,
     transports,
-    shard,
+    sessionToken,
   )
   const parsed: unknown = parse(body, { reviver })
   if (!isObject(parsed)) return parsed

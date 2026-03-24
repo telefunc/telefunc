@@ -21,7 +21,7 @@ const functionClientPlaceholderType: PlaceholderReviverType<FunctionContract> = 
       channelId: metadata.channelId,
       ackMode: true,
       transports: context.channelTransports,
-      shard: context.shard,
+      sessionToken: context.sessionToken,
     })
     const fn = (...args: unknown[]) => channel.send(args, { ack: true })
     globalObject.gcRegistry.register(fn, channel)

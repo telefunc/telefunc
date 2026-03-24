@@ -244,7 +244,66 @@ By default, the sender receives its own published messages in `subscribe()`. Thi
 const channel = createChannel<Message, Message>({ key: 'chat:lobby', selfDelivery: false })
 ```
 
-> In-memory pub/sub works out of the box for single-server deployments. On Cloudflare Workers, Telefunc uses Durable Objects for distributed pub/sub across edge locations — see <Link href="/telefuncWebSocketCloudflare" />.
+> In-memory pub/sub works out of the box for single-server deployments. For multi-server, set `config.channel.adapter` — see [Scaling pub/sub](#scaling-pubsub). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/telefuncWebSocketCloudflare" />.
+
+
+## Scaling pub/sub
+
+By default, pub/sub is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, set `config.channel.adapter`:
+
+```ts
+// Environment: server
+
+import { config } from 'telefunc'
+import Redis from 'ioredis'
+
+const pub = new Redis()
+const sub = new Redis()
+
+config.channel.adapter = {
+  subscribe(key, deliver) {
+    sub.subscribe(key)
+    sub.on('message', (ch, msg) => {
+      if (ch === key) deliver(msg)
+    })
+  },
+  unsubscribe(key) {
+    sub.unsubscribe(key)
+  },
+  async publish(key, message) {
+    const [, seq] = await pub
+      .multi()
+      .publish(key, message)
+      .incr(`telefunc:seq:${key}`)
+      .exec()
+    return { seq: seq[1] as number }
+  },
+}
+```
+
+The adapter is a message bus — Telefunc passes opaque strings, handles self-delivery filtering, and constructs publish receipts. The adapter only needs to broadcast and (optionally) provide a globally monotonic sequence number.
+
+### Adapter interface
+
+```ts
+type PubSubAdapter = {
+  subscribe(key: string, deliver: (message: string) => void): void | Promise<void>
+  unsubscribe(key: string): void | Promise<void>
+  publish(key: string, message: string): PubSubAdapterResult | Promise<PubSubAdapterResult>
+}
+
+type PubSubAdapterResult = {
+  seq?: number   // globally monotonic per key — e.g. Redis INCR
+  ts?: number    // server timestamp (defaults to Date.now())
+  meta?: Record<string, unknown>
+}
+```
+
+All messages flow through the adapter, including delivery to same-node subscribers. This ensures subscribers see messages in the global sequence order assigned by the adapter.
+
+When `seq` is provided, it appears in the publish receipt and is guaranteed to be globally monotonic for the key. When omitted, `receipt.seq` is `0` — useful for adapters that don't coordinate ordering.
+
+> On Cloudflare Workers, Telefunc handles distributed pub/sub automatically via Durable Objects — no adapter needed. See <Link href="/telefuncWebSocketCloudflare" />.
 
 
 ## Lifecycle

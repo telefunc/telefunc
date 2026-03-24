@@ -67,14 +67,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     ackMode = false,
     key,
     transports,
-    shard,
+    sessionToken,
     defer = false,
   }: {
     channelId: string
     ackMode?: boolean
     key?: string
     transports: ChannelTransports
-    shard?: string
+    sessionToken?: string
     defer?: boolean
   }) {
     this.id = channelId
@@ -82,10 +82,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.key = key
     this.defer = defer
     const config = resolveClientConfig()
-    const url = shard ? appendShardParam(config.telefuncUrl, shard) : config.telefuncUrl
+    const url = sessionToken ? appendSessionParam(config.telefuncUrl, sessionToken) : config.telefuncUrl
     this._connection = ClientConnection.getOrCreate(url, this, {
       transports,
-      fetchImpl: config.fetch ?? globalThis.fetch,
+      fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
+      sessionToken,
     })
   }
 
@@ -420,7 +421,7 @@ function normalizeCloseTimeout(timeout: number | undefined): number {
   return timeout
 }
 
-/** Append ?shard=N (or &shard=N) to a URL string. */
-function appendShardParam(url: string, shard: string): string {
-  return url.includes('?') ? `${url}&shard=${shard}` : `${url}?shard=${shard}`
+/** Append ?session=TOKEN (or &session=TOKEN) to a URL string. */
+function appendSessionParam(url: string, token: string): string {
+  return url.includes('?') ? `${url}&session=${token}` : `${url}?session=${token}`
 }
