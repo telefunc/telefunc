@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-Telefunctions can stream values to the client using `AsyncGenerator`, `ReadableStream`, or nested `Promise`s. A single telefunction can return any combination of these — all multiplexed over one HTTP response.
+Telefunctions can stream values to the client using `AsyncGenerator`, `ReadableStream`, or nested `Promise`s.
 
 > Streaming works out of the box with zero config. Plain telefunction calls are unaffected.
 
@@ -127,7 +127,7 @@ const report = await res.report
 
 ## Mixed return types
 
-A telefunction can return an object with any combination of generators, streams, and promises — all multiplexed over one HTTP response.
+A telefunction can return any combination of generators, streams, and promises.
 
 ```ts
 // Dashboard.telefunc.ts
@@ -169,7 +169,7 @@ const fast = await res.fast
 const slow = await res.slow
 ```
 
-> All streamed values are multiplexed over a single HTTP response. Multiple generators and promises resolve concurrently without blocking each other.
+> Multiple generators and promises resolve concurrently without blocking each other.
 
 
 ## Cancellation
