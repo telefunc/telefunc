@@ -111,6 +111,9 @@ describe('keyed channel pubsub', () => {
     ;(sender as any)._registerChannel()
     ;(receiver as any)._registerChannel()
 
+    // subscribe() registers with the transport so the receiver gets pub/sub messages
+    receiver.subscribe(() => {})
+
     sender.publish({ text: 'hello' })
 
     const frames: Uint8Array[] = []
@@ -152,7 +155,7 @@ describe('keyed channel pubsub', () => {
       key: 'room:test:ack',
       seq: 1,
       meta: {
-        delivered: 2,
+        delivered: 1,
         transport: 'in-memory',
       },
     })

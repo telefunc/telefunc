@@ -41,7 +41,7 @@ Controls how streamed values are delivered over HTTP.
 | `'binary-inline'` | ✅ | 🟡 | ❌ | None |
 | `'sse-inline'` | 🟡 | ✅ | ❌ | None |
 | `'channel'` (SSE) | 🟡 | ✅ | ✅ | None |
-| `'channel'` (WS) | ✅ | 🟡 | ✅ | <Link text={<code>tf.installWebSocket()</code>} href="/server" /> |
+| `'channel'` (WS) | ✅ | 🟡 | ✅ | <Link text="Server setup" href="/server" /> |
 
 ### When to use what
 
@@ -57,19 +57,19 @@ Controls how <Link text={<code>createChannel()</code>} href="/createChannel" /> 
 | Transport | Description |
 |---|---|
 | `'sse'` (default) | HTTP requests + SSE stream. Works without extra server setup. |
-| `'ws'` | Multiplexed WebSocket. Requires <Link text={<code>tf.installWebSocket()</code>} href="/server" />. |
+| `'ws'` | Multiplexed WebSocket. Requires <Link text="WebSocket server setup" href="/server" />. |
 
 ### Comparison
 
 | | Throughput | Recovery | Proxy/CDN | Setup |
 |---|---|---|---|---|
 | `'sse'` | 🟡 | ✅ | ✅ | None |
-| `'ws'` | ✅ | ✅ | 🟡 | <Link text={<code>tf.installWebSocket()</code>} href="/server" /> |
+| `'ws'` | ✅ | ✅ | 🟡 | <Link text="Server setup" href="/server" /> |
 
 - **Start with `'sse'`** — it works everywhere out of the box.
 - **Use `'ws'`** for chatty real-time traffic where you want full-duplex.
 
-> When `tf.installWebSocket()` is called (see <Link href="/server" />), the server enables both SSE and WS. The client starts on SSE and seamlessly upgrades to WebSocket in the background — no interruption to your application code.
+> When WebSocket is enabled (see <Link href="/server" />), the server supports both SSE and WS. The client starts on SSE and seamlessly upgrades to WebSocket in the background — no interruption to your application code.
 
 
 ## Recommended setup
@@ -80,7 +80,7 @@ Controls how <Link text={<code>createChannel()</code>} href="/createChannel" /> 
 | Proxy buffers binary | `config.stream.transport = 'sse-inline'` |
 | Streams with reconnection | `config.stream.transport = 'channel'` |
 | Channels without WS | `config.channel.transport = 'sse'` |
-| Full-duplex channels | `config.channel.transport = 'ws'` + <Link text={<code>tf.installWebSocket()</code>} href="/server" /> |
+| Full-duplex channels | `config.channel.transport = 'ws'` + <Link text="Server setup" href="/server" /> |
 
 
 ## Per-call override

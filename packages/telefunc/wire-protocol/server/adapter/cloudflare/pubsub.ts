@@ -395,18 +395,27 @@ class CloudflarePubSubTransport implements PubSubTransport {
 
   publish(subscription: PubSubSubscription, serialized: string): Promise<ChannelPublishAck> {
     const memberState = this.memberStates.get(subscription)
-    assert(
-      memberState,
-      'Cloudflare keyed channel publish was called before the channel was registered. Expected ServerChannel._registerChannel() to run first.',
-    )
 
-    if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
-      return new Promise<ChannelPublishAck>((resolve, reject) => {
-        memberState.pendingPublishes.push(serialized, { resolve, reject })
-      })
+    // Subscribed channel — route through memberState (respects presence setup buffering)
+    if (memberState) {
+      if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
+        return new Promise<ChannelPublishAck>((resolve, reject) => {
+          memberState.pendingPublishes.push(serialized, { resolve, reject })
+        })
+      }
+      return memberState.publish(serialized)
     }
 
-    return memberState.publish(serialized)
+    // Publish-only channel — send directly to authority without presence registration
+    const location = this.resolveCurrentMemberLocation()
+    const authority = this.getAuthorityStub(subscription.key, location.locationBucket)
+    return authority.telefuncPubSubPublish({
+      key: subscription.key,
+      locationBucket: location.locationBucket,
+      serialized,
+      sourceChannelId: subscription.id,
+      sourceSessionInstanceName: location.sessionInstanceName,
+    })
   }
 
   unsubscribe(subscription: PubSubSubscription): void {

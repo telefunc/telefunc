@@ -7,7 +7,7 @@ Telefunc handles real-time flows — chat, upload progress, live updates — usi
 | Primitive | Best for | Setup |
 |---|---|---|
 | **Function passing** | Short-lived callbacks — progress updates, one-off server-to-client pushes | None |
-| **Channels** | Ongoing real-time messaging — direct or broadcast | None (SSE) or <Link text={<code>tf.installWebSocket()</code>} href="/server" /> (WS) |
+| **Channels** | Ongoing real-time messaging — direct or broadcast | None (SSE) or <Link text="WebSocket server setup" href="/server" /> (WS) |
 | **`config.stream.transport = 'channel'`** | <Link href="/stream">Streamed values</Link> over the same reconnecting transport as channels | Same as channels |
 
 
@@ -155,12 +155,12 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 
 ## Transport
 
-By default channels use **SSE** — no extra setup required. For full-duplex WebSocket transport, call `tf.installWebSocket()` (see <Link href="/server" />).
+By default channels use **SSE** — no extra setup required. For full-duplex WebSocket transport, enable WebSocket in your server setup (see <Link href="/server" />).
 
 | Transport | Throughput | Recovery | CDN-friendly | Setup |
 |---|---|---|---|---|
 | SSE (default) | 🟡 | ✅ | ✅ | None |
-| WebSocket | ✅ | ✅ | 🟡 | <Link text={<code>tf.installWebSocket()</code>} href="/server" /> |
+| WebSocket | ✅ | ✅ | 🟡 | <Link text="Server setup" href="/server" /> |
 
 All channels share a single multiplexed connection per server URL.
 

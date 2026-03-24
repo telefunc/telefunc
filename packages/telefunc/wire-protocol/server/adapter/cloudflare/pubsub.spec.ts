@@ -383,6 +383,8 @@ describe('cloudflare pubsub routing', () => {
       ),
       async () => {
         const channel = createChannel<{ text: string }, { text: string }>({ key: 'room:test' })
+        // subscribe() triggers KV presence setup — publish should wait for it
+        channel.subscribe(() => {})
         channel.publish({ text: 'hello' })
 
         await flushMicrotasks(2)

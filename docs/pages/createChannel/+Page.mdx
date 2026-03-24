@@ -23,7 +23,7 @@ const channel = createChannel<Message, Message>({ key: 'chat:lobby' })
 
 Return `channel.client` from a telefunction — it serializes into a client-side channel automatically.
 
-By default, channels use **SSE** and work without extra server setup. When `tf.installWebSocket()` is called (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background. See <Link href="/transport" />.
+By default, channels use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background. See <Link href="/transport" />.
 
 > For short-lived callbacks (e.g. progress updates), <Link href="/real-time">function passing</Link> is usually simpler.
 
@@ -205,7 +205,7 @@ channel.publish({ user: 'Alice', text: 'Hello!', ts: Date.now() })
 
 ### Server-only pub/sub
 
-Keyed channels also work without a client — useful for broadcasting from server-side logic:
+Keyed channels also work without a client — useful for fire-and-forget broadcasting from server-side logic. A channel that only calls `publish()` is lightweight: it doesn't register with the pub/sub transport or create presence entries, so there's nothing to clean up.
 
 ```ts
 // notifications.telefunc.ts
@@ -213,7 +213,7 @@ Keyed channels also work without a client — useful for broadcasting from serve
 
 import { createChannel } from 'telefunc'
 
-// Server-side broadcast — no channel.client returned
+// Fire-and-forget broadcast — no subscribe(), no cleanup needed
 export async function onNotify(roomId: string, text: string) {
   const channel = createChannel<(msg: string) => void, never>({ key: `room:${roomId}` })
   channel.publish(text)
@@ -224,8 +224,8 @@ export async function onNotify(roomId: string, text: string) {
 
 | Method | Description |
 |---|---|
-| `publish(data)` | Send to all channels with the same key, including the sender. Returns a receipt. |
-| `subscribe(cb)` | Receive messages published by any channel with the same key. Returns an unsubscribe function. |
+| `publish(data)` | Send to all subscribed channels with the same key. Returns a receipt. |
+| `subscribe(cb)` | Receive messages published by any channel with the same key. Registers the channel with the pub/sub transport. Returns an unsubscribe function. |
 
 `publish()` returns a `Promise<ChannelPublishAck>`:
 
@@ -244,7 +244,7 @@ By default, the sender receives its own published messages in `subscribe()`. Thi
 const channel = createChannel<Message, Message>({ key: 'chat:lobby', selfDelivery: false })
 ```
 
-> In-memory pub/sub works out of the box for single-server deployments. On Cloudflare Workers, Telefunc uses Durable Objects for distributed pub/sub across edge locations.
+> In-memory pub/sub works out of the box for single-server deployments. On Cloudflare Workers, Telefunc uses Durable Objects for distributed pub/sub across edge locations — see <Link href="/telefuncWebSocketCloudflare" />.
 
 
 ## Lifecycle

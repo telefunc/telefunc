@@ -111,14 +111,14 @@ Keyed channels (<Link href="/createChannel" />) use a three-tier fanout architec
 ```
 Publisher (session shard)
   → Authority DO (one per key — sequences and timestamps)
-    → Bucket coordinators (one per active region)
+    → Bucket coordinators (one or more per active region)
       → Session shards (deliver to local subscribers)
 ```
 
 1. The publisher's session shard forwards to the **authority** Durable Object for the key.
 2. The authority serializes publishes through an exclusive dispatch chain, assigns a monotonic sequence number, reads active presence from KV, and forwards to each **bucket coordinator**.
 3. Each bucket coordinator delivers to the listed **session shards** in its region.
-4. Each session shard delivers to its local subscribers (skipping the original sender).
+4. Each session shard delivers to its local subscribers (including the sender when `selfDelivery` is enabled — the default).
 
 ### Ordering
 

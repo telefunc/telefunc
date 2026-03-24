@@ -158,31 +158,6 @@ await Promise.all([
 ```
 
 
-## Server integration
-
-Pass the web standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object directly:
-
-```ts
-const httpResponse = await telefunc({ request })
-```
-
-Or with Express, Fastify, or any Node.js framework, pass the [`Readable`](https://nodejs.org/api/stream.html#readable-streams) stream:
-
-```ts
-app.all('/_telefunc', async (req, res) => {
-  const httpResponse = await telefunc({
-    url: req.originalUrl,
-    method: req.method,
-    readable: req,
-    headers: req.headers,
-  })
-  httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
-  res.status(httpResponse.statusCode)
-  httpResponse.pipe(res)
-})
-```
-
-
 ## How it works
 
 > You can skip this section — read it only if you're curious.

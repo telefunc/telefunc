@@ -137,9 +137,9 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _shutdownCallback: (() => void) | null = null
   private _pendingCloseAck = false
-  private _didRegisterPubSub = false
   private _pubSubTransport: PubSubTransport | null = null
   private _pubSubSubscription: PubSubSubscription | null = null
+  private _didSubscribePubSub = false
 
   constructor({
     ackMode = false,
@@ -213,7 +213,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 
   publish(data: ChannelData<ServerToClient>): Promise<ChannelPublishAck> {
     assertUsage(this.key, 'Channel.publish() requires createChannel({ key })')
-    this._registerPubSub()
+    this._ensurePubSub()
     if (!this._pubSubSubscription) throw new ChannelClosedError()
     const serialized = stringify(data, { forbidReactElements: false })
     const ret = this._trackAck(Promise.resolve(this._publishPubSub(serialized)))
@@ -227,8 +227,8 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 
   subscribe(callback: ChannelListener<ClientToServer>): () => void {
     assertUsage(this.key, 'Channel.subscribe() requires createChannel({ key })')
-    // Pure server-side keyed pub/sub registers lazily here; Cloudflare needs async request context on this path.
-    this._registerPubSub()
+    this._ensurePubSub()
+    this._subscribePubSub()
     this._pubSubListeners.push(callback)
     return () => {
       const index = this._pubSubListeners.indexOf(callback)
@@ -287,8 +287,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     if (this._didShutdown || this._peer || this._didRegister) return
     this._didRegister = true
     getChannelRegistry().set(this.id, this as ServerChannel<unknown, unknown>)
-    // Returned keyed channels register pub/sub here while serialization has restored sync request context.
-    this._registerPubSub()
     const hook = globalObject.creationHooks.get(this.id)
     if (hook) {
       globalObject.creationHooks.delete(this.id)
@@ -530,7 +528,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private async _dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
     assert(this.key)
     try {
-      this._registerPubSub()
+      this._ensurePubSub()
       const result = await this._publishPubSub(serialized)
       this._peer?.sendAckRes(seq, stringify(result, { forbidReactElements: false }))
     } catch (err) {
@@ -579,9 +577,10 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._prePeerBuffer.clear(ackErr)
   }
 
-  private _registerPubSub(): void {
-    if (!this.key || this._didRegisterPubSub) return
-    this._didRegisterPubSub = true
+  /** Create the subscription identity and transport reference. Does not register for receiving. */
+  private _ensurePubSub(): void {
+    if (this._pubSubSubscription) return
+    assert(this.key)
     this._pubSubTransport = getPubSubTransport()
     this._pubSubSubscription = {
       id: this.id,
@@ -591,16 +590,23 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         this._deliverPubSubMessage(serialized, sourceChannelId)
       },
     }
+  }
+
+  /** Register with the transport to receive messages. Only called from channel.subscribe(). */
+  private _subscribePubSub(): void {
+    if (this._didSubscribePubSub) return
+    this._didSubscribePubSub = true
+    assert(this._pubSubTransport)
+    assert(this._pubSubSubscription)
     void this._pubSubTransport.subscribe(this._pubSubSubscription)
   }
 
   private _unregisterPubSub(): void {
-    if (!this.key || !this._didRegisterPubSub) return
-    this._didRegisterPubSub = false
+    if (!this._didSubscribePubSub) return
+    this._didSubscribePubSub = false
     assert(this._pubSubTransport)
     assert(this._pubSubSubscription)
     void this._pubSubTransport.unsubscribe(this._pubSubSubscription)
-    this._pubSubSubscription = null
   }
 
   private _publishPubSub(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
