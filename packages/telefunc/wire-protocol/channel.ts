@@ -1,3 +1,4 @@
+export { makePublishInfo }
 export type {
   Channel,
   ChannelClient,
@@ -7,19 +8,27 @@ export type {
   ChannelData,
   ChannelAck,
   ChannelPublishAck,
+  ChannelPublishInfo,
   ChannelPublishMeta,
   ChannelListenReturn,
   ChannelListener,
+  PubSubListener,
 }
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
 type ChannelPublishMeta = Record<string, unknown>
-type ChannelPublishAck = {
+/** Metadata delivered to pub/sub subscribers alongside each message. */
+type ChannelPublishInfo = {
   key: string
+  /** Strict per-key counter (1, 2, 3…). Resets if the authority restarts. Use for gap detection. */
   seq: number
   ts: number
-  meta?: ChannelPublishMeta
+}
+type ChannelPublishAck = ChannelPublishInfo & { meta?: ChannelPublishMeta }
+
+function makePublishInfo(key: string, seq: number, ts: number): ChannelPublishInfo {
+  return { key, seq, ts }
 }
 type ChannelListenReturn<T> = [T] extends [never]
   ? void
@@ -27,6 +36,8 @@ type ChannelListenReturn<T> = [T] extends [never]
     ? Awaited<R> | Promise<Awaited<R>>
     : unknown | Promise<unknown> | void
 type ChannelListener<T> = (data: ChannelData<T>) => ChannelListenReturn<T>
+/** Callback for `channel.subscribe()` — receives message data and publish info. */
+type PubSubListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => ChannelListenReturn<T>
 type ChannelCloseOptions = {
   timeout?: number
 }
@@ -37,7 +48,7 @@ type KeyedChannelMethods<TOut, TIn, TKeyed extends boolean> = TKeyed extends tru
       /** Publish to other members sharing the same key and await the authority receipt. */
       publish(data: ChannelData<TOut>): Promise<ChannelPublishAck>
       /** Subscribe to broadcasts for the same key. Only valid when the channel was created with a key. */
-      subscribe(callback: ChannelListener<TIn>): () => void
+      subscribe(callback: PubSubListener<TIn>): () => void
     }
   : {}
 

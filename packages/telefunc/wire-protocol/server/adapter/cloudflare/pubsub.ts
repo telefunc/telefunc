@@ -13,8 +13,8 @@ import {
 import { getRequestContext } from '../../../../node/server/requestContext.js'
 import { assert } from '../../../../utils/assert.js'
 import { utf8ByteLength } from '../../../../utils/utf8ByteLength.js'
-import type { ChannelPublishAck } from '../../../channel.js'
-import type { PubSubSubscription, PubSubTransport } from '../../pubsub.js'
+import type { PubSubPublish, PubSubPublishResult, PubSubRegistry, PubSubSubscription } from '../../pubsub.js'
+import type { WirePublishInfo } from '../../../shared-ws.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
@@ -30,9 +30,9 @@ type PubSubPublishRequest = {
   locationBucket: LocationBucket
   serialized: string
   sourceChannelId: string
-  sourceSessionInstanceName: string | null
   forwarded?: boolean
   sessionShardNames?: string[]
+  info?: WirePublishInfo
 }
 
 type PubSubDeliverRequest = {
@@ -40,10 +40,11 @@ type PubSubDeliverRequest = {
   locationBucket: LocationBucket
   serialized: string
   sourceChannelId: string
+  info: WirePublishInfo
 }
 
 type TelefuncPubSubStub = DurableObjectStub & {
-  telefuncPubSubPublish(request: PubSubPublishRequest): Promise<ChannelPublishAck>
+  telefuncPubSubPublish(request: PubSubPublishRequest): Promise<PubSubPublishResult>
   telefuncPubSubDeliver(request: PubSubDeliverRequest): Promise<void>
 }
 
@@ -53,7 +54,7 @@ type MemberLocation = {
 }
 
 type PendingBucketPublish = {
-  resolve: (ack: ChannelPublishAck) => void
+  resolve: (ack: PubSubPublishResult) => void
   reject: (err: Error) => void
 }
 
@@ -68,10 +69,10 @@ class CloudflareBucketPublishBuffer {
   private head = 0
   private totalBytes = 0
   private readonly maxBytes: number
-  private readonly sendPublish: (serialized: string) => Promise<ChannelPublishAck>
+  private readonly sendPublish: (serialized: string) => Promise<PubSubPublishResult>
   private _flushing = false
 
-  constructor(maxBytes: number, sendPublish: (serialized: string) => Promise<ChannelPublishAck>) {
+  constructor(maxBytes: number, sendPublish: (serialized: string) => Promise<PubSubPublishResult>) {
     assert(maxBytes > 0, 'Cloudflare bucket publish buffer size must be > 0.')
     this.maxBytes = maxBytes
     this.sendPublish = sendPublish
@@ -177,13 +178,12 @@ class MemberBucketState {
       key,
       locationBucket: location.locationBucket,
       sourceChannelId,
-      sourceSessionInstanceName: location.sessionInstanceName,
     }
     this.authority = authority
     this.pendingPublishes = new CloudflareBucketPublishBuffer(CHANNEL_BUFFER_LIMIT_BYTES, (s) => this.publish(s))
   }
 
-  publish(serialized: string): Promise<ChannelPublishAck> {
+  publish(serialized: string): Promise<PubSubPublishResult> {
     return this.authority.telefuncPubSubPublish({
       ...this.publishRequestBase,
       serialized,
@@ -200,7 +200,7 @@ class MemberBucketState {
 
 class CloudflarePubSubRegistry {
   private readonly state: DurableObjectState
-  private readonly localKeyBuckets = new Map<string, Map<LocationBucket, Set<PubSubSubscription>>>()
+  private readonly localKeyBuckets = new Map<string, Map<LocationBucket, Map<string, PubSubSubscription>>>()
   private authorityPublishChain: Promise<void> = Promise.resolve()
   private readonly keySeqCache = new Map<string, number>()
   private readonly authorityBucketCache = new Map<string, LocationBucket>()
@@ -210,43 +210,39 @@ class CloudflarePubSubRegistry {
   }
 
   /** Records a local subscriber in memory only. */
-  registerLocal(subscription: PubSubSubscription, locationBucket: LocationBucket): void {
-    const key = subscription.key
-    if (!key) return
-    let keyBuckets = this.localKeyBuckets.get(key)
+  registerLocal(sub: PubSubSubscription, locationBucket: LocationBucket): void {
+    let keyBuckets = this.localKeyBuckets.get(sub.key)
     if (!keyBuckets) {
       keyBuckets = new Map()
-      this.localKeyBuckets.set(key, keyBuckets)
+      this.localKeyBuckets.set(sub.key, keyBuckets)
     }
     let members = keyBuckets.get(locationBucket)
     if (!members) {
-      members = new Set()
+      members = new Map()
       keyBuckets.set(locationBucket, members)
     }
-    members.add(subscription)
+    members.set(sub.id, sub)
   }
 
   /** Removes a local subscriber from the in-memory key index. */
-  unregisterLocal(subscription: PubSubSubscription, locationBucket: LocationBucket): void {
-    const key = subscription.key
-    if (!key) return
+  unregisterLocal(id: string, key: string, locationBucket: LocationBucket): void {
     const keyBuckets = this.localKeyBuckets.get(key)
     if (!keyBuckets) return
     const members = keyBuckets.get(locationBucket)
     if (!members) return
-    members.delete(subscription)
+    members.delete(id)
     if (members.size !== 0) return
     keyBuckets.delete(locationBucket)
     if (keyBuckets.size === 0) this.localKeyBuckets.delete(key)
   }
 
   /** Delivers to only the subscribers that are both local to this DO and in the same key-location-bucket. */
-  deliverLocal({ key, locationBucket, serialized, sourceChannelId }: PubSubDeliverRequest): void {
+  deliverLocal({ key, locationBucket, serialized, sourceChannelId, info }: PubSubDeliverRequest): void {
     const members = this.localKeyBuckets.get(key)?.get(locationBucket)
     if (!members) return
-    for (const subscription of members) {
-      if (subscription.id === sourceChannelId && !subscription.selfDelivery) continue
-      subscription.onMessage(serialized, sourceChannelId)
+    for (const [id, member] of members) {
+      if (id === sourceChannelId && !member.selfDelivery) continue
+      member.onMessage(serialized, sourceChannelId, info)
     }
   }
 
@@ -289,14 +285,14 @@ class CloudflarePubSubRegistry {
   }
 }
 
-class CloudflarePubSubTransport implements PubSubTransport {
+class CloudflarePubSubTransport implements PubSubRegistry {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
   private bindingName: string | null = null
   private binding: DurableObjectNamespace | null = null
   private kv: KVNamespace | null = null
   private readonly localRegistries = new Map<string, CloudflarePubSubRegistry>()
-  private readonly memberStates = new WeakMap<PubSubSubscription, MemberBucketState>()
+  private readonly memberStates = new Map<string, MemberBucketState>()
 
   constructor({ baseInstanceName, scale }: CloudflarePubSubTransportOptions) {
     this.baseInstanceName = baseInstanceName
@@ -372,34 +368,34 @@ class CloudflarePubSubTransport implements PubSubTransport {
     return result
   }
 
-  // --- PubSubTransport interface ---
+  // --- PubSubRegistry interface ---
 
-  subscribe(subscription: PubSubSubscription): void {
+  subscribe(sub: PubSubSubscription): void {
     const memberLocation = this.resolveCurrentMemberLocation()
     const registry = this.localRegistries.get(memberLocation.sessionInstanceName)
     assert(
       registry,
       `No Cloudflare pub/sub registry found for session instance "${memberLocation.sessionInstanceName}".`,
     )
-    registry.registerLocal(subscription, memberLocation.locationBucket)
+    registry.registerLocal(sub, memberLocation.locationBucket)
 
     const memberState = new MemberBucketState(
-      subscription.key,
-      subscription.id,
+      sub.key,
+      sub.id,
       memberLocation,
-      this.getAuthorityStub(subscription.key, memberLocation.locationBucket),
+      this.getAuthorityStub(sub.key, memberLocation.locationBucket),
     )
-    this.memberStates.set(subscription, memberState)
-    void this.initializePresence(subscription, memberState)
+    this.memberStates.set(sub.id, memberState)
+    void this.initializePresence(sub.id, memberState)
   }
 
-  publish(subscription: PubSubSubscription, serialized: string): Promise<ChannelPublishAck> {
-    const memberState = this.memberStates.get(subscription)
+  publish({ id, key, serialized }: PubSubPublish): Promise<PubSubPublishResult> {
+    const memberState = this.memberStates.get(id)
 
     // Subscribed channel — route through memberState (respects presence setup buffering)
     if (memberState) {
       if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
-        return new Promise<ChannelPublishAck>((resolve, reject) => {
+        return new Promise<PubSubPublishResult>((resolve, reject) => {
           memberState.pendingPublishes.push(serialized, { resolve, reject })
         })
       }
@@ -408,25 +404,24 @@ class CloudflarePubSubTransport implements PubSubTransport {
 
     // Publish-only channel — send directly to authority without presence registration
     const location = this.resolveCurrentMemberLocation()
-    const authority = this.getAuthorityStub(subscription.key, location.locationBucket)
+    const authority = this.getAuthorityStub(key, location.locationBucket)
     return authority.telefuncPubSubPublish({
-      key: subscription.key,
+      key,
       locationBucket: location.locationBucket,
       serialized,
-      sourceChannelId: subscription.id,
-      sourceSessionInstanceName: location.sessionInstanceName,
+      sourceChannelId: id,
     })
   }
 
-  unsubscribe(subscription: PubSubSubscription): void {
-    const memberState = this.memberStates.get(subscription)
+  unsubscribe(id: string, key: string): void {
+    const memberState = this.memberStates.get(id)
     assert(
       memberState,
       'Cloudflare keyed channel unsubscribe was called before the channel was registered. Expected ServerChannel._registerChannel() to run first.',
     )
     this.localRegistries
       .get(memberState.location.sessionInstanceName)
-      ?.unregisterLocal(subscription, memberState.location.locationBucket)
+      ?.unregisterLocal(id, key, memberState.location.locationBucket)
 
     if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
       memberState.teardownRequested = true
@@ -434,12 +429,8 @@ class CloudflarePubSubTransport implements PubSubTransport {
     }
 
     memberState.stopRefresh()
-    this.memberStates.delete(subscription)
-    void this.deletePresence(
-      subscription.key,
-      memberState.location.locationBucket,
-      memberState.location.sessionInstanceName,
-    )
+    this.memberStates.delete(id)
+    void this.deletePresence(key, memberState.location.locationBucket, memberState.location.sessionInstanceName)
   }
 
   /**
@@ -452,10 +443,12 @@ class CloudflarePubSubTransport implements PubSubTransport {
   async publishToSubscribers(
     registry: CloudflarePubSubRegistry,
     request: PubSubPublishRequest,
-  ): Promise<ChannelPublishAck> {
-    const { key, locationBucket, serialized, sourceChannelId, sourceSessionInstanceName, forwarded = false } = request
+  ): Promise<PubSubPublishResult> {
+    const { key, locationBucket, serialized, sourceChannelId, forwarded = false } = request
 
     if (forwarded) {
+      assert(request.info, 'Forwarded publish must include info')
+      const info = request.info
       const sessionShardNames = request.sessionShardNames ?? []
       await Promise.all(
         sessionShardNames.map((sessionInstanceName) =>
@@ -464,10 +457,11 @@ class CloudflarePubSubTransport implements PubSubTransport {
             locationBucket,
             serialized,
             sourceChannelId,
+            info,
           }),
         ),
       )
-      return { key, seq: 0, ts: Date.now() }
+      return { seq: info.seq, ts: info.ts }
     }
 
     const { authorityBucket, seq, presenceByBucket } = await registry.runInAuthorityChain(async () => ({
@@ -477,6 +471,7 @@ class CloudflarePubSubTransport implements PubSubTransport {
     }))
 
     const ts = Date.now()
+    const info = { seq, ts }
     const activeBuckets = Array.from(presenceByBucket.keys())
     await Promise.all(
       activeBuckets.map((activeBucket) =>
@@ -484,19 +479,19 @@ class CloudflarePubSubTransport implements PubSubTransport {
           key,
           serialized,
           sourceChannelId,
-          sourceSessionInstanceName,
           forwarded: true,
           locationBucket: activeBucket,
           sessionShardNames: presenceByBucket.get(activeBucket)!,
+          info,
         }),
       ),
     )
-    return { key, seq, ts, meta: { authorityBucket, fanoutBuckets: activeBuckets } }
+    return { seq, ts, meta: { authorityBucket, fanoutBuckets: activeBuckets } }
   }
 
   // --- Private ---
 
-  private async initializePresence(subscription: PubSubSubscription, memberState: MemberBucketState): Promise<void> {
+  private async initializePresence(id: string, memberState: MemberBucketState): Promise<void> {
     try {
       await this.putPresence(
         memberState.key,
@@ -524,7 +519,7 @@ class CloudflarePubSubTransport implements PubSubTransport {
         memberState.location.locationBucket,
         memberState.location.sessionInstanceName,
       )
-      this.memberStates.delete(subscription)
+      this.memberStates.delete(id)
     }
   }
 

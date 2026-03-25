@@ -16,7 +16,7 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
         log.logText.includes('File arguments are being consumed out of order') ||
         log.logText.includes('multiple streaming values') ||
         log.logText.includes('the server responded with a status of 500') ||
-        log.logText.includes('[telefunc:channel-callback-error]') ||
+        log.logText.includes('[telefunc:channel-error]') ||
         log.logText.includes('Error: server-listener-bug') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('The user aborted a request') ||

@@ -3,13 +3,13 @@ import { createChannel } from './channel.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { TAG, decode } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import { getPubSubTransport, setPubSubTransport, AdaptedPubSubTransport } from './pubsub.js'
+import { getPubSubRegistry, setPubSubRegistry, DefaultPubSubRegistry } from './pubsub.js'
 import type { PubSubAdapter } from './pubsub.js'
 
-const previousPubSubTransport = getPubSubTransport()
+const previousPubSubRegistry = getPubSubRegistry()
 
 afterEach(() => {
-  setPubSubTransport(previousPubSubTransport)
+  setPubSubRegistry(previousPubSubRegistry)
 })
 
 describe('keyed channel pubsub', () => {
@@ -160,11 +160,11 @@ describe('keyed channel pubsub', () => {
         transport: 'in-memory',
       },
     })
+    expect(firstReceipt.ts).toEqual(expect.any(Number))
     expect(secondReceipt).toMatchObject({
       key: 'room:test:ack',
       seq: 2,
     })
-    expect(firstReceipt.ts).toEqual(expect.any(Number))
     expect(secondReceipt.ts).toEqual(expect.any(Number))
   })
 
@@ -190,20 +190,22 @@ describe('keyed channel pubsub', () => {
   })
 })
 
-describe('AdaptedPubSubTransport', () => {
+describe('DefaultPubSubRegistry with adapter', () => {
   /** Simulates a multi-node message bus with synchronous delivery. */
-  function createMockAdapter(): PubSubAdapter & { _listeners: Map<string, Set<(message: string) => void>> } {
-    const listeners = new Map<string, Set<(message: string) => void>>()
+  function createMockAdapter(): PubSubAdapter & {
+    _listeners: Map<string, Set<(message: string, info: { seq: number; ts: number }) => void>>
+  } {
+    const listeners = new Map<string, Set<(message: string, info: { seq: number; ts: number }) => void>>()
     const seqs = new Map<string, number>()
     return {
       _listeners: listeners,
-      subscribe(key, deliver) {
+      subscribe(key, onMessage) {
         let set = listeners.get(key)
         if (!set) {
           set = new Set()
           listeners.set(key, set)
         }
-        set.add(deliver)
+        set.add(onMessage)
       },
       unsubscribe(key) {
         listeners.delete(key)
@@ -211,19 +213,20 @@ describe('AdaptedPubSubTransport', () => {
       publish(key, message) {
         const seq = (seqs.get(key) ?? 0) + 1
         seqs.set(key, seq)
+        const ts = Date.now()
         const set = listeners.get(key)
         if (set) {
-          for (const deliver of set) deliver(message)
+          for (const cb of set) cb(message, { seq, ts })
         }
-        return { seq, ts: Date.now() }
+        return { seq, ts }
       },
     }
   }
 
   it('delivers locally and returns adapter seq', async () => {
     const adapter = createMockAdapter()
-    const transport = new AdaptedPubSubTransport(adapter)
-    setPubSubTransport(transport)
+    const registry = new DefaultPubSubRegistry(adapter)
+    setPubSubRegistry(registry)
 
     const sender = createChannel<{ text: string }, { text: string }>({ key: 'room:adapted:basic' })
     const receiver = createChannel<{ text: string }, { text: string }>({ key: 'room:adapted:basic' })
@@ -242,8 +245,8 @@ describe('AdaptedPubSubTransport', () => {
 
   it('does not double-deliver from same node echo', () => {
     const adapter = createMockAdapter()
-    const transport = new AdaptedPubSubTransport(adapter)
-    setPubSubTransport(transport)
+    const registry = new DefaultPubSubRegistry(adapter)
+    setPubSubRegistry(registry)
 
     const sender = createChannel<{ text: string }, { text: string }>({ key: 'room:adapted:echo' })
     const receiver = createChannel<{ text: string }, { text: string }>({ key: 'room:adapted:echo' })
@@ -260,39 +263,30 @@ describe('AdaptedPubSubTransport', () => {
     expect(received).toEqual([{ text: 'hello' }])
   })
 
-  it('delivers from a different node (different transport instance)', () => {
+  it('delivers from a different node (different registry instance)', () => {
     const adapter = createMockAdapter()
-    const node1 = new AdaptedPubSubTransport(adapter)
-    const node2 = new AdaptedPubSubTransport(adapter)
+    const node1 = new DefaultPubSubRegistry(adapter)
+    const node2 = new DefaultPubSubRegistry(adapter)
 
     // node2 has a subscriber
     const received: string[] = []
-    const sub = {
+    node2.subscribe({
       id: 'receiver-1',
       key: 'room:cross-node',
       selfDelivery: true,
-      onMessage(serialized: string) {
-        received.push(serialized)
-      },
-    }
-    node2.subscribe(sub)
+      onMessage: (serialized: string) => received.push(serialized),
+    })
 
     // node1 publishes
-    const pub = {
-      id: 'sender-1',
-      key: 'room:cross-node',
-      selfDelivery: true,
-      onMessage() {},
-    }
-    node1.publish(pub, '{"text":"from-node1"}')
+    node1.publish({ id: 'sender-1', key: 'room:cross-node', selfDelivery: true, serialized: '{"text":"from-node1"}' })
 
     expect(received).toEqual(['{"text":"from-node1"}'])
   })
 
   it('respects selfDelivery: false', () => {
     const adapter = createMockAdapter()
-    const transport = new AdaptedPubSubTransport(adapter)
-    setPubSubTransport(transport)
+    const registry = new DefaultPubSubRegistry(adapter)
+    setPubSubRegistry(registry)
 
     const channel = createChannel<{ text: string }, { text: string }>({
       key: 'room:adapted:self-off',
@@ -310,29 +304,16 @@ describe('AdaptedPubSubTransport', () => {
 
   it('unsubscribes from adapter when last local subscriber leaves', () => {
     const adapter = createMockAdapter()
-    const transport = new AdaptedPubSubTransport(adapter)
+    const registry = new DefaultPubSubRegistry(adapter)
 
-    const sub1 = {
-      id: 'sub-1',
-      key: 'room:unsub',
-      selfDelivery: true,
-      onMessage() {},
-    }
-    const sub2 = {
-      id: 'sub-2',
-      key: 'room:unsub',
-      selfDelivery: true,
-      onMessage() {},
-    }
-
-    transport.subscribe(sub1)
-    transport.subscribe(sub2)
+    registry.subscribe({ id: 'sub-1', key: 'room:unsub', selfDelivery: true, onMessage() {} })
+    registry.subscribe({ id: 'sub-2', key: 'room:unsub', selfDelivery: true, onMessage() {} })
     expect(adapter._listeners.get('room:unsub')?.size).toBe(1) // one adapter subscription
 
-    transport.unsubscribe(sub1)
+    registry.unsubscribe('sub-1', 'room:unsub')
     expect(adapter._listeners.has('room:unsub')).toBe(true) // still subscribed
 
-    transport.unsubscribe(sub2)
+    registry.unsubscribe('sub-2', 'room:unsub')
     expect(adapter._listeners.has('room:unsub')).toBe(false) // adapter unsubscribed
   })
 
@@ -344,8 +325,8 @@ describe('AdaptedPubSubTransport', () => {
         return {} // no seq, no ts
       },
     }
-    const transport = new AdaptedPubSubTransport(adapter)
-    setPubSubTransport(transport)
+    const registry = new DefaultPubSubRegistry(adapter)
+    setPubSubRegistry(registry)
 
     const channel = createChannel<{ text: string }, { text: string }>({ key: 'room:no-seq' })
     ;(channel as any)._registerChannel()

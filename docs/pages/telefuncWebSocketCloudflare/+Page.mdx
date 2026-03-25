@@ -154,14 +154,14 @@ receipt.ts   // server timestamp
 
 ### Presence
 
-Telefunc tracks which Durable Objects have active subscribers using KV presence entries:
+Telefunc tracks which Durable Objects have active subscribers by writing short-lived KV records called **presence entries**:
 
 | Setting | Value |
 |---|---|
 | TTL | 90 seconds |
 | Refresh interval | 30 seconds |
 
-Presence entries are created when a channel subscribes to a key and deleted when it unsubscribes. The refresh timer keeps the entry alive as long as the channel is open. If a Durable Object is evicted by the runtime without unsubscribing (e.g. during a deployment), the entry expires after 90 seconds and the bucket is no longer included in fanout.
+A presence entry is created when a channel subscribes to a key and deleted when it unsubscribes. The refresh timer keeps the entry alive as long as the channel is open. If a Durable Object is evicted by the runtime without unsubscribing (e.g. during a deployment), the entry expires after 90 seconds and the bucket is no longer included in fanout.
 
 
 ## Delivery guarantees

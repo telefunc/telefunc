@@ -24,7 +24,14 @@ import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
 import { encodeSseRequest } from '../sse-request.js'
 import { TAG, decode, encode, encodeCtrl } from '../shared-ws.js'
-import type { AckResultStatus, CtrlMessage, CtrlReconcile, CtrlReconciled } from '../shared-ws.js'
+import type {
+  AckResultStatus,
+  CtrlMessage,
+  CtrlReconcile,
+  CtrlReconciled,
+  DecodedFrame,
+  WirePublishInfo,
+} from '../shared-ws.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
 import { CHANNEL_TRANSPORT, type ChannelTransport } from '../constants.js'
@@ -53,7 +60,7 @@ interface MuxChannel {
   readonly isClosed: boolean
   _onTransportOpen(): void
   _onTransportMessage(data: string): void
-  _onTransportPublish(data: string): void
+  _onTransportPublish(data: string, info: WirePublishInfo): void
   _onTransportBinaryMessage(data: Uint8Array): void
   _onTransportAckReqMessage(data: string, seq: number): Promise<void>
   _onTransportCloseRequest(timeoutMs: number): void
@@ -129,8 +136,6 @@ type UpgradeState = {
   handoffBuffer: Uint8Array<ArrayBuffer>[] | null
 }
 
-type InboundFrame = ReturnType<typeof decode>
-
 class ClientConnection implements MuxConnection {
   private static cache = new Map<string, ClientConnection>()
 
@@ -183,7 +188,7 @@ class ClientConnection implements MuxConnection {
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
   private pongTimeoutMs = CHANNEL_PING_INTERVAL_MS * 2
-  private readonly dispatchFrame = (_raw: Uint8Array<ArrayBuffer>, frame: InboundFrame): void => {
+  private readonly dispatchFrame = (_raw: Uint8Array<ArrayBuffer>, frame: DecodedFrame): void => {
     switch (frame.tag) {
       case TAG.CTRL:
         this.handleCtrl(frame.ctrl)
@@ -199,7 +204,7 @@ class ClientConnection implements MuxConnection {
         this.handleAckRes(frame.index, frame.ackedSeq, frame.text, frame.status)
     }
   }
-  private readonly bufferFrameDuringHandoff = (raw: Uint8Array<ArrayBuffer>, frame: InboundFrame): void => {
+  private readonly bufferFrameDuringHandoff = (raw: Uint8Array<ArrayBuffer>, frame: DecodedFrame): void => {
     if (frame.tag === TAG.CTRL) {
       if (frame.ctrl.t === 'fin') {
         this.handleHandoffFin()
@@ -781,14 +786,14 @@ class ClientConnection implements MuxConnection {
     }
   }
 
-  private handleDataFrame(frame: { tag: number; index: number; seq: number; text?: string; data?: Uint8Array }): void {
+  private handleDataFrame(frame: Extract<DecodedFrame, { index: number; seq: number }>): void {
     if (frame.seq && !this.trackSeq(frame.index, frame.seq)) return
     if (frame.tag === TAG.TEXT_ACK_REQ) {
       void this.channels.get(frame.index)?._onTransportAckReqMessage(frame.text!, frame.seq)
       return
     }
     if (frame.tag === TAG.PUBLISH) {
-      this.channels.get(frame.index)?._onTransportPublish(frame.text!)
+      this.channels.get(frame.index)?._onTransportPublish(frame.text!, frame.info!)
       return
     }
     if (frame.tag === TAG.TEXT) {

@@ -43,7 +43,7 @@ const mocks = vi.hoisted(() => {
         return new ReadableStream()
       },
     })),
-    setPubSubTransport: vi.fn(),
+    setPubSubRegistry: vi.fn(),
     transportInstances: [] as MockCloudflarePubSubTransport[],
     registryInstances: [] as MockCloudflarePubSubRegistry[],
     MockCloudflarePubSubRegistry,
@@ -81,7 +81,7 @@ vi.mock('../../../../node/server/telefunc.js', () => ({
 }))
 
 vi.mock('../../pubsub.js', () => ({
-  setPubSubTransport: mocks.setPubSubTransport,
+  setPubSubRegistry: mocks.setPubSubRegistry,
 }))
 
 vi.mock('./pubsub.js', () => ({
@@ -161,7 +161,7 @@ beforeEach(() => {
       return new ReadableStream()
     },
   })
-  mocks.setPubSubTransport.mockClear()
+  mocks.setPubSubRegistry.mockClear()
   mocks.transportInstances.length = 0
   mocks.registryInstances.length = 0
 })
@@ -181,7 +181,7 @@ describe('cloudflare adapter entrypoint', () => {
     )
 
     expect(mocks.enableChannelTransports).toHaveBeenCalled()
-    expect(mocks.setPubSubTransport).toHaveBeenCalledWith(mocks.transportInstances[0])
+    expect(mocks.setPubSubRegistry).toHaveBeenCalledWith(mocks.transportInstances[0])
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-1' }), {
       locationHint: 'weur',
     })
@@ -318,7 +318,7 @@ describe('cloudflare adapter entrypoint', () => {
       locationBucket: 'weur',
       serialized: '{"text":"hello"}',
       sourceChannelId: 'channel-1',
-      sourceSessionInstanceName: 'telefunc-shard-weur-1',
+
       forwarded: false,
     })
     expect(mocks.transportInstances[0]?.publishToSubscribers).toHaveBeenCalledWith(mocks.registryInstances[0], {
@@ -326,7 +326,7 @@ describe('cloudflare adapter entrypoint', () => {
       locationBucket: 'weur',
       serialized: '{"text":"hello"}',
       sourceChannelId: 'channel-1',
-      sourceSessionInstanceName: 'telefunc-shard-weur-1',
+
       forwarded: false,
     })
 

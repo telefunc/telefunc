@@ -9,11 +9,14 @@ import type {
   ChannelData,
   ChannelListener,
   ChannelPublishAck,
+  PubSubListener,
 } from '../channel.js'
+import { makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../client/clientConfig.js'
 import { createAbortError, isAbort } from '../../shared/Abort.js'
+import type { WirePublishInfo } from '../shared-ws.js'
 import { ClientConnection } from './connection.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, type ChannelTransports } from '../constants.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
@@ -45,7 +48,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   readonly key: string | undefined
   private _connection: MuxConnection
   private _listeners: Array<ChannelListener<ServerToClient>> = []
-  private _pubSubListeners: Array<ChannelListener<ServerToClient>> = []
+  private _pubSubListeners: Array<PubSubListener<ServerToClient>> = []
   private _binaryListeners: Array<(data: Uint8Array<ArrayBuffer>) => void> = []
   private _openCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<ChannelCloseCallback> = []
@@ -125,7 +128,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._listeners.push(callback)
   }
 
-  subscribe(callback: ChannelListener<ServerToClient>): () => void {
+  subscribe(callback: PubSubListener<ServerToClient>): () => void {
     assertUsage(this.key, 'Channel.subscribe() requires createChannel({ key })')
     this._pubSubListeners.push(callback)
     return () => {
@@ -214,11 +217,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal */
-  _onTransportPublish(data: string): void {
+  _onTransportPublish(data: string, wireInfo: WirePublishInfo): void {
     const parsed = parse(data) as ChannelData<ServerToClient>
+    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.ts)
     for (const cb of this._pubSubListeners) {
       try {
-        cb(parsed)
+        cb(parsed, info)
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }

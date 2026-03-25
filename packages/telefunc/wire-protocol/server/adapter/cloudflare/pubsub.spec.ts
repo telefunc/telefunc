@@ -11,7 +11,7 @@ import '../../../../node/server/async_hooks.js'
 import { CloudflarePubSubRegistry, CloudflarePubSubTransport } from './pubsub.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { createChannel } from '../../channel.js'
-import { getPubSubTransport, setPubSubTransport } from '../../pubsub.js'
+import { getPubSubRegistry, setPubSubRegistry } from '../../pubsub.js'
 import { createRequestContext, restoreRequestContext } from '../../../../node/server/requestContext.js'
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
@@ -240,29 +240,22 @@ describe('cloudflare pubsub routing', () => {
   it('delivers locally only to members in the matching bucket', () => {
     const registry = createRegistry()
     const delivered: string[] = []
-    const weurMember = {
-      id: 'weur-member',
-      key: 'room:test',
-      onMessage() {
-        delivered.push('weur')
-      },
-    }
-    const apacMember = {
-      id: 'apac-member',
-      key: 'room:test',
-      onMessage() {
-        delivered.push('apac')
-      },
-    }
 
-    registry.registerLocal(weurMember, 'weur')
-    registry.registerLocal(apacMember, 'apac')
+    registry.registerLocal(
+      { id: 'weur-member', key: 'room:test', selfDelivery: true, onMessage: () => delivered.push('weur') },
+      'weur',
+    )
+    registry.registerLocal(
+      { id: 'apac-member', key: 'room:test', selfDelivery: true, onMessage: () => delivered.push('apac') },
+      'apac',
+    )
 
     registry.deliverLocal({
       key: 'room:test',
       locationBucket: 'weur',
       serialized: '{"text":"hello"}',
       sourceChannelId: null as any,
+      info: { seq: 1, ts: Date.now() },
     })
 
     expect(delivered).toEqual(['weur'])
@@ -272,12 +265,12 @@ describe('cloudflare pubsub routing', () => {
     const transport = new CloudflarePubSubTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const registry = createRegistry()
     const kv = createMockKV()
-    const previousTransport = getPubSubTransport()
+    const previousTransport = getPubSubRegistry()
 
     transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
     transport.attachKV(kv)
     transport.attachSessionRegistry('telefunc-shard-weur-0', registry)
-    setPubSubTransport(transport)
+    setPubSubRegistry(transport)
 
     await restoreRequestContext(
       createRequestContext(
@@ -289,11 +282,7 @@ describe('cloudflare pubsub routing', () => {
         }),
       ),
       async () => {
-        transport.subscribe({
-          id: 'member-1',
-          key: 'room:test',
-          onMessage() {},
-        })
+        transport.subscribe({ id: 'member-1', key: 'room:test', selfDelivery: true, onMessage() {} })
         await flushMicrotasks()
 
         // KV should have a presence entry
@@ -301,7 +290,7 @@ describe('cloudflare pubsub routing', () => {
         expect(value).toBe('1')
       },
     )
-    setPubSubTransport(previousTransport)
+    setPubSubRegistry(previousTransport)
   })
 
   it('keeps the first-touch authority bucket in publish receipts', async () => {
@@ -327,25 +316,25 @@ describe('cloudflare pubsub routing', () => {
       locationBucket: 'apac',
       serialized: '{"text":"hello"}',
       sourceChannelId: 'channel-1',
-      sourceSessionInstanceName: 'telefunc-shard-weur-0',
+
       forwarded: false,
     })
 
     expect(receipt).toMatchObject({
-      key: 'room:first-touch',
       seq: 1,
       meta: {
         authorityBucket: 'weur',
         fanoutBuckets: ['weur', 'apac'],
       },
     })
+    expect(receipt.ts).toEqual(expect.any(Number))
   })
 
   it('waits for KV presence setup before authority publish fanout', async () => {
     const transport = new CloudflarePubSubTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const registry = createRegistry()
     const kv = createMockKV()
-    const previousTransport = getPubSubTransport()
+    const previousTransport = getPubSubRegistry()
     const publishTargets: string[] = []
     let releaseKVPut: (() => void) | null = null
     const kvPutReady = new Promise<void>((resolve) => {
@@ -370,7 +359,7 @@ describe('cloudflare pubsub routing', () => {
     )
     transport.attachKV(kv)
     transport.attachSessionRegistry('telefunc-shard-weur-0', registry)
-    setPubSubTransport(transport)
+    setPubSubRegistry(transport)
 
     await restoreRequestContext(
       createRequestContext(
@@ -396,7 +385,7 @@ describe('cloudflare pubsub routing', () => {
         expect(publishTargets).toEqual(['telefunc:pubsub:authority:room:test'])
       },
     )
-    setPubSubTransport(previousTransport)
+    setPubSubRegistry(previousTransport)
   })
 
   it('does not deliver locally before ordered publish setup completes', async () => {
@@ -404,7 +393,7 @@ describe('cloudflare pubsub routing', () => {
     const registry = createRegistry()
     const kv = createMockKV()
     const received: string[] = []
-    const previousTransport = getPubSubTransport()
+    const previousTransport = getPubSubRegistry()
     let releaseKVPut: (() => void) | null = null
     const kvPutReady = new Promise<void>((resolve) => {
       releaseKVPut = resolve
@@ -421,8 +410,8 @@ describe('cloudflare pubsub routing', () => {
         onPublish(id, request) {
           return transport.publishToSubscribers(registry, { ...request, locationBucket: request.locationBucket })
         },
-        onDeliver(id, { key, locationBucket, serialized, sourceChannelId }) {
-          registry.deliverLocal({ key, locationBucket, serialized, sourceChannelId })
+        onDeliver(id, { key, locationBucket, serialized, sourceChannelId, info }) {
+          registry.deliverLocal({ key, locationBucket, serialized, sourceChannelId, info })
           return Promise.resolve()
         },
       }),
@@ -430,7 +419,7 @@ describe('cloudflare pubsub routing', () => {
     )
     transport.attachKV(kv)
     transport.attachSessionRegistry('telefunc-shard-weur-0', registry)
-    setPubSubTransport(transport)
+    setPubSubRegistry(transport)
 
     await restoreRequestContext(
       createRequestContext(
@@ -458,14 +447,14 @@ describe('cloudflare pubsub routing', () => {
         expect(received).toEqual(['hello'])
       },
     )
-    setPubSubTransport(previousTransport)
+    setPubSubRegistry(previousTransport)
   })
 
   it('resolves publish ack with authority metadata after cold-path setup completes', async () => {
     const transport = new CloudflarePubSubTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const registry = createRegistry()
     const kv = createMockKV()
-    const previousTransport = getPubSubTransport()
+    const previousTransport = getPubSubRegistry()
     let releaseKVPut: (() => void) | null = null
     const kvPutReady = new Promise<void>((resolve) => {
       releaseKVPut = resolve
@@ -482,8 +471,8 @@ describe('cloudflare pubsub routing', () => {
         onPublish(id, request) {
           return transport.publishToSubscribers(registry, { ...request, locationBucket: request.locationBucket })
         },
-        onDeliver(id, { key, locationBucket, serialized, sourceChannelId }) {
-          registry.deliverLocal({ key, locationBucket, serialized, sourceChannelId })
+        onDeliver(id, { key, locationBucket, serialized, sourceChannelId, info }) {
+          registry.deliverLocal({ key, locationBucket, serialized, sourceChannelId, info })
           return Promise.resolve()
         },
       }),
@@ -491,7 +480,7 @@ describe('cloudflare pubsub routing', () => {
     )
     transport.attachKV(kv)
     transport.attachSessionRegistry('telefunc-shard-weur-0', registry)
-    setPubSubTransport(transport)
+    setPubSubRegistry(transport)
 
     await restoreRequestContext(
       createRequestContext(
@@ -524,7 +513,7 @@ describe('cloudflare pubsub routing', () => {
         expect(receipt.ts).toEqual(expect.any(Number))
       },
     )
-    setPubSubTransport(previousTransport)
+    setPubSubRegistry(previousTransport)
   })
 
   it('authority forwards once to each populated bucket coordinator', async () => {
@@ -554,7 +543,7 @@ describe('cloudflare pubsub routing', () => {
       locationBucket: 'weur',
       serialized: '{"text":"hello"}',
       sourceChannelId: 'channel-1',
-      sourceSessionInstanceName: 'telefunc-shard-weur-0',
+
       forwarded: false,
     })
 
@@ -581,9 +570,9 @@ describe('cloudflare pubsub routing', () => {
       locationBucket: 'weur',
       serialized: '{"text":"hello"}',
       sourceChannelId: 'channel-1',
-      sourceSessionInstanceName: 'telefunc-shard-weur-0',
       forwarded: true,
       sessionShardNames: ['telefunc-shard-weur-0', 'telefunc-shard-weur-1'],
+      info: { seq: 1, ts: Date.now() },
     })
 
     expect(deliveredTo.sort()).toEqual(['telefunc-shard-weur-0', 'telefunc-shard-weur-1'])
@@ -594,7 +583,7 @@ describe('cloudflare pubsub routing', () => {
     const registry = createRegistry()
     const kv = createMockKV()
     const coordinatorPublishes: Array<{ name: string; key: string; locationBucket: string; serialized: string }> = []
-    const previousTransport = getPubSubTransport()
+    const previousTransport = getPubSubRegistry()
 
     transport.attachBinding(
       createBasicBinding({
@@ -615,7 +604,7 @@ describe('cloudflare pubsub routing', () => {
         'x-telefunc-do-location-hint': 'weur',
       },
     })
-    setPubSubTransport(transport)
+    setPubSubRegistry(transport)
     await restoreRequestContext(createRequestContext(request), async () => {
       await Promise.resolve()
       const channel = createChannel<{ text: string }, { text: string }>({ key: 'room:test:late-context' })
@@ -633,19 +622,19 @@ describe('cloudflare pubsub routing', () => {
         },
       ])
     })
-    setPubSubTransport(previousTransport)
+    setPubSubRegistry(previousTransport)
   })
 
   it('throws when a keyed channel has no cloudflare request context', () => {
     const transport = new CloudflarePubSubTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const registry = createRegistry()
     const kv = createMockKV()
-    const previousTransport = getPubSubTransport()
+    const previousTransport = getPubSubRegistry()
 
     transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
     transport.attachKV(kv)
     transport.attachSessionRegistry('telefunc', registry)
-    setPubSubTransport(transport)
+    setPubSubRegistry(transport)
     restoreRequestContext(null, () => {
       const channel = createChannel<{ text: string }, { text: string }>({ key: 'room:test:pure-publisher' })
 
@@ -653,7 +642,7 @@ describe('cloudflare pubsub routing', () => {
         'Cloudflare keyed pub/sub requires request context. Enable Workers AsyncLocalStorage with compatibility_flags: ["nodejs_als"].',
       )
     })
-    setPubSubTransport(previousTransport)
+    setPubSubRegistry(previousTransport)
   })
 
   it('serializes authority dispatch without blocking later publishes on remote delivery completion', async () => {
@@ -702,7 +691,7 @@ describe('cloudflare pubsub routing', () => {
       locationBucket: 'weur',
       serialized: '{"text":"first"}',
       sourceChannelId: null as any,
-      sourceSessionInstanceName: 'telefunc-shard-weur-0',
+
       forwarded: false,
     })
     await flushMicrotasks(8)
@@ -712,7 +701,7 @@ describe('cloudflare pubsub routing', () => {
       locationBucket: 'weur',
       serialized: '{"text":"second"}',
       sourceChannelId: null as any,
-      sourceSessionInstanceName: 'telefunc-shard-weur-0',
+
       forwarded: false,
     })
     await flushMicrotasks(8)
@@ -733,18 +722,12 @@ describe('cloudflare pubsub routing', () => {
     const transport = new CloudflarePubSubTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const registry = createRegistry()
     const kv = createMockKV()
-    const previousTransport = getPubSubTransport()
+    const previousTransport = getPubSubRegistry()
 
     transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
     transport.attachKV(kv)
     transport.attachSessionRegistry('telefunc-shard-weur-0', registry)
-    setPubSubTransport(transport)
-
-    const subscription = {
-      id: 'member-1',
-      key: 'room:test',
-      onMessage() {},
-    }
+    setPubSubRegistry(transport)
 
     await restoreRequestContext(
       createRequestContext(
@@ -756,18 +739,18 @@ describe('cloudflare pubsub routing', () => {
         }),
       ),
       async () => {
-        transport.subscribe(subscription)
+        transport.subscribe({ id: 'member-1', key: 'room:test', selfDelivery: true, onMessage() {} })
         await flushMicrotasks()
 
         const presenceKey = `tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`
         expect(await kv.get(presenceKey)).toBe('1')
 
-        transport.unsubscribe(subscription)
+        transport.unsubscribe('member-1', 'room:test')
         await flushMicrotasks()
 
         expect(await kv.get(presenceKey)).toBeNull()
       },
     )
-    setPubSubTransport(previousTransport)
+    setPubSubRegistry(previousTransport)
   })
 })

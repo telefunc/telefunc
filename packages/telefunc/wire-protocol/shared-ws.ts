@@ -1,5 +1,5 @@
-export { TAG, encode, decode, encodeCtrl }
-export type { AckResultStatus, CtrlMessage, CtrlReconcile, CtrlReconciled }
+export { TAG, encode, decode, encodeCtrl, encodePublishText, decodePublishText }
+export type { AckResultStatus, CtrlMessage, CtrlReconcile, CtrlReconciled, DecodedFrame, WirePublishInfo }
 
 import { assert } from '../utils/assert.js'
 import type { ChannelTransports } from './constants.js'
@@ -100,12 +100,15 @@ type CtrlMessage =
 
 type AckResultStatus = 'ok' | 'error' | 'abort'
 
+/** Ordering metadata embedded in PUBLISH frames on the wire. */
+type WirePublishInfo = { seq: number; ts: number }
+
 // ===== Decoded frame =====
 
 type DecodedFrame =
   | { tag: typeof TAG.CTRL; ctrl: CtrlMessage }
   | { tag: typeof TAG.TEXT; index: number; seq: number; text: string }
-  | { tag: typeof TAG.PUBLISH; index: number; seq: number; text: string }
+  | { tag: typeof TAG.PUBLISH; index: number; seq: number; text: string; info: WirePublishInfo }
   | { tag: typeof TAG.PUBLISH_ACK_REQ; index: number; seq: number; text: string }
   | { tag: typeof TAG.BINARY; index: number; seq: number; data: Uint8Array }
   | { tag: typeof TAG.ACK_RES; index: number; seq: number; ackedSeq: number; status: AckResultStatus; text: string }
@@ -250,7 +253,8 @@ function decode(frame: Uint8Array): DecodedFrame {
     return { tag: TAG.TEXT, index, seq, text: textDecoder.decode(payload) }
   }
   if (tag === TAG.PUBLISH) {
-    return { tag: TAG.PUBLISH, index, seq, text: textDecoder.decode(payload) }
+    const { text, info } = decodePublishText(textDecoder.decode(payload))
+    return { tag: TAG.PUBLISH, index, seq, text, info }
   }
   if (tag === TAG.PUBLISH_ACK_REQ) {
     return { tag: TAG.PUBLISH_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
@@ -269,4 +273,23 @@ function decode(frame: Uint8Array): DecodedFrame {
     return { tag: TAG.ACK_RES, index, seq, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
   }
   return { tag: TAG.BINARY, index, seq, data: payload }
+}
+
+// ===== Publish info helpers =====
+// Format: seq,ts\n{serialized text}
+// JSON.stringify never produces bare \n, so the first \n reliably splits info from payload.
+
+function encodePublishText(text: string, info: WirePublishInfo): string {
+  return info.seq + ',' + info.ts + '\n' + text
+}
+
+function decodePublishText(wire: string): { text: string; info: WirePublishInfo } {
+  const nl = wire.indexOf('\n')
+  assert(nl !== -1, 'PUBLISH frame missing info prefix')
+  const comma = wire.indexOf(',')
+  assert(comma !== -1 && comma < nl, 'PUBLISH frame malformed info prefix')
+  const seq = Number(wire.slice(0, comma))
+  const ts = Number(wire.slice(comma + 1, nl))
+  assert(Number.isFinite(seq) && Number.isFinite(ts), 'PUBLISH frame info must be finite numbers')
+  return { text: wire.slice(nl + 1), info: { seq, ts } }
 }

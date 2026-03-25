@@ -8,7 +8,7 @@ import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../../ws.js'
 import { getServerConfig, enableChannelTransports } from '../../../../node/server/serverConfig.js'
 import { telefunc } from '../../../../node/server/telefunc.js'
-import { setPubSubTransport } from '../../pubsub.js'
+import { setPubSubRegistry } from '../../pubsub.js'
 import { CloudflarePubSubRegistry, CloudflarePubSubTransport } from './pubsub.js'
 import type { PubSubDeliverRequest, PubSubPublishRequest } from './pubsub.js'
 import {
@@ -124,7 +124,7 @@ function telefuncWebSocket(options?: CloudflareWebSocketOptions): TelefuncAdapte
     return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
   }
 
-  setPubSubTransport(pubSub)
+  setPubSubRegistry(pubSub)
 
   async function resolveShardAndForward(
     request: Request,

@@ -13,6 +13,7 @@ import type {
   ChannelData,
   ChannelListener,
   ChannelPublishAck,
+  PubSubListener,
 } from '../channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -29,9 +30,12 @@ import { isPromise } from '../../utils/isPromise.js'
 import { CHANNEL_BUFFER_LIMIT_BYTES, CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_CONNECT_TTL_MS } from '../constants.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
+import { makePublishInfo } from '../channel.js'
+import { encodePublishText } from '../shared-ws.js'
 import type { AckResultStatus } from '../shared-ws.js'
-import { getPubSubTransport } from './pubsub.js'
-import type { PubSubSubscription, PubSubTransport } from './pubsub.js'
+import { getPubSubRegistry } from './pubsub.js'
+import type { PubSubPublishResult, PubSubRegistry } from './pubsub.js'
+import type { WirePublishInfo } from '../shared-ws.js'
 
 const globalObject = getGlobalObject('channel.ts', {
   channelRegistry: new Map<string, ServerChannel<unknown, unknown>>(),
@@ -110,7 +114,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _didRegister = false
   private _peer: IndexedPeer | null = null
   private _listeners: Array<ChannelListener<ClientToServer>> = []
-  private _pubSubListeners: Array<ChannelListener<ClientToServer>> = []
+  private _pubSubListeners: Array<PubSubListener<ClientToServer>> = []
   private _binaryListeners: Array<(data: Uint8Array) => void> = []
   private _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
   private _pendingAcks = new Map<
@@ -137,8 +141,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _shutdownCallback: (() => void) | null = null
   private _pendingCloseAck = false
-  private _pubSubTransport: PubSubTransport | null = null
-  private _pubSubSubscription: PubSubSubscription | null = null
+  private _pubSubRegistry: PubSubRegistry | null = null
   private _didSubscribePubSub = false
 
   constructor({
@@ -214,7 +217,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   publish(data: ChannelData<ServerToClient>): Promise<ChannelPublishAck> {
     assertUsage(this.key, 'Channel.publish() requires createChannel({ key })')
     this._ensurePubSub()
-    if (!this._pubSubSubscription) throw new ChannelClosedError()
+    if (!this._pubSubRegistry) throw new ChannelClosedError()
     const serialized = stringify(data, { forbidReactElements: false })
     const ret = this._trackAck(Promise.resolve(this._publishPubSub(serialized)))
     ret.catch((e) => reportServerChannelError(e))
@@ -225,7 +228,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._listeners.push(callback)
   }
 
-  subscribe(callback: ChannelListener<ClientToServer>): () => void {
+  subscribe(callback: PubSubListener<ClientToServer>): () => void {
     assertUsage(this.key, 'Channel.subscribe() requires createChannel({ key })')
     this._ensurePubSub()
     this._subscribePubSub()
@@ -309,19 +312,22 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   }
 
   /** @internal */
-  _deliverPubSubMessage(serialized: string, _sourceChannelId: string): void {
+  _deliverPubSubMessage(serialized: string, rawInfo: WirePublishInfo): void {
+    const info = makePublishInfo(this.key!, rawInfo.seq, rawInfo.ts)
+    const data = parse(serialized) as ChannelData<ClientToServer>
     for (const cb of this._pubSubListeners) {
       try {
-        cb(parse(serialized) as ChannelData<ClientToServer>)
+        cb(data, info)
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
     }
+    const wireText = encodePublishText(serialized, rawInfo)
     if (this._peer) {
-      this._peer.sendPublish(serialized)
+      this._peer.sendPublish(wireText)
       return
     }
-    this._prePeerBuffer.pushPublish(serialized)
+    this._prePeerBuffer.pushPublish(wireText)
   }
 
   _attachPeer(peer: IndexedPeer): void {
@@ -577,43 +583,45 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._prePeerBuffer.clear(ackErr)
   }
 
-  /** Create the subscription identity and transport reference. Does not register for receiving. */
   private _ensurePubSub(): void {
-    if (this._pubSubSubscription) return
+    if (this._pubSubRegistry) return
     assert(this.key)
-    this._pubSubTransport = getPubSubTransport()
-    this._pubSubSubscription = {
-      id: this.id,
-      key: this.key,
-      selfDelivery: this.selfDelivery,
-      onMessage: (serialized, sourceChannelId) => {
-        this._deliverPubSubMessage(serialized, sourceChannelId)
-      },
-    }
+    this._pubSubRegistry = getPubSubRegistry()
   }
 
-  /** Register with the transport to receive messages. Only called from channel.subscribe(). */
+  /** Register with the registry to receive messages. Only called from channel.subscribe(). */
   private _subscribePubSub(): void {
     if (this._didSubscribePubSub) return
     this._didSubscribePubSub = true
-    assert(this._pubSubTransport)
-    assert(this._pubSubSubscription)
-    void this._pubSubTransport.subscribe(this._pubSubSubscription)
+    assert(this._pubSubRegistry)
+    void this._pubSubRegistry.subscribe({
+      id: this.id,
+      key: this.key!,
+      selfDelivery: this.selfDelivery,
+      onMessage: (serialized, _sourceChannelId, rawInfo) => this._deliverPubSubMessage(serialized, rawInfo),
+    })
   }
 
   private _unregisterPubSub(): void {
     if (!this._didSubscribePubSub) return
     this._didSubscribePubSub = false
-    assert(this._pubSubTransport)
-    assert(this._pubSubSubscription)
-    void this._pubSubTransport.unsubscribe(this._pubSubSubscription)
+    assert(this._pubSubRegistry)
+    void this._pubSubRegistry.unsubscribe(this.id, this.key!)
   }
 
   private _publishPubSub(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
     assert(this.key)
-    assert(this._pubSubTransport)
-    assert(this._pubSubSubscription)
-    return this._pubSubTransport.publish(this._pubSubSubscription, serialized)
+    assert(this._pubSubRegistry)
+    const toAck = (r: PubSubPublishResult): ChannelPublishAck =>
+      Object.assign(makePublishInfo(this.key!, r.seq, r.ts), { meta: r.meta })
+    const result = this._pubSubRegistry.publish({
+      id: this.id,
+      key: this.key!,
+      selfDelivery: this.selfDelivery,
+      serialized,
+    })
+    if (isPromise(result)) return result.then(toAck)
+    return toAck(result)
   }
 
   private _fireClose(err?: Error): void {
