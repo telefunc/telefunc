@@ -205,7 +205,7 @@ channel.publish({ user: 'Alice', text: 'Hello!', ts: Date.now() })
 
 ### Server-only pub/sub
 
-Keyed channels also work without a client — useful for fire-and-forget broadcasting from server-side logic. A channel that only calls `publish()` is lightweight: it doesn't register with the pub/sub transport or write KV records, so there's nothing to clean up.
+Keyed channels also work without a client — useful for fire-and-forget broadcasting from server-side logic. A channel that only calls `publish()` is lightweight: it doesn't register with the pub/sub transport, so there's nothing to clean up.
 
 ```ts
 // notifications.telefunc.ts
