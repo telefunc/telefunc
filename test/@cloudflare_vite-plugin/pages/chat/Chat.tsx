@@ -37,7 +37,6 @@ function ChatDemo() {
     if (!text || !channelRef.current || channelRef.current.isClosed) return
     const msg: ChatMessage = { user: username, text, ts: Date.now() }
     channelRef.current.publish(msg)
-    setMessages((prev) => [...prev, msg])
     setInput('')
   }, [input, username])
 

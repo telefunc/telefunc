@@ -9,7 +9,7 @@ import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver } from '../../../wire-protocol/server/request/registry.js'
 import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
 import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
-import type { RequestBodyReader } from '../../../wire-protocol/request-types.js'
+import type { RequestContext } from '../requestContext.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
 
@@ -32,12 +32,11 @@ type ParseResult =
 
 async function parseHttpRequest(runContext: {
   request: Request
+  requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
     telefuncUrl: string
-    stream: {
-      transport: StreamTransport
-    }
+    stream: { transport: StreamTransport }
   }
 }): Promise<ParseResult> {
   assertUrl(runContext)
@@ -56,25 +55,37 @@ async function parseHttpRequest(runContext: {
       if (!sseResponse) return { isMalformedRequest: true }
       return { isMalformedRequest: false, isSseRequest: true, sseResponse }
     }
-    case REQUEST_KIND.BINARY:
+    case REQUEST_KIND.BINARY: {
       assert(request.body)
-      return parseBinaryFrameBody(request.body, runContext)
+      const reader = new StreamReader(request.body)
+      const metaText = await reader.readMetadata()
+      const reviver = createRequestReviver({
+        registerFile: (index, size) => reader.registerFile(index, size),
+        consumeFile: (index, size) => reader.consumeFile(index, size),
+        registerChannel: (ch) => {
+          runContext.requestContext.onTopLevelError(() => ch.close())
+          runContext.requestContext.responseAbort.onAbort(() => ch.close())
+        },
+      })
+      return parseTelefuncPayload(metaText, runContext, reviver)
+    }
     case REQUEST_KIND.TEXT:
     case null: {
       const text = await request.text()
-      const reviver = createRequestReviver(noopReader)
+      const reviver = createRequestReviver({
+        registerFile: () => {},
+        consumeFile: () => Promise.reject(new Error('No binary frame')),
+        registerChannel: (ch) => {
+          runContext.requestContext.onTopLevelError(() => ch.close())
+          runContext.requestContext.responseAbort.onAbort(() => ch.close())
+        },
+      })
       return parseTelefuncPayload(text, runContext, reviver)
     }
   }
 }
 
 // ===== Main parsing =====
-
-/** No-op reader used when there is no binary frame (plain JSON requests). */
-const noopReader: RequestBodyReader = {
-  registerFile: () => {},
-  consumeFile: () => Promise.reject(new Error('No binary frame')),
-}
 
 /** Parse main payload, validate shape, and build a ParseResult. */
 function parseTelefuncPayload(
@@ -128,19 +139,6 @@ function parseTelefuncPayload(
     isSseRequest: false,
     isMalformedRequest: false,
   }
-}
-
-// ===== Binary frame parsing =====
-
-async function parseBinaryFrameBody(
-  bodyStream: ReadableStream<Uint8Array>,
-  runContext: { logMalformedRequests: boolean },
-): Promise<ParseResult> {
-  const reader = new StreamReader(bodyStream)
-  const metaText = await reader.readMetadata()
-
-  const reviver = createRequestReviver(reader)
-  return parseTelefuncPayload(metaText, runContext, reviver)
 }
 
 // ===== Helpers =====

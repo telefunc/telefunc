@@ -5,6 +5,7 @@ import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
+import { PushToPullStream } from '../push-to-pull-stream.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 import { parseSseRequestMetadata } from '../sse-request.js'
 import { ServerConnection } from './connection.js'
@@ -19,8 +20,7 @@ type SseChannelHttpResponse = {
 
 type SseConnection = {
   connId: string
-  controller: ReadableStreamDefaultController<Uint8Array>
-  pullWaiters: Array<() => void>
+  stream: PushToPullStream<Uint8Array>
   closed: boolean
   sessionId: string | null
 }
@@ -34,6 +34,8 @@ const globalObject = getGlobalObject('wire-protocol/server/sse.ts', {
 
 class SseConnectionTransport {
   private readonly connections = new Map<string, SseConnection>()
+  /** Resolvers for non-stream POSTs that arrived before the stream POST created the connection. */
+  private readonly pendingConnections = new Map<string, Array<(connection: SseConnection | null) => void>>()
   private readonly connection = new ServerConnection<SseConnection>({
     getSessionId: (connection) => connection.sessionId ?? undefined,
     setSessionId: (connection, sessionId) => {
@@ -58,7 +60,7 @@ class SseConnectionTransport {
         return this.openStream(metadata.connId, reader)
       }
 
-      const connection = this.connections.get(metadata.connId)
+      const connection = this.connections.get(metadata.connId) ?? (await this.waitForConnection(metadata.connId))
       if (!connection) {
         return { statusCode: 400, contentType: 'text/plain', headers: [], body: '' }
       }
@@ -71,54 +73,51 @@ class SseConnectionTransport {
   }
 
   private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void | Promise<void> {
+    if (connection.closed) return
     const payload = textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
-    if (!connection.closed && connection.controller.desiredSize !== null && connection.controller.desiredSize > 0) {
-      connection.controller.enqueue(payload)
-      return
-    }
-    return this._sendWhenWritable(connection, payload)
+    return connection.stream.push(payload)
   }
 
-  private async _sendWhenWritable(connection: SseConnection, payload: Uint8Array): Promise<void> {
-    while (!connection.closed && connection.controller.desiredSize !== null && connection.controller.desiredSize <= 0) {
-      await new Promise<void>((resolve) => {
-        connection.pullWaiters.push(resolve)
-      })
-    }
-    if (connection.closed) return
-    connection.controller.enqueue(payload)
+  /** Wait briefly for a connection to be created by a concurrent stream POST. */
+  private waitForConnection(connId: string): Promise<SseConnection | null> {
+    return new Promise<SseConnection | null>((resolve) => {
+      let pending = this.pendingConnections.get(connId)
+      if (!pending) {
+        pending = []
+        this.pendingConnections.set(connId, pending)
+      }
+      pending.push(resolve)
+      // Don't wait forever — if the stream POST never arrives, give up.
+      setTimeout(() => resolve(null), this.connection.connectTtl)
+    })
+  }
+
+  private resolvePendingConnections(connId: string, connection: SseConnection | null): void {
+    const pending = this.pendingConnections.get(connId)
+    if (!pending) return
+    this.pendingConnections.delete(connId)
+    for (const resolve of pending) resolve(connection)
   }
 
   private openStream(connId: string, initialFrameReader: StreamReader): SseChannelHttpResponse {
     const existing = this.connections.get(connId)
     if (existing) this.closeConnection(existing, false)
 
-    const body = new ReadableStream<Uint8Array>({
-      start: (controller) => {
-        const connection = {
-          connId,
-          controller,
-          pullWaiters: [],
-          closed: false,
-          sessionId: null,
-        }
-        this.connections.set(connId, connection)
-        controller.enqueue(sseOpenComment)
-        this.connection.onConnectionOpen(connection)
-        void this.processFrameReader(connection, initialFrameReader)
-      },
-      pull: () => {
-        const connection = this.connections.get(connId)
-        if (!connection) return
-        const waiters = connection.pullWaiters.splice(0)
-        for (const waiter of waiters) waiter()
-      },
-      cancel: () => {
-        const connection = this.connections.get(connId)
-        if (!connection) return
-        this.closeConnection(connection, false)
-      },
+    const stream = new PushToPullStream<Uint8Array>(() => {
+      const conn = this.connections.get(connId)
+      if (conn) this.closeConnection(conn, false)
     })
+    const connection: SseConnection = {
+      connId,
+      stream,
+      closed: false,
+      sessionId: null,
+    }
+    this.connections.set(connId, connection)
+    this.resolvePendingConnections(connId, connection)
+    stream.push(sseOpenComment)
+    this.connection.onConnectionOpen(connection)
+    void this.processFrameReader(connection, initialFrameReader)
 
     return {
       statusCode: 200,
@@ -127,19 +126,16 @@ class SseConnectionTransport {
         ['Cache-Control', 'no-cache, no-transform'],
         ['X-Accel-Buffering', 'no'],
       ],
-      body,
+      body: stream.readable,
     }
   }
 
   private closeConnection(connection: SseConnection, permanent: boolean): void {
     if (connection.closed) return
     connection.closed = true
-    connection.pullWaiters.splice(0).forEach((resolve) => resolve())
     this.connections.delete(connection.connId)
     this.connection.onConnectionClosed(connection, permanent)
-    try {
-      connection.controller.close()
-    } catch {}
+    connection.stream.close()
   }
 
   private terminateConnection(connection: SseConnection): void {

@@ -82,6 +82,7 @@ type ServerTransport<TConnection> = {
 }
 
 class ServerConnection<TConnection> {
+  readonly connectTtl: number
   private readonly options: MuxServerOptions
   private readonly transport: ServerTransport<TConnection>
   private readonly sessionStates = globalObject.sessionStates
@@ -92,6 +93,7 @@ class ServerConnection<TConnection> {
     this.transport = transport
     const resolvedOptions = resolveMuxServerOptions()
     this.options = resolvedOptions
+    this.connectTtl = resolvedOptions.connectTtl
     setChannelDefaults({
       connectTtl: resolvedOptions.connectTtl,
       bufferLimit: resolvedOptions.bufferLimit,
@@ -243,14 +245,19 @@ class ServerConnection<TConnection> {
         entry.channel._onPeerCloseAck()
         return null
       }
-      case 'pause': {
+      case 'window': {
         const entry = sessionState.ixMap.get(ctrl.ix)
-        if (entry) entry.channel._onPeerPause()
+        if (entry) entry.channel._onPeerWindowUpdate(ctrl.bytes)
         return null
       }
-      case 'resume': {
+      case 'pubsub-sub': {
         const entry = sessionState.ixMap.get(ctrl.ix)
-        if (entry) entry.channel._onPeerResume()
+        if (entry) entry.channel._onPeerPubSubSubscribe(ctrl.binary ?? false)
+        return null
+      }
+      case 'pubsub-unsub': {
+        const entry = sessionState.ixMap.get(ctrl.ix)
+        if (entry) entry.channel._onPeerPubSubUnsubscribe(ctrl.binary ?? false)
         return null
       }
     }
@@ -428,6 +435,14 @@ class ServerConnection<TConnection> {
         if (frame.seq && frame.seq <= entry.lastClientSeq) return null
         if (frame.seq) entry.lastClientSeq = frame.seq
         entry.channel._onPeerPublishAckReqMessage(frame.text, frame.seq)
+        return null
+      }
+      case TAG.PUBLISH_BINARY_ACK_REQ: {
+        const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
+        if (!entry) return null
+        if (frame.seq && frame.seq <= entry.lastClientSeq) return null
+        if (frame.seq) entry.lastClientSeq = frame.seq
+        entry.channel._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
         return null
       }
       case TAG.TEXT_ACK_REQ: {

@@ -2,7 +2,6 @@
 export { telefuncWebSocket }
 export type { CloudflareWebSocketOptions }
 
-import '../../../../node/server/async_hooks.js'
 import { DurableObject } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../../ws.js'
@@ -87,7 +86,6 @@ type StoredShardToken = {
  * In `wrangler.jsonc`:
  * ```jsonc
  * {
- *   "compatibility_flags": ["nodejs_als"],
  *   "durable_objects": {
  *     "bindings": [{ "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }]
  *   },

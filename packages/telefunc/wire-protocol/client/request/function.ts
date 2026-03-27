@@ -1,8 +1,7 @@
-export { functionClientRequestType }
+export { functionReplacer }
 
+import type { ClientReplacerContext, ReplacerType } from '../../types.js'
 import { SERIALIZER_PREFIX_FUNCTION } from '../../constants.js'
-import type { PlaceholderReplacerType, FunctionContract } from '../../placeholder-types.js'
-import type { ClientRequestContext } from '../../request-types.js'
 import { ClientChannel } from '../channel.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 
@@ -11,18 +10,24 @@ const globalObject = getGlobalObject('wire-protocol/client/request/function.ts',
   gcRegistry: new FinalizationRegistry<ClientChannel<unknown, readonly unknown[]>>((channel) => channel.close()),
 })
 
-const functionClientRequestType: PlaceholderReplacerType<FunctionContract, ClientRequestContext> = {
+type FunctionRequestContract = {
+  value: (...args: readonly unknown[]) => unknown
+  result: (...args: readonly unknown[]) => Promise<unknown>
+  metadata: { channelId: string }
+}
+
+const functionReplacer: ReplacerType<FunctionRequestContract, ClientReplacerContext> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
-  detect: (value): value is FunctionContract['value'] => typeof value === 'function',
-  getMetadata: (fn, { channelTransports }) => {
-    // Connect eagerly — the server will block reconcile until ServerChannel is created.
+  detect: (value): value is FunctionRequestContract['value'] => typeof value === 'function',
+  getMetadata: (fn, context) => {
     const channel = new ClientChannel<unknown, readonly unknown[]>({
       channelId: crypto.randomUUID(),
       ackMode: true,
-      transports: channelTransports,
+      transports: context.channelTransports,
       defer: true,
     })
     channel.listen((args) => fn(...args))
+    context.registerChannel(channel)
     globalObject.gcRegistry.register(fn, channel)
     return { channelId: channel.id }
   },

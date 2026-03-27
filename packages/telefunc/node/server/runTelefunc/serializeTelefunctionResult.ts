@@ -6,14 +6,13 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
-import {
-  buildStreamingResponseBody,
-  buildSSEResponseBody,
-} from '../../../wire-protocol/server/response/StreamingResponseBody.js'
-import { buildChannelResponseBody } from '../../../wire-protocol/server/response/ChannelResponseBody.js'
-import { ServerChannel } from '../../../wire-protocol/server/channel.js'
-import { injectFrameChannel } from '../../../wire-protocol/frame-channel.js'
+import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
+import { buildInlineResponseBody } from '../../../wire-protocol/server/response/StreamingResponseBody.js'
+import { pumpProducerToChannel } from '../../../wire-protocol/server/response/ChannelResponseBody.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
+import { textEncoder } from '../../../wire-protocol/frame.js'
+import { uint8ArrayToBase64url } from '../../../wire-protocol/base64url.js'
+import type { StreamingValueServer } from '../../../wire-protocol/types.js'
 import { restoreRequestContext, type RequestContext } from '../requestContext.js'
 import type { Telefunc } from '../getContext.js'
 
@@ -42,14 +41,35 @@ function serializeTelefunctionResult(runContext: {
 }): SerializeResult {
   const { requestContext } = runContext
 
-  const bodyValue: TelefuncResponseBody = runContext.telefunctionAborted
+  const bodyValue = runContext.telefunctionAborted
     ? { ret: runContext.telefunctionReturn, abort: true }
     : { ret: runContext.telefunctionReturn }
 
-  const { replacer, streamingValues } = createStreamingReplacer((channel) => {
-    channel._setResponseAbort(requestContext.responseAbort.abort)
-    requestContext.responseAbort.onAbort((abortError) => channel.abort(abortError.abortValue))
-  })
+  const useChannelPump = runContext.streamTransport === STREAM_TRANSPORT.CHANNEL
+  const streamingValues: StreamingValueServer[] = []
+  let nextStreamingIndex = 0
+  let activePumps = 0
+  const context: ServerReplacerContext = {
+    useChannelPump,
+    registerChannel(channel) {
+      channel._setResponseAbort(requestContext.responseAbort.abort)
+      requestContext.responseAbort.onAbort((abortError) => channel.abort(abortError.abortValue))
+    },
+    registerStreamingValue(createProducer) {
+      assert(!useChannelPump, 'registerStreamingValue called in channel transport mode')
+      const index = nextStreamingIndex++
+      streamingValues.push({ createProducer, index })
+      return index
+    },
+    pumpToChannel(createProducer) {
+      assert(useChannelPump, 'pumpToChannel called in inline transport mode')
+      activePumps++
+      return pumpProducerToChannel(createProducer, runContext, () => {
+        if (--activePumps === 0) requestContext.markComplete()
+      })
+    },
+  }
+  const replacer = createStreamingReplacer(context)
 
   let httpResponseBody: string
   try {
@@ -70,8 +90,12 @@ function serializeTelefunctionResult(runContext: {
     )
   }
 
-  if (streamingValues.length === 0) {
-    requestContext.markComplete()
+  // Channel pump: each streaming value owns its own channel + pump (set up by the replacer).
+  // No streaming values: nothing to multiplex.
+  // In both cases, return a plain text response. markComplete fires when all pumps finish
+  // (via activePumps counter), or immediately if there are none.
+  if (useChannelPump || streamingValues.length === 0) {
+    if (activePumps === 0) requestContext.markComplete()
     return { type: 'text', body: httpResponseBody }
   }
 
@@ -80,52 +104,20 @@ function serializeTelefunctionResult(runContext: {
     telefuncFilePath: runContext.telefuncFilePath,
   }
 
-  if (runContext.streamTransport === STREAM_TRANSPORT.CHANNEL) {
-    const serverChannel = new ServerChannel<never, never>()
-    serverChannel._registerChannel()
-    serverChannel.onClose(() => requestContext.markComplete())
-    httpResponseBody = injectFrameChannel(httpResponseBody, {
-      channelId: serverChannel.id,
-    })
-    buildChannelResponseBody(streamingValues, telefuncId, serverChannel, runContext)
-    return { type: 'text', body: httpResponseBody }
-  }
-
-  let buildFn: typeof buildStreamingResponseBody | typeof buildSSEResponseBody
-  switch (runContext.streamTransport) {
-    case STREAM_TRANSPORT.BINARY_INLINE:
-      buildFn = buildStreamingResponseBody
-      break
-    case STREAM_TRANSPORT.SSE_INLINE:
-      buildFn = buildSSEResponseBody
-      break
-    default:
-      assert(false)
-  }
+  const encodeFrame =
+    runContext.streamTransport === STREAM_TRANSPORT.SSE_INLINE
+      ? (frame: Uint8Array<ArrayBuffer>) => textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
+      : (frame: Uint8Array<ArrayBuffer>) => frame
 
   return {
     type: 'streaming',
-    body: buildFn(
-      httpResponseBody,
+    body: buildInlineResponseBody({
+      metadataSerialized: httpResponseBody,
       streamingValues,
       telefuncId,
-      requestContext.markComplete,
-      runContext.abortSignal,
-      requestContext.responseAbort,
-    ),
+      requestContext,
+      encodeFrame,
+    }),
     streamTransport: runContext.streamTransport,
   }
-}
-
-// ===== Response body (JSON path + streaming metadata) =====
-/** Wire format of the JSON response body / streaming metadata. */
-type TelefuncResponseBody = TelefuncResponseBodySuccess | TelefuncResponseBodyAbort
-/** Successful telefunction return value. */
-type TelefuncResponseBodySuccess = {
-  ret: unknown
-}
-/** Aborted telefunction return value. */
-type TelefuncResponseBodyAbort = {
-  ret: unknown
-  abort: true
 }

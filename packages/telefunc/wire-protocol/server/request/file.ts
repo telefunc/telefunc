@@ -1,10 +1,10 @@
-export { fileServerType }
+export { fileReviver }
 
+import type { FileRequestContract, ServerReviverContext, ReviverType } from '../../types.js'
 import { SERIALIZER_PREFIX_FILE } from '../../constants.js'
 import { LazyFile } from './LazyFile.js'
-import type { ServerRequestType, FileRequestContract } from '../../request-types.js'
 
-const fileServerType: ServerRequestType<FileRequestContract> = {
+const fileReviver: ReviverType<FileRequestContract, ServerReviverContext> = {
   prefix: SERIALIZER_PREFIX_FILE,
-  createValue: (metadata, reader) => new LazyFile(metadata, reader),
+  createValue: (metadata, reader) => ({ value: new LazyFile(metadata, reader) }),
 }

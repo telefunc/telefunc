@@ -30,7 +30,6 @@ export default {
 ```jsonc
 // wrangler.jsonc
 {
-  "compatibility_flags": ["nodejs_als"],
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
@@ -45,7 +44,40 @@ export default {
 }
 ```
 
-> `compatibility_flags: ["nodejs_als"]` is required for channels and pub/sub — Telefunc uses `AsyncLocalStorage` to preserve request context across async boundaries (e.g. routing pub/sub messages to the correct bucket).
+### Async context (pub/sub only)
+
+Telefunc captures request context when `createChannel()` is called. If you `await` before creating a keyed channel, the synchronous context is lost and you need `"nodejs_als"`:
+
+```ts
+// ✅ Works without nodejs_als — createChannel runs synchronously in the telefunc
+async function onRoom() {
+  const channel = createChannel({ key: 'room:lobby' })
+  channel.subscribe(() => {})
+  await loadUserData()
+  return { channel: channel.client }
+}
+
+// ❌ Requires nodejs_als — the await breaks synchronous context propagation
+async function onRoom() {
+  await loadUserData()
+  const channel = createChannel({ key: 'room:lobby' }) // context lost
+  channel.subscribe(() => {})
+  return { channel: channel.client }
+}
+```
+
+To support the second pattern, add `"nodejs_als"` to your compatibility flags and import the async context hook:
+
+```jsonc
+{ "compatibility_flags": ["nodejs_als"] }
+```
+
+```ts
+// worker.ts — import once, before any telefunc calls
+import 'telefunc/async_hooks'
+```
+
+This is the same constraint as <Link text={<code>getContext()</code>} href="/getContext#access" /> — both rely on synchronous context propagation.
 
 
 ## Context
@@ -154,14 +186,14 @@ receipt.ts   // server timestamp
 
 ### Presence
 
-Telefunc tracks which Durable Objects have active subscribers by writing short-lived KV records called **presence entries**:
+Telefunc tracks which Durable Objects have active subscribers by writing short-lived KV records:
 
 | Setting | Value |
 |---|---|
 | TTL | 90 seconds |
 | Refresh interval | 30 seconds |
 
-A presence entry is created when a channel subscribes to a key and deleted when it unsubscribes. The refresh timer keeps the entry alive as long as the channel is open. If a Durable Object is evicted by the runtime without unsubscribing (e.g. during a deployment), the entry expires after 90 seconds and the bucket is no longer included in fanout.
+A KV record is created when a channel subscribes to a key and deleted when it unsubscribes. The refresh timer keeps the record alive as long as the channel is open. If a Durable Object is evicted by the runtime without unsubscribing (e.g. during a deployment), the record expires after 90 seconds and the bucket is no longer included in fanout.
 
 
 ## Delivery guarantees
@@ -182,7 +214,7 @@ A presence entry is created when a channel subscribes to a key and deleted when 
 |---|---|
 | Ordering | Publishes for a given key are serialized through a single authority and delivered in order. |
 | Delivery | `publish()` resolves after all active session shards have received the message. This confirms server-side fanout completed — delivery to the client happens over the channel wire and is not awaited. |
-| Presence lag | Up to 90 seconds. An evicted Durable Object may still receive fanout attempts until its KV presence entry expires. A new subscriber may miss publishes from other publishers until its KV presence entry is written (typically a few milliseconds). |
+| Presence lag | Up to 90 seconds. An evicted Durable Object may still receive fanout attempts until its KV record expires. A new subscriber may miss publishes from other publishers until its KV record is written (typically a few milliseconds). |
 
 > Once a pub/sub message reaches a session shard, it participates in the same replay and recovery semantics as regular channel messages — buffered if the client is disconnected, replayed on reconnect.
 

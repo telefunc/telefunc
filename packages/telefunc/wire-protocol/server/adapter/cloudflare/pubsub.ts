@@ -10,15 +10,31 @@ import {
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
 } from './routing.js'
-import { getRequestContext } from '../../../../node/server/requestContext.js'
-import { assert } from '../../../../utils/assert.js'
+import { assert, assertUsage } from '../../../../utils/assert.js'
 import { utf8ByteLength } from '../../../../utils/utf8ByteLength.js'
-import type { PubSubPublish, PubSubPublishResult, PubSubRegistry, PubSubSubscription } from '../../pubsub.js'
+import type {
+  PubSubBinaryOnMessage,
+  PubSubBinaryPublish,
+  PubSubBinarySubscription,
+  PubSubOnMessage,
+  PubSubPublish,
+  PubSubPublishResult,
+  PubSubRegistry,
+  PubSubSubscription,
+} from '../../pubsub.js'
 import type { WirePublishInfo } from '../../../shared-ws.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
+
+/** Unwrap Cloudflare DO RPC proxy into a plain object.
+ *  RPC properties are lazy stubs that must be awaited to resolve their values. */
+async function unwrapRpcResult(rpc: Promise<PubSubPublishResult>): Promise<PubSubPublishResult> {
+  const r = await rpc
+  const [seq, ts, meta] = await Promise.all([r.seq, r.ts, r.meta])
+  return { seq, ts, ...(meta ? { meta } : undefined) }
+}
 
 type CloudflarePubSubTransportOptions = {
   baseInstanceName: string
@@ -28,19 +44,22 @@ type CloudflarePubSubTransportOptions = {
 type PubSubPublishRequest = {
   key: string
   locationBucket: LocationBucket
-  serialized: string
   sourceChannelId: string
   forwarded?: boolean
   sessionShardNames?: string[]
   info?: WirePublishInfo
+  // Exactly one of these is set per publish
+  serialized?: string
+  binaryData?: Uint8Array
 }
 
 type PubSubDeliverRequest = {
   key: string
   locationBucket: LocationBucket
-  serialized: string
   sourceChannelId: string
   info: WirePublishInfo
+  serialized?: string
+  binaryData?: Uint8Array
 }
 
 type TelefuncPubSubStub = DurableObjectStub & {
@@ -58,41 +77,40 @@ type PendingBucketPublish = {
   reject: (err: Error) => void
 }
 
+type BufferedPublish = {
+  send: () => Promise<PubSubPublishResult>
+  bytes: number
+  pending: PendingBucketPublish
+}
+
 /**
  * Hard-capped ring buffer for bucket publishes that arrive before the source bucket setup finishes.
  * This bounds cold-path memory while preserving a contiguous FIFO suffix of pending publishes.
+ * Payload-agnostic — each entry carries its own send function (works for both text and binary).
  */
 class CloudflareBucketPublishBuffer {
-  private data: string[] = []
-  private sizes: number[] = []
-  private pendingPublishes: Array<PendingBucketPublish> = []
+  private entries: BufferedPublish[] = []
   private head = 0
   private totalBytes = 0
   private readonly maxBytes: number
-  private readonly sendPublish: (serialized: string) => Promise<PubSubPublishResult>
   private _flushing = false
 
-  constructor(maxBytes: number, sendPublish: (serialized: string) => Promise<PubSubPublishResult>) {
+  constructor(maxBytes: number) {
     assert(maxBytes > 0, 'Cloudflare bucket publish buffer size must be > 0.')
     this.maxBytes = maxBytes
-    this.sendPublish = sendPublish
   }
 
-  push(serialized: string, pendingPublish: PendingBucketPublish): void {
-    const bytes = utf8ByteLength(serialized)
-
-    if (bytes > this.maxBytes) {
-      pendingPublish.reject(
+  push(entry: BufferedPublish): void {
+    if (entry.bytes > this.maxBytes) {
+      entry.pending.reject(
         new Error('Keyed publish exceeded the Cloudflare bucket buffer limit during cold-path setup'),
       )
       this.clear()
       return
     }
 
-    this.data.push(serialized)
-    this.sizes.push(bytes)
-    this.pendingPublishes.push(pendingPublish)
-    this.totalBytes += bytes
+    this.entries.push(entry)
+    this.totalBytes += entry.bytes
     this.evict()
   }
 
@@ -104,15 +122,15 @@ class CloudflareBucketPublishBuffer {
     if (this._flushing) return
     this._flushing = true
     try {
-      while (this.head < this.data.length) {
-        const pendingPublish = this.pendingPublishes[this.head]!
+      while (this.head < this.entries.length) {
+        const entry = this.entries[this.head]!
         try {
-          const ack = await this.sendPublish(this.data[this.head]!)
-          pendingPublish.resolve(ack)
+          const ack = await entry.send()
+          entry.pending.resolve(ack)
         } catch (err) {
-          pendingPublish.reject(err instanceof Error ? err : new Error(String(err)))
+          entry.pending.reject(err instanceof Error ? err : new Error(String(err)))
         }
-        this.totalBytes -= this.sizes[this.head]!
+        this.totalBytes -= entry.bytes
         this.head++
       }
       this.compact()
@@ -122,24 +140,20 @@ class CloudflareBucketPublishBuffer {
   }
 
   clear(): void {
-    this.rejectRange(
-      this.head,
-      this.pendingPublishes.length,
-      'Keyed publish was dropped from the Cloudflare bucket buffer',
-    )
-    this.data.length = 0
-    this.sizes.length = 0
-    this.pendingPublishes.length = 0
+    for (let i = this.head; i < this.entries.length; i++) {
+      this.entries[i]!.pending.reject(new Error('Keyed publish was dropped from the Cloudflare bucket buffer'))
+    }
+    this.entries.length = 0
     this.head = 0
     this.totalBytes = 0
   }
 
   private evict(): void {
-    while (this.totalBytes > this.maxBytes && this.head < this.data.length) {
-      this.pendingPublishes[this.head]!.reject(
+    while (this.totalBytes > this.maxBytes && this.head < this.entries.length) {
+      this.entries[this.head]!.pending.reject(
         new Error('Keyed publish was evicted from the Cloudflare bucket buffer before bucket setup completed'),
       )
-      this.totalBytes -= this.sizes[this.head]!
+      this.totalBytes -= this.entries[this.head]!.bytes
       this.head++
     }
     this.compact()
@@ -147,17 +161,9 @@ class CloudflareBucketPublishBuffer {
 
   private compact(): void {
     if (this.head === 0) return
-    if (this.head < this.data.length - this.head) return
-    this.data = this.data.slice(this.head)
-    this.sizes = this.sizes.slice(this.head)
-    this.pendingPublishes = this.pendingPublishes.slice(this.head)
+    if (this.head < this.entries.length - this.head) return
+    this.entries = this.entries.slice(this.head)
     this.head = 0
-  }
-
-  private rejectRange(start: number, end: number, message: string): void {
-    for (let index = start; index < end; index++) {
-      this.pendingPublishes[index]!.reject(new Error(message))
-    }
   }
 }
 
@@ -168,7 +174,7 @@ class MemberBucketState {
   setupInFlight = true
   teardownRequested = false
   refreshTimer: ReturnType<typeof setInterval> | null = null
-  private readonly publishRequestBase: Omit<PubSubPublishRequest, 'serialized' | 'forwarded' | 'sessionShardNames'>
+  private readonly publishRequestBase: Pick<PubSubPublishRequest, 'key' | 'locationBucket' | 'sourceChannelId'>
   private readonly authority: TelefuncPubSubStub
 
   constructor(key: string, sourceChannelId: string, location: MemberLocation, authority: TelefuncPubSubStub) {
@@ -180,14 +186,25 @@ class MemberBucketState {
       sourceChannelId,
     }
     this.authority = authority
-    this.pendingPublishes = new CloudflareBucketPublishBuffer(CHANNEL_BUFFER_LIMIT_BYTES, (s) => this.publish(s))
+    this.pendingPublishes = new CloudflareBucketPublishBuffer(CHANNEL_BUFFER_LIMIT_BYTES)
   }
 
   publish(serialized: string): Promise<PubSubPublishResult> {
-    return this.authority.telefuncPubSubPublish({
-      ...this.publishRequestBase,
-      serialized,
-    })
+    return unwrapRpcResult(
+      this.authority.telefuncPubSubPublish({
+        ...this.publishRequestBase,
+        serialized,
+      }),
+    )
+  }
+
+  publishBinary(data: Uint8Array): Promise<PubSubPublishResult> {
+    return unwrapRpcResult(
+      this.authority.telefuncPubSubPublish({
+        ...this.publishRequestBase,
+        binaryData: data,
+      }),
+    )
   }
 
   stopRefresh(): void {
@@ -198,9 +215,15 @@ class MemberBucketState {
   }
 }
 
+type LocalSubscriber = {
+  selfDelivery: boolean
+  onMessage?: PubSubOnMessage
+  onBinaryMessage?: PubSubBinaryOnMessage
+}
+
 class CloudflarePubSubRegistry {
   private readonly state: DurableObjectState
-  private readonly localKeyBuckets = new Map<string, Map<LocationBucket, Map<string, PubSubSubscription>>>()
+  private readonly localKeyBuckets = new Map<string, Map<LocationBucket, Map<string, LocalSubscriber>>>()
   private authorityPublishChain: Promise<void> = Promise.resolve()
   private readonly keySeqCache = new Map<string, number>()
   private readonly authorityBucketCache = new Map<string, LocationBucket>()
@@ -209,23 +232,84 @@ class CloudflarePubSubRegistry {
     this.state = state
   }
 
-  /** Records a local subscriber in memory only. */
+  /** Records a local text subscriber in memory only. */
   registerLocal(sub: PubSubSubscription, locationBucket: LocationBucket): void {
-    let keyBuckets = this.localKeyBuckets.get(sub.key)
+    const entry = this.getOrCreateEntry(sub.id, sub.key, sub.selfDelivery, locationBucket)
+    entry.onMessage = sub.onMessage
+  }
+
+  /** Records a local binary subscriber in memory only. */
+  registerBinaryLocal(sub: PubSubBinarySubscription, locationBucket: LocationBucket): void {
+    const entry = this.getOrCreateEntry(sub.id, sub.key, sub.selfDelivery, locationBucket)
+    entry.onBinaryMessage = sub.onMessage
+  }
+
+  /** Removes a local text subscriber callback, cleaning up if both callbacks are gone. */
+  unregisterLocal(id: string, key: string, locationBucket: LocationBucket): void {
+    const entry = this.getEntry(id, key, locationBucket)
+    if (!entry) return
+    entry.onMessage = undefined
+    if (!entry.onBinaryMessage) this.removeEntry(id, key, locationBucket)
+  }
+
+  /** Removes a local binary subscriber callback, cleaning up if both callbacks are gone. */
+  unregisterBinaryLocal(id: string, key: string, locationBucket: LocationBucket): void {
+    const entry = this.getEntry(id, key, locationBucket)
+    if (!entry) return
+    entry.onBinaryMessage = undefined
+    if (!entry.onMessage) this.removeEntry(id, key, locationBucket)
+  }
+
+  /** Returns true if the subscriber entry still has at least one callback. */
+  hasLocalCallbacks(id: string, key: string, locationBucket: LocationBucket): boolean {
+    const entry = this.getEntry(id, key, locationBucket)
+    return entry !== undefined && (entry.onMessage !== undefined || entry.onBinaryMessage !== undefined)
+  }
+
+  /** Delivers to only the subscribers that are both local to this DO and in the same key-location-bucket. */
+  deliverLocal({ key, locationBucket, serialized, binaryData, sourceChannelId, info }: PubSubDeliverRequest): void {
+    const members = this.localKeyBuckets.get(key)?.get(locationBucket)
+    if (!members) return
+    for (const [id, member] of members) {
+      if (id === sourceChannelId && !member.selfDelivery) continue
+      if (serialized !== undefined && member.onMessage) {
+        member.onMessage(serialized, sourceChannelId, info)
+      }
+      if (binaryData !== undefined && member.onBinaryMessage) {
+        member.onBinaryMessage(binaryData, sourceChannelId, info)
+      }
+    }
+  }
+
+  private getOrCreateEntry(
+    id: string,
+    key: string,
+    selfDelivery: boolean,
+    locationBucket: LocationBucket,
+  ): LocalSubscriber {
+    let keyBuckets = this.localKeyBuckets.get(key)
     if (!keyBuckets) {
       keyBuckets = new Map()
-      this.localKeyBuckets.set(sub.key, keyBuckets)
+      this.localKeyBuckets.set(key, keyBuckets)
     }
     let members = keyBuckets.get(locationBucket)
     if (!members) {
       members = new Map()
       keyBuckets.set(locationBucket, members)
     }
-    members.set(sub.id, sub)
+    let entry = members.get(id)
+    if (!entry) {
+      entry = { selfDelivery }
+      members.set(id, entry)
+    }
+    return entry
   }
 
-  /** Removes a local subscriber from the in-memory key index. */
-  unregisterLocal(id: string, key: string, locationBucket: LocationBucket): void {
+  private getEntry(id: string, key: string, locationBucket: LocationBucket): LocalSubscriber | undefined {
+    return this.localKeyBuckets.get(key)?.get(locationBucket)?.get(id)
+  }
+
+  private removeEntry(id: string, key: string, locationBucket: LocationBucket): void {
     const keyBuckets = this.localKeyBuckets.get(key)
     if (!keyBuckets) return
     const members = keyBuckets.get(locationBucket)
@@ -234,16 +318,6 @@ class CloudflarePubSubRegistry {
     if (members.size !== 0) return
     keyBuckets.delete(locationBucket)
     if (keyBuckets.size === 0) this.localKeyBuckets.delete(key)
-  }
-
-  /** Delivers to only the subscribers that are both local to this DO and in the same key-location-bucket. */
-  deliverLocal({ key, locationBucket, serialized, sourceChannelId, info }: PubSubDeliverRequest): void {
-    const members = this.localKeyBuckets.get(key)?.get(locationBucket)
-    if (!members) return
-    for (const [id, member] of members) {
-      if (id === sourceChannelId && !member.selfDelivery) continue
-      member.onMessage(serialized, sourceChannelId, info)
-    }
   }
 
   /** Returns the next globally ordered sequence for this key from this authority instance. */
@@ -371,46 +445,77 @@ class CloudflarePubSubTransport implements PubSubRegistry {
   // --- PubSubRegistry interface ---
 
   subscribe(sub: PubSubSubscription): void {
-    const memberLocation = this.resolveCurrentMemberLocation()
-    const registry = this.localRegistries.get(memberLocation.sessionInstanceName)
-    assert(
-      registry,
-      `No Cloudflare pub/sub registry found for session instance "${memberLocation.sessionInstanceName}".`,
-    )
+    const memberLocation = this.resolveMemberLocation(sub.headers)
+    const registry = this.requireRegistry(memberLocation.sessionInstanceName)
     registry.registerLocal(sub, memberLocation.locationBucket)
-
-    const memberState = new MemberBucketState(
-      sub.key,
-      sub.id,
-      memberLocation,
-      this.getAuthorityStub(sub.key, memberLocation.locationBucket),
-    )
-    this.memberStates.set(sub.id, memberState)
-    void this.initializePresence(sub.id, memberState)
+    this.ensurePresence(sub.id, sub.key, memberLocation)
   }
 
-  publish({ id, key, serialized }: PubSubPublish): Promise<PubSubPublishResult> {
+  subscribeBinary(sub: PubSubBinarySubscription): void {
+    const memberLocation = this.resolveMemberLocation(sub.headers)
+    const registry = this.requireRegistry(memberLocation.sessionInstanceName)
+    registry.registerBinaryLocal(sub, memberLocation.locationBucket)
+    this.ensurePresence(sub.id, sub.key, memberLocation)
+  }
+
+  publish({ id, key, serialized, headers }: PubSubPublish): Promise<PubSubPublishResult> {
     const memberState = this.memberStates.get(id)
 
     // Subscribed channel — route through memberState (respects presence setup buffering)
     if (memberState) {
       if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
         return new Promise<PubSubPublishResult>((resolve, reject) => {
-          memberState.pendingPublishes.push(serialized, { resolve, reject })
+          memberState.pendingPublishes.push({
+            send: () => memberState.publish(serialized),
+            bytes: utf8ByteLength(serialized),
+            pending: { resolve, reject },
+          })
         })
       }
       return memberState.publish(serialized)
     }
 
     // Publish-only channel — send directly to authority without presence registration
-    const location = this.resolveCurrentMemberLocation()
+    const location = this.resolveMemberLocation(headers)
     const authority = this.getAuthorityStub(key, location.locationBucket)
-    return authority.telefuncPubSubPublish({
-      key,
-      locationBucket: location.locationBucket,
-      serialized,
-      sourceChannelId: id,
-    })
+    return unwrapRpcResult(
+      authority.telefuncPubSubPublish({
+        key,
+        locationBucket: location.locationBucket,
+        serialized,
+        sourceChannelId: id,
+      }),
+    )
+  }
+
+  publishBinary({ id, key, data, headers }: PubSubBinaryPublish): Promise<PubSubPublishResult> {
+    const memberState = this.memberStates.get(id)
+
+    // Subscribed channel — route through memberState (respects presence setup buffering)
+    if (memberState) {
+      if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
+        return new Promise<PubSubPublishResult>((resolve, reject) => {
+          memberState.pendingPublishes.push({
+            send: () => memberState.publishBinary(data),
+            bytes: data.byteLength,
+            pending: { resolve, reject },
+          })
+        })
+      }
+      return memberState.publishBinary(data)
+    }
+
+    // Publish-only channel — send directly to authority without presence registration
+    const location = this.resolveMemberLocation(headers)
+    const authority = this.getAuthorityStub(key, location.locationBucket)
+    return unwrapRpcResult(
+      authority.telefuncPubSubPublish({
+        key,
+        locationBucket: location.locationBucket,
+        binaryData: data,
+        sourceChannelId: id,
+      }),
+    )
   }
 
   unsubscribe(id: string, key: string): void {
@@ -419,18 +524,20 @@ class CloudflarePubSubTransport implements PubSubRegistry {
       memberState,
       'Cloudflare keyed channel unsubscribe was called before the channel was registered. Expected ServerChannel._registerChannel() to run first.',
     )
-    this.localRegistries
-      .get(memberState.location.sessionInstanceName)
-      ?.unregisterLocal(id, key, memberState.location.locationBucket)
+    const registry = this.localRegistries.get(memberState.location.sessionInstanceName)
+    registry?.unregisterLocal(id, key, memberState.location.locationBucket)
+    this.teardownPresenceIfEmpty(id, key, memberState)
+  }
 
-    if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
-      memberState.teardownRequested = true
-      return
-    }
-
-    memberState.stopRefresh()
-    this.memberStates.delete(id)
-    void this.deletePresence(key, memberState.location.locationBucket, memberState.location.sessionInstanceName)
+  unsubscribeBinary(id: string, key: string): void {
+    const memberState = this.memberStates.get(id)
+    assert(
+      memberState,
+      'Cloudflare keyed channel unsubscribeBinary was called before the channel was registered. Expected ServerChannel._registerChannel() to run first.',
+    )
+    const registry = this.localRegistries.get(memberState.location.sessionInstanceName)
+    registry?.unregisterBinaryLocal(id, key, memberState.location.locationBucket)
+    this.teardownPresenceIfEmpty(id, key, memberState)
   }
 
   /**
@@ -444,7 +551,7 @@ class CloudflarePubSubTransport implements PubSubRegistry {
     registry: CloudflarePubSubRegistry,
     request: PubSubPublishRequest,
   ): Promise<PubSubPublishResult> {
-    const { key, locationBucket, serialized, sourceChannelId, forwarded = false } = request
+    const { key, locationBucket, serialized, binaryData, sourceChannelId, forwarded = false } = request
 
     if (forwarded) {
       assert(request.info, 'Forwarded publish must include info')
@@ -456,6 +563,7 @@ class CloudflarePubSubTransport implements PubSubRegistry {
             key,
             locationBucket,
             serialized,
+            binaryData,
             sourceChannelId,
             info,
           }),
@@ -478,6 +586,7 @@ class CloudflarePubSubTransport implements PubSubRegistry {
         this.getBucketCoordinatorStub(key, activeBucket).telefuncPubSubPublish({
           key,
           serialized,
+          binaryData,
           sourceChannelId,
           forwarded: true,
           locationBucket: activeBucket,
@@ -490,6 +599,38 @@ class CloudflarePubSubTransport implements PubSubRegistry {
   }
 
   // --- Private ---
+
+  private requireRegistry(sessionInstanceName: string): CloudflarePubSubRegistry {
+    const registry = this.localRegistries.get(sessionInstanceName)
+    assert(registry, `No Cloudflare pub/sub registry found for session instance "${sessionInstanceName}".`)
+    return registry
+  }
+
+  private ensurePresence(id: string, key: string, memberLocation: MemberLocation): void {
+    if (this.memberStates.has(id)) return
+    const memberState = new MemberBucketState(
+      key,
+      id,
+      memberLocation,
+      this.getAuthorityStub(key, memberLocation.locationBucket),
+    )
+    this.memberStates.set(id, memberState)
+    void this.initializePresence(id, memberState)
+  }
+
+  private teardownPresenceIfEmpty(id: string, key: string, memberState: MemberBucketState): void {
+    const registry = this.localRegistries.get(memberState.location.sessionInstanceName)
+    if (registry?.hasLocalCallbacks(id, key, memberState.location.locationBucket)) return
+
+    if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
+      memberState.teardownRequested = true
+      return
+    }
+
+    memberState.stopRefresh()
+    this.memberStates.delete(id)
+    void this.deletePresence(key, memberState.location.locationBucket, memberState.location.sessionInstanceName)
+  }
 
   private async initializePresence(id: string, memberState: MemberBucketState): Promise<void> {
     try {
@@ -523,20 +664,19 @@ class CloudflarePubSubTransport implements PubSubRegistry {
     }
   }
 
-  private resolveCurrentMemberLocation(): MemberLocation {
-    const request = getRequestContext()?.request ?? null
-    assert(
-      request,
-      'Cloudflare keyed pub/sub requires request context. Enable Workers AsyncLocalStorage with compatibility_flags: ["nodejs_als"].',
+  private resolveMemberLocation(headers?: Headers): MemberLocation {
+    assertUsage(
+      headers,
+      'Ensure createChannel() is called before any `await` in the telefunc, or enable `"nodejs_als"` in your compatibility flags. See https://telefunc.com/getContext#access',
     )
 
-    const locationBucket = request.headers.get(TELEFUNC_PUBSUB_BUCKET_HEADER)
+    const locationBucket = headers.get(TELEFUNC_PUBSUB_BUCKET_HEADER)
     assert(
       locationBucket && KNOWN_PUBSUB_BUCKETS.has(locationBucket),
       'Cloudflare keyed pub/sub requires a valid forwarded bucket header. Expected handleTelefunc() to set x-telefunc-pubsub-bucket before Durable Object dispatch.',
     )
 
-    const sessionInstanceName = request.headers.get(TELEFUNC_SHARD_HEADER)
+    const sessionInstanceName = headers.get(TELEFUNC_SHARD_HEADER)
     assert(
       sessionInstanceName && sessionInstanceName.startsWith(`${this.baseInstanceName}-shard-`),
       'Cloudflare keyed pub/sub registration is missing a valid shard header.',

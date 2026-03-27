@@ -1,9 +1,9 @@
-export { blobClientType }
+export { blobReplacer }
 
+import type { BlobRequestContract, ClientReplacerContext, ReplacerType } from '../../types.js'
 import { SERIALIZER_PREFIX_BLOB } from '../../constants.js'
-import type { ClientRequestType, BlobRequestContract } from '../../request-types.js'
 
-const blobClientType: ClientRequestType<BlobRequestContract> = {
+const blobReplacer: ReplacerType<BlobRequestContract, ClientReplacerContext> = {
   prefix: SERIALIZER_PREFIX_BLOB,
   detect: (value: unknown): value is Blob => value instanceof Blob,
   getMetadata: (value, context) => {

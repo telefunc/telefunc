@@ -81,6 +81,7 @@ const onReadTwice = async (file: File) => {
 // sleep, keeping rssGrowthDuringSleep near zero. maxChunkSize verifies individual chunks
 // arrive at TCP frame size rather than as one large assembled buffer.
 const onUploadBackpressure = async (file: File) => {
+  globalThis.gc?.()
   const rssBeforeSleep = process.memoryUsage().rss
   let rssAfterSleep = rssBeforeSleep
 
@@ -96,17 +97,16 @@ const onUploadBackpressure = async (file: File) => {
       // Stall after first chunk — if backpressure works, the browser should not
       // have pushed the remaining ~100 MB into OS/server buffers while we sleep.
       await new Promise((resolve) => setTimeout(resolve, 3000))
+      globalThis.gc?.()
       rssAfterSleep = process.memoryUsage().rss
     }
   }
 
   return {
-    totalBytes,
+    totalMB: Math.round(totalBytes / 1024 / 1024),
     chunkCount,
-    maxChunkSize,
-    rssBeforeSleep,
-    rssAfterSleep,
-    rssGrowthDuringSleep: rssAfterSleep - rssBeforeSleep,
+    maxChunkKB: Math.round(maxChunkSize / 1024),
+    rssGrowthMB: Math.round((rssAfterSleep - rssBeforeSleep) / 1024 / 1024),
   }
 }
 

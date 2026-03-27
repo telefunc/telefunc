@@ -1,13 +1,13 @@
-export { channelServerPlaceholderType }
+export { channelReplacer }
 
+import type { ChannelContract, ReplacerType, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_CHANNEL } from '../../constants.js'
-import type { PlaceholderReplacerType, ChannelContract } from '../../placeholder-types.js'
-import type { ServerResponseContext } from './registry.js'
+
 import { ServerChannel } from '../channel.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
-const channelServerPlaceholderType: PlaceholderReplacerType<ChannelContract, ServerResponseContext> = {
+const channelReplacer: ReplacerType<ChannelContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_CHANNEL,
   detect(value): value is ChannelContract['value'] {
     return ServerChannel.isServerChannel(value)

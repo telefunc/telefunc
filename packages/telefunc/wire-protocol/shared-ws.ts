@@ -1,4 +1,13 @@
-export { TAG, encode, decode, encodeCtrl, encodePublishText, decodePublishText }
+export {
+  TAG,
+  encode,
+  decode,
+  encodeCtrl,
+  encodePublishText,
+  decodePublishText,
+  encodePublishBinary,
+  decodePublishBinary,
+}
 export type { AckResultStatus, CtrlMessage, CtrlReconcile, CtrlReconciled, DecodedFrame, WirePublishInfo }
 
 import { assert } from '../utils/assert.js'
@@ -47,14 +56,17 @@ const TAG = {
   PUBLISH: 0x06 as const,
   /** Replayable keyed publish frame that requests an acknowledgement receipt. */
   PUBLISH_ACK_REQ: 0x07 as const,
+  /** Replayable binary publish frame delivered to keyed-channel subscribers. */
+  PUBLISH_BINARY: 0x08 as const,
+  /** Replayable keyed binary publish frame that requests an acknowledgement receipt. */
+  PUBLISH_BINARY_ACK_REQ: 0x09 as const,
 }
 
 // ===== Control message types =====
 
 type CtrlClose = { t: 'close'; ix: number; timeoutMs: number }
 type CtrlCloseAck = { t: 'close-ack'; ix: number }
-type CtrlPause = { t: 'pause'; ix: number }
-type CtrlResume = { t: 'resume'; ix: number }
+type CtrlWindow = { t: 'window'; ix: number; bytes: number }
 type CtrlPing = { t: 'ping' }
 type CtrlPong = { t: 'pong' }
 /** Server → client: channel closed with an abort value (analogous to throw Abort() in streaming). */
@@ -85,18 +97,23 @@ type CtrlReconciled = {
 }
 /** Server → client on old transport after upgrade drain: signals the client that this is the last frame on this transport. */
 type CtrlFin = { t: 'fin' }
+/** Client → server: subscribe this channel to pubsub. binary flag selects text or binary pubsub. */
+type CtrlPubSubSub = { t: 'pubsub-sub'; ix: number; binary?: true }
+/** Client → server: unsubscribe this channel from pubsub. */
+type CtrlPubSubUnsub = { t: 'pubsub-unsub'; ix: number; binary?: true }
 type CtrlMessage =
   | CtrlClose
   | CtrlCloseAck
   | CtrlAbort
   | CtrlError
-  | CtrlPause
-  | CtrlResume
+  | CtrlWindow
   | CtrlPing
   | CtrlPong
   | CtrlReconcile
   | CtrlReconciled
   | CtrlFin
+  | CtrlPubSubSub
+  | CtrlPubSubUnsub
 
 type AckResultStatus = 'ok' | 'error' | 'abort'
 
@@ -113,6 +130,8 @@ type DecodedFrame =
   | { tag: typeof TAG.BINARY; index: number; seq: number; data: Uint8Array }
   | { tag: typeof TAG.ACK_RES; index: number; seq: number; ackedSeq: number; status: AckResultStatus; text: string }
   | { tag: typeof TAG.TEXT_ACK_REQ; index: number; seq: number; text: string }
+  | { tag: typeof TAG.PUBLISH_BINARY; index: number; seq: number; data: Uint8Array; info: WirePublishInfo }
+  | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
 
 const ACK_RESULT_STATUS = {
   ok: 0x00,
@@ -196,6 +215,20 @@ const encode = {
     return frame
   },
 
+  publishBinary(index: number, data: Uint8Array, seq = 0): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER_DATA + data.byteLength)
+    writeDataHeader(frame, TAG.PUBLISH_BINARY, index, seq)
+    frame.set(data, HEADER_DATA)
+    return frame
+  },
+
+  publishBinaryAckReq(index: number, data: Uint8Array, seq = 0): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER_DATA + data.byteLength)
+    writeDataHeader(frame, TAG.PUBLISH_BINARY_ACK_REQ, index, seq)
+    frame.set(data, HEADER_DATA)
+    return frame
+  },
+
   /** Identical wire layout to TEXT, but signals to the receiver: send ACK_RES when done. */
   textAckReq(index: number, text: string, seq = 0): Uint8Array<ArrayBuffer> {
     const payload = textEncoder.encode(text)
@@ -259,6 +292,13 @@ function decode(frame: Uint8Array): DecodedFrame {
   if (tag === TAG.PUBLISH_ACK_REQ) {
     return { tag: TAG.PUBLISH_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
   }
+  if (tag === TAG.PUBLISH_BINARY) {
+    const { data, info } = decodePublishBinary(payload)
+    return { tag: TAG.PUBLISH_BINARY, index, seq, data, info }
+  }
+  if (tag === TAG.PUBLISH_BINARY_ACK_REQ) {
+    return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, data: payload }
+  }
   if (tag === TAG.TEXT_ACK_REQ) {
     return { tag: TAG.TEXT_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
   }
@@ -292,4 +332,27 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
   const ts = Number(wire.slice(comma + 1, nl))
   assert(Number.isFinite(seq) && Number.isFinite(ts), 'PUBLISH frame info must be finite numbers')
   return { text: wire.slice(nl + 1), info: { seq, ts } }
+}
+
+// ===== Binary publish info helpers =====
+// Format: [4 bytes: seq as u32 LE][8 bytes: ts as f64 LE][binary data]
+
+const PUBLISH_BINARY_HEADER = 12
+
+function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
+  const result = new Uint8Array(PUBLISH_BINARY_HEADER + data.byteLength)
+  const view = new DataView(result.buffer)
+  view.setUint32(0, info.seq, true)
+  view.setFloat64(4, info.ts, true)
+  result.set(data, PUBLISH_BINARY_HEADER)
+  return result
+}
+
+function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
+  assert(wire.byteLength >= PUBLISH_BINARY_HEADER, 'PUBLISH_BINARY frame too short for info header')
+  const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
+  const seq = view.getUint32(0, true)
+  const ts = view.getFloat64(4, true)
+  assert(Number.isFinite(seq) && Number.isFinite(ts), 'PUBLISH_BINARY frame info must be finite numbers')
+  return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, ts } }
 }

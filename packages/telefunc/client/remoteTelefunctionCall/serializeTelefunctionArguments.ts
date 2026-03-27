@@ -5,9 +5,11 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
-import { encodeBinaryRequest } from '../../wire-protocol/client/request/serialize.js'
-
-import { type ChannelTransports, type StreamTransport } from '../../wire-protocol/constants.js'
+import { encodeRequestEnvelope } from '../../wire-protocol/frame.js'
+import { pumpClientProducerToChannel } from '../../wire-protocol/client/request/pumpToChannel.js'
+import { makeAbortError } from './errors.js'
+import type { ClientReplacerContext } from '../../wire-protocol/types.js'
+import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
 
 type CallContext = {
   telefuncFilePath: string
@@ -15,6 +17,7 @@ type CallContext = {
   telefunctionArgs: unknown[]
   stream?: { transport?: StreamTransport }
   channel: { transports: ChannelTransports }
+  abortController: AbortController
 }
 
 function serializeTelefunctionArguments(callContext: CallContext): string | Blob {
@@ -30,10 +33,36 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
   }
 
   const channelTransports = callContext.channel.transports
-  const { replacer, files } = createRequestReplacer(channelTransports)
+  const abortSignal = callContext.abortController.signal
+  const files: Blob[] = []
 
+  const context: ClientReplacerContext = {
+    channelTransports,
+    registerFile(body) {
+      const index = files.length
+      files.push(body)
+      return index
+    },
+    registerChannel(channel) {
+      abortSignal.addEventListener(
+        'abort',
+        () => {
+          const abortError = makeAbortError(undefined, callContext)
+          channel._abortLocally(abortError.abortValue, abortError.message)
+        },
+        { once: true },
+      )
+    },
+    pumpToChannel(createProducer) {
+      const channel = pumpClientProducerToChannel(createProducer, channelTransports)
+      context.registerChannel(channel)
+      return { channelId: channel.id, close: () => channel.close() }
+    },
+  }
+
+  const replacer = createRequestReplacer(context)
   const dataMainSerialized = serialize(dataMain, callContext, replacer)
-  if (files.length > 0) return encodeBinaryRequest(dataMainSerialized, files)
+  if (files.length > 0) return encodeRequestEnvelope(dataMainSerialized, files)
   return dataMainSerialized
 }
 

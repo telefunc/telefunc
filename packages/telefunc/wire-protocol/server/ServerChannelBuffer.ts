@@ -62,12 +62,22 @@ class ServerChannelBuffer<TAck = never> {
     this.#push(3, data, bytes, null)
   }
 
+  pushPublishBinary(data: Uint8Array): void {
+    const bytes = data.byteLength
+    this.#push(4, data, bytes, null)
+  }
+
   pushTextAck(data: string, resolve: (value: TAck) => void, reject: (err: Error) => void): void {
     const bytes = utf8ByteLength(data)
     this.#push(2, data, bytes, { resolve, reject })
   }
 
-  #push(tag: 0 | 1 | 2 | 3, data: string | Uint8Array, bytes: number, ackEntry: BufferedAckEntry<TAck> | null): void {
+  #push(
+    tag: 0 | 1 | 2 | 3 | 4,
+    data: string | Uint8Array,
+    bytes: number,
+    ackEntry: BufferedAckEntry<TAck> | null,
+  ): void {
     const overflowErr = new ChannelOverflowError()
     if (bytes > this.#maxBytes) {
       this.clear(overflowErr)
@@ -112,12 +122,15 @@ class ServerChannelBuffer<TAck = never> {
     sendPublish: (data: string) => void,
     sendBinary: (data: Uint8Array) => void,
     sendTextAck: (data: string, ackEntry: BufferedAckEntry<TAck>) => void,
+    sendPublishBinary?: (data: Uint8Array) => void,
   ): void {
     for (let i = this.#head; i < this.#data.length; i++) {
       if (this.#tags[i] === 0) {
         sendText(this.#data[i] as string)
       } else if (this.#tags[i] === 3) {
         sendPublish(this.#data[i] as string)
+      } else if (this.#tags[i] === 4) {
+        sendPublishBinary?.(this.#data[i] as Uint8Array)
       } else if (this.#tags[i] === 1) {
         sendBinary(this.#data[i] as Uint8Array)
       } else {

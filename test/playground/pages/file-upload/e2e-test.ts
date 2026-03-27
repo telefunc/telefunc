@@ -96,15 +96,14 @@ function testFileUpload() {
       async () => {
         const result = await getResult('#upload-result')
         expect(result.done).toBe(true)
-        expect(result.totalBytes).toBe(100 * 1024 * 1024)
+        expect(result.totalMB).toBe(100)
         expect(result.chunkCount).greaterThan(0)
         // No single chunk should be near the full file size.
         // Observed empirically: 64 KB (one TCP frame). 128 KB gives 2× headroom.
-        expect(result.maxChunkSize).lessThan(128 * 1024)
+        expect(result.maxChunkKB).lessThan(128)
         // RSS growth during the 3 s sleep must be well below the 100 MB file size.
         // If the client blasted everything into server buffers, RSS would spike here.
-        // Observed empirically: 0 bytes.
-        expect(result.rssGrowthDuringSleep).lessThan(5 * 1024 * 1024)
+        expect(result.rssGrowthMB).lessThan(5)
       },
       { timeout: 60_000 },
     )

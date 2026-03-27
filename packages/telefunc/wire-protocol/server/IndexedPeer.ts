@@ -84,9 +84,27 @@ class IndexedPeer {
     }
   }
 
+  sendWindowUpdate(bytes: number): void {
+    try {
+      this.sender.send(encodeCtrl({ t: 'window', ix: this.index, bytes }))
+    } catch {
+      /* transport may already be closed */
+    }
+  }
+
   sendPublish(data: string): void {
     const seq = this.replay.nextSeq()
     const frame = encode.publish(this.index, data, seq)
+    try {
+      this.sender.send(frame, () => this.replay.push(seq, frame))
+    } catch {
+      /* transport may already be closed */
+    }
+  }
+
+  sendPublishBinary(data: Uint8Array): void {
+    const seq = this.replay.nextSeq()
+    const frame = encode.publishBinary(this.index, data, seq)
     try {
       this.sender.send(frame, () => this.replay.push(seq, frame))
     } catch {

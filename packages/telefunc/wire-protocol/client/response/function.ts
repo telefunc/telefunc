@@ -1,7 +1,7 @@
-export { functionClientPlaceholderType }
+export { functionReviver }
 
+import type { FunctionContract, ClientReviverContext, ReviverType } from '../../types.js'
 import { SERIALIZER_PREFIX_FUNCTION } from '../../constants.js'
-import type { PlaceholderReviverType, FunctionContract } from '../../placeholder-types.js'
 import { ClientChannel } from '../channel.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 const globalObject = getGlobalObject('wire-protocol/client/response/function.ts', {
@@ -14,7 +14,7 @@ const globalObject = getGlobalObject('wire-protocol/client/response/function.ts'
  * Each call is forwarded as an ack message over a persistent `ClientChannel`.
  * The channel closes via `close(fn)` or automatically once the proxy is GC'd.
  */
-const functionClientPlaceholderType: PlaceholderReviverType<FunctionContract> = {
+const functionReviver: ReviverType<FunctionContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
   createValue(metadata, context) {
     const channel = new ClientChannel({

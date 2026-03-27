@@ -1,22 +1,23 @@
-export { promiseClientType }
+export { promiseReviver }
 
+import type { ReviverType, PromiseContract, ClientReviverContext } from '../../types.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { textDecoder } from '../../frame.js'
 import { SERIALIZER_PREFIX_PROMISE } from '../../constants.js'
-import type { ClientStreamingType, PromiseContract } from '../../streaming-types.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 
 const globalObject = getGlobalObject('wire-protocol/client/response/promise.ts', {
   gcRegistry: new FinalizationRegistry<() => void>((cancel) => cancel()),
 })
 
-const promiseClientType: ClientStreamingType<PromiseContract> = {
+const promiseReviver: ReviverType<PromiseContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_PROMISE,
-  createValue: (_metadata, readNextChunk, cancel) => {
+  createValue: (metadata, context) => {
+    const { readNextChunk, cancel } =
+      'channelId' in metadata
+        ? context.createChannelChunkReader(metadata.channelId)
+        : context.createInlineChunkReader(metadata.__index)
     const promise = readNextChunk().then((chunk) => {
-      // Signal completion so the demuxer knows this consumer is done.
-      // Critical for per-index cancel: upstream is only cancelled when ALL
-      // consumers are done, so promises must report completion too.
       cancel()
       if (!chunk) throw new Error('Stream ended before promise resolved')
       return parse(textDecoder.decode(chunk))
@@ -26,8 +27,6 @@ const promiseClientType: ClientStreamingType<PromiseContract> = {
     globalObject.gcRegistry.register(promise, cancel)
     return {
       value: promise,
-      // A promise has no post-resolution live resource to tear down.
-      // Pre-settlement interruption is handled by abort(), not close(res).
       close: undefined,
     }
   },

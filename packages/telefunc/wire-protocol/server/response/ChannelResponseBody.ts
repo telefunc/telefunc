@@ -1,43 +1,71 @@
-export { buildChannelResponseBody }
+export { pumpProducerToChannel }
+export type { ChannelPumpRunContext }
 
-import type { StreamingValueServer } from '../../streaming-types.js'
-import { generateResponseBody } from './StreamingResponseBody.js'
-import type { TelefuncId } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
-import { ChannelClosedError, type ServerChannel } from '../channel.js'
+import type { StreamingProducer } from '../../types.js'
+import { concat } from '../../frame.js'
+import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
+import { ChannelClosedError, ServerChannel } from '../channel.js'
+import { isAbort } from '../../../node/server/Abort.js'
+import { encodeErrorPayload } from './StreamingResponseBody.js'
 import { restoreContext, Telefunc } from '../../../node/server/getContext.js'
 import { RequestContext, restoreRequestContext } from '../../../node/server/requestContext.js'
 
-/** Narrow interface: only what the frame pump needs from a ServerChannel. */
-type FrameChannel = Pick<ServerChannel, 'onOpen' | 'onClose' | 'close' | '_sendBinaryAwaitable'>
+const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
+const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
 
-/** Pump indexed data frames from streaming producers into a channel.
+type ChannelPumpRunContext = {
+  requestContext: RequestContext
+  providedContext: Telefunc.Context | null
+  telefunctionName: string
+  telefuncFilePath: string
+}
+
+/**
+ * Pump a single producer's chunks through a dedicated ServerChannel.
  *
- *  Metadata is NOT sent over the channel — it's in the HTTP response body.
- *  Only indexed frames + terminator are pumped.
+ * Creates the channel, registers it, waits for client connection, then streams
+ * chunks with proper context restoration and cleanup.
  *
- *  The pump waits for the client to connect before starting.
- *  If the channel closes before the client connects, the pump exits cleanly. */
-function buildChannelResponseBody(
-  streamingValues: StreamingValueServer[],
-  telefuncId: TelefuncId,
-  channel: FrameChannel,
-  runContext: {
-    requestContext: RequestContext
-    providedContext: Telefunc.Context | null
-  },
-): void {
-  const producers = streamingValues.map((sv) => ({ producer: sv.createProducer(), index: sv.index }))
-  const gen = generateResponseBody('', producers, telefuncId, {
-    skipMetadata: true,
-    responseAbort: runContext.requestContext.responseAbort,
-  })
+ * Each binary send is tagged: `[TAG_DATA][payload]` for data, `[TAG_ERROR][errorPayload]`
+ * for errors. Tags are defined in constants.ts and shared with the client's
+ * ChannelChunkReader. Errors are encoded with `encodeErrorPayload` — the same
+ * payload format as inline streaming.
+ *
+ * The pump races three promises each iteration:
+ *   1. `responseAbort.errorPromise` — resolves when a sibling throws Abort
+ *   2. `cancelledPromise` — resolves when the channel closes (client disconnect/abort)
+ *   3. `producer.chunks.next()` — resolves when the producer yields a chunk
+ *
+ * `cancelledPromise` is needed because async generator `.return()` is queued behind
+ * a pending `.next()` — it can't interrupt an in-progress `await` (e.g. `sleep()`).
+ * Without it the pump would stay stuck until the generator's current await resolves.
+ *
+ * Returns the channelId for inclusion in serialized metadata.
+ */
+function pumpProducerToChannel(
+  createProducer: () => StreamingProducer,
+  runContext: ChannelPumpRunContext,
+  onComplete?: () => void,
+): string {
+  const channel = new ServerChannel<never, never>()
+  channel._registerChannel()
+  const producer = createProducer()
+
+  const telefuncId = {
+    telefunctionName: runContext.telefunctionName,
+    telefuncFilePath: runContext.telefuncFilePath,
+  }
 
   let cancelled = false
+  let resolveCancelled!: (v: IteratorResult<Uint8Array<ArrayBuffer>>) => void
+  const cancelledPromise = new Promise<IteratorResult<Uint8Array<ArrayBuffer>>>((r) => {
+    resolveCancelled = r
+  })
   const doCancel = () => {
     if (cancelled) return
     cancelled = true
-    for (const { producer } of producers) producer.cancel()
-    gen.return(undefined)
+    resolveCancelled({ done: true, value: undefined as never })
+    producer.cancel()
   }
 
   channel.onClose(doCancel)
@@ -49,18 +77,34 @@ function buildChannelResponseBody(
       })
       await restoreContext(runContext.providedContext, () =>
         restoreRequestContext(runContext.requestContext, async () => {
-          for await (const frame of gen) {
-            if (cancelled) break
-            const pending = channel._sendBinaryAwaitable(frame)
+          const { responseAbort } = runContext.requestContext
+          while (true) {
+            const { done, value } = await Promise.race([
+              responseAbort.errorPromise,
+              cancelledPromise,
+              producer.chunks.next(),
+            ])
+            if (done || cancelled) break
+            const pending = channel._sendBinaryAwaitable(concat(TAG_DATA, value))
             if (pending) await pending
           }
         }),
       )
-    } catch {
-      // ChannelClosedError from onClose rejection or sendBinary — pump exits cleanly
+    } catch (err) {
+      if (!(err instanceof ChannelClosedError)) {
+        if (isAbort(err)) {
+          runContext.requestContext.responseAbort.abort(err.abortValue)
+        }
+        const errorFrame = concat(TAG_ERROR, encodeErrorPayload(err, telefuncId))
+        const pending = channel._sendBinaryAwaitable(errorFrame)
+        if (pending) await pending
+      }
     } finally {
       doCancel()
       channel.close()
+      onComplete?.()
     }
   })()
+
+  return channel.id
 }

@@ -1,14 +1,17 @@
-export { readableStreamServerType }
+export { readableStreamReplacer }
 
+import type { StreamingReplacerType, ReadableStreamContract, ServerReplacerContext } from '../../types.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { SERIALIZER_PREFIX_STREAM } from '../../constants.js'
-import type { ServerStreamingType, ReadableStreamContract } from '../../streaming-types.js'
-import type { ServerResponseContext } from './registry.js'
 
-const readableStreamServerType: ServerStreamingType<ReadableStreamContract, ServerResponseContext> = {
+const readableStreamReplacer: StreamingReplacerType<ReadableStreamContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_STREAM,
   detect: (value): value is ReadableStream<Uint8Array<ArrayBuffer>> => value instanceof ReadableStream,
-  getMetadata: (_value, _context) => ({}),
+  getMetadata: (value, context) => {
+    if (context.useChannelPump)
+      return { channelId: context.pumpToChannel(() => readableStreamReplacer.createProducer(value)) }
+    return { __index: context.registerStreamingValue(() => readableStreamReplacer.createProducer(value)) }
+  },
   createProducer: (value) => {
     // Acquire the reader here so cancel() can call reader.cancel() directly.
     // gen.return() alone cannot interrupt a suspended reader.read();
@@ -31,9 +34,9 @@ const readableStreamServerType: ServerStreamingType<ReadableStreamContract, Serv
     })()
     return {
       chunks,
-      cancel: () => {
+      cancel: (reason) => {
         chunks.return(undefined)
-        reader.cancel()
+        reader.cancel(reason)
       },
     }
   },

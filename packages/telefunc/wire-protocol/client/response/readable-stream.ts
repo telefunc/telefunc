@@ -1,16 +1,20 @@
-export { readableStreamClientType }
+export { readableStreamReviver }
 
+import type { ReviverType, ReadableStreamContract, ClientReviverContext } from '../../types.js'
 import { SERIALIZER_PREFIX_STREAM } from '../../constants.js'
-import type { ClientStreamingType, ReadableStreamContract } from '../../streaming-types.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 
 const globalObject = getGlobalObject('wire-protocol/client/response/readable-stream.ts', {
   gcRegistry: new FinalizationRegistry<() => void>((cancel) => cancel()),
 })
 
-const readableStreamClientType: ClientStreamingType<ReadableStreamContract> = {
+const readableStreamReviver: ReviverType<ReadableStreamContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_STREAM,
-  createValue: (_metadata, readNextChunk, cancel) => {
+  createValue: (metadata, context) => {
+    const { readNextChunk, cancel } =
+      'channelId' in metadata
+        ? context.createChannelChunkReader(metadata.channelId)
+        : context.createInlineChunkReader(metadata.__index)
     const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
       async pull(controller) {
         try {

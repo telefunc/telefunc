@@ -13,6 +13,7 @@ export type {
   ChannelListenReturn,
   ChannelListener,
   PubSubListener,
+  PubSubBinaryListener,
 }
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
@@ -38,6 +39,8 @@ type ChannelListenReturn<T> = [T] extends [never]
 type ChannelListener<T> = (data: ChannelData<T>) => ChannelListenReturn<T>
 /** Callback for `channel.subscribe()` — receives message data and publish info. */
 type PubSubListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => ChannelListenReturn<T>
+/** Callback for `channel.subscribeBinary()` — receives raw binary data and publish info. */
+type PubSubBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => void | Promise<void>
 type ChannelCloseOptions = {
   timeout?: number
 }
@@ -49,6 +52,10 @@ type KeyedChannelMethods<TOut, TIn, TKeyed extends boolean> = TKeyed extends tru
       publish(data: ChannelData<TOut>): Promise<ChannelPublishAck>
       /** Subscribe to broadcasts for the same key. Only valid when the channel was created with a key. */
       subscribe(callback: PubSubListener<TIn>): () => void
+      /** Publish raw binary data to other members sharing the same key and await the authority receipt. */
+      publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
+      /** Subscribe to binary broadcasts for the same key. Only valid when the channel was created with a key. */
+      subscribeBinary(callback: PubSubBinaryListener): () => void
     }
   : {}
 

@@ -1,10 +1,10 @@
-export { blobServerType }
+export { blobReviver }
 
+import type { BlobRequestContract, ServerReviverContext, ReviverType } from '../../types.js'
 import { SERIALIZER_PREFIX_BLOB } from '../../constants.js'
 import { LazyBlob } from './LazyFile.js'
-import type { ServerRequestType, BlobRequestContract } from '../../request-types.js'
 
-const blobServerType: ServerRequestType<BlobRequestContract> = {
+const blobReviver: ReviverType<BlobRequestContract, ServerReviverContext> = {
   prefix: SERIALIZER_PREFIX_BLOB,
-  createValue: (metadata, reader) => new LazyBlob(metadata, reader),
+  createValue: (metadata, reader) => ({ value: new LazyBlob(metadata, reader) }),
 }

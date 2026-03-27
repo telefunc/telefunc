@@ -13,6 +13,7 @@ import type {
   ChannelData,
   ChannelListener,
   ChannelPublishAck,
+  PubSubBinaryListener,
   PubSubListener,
 } from '../channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
@@ -27,12 +28,18 @@ import { createAbortError, type AbortError } from '../../shared/Abort.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { CHANNEL_BUFFER_LIMIT_BYTES, CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_CONNECT_TTL_MS } from '../constants.js'
+import {
+  CHANNEL_BUFFER_LIMIT_BYTES,
+  CHANNEL_CLOSE_TIMEOUT_MS,
+  CHANNEL_CONNECT_TTL_MS,
+  CREDIT_WINDOW_BYTES,
+} from '../constants.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { makePublishInfo } from '../channel.js'
-import { encodePublishText } from '../shared-ws.js'
+import { encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import type { AckResultStatus } from '../shared-ws.js'
+import { getRequestContext } from '../../node/server/requestContext.js'
 import { getPubSubRegistry } from './pubsub.js'
 import type { PubSubPublishResult, PubSubRegistry } from './pubsub.js'
 import type { WirePublishInfo } from '../shared-ws.js'
@@ -115,7 +122,8 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _peer: IndexedPeer | null = null
   private _listeners: Array<ChannelListener<ClientToServer>> = []
   private _pubSubListeners: Array<PubSubListener<ClientToServer>> = []
-  private _binaryListeners: Array<(data: Uint8Array) => void> = []
+  private _pubSubBinaryListeners: Array<PubSubBinaryListener> = []
+  private _binaryListeners: Array<(data: Uint8Array) => void | Promise<void>> = []
   private _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
   private _pendingAcks = new Map<
     number,
@@ -135,7 +143,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _inflightAcks = 0
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null
   private _disconnected = false
-  private _sendPaused = false
+  private _peerWindow: number = CREDIT_WINDOW_BYTES
   private _sendWaiters: Array<() => void> = []
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
@@ -143,6 +151,8 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _pendingCloseAck = false
   private _pubSubRegistry: PubSubRegistry | null = null
   private _didSubscribePubSub = false
+  private _didSubscribeBinaryPubSub = false
+  private _requestHeaders: Headers | null
 
   constructor({
     ackMode = false,
@@ -162,6 +172,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this.selfDelivery = selfDelivery
     this.id = id ?? crypto.randomUUID()
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(bufferLimit ?? globalObject.bufferLimit)
+    this._requestHeaders = getRequestContext()?.request.headers ?? null
   }
 
   get isClosed(): boolean {
@@ -239,7 +250,27 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     }
   }
 
-  listenBinary(callback: (data: Uint8Array) => void): void {
+  publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
+    assertUsage(this.key, 'Channel.publishBinary() requires createChannel({ key })')
+    this._ensurePubSub()
+    if (!this._pubSubRegistry) throw new ChannelClosedError()
+    const ret = this._trackAck(Promise.resolve(this._publishBinaryPubSub(data)))
+    ret.catch((e) => reportServerChannelError(e))
+    return ret
+  }
+
+  subscribeBinary(callback: PubSubBinaryListener): () => void {
+    assertUsage(this.key, 'Channel.subscribeBinary() requires createChannel({ key })')
+    this._ensurePubSub()
+    this._subscribeBinaryPubSub()
+    this._pubSubBinaryListeners.push(callback)
+    return () => {
+      const index = this._pubSubBinaryListeners.indexOf(callback)
+      if (index >= 0) this._pubSubBinaryListeners.splice(index, 1)
+    }
+  }
+
+  listenBinary(callback: (data: Uint8Array) => void | Promise<void>): void {
     this._binaryListeners.push(callback)
   }
 
@@ -312,6 +343,11 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   }
 
   /** @internal */
+  _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
+    return this._trackAck(this._dispatchPublishBinaryAckReq(data, seq))
+  }
+
+  /** @internal */
   _deliverPubSubMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key!, rawInfo.seq, rawInfo.ts)
     const data = parse(serialized) as ChannelData<ClientToServer>
@@ -330,21 +366,43 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._prePeerBuffer.pushPublish(wireText)
   }
 
+  /** @internal */
+  _deliverPubSubBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
+    const info = makePublishInfo(this.key!, rawInfo.seq, rawInfo.ts)
+    for (const cb of this._pubSubBinaryListeners) {
+      try {
+        cb(data, info)
+      } catch (err) {
+        if (this._handleCallbackError(err)) return
+      }
+    }
+    const wireData = encodePublishBinary(data, rawInfo)
+    if (this._peer) {
+      this._peer.sendPublishBinary(wireData)
+      return
+    }
+    this._prePeerBuffer.pushPublishBinary(wireData)
+  }
+
   _attachPeer(peer: IndexedPeer): void {
     if (this._didShutdown) return
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
     this._disconnected = false
-    this._sendPaused = false
+    this._peerWindow = CREDIT_WINDOW_BYTES
     this._peer = peer
     this._prePeerBuffer.flush(
       (msg) => peer.sendText(msg),
       (msg) => peer.sendPublish(msg),
-      (msg) => peer.sendBinary(msg),
+      (msg) => {
+        this._peerWindow -= msg.byteLength
+        peer.sendBinary(msg)
+      },
       (data, ackEntry) => {
         const seq = peer.sendTextAckReq(data)
         this._pendingAcks.set(seq, ackEntry)
       },
+      (msg) => peer.sendPublishBinary(msg),
     )
     if (this._pendingCloseAck) peer.sendCloseAck()
     if (this._awaitingCloseAck) peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
@@ -358,17 +416,20 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 
   _sendBinaryAwaitable(data: Uint8Array): void | Promise<void> {
     if (this._isClosed) throw new ChannelClosedError()
-    if (this._sendPaused || this._disconnected) return this._sendBinaryWhenReady(data)
+    if (this._peerWindow <= 0 || this._disconnected) return this._sendBinaryWhenReady(data)
     return this._sendBinaryNow(data)
   }
 
   private _sendBinaryNow(data: Uint8Array): void | Promise<void> {
-    if (this._peer) return this._peer.sendBinary(data)
+    if (this._peer) {
+      this._peerWindow -= data.byteLength
+      return this._peer.sendBinary(data)
+    }
     this._prePeerBuffer.pushBinary(data)
   }
 
   private async _sendBinaryWhenReady(data: Uint8Array): Promise<void> {
-    while ((this._sendPaused || this._disconnected) && !this._isClosed) {
+    while ((this._peerWindow <= 0 || this._disconnected) && !this._isClosed) {
       await this._waitUntilSendReady()
     }
     if (this._isClosed) throw new ChannelClosedError()
@@ -462,13 +523,25 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._shutdown()
   }
 
-  _onPeerPause(): void {
-    this._sendPaused = true
+  _onPeerWindowUpdate(bytes: number): void {
+    this._peerWindow = bytes
+    this._notifySendReady()
   }
 
-  _onPeerResume(): void {
-    this._sendPaused = false
-    this._notifySendReady()
+  _onPeerPubSubSubscribe(binary: boolean): void {
+    this._ensurePubSub()
+    if (binary) this._subscribeBinaryPubSub()
+    else this._subscribePubSub()
+  }
+
+  _onPeerPubSubUnsubscribe(binary: boolean): void {
+    if (binary) this._unsubscribeBinaryPubSub()
+    else this._unsubscribeTextPubSub()
+  }
+
+  /** Advertise free buffer space to the peer so it can unblock. */
+  _sendWindowUpdate(bytes: number): void {
+    this._peer?.sendWindowUpdate(bytes)
   }
 
   private _startClose(err?: Error): void {
@@ -543,6 +616,18 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     }
   }
 
+  private async _dispatchPublishBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
+    assert(this.key)
+    try {
+      this._ensurePubSub()
+      const result = await this._publishBinaryPubSub(data)
+      this._peer?.sendAckRes(seq, stringify(result, { forbidReactElements: false }))
+    } catch (err) {
+      if (this._handleCallbackError(err)) return
+      this._peer?.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
+    }
+  }
+
   private _trackAck<T>(promise: Promise<T>): Promise<T> {
     this._inflightAcks++
     return promise.finally(() => {
@@ -598,15 +683,42 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       id: this.id,
       key: this.key!,
       selfDelivery: this.selfDelivery,
+      headers: this._requestHeaders ?? undefined,
       onMessage: (serialized, _sourceChannelId, rawInfo) => this._deliverPubSubMessage(serialized, rawInfo),
     })
   }
 
-  private _unregisterPubSub(): void {
+  /** Register with the registry to receive binary messages. Only called from channel.subscribeBinary(). */
+  private _subscribeBinaryPubSub(): void {
+    if (this._didSubscribeBinaryPubSub) return
+    this._didSubscribeBinaryPubSub = true
+    assert(this._pubSubRegistry)
+    void this._pubSubRegistry.subscribeBinary({
+      id: this.id,
+      key: this.key!,
+      selfDelivery: this.selfDelivery,
+      headers: this._requestHeaders ?? undefined,
+      onMessage: (data, _sourceChannelId, rawInfo) => this._deliverPubSubBinaryMessage(data, rawInfo),
+    })
+  }
+
+  private _unsubscribeTextPubSub(): void {
     if (!this._didSubscribePubSub) return
     this._didSubscribePubSub = false
     assert(this._pubSubRegistry)
     void this._pubSubRegistry.unsubscribe(this.id, this.key!)
+  }
+
+  private _unsubscribeBinaryPubSub(): void {
+    if (!this._didSubscribeBinaryPubSub) return
+    this._didSubscribeBinaryPubSub = false
+    assert(this._pubSubRegistry)
+    void this._pubSubRegistry.unsubscribeBinary(this.id, this.key!)
+  }
+
+  private _unregisterPubSub(): void {
+    this._unsubscribeTextPubSub()
+    this._unsubscribeBinaryPubSub()
   }
 
   private _publishPubSub(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
@@ -618,7 +730,24 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       id: this.id,
       key: this.key!,
       selfDelivery: this.selfDelivery,
+      headers: this._requestHeaders ?? undefined,
       serialized,
+    })
+    if (isPromise(result)) return result.then(toAck)
+    return toAck(result)
+  }
+
+  private _publishBinaryPubSub(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
+    assert(this.key)
+    assert(this._pubSubRegistry)
+    const toAck = (r: PubSubPublishResult): ChannelPublishAck =>
+      Object.assign(makePublishInfo(this.key!, r.seq, r.ts), { meta: r.meta })
+    const result = this._pubSubRegistry.publishBinary({
+      id: this.id,
+      key: this.key!,
+      selfDelivery: this.selfDelivery,
+      headers: this._requestHeaders ?? undefined,
+      data,
     })
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)

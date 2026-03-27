@@ -1,18 +1,22 @@
-export { asyncGeneratorClientType }
+export { asyncGeneratorReviver }
 
+import type { ReviverType, AsyncGeneratorContract, ClientReviverContext } from '../../types.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { textDecoder } from '../../frame.js'
 import { SERIALIZER_PREFIX_GENERATOR } from '../../constants.js'
-import type { ClientStreamingType, AsyncGeneratorContract } from '../../streaming-types.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 
 const globalObject = getGlobalObject('wire-protocol/client/response/async-generator.ts', {
   gcRegistry: new FinalizationRegistry<() => void>((cancel) => cancel()),
 })
 
-const asyncGeneratorClientType: ClientStreamingType<AsyncGeneratorContract> = {
+const asyncGeneratorReviver: ReviverType<AsyncGeneratorContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_GENERATOR,
-  createValue: (_metadata, readNextChunk, cancel) => {
+  createValue: (metadata, context) => {
+    const { readNextChunk, cancel } =
+      'channelId' in metadata
+        ? context.createChannelChunkReader(metadata.channelId)
+        : context.createInlineChunkReader(metadata.__index)
     const gen = (async function* () {
       try {
         while (true) {

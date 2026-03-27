@@ -29,6 +29,10 @@ type SimpleType<T, Acc extends any[] = []> = Equals<T, string> extends true
   ? ShieldRes<'__telefunc_t.file', Acc>
   : Equals<T, Blob> extends true
   ? ShieldRes<'__telefunc_t.blob', Acc>
+  : Equals<T, ReadableStream<Uint8Array>> extends true
+  ? ShieldRes<'__telefunc_t.readableStream', Acc>
+  : Equals<T, ReadableStream> extends true
+  ? ShieldRes<'__telefunc_t.readableStream', Acc>
   : Equals<T, any> extends true
   ? ShieldRes<'__telefunc_t.any', Acc>
   : false

@@ -23,17 +23,18 @@ function executeTelefunction(runContext: {
       const { telefunction, telefunctionArgs } = runContext
 
       let telefunctionReturn: unknown
-      let telefunctionError: unknown
+      let telefunctionTopLevelError: unknown
       let telefunctionHasErrored = false
       let telefunctionAborted = false
-      const onError = (err: unknown) => {
+      const onTopLevelError = (err: unknown) => {
         validateTelefunctionError(err, runContext)
         if (isAbort(err)) {
           telefunctionAborted = true
           telefunctionReturn = err.abortValue
+          runContext.requestContext.responseAbort.abort(err.abortValue)
         } else {
           telefunctionHasErrored = true
-          telefunctionError = err
+          telefunctionTopLevelError = err
         }
       }
 
@@ -41,7 +42,7 @@ function executeTelefunction(runContext: {
       try {
         resultSync = telefunction.apply(null, telefunctionArgs)
       } catch (err: unknown) {
-        onError(err)
+        onTopLevelError(err)
       }
 
       if (!telefunctionHasErrored && !telefunctionAborted) {
@@ -53,14 +54,14 @@ function executeTelefunction(runContext: {
           try {
             telefunctionReturn = await resultSync
           } catch (err: unknown) {
-            onError(err)
+            onTopLevelError(err)
           }
         } else {
           telefunctionReturn = resultSync
         }
       }
 
-      return { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionError }
+      return { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionTopLevelError }
     }),
   )
 }

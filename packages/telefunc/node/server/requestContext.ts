@@ -25,6 +25,10 @@ type RequestContext = {
   abortSignal: AbortSignal
   /** Response-wide abort source used by returned values and response transports. */
   responseAbort: ResponseAbortSource
+  /** Fires when the telefunction throws (or has already thrown) at the top level. */
+  onTopLevelError: (cb: () => void) => void
+  /** @internal Called by the framework after executeTelefunction catches a top-level throw. */
+  markTopLevelError: () => void
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onClose: (cb: () => void) => void
@@ -53,10 +57,31 @@ function createRequestContext(request: Request): RequestContext {
     closeCallbacks.length = 0
   }
 
+  const errorCallbacks: Array<() => void> = []
+  let errored = false
+  const fireError = () => {
+    if (errored) return
+    errored = true
+    for (const cb of errorCallbacks) {
+      try {
+        cb()
+      } catch {}
+    }
+    errorCallbacks.length = 0
+  }
+
   const ctx: RequestContext = {
     request,
     abortSignal: request.signal,
     responseAbort,
+    onTopLevelError(cb) {
+      if (errored) {
+        cb()
+        return
+      }
+      errorCallbacks.push(cb)
+    },
+    markTopLevelError: fireError,
     onClose(cb) {
       if (closed) {
         cb()

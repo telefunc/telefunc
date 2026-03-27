@@ -101,7 +101,7 @@ function createBasicBinding(
     get(id: { name: string }) {
       return {
         telefuncPubSubPublish(request: any) {
-          return overrides?.onPublish?.(id, request) ?? Promise.resolve()
+          return overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, ts: Date.now() })
         },
         telefuncPubSubDeliver(request: any) {
           return overrides?.onDeliver?.(id, request) ?? Promise.resolve()
@@ -282,10 +282,11 @@ describe('cloudflare pubsub routing', () => {
         }),
       ),
       async () => {
-        transport.subscribe({ id: 'member-1', key: 'room:test', selfDelivery: true, onMessage() {} })
+        const headers = new Headers({ 'x-telefunc-shard': 'telefunc-shard-weur-0', 'x-telefunc-pubsub-bucket': 'weur' })
+        transport.subscribe({ id: 'member-1', key: 'room:test', selfDelivery: true, headers, onMessage() {} })
         await flushMicrotasks()
 
-        // KV should have a presence entry
+        // KV should have a presence record
         const value = await kv.get(`tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`)
         expect(value).toBe('1')
       },
@@ -352,7 +353,7 @@ describe('cloudflare pubsub routing', () => {
       createBasicBinding({
         onPublish(id, request) {
           publishTargets.push(id.name)
-          return Promise.resolve()
+          return Promise.resolve({ seq: 1, ts: Date.now() })
         },
       }),
       'TelefuncDurableObject',
@@ -589,7 +590,7 @@ describe('cloudflare pubsub routing', () => {
       createBasicBinding({
         onPublish(id, { key, locationBucket, serialized }) {
           coordinatorPublishes.push({ name: id.name, key, locationBucket, serialized })
-          return Promise.resolve()
+          return Promise.resolve({ seq: 1, ts: Date.now() })
         },
       }),
       'TelefuncDurableObject',
@@ -639,7 +640,7 @@ describe('cloudflare pubsub routing', () => {
       const channel = createChannel<{ text: string }, { text: string }>({ key: 'room:test:pure-publisher' })
 
       expect(() => channel.publish({ text: 'hello' })).toThrow(
-        'Cloudflare keyed pub/sub requires request context. Enable Workers AsyncLocalStorage with compatibility_flags: ["nodejs_als"].',
+        'Ensure createChannel() is called before any `await` in the telefunc, or enable `"nodejs_als"` in your compatibility flags. See https://telefunc.com/getContext#access',
       )
     })
     setPubSubRegistry(previousTransport)
@@ -739,7 +740,8 @@ describe('cloudflare pubsub routing', () => {
         }),
       ),
       async () => {
-        transport.subscribe({ id: 'member-1', key: 'room:test', selfDelivery: true, onMessage() {} })
+        const headers = new Headers({ 'x-telefunc-shard': 'telefunc-shard-weur-0', 'x-telefunc-pubsub-bucket': 'weur' })
+        transport.subscribe({ id: 'member-1', key: 'room:test', selfDelivery: true, headers, onMessage() {} })
         await flushMicrotasks()
 
         const presenceKey = `tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`

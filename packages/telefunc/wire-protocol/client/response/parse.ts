@@ -6,15 +6,16 @@ import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { createStreamingReviver } from './registry.js'
+import type { ClientReviverContext } from '../../types.js'
 import { setAbortController } from '../../../client/abort.js'
 import { setCloseHandlers } from '../../../client/close.js'
-import { makeAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
+import { makeAbortError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
-import { ChannelStreamReader } from './ChannelStreamReader.js'
 import { ClientChannel } from '../channel.js'
-import { extractFrameChannel } from '../../frame-channel.js'
+import { ChannelChunkReader } from '../../ChannelChunkReader.js'
+import { STREAMING_ERROR_TYPE } from '../../constants.js'
 import type { ChannelTransports } from '../../constants.js'
 
 // ===== Types =====
@@ -36,8 +37,7 @@ type CallContext = {
  *
  *  - `application/octet-stream` → HTTP binary stream
  *  - `text/event-stream`        → SSE stream
- *  - text with `__frameChannel` → WS streaming
- *  - text without               → plain (placeholder-only) */
+ *  - text                       → plain or channel-pump streaming */
 async function parseResponse(response: Response, callContext: CallContext, sessionToken?: string): Promise<unknown> {
   const transports = callContext.channel.transports
   const contentType = response.headers.get('content-type') ?? ''
@@ -48,104 +48,84 @@ async function parseResponse(response: Response, callContext: CallContext, sessi
     assert(response.body)
     const reader = response.body.getReader()
     const isSSE = contentType.includes('text/event-stream')
-    const streamReader = isSSE ? new SSEStreamReader(reader, callContext) : new StreamReader(reader, callContext)
+    const streamReader = isSSE
+      ? //
+        new SSEStreamReader(reader, callContext)
+      : new StreamReader(reader, callContext)
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
     const metaText = new TextDecoder().decode(metaBytes)
-    return reviveStreamingResponse(metaText, callContext, streamReader, transports, sessionToken)
+    return reviveResponse(metaText, callContext, transports, sessionToken, streamReader)
   }
 
-  // Text response: channel streaming or plain
+  // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
   const body = await response.text()
-  const frameChannel = extractFrameChannel(body)
-  if (frameChannel) {
-    const channel = new ClientChannel({
-      channelId: frameChannel.metadata.channelId,
-      transports,
-      sessionToken,
-      defer: false,
-    })
-    const streamReader = new ChannelStreamReader(channel, callContext)
-    return reviveStreamingResponse(frameChannel.strippedBody, callContext, streamReader, transports, sessionToken)
-  }
-  return revivePlainResponse(body, callContext, transports, sessionToken)
+  return reviveResponse(body, callContext, transports, sessionToken, null)
 }
 
-// ===== Streaming response (HTTP / WS) =====
+// ===== Response revival =====
 
-/** Revive a response that contains streaming values (generators, streams, promises).
- *
- *  The demuxer is created before parse — this is required because some
- *  streaming types (e.g. Promise) eagerly read chunks inside `createValue`. */
-function reviveStreamingResponse(
-  metadataText: string,
-  callContext: CallContext,
-  streamReader: BaseStreamReader,
-  transports: ChannelTransports,
-  sessionToken?: string,
-): unknown {
-  const demuxer = new FrameDemuxer(streamReader)
-
-  const getChunkReader = (index: number) => {
-    demuxer.registerConsumer()
-    return () => demuxer.readNextChunkForIndex(index)
-  }
-  const getCancelIndex = (index: number) => () => demuxer.cancelIndex(index)
-
-  const { reviver, channels, closeHandlers } = createStreamingReviver(
-    getChunkReader,
-    getCancelIndex,
-    transports,
-    sessionToken,
-  )
-  const parsed: unknown = parse(metadataText, { reviver })
-  if (!isObject(parsed)) return parsed
-
-  return finalizeResponse(parsed, channels, closeHandlers, callContext)
-}
-
-// ===== Plain text response =====
-
-/** Revive a non-streaming response. Only placeholder types (e.g. Channel) are revived. */
-function revivePlainResponse(
+function reviveResponse(
   body: string,
   callContext: CallContext,
   transports: ChannelTransports,
-  sessionToken?: string,
+  sessionToken: string | undefined,
+  bodyStreamReader: BaseStreamReader | null,
 ): unknown {
-  const unreachable = (): never => {
-    assert(false, 'Unexpected streaming value in plain response')
-  }
-  const { reviver, channels, closeHandlers } = createStreamingReviver(
-    () => unreachable,
-    () => unreachable,
-    transports,
+  const closeHandlers = new WeakMap<object, () => void>()
+
+  let demuxer: FrameDemuxer | null = null
+
+  const context: ClientReviverContext = {
+    channelTransports: transports,
     sessionToken,
+    registerChannel(channel) {
+      callContext.abortController.signal.addEventListener(
+        'abort',
+        () => {
+          const abortError = makeAbortError(undefined, callContext)
+          channel._abortLocally(abortError.abortValue, abortError.message)
+        },
+        { once: true },
+      )
+    },
+    createInlineChunkReader(index) {
+      assert(bodyStreamReader, 'Unexpected createInlineChunkReader call in non-streaming response')
+      demuxer ??= new FrameDemuxer(bodyStreamReader)
+      demuxer.registerConsumer()
+      return {
+        readNextChunk: () => demuxer!.readNextChunkForIndex(index),
+        cancel: () => demuxer!.cancelIndex(index),
+      }
+    },
+    createChannelChunkReader(channelId) {
+      const channel = new ClientChannel({ channelId, transports, sessionToken, defer: false })
+      // Register so abort(res) propagates to pump channels.
+      context.registerChannel(channel)
+      return ChannelChunkReader.create(
+        //
+        channel,
+        function throwError(errorPayload) {
+          if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT && 'abortValue' in errorPayload) {
+            throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, errorPayload.abortValue)
+          }
+          throwBugError()
+        },
+      )
+    },
+  }
+
+  const reviver = createStreamingReviver(
+    //
+    context,
+    function onRevived(revived) {
+      if (!revived.close) return
+      assert(isObjectOrFunction(revived.value))
+      closeHandlers.set(revived.value, revived.close)
+    },
   )
   const parsed: unknown = parse(body, { reviver })
   if (!isObject(parsed)) return parsed
-
-  return finalizeResponse(parsed, channels, closeHandlers, callContext)
-}
-
-// ===== Shared cleanup =====
-
-function finalizeResponse(
-  parsed: Record<string, unknown>,
-  channels: ClientChannel[],
-  closeHandlers: WeakMap<object, () => void>,
-  callContext: CallContext,
-): Record<string, unknown> {
-  if (channels.length > 0) {
-    callContext.abortController.signal.addEventListener(
-      'abort',
-      () => {
-        const abortError = makeAbortError(undefined, callContext)
-        for (const ch of channels) ch._abortLocally(abortError.abortValue, abortError.message)
-      },
-      { once: true },
-    )
-  }
 
   const { ret } = parsed
   if (isObjectOrFunction(ret)) {

@@ -27,10 +27,22 @@ function decodeU32(buf: Uint8Array<ArrayBuffer>, offset = 0): number {
   return new DataView(buf.buffer, buf.byteOffset + offset, U32_SIZE).getUint32(0, false)
 }
 
-function concat(a: Uint8Array<ArrayBuffer>, b: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-  const result = new Uint8Array(a.length + b.length)
-  result.set(a, 0)
-  result.set(b, a.length)
+function concat(...parts: Uint8Array<ArrayBuffer>[]): Uint8Array<ArrayBuffer> {
+  if (parts.length === 2) {
+    const [a, b] = parts as [Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>]
+    const result = new Uint8Array(a.length + b.length)
+    result.set(a, 0)
+    result.set(b, a.length)
+    return result
+  }
+  let total = 0
+  for (const p of parts) total += p.length
+  const result = new Uint8Array(total)
+  let offset = 0
+  for (const p of parts) {
+    result.set(p, offset)
+    offset += p.length
+  }
   return result
 }
 

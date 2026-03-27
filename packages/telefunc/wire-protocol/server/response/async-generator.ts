@@ -1,16 +1,19 @@
-export { asyncGeneratorServerType }
+export { asyncGeneratorReplacer }
 
+import type { StreamingReplacerType, AsyncGeneratorContract, ServerReplacerContext } from '../../types.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { isAsyncGenerator } from '../../../utils/isAsyncGenerator.js'
 import { textEncoder } from '../../frame.js'
 import { SERIALIZER_PREFIX_GENERATOR } from '../../constants.js'
-import type { ServerStreamingType, AsyncGeneratorContract } from '../../streaming-types.js'
-import type { ServerResponseContext } from './registry.js'
 
-const asyncGeneratorServerType: ServerStreamingType<AsyncGeneratorContract, ServerResponseContext> = {
+const asyncGeneratorReplacer: StreamingReplacerType<AsyncGeneratorContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_GENERATOR,
   detect: (value): value is AsyncGenerator<unknown> => isAsyncGenerator(value),
-  getMetadata: (_value, _context) => ({}),
+  getMetadata: (value, context) => {
+    if (context.useChannelPump)
+      return { channelId: context.pumpToChannel(() => asyncGeneratorReplacer.createProducer(value)) }
+    return { __index: context.registerStreamingValue(() => asyncGeneratorReplacer.createProducer(value)) }
+  },
   createProducer: (value) => {
     const chunks = (async function* () {
       try {

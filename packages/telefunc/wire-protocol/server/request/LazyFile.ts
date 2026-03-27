@@ -3,7 +3,7 @@ export { LazyFile }
 export { isLazyBlob }
 export { isLazyFile }
 
-import type { RequestBodyReader, FileMetadata, BlobMetadata } from '../../request-types.js'
+import type { ServerReviverContext, FileMetadata, BlobMetadata } from '../../types.js'
 import { assertUsage } from '../../../utils/assert.js'
 
 const LAZY_BLOB_BRAND = Symbol.for('telefunc.LazyBlob')
@@ -76,11 +76,11 @@ class LazyBlob extends BaseStreamBlob {
   readonly type: string
   readonly [LAZY_BLOB_BRAND] = true
 
-  #reader: RequestBodyReader
+  #reader: ServerReviverContext
   #index: number
   #consumed = false
 
-  constructor(metadata: BlobMetadata, reader: RequestBodyReader) {
+  constructor(metadata: BlobMetadata, reader: ServerReviverContext) {
     super()
     this.#reader = reader
     this.#index = metadata.index
@@ -170,7 +170,7 @@ class LazyFile extends LazyBlob implements File {
   readonly webkitRelativePath: string = ''
   readonly [LAZY_FILE_BRAND] = true
 
-  constructor(metadata: FileMetadata, reader: RequestBodyReader) {
+  constructor(metadata: FileMetadata, reader: ServerReviverContext) {
     super(metadata, reader)
     this.name = metadata.name
     this.lastModified = metadata.lastModified

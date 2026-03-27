@@ -1,9 +1,9 @@
-export { fileClientType }
+export { fileReplacer }
 
+import type { FileRequestContract, ClientReplacerContext, ReplacerType } from '../../types.js'
 import { SERIALIZER_PREFIX_FILE } from '../../constants.js'
-import type { ClientRequestType, FileRequestContract } from '../../request-types.js'
 
-const fileClientType: ClientRequestType<FileRequestContract> = {
+const fileReplacer: ReplacerType<FileRequestContract, ClientReplacerContext> = {
   prefix: SERIALIZER_PREFIX_FILE,
   detect: (value: unknown): value is File => value instanceof File,
   getMetadata: (value, context) => {

@@ -1,14 +1,14 @@
-export { channelClientPlaceholderType }
+export { channelReviver }
 
+import type { ChannelContract, ClientReviverContext, ReviverType } from '../../types.js'
 import { SERIALIZER_PREFIX_CHANNEL } from '../../constants.js'
-import type { PlaceholderReviverType, ChannelContract } from '../../placeholder-types.js'
 import { ClientChannel } from '../channel.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 const globalObject = getGlobalObject('wire-protocol/client/response/channel.ts', {
   gcRegistry: new FinalizationRegistry<ClientChannel>((channel) => channel.close()),
 })
 
-const channelClientPlaceholderType: PlaceholderReviverType<ChannelContract> = {
+const channelReviver: ReviverType<ChannelContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_CHANNEL,
   createValue(metadata, context) {
     const channel = new ClientChannel({
@@ -18,6 +18,11 @@ const channelClientPlaceholderType: PlaceholderReviverType<ChannelContract> = {
       transports: context.channelTransports,
       sessionToken: context.sessionToken,
     })
+    // Proxy so `value` and `channel` are separate objects. This allows
+    // FinalizationRegistry to detect when the user drops `value` (the public
+    // handle) while `channel` (the internal transport peer) stays alive.
+    // If we returned `channel` directly, the GC callback would never fire
+    // because `channel` is held by the transport connection.
     const value = new Proxy({} as ClientChannel, {
       get(_target, prop) {
         const property = Reflect.get(channel, prop, channel)

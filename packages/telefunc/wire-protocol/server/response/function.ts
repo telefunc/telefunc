@@ -1,13 +1,13 @@
-export { functionServerPlaceholderType }
+export { functionReplacer }
 
+import type { FunctionContract, ReplacerType, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_FUNCTION } from '../../constants.js'
-import type { PlaceholderReplacerType, FunctionContract } from '../../placeholder-types.js'
-import type { ServerResponseContext } from './registry.js'
+
 import { ServerChannel } from '../channel.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
-const functionServerPlaceholderType: PlaceholderReplacerType<FunctionContract, ServerResponseContext> = {
+const functionReplacer: ReplacerType<FunctionContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
   detect(value): value is FunctionContract['value'] {
     return typeof value === 'function'

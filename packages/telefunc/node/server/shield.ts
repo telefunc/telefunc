@@ -317,6 +317,13 @@ const type = (() => {
     verifier.toString = () => 'blob'
     return verifier as any
   })()
+  const readableStream = ((): ReadableStream => {
+    const verifier = (input: unknown, breadcrumbs: string) =>
+      input instanceof ReadableStream ? true : errorMessage(breadcrumbs, getTypeName(input), 'readableStream')
+    markVerifier(verifier)
+    verifier.toString = () => 'readableStream'
+    return verifier as any
+  })()
   const function_ = ((): Function => {
     const verifier = (input: unknown, breadcrumbs: string) =>
       isCallable(input) ? true : errorMessage(breadcrumbs, getTypeName(input), 'function')
@@ -338,6 +345,7 @@ const type = (() => {
     date,
     file,
     blob,
+    readableStream,
     function: function_,
     array,
     object,
@@ -393,6 +401,9 @@ function getTypeName(thing: unknown): string {
     }
     if (isLazyBlob(thing)) {
       return 'blob'
+    }
+    if (thing instanceof ReadableStream) {
+      return 'readableStream'
     }
     if (Array.isArray(thing)) {
       return 'array'

@@ -323,18 +323,22 @@ async function runTelefunc_({
 
   {
     assert(runContext.isValidRequest)
-    const { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionError } =
+    const { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionTopLevelError } =
       await executeTelefunction(runContext)
     objectAssign(runContext, {
       telefunctionReturn,
       telefunctionHasErrored,
       telefunctionAborted,
-      telefunctionError,
+      telefunctionTopLevelError,
     })
   }
 
+  if (runContext.telefunctionHasErrored || runContext.telefunctionAborted) {
+    runContext.requestContext.markTopLevelError()
+  }
+
   if (runContext.telefunctionHasErrored) {
-    throw runContext.telefunctionError
+    throw runContext.telefunctionTopLevelError
   }
 
   {

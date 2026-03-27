@@ -9,9 +9,12 @@ const nav = [
   { href: '/streaming', label: 'Streaming' },
   { href: '/file-upload', label: 'Upload' },
   { href: '/abort', label: 'Abort' },
+  { href: '/close', label: 'Close' },
   { href: '/chat', label: 'Chat' },
   { href: '/channel', label: 'Channel' },
   { href: '/function', label: 'Function' },
+  { href: '/stream-to-server', label: 'Stream→Server' },
+  { href: '/publish', label: 'Publish' },
   { href: '/kitchen-sink', label: 'Kitchen Sink' },
 ]
 

@@ -8,6 +8,7 @@ import { testAbort } from './pages/abort/e2e-test'
 import { testClose } from './pages/close/e2e-test'
 import { testChannel } from './pages/channel/e2e-test'
 import { testFunction } from './pages/function/e2e-test'
+import { testStreamToServer } from './pages/stream-to-server/e2e-test'
 
 function testRun(cmd: 'npm run dev' | 'npm run preview') {
   run(cmd, {
@@ -21,8 +22,9 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('The user aborted a request') ||
         log.logText.includes('Telefunc call cancelled') ||
-        // Expected during reconnect test: WS fails while browser context is offline
         log.logText.includes('ERR_INTERNET_DISCONNECTED') ||
+        log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
+        log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
         (log.logText.includes('WebSocket connection to') && log.logText.includes('failed'))
       )
     },
@@ -60,6 +62,8 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
   testChannel(isDev)
 
   testFunction()
+
+  testStreamToServer()
 
   if (!isDev) {
     test('shield() generation', async () => {

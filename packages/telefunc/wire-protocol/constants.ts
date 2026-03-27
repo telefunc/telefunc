@@ -8,8 +8,11 @@ export const SERIALIZER_PREFIX_FUNCTION = '!TelefuncFunction:'
 
 // ===== WS transport =====
 
-/** JSON key for the frame channel injected into WS transport responses. */
-export const FRAME_CHANNEL_KEY = '__frameChannel'
+// ===== Channel pump frame tags =====
+
+/** 1-byte tag prefixed to every binary send in per-channel streaming pumps. */
+export const CHANNEL_PUMP_TAG_DATA = 0x00
+export const CHANNEL_PUMP_TAG_ERROR = 0x01
 
 // ===== Streaming error frames =====
 
@@ -103,6 +106,16 @@ export const CHANNEL_CONNECT_TTL_MS = 5_000
 // Client-side channel reconnect defaults
 export const CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500
 export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
+
+// ===== Credit-based flow control =====
+
+/** Maximum bytes in flight before the sender blocks.
+ *
+ *  Must exceed the bandwidth-delay product of the connection to avoid stalls.
+ *  16 MB covers up to ~1 Gbit/s at 100 ms RTT or ~430 Mbit/s at 300 ms RTT. */
+export const CREDIT_WINDOW_BYTES = 16 * 1024 * 1024
+/** Receiver sends a window update once it has consumed this many bytes since the last update. */
+export const WINDOW_UPDATE_THRESHOLD_BYTES = 2 * 1024 * 1024
 
 // ===== Session routing =====
 
