@@ -20,6 +20,7 @@ type ParseResult =
       telefunctionKey: string
       telefunctionArgs: unknown[]
       streamTransport: StreamTransport
+      requestExtensions: Record<string, Record<string, unknown>>
       isSseRequest: false
       isMalformedRequest: false
     }
@@ -130,12 +131,19 @@ function parseTelefuncPayload(
       parsed.stream.transport === STREAM_TRANSPORT.CHANNEL)
       ? parsed.stream.transport
       : (runContext.serverConfig?.stream.transport ?? STREAM_TRANSPORT.BINARY_INLINE)
+
+  const requestExtensions: Record<string, Record<string, unknown>> = hasProp(parsed, 'extensions', 'object') &&
+  parsed.extensions !== null
+    ? (parsed.extensions as Record<string, Record<string, unknown>>)
+    : {}
+
   return {
     telefuncFilePath: parsed.file,
     telefunctionName: parsed.name,
     telefunctionKey,
     telefunctionArgs: parsed.args,
     streamTransport,
+    requestExtensions,
     isSseRequest: false,
     isMalformedRequest: false,
   }

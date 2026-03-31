@@ -1,6 +1,6 @@
 export { onMixedForClose, onCloseGen, onCloseStream, onCloseChannel, onCloseFn }
 
-import { createChannel } from 'telefunc'
+import { channel } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -38,12 +38,12 @@ async function onCloseStream(): Promise<ReadableStream<Uint8Array>> {
 }
 
 async function onCloseChannel() {
-  const channel = createChannel<never, never>()
+  const ch = channel<never, never>()
   cleanupState.closeChannel_onCloseErr = 'pending'
-  channel.onClose((err) => {
+  ch.onClose((err) => {
     cleanupState.closeChannel_onCloseErr = err ? ((err as any).message ?? 'error') : 'none'
   })
-  return channel.client
+  return ch.client
 }
 
 async function onCloseFn(callback: () => void) {
@@ -97,9 +97,9 @@ async function onMixedForClose(callback: (msg: string) => void) {
   })
 
   // Channel — close(result) closes it cleanly; onClose tracks no-error close
-  const channel = createChannel<never, never>()
+  const ch = channel<never, never>()
   cleanupState.closeMixed_channel_onCloseErr = 'pending'
-  channel.onClose((err) => {
+  ch.onClose((err) => {
     cleanupState.closeMixed_channel_onCloseErr = err ? ((err as any).message ?? 'error') : 'none'
   })
 
@@ -108,5 +108,5 @@ async function onMixedForClose(callback: (msg: string) => void) {
     cleanupState.closeMixed_retFnCalled = 'true'
   }
 
-  return { generator, stream, channel: channel.client, fn }
+  return { generator, stream, channel: ch.client, fn }
 }

@@ -1,0 +1,41 @@
+{
+  "name": "@telefunc/tanstack-query",
+  "version": "0.1.0",
+  "description": "Live queries for TanStack Query — server-side invalidation that automatically refetches connected clients.",
+  "homepage": "https://github.com/brillout/telefunc/tree/main/packages/tanstack-query#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brillout/telefunc.git",
+    "directory": "packages/tanstack-query"
+  },
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/client.d.ts",
+      "browser": "./dist/client.js",
+      "default": "./dist/client.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "worker": "./dist/server.js",
+      "default": "./dist/server.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --watch"
+  },
+  "peerDependencies": {
+    "telefunc": ">=0.2.0",
+    "@tanstack/query-core": ">=5.0.0"
+  },
+  "devDependencies": {
+    "telefunc": "workspace:*",
+    "@tanstack/query-core": "^5.0.0",
+    "typescript": "^5.9.2"
+  }
+}

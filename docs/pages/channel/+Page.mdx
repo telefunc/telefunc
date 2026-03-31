@@ -1,0 +1,368 @@
+import { Link } from '@brillout/docpress'
+
+**Environment**: server.
+
+Telefunc provides two primitives for real-time communication:
+
+| Primitive | Methods | Use case |
+|---|---|---|
+| **`channel()`** | `send()` / `listen()` | Direct messages between one server and one client — commands, acks, request-response over a persistent connection. |
+| **`pubsub()`** | `publish()` / `subscribe()` | Broadcast to all subscribers sharing a key — chat rooms, live feeds, collaborative editing. |
+
+Return either from a telefunction — they serialize into client-side objects automatically.
+
+By default, channels and pubsub use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background. See <Link href="/transport" />.
+
+> For short-lived callbacks (e.g. progress updates), <Link href="/real-time">function passing</Link> is usually simpler.
+
+
+## channel()
+
+```ts
+import { channel } from 'telefunc'
+
+const ch = channel<ClientToServer, ServerToClient>()
+return { channel: ch.client }
+```
+
+### Methods
+
+| Method | Description |
+|---|---|
+| `send(data)` | Send a message. |
+| `send(data, { ack: true })` | Send and await acknowledgement. |
+| `listen(cb)` | Receive messages. Return a value to ack. |
+| `sendBinary(data)` / `listenBinary(cb)` | Binary data (`Uint8Array`). |
+| `onOpen(cb)` / `onClose(cb)` | Lifecycle callbacks. |
+| `close()` | Close gracefully. |
+| `abort(value?)` | Terminate immediately. |
+
+Server: return `ch.client` from the telefunction. The client gets the same API with message directions flipped.
+
+
+### TypeScript
+
+`channel<ClientToServer, ServerToClient>()` takes two generic type parameters. Each is a function signature:
+- The **argument** is the message type.
+- The **return type** is the acknowledgement type (`void` if no ack).
+
+```ts
+// Room.telefunc.ts
+// Environment: server
+
+import { channel } from 'telefunc'
+
+type ServerMessage =
+  | { type: 'system'; text: string }
+  | { type: 'chat'; text: string }
+
+type ClientMessage =
+  | { type: 'join'; roomId: string }
+  | { type: 'chat'; text: string }
+
+type ClientToServer = (message: ClientMessage) => { accepted: true }
+type ServerToClient = (message: ServerMessage) => { delivered: true }
+
+export async function onJoinRoom() {
+  const ch = channel<ClientToServer, ServerToClient>({ ack: true })
+
+  ch.listen((message) => {
+    if (message.type === 'join') {
+      ch.send({ type: 'system', text: `Joined ${message.roomId}` })
+      return { accepted: true }
+    }
+    ch.send({ type: 'chat', text: `echo: ${message.text}` })
+    return { accepted: true }
+  })
+
+  return { channel: ch.client }
+}
+```
+
+```ts
+// Room.tsx
+// Environment: client
+
+import { onJoinRoom } from './Room.telefunc'
+
+const { channel } = await onJoinRoom()
+
+channel.listen((message) => {
+  console.log(message.text)
+  return { delivered: true }
+})
+
+const ack = await channel.send({ type: 'join', roomId: 'general' })
+ack.accepted // true
+```
+
+On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `ch.client` type swaps the directions.
+
+
+### Acknowledgements
+
+#### Channel-wide
+
+```ts
+const ch = channel<ClientToServer, ServerToClient>({ ack: true })
+
+// Every send() now returns a Promise with the listener's return value
+const ack = await ch.send({ type: 'status', text: 'OK' })
+```
+
+#### Per-send
+
+```ts
+const ch = channel<ClientToServer, ServerToClient>()
+
+// Opt in for a single send
+const ack = await ch.send(data, { ack: true })
+
+// On an ack-default channel, opt out for a single send
+ch.send(data, { ack: false }) // void, not Promise
+```
+
+
+### Binary data
+
+Send and receive raw binary alongside structured messages:
+
+```ts
+// Server
+ch.sendBinary(new Uint8Array([1, 2, 3]))
+ch.listenBinary((data) => {
+  console.log(data.byteLength)
+})
+
+// Client — same API
+channel.sendBinary(new Uint8Array(buffer))
+channel.listenBinary((data) => {
+  console.log(data.byteLength)
+})
+```
+
+
+## pubsub()
+
+Use `pubsub()` for broadcast messaging. All pubsub instances sharing a key form a broadcast group.
+
+```ts
+import { pubsub } from 'telefunc'
+
+const ps = pubsub<ChatMessage>('chat:lobby')
+return ps
+```
+
+Return the pubsub instance directly from a telefunction — no `.client` needed (unlike channels, pubsub has no directional type flip).
+
+### Chat example
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+import { pubsub } from 'telefunc'
+
+type ChatMessage = { user: string; text: string }
+
+export async function onJoinChat(username: string) {
+  const ps = pubsub<ChatMessage>('chat:lobby')
+
+  ps.onOpen(() => {
+    ps.publish({ user: 'system', text: `${username} joined`, })
+  })
+
+  ps.onClose(() => {
+    ps.publish({ user: 'system', text: `${username} left`, })
+  })
+
+  return ps
+}
+```
+
+```ts
+// Chat.tsx
+// Environment: client
+
+import { onJoinChat } from './Chat.telefunc'
+
+const ps = await onJoinChat('Alice')
+
+// Receive messages published by other instances with the same key
+ps.subscribe((msg, info) => {
+  console.log(`#${info.seq} ${msg.user}: ${msg.text}`)
+})
+
+// Publish to all other instances with the same key
+ps.publish({ user: 'Alice', text: 'Hello!', })
+```
+
+### Server-only pub/sub
+
+Use the static methods for server-side-only pub/sub — no client, no lifecycle:
+
+```ts
+import { pubsub } from 'telefunc'
+
+// Fire-and-forget publish
+pubsub.publish('room:lobby', { text: 'Hello!' })
+
+// Server-only subscription
+const unsub = pubsub.subscribe('room:lobby', (msg, info) => {
+  console.log(msg, info.seq)
+})
+```
+
+### API
+
+| Method | Description |
+|---|---|
+| `publish(data)` | Send to all subscribers with the same key. Returns a receipt. |
+| `subscribe(cb)` | Receive `(data, info)`. Returns an unsubscribe function. |
+| `publishBinary(data)` | Send raw binary to all subscribers. Returns a receipt. |
+| `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
+
+Both `publish` and `subscribe` share the same `info` object:
+
+```ts
+info.key  // 'chat:lobby' — the pubsub key
+info.seq  // monotonic sequence number for this key
+info.ts   // server timestamp
+```
+
+`publish()` returns a `Promise` that resolves to `info` once the message is accepted. `subscribe()` receives `info` alongside each message — useful for ordering and gap detection.
+
+> In-memory pub/sub works out of the box for single-server deployments. For multi-server, set `config.pubsub.adapter` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
+
+
+## Multi-server
+
+By default, pub/sub is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, set `config.pubsub.adapter`:
+
+```ts
+// Environment: server
+
+import { config } from 'telefunc'
+import Redis from 'ioredis'
+
+const pub = new Redis()
+const sub = new Redis()
+
+config.pubsub.adapter = {
+  subscribe(key, deliver) {
+    sub.subscribe(key)
+    sub.on('message', (ch, msg) => {
+      if (ch === key) deliver(msg, { seq: 0, ts: Date.now() })
+    })
+    return () => { sub.unsubscribe(key) }
+  },
+  subscribeBinary(key, deliver) {
+    // Binary subscriptions if needed
+    return () => {}
+  },
+  async publish(key, message) {
+    const [, seq] = await pub
+      .multi()
+      .publish(key, message)
+      .incr(`telefunc:seq:${key}`)
+      .exec()
+    return { seq: seq[1] as number }
+  },
+  async publishBinary(key, data) {
+    return { seq: 0 }
+  },
+}
+```
+
+### Adapter interface
+
+```ts
+type PubSubAdapter = {
+  subscribe(key: string, onMessage: (message: string, info: PubSubInfo) => void): () => void
+  publish(key: string, message: string): PubSubResult | Promise<PubSubResult>
+  subscribeBinary(key: string, onMessage: (data: Uint8Array, info: PubSubInfo) => void): () => void
+  publishBinary(key: string, data: Uint8Array): PubSubResult | Promise<PubSubResult>
+}
+
+type PubSubInfo = { seq: number; ts: number }
+type PubSubResult = { seq?: number; ts?: number }
+
+```
+
+`subscribe` returns an unsubscribe function. All messages flow through the adapter, including delivery to same-node subscribers. This ensures subscribers see messages in the global sequence order assigned by the adapter.
+
+> On Cloudflare Workers, Telefunc handles distributed pub/sub automatically via Durable Objects — no adapter needed. See <Link href="/cloudflare" />.
+
+
+## Lifecycle
+
+```ts
+ch.onOpen(() => {
+  // Connection established — safe to send
+})
+
+ch.onClose((err) => {
+  if (!err) {
+    // Clean close
+  } else if (err instanceof Abort) {
+    // Server called channel.abort(value)
+    console.log(err.abortValue)
+  } else {
+    // Network error or timeout
+  }
+})
+
+// Clean close from either side
+await ch.close()
+
+// Immediate termination with abort value
+ch.abort({ reason: 'session-expired' })
+```
+
+> After `close()` or `abort()`, calling `send()` throws `ChannelClosedError` synchronously.
+
+
+## Reconnection
+
+If the connection drops, Telefunc reconnects automatically and resumes existing channels and pubsub instances:
+
+- Messages sent while offline are buffered and delivered in order on reconnect.
+- Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed.
+- `onOpen()` fires only on initial open, `onClose()` only on permanent close.
+
+> Reconnection is transparent — you don't need to handle it in your application code.
+
+
+## Error handling
+
+| Error | When | Recovery |
+|---|---|---|
+| `Abort` | Server called `abort()` | Terminal — inspect `err.abortValue` |
+| `ChannelClosedError` | `send()` after close/abort | Terminal — recreate channel if needed |
+| `ChannelNetworkError` | Connection lost beyond timeout | Terminal — channel auto-closed |
+
+
+## Config
+
+```ts
+import { config } from 'telefunc'
+
+config.channel = {
+  reconnectTimeout: 60_000,  // Hold channels open after disconnect (ms)
+  idleTimeout: 60_000,       // Keep connection alive after last channel closes (ms)
+  pingInterval: 5_000,       // Client ping interval (ms)
+  serverReplayBuffer: 262_144,  // Server replay buffer per channel (bytes)
+  clientReplayBuffer: 1_048_576, // Client replay buffer per channel (bytes)
+  connectTtl: 5_000,         // Wait for client to connect to new channel (ms)
+  bufferLimit: 524_288,      // Buffer for messages before client connects (bytes)
+}
+```
+
+
+## See also
+
+- <Link href="/real-time" /> — choosing between function passing and channels
+- <Link href="/stream" /> — streaming server values
+- <Link href="/file-upload" /> — file uploads with progress
+- <Link href="/transport" /> — transport configuration
+- <Link href="/cloudflare" /> — Cloudflare Workers with distributed pub/sub

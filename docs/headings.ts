@@ -23,7 +23,7 @@ const categories = ['Guides', 'API', 'Get Started', 'Overview', 'Miscellaneous']
 const headingsDetached = [
   {
     title: 'Cloudflare Workers',
-    url: '/telefuncWebSocketCloudflare',
+    url: '/cloudflare',
     category: 'API',
   },
   ...misc(),
@@ -161,6 +161,11 @@ const headings = [
     url: '/real-time',
   },
   {
+    level: 2,
+    title: 'Live Queries',
+    url: '/live-queries',
+  },
+  {
     level: 1,
     title: 'API',
     titleIcon: iconGear,
@@ -197,22 +202,17 @@ const headings = [
   },
   {
     level: 2,
-    title: '`telefunc()',
-    url: '/telefunc',
-  },
-  {
-    level: 2,
-    title: '`telefuncWebSocket()`',
-    url: '/telefuncWebSocket',
+    title: '`serve()`',
+    url: '/serve',
   },
   {
     level: 4,
-    title: 'Channels',
+    title: 'Real-Time',
   },
   {
     level: 2,
-    title: '`createChannel()`',
-    url: '/createChannel',
+    title: '`channel()` / `pubsub()`',
+    url: '/channel',
   },
   {
     level: 4,

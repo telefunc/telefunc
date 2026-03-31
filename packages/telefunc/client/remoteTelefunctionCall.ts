@@ -7,7 +7,7 @@ import { assertUsage } from '../utils/assert.js'
 import { isBrowser } from '../utils/isBrowser.js'
 import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
-import type { ClientCallContext } from './withContext.js'
+import { getPendingContext } from './withContext.js'
 import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/async-generator-interface.js'
 import { getSessionToken } from '../wire-protocol/client/session-registry.js'
 import { TELEFUNC_SESSION_HEADER } from '../wire-protocol/constants.js'
@@ -16,9 +16,10 @@ function remoteTelefunctionCall(
   telefuncFilePath: string,
   telefunctionName: string,
   telefunctionArgs: unknown[],
-  callClientContext?: ClientCallContext,
 ): Promise<unknown> {
   assertUsage(isBrowser(), 'The Telefunc Client is meant to be run only in the browser.')
+
+  const callClientContext = getPendingContext()
 
   const callContext = {}
 
@@ -59,6 +60,12 @@ function remoteTelefunctionCall(
   if (callClientContext?.channel?.transports) {
     objectAssign(callContext, {
       channel: { transports: callClientContext.channel.transports },
+    })
+  }
+
+  if (callClientContext?.extensions) {
+    objectAssign(callContext, {
+      extensions: callClientContext.extensions,
     })
   }
 

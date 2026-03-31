@@ -1,0 +1,208 @@
+import { Link } from '@brillout/docpress'
+
+**Environment**: server.
+
+Cloudflare-specific setup and architecture for Telefunc channels and pub/sub.
+
+
+## Setup
+
+```ts
+// worker.ts
+// Environment: server
+
+import { telefunc } from 'telefunc/cloudflare'
+
+const tf = telefunc()
+
+export const TelefuncDurableObject = tf.TelefuncDurableObject
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const response = await tf.serve({ request, env, ctx })
+    if (response) return response
+
+    return new Response('Not found', { status: 404 })
+  },
+}
+```
+
+```jsonc
+// wrangler.jsonc
+{
+  "durable_objects": {
+    "bindings": [
+      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
+    ]
+  },
+  "kv_namespaces": [
+    { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
+  ],
+  "migrations": [
+    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] }
+  ]
+}
+```
+
+## Context
+
+Pass per-request data to telefunctions via <Link text={<code>getContext()</code>} href="/getContext" />:
+
+```ts
+const tf = telefunc({
+  context: async (request, env: Env) => ({
+    user: await getUserFromCookie(request, env),
+  }),
+})
+```
+
+
+## Architecture
+
+Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for channel state and pub/sub. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object as the WebSocket connection.
+
+[KV](https://developers.cloudflare.com/kv/) stores two things:
+- **Session tokens** — pins a browser to the same Durable Object across requests.
+- **Pub/sub presence** — tracks which Durable Objects have active subscribers for each key.
+
+### Regions
+
+Telefunc maps each request to one of six geographic regions using Cloudflare's colocation data:
+
+| Region | Code |
+|---|---|
+| West North America | `wnam` |
+| East North America | `enam` |
+| West Europe | `weur` |
+| East Europe | `eeur` |
+| Asia Pacific | `apac` |
+| Oceania | `oc` |
+
+Each region runs its own Durable Objects so that channel state stays close to users.
+
+### Session affinity
+
+Every telefunction call and channel message from a browser must reach the **same Durable Object** — otherwise the channel state wouldn't be there.
+
+On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns it to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
+
+> **CDN / reverse proxy note**: Make sure `x-telefunc-session` is not stripped from responses or requests. Without it, each request would be routed to a random Durable Object and channel state would be lost.
+
+
+## Scaling
+
+By default, Telefunc creates one Durable Object per region. Increase capacity with `scale`:
+
+```ts
+const tf = telefunc({ scale: 4 })
+```
+
+This creates 4 Durable Objects per region. Sessions are distributed across them.
+
+### Per-region scale
+
+```ts
+const tf = telefunc({
+  scale: { weur: 5, enam: 3, apac: 2 },
+})
+```
+
+Only specified regions get Durable Objects. Requests from unspecified regions fall back to `locationFallback`.
+
+
+## Distributed pub/sub
+
+Pub/sub (<Link href="/channel#pubsub" />) broadcasts across all regions automatically.
+
+### How it works
+
+```
+Publisher (Durable Object)
+  → Authority DO (one per key — assigns sequence numbers)
+    → Coordinators (one per active region)
+      → Durable Objects (deliver to local subscribers)
+```
+
+1. The publisher forwards to an **authority** Durable Object for the key.
+2. The authority assigns a monotonic sequence number, reads active presence from KV, and forwards to each region with subscribers.
+3. Each region's coordinator fans out to the Durable Objects in that region.
+4. Each Durable Object delivers to its local subscribers.
+
+### Ordering
+
+Publishes for a given key go through a single authority, so subscribers receive messages in order with a monotonic `seq`.
+
+### Presence
+
+Telefunc uses KV to track which Durable Objects have active subscribers:
+
+| Setting | Value |
+|---|---|
+| TTL | 90 seconds |
+| Refresh | every 30 seconds |
+
+A KV record is created on subscribe and deleted on unsubscribe. If a Durable Object is evicted (e.g. during a deployment), the record expires after 90 seconds and the region is excluded from fanout.
+
+
+## Delivery guarantees
+
+### Channel messages (`send` / `listen`)
+
+| Guarantee | Details |
+|---|---|
+| Ordering | Messages are delivered in order. |
+| Buffering | The server buffers messages while the client is disconnected, up to `config.channel.bufferLimit` (default: 512 KB). |
+| Replay | Both sides keep a replay buffer. On reconnect, missing messages are replayed and duplicates are ignored. |
+| Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
+| Loss | If the disconnect exceeds `config.channel.reconnectTimeout`, the channel closes with `ChannelNetworkError`. |
+
+### Pub/sub messages (`publish` / `subscribe`)
+
+| Guarantee | Details |
+|---|---|
+| Ordering | Publishes for a given key are serialized and delivered in order. |
+| Delivery | `publish()` resolves after all Durable Objects with subscribers have received the message. Client delivery happens over the channel wire. |
+| Presence lag | Up to 90 seconds. A new subscriber may miss a publish until its KV record is written (typically a few milliseconds). |
+
+> Once a pub/sub message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
+
+
+## Configuration
+
+```ts
+const tf = telefunc({
+  bindingName: 'TelefuncDurableObject',  // DO binding name (default)
+  kvBindingName: 'TelefuncKV',           // KV binding name (default)
+  instanceName: 'telefunc',              // Base name for DO instances (default)
+  scale: 1,                              // DOs per region (default)
+  locationFallback: 'weur',              // Fallback region (default)
+  jurisdiction: 'eu',                    // Restrict DOs to a jurisdiction
+})
+```
+
+
+## Hibernation
+
+> **[Hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#why-use-hibernation) while channels are open is not supported.**
+>
+> Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
+
+Once all channels close and no clients are connected, the Durable Object can hibernate — after the reconnect and idle windows expire.
+
+```ts
+import { config } from 'telefunc'
+
+// Shorter windows = hibernate sooner, less disconnect tolerance
+config.channel = {
+  reconnectTimeout: 5_000,
+  idleTimeout: 5_000,
+  pingInterval: 2_000,
+}
+```
+
+
+## See also
+
+- <Link href="/server" /> — serve API for all runtimes
+- <Link href="/channel" /> — channel and pub/sub API
+- <Link href="/real-time" /> — real-time patterns

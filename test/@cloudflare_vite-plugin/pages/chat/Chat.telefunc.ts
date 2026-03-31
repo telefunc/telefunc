@@ -1,19 +1,19 @@
 export { onJoinChat }
 
-import { createChannel } from 'telefunc'
+import { pubsub } from 'telefunc'
 
 type ChatMessage = { user: string; text: string; ts: number }
 
 async function onJoinChat(username: string) {
-  const channel = createChannel<(msg: ChatMessage) => void, (msg: ChatMessage) => void>({ key: 'chat:lobby' })
+  const ps = pubsub<ChatMessage>('chat:lobby')
 
-  channel.onOpen(() => {
-    channel.publish({ user: 'system', text: `${username} joined`, ts: Date.now() })
+  ps.onOpen(() => {
+    ps.publish({ user: 'system', text: `${username} joined`, ts: Date.now() })
   })
 
-  channel.onClose(() => {
-    channel.publish({ user: 'system', text: `${username} left`, ts: Date.now() })
+  ps.onClose(() => {
+    ps.publish({ user: 'system', text: `${username} left`, ts: Date.now() })
   })
 
-  return { channel: channel.client }
+  return ps
 }

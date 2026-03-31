@@ -14,7 +14,6 @@ const channelReviver: ReviverType<ChannelContract, ClientReviverContext> = {
     const channel = new ClientChannel({
       channelId: metadata.channelId,
       ackMode: metadata.ack,
-      key: metadata.key,
       transports: context.channelTransports,
       sessionToken: context.sessionToken,
     })

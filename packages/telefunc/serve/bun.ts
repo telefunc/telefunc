@@ -1,12 +1,15 @@
 export { telefunc }
 
+import crossws from 'crossws/adapters/bun'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { Telefunc } from '../node/server/getContext.js'
-import { telefuncWebSocket } from '../wire-protocol/server/adapter/bun.js'
+import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
+import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
+import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 
-type BunAdapter = ReturnType<typeof telefuncWebSocket>
-type BunServer = Parameters<BunAdapter['handleUpgrade']>[1]
+type BunWs = ReturnType<typeof crossws>
+type BunServer = Parameters<BunWs['handleUpgrade']>[1]
 
 type ServeInput = {
   request: Request
@@ -15,18 +18,23 @@ type ServeInput = {
 }
 
 interface TelefuncServe {
-  websocket: BunAdapter['websocket']
+  websocket: BunWs['websocket']
   serve(input: ServeInput): Promise<Response | undefined>
 }
 
 function telefunc(): TelefuncServe {
-  const adapter = telefuncWebSocket()
+  enableChannelTransports([CHANNEL_TRANSPORT.WS])
+  const ws = crossws({ hooks: getTelefuncChannelHooks() })
 
   return {
-    websocket: adapter.websocket,
+    websocket: ws.websocket,
     async serve({ request, server, context }: ServeInput): Promise<Response | undefined> {
-      const upgraded = adapter.handleUpgrade(request, server)
-      if (upgraded) return upgraded
+      const url = new URL(request.url)
+      const config = getServerConfig()
+      if (url.pathname === config.telefuncUrl && request.headers.get('upgrade') === 'websocket') {
+        if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) return new Response(null, { status: 400 })
+        return ws.handleUpgrade(request, server) as Response | Promise<Response>
+      }
       if (!isTelefuncRequest(request)) return undefined
 
       const httpResponse = await serveTelefunc(context ? { request, context } : { request })

@@ -8,7 +8,7 @@ Telefunc has two transport settings:
 | Setting | Controls |
 |---|---|
 | `config.stream.transport` | How <Link href="/stream">streamed values</Link> (`AsyncGenerator`, `ReadableStream`, `Promise`) are delivered |
-| `config.channel.transports` | How <Link text={<code>createChannel()</code>} href="/createChannel" /> connections work |
+| `config.channel.transports` | How <Link text={<code>channel()</code>} href="/channel" /> connections work |
 
 Plain telefunction calls are always `text/plain` JSON — these settings only affect streaming and channels.
 
@@ -52,7 +52,7 @@ Controls how streamed values are delivered over HTTP.
 
 ## Channel transport
 
-Controls how <Link text={<code>createChannel()</code>} href="/createChannel" /> connections work, and which backend `config.stream.transport = 'channel'` uses.
+Controls how <Link text={<code>channel()</code>} href="/channel" /> connections work, and which backend `config.stream.transport = 'channel'` uses.
 
 | Transport | Description |
 |---|---|
@@ -106,4 +106,4 @@ for await (const token of gen) {
 
 - <Link href="/stream" /> — streaming values
 - <Link href="/real-time" /> — real-time patterns
-- <Link href="/createChannel" /> — channel API
+- <Link href="/channel" /> — channel API

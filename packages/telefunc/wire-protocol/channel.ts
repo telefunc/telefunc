@@ -1,7 +1,7 @@
 export { makePublishInfo }
 export type {
   Channel,
-  ChannelClient,
+  ClientChannel,
   ChannelCloseCallback,
   ChannelCloseOptions,
   ChannelCloseResult,
@@ -12,6 +12,7 @@ export type {
   ChannelPublishMeta,
   ChannelListenReturn,
   ChannelListener,
+  PubSub,
   PubSubListener,
   PubSubBinaryListener,
 }
@@ -37,36 +38,23 @@ type ChannelListenReturn<T> = [T] extends [never]
     ? Awaited<R> | Promise<Awaited<R>>
     : unknown | Promise<unknown> | void
 type ChannelListener<T> = (data: ChannelData<T>) => ChannelListenReturn<T>
-/** Callback for `channel.subscribe()` — receives message data and publish info. */
+/** Callback for `pubsub.subscribe()` — receives message data and publish info. */
 type PubSubListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => ChannelListenReturn<T>
-/** Callback for `channel.subscribeBinary()` — receives raw binary data and publish info. */
+/** Callback for `pubsub.subscribeBinary()` — receives raw binary data and publish info. */
 type PubSubBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => void | Promise<void>
 type ChannelCloseOptions = {
   timeout?: number
 }
 type ChannelCloseResult = 0 | 1
 type ChannelCloseCallback = (err?: Error) => void | Promise<void>
-type KeyedChannelMethods<TOut, TIn, TKeyed extends boolean> = TKeyed extends true
-  ? {
-      /** Publish to other members sharing the same key and await the authority receipt. */
-      publish(data: ChannelData<TOut>): Promise<ChannelPublishAck>
-      /** Subscribe to broadcasts for the same key. Only valid when the channel was created with a key. */
-      subscribe(callback: PubSubListener<TIn>): () => void
-      /** Publish raw binary data to other members sharing the same key and await the authority receipt. */
-      publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
-      /** Subscribe to binary broadcasts for the same key. Only valid when the channel was created with a key. */
-      subscribeBinary(callback: PubSubBinaryListener): () => void
-    }
-  : {}
 
 /**
  * Internal base — `TOut` is what this side sends, `TIn` is what this side receives.
  * Each can be a raw message type or a handler signature `(msg) => ack`.
- * Not exported — use `Channel` or `ChannelClient`.
+ * Not exported — use `Channel` or `ClientChannel`.
  */
-type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false, TKeyed extends boolean = false> = {
+type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false> = {
   readonly id: string
-  readonly key?: string
   readonly isClosed: boolean
   /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `void`. */
   send(data: ChannelData<TOut>): TDefault extends true ? Promise<ChannelAck<TOut>> : void
@@ -81,26 +69,38 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   onClose(callback: ChannelCloseCallback): void
   onOpen(callback: () => void): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
-} & KeyedChannelMethods<TOut, TIn, TKeyed>
+}
 
 /** Server-side channel. `ServerToClient` = messages the server sends; `ClientToServer` = messages the server receives. */
-type Channel<
-  ServerToClient = unknown,
-  ClientToServer = unknown,
-  TDefault extends boolean = false,
-  TKeyed extends boolean = false,
-> = ChannelBase<ServerToClient, ClientToServer, TDefault, TKeyed> & {
+type Channel<ServerToClient = unknown, ClientToServer = unknown, TDefault extends boolean = false> = ChannelBase<
+  ServerToClient,
+  ClientToServer,
+  TDefault
+> & {
   /** The client-side end of the channel — return this from a telefunction. */
-  readonly client: ChannelClient<ClientToServer, ServerToClient, TDefault, TKeyed>
+  readonly client: ClientChannel<ClientToServer, ServerToClient, TDefault>
   abort(abortValue?: unknown): void
 }
 
 /** Client-side channel. `ClientToServer` = messages the client sends; `ServerToClient` = messages the client receives. */
-type ChannelClient<
-  ClientToServer = unknown,
-  ServerToClient = unknown,
-  TDefault extends boolean = false,
-  TKeyed extends boolean = false,
-> = ChannelBase<ClientToServer, ServerToClient, TDefault, TKeyed> & {
+type ClientChannel<ClientToServer = unknown, ServerToClient = unknown, TDefault extends boolean = false> = ChannelBase<
+  ClientToServer,
+  ServerToClient,
+  TDefault
+> & {
   abort(): void
+}
+
+/** Pub/sub instance — publish and subscribe to a keyed topic. Returnable from telefunctions. */
+type PubSub<T = unknown> = {
+  readonly id: string
+  readonly key: string
+  readonly isClosed: boolean
+  publish(data: ChannelData<T>): Promise<ChannelPublishAck>
+  subscribe(callback: PubSubListener<T>): () => void
+  publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
+  subscribeBinary(callback: PubSubBinaryListener): () => void
+  onClose(callback: ChannelCloseCallback): void
+  onOpen(callback: () => void): void
+  close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
 }

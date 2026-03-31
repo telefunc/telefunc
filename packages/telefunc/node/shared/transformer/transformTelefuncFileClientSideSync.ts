@@ -34,7 +34,7 @@ export function getCode(exportNames: readonly string[], telefuncFilePath: string
     const varName = exportName === 'default' ? 'defaultExport' : exportName
 
     lines.push(
-      `const ${varName} =  (...args) => __remoteTelefunctionCall('${telefuncFilePath}', '${exportName}', args, ${varName}._context);`,
+      `const ${varName} =  (...args) => __remoteTelefunctionCall('${telefuncFilePath}', '${exportName}', args);`,
     )
 
     {

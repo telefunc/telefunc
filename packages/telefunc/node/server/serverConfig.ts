@@ -4,11 +4,13 @@ export { enableChannelTransports }
 export type { ConfigUser, ConfigResolved, StreamConfigUser, ChannelConfigUser, ChannelConfigResolved }
 
 import { assertUsage } from '../../utils/assert.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
+import type { TelefuncServerExtension } from './extensions.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute } from '../../utils/path.js'
-import { setPubSubAdapter, type PubSubAdapter } from '../../wire-protocol/server/pubsub.js'
+import { setPubSubAdapter, DefaultPubSubAdapter, type PubSubAdapter } from '../../wire-protocol/server/pubsub.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
@@ -99,8 +101,6 @@ type ChannelConfigUser = {
    * `sseFlushThrottle` window.
    */
   ssePostIdleFlushDelay?: number
-  /** Adapter for cross-node pub/sub. See https://telefunc.com/createChannel#keyed-channels-pubsub */
-  adapter?: PubSubAdapter
 }
 
 type ChannelConfigResolved = {
@@ -163,6 +163,13 @@ type ConfigUser = {
   stream: StreamConfigUser
   /** Enabled transports and runtime settings for Telefunc channels. */
   channel: ChannelConfigUser
+  /** Pub/sub configuration. */
+  pubsub: {
+    /** Adapter for cross-node pub/sub delivery. */
+    adapter?: PubSubAdapter
+  }
+  /** Registered server extensions. Use `config.extensions.push(ext)` to add. */
+  extensions: TelefuncServerExtension[]
 }
 
 type ConfigResolved = {
@@ -179,12 +186,38 @@ type ConfigResolved = {
     transport: StreamTransport
   }
   channel: ChannelConfigResolved
+  extensions: TelefuncServerExtension[]
 }
 
-const configState: ConfigUser = { stream: {}, channel: {} }
+const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
+  stream: {},
+  channel: {},
+  pubsub: {},
+  extensions: [],
+})
 
 const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   get(_target, prop) {
+    if (prop === 'extensions') {
+      return new Proxy(configState.extensions, {
+        get(target, subProp, receiver) {
+          if (subProp === 'push') {
+            return (...exts: TelefuncServerExtension[]) => {
+              for (const ext of exts) {
+                const idx = target.findIndex((e) => e.name === ext.name)
+                if (idx >= 0) {
+                  target[idx] = ext
+                } else {
+                  target.push(ext)
+                }
+              }
+              return target.length
+            }
+          }
+          return Reflect.get(target, subProp, receiver)
+        },
+      })
+    }
     if (prop === 'stream') {
       return new Proxy({} as StreamConfigUser, {
         get(_t, subProp) {
@@ -192,7 +225,7 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         },
         set(_t, subProp, val) {
           if (typeof subProp !== 'string') return true
-          configState.stream = validateStreamConfig({ ...configState.stream, [subProp]: val })
+          applyStreamConfig({ ...configState.stream, [subProp]: val })
           return true
         },
       })
@@ -204,17 +237,27 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         },
         set(_t, subProp, val) {
           if (typeof subProp !== 'string') return true
-          const channelConfigNext = { ...configState.channel }
-          setChannelConfigValue(channelConfigNext, subProp, val, 'config.channel')
-          configState.channel = channelConfigNext
+          applyChannelConfig({ ...configState.channel, [subProp]: val })
           return true
         },
       })
     }
-    return configState[prop as keyof ConfigUser]
+    if (prop === 'pubsub') {
+      return new Proxy({} as ConfigUser['pubsub'], {
+        get(_t, subProp) {
+          return configState.pubsub[subProp as keyof ConfigUser['pubsub']]
+        },
+        set(_t, subProp, val) {
+          if (typeof subProp !== 'string') return true
+          applyPubSubConfig({ ...configState.pubsub, [subProp]: val })
+          return true
+        },
+      })
+    }
+    return configState[prop as keyof typeof configState]
   },
   set(_target, prop, val) {
-    validateUserConfig(prop, val)
+    applyUserConfig(prop, val)
     return true
   },
 })
@@ -266,6 +309,7 @@ function getServerConfig(): ConfigResolved {
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
       ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
+    extensions: configState.extensions,
   }
 }
 
@@ -278,7 +322,7 @@ function enableChannelTransports(transports: ChannelTransports): void {
   }
 }
 
-function validateUserConfig(prop: string | symbol, val: unknown) {
+function applyUserConfig(prop: string | symbol, val: unknown) {
   if (typeof prop !== 'string') return
 
   if (prop === 'root') {
@@ -350,67 +394,76 @@ function validateUserConfig(prop: string | symbol, val: unknown) {
     }
     configState.log = val as ConfigUser['log']
   } else if (prop === 'stream') {
-    configState.stream = validateStreamConfig(val)
+    applyStreamConfig(val)
   } else if (prop === 'channel') {
-    configState.channel = validateChannelConfig(val)
+    applyChannelConfig(val)
+  } else if (prop === 'pubsub') {
+    applyPubSubConfig(val)
+  } else if (prop === 'extensions') {
+    assertUsage(Array.isArray(val), 'config.extensions should be an array')
+    configState.extensions = val as TelefuncServerExtension[]
   } else {
     assertUsage(false, `Unknown config.${prop}`)
   }
 }
 
-function validateStreamConfig(val: unknown): StreamConfigUser {
+function applyStreamConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.stream should be an object')
-  const streamConfigNext: StreamConfigUser = {}
+  const next: StreamConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transport') {
-      streamConfigNext.transport = validateStreamTransport(value, 'config.stream.transport')
+      next.transport = validateStreamTransport(value, 'config.stream.transport')
     } else {
       assertUsage(false, `Unknown config.stream.${key}`)
     }
   }
-  return streamConfigNext
+  configState.stream = next
 }
 
-function validateChannelConfig(val: unknown): ChannelConfigUser {
+function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
-  const channelConfigNext: ChannelConfigUser = {}
+  const next: ChannelConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
-    setChannelConfigValue(channelConfigNext, key, value, 'config.channel')
+    const configPath = `config.channel.${key}`
+    switch (key) {
+      case 'transports':
+        next.transports = validateChannelTransports(value, configPath)
+        break
+      case 'reconnectTimeout':
+      case 'idleTimeout':
+      case 'pingInterval':
+      case 'serverReplayBuffer':
+      case 'clientReplayBuffer':
+      case 'connectTtl':
+      case 'bufferLimit':
+      case 'sseFlushThrottle':
+      case 'ssePostIdleFlushDelay':
+        assertUsage(typeof value === 'number', `\`${configPath}\` should be a number`)
+        assertUsage(value >= 0, `\`${configPath}\` should be a non-negative number`)
+        ;(next as Record<string, unknown>)[key] = value
+        break
+      default:
+        assertUsage(false, `Unknown ${configPath}`)
+    }
   }
-  return channelConfigNext
+  configState.channel = next
 }
 
-function setChannelConfigValue(channelConfigNext: ChannelConfigUser, key: string, value: unknown, basePath: string) {
-  const configPath = `${basePath}.${key}`
-  switch (key) {
-    case 'transports':
-      channelConfigNext.transports = validateChannelTransports(value, configPath)
-      return
-    case 'adapter':
+function applyPubSubConfig(val: unknown): void {
+  assertUsage(isObject(val), 'config.pubsub should be an object')
+  for (const [key, value] of Object.entries(val)) {
+    if (key === 'adapter') {
       assertUsage(
         isObject(value) &&
           typeof (value as any).subscribe === 'function' &&
           typeof (value as any).publish === 'function',
-        `\`${configPath}\` must be an object with subscribe(), unsubscribe(), and publish() methods`,
+        'config.pubsub.adapter must be an object with subscribe() and publish() methods',
       )
-      channelConfigNext.adapter = value as PubSubAdapter
-      setPubSubAdapter(value as PubSubAdapter)
-      return
-    case 'reconnectTimeout':
-    case 'idleTimeout':
-    case 'pingInterval':
-    case 'serverReplayBuffer':
-    case 'clientReplayBuffer':
-    case 'connectTtl':
-    case 'bufferLimit':
-    case 'sseFlushThrottle':
-    case 'ssePostIdleFlushDelay':
-      assertUsage(typeof value === 'number', `\`${configPath}\` should be a number`)
-      assertUsage(value >= 0, `\`${configPath}\` should be a non-negative number`)
-      ;(channelConfigNext as Record<string, unknown>)[key] = value
-      return
-    default:
-      assertUsage(false, `Unknown ${configPath}`)
+      configState.pubsub.adapter = value as PubSubAdapter
+      setPubSubAdapter(new DefaultPubSubAdapter(value as PubSubAdapter))
+    } else {
+      assertUsage(false, `Unknown config.pubsub.${key}`)
+    }
   }
 }
 

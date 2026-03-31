@@ -21,7 +21,6 @@ const channelReplacer: ReplacerType<ChannelContract, ServerReplacerContext> = {
     return {
       channelId: channel.id,
       ...(channel.ackMode && { ack: channel.ackMode }),
-      ...(channel.key && { key: channel.key }),
     }
   },
 }

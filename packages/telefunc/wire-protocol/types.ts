@@ -23,11 +23,13 @@ export type {
   FileMetadata,
   BlobMetadata,
   ChannelContract,
+  PubSubContract,
   FunctionContract,
 }
 
 import type { ServerChannel } from './server/channel.js'
-import type { ClientChannel } from './client/channel.js'
+import type { ServerPubSub } from './server/server-pubsub.js'
+import type { ClientChannel, ClientPubSub } from './client/channel.js'
 import type { ChannelTransports } from './constants.js'
 
 // ===== Base types =====
@@ -133,7 +135,9 @@ type PromiseContract = TypeContract<Promise<unknown>, Promise<unknown>, Streamin
 type FileRequestContract = TypeContract<File, File, FileMetadata>
 type BlobRequestContract = TypeContract<Blob, Blob, BlobMetadata>
 
-type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true; key?: string }>
+type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
+
+type PubSubContract = TypeContract<ServerPubSub, ClientPubSub, { channelId: string; key: string }>
 
 type FunctionContract = TypeContract<
   (...args: readonly unknown[]) => unknown,

@@ -1,16 +1,19 @@
 export { telefunc }
 
+import crossws from 'crossws/adapters/node'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { Telefunc } from '../node/server/getContext.js'
-import { getServerConfig } from '../node/server/serverConfig.js'
-import { telefuncWebSocket } from '../wire-protocol/server/adapter/node.js'
+import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
+import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
+import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
+import type { IncomingMessage, ServerResponse, Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
 
-type HttpServerOrWrapper = Parameters<ReturnType<typeof telefuncWebSocket>['install']>[0]
-type HttpServer = Exclude<HttpServerOrWrapper, { node?: { server?: unknown } }>
+type HttpServer = Server | Http2SecureServer
+type HttpServerOrWrapper = HttpServer | { node?: { server?: HttpServer } }
 type NodeRequest = IncomingMessage & { originalUrl?: string }
 
 type ServeInputNode<Req extends NodeRequest, Res extends ServerResponse> = {
@@ -32,15 +35,42 @@ interface TelefuncServe<Req extends NodeRequest, Res extends ServerResponse> {
   serve(input: ServeInputRequest): Promise<Response | undefined>
 }
 
+const { registeredServers } = getGlobalObject('serve/node.ts', {
+  registeredServers: new WeakSet<HttpServer>(),
+})
+
 function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse>(): TelefuncServe<
   Req,
   Res
 > {
-  const adapter = telefuncWebSocket()
+  const ws = crossws({ hooks: getTelefuncChannelHooks() })
+
+  function installWebSocket(server: HttpServerOrWrapper): void {
+    enableChannelTransports([CHANNEL_TRANSPORT.WS])
+    const httpServer: HttpServer = (server as any)?.node?.server ?? (server as HttpServer)
+    if (typeof (httpServer as any)?.on !== 'function') {
+      throw new Error(
+        'installWebSocket() received an unsupported server object. Pass a Node.js `http.Server` or a srvx-compatible wrapper.',
+      )
+    }
+    if (registeredServers.has(httpServer)) return
+    registeredServers.add(httpServer)
+
+    httpServer.on('upgrade', (req, socket, head) => {
+      const url = new URL(req.url ?? '', 'http://localhost')
+      const config = getServerConfig()
+      if (url.pathname !== config.telefuncUrl) return
+      if (!config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
+        socket.once('finish', socket.destroy)
+        socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+        return
+      }
+      ws.handleUpgrade(req, socket, head)
+    })
+  }
 
   function inferServer(req: Req): HttpServer | undefined {
-    const server = (req.socket as NodeRequest['socket'] & { server?: HttpServer | Http2SecureServer }).server
-    return server
+    return (req.socket as NodeRequest['socket'] & { server?: HttpServer }).server
   }
 
   function isNodeServeInput(input: ServeInput<Req, Res>): input is ServeInputNode<Req, Res> {
@@ -60,7 +90,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
 
     const { req, res, context } = input
     const server = inferServer(req)
-    if (server) adapter.install(server)
+    if (server) installWebSocket(server)
 
     if (res.headersSent) return false
 
@@ -79,10 +109,5 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
     return true
   }
 
-  return {
-    installWebSocket(server: HttpServerOrWrapper): void {
-      adapter.install(server)
-    },
-    serve,
-  }
+  return { installWebSocket, serve }
 }

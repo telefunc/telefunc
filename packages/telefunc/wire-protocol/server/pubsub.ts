@@ -1,138 +1,88 @@
-export { getPubSubRegistry, setPubSubRegistry, setPubSubAdapter, DefaultPubSubRegistry }
-export type {
-  PubSubRegistry,
-  PubSubSubscriber,
-  PubSubSubscription,
-  PubSubPublish,
-  PubSubPublishResult,
-  PubSubOnMessage,
-  PubSubBinaryOnMessage,
-  PubSubBinarySubscription,
-  PubSubBinaryPublish,
-  PubSubAdapter,
-  PubSubAdapterResult,
-}
+export { getPubSubAdapter, setPubSubAdapter, DefaultPubSubAdapter }
+export type { PubSubAdapter, PubSubUnsubscribe, PubSubPublishResult, PubSubOnMessage, PubSubBinaryOnMessage }
 
 import { assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
 import type { WirePublishInfo } from '../shared-ws.js'
 
-/** Transport-level publish result — no key, no id. Channel adds those. */
+/** Transport-level publish result. */
 type PubSubPublishResult = WirePublishInfo & { meta?: Record<string, unknown> }
 
 /** Callback for delivering a pub/sub message to a subscriber. */
-type PubSubOnMessage = (serialized: string, sourceChannelId: string, info: WirePublishInfo) => void
+type PubSubOnMessage = (serialized: string, info: WirePublishInfo) => void
 
-type PubSubSubscriber = { id: string; key: string; selfDelivery: boolean; headers?: Headers }
-type PubSubSubscription = PubSubSubscriber & { onMessage: PubSubOnMessage }
-type PubSubPublish = PubSubSubscriber & { serialized: string }
+type PubSubBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => void
 
-type PubSubBinaryOnMessage = (data: Uint8Array, sourceChannelId: string, info: WirePublishInfo) => void
-type PubSubBinarySubscription = PubSubSubscriber & { onMessage: PubSubBinaryOnMessage }
-type PubSubBinaryPublish = PubSubSubscriber & { data: Uint8Array }
-
-// ---------------------------------------------------------------------------
-// Registry — the interface ServerChannel talks to
-// ---------------------------------------------------------------------------
-
-type PubSubRegistry = {
-  subscribe(sub: PubSubSubscription): void | Promise<void>
-  unsubscribe(id: string, key: string): void | Promise<void>
-  publish(msg: PubSubPublish): PubSubPublishResult | Promise<PubSubPublishResult>
-  subscribeBinary(sub: PubSubBinarySubscription): void | Promise<void>
-  unsubscribeBinary(id: string, key: string): void | Promise<void>
-  publishBinary(msg: PubSubBinaryPublish): PubSubPublishResult | Promise<PubSubPublishResult>
-}
-
-// ---------------------------------------------------------------------------
-// Public adapter interface — a pure message bus across nodes
-// ---------------------------------------------------------------------------
-
-type PubSubAdapterResult = {
-  /** Per-key counter (1, 2, 3…) for ordering and gap detection. */
-  seq?: number
-  /** Server timestamp (ms). */
-  ts?: number
-  /** Adapter-specific metadata (only included in publisher receipt, not delivered to subscribers). */
-  meta?: Record<string, unknown>
-}
+type PubSubUnsubscribe = () => void
 
 type PubSubAdapter = {
-  /**
-   * Subscribe to cross-node messages for `key`.
-   * Call `onMessage(message, info)` when a message arrives from another node.
-   * `message` is an opaque string — do not parse or modify it.
-   * `info` carries the ordering metadata assigned at publish time.
-   */
-  subscribe(key: string, onMessage: (message: string, info: WirePublishInfo) => void): void | Promise<void>
-  /** Unsubscribe from `key`. */
-  unsubscribe(key: string): void | Promise<void>
-  /**
-   * Broadcast `message` to all nodes subscribed to `key`.
-   * Return `{ seq, ts }` — both optional, defaults applied by the registry.
-   */
-  publish(key: string, message: string): PubSubAdapterResult | Promise<PubSubAdapterResult>
-  subscribeBinary(key: string, onMessage: (data: Uint8Array, info: WirePublishInfo) => void): void | Promise<void>
-  unsubscribeBinary(key: string): void | Promise<void>
-  publishBinary(key: string, data: Uint8Array): PubSubAdapterResult | Promise<PubSubAdapterResult>
+  subscribe(key: string, onMessage: PubSubOnMessage): PubSubUnsubscribe
+  publish(key: string, serialized: string): PubSubPublishResult | Promise<PubSubPublishResult>
+  subscribeBinary(key: string, onMessage: PubSubBinaryOnMessage): PubSubUnsubscribe
+  publishBinary(key: string, data: Uint8Array): PubSubPublishResult | Promise<PubSubPublishResult>
 }
 
 // ---------------------------------------------------------------------------
-// Default registry — handles in-memory + adapted (user-provided adapter)
+// Default adapter — handles in-memory + wrapped (user-provided adapter)
 // ---------------------------------------------------------------------------
 
-class DefaultPubSubRegistry implements PubSubRegistry {
-  private readonly adapter: PubSubAdapter | null
-  /** key → id → subscription */
-  private readonly subscriptions = new Map<string, Map<string, PubSubSubscription>>()
-  private readonly binarySubscriptions = new Map<string, Map<string, PubSubBinarySubscription>>()
-  private readonly adapterKeys = new Set<string>()
-  private readonly adapterBinaryKeys = new Set<string>()
+class DefaultPubSubAdapter implements PubSubAdapter {
+  private readonly wrappedAdapter: PubSubAdapter | null
+  private readonly subscriptions = new Map<string, Set<PubSubOnMessage>>()
+  private readonly binarySubscriptions = new Map<string, Set<PubSubBinaryOnMessage>>()
+  private readonly adapterUnsubs = new Map<string, () => void>()
+  private readonly adapterBinaryUnsubs = new Map<string, () => void>()
   /** Per-key seq counter for in-memory mode. */
   private readonly keySeqs = new Map<string, number>()
 
   constructor(adapter?: PubSubAdapter) {
-    this.adapter = adapter ?? null
+    this.wrappedAdapter = adapter ?? null
   }
 
-  subscribe(sub: PubSubSubscription): void | Promise<void> {
-    let subs = this.subscriptions.get(sub.key)
+  subscribe(key: string, onMessage: PubSubOnMessage): PubSubUnsubscribe {
+    let subs = this.subscriptions.get(key)
     if (!subs) {
-      subs = new Map()
-      this.subscriptions.set(sub.key, subs)
+      subs = new Set()
+      this.subscriptions.set(key, subs)
     }
-    subs.set(sub.id, sub)
+    subs.add(onMessage)
 
-    if (this.adapter && !this.adapterKeys.has(sub.key)) {
-      this.adapterKeys.add(sub.key)
-      return this.adapter.subscribe(sub.key, (envelope, info) => {
-        this._onAdapterMessage(sub.key, envelope, info)
-      })
+    if (this.wrappedAdapter && !this.adapterUnsubs.has(key)) {
+      this.adapterUnsubs.set(
+        key,
+        this.wrappedAdapter.subscribe(key, (message, info) => {
+          this._onAdapterMessage(key, message, info)
+        }),
+      )
     }
-  }
 
-  unsubscribe(id: string, key: string): void | Promise<void> {
-    const subs = this.subscriptions.get(key)
-    if (!subs) return
-    subs.delete(id)
-    if (subs.size === 0) {
-      this.subscriptions.delete(key)
-      if (this.adapter && this.adapterKeys.has(key)) {
-        this.adapterKeys.delete(key)
-        return this.adapter.unsubscribe(key)
+    return () => {
+      const s = this.subscriptions.get(key)
+      if (!s) return
+      s.delete(onMessage)
+      if (s.size === 0) {
+        this.subscriptions.delete(key)
+        return this._resolveAdapterUnsub(this.adapterUnsubs, key)
       }
     }
   }
 
-  publish(msg: PubSubPublish): PubSubPublishResult | Promise<PubSubPublishResult> {
-    if (this.adapter) {
-      return this._publishViaAdapter(msg.id, msg.key, msg.serialized)
-    }
-    return this._publishInMemory(msg.id, msg.key, msg.selfDelivery, msg.serialized)
+  private _resolveAdapterUnsub(map: Map<string, () => void>, key: string): void {
+    const unsub = map.get(key)
+    if (!unsub) return
+    map.delete(key)
+    unsub()
   }
 
-  private _publishInMemory(id: string, key: string, selfDelivery: boolean, serialized: string): PubSubPublishResult {
+  publish(key: string, serialized: string): PubSubPublishResult | Promise<PubSubPublishResult> {
+    if (this.wrappedAdapter) {
+      return this._publishViaAdapter(key, serialized)
+    }
+    return this._publishInMemory(key, serialized)
+  }
+
+  private _publishInMemory(key: string, serialized: string): PubSubPublishResult {
     const subs = this.subscriptions.get(key)
     const seq = (this.keySeqs.get(key) ?? 0) + 1
     this.keySeqs.set(key, seq)
@@ -140,101 +90,78 @@ class DefaultPubSubRegistry implements PubSubRegistry {
     let delivered = 0
 
     if (subs) {
-      for (const [targetId, target] of subs) {
-        if (targetId === id && !selfDelivery) continue
+      for (const onMessage of subs.values()) {
         delivered++
-        target.onMessage(serialized, id, { seq, ts })
+        onMessage(serialized, { seq, ts })
       }
     }
 
     return { seq, ts, meta: { delivered, transport: 'in-memory' } }
   }
 
-  private _publishViaAdapter(
-    id: string,
-    key: string,
-    serialized: string,
-  ): PubSubPublishResult | Promise<PubSubPublishResult> {
-    // Everything flows through the adapter — local delivery happens when the
-    // message comes back via _onAdapterMessage, just like Cloudflare's authority path.
-    // This ensures subscribers see messages in global seq order.
-    const envelope = id + '\n' + serialized
-    const result = this.adapter!.publish(key, envelope)
-
-    if (isPromise(result)) {
-      return result.then((r) => this._toResult(r))
-    }
+  private _publishViaAdapter(key: string, serialized: string): PubSubPublishResult | Promise<PubSubPublishResult> {
+    const result = this.wrappedAdapter!.publish(key, serialized)
+    if (isPromise(result)) return result.then((r) => this._toResult(r))
     return this._toResult(result)
   }
 
-  private _toResult(result: PubSubAdapterResult): PubSubPublishResult {
+  private _toResult(result: PubSubPublishResult): PubSubPublishResult {
     const seq = result.seq ?? 0
     const ts = result.ts ?? Date.now()
     assertUsage(Number.isFinite(seq) && Number.isFinite(ts), 'PubSubAdapter.publish() must return finite seq and ts')
     return { seq, ts, meta: result.meta }
   }
 
-  private _onAdapterMessage(key: string, envelope: string, adapterInfo: WirePublishInfo): void {
+  private _onAdapterMessage(key: string, serialized: string, adapterInfo: WirePublishInfo): void {
     assertUsage(
       Number.isFinite(adapterInfo.seq) && Number.isFinite(adapterInfo.ts),
       'PubSubAdapter deliver callback must provide finite seq and ts',
     )
-    const nl = envelope.indexOf('\n')
-    const sourceChannelId = envelope.slice(0, nl)
-    const serialized = envelope.slice(nl + 1)
-
     const subs = this.subscriptions.get(key)
     if (!subs) return
-    for (const [targetId, target] of subs) {
-      if (targetId === sourceChannelId && !target.selfDelivery) continue
-      target.onMessage(serialized, sourceChannelId, adapterInfo)
+    for (const onMessage of subs.values()) {
+      onMessage(serialized, adapterInfo)
     }
   }
 
   // ── Binary pub/sub ──
 
-  subscribeBinary(sub: PubSubBinarySubscription): void | Promise<void> {
-    let subs = this.binarySubscriptions.get(sub.key)
+  subscribeBinary(key: string, onMessage: PubSubBinaryOnMessage): PubSubUnsubscribe {
+    let subs = this.binarySubscriptions.get(key)
     if (!subs) {
-      subs = new Map()
-      this.binarySubscriptions.set(sub.key, subs)
+      subs = new Set()
+      this.binarySubscriptions.set(key, subs)
     }
-    subs.set(sub.id, sub)
+    subs.add(onMessage)
 
-    if (this.adapter && !this.adapterBinaryKeys.has(sub.key)) {
-      this.adapterBinaryKeys.add(sub.key)
-      return this.adapter.subscribeBinary(sub.key, (data, info) => {
-        this._onAdapterBinaryMessage(sub.key, data, info)
-      })
+    if (this.wrappedAdapter && !this.adapterBinaryUnsubs.has(key)) {
+      this.adapterBinaryUnsubs.set(
+        key,
+        this.wrappedAdapter.subscribeBinary(key, (data, info) => {
+          this._onAdapterBinaryMessage(key, data, info)
+        }),
+      )
     }
-  }
 
-  unsubscribeBinary(id: string, key: string): void | Promise<void> {
-    const subs = this.binarySubscriptions.get(key)
-    if (!subs) return
-    subs.delete(id)
-    if (subs.size === 0) {
-      this.binarySubscriptions.delete(key)
-      if (this.adapter && this.adapterBinaryKeys.has(key)) {
-        this.adapterBinaryKeys.delete(key)
-        return this.adapter.unsubscribeBinary(key)
+    return () => {
+      const s = this.binarySubscriptions.get(key)
+      if (!s) return
+      s.delete(onMessage)
+      if (s.size === 0) {
+        this.binarySubscriptions.delete(key)
+        return this._resolveAdapterUnsub(this.adapterBinaryUnsubs, key)
       }
     }
   }
 
-  publishBinary(msg: PubSubBinaryPublish): PubSubPublishResult | Promise<PubSubPublishResult> {
-    if (this.adapter) {
-      return this._publishBinaryViaAdapter(msg.id, msg.key, msg.data)
+  publishBinary(key: string, data: Uint8Array): PubSubPublishResult | Promise<PubSubPublishResult> {
+    if (this.wrappedAdapter) {
+      return this._publishBinaryViaAdapter(key, data)
     }
-    return this._publishBinaryInMemory(msg.id, msg.key, msg.selfDelivery, msg.data)
+    return this._publishBinaryInMemory(key, data)
   }
 
-  private _publishBinaryInMemory(
-    id: string,
-    key: string,
-    selfDelivery: boolean,
-    data: Uint8Array,
-  ): PubSubPublishResult {
+  private _publishBinaryInMemory(key: string, data: Uint8Array): PubSubPublishResult {
     const subs = this.binarySubscriptions.get(key)
     const seq = (this.keySeqs.get(key) ?? 0) + 1
     this.keySeqs.set(key, seq)
@@ -242,26 +169,18 @@ class DefaultPubSubRegistry implements PubSubRegistry {
     let delivered = 0
 
     if (subs) {
-      for (const [targetId, target] of subs) {
-        if (targetId === id && !selfDelivery) continue
+      for (const onMessage of subs.values()) {
         delivered++
-        target.onMessage(data, id, { seq, ts })
+        onMessage(data, { seq, ts })
       }
     }
 
     return { seq, ts, meta: { delivered, transport: 'in-memory' } }
   }
 
-  private _publishBinaryViaAdapter(
-    _id: string,
-    key: string,
-    data: Uint8Array,
-  ): PubSubPublishResult | Promise<PubSubPublishResult> {
-    const result = this.adapter!.publishBinary(key, data)
-
-    if (isPromise(result)) {
-      return result.then((r) => this._toResult(r))
-    }
+  private _publishBinaryViaAdapter(key: string, data: Uint8Array): PubSubPublishResult | Promise<PubSubPublishResult> {
+    const result = this.wrappedAdapter!.publishBinary(key, data)
+    if (isPromise(result)) return result.then((r) => this._toResult(r))
     return this._toResult(result)
   }
 
@@ -270,31 +189,26 @@ class DefaultPubSubRegistry implements PubSubRegistry {
       Number.isFinite(adapterInfo.seq) && Number.isFinite(adapterInfo.ts),
       'PubSubAdapter deliver callback must provide finite seq and ts',
     )
-
     const subs = this.binarySubscriptions.get(key)
     if (!subs) return
-    for (const [, target] of subs) {
-      target.onMessage(data, '', adapterInfo)
+    for (const onMessage of subs.values()) {
+      onMessage(data, adapterInfo)
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Global registry state
+// Global adapter state
 // ---------------------------------------------------------------------------
 
 const globalObject = getGlobalObject('wire-protocol/server/pubsub.ts', {
-  registry: new DefaultPubSubRegistry() as PubSubRegistry,
+  adapter: new DefaultPubSubAdapter() as PubSubAdapter,
 })
 
-function getPubSubRegistry(): PubSubRegistry {
-  return globalObject.registry
-}
-
-function setPubSubRegistry(registry: PubSubRegistry): void {
-  globalObject.registry = registry
+function getPubSubAdapter(): PubSubAdapter {
+  return globalObject.adapter
 }
 
 function setPubSubAdapter(adapter: PubSubAdapter): void {
-  globalObject.registry = new DefaultPubSubRegistry(adapter)
+  globalObject.adapter = adapter
 }

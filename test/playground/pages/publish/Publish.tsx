@@ -18,11 +18,11 @@ function Publish() {
         id="test-text-pubsub"
         onClick={async () => {
           setResult('')
-          const { publisherChannel, getReceived } = await onTextPubSub()
-          // Publish 3 messages from the publisher channel
+          const { publisher, getReceived } = await onTextPubSub()
+          // Publish 3 messages from the publisher
           const acks = []
           for (let i = 0; i < 3; i++) {
-            const ack = await publisherChannel.publish({ text: `msg-${i}`, from: 'client' })
+            const ack = await publisher.publish({ text: `msg-${i}`, from: 'client' })
             acks.push({ seq: ack.seq, key: ack.key })
           }
           // Small delay for delivery
@@ -40,12 +40,12 @@ function Publish() {
         id="test-binary-pubsub"
         onClick={async () => {
           setResult('')
-          const { publisherChannel, getReceived } = await onBinaryPubSub()
+          const { publisher, getReceived } = await onBinaryPubSub()
           // Publish 3 binary frames
           const acks = []
           for (let i = 0; i < 3; i++) {
             const data = new Uint8Array(128).fill(i + 10)
-            const ack = await publisherChannel.publishBinary(data)
+            const ack = await publisher.publishBinary(data)
             acks.push({ seq: ack.seq, key: ack.key })
           }
           await new Promise((r) => setTimeout(r, 200))
@@ -62,9 +62,9 @@ function Publish() {
         id="test-binary-broadcast"
         onClick={async () => {
           setResult('')
-          const { channel } = await onBinaryBroadcast()
+          const ps = await onBinaryBroadcast()
           const received: Array<{ size: number; firstByte: number }> = []
-          channel.subscribeBinary((data, info) => {
+          ps.subscribeBinary((data, info) => {
             received.push({ size: data.byteLength, firstByte: data[0]! })
             setResult(JSON.stringify({ received, done: received.length >= 5 }))
           })

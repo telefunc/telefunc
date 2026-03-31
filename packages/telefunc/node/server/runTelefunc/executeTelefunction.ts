@@ -8,8 +8,9 @@ import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { isAsyncGenerator } from '../../../utils/isAsyncGenerator.js'
 import { validateTelefunctionError } from './validateTelefunctionError.js'
+import type { ConfigResolved } from '../serverConfig.js'
 
-function executeTelefunction(runContext: {
+async function executeTelefunction(runContext: {
   telefunction: Telefunction
   telefunctionName: string
   telefuncFilePath: string
@@ -17,51 +18,64 @@ function executeTelefunction(runContext: {
   providedContext: Telefunc.Context | null
   requestContext: ReturnType<typeof createRequestContext>
   request: Request
+  requestExtensions: Record<string, Record<string, unknown>>
+  serverConfig: ConfigResolved
 }) {
-  return restoreContext(runContext.providedContext, () =>
-    restoreRequestContext(runContext.requestContext, async () => {
-      const { telefunction, telefunctionArgs } = runContext
+  const { telefunction, telefunctionArgs, requestExtensions } = runContext
+  const { extensions } = runContext.serverConfig
 
-      let telefunctionReturn: unknown
-      let telefunctionTopLevelError: unknown
-      let telefunctionHasErrored = false
-      let telefunctionAborted = false
-      const onTopLevelError = (err: unknown) => {
-        validateTelefunctionError(err, runContext)
-        if (isAbort(err)) {
-          telefunctionAborted = true
-          telefunctionReturn = err.abortValue
-          runContext.requestContext.responseAbort.abort(err.abortValue)
-        } else {
-          telefunctionHasErrored = true
-          telefunctionTopLevelError = err
-        }
-      }
+  /** Restore request + user context before executing `fn`. */
+  const withContext = <T>(fn: () => T): T =>
+    restoreContext(runContext.providedContext, () => restoreRequestContext(runContext.requestContext, fn))
 
-      let resultSync: unknown
+  let telefunctionReturn: unknown
+  let telefunctionTopLevelError: unknown
+  let telefunctionHasErrored = false
+  let telefunctionAborted = false
+  const onTopLevelError = (err: unknown) => {
+    validateTelefunctionError(err, runContext)
+    if (isAbort(err)) {
+      telefunctionAborted = true
+      telefunctionReturn = err.abortValue
+      runContext.requestContext.responseAbort.abort(err.abortValue)
+    } else {
+      telefunctionHasErrored = true
+      telefunctionTopLevelError = err
+    }
+  }
+
+  let resultSync: unknown
+  try {
+    resultSync = withContext(() => telefunction.apply(null, telefunctionArgs))
+  } catch (err: unknown) {
+    onTopLevelError(err)
+  }
+
+  if (!telefunctionHasErrored && !telefunctionAborted) {
+    assertUsage(
+      isPromise(resultSync) || isAsyncGenerator(resultSync),
+      `The telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) did not return a promise or async generator. A telefunction should always be defined as \`async function\` or \`async function*\`.`,
+    )
+    if (isPromise(resultSync)) {
       try {
-        resultSync = telefunction.apply(null, telefunctionArgs)
+        telefunctionReturn = await resultSync
       } catch (err: unknown) {
         onTopLevelError(err)
       }
+    } else {
+      telefunctionReturn = resultSync
+    }
+  }
 
-      if (!telefunctionHasErrored && !telefunctionAborted) {
-        assertUsage(
-          isPromise(resultSync) || isAsyncGenerator(resultSync),
-          `The telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) did not return a promise or async generator. A telefunction should always be defined as \`async function\` or \`async function*\`.`,
-        )
-        if (isPromise(resultSync)) {
-          try {
-            telefunctionReturn = await resultSync
-          } catch (err: unknown) {
-            onTopLevelError(err)
-          }
-        } else {
-          telefunctionReturn = resultSync
-        }
+  if (!telefunctionHasErrored && !telefunctionAborted) {
+    for (const ext of extensions) {
+      if (ext.hooks.onTransformResult && requestExtensions[ext.name]) {
+        // The extension name guarantees the data shape matches — enforced by TelefuncExtensionRegistry augmentation.
+        const data: any = requestExtensions[ext.name]!
+        telefunctionReturn = await withContext(() => ext.hooks.onTransformResult!({ result: telefunctionReturn, data }))
       }
+    }
+  }
 
-      return { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionTopLevelError }
-    }),
-  )
+  return { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionTopLevelError }
 }

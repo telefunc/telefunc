@@ -4,19 +4,19 @@ import { Link } from '@brillout/docpress'
 
 Low-level function that processes telefunction requests and returns an HTTP response. It's a pure function with no side effects.
 
-> For most setups, use the runtime adapter instead — `telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare`. See <Link href="/server" />.
+> For most setups, use the runtime-specific `telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare` instead. See <Link href="/server" />.
 
 ## Basic usage
 
 Pass the web standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
 
 ```ts
-import { telefunc } from 'telefunc'
+import { serve } from 'telefunc'
 
-const httpResponse = await telefunc({ request })
+const httpResponse = await serve({ request })
 ```
 
-Convert the result to a [`Response`](https://developer.mozilla.org/en-US:Web/API/Response):
+Convert the result to a [`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response):
 
 ```ts
 const response = new Response(httpResponse.getReadableWebStream(), {
@@ -31,7 +31,7 @@ const response = new Response(httpResponse.getReadableWebStream(), {
 Pass a `context` object to make request-scoped data available inside telefunctions via <Link href="/getContext">`getContext()`</Link>:
 
 ```ts
-const httpResponse = await telefunc({
+const httpResponse = await serve({
   request,
   context: {
     user: await getUser(request),
@@ -47,7 +47,7 @@ const httpResponse = await telefunc({
 For [Express](https://expressjs.com), [Fastify](https://fastify.dev), or any Node.js framework, pass the `req` readable stream:
 
 ```ts
-const httpResponse = await telefunc({
+const httpResponse = await serve({
   url: req.originalUrl,
   method: req.method,
   readable: req,
@@ -72,7 +72,7 @@ const httpResponse = await telefunc({
 
 ## Runtime adapters
 
-For production deployments with channels and WebSocket support, use the runtime-specific `telefunc()` factory from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare`. See <Link href="/server" /> for examples.
+For production deployments with channels and WebSocket support, use the runtime-specific `telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare`. See <Link href="/server" /> for examples.
 
 
 ## See also

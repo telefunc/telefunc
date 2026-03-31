@@ -1,11 +1,13 @@
 import { apply, serve } from '@photonjs/hono'
 import { Hono } from 'hono'
 import { config } from 'telefunc'
-import { telefuncWebSocket } from 'telefunc/websocket/node'
+import { telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState } from '../cleanup-state'
 config.channel.pingInterval = 1000
 
 const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
+
+const tf = telefunc()
 
 function startServer() {
   const app = new Hono()
@@ -45,12 +47,18 @@ function startServer() {
   })
 
   apply(app)
+
+  app.all('/_telefunc', async (c) => {
+    const response = await tf.serve({ request: c.req.raw })
+    if (response) return response
+    return c.text('Not found', 404)
+  })
+
   return serve(app, {
     port: 3000,
     onCreate(server) {
-      const ws = telefuncWebSocket()
       // @ts-expect-error srvx types not exposed
-      ws.install(server.node.server)
+      tf.installWebSocket(server.node.server)
     },
   })
 }

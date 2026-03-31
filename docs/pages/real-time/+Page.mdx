@@ -7,7 +7,8 @@ Telefunc handles real-time flows — chat, upload progress, live updates — usi
 | Primitive | Best for | Setup |
 |---|---|---|
 | **Function passing** | Short-lived callbacks — progress updates, one-off server-to-client pushes | None |
-| **Channels** | Ongoing real-time messaging — direct or broadcast | None (SSE) or <Link text="WebSocket server setup" href="/server" /> (WS) |
+| **`channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE) or <Link text="WebSocket server setup" href="/server" /> (WS) |
+| **`pubsub()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
 | **`config.stream.transport = 'channel'`** | <Link href="/stream">Streamed values</Link> over the same reconnecting transport as channels | Same as channels |
 
 
@@ -74,10 +75,38 @@ If you only need callback-style interaction, function passing is simpler than a 
 
 ## Channels
 
-Use <Link text={<code>createChannel()</code>} href="/createChannel" /> when both sides keep sending messages over time. Channels have two modes:
+Use <Link text={<code>channel()</code>} href="/channel" /> for point-to-point messaging — direct messages between one server and one client.
 
-- **Point-to-point** (`send` / `listen`) — direct messages between one server and one client. Good for commands, request-response, or controlling a specific session.
-- **Pub/sub** (`publish` / `subscribe`) — broadcast to all channels sharing a key. Good for chat rooms, live feeds, notifications.
+### Game session
+
+```ts
+// Game.telefunc.ts
+// Environment: server
+
+import { channel } from 'telefunc'
+
+type Command = (cmd: { action: string }) => { ok: boolean }
+type Event = (event: { type: string; data: unknown }) => void
+
+export async function onJoinGame(gameId: string) {
+  const ch = channel<Command, Event>({ ack: true })
+
+  ch.listen((cmd) => {
+    // Process player command, push game state
+    ch.send({ type: 'state', data: getGameState(gameId) })
+    return { ok: true }
+  })
+
+  return { channel: ch.client }
+}
+```
+
+See <Link href="/channel" /> for the full API — <Link href="/channel#typescript">TypeScript</Link>, <Link href="/channel#acknowledgements">acknowledgements</Link>, <Link href="/channel#binary-data">binary data</Link>, and <Link href="/channel#lifecycle">lifecycle</Link>.
+
+
+## Pub/sub
+
+Use <Link text={<code>pubsub()</code>} href="/channel#pubsub" /> for broadcast messaging — all instances sharing a key form a broadcast group.
 
 ### Chat room
 
@@ -85,19 +114,18 @@ Use <Link text={<code>createChannel()</code>} href="/createChannel" /> when both
 // Chat.telefunc.ts
 // Environment: server
 
-import { createChannel } from 'telefunc'
+import { pubsub } from 'telefunc'
 
-type ChatMessage = { user: string; text: string; ts: number }
-type Message = (msg: ChatMessage) => void
+type ChatMessage = { user: string; text: string }
 
 export async function onJoinChat(username: string) {
-  const channel = createChannel<Message, Message>({ key: 'chat:lobby' })
+  const ps = pubsub<ChatMessage>('chat:lobby')
 
-  channel.onOpen(() => {
-    channel.publish({ user: 'system', text: `${username} joined`, ts: Date.now() })
+  ps.onOpen(() => {
+    ps.publish({ user: 'system', text: `${username} joined` })
   })
 
-  return { channel: channel.client }
+  return ps
 }
 ```
 
@@ -107,40 +135,16 @@ export async function onJoinChat(username: string) {
 
 import { onJoinChat } from './Chat.telefunc'
 
-const { channel } = await onJoinChat('Alice')
+const ps = await onJoinChat('Alice')
 
-channel.subscribe((msg) => {
+ps.subscribe((msg) => {
   console.log(`${msg.user}: ${msg.text}`)
 })
 
-channel.publish({ user: 'Alice', text: 'Hello!', ts: Date.now() })
+ps.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
-### Game session
-
-```ts
-// Game.telefunc.ts
-// Environment: server
-
-import { createChannel } from 'telefunc'
-
-type Command = (cmd: { action: string }) => { ok: boolean }
-type Event = (event: { type: string; data: unknown }) => void
-
-export async function onJoinGame(gameId: string) {
-  const channel = createChannel<Command, Event>({ ack: true })
-
-  channel.listen((cmd) => {
-    // Process player command, push game state
-    channel.send({ type: 'state', data: getGameState(gameId) })
-    return { ok: true }
-  })
-
-  return { channel: channel.client }
-}
-```
-
-See <Link href="/createChannel" /> for the full API — <Link href="/createChannel#typescript">TypeScript</Link>, <Link href="/createChannel#acknowledgements">acknowledgements</Link>, <Link href="/createChannel#keyed-channels-pubsub">pub/sub</Link>, <Link href="/createChannel#binary-data">binary data</Link>, and <Link href="/createChannel#lifecycle">lifecycle</Link>.
+See <Link href="/channel#pubsub" /> for the full pub/sub API and <Link href="/channel#multi-server">scaling pub/sub</Link> across servers.
 
 
 ## Reconnection
@@ -155,22 +159,14 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 
 ## Transport
 
-By default channels use **SSE** — no extra setup required. For full-duplex WebSocket transport, enable WebSocket in your server setup (see <Link href="/server" />).
+Channels start on **SSE** and automatically upgrade to **WebSocket** when WebSocket is enabled in your <Link text="serve setup" href="/server" />. No client-side configuration needed.
 
-| Transport | Throughput | Recovery | CDN-friendly | Setup |
-|---|---|---|---|---|
-| SSE (default) | 🟡 | ✅ | ✅ | None |
-| WebSocket | ✅ | ✅ | 🟡 | <Link text="Server setup" href="/server" /> |
+| Transport | Throughput | Recovery | CDN-friendly |
+|---|---|---|---|
+| SSE (initial) | 🟡 | ✅ | ✅ |
+| WebSocket (upgraded) | ✅ | ✅ | 🟡 |
 
-All channels share a single multiplexed connection per server URL.
-
-```ts
-// Environment: client
-
-import { config } from 'telefunc/client'
-
-config.channel.transport = 'ws'
-```
+All channels share a single multiplexed connection per server URL. The upgrade happens transparently in the background — no interruption to active channels.
 
 See <Link href="/transport" /> for the full comparison.
 
@@ -179,5 +175,5 @@ See <Link href="/transport" /> for the full comparison.
 
 - <Link href="/stream" /> — streaming server values
 - <Link href="/file-upload" /> — file uploads
-- <Link href="/createChannel" /> — full channel API reference
+- <Link href="/channel" /> — full channel API reference
 - <Link href="/transport" /> — transport configuration

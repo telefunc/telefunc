@@ -6,6 +6,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import type { ServerChannel } from './channel.js'
 import { getChannelRegistry, onChannelCreated, setChannelDefaults } from './channel.js'
+import { ServerPubSub } from './server-pubsub.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import type { PeerSender } from './IndexedPeer.js'
@@ -252,12 +253,14 @@ class ServerConnection<TConnection> {
       }
       case 'pubsub-sub': {
         const entry = sessionState.ixMap.get(ctrl.ix)
-        if (entry) entry.channel._onPeerPubSubSubscribe(ctrl.binary ?? false)
+        if (entry && ServerPubSub.isServerPubSub(entry.channel))
+          entry.channel._onPeerPubSubSubscribe(ctrl.binary ?? false)
         return null
       }
       case 'pubsub-unsub': {
         const entry = sessionState.ixMap.get(ctrl.ix)
-        if (entry) entry.channel._onPeerPubSubUnsubscribe(ctrl.binary ?? false)
+        if (entry && ServerPubSub.isServerPubSub(entry.channel))
+          entry.channel._onPeerPubSubUnsubscribe(ctrl.binary ?? false)
         return null
       }
     }
@@ -434,7 +437,7 @@ class ServerConnection<TConnection> {
         if (!entry) return null
         if (frame.seq && frame.seq <= entry.lastClientSeq) return null
         if (frame.seq) entry.lastClientSeq = frame.seq
-        entry.channel._onPeerPublishAckReqMessage(frame.text, frame.seq)
+        if (entry.channel instanceof ServerPubSub) entry.channel._onPeerPublishAckReqMessage(frame.text, frame.seq)
         return null
       }
       case TAG.PUBLISH_BINARY_ACK_REQ: {
@@ -442,7 +445,8 @@ class ServerConnection<TConnection> {
         if (!entry) return null
         if (frame.seq && frame.seq <= entry.lastClientSeq) return null
         if (frame.seq) entry.lastClientSeq = frame.seq
-        entry.channel._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
+        if (entry.channel instanceof ServerPubSub)
+          entry.channel._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
         return null
       }
       case TAG.TEXT_ACK_REQ: {

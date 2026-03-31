@@ -4,13 +4,21 @@ import type { Reviver } from '@brillout/json-serializer/parse'
 import { asyncGeneratorReviver } from './async-generator.js'
 import { readableStreamReviver } from './readable-stream.js'
 import { promiseReviver } from './promise.js'
+import { pubsubReviver } from './pubsub.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
 import type { ClientReviverContext } from '../../types.js'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 
-const clientTypes = [asyncGeneratorReviver, readableStreamReviver, promiseReviver, channelReviver, functionReviver]
+const clientTypes = [
+  asyncGeneratorReviver,
+  readableStreamReviver,
+  promiseReviver,
+  pubsubReviver,
+  channelReviver,
+  functionReviver,
+]
 
 /** Creates a JSON-serializer reviver that delegates to type-specific plugins. */
 function createStreamingReviver(

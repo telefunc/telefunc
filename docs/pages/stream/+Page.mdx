@@ -1,6 +1,8 @@
 import { Link } from '@brillout/docpress'
 
-Telefunctions can stream values to the client using `AsyncGenerator`, `ReadableStream`, or nested `Promise`s.
+Telefunc supports streaming in both directions:
+- **Server → client**: Return `AsyncGenerator`, `ReadableStream`, or nested `Promise` from a telefunction.
+- **Client → server**: Pass a `ReadableStream` as a telefunction argument.
 
 > Streaming works out of the box with zero config. Plain telefunction calls are unaffected.
 
@@ -123,6 +125,48 @@ const report = await res.report
 >   }
 > }
 > ```
+
+
+## Client → server streaming
+
+Pass a `ReadableStream` as a telefunction argument to stream bytes from the client to the server.
+
+```ts
+// Ingest.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+import { Writable } from 'node:stream'
+
+export async function onIngest(stream: ReadableStream<Uint8Array>, filename: string) {
+  const dest = fs.createWriteStream(`./uploads/${filename}`)
+  await stream.pipeTo(Writable.toWeb(dest))
+}
+```
+
+```ts
+// Ingest.tsx
+// Environment: client
+
+import { onIngest } from './Ingest.telefunc'
+
+const stream = new ReadableStream({
+  start(controller) {
+    controller.enqueue(new TextEncoder().encode('chunk 1'))
+    controller.enqueue(new TextEncoder().encode('chunk 2'))
+    controller.close()
+  },
+})
+
+await onIngest(stream, 'data.txt')
+```
+
+| Method | Backpressure | Best for |
+|---|---|---|
+| <Link text={<code>File</code>} href="/file-upload" /> / <Link text={<code>Blob</code>} href="/file-upload" /> argument | TCP-level | Finite uploads — files, images, CSV imports |
+| `ReadableStream` argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
+| <Link text={<code>channel().sendBinary()</code>} href="/channel#binary-data" /> | No | Fire-and-forget binary — low-latency frames where dropping is acceptable |
+| <Link text={<code>pubsub().publishBinary()</code>} href="/channel#pubsub" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
 
 
 ## Mixed return types
@@ -292,5 +336,5 @@ See <Link href="/error-handling" /> for details.
 
 - <Link href="/real-time" /> — function passing, channels, and upload progress
 - <Link href="/file-upload" /> — streaming file uploads
-- <Link href="/createChannel" /> — bidirectional channels
+- <Link href="/channel" /> — bidirectional channels
 - <Link href="/transport" /> — transport comparison and configuration

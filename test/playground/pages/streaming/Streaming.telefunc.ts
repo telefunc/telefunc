@@ -21,7 +21,7 @@ export {
   onUploadWithProgress,
 }
 
-import { Abort, createChannel, getContext } from 'telefunc'
+import { Abort, channel, getContext } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -267,8 +267,8 @@ const onChannelAbortAbortsSiblingStreamingValues = async () => {
   const streamStarted = new Promise<void>((resolve) => {
     markStreamStarted = resolve
   })
-  const channel = createChannel<(msg: string) => void, never>()
-  channel.listen(async () => {
+  const ch = channel<(msg: string) => void, never>()
+  ch.listen(async () => {
     await Promise.all([firstStarted, secondStarted, streamStarted])
     throw Abort({ reason: 'channel-listener-abort', code: 7 })
   })
@@ -306,7 +306,7 @@ const onChannelAbortAbortsSiblingStreamingValues = async () => {
     },
   })
 
-  return { first: first(), second: second(), stream, channel: channel.client }
+  return { first: first(), second: second(), stream, channel: ch.client }
 }
 
 // ── Upload progress via streaming ────────────────────────────────────

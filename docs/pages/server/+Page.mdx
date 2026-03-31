@@ -147,11 +147,14 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
   },
   "kv_namespaces": [
     { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
+  ],
+  "migrations": [
+    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] }
   ]
 }
 ```
 
-> See <Link text="Cloudflare Workers" href="/telefuncWebSocketCloudflare" /> for scaling, distributed pub/sub, delivery guarantees, and Durable Object configuration.
+> See <Link text="Cloudflare Workers" href="/cloudflare" /> for scaling, distributed pub/sub, delivery guarantees, and Durable Object configuration.
 
 
 ## Return value
@@ -171,13 +174,13 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 
 ## Low-level API
 
-If you need direct control over the HTTP response, you can use the core `telefunc()` function:
+If you need direct control over the HTTP response, you can use the core `serve()` function:
 
 ```ts
-import { telefunc } from 'telefunc'
+import { serve } from 'telefunc'
 
 app.all('/_telefunc', async (c) => {
-  const httpResponse = await telefunc({ request: c.req.raw })
+  const httpResponse = await serve({ request: c.req.raw })
   return new Response(httpResponse.getReadableWebStream(), {
     status: httpResponse.statusCode,
     headers: httpResponse.headers,
@@ -185,10 +188,10 @@ app.all('/_telefunc', async (c) => {
 })
 ```
 
-See <Link href="/telefunc" /> for details.
+See <Link href="/serve" /> for details.
 
 
 ## See also
 
-- <Link href="/telefunc" /> — core `telefunc()` function reference
+- <Link href="/serve" /> — core `telefunc()` function reference
 - <Link href="/getContext" /> — request context

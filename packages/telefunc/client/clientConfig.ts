@@ -52,9 +52,7 @@ type ConfigResolved = {
   channel: { transports: ChannelTransports }
 }
 
-type ConfigState = Omit<ConfigUser, 'stream' | 'channel'> & { stream: StreamConfigUser; channel: ChannelConfigUser }
-
-const configState: ConfigState = { stream: {}, channel: {} }
+const configState: ConfigUser = { stream: {}, channel: {} }
 
 const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   get(_target, prop) {
@@ -82,7 +80,7 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         },
       })
     }
-    return configState[prop as keyof ConfigUser]
+    return configState[prop as keyof typeof configState]
   },
   set(_target, prop, val) {
     validateUserConfig(prop, val)

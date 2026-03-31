@@ -22,6 +22,7 @@ import {
 import { encodeU32, encodeLengthPrefixedFrames, textEncoder } from '../frame.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
+import { ClientPubSub } from './channel.js'
 import { encodeSseRequest } from '../sse-request.js'
 import { TAG, decode, encode, encodeCtrl } from '../shared-ws.js'
 import type {
@@ -61,8 +62,6 @@ interface MuxChannel {
   readonly isClosed: boolean
   _onTransportOpen(): void
   _onTransportMessage(data: string): void
-  _onTransportPublish(data: string, info: WirePublishInfo): void
-  _onTransportPublishBinary(data: Uint8Array, info: WirePublishInfo): void
   _onTransportBinaryMessage(data: Uint8Array): void
   _onTransportAckReqMessage(data: string, seq: number): Promise<void>
   _onPeerWindowUpdate(bytes: number): void
@@ -828,11 +827,13 @@ class ClientConnection implements MuxConnection {
       return
     }
     if (frame.tag === TAG.PUBLISH) {
-      this.channels.get(frame.index)?._onTransportPublish(frame.text!, frame.info!)
+      const ch = this.channels.get(frame.index)
+      if (ch && ClientPubSub.isClientPubSub(ch)) ch._onTransportPublish(frame.text!, frame.info!)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
-      this.channels.get(frame.index)?._onTransportPublishBinary(frame.data!, frame.info!)
+      const ch = this.channels.get(frame.index)
+      if (ch && ClientPubSub.isClientPubSub(ch)) ch._onTransportPublishBinary(frame.data!, frame.info!)
       return
     }
     if (frame.tag === TAG.TEXT) {

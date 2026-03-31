@@ -18,6 +18,7 @@ type CallContext = {
   stream?: { transport?: StreamTransport }
   channel: { transports: ChannelTransports }
   abortController: AbortController
+  extensions?: Record<string, unknown>
 }
 
 function serializeTelefunctionArguments(callContext: CallContext): string | Blob {
@@ -30,6 +31,10 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
   if (callContext.stream?.transport) {
     const { transport } = callContext.stream
     dataMain.stream = { transport }
+  }
+
+  if (callContext.extensions) {
+    dataMain.extensions = callContext.extensions
   }
 
   const channelTransports = callContext.channel.transports

@@ -1,13 +1,10 @@
 {
   "scripts": {
     "========= Dev": "",
-    "// Develop telefunc": "",
     "dev": "cd packages/telefunc/ && pnpm run dev",
     "========= Build": "",
-    "// Build Telefunc": "",
-    "build": "cd packages/telefunc/ && pnpm run build",
+    "build": "pnpm --recursive --filter \"{packages/*}\" run build",
     "========= Test": "",
-    "// Run tests": "",
     "test": "pnpm run test:units && pnpm run test:e2e && pnpm run test:types",
     "test:units": "vitest run",
     "test:e2e": "test-e2e",
