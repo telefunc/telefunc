@@ -70,8 +70,7 @@ async function executeTelefunction(runContext: {
   if (!telefunctionHasErrored && !telefunctionAborted) {
     for (const ext of extensions) {
       if (ext.hooks.onTransformResult && requestExtensions[ext.name]) {
-        // The extension name guarantees the data shape matches — enforced by TelefuncExtensionRegistry augmentation.
-        const data: any = requestExtensions[ext.name]!
+        const data = requestExtensions[ext.name]!
         telefunctionReturn = await withContext(() => ext.hooks.onTransformResult!({ result: telefunctionReturn, data }))
       }
     }

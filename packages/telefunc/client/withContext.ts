@@ -3,7 +3,6 @@ export type { ClientCallContext, StreamTransport }
 
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import type { StreamTransport, ChannelTransports } from '../wire-protocol/constants.js'
-import type { TelefuncExtensionRegistry } from '../node/server/extensions.js'
 
 const globalObject = getGlobalObject<{ pendingContext: ClientCallContext | null }>('withContext.ts', {
   pendingContext: null,
@@ -30,7 +29,7 @@ type ClientCallContext = {
   /** Channel transport overrides for this call. */
   channel?: ChannelCallContext
   /** Per-call extension data, keyed by extension name. */
-  extensions?: { [K in keyof TelefuncExtensionRegistry]?: TelefuncExtensionRegistry[K] }
+  extensions?: Record<string, Record<string, unknown>>
 }
 
 /** Wrap a telefunc function with per-call context (signal, headers).

@@ -1,20 +1,28 @@
 export { LiveQueryClient }
 
-import { QueryClient, type QueryClientConfig, type QueryPersister } from '@tanstack/query-core'
+import {
+  QueryClient,
+  hashKey,
+  partialMatchKey,
+  type QueryClientConfig,
+  type QueryPersister,
+} from '@tanstack/query-core'
 import { withContext } from 'telefunc/client'
-import { EXTENSION_NAME, type LiveQueryResult } from './shared.js'
+import {
+  EXTENSION_NAME,
+  __LQ__DATA_KEY,
+  __LQ__CHANNEL_KEY,
+  type LiveQueryExtensionData,
+  type LiveQueryResult,
+} from './shared.js'
 import { assignDeep } from './utils/assignDeep.js'
 
 function isLiveQueryResult(v: unknown): v is LiveQueryResult {
-  return v !== null && typeof v === 'object' && 'data' in v && 'channel' in v
+  return v !== null && typeof v === 'object' && __LQ__DATA_KEY in v && __LQ__CHANNEL_KEY in v
 }
 
 function isPromise(val: unknown): val is Promise<unknown> {
-  return typeof val === 'object' && val !== null && 'then' in val && typeof (val as any).then === 'function'
-}
-
-function hashQueryKey(queryKey: readonly unknown[]): string {
-  return JSON.stringify(queryKey)
+  return typeof val === 'object' && val !== null && 'then' in val && typeof val.then === 'function'
 }
 
 class LiveQueryClient extends QueryClient {
@@ -28,7 +36,7 @@ class LiveQueryClient extends QueryClient {
     const persister: QueryPersister = (queryFn, context, query) => {
       const queryKey = context.queryKey
       const wrappedQueryFn = withContext((() => queryFn(context)) as (...args: unknown[]) => unknown, {
-        extensions: { [EXTENSION_NAME]: { queryKey: [...queryKey] } },
+        extensions: { [EXTENSION_NAME]: { queryKey } satisfies LiveQueryExtensionData },
       })
       const execute = userPersister
         ? () => userPersister(wrappedQueryFn as typeof queryFn, context, query)
@@ -51,8 +59,8 @@ class LiveQueryClient extends QueryClient {
   #handleResult(queryKey: readonly unknown[], result: unknown): unknown {
     if (!isLiveQueryResult(result)) return result
 
-    const { data, channel } = result
-    const hashed = hashQueryKey(queryKey)
+    const { [__LQ__DATA_KEY]: data, [__LQ__CHANNEL_KEY]: channel } = result
+    const hashed = hashKey(queryKey)
 
     const prev = this.#subs.get(hashed)
     if (prev) prev.close()
@@ -66,7 +74,7 @@ class LiveQueryClient extends QueryClient {
   }
 
   #teardown(query: { queryKey: readonly unknown[] }) {
-    const hashed = hashQueryKey(query.queryKey)
+    const hashed = hashKey(query.queryKey)
     const sub = this.#subs.get(hashed)
     if (sub) {
       sub.close()
