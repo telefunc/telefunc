@@ -2,10 +2,10 @@ export { Page }
 
 import React from 'react'
 import { QueryClientProvider } from '@tanstack/react-query'
-import { LiveQueryClient } from '@telefunc/tanstack-query'
+import { QueryClient } from '@telefunc/tanstack-query'
 import { TodoList } from './TodoList'
 
-const queryClient = new LiveQueryClient()
+const queryClient = new QueryClient()
 
 function Page() {
   return (

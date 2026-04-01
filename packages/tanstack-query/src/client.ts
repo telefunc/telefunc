@@ -1,31 +1,31 @@
-export { LiveQueryClient }
+export { QueryClient }
 
 import {
-  QueryClient,
+  QueryClient as BaseQueryClient,
   hashKey,
-  partialMatchKey,
+  type MutationOptions,
   type QueryClientConfig,
   type QueryPersister,
 } from '@tanstack/query-core'
 import { withContext } from 'telefunc/client'
 import {
   EXTENSION_NAME,
-  __LQ__DATA_KEY,
-  __LQ__CHANNEL_KEY,
-  type LiveQueryExtensionData,
-  type LiveQueryResult,
+  __TQ__DATA_KEY,
+  __TQ__CHANNEL_KEY,
+  type TanstackQueryExtensionData,
+  type TanstackQueryResult,
 } from './shared.js'
 import { assignDeep } from './utils/assignDeep.js'
 
-function isLiveQueryResult(v: unknown): v is LiveQueryResult {
-  return v !== null && typeof v === 'object' && __LQ__DATA_KEY in v && __LQ__CHANNEL_KEY in v
+function isTanstackQueryResult(v: unknown): v is TanstackQueryResult {
+  return v !== null && typeof v === 'object' && __TQ__DATA_KEY in v && __TQ__CHANNEL_KEY in v
 }
 
 function isPromise(val: unknown): val is Promise<unknown> {
   return typeof val === 'object' && val !== null && 'then' in val && typeof val.then === 'function'
 }
 
-class LiveQueryClient extends QueryClient {
+class QueryClient extends BaseQueryClient {
   #subs = new Map<string, { close: () => Promise<unknown> }>()
   #unsubCache: (() => void) | null = null
 
@@ -35,12 +35,10 @@ class LiveQueryClient extends QueryClient {
     const userPersister = config?.defaultOptions?.queries?.persister
     const persister: QueryPersister = (queryFn, context, query) => {
       const queryKey = context.queryKey
-      const wrappedQueryFn = withContext((() => queryFn(context)) as (...args: unknown[]) => unknown, {
-        extensions: { [EXTENSION_NAME]: { queryKey } satisfies LiveQueryExtensionData },
+      const wrappedQueryFn = withContext(() => queryFn(context), {
+        extensions: { [EXTENSION_NAME]: { queryKey } satisfies TanstackQueryExtensionData },
       })
-      const execute = userPersister
-        ? () => userPersister(wrappedQueryFn as typeof queryFn, context, query)
-        : wrappedQueryFn
+      const execute = userPersister ? () => userPersister(wrappedQueryFn, context, query) : wrappedQueryFn
       const result = execute()
       if (isPromise(result)) {
         return result.then((resolved) => this.#handleResult(queryKey, resolved))
@@ -57,9 +55,9 @@ class LiveQueryClient extends QueryClient {
   }
 
   #handleResult(queryKey: readonly unknown[], result: unknown): unknown {
-    if (!isLiveQueryResult(result)) return result
+    if (!isTanstackQueryResult(result)) return result
 
-    const { [__LQ__DATA_KEY]: data, [__LQ__CHANNEL_KEY]: channel } = result
+    const { [__TQ__DATA_KEY]: data, [__TQ__CHANNEL_KEY]: channel } = result
     const hashed = hashKey(queryKey)
 
     const prev = this.#subs.get(hashed)
@@ -94,6 +92,17 @@ class LiveQueryClient extends QueryClient {
   override unmount() {
     this.#cleanup()
     super.unmount()
+  }
+
+  override defaultMutationOptions<T extends MutationOptions<any, any, any, any>>(options?: T): T {
+    const merged = super.defaultMutationOptions(options)
+    const invalidates = merged.meta?.invalidates
+    if (Array.isArray(invalidates) && merged.mutationFn) {
+      merged.mutationFn = withContext(merged.mutationFn, {
+        extensions: { [EXTENSION_NAME]: { invalidates } satisfies TanstackQueryExtensionData },
+      })
+    }
+    return merged
   }
 
   override clear() {

@@ -19,132 +19,102 @@ Telefunc can pass functions between client and server:
 - **Client → server**: Pass a callback as an argument — the server can call it.
 - **Server → client**: Return a function from a telefunction — call it later from the client.
 
-### File upload progress
-
-A callback argument reporting progress while the server reads the file stream:
+### Upload progress
 
 ```ts
 // Upload.telefunc.ts
-// Environment: server
-
-import fs from 'node:fs'
-
 export async function onUpload(file: File, onProgress: (percent: number) => void) {
-  const total = file.size
   let loaded = 0
-
-  const dest = fs.createWriteStream(`./uploads/${file.name}`)
-
   for await (const chunk of file.stream()) {
-    dest.write(chunk)
+    writeChunk(chunk)
     loaded += chunk.byteLength
-    onProgress(Math.round((loaded / total) * 100))
+    onProgress(Math.round((loaded / file.size) * 100))
   }
-
-  dest.end()
 }
 ```
 
 ```tsx
 // Upload.tsx
-// Environment: client
-
-import { useState } from 'react'
-import { onUpload } from './Upload.telefunc'
-
-function Upload() {
-  const [progress, setProgress] = useState(0)
-
-  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    await onUpload(file, (percent) => setProgress(percent))
-  }
-
-  return (
-    <div>
-      <input type="file" onChange={handleUpload} />
-      <div style={{ width: `${progress}%`, height: 4, background: '#3b82f6' }} />
-    </div>
-  )
-}
+await onUpload(file, (percent) => setProgress(percent))
 ```
 
-If you only need callback-style interaction, function passing is simpler than a dedicated channel.
+If you only need callback-style interaction, function passing is simpler than a channel.
 
 
 ## Channels
 
 Use <Link text={<code>channel()</code>} href="/channel" /> for point-to-point messaging — direct messages between one server and one client.
 
-### Game session
+### Dashboard
+
+A channel that stays open for the lifetime of a page, pushing live metrics from the server:
 
 ```ts
-// Game.telefunc.ts
-// Environment: server
-
+// Dashboard.telefunc.ts
 import { channel } from 'telefunc'
 
-type Command = (cmd: { action: string }) => { ok: boolean }
-type Event = (event: { type: string; data: unknown }) => void
+export async function onDashboard() {
+  const ch = channel()
 
-export async function onJoinGame(gameId: string) {
-  const ch = channel<Command, Event>({ ack: true })
+  const interval = setInterval(() => {
+    ch.send(getMetrics())
+  }, 1000)
 
-  ch.listen((cmd) => {
-    // Process player command, push game state
-    ch.send({ type: 'state', data: getGameState(gameId) })
-    return { ok: true }
-  })
+  ch.onClose(() => clearInterval(interval))
 
   return { channel: ch.client }
 }
 ```
 
-See <Link href="/channel" /> for the full API — <Link href="/channel#typescript">TypeScript</Link>, <Link href="/channel#acknowledgements">acknowledgements</Link>, <Link href="/channel#binary-data">binary data</Link>, and <Link href="/channel#lifecycle">lifecycle</Link>.
+```ts
+// Dashboard.tsx
+const { channel } = await onDashboard()
+channel.listen((metrics) => updateCharts(metrics))
+```
+
+See <Link href="/channel" /> for the full API.
 
 
 ## Pub/sub
 
 Use <Link text={<code>pubsub()</code>} href="/channel#pubsub" /> for broadcast messaging — all instances sharing a key form a broadcast group.
 
+### Notifications
+
+```ts
+// Notifications.telefunc.ts
+import { pubsub } from 'telefunc'
+
+export async function onListenNotifications(userId: string) {
+  return pubsub(`notifications:${userId}`)
+}
+```
+
+```ts
+// Notifications.tsx
+const ps = await onListenNotifications(userId)
+ps.subscribe((n) => showToast(n))
+```
+
 ### Chat room
 
 ```ts
 // Chat.telefunc.ts
-// Environment: server
-
 import { pubsub } from 'telefunc'
 
-type ChatMessage = { user: string; text: string }
-
-export async function onJoinChat(username: string) {
-  const ps = pubsub<ChatMessage>('chat:lobby')
-
-  ps.onOpen(() => {
-    ps.publish({ user: 'system', text: `${username} joined` })
-  })
-
-  return ps
+export async function onJoinChat(room: string) {
+  return pubsub(`chat:${room}`)
 }
 ```
 
 ```ts
 // Chat.tsx
-// Environment: client
-
-import { onJoinChat } from './Chat.telefunc'
-
-const ps = await onJoinChat('Alice')
-
-ps.subscribe((msg) => {
-  console.log(`${msg.user}: ${msg.text}`)
-})
-
+const ps = await onJoinChat('lobby')
+ps.subscribe((msg) => console.log(msg))
 ps.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
-See <Link href="/channel#pubsub" /> for the full pub/sub API and <Link href="/channel#multi-server">scaling pub/sub</Link> across servers.
+See <Link href="/channel#pubsub" /> for the full pub/sub API.
 
 
 ## Reconnection
@@ -159,7 +129,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 
 ## Transport
 
-Channels start on **SSE** and automatically upgrade to **WebSocket** when WebSocket is enabled in your <Link text="serve setup" href="/server" />. No client-side configuration needed.
+Channels start on **SSE** and automatically upgrade to **WebSocket** when WebSocket is enabled in your <Link text="server setup" href="/server" />. No client-side configuration needed.
 
 | Transport | Throughput | Recovery | CDN-friendly |
 |---|---|---|---|

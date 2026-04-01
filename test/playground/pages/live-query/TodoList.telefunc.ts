@@ -1,7 +1,5 @@
 export { onGetTodos, onAddTodo, onRemoveTodo, onClearTodos }
 
-import { invalidate } from '@telefunc/tanstack-query/server'
-
 type Todo = { id: string; text: string }
 
 let todos: Todo[] = [
@@ -16,15 +14,12 @@ async function onGetTodos() {
 
 async function onAddTodo(text: string) {
   todos.push({ id: String(nextId++), text })
-  invalidate(['todos'])
 }
 
 async function onRemoveTodo(id: string) {
   todos = todos.filter((t) => t.id !== id)
-  invalidate(['todos'])
 }
 
 async function onClearTodos() {
   todos = []
-  invalidate(['todos'])
 }

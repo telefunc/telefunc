@@ -1,7 +1,7 @@
 export { TodoList }
 
 import React, { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { onGetTodos, onAddTodo, onRemoveTodo, onClearTodos } from './TodoList.telefunc'
 
 function TodoList() {
@@ -10,6 +10,21 @@ function TodoList() {
   const { data: todos, isLoading } = useQuery({
     queryKey: ['todos'],
     queryFn: () => onGetTodos(),
+  })
+
+  const addTodo = useMutation({
+    mutationFn: (text: string) => onAddTodo(text),
+    meta: { invalidates: [['todos']] },
+  })
+
+  const removeTodo = useMutation({
+    mutationFn: (id: string) => onRemoveTodo(id),
+    meta: { invalidates: [['todos']] },
+  })
+
+  const clearTodos = useMutation({
+    mutationFn: () => onClearTodos(),
+    meta: { invalidates: [['todos']] },
   })
 
   return (
@@ -21,7 +36,7 @@ function TodoList() {
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && text.trim()) {
-              onAddTodo(text.trim())
+              addTodo.mutate(text.trim())
               setText('')
             }
           }}
@@ -31,14 +46,14 @@ function TodoList() {
         <button
           onClick={() => {
             if (text.trim()) {
-              onAddTodo(text.trim())
+              addTodo.mutate(text.trim())
               setText('')
             }
           }}
         >
           Add
         </button>
-        <button onClick={() => onClearTodos()}>Clear all</button>
+        <button onClick={() => clearTodos.mutate()}>Clear all</button>
       </div>
 
       {isLoading ? (
@@ -48,7 +63,7 @@ function TodoList() {
           {todos?.map((todo) => (
             <li key={todo.id} className="flex items-center gap-2">
               <span className="flex-1">{todo.text}</span>
-              <button onClick={() => onRemoveTodo(todo.id)} className="text-xs text-red-500">
+              <button onClick={() => removeTodo.mutate(todo.id)} className="text-xs text-red-500">
                 Remove
               </button>
             </li>

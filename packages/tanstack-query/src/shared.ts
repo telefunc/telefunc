@@ -1,16 +1,16 @@
-export { __LQ__PUBSUB_KEY_PREFIX, __LQ__DATA_KEY, __LQ__CHANNEL_KEY, EXTENSION_NAME }
-export type { LiveQueryExtensionData, LiveQueryResult }
+export { __TQ__PUBSUB_KEY_PREFIX, __TQ__DATA_KEY, __TQ__CHANNEL_KEY, EXTENSION_NAME }
+export type { TanstackQueryExtensionData, TanstackQueryResult }
 
 import type { ClientChannel } from 'telefunc'
 
-const __LQ__PUBSUB_KEY_PREFIX = '__lq__:'
-const __LQ__DATA_KEY = '__lq__data'
-const __LQ__CHANNEL_KEY = '__lq__channel'
+const __TQ__PUBSUB_KEY_PREFIX = '__tq__:'
+const __TQ__DATA_KEY = '__tq__data'
+const __TQ__CHANNEL_KEY = '__tq__channel'
 const EXTENSION_NAME = 'telefunc/tanstack-query'
 
-type LiveQueryExtensionData = { queryKey: readonly unknown[] }
+type TanstackQueryExtensionData = { queryKey: readonly unknown[] } | { invalidates: readonly (readonly unknown[])[] }
 
-type LiveQueryResult = {
-  [__LQ__DATA_KEY]: unknown
-  [__LQ__CHANNEL_KEY]: ClientChannel<never, 'invalidate'>
+type TanstackQueryResult = {
+  [__TQ__DATA_KEY]: unknown
+  [__TQ__CHANNEL_KEY]: ClientChannel<never, 'invalidate'>
 }

@@ -1,0 +1,123 @@
+import { Link } from '@brillout/docpress'
+
+Invalidate [TanStack Query](https://tanstack.com/query) queries from the server — every connected client refetches.
+
+## Setup
+
+Use `QueryClient` from `@telefunc/tanstack-query` instead of `@tanstack/react-query`:
+
+```tsx
+import { QueryClient } from '@telefunc/tanstack-query'
+import { QueryClientProvider } from '@tanstack/react-query'
+
+const queryClient = new QueryClient()
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <MyApp />
+    </QueryClientProvider>
+  )
+}
+```
+
+It's a drop-in replacement — same options, same API.
+
+Import `@telefunc/tanstack-query/server` on the server to register the extension:
+
+```ts
+// server.ts
+import '@telefunc/tanstack-query/server'
+```
+
+
+## Client-side invalidation
+
+Use `meta.invalidates` on mutations to automatically invalidate queries through the server:
+
+```ts
+// todos.telefunc.ts
+
+export async function getTodos() {
+  return db.todo.findMany()
+}
+
+export async function addTodo(text: string) {
+  await db.todo.create({ data: { text, done: false } })
+}
+```
+
+```tsx
+// Todos.tsx
+import { useQuery, useMutation } from '@tanstack/react-query'
+import { getTodos, addTodo } from './todos.telefunc'
+
+function Todos() {
+  const { data: todos } = useQuery({
+    queryKey: ['todos'],
+    queryFn: () => getTodos(),
+  })
+
+  const add = useMutation({
+    mutationFn: (text: string) => addTodo(text),
+    meta: { invalidates: [['todos']] },
+  })
+
+  return (
+    <>
+      <ul>{todos?.map(todo => <li key={todo.id}>{todo.text}</li>)}</ul>
+      <button onClick={() => add.mutate('New todo')}>Add</button>
+    </>
+  )
+}
+```
+
+The `invalidates` metadata travels with the telefunc call to the server, which publishes through <Link text="pub/sub" href="/channel#pubsub" />. Every connected client with a matching query refetches.
+
+A mutation can invalidate multiple query keys:
+
+```tsx
+useMutation({
+  mutationFn: (id: string) => assignTodoToProject(id),
+  meta: { invalidates: [['todos'], ['projects']] },
+})
+```
+
+
+## Server-side invalidation
+
+For changes not triggered by a client mutation (background jobs, webhooks, other services), use `invalidate()` directly:
+
+```ts
+import { invalidate } from '@telefunc/tanstack-query/server'
+
+// e.g. in a webhook handler
+app.post('/webhooks/stripe', async (req) => {
+  await processPayment(req.body)
+  invalidate(['billing'])
+})
+```
+
+```ts
+invalidate(['todos'])       // all queries starting with ['todos']
+invalidate(['todos', 1])    // only ['todos', 1]
+```
+
+Prefix matching — same behavior as TanStack Query's `invalidateQueries`.
+
+
+## How it works
+
+1. `QueryClient` passes each query's `queryKey` alongside the telefunc call.
+2. The server subscribes to invalidation events for that key.
+3. Mutations with `meta.invalidates` (or explicit `invalidate()` calls) publish through <Link text="pub/sub" href="/channel#pubsub" />.
+4. The client receives the event and calls `invalidateQueries()`.
+
+Works across multiple servers via the <Link text="pub/sub adapter" href="/channel#multi-server" />.
+
+
+## See also
+
+- <Link href="/channel" /> — channels and pub/sub
+- <Link href="/real-time" /> — real-time patterns
+- <Link href="/cloudflare" /> — Cloudflare Workers

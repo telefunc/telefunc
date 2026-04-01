@@ -162,8 +162,8 @@ const headings = [
   },
   {
     level: 2,
-    title: 'Live Queries',
-    url: '/live-queries',
+    title: 'TanStack Query',
+    url: '/tanstack-query',
   },
   {
     level: 1,
