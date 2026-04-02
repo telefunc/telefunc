@@ -143,12 +143,12 @@ function testChannel(isDev: boolean) {
 
   // ── send(data, { ack: false }) opt-out ───────────────────────────────
 
-  test('channel: send({ ack: false }) opts out of ack on ack-default channel — returns void synchronously', async () => {
+  test('channel: send({ ack: false }) opts out of ack on ack-default channel — resolves to void', async () => {
     await page.click('#channel-send-no-ack')
 
     await autoRetry(async () => {
       const state = await getResult<ChannelState>('#channel-state')
-      // send() with { ack: false } returns undefined (void), not a Promise
+      // send() with { ack: false } returns Promise<void> — no ack value
       expect(state.noAckSendVoid).toBe(true)
       // Server still received and echoed the message back (message was delivered)
       expect(state.lastEchoText).toBe('no-ack-test')

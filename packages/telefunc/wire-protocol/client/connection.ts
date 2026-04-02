@@ -7,6 +7,7 @@ import { assert } from '../../utils/assert.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
+  CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
@@ -64,6 +65,7 @@ interface MuxChannel {
   _onTransportMessage(data: string): void
   _onTransportBinaryMessage(data: Uint8Array): void
   _onTransportAckReqMessage(data: string, seq: number): Promise<void>
+  _onTransportBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void>
   _onPeerWindowUpdate(bytes: number): void
   _onTransportCloseRequest(timeoutMs: number): void
   _onTransportCloseAck(): void
@@ -75,6 +77,7 @@ interface MuxConnection {
   sendPublishAckReq(channel: MuxChannel, data: string): Promise<unknown>
   sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array): Promise<unknown>
   sendTextAckReq(channel: MuxChannel, data: string): Promise<unknown>
+  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array): Promise<unknown>
   sendBinary(channel: MuxChannel, data: Uint8Array): void
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
   sendAbort(channel: MuxChannel): void
@@ -189,6 +192,7 @@ class ClientConnection implements MuxConnection {
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs = CHANNEL_IDLE_TIMEOUT_MS
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
+  private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
   private pongTimeoutMs = CHANNEL_PING_INTERVAL_MS * 2
   private readonly dispatchFrame = (_raw: Uint8Array<ArrayBuffer>, frame: DecodedFrame): void => {
@@ -243,7 +247,10 @@ class ClientConnection implements MuxConnection {
     const ix = this.nextIndex++
     this.channels.set(ix, channel)
     this.channelIndex.set(channel, ix)
-    this.replayBuffers.set(ix, new ReplayBuffer(this.clientReplayBufferBytes, this.reconnectTimeoutMs))
+    this.replayBuffers.set(
+      ix,
+      new ReplayBuffer(this.clientReplayBufferBytes, this.reconnectTimeoutMs, this.clientReplayBufferBinaryBytes),
+    )
 
     if (!this.transport.hasActiveTransport() && !this.transport.isConnecting()) {
       this.transport.start()
@@ -307,7 +314,7 @@ class ClientConnection implements MuxConnection {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return promise
     }
-    replay.push(seq, frame)
+    replay.push(seq, frame, true)
     this.transport.sendFrame({ kind: 'ack', frame })
     return promise
   }
@@ -330,6 +337,24 @@ class ClientConnection implements MuxConnection {
     return promise
   }
 
+  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array): Promise<unknown> {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return Promise.reject(new ChannelClosedError())
+    const replay = this.replayBuffers.get(ix)!
+    const seq = replay.nextSeq()
+    const promise = new Promise<unknown>((resolve, reject) => {
+      this.pendingAcks.set(`${ix}:${seq}`, { resolve, reject })
+    })
+    const frame = encode.binaryAckReq(ix, data, seq)
+    if (!this.canSendImmediately()) {
+      this.sendBuffer.push({ frame, channelIx: ix, seq })
+      return promise
+    }
+    replay.push(seq, frame, true)
+    this.transport.sendFrame({ kind: 'ack', frame })
+    return promise
+  }
+
   sendBinary(channel: MuxChannel, data: Uint8Array): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
@@ -340,7 +365,7 @@ class ClientConnection implements MuxConnection {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
     }
-    replay.push(seq, frame)
+    replay.push(seq, frame, true)
     this.transport.sendFrame({ kind: 'data', frame })
   }
 
@@ -750,6 +775,7 @@ class ClientConnection implements MuxConnection {
     if (ctrl.reconnectTimeout) this.reconnectTimeoutMs = ctrl.reconnectTimeout
     if (ctrl.idleTimeout) this.idleTimeoutMs = ctrl.idleTimeout
     if (ctrl.clientReplayBuffer) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
+    if (ctrl.clientReplayBufferBinary) this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
     if (ctrl.pingInterval) {
       this.pingIntervalMs = ctrl.pingInterval
       this.pongTimeoutMs = ctrl.pingInterval * 2
@@ -840,6 +866,10 @@ class ClientConnection implements MuxConnection {
       this.channels.get(frame.index)?._onTransportMessage(frame.text!)
       return
     }
+    if (frame.tag === TAG.BINARY_ACK_REQ) {
+      this.channels.get(frame.index)?._onTransportBinaryAckReqMessage(frame.data!, frame.seq)
+      return
+    }
     if (frame.tag === TAG.BINARY) this.channels.get(frame.index)?._onTransportBinaryMessage(frame.data!)
   }
 
@@ -875,7 +905,11 @@ class ClientConnection implements MuxConnection {
         if (retainedChannels?.has(channelIx)) sendBuffer[writeIx++] = entry
         continue
       }
-      if (seq !== undefined) this.replayBuffers.get(channelIx)?.push(seq, frame)
+      if (seq !== undefined) {
+        const tag = frame[0]
+        const isBinary = tag === TAG.BINARY || tag === TAG.PUBLISH_BINARY || tag === TAG.PUBLISH_BINARY_ACK_REQ
+        this.replayBuffers.get(channelIx)?.push(seq, frame, isBinary)
+      }
       frames.push({ kind, frame })
     }
     sendBuffer.length = writeIx

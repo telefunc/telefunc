@@ -88,14 +88,22 @@ export const CHANNEL_IDLE_TIMEOUT_MS = 60_000
 export const CHANNEL_PING_INTERVAL_MS = 5_000
 export const CHANNEL_PING_INTERVAL_MIN_MS = 1_000
 export const CHANNEL_CLOSE_TIMEOUT_MS = 5_000
+/** Per-channel replay buffer for text frames kept on the server for reconnect recovery. */
 export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 256 * 1024
+/** Per-channel replay buffer for binary frames kept on the server for reconnect recovery. */
+export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
+/** Per-channel replay buffer for text frames advertised to the client for reconnect replay. */
 export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 1024 * 1024
+/** Per-channel replay buffer for binary frames advertised to the client for reconnect replay. */
+export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
 /**
- * Maximum bytes buffered per channel for messages sent before a peer connects.
+ * Maximum bytes buffered per channel for text messages sent before a peer connects.
  * When the budget is exceeded the oldest entries are evicted (FIFO) so the
  * channel stays alive and memory stays bounded.
  */
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
+/** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
+export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
 
 /**
  * How long (ms) a channel waits for a peer to connect after the server→client

@@ -19,10 +19,10 @@ class IndexedPeer {
     private replay: ReplayBuffer,
   ) {}
 
-  sendText(data: string): void {
+  sendText(data: string): void | Promise<void> {
     const seq = this.replay.nextSeq()
     const frame = encode.text(this.index, data, seq)
-    this.sender.send(frame, () => this.replay.push(seq, frame))
+    return this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 
   /** Send a text frame that requests an ack response from the receiver. Returns seq. */
@@ -37,7 +37,16 @@ class IndexedPeer {
   sendBinary(data: Uint8Array): void | Promise<void> {
     const seq = this.replay.nextSeq()
     const frame = encode.binary(this.index, data, seq)
-    return this.sender.send(frame, () => this.replay.push(seq, frame))
+    return this.sender.send(frame, () => this.replay.push(seq, frame, true))
+  }
+
+  /** Send a binary frame that requests an ack response from the receiver. Returns seq. */
+  sendBinaryAckReq(data: Uint8Array, onQueued?: (seq: number) => void): number {
+    const seq = this.replay.nextSeq()
+    const frame = encode.binaryAckReq(this.index, data, seq)
+    onQueued?.(seq)
+    this.sender.send(frame, () => this.replay.push(seq, frame, true))
+    return seq
   }
 
   /** Send an acknowledgement response for a message the client sent.
@@ -106,7 +115,7 @@ class IndexedPeer {
     const seq = this.replay.nextSeq()
     const frame = encode.publishBinary(this.index, data, seq)
     try {
-      this.sender.send(frame, () => this.replay.push(seq, frame))
+      this.sender.send(frame, () => this.replay.push(seq, frame, true))
     } catch {
       /* transport may already be closed */
     }

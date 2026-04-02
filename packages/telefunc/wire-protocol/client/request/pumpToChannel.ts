@@ -53,12 +53,12 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, ch
       while (true) {
         const { done, value } = await Promise.race([cancelledPromise, producer.chunks.next()])
         if (done || cancelled) break
-        const pending = channel._sendBinaryAwaitable(concat(TAG_DATA, value))
+        const pending = channel._sendBinary(concat(TAG_DATA, value))
         if (pending) await pending
       }
     } catch {
       // ChannelClosedError — either from onOpen rejection (closed before connect)
-      // or from _sendBinaryAwaitable (closed mid-send, e.g. by abort(res)).
+      // or from sendBinary (closed mid-send, e.g. by abort(res)).
       // Abort semantics propagate through doCancel(err) → producer.cancel(err) →
       // reader.cancel(err), not through this catch.
     } finally {

@@ -60,6 +60,8 @@ const TAG = {
   PUBLISH_BINARY: 0x08 as const,
   /** Replayable keyed binary publish frame that requests an acknowledgement receipt. */
   PUBLISH_BINARY_ACK_REQ: 0x09 as const,
+  /** Binary frame that requests an acknowledgement from the receiver. */
+  BINARY_ACK_REQ: 0x0a as const,
 }
 
 // ===== Control message types =====
@@ -91,6 +93,7 @@ type CtrlReconciled = {
   idleTimeout: number
   pingInterval: number
   clientReplayBuffer: number
+  clientReplayBufferBinary: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
@@ -132,6 +135,7 @@ type DecodedFrame =
   | { tag: typeof TAG.TEXT_ACK_REQ; index: number; seq: number; text: string }
   | { tag: typeof TAG.PUBLISH_BINARY; index: number; seq: number; data: Uint8Array; info: WirePublishInfo }
   | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
+  | { tag: typeof TAG.BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
 
 const ACK_RESULT_STATUS = {
   ok: 0x00,
@@ -229,6 +233,14 @@ const encode = {
     return frame
   },
 
+  /** Identical wire layout to BINARY, but signals to the receiver: send ACK_RES when done. */
+  binaryAckReq(index: number, data: Uint8Array, seq = 0): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER_DATA + data.byteLength)
+    writeDataHeader(frame, TAG.BINARY_ACK_REQ, index, seq)
+    frame.set(data, HEADER_DATA)
+    return frame
+  },
+
   /** Identical wire layout to TEXT, but signals to the receiver: send ACK_RES when done. */
   textAckReq(index: number, text: string, seq = 0): Uint8Array<ArrayBuffer> {
     const payload = textEncoder.encode(text)
@@ -311,6 +323,9 @@ function decode(frame: Uint8Array): DecodedFrame {
       ((payload[3] as number) << 24)
     const status = decodeAckResultStatus(payload[4] as number)
     return { tag: TAG.ACK_RES, index, seq, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
+  }
+  if (tag === TAG.BINARY_ACK_REQ) {
+    return { tag: TAG.BINARY_ACK_REQ, index, seq, data: payload }
   }
   return { tag: TAG.BINARY, index, seq, data: payload }
 }

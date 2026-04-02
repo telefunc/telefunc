@@ -12,6 +12,7 @@ import type {
   ChannelCloseResult,
   ChannelData,
   ChannelListener,
+  ChannelBinaryListener,
 } from '../channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -25,11 +26,14 @@ import { createAbortError, type AbortError } from '../../shared/Abort.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
+import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
+  CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
   CHANNEL_CLOSE_TIMEOUT_MS,
   CHANNEL_CONNECT_TTL_MS,
   CREDIT_WINDOW_BYTES,
+  WINDOW_UPDATE_THRESHOLD_BYTES,
 } from '../constants.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
@@ -40,11 +44,13 @@ const globalObject = getGlobalObject('channel.ts', {
   creationHooks: new Map<string, () => void>(),
   connectTtlMs: CHANNEL_CONNECT_TTL_MS,
   bufferLimit: CHANNEL_BUFFER_LIMIT_BYTES,
+  bufferLimitBinary: CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
 })
 
-function setChannelDefaults(opts: { connectTtl: number; bufferLimit: number }): void {
+function setChannelDefaults(opts: { connectTtl: number; bufferLimit: number; bufferLimitBinary: number }): void {
   globalObject.connectTtlMs = opts.connectTtl
   globalObject.bufferLimit = opts.bufferLimit
+  globalObject.bufferLimitBinary = opts.bufferLimitBinary
 }
 
 function getChannelRegistry(): Map<string, ServerChannel<unknown, unknown>> {
@@ -92,7 +98,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _didRegister = false
   protected _peer: IndexedPeer | null = null
   private _listeners: Array<ChannelListener<ClientToServer>> = []
-  private _binaryListeners: Array<(data: Uint8Array) => void | Promise<void>> = []
+  private _binaryListeners: Array<ChannelBinaryListener> = []
   protected _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
   protected _pendingAcks = new Map<
     number,
@@ -112,8 +118,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   protected _inflightAcks = 0
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null
   protected _peerWindow: number = CREDIT_WINDOW_BYTES
-  private _awaitableBinaryBuffer: Uint8Array[] = []
-  private _awaitableBinaryBufferBytes = 0
+  private _consumedBinaryBytes = 0
   private _sendWaiters: Array<() => void> = []
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
@@ -131,7 +136,10 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   } = {}) {
     this.ackMode = ackMode
     this.id = id ?? crypto.randomUUID()
-    this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(bufferLimit ?? globalObject.bufferLimit)
+    this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
+      bufferLimit ?? globalObject.bufferLimit,
+      globalObject.bufferLimitBinary,
+    )
   }
 
   get isClosed(): boolean {
@@ -144,22 +152,38 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._shutdownCallback = cb
   }
 
-  send(data: ChannelData<ServerToClient>): void
+  send(data: ChannelData<ServerToClient>): Promise<void>
   send(data: ChannelData<ServerToClient>, opts: { ack: true }): Promise<ChannelAck<ServerToClient>>
-  send(data: ChannelData<ServerToClient>, opts: { ack: false }): void
-  send(data: ChannelData<ServerToClient>, opts?: { ack?: boolean }): Promise<ChannelAck<ServerToClient>> | void {
+  send(data: ChannelData<ServerToClient>, opts: { ack: false }): Promise<void>
+  send(
+    data: ChannelData<ServerToClient>,
+    opts?: { ack?: boolean },
+  ): Promise<ChannelAck<ServerToClient>> | Promise<void> {
+    const ret = this._send(data, opts) ?? Promise.resolve()
+    ret.catch(() => {})
+    return ret
+  }
+
+  _send(
+    data: ChannelData<ServerToClient>,
+    opts?: { ack?: boolean },
+  ): void | Promise<ChannelAck<ServerToClient>> | Promise<void> {
     if (this._isClosed) throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ackMode === true)
     const serialized = stringify(data, { forbidReactElements: false })
-    if (!needsAck) {
-      if (this._peer) {
-        this._peer.sendText(serialized)
-      } else {
-        this._prePeerBuffer.pushText(serialized)
+    if (!this._peer) {
+      if (needsAck) {
+        return this._trackAck(
+          new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
+            this._prePeerBuffer.pushTextAck(serialized, resolve, reject)
+          }),
+        )
       }
-      return
+      return new Promise<void>((resolve, reject) => {
+        this._prePeerBuffer.pushText(serialized, resolve, reject)
+      })
     }
-    if (this._peer) {
+    if (needsAck) {
       return this._trackAck(
         new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
           this._peer!.sendTextAckReq(serialized, (seq) => {
@@ -168,28 +192,66 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         }),
       )
     }
-    return this._trackAck(
-      new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-        this._prePeerBuffer.pushTextAck(serialized, resolve, reject)
-      }),
-    )
+    return this._sendToPeerWithWindow(this._peer.sendText(serialized), utf8ByteLength(serialized))
   }
 
-  sendBinary(data: Uint8Array): void {
+  private _sendToPeerWithWindow(transport: void | Promise<void>, bytes: number): void | Promise<void> {
+    this._peerWindow -= bytes
+    if (this._peerWindow > 0) return transport ?? undefined
+    const window = new Promise<void>((resolve) => {
+      this._sendWaiters.push(resolve)
+    })
+    return transport ? transport.then(() => window) : window
+  }
+
+  sendBinary(data: Uint8Array): Promise<void>
+  sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
+  sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
+  sendBinary(data: Uint8Array, opts?: { ack?: boolean }): Promise<unknown> | Promise<void> {
+    const ret = this._sendBinary(data, opts) ?? Promise.resolve()
+    ret.catch(() => {})
+    return ret
+  }
+
+  _sendBinary(data: Uint8Array, opts?: { ack?: boolean }): void | Promise<unknown> | Promise<void> {
     if (this._isClosed) throw new ChannelClosedError()
-    if (this._peer) {
-      void this._peer.sendBinary(data)
-      return
+    const needsAck = opts?.ack === true
+    if (!this._peer) {
+      if (needsAck) {
+        return new Promise<unknown>((resolve, reject) => {
+          this._prePeerBuffer.pushBinaryAck(data, resolve, reject)
+        })
+      }
+      return new Promise<void>((resolve, reject) => {
+        this._prePeerBuffer.pushBinary(data, resolve, reject)
+      })
     }
-    this._prePeerBuffer.pushBinary(data)
+    if (needsAck) {
+      return this._trackAck(
+        new Promise<unknown>((resolve, reject) => {
+          this._peer!.sendBinaryAckReq(data, (seq) => {
+            this._pendingAcks.set(seq, { resolve, reject })
+          })
+        }),
+      )
+    }
+    return this._sendToPeerWithWindow(this._peer.sendBinary(data), data.byteLength)
   }
 
-  listen(callback: ChannelListener<ClientToServer>): void {
+  listen(callback: ChannelListener<ClientToServer>): () => void {
     this._listeners.push(callback)
+    return () => {
+      const i = this._listeners.indexOf(callback)
+      if (i >= 0) this._listeners.splice(i, 1)
+    }
   }
 
-  listenBinary(callback: (data: Uint8Array) => void | Promise<void>): void {
+  listenBinary(callback: ChannelBinaryListener): () => void {
     this._binaryListeners.push(callback)
+    return () => {
+      const i = this._binaryListeners.indexOf(callback)
+      if (i >= 0) this._binaryListeners.splice(i, 1)
+    }
   }
 
   onClose(callback: ChannelCloseCallback): void {
@@ -261,17 +323,20 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._clearTimer('_reconnectTimer')
     this._peerWindow = CREDIT_WINDOW_BYTES
     this._peer = peer
-    this._prePeerBuffer.flush(
-      (msg) => peer.sendText(msg),
-      (msg) => peer.sendPublish(msg),
-      (msg) => peer.sendBinary(msg),
-      (data, ackEntry) => {
+    this._prePeerBuffer.flush({
+      sendText: (msg) => peer.sendText(msg),
+      sendPublish: (msg) => peer.sendPublish(msg),
+      sendBinary: (msg) => peer.sendBinary(msg),
+      sendTextAck: (data, cb) => {
         const seq = peer.sendTextAckReq(data)
-        this._pendingAcks.set(seq, ackEntry)
+        this._pendingAcks.set(seq, cb)
       },
-      (msg) => peer.sendPublishBinary(msg),
-    )
-    this._flushAwaitableBinaryBuffer()
+      sendBinaryAck: (data, cb) => {
+        const seq = peer.sendBinaryAckReq(data)
+        this._pendingAcks.set(seq, cb)
+      },
+      sendPublishBinary: (msg) => peer.sendPublishBinary(msg),
+    })
     if (this._pendingCloseAck) peer.sendCloseAck()
     if (this._awaitingCloseAck) peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
     if (this._isClosed) {
@@ -279,43 +344,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       return
     }
     this._fireOpen()
-    this._notifySendReady()
-  }
-
-  _sendBinaryAwaitable(data: Uint8Array): void | Promise<void> {
-    if (this._isClosed) throw new ChannelClosedError()
-    if (!this._peer) {
-      // Pre-peer: buffer up to CREDIT_WINDOW_BYTES, block when full
-      if (this._awaitableBinaryBufferBytes + data.byteLength > CREDIT_WINDOW_BYTES) {
-        return this._sendBinaryWhenReady(data)
-      }
-      this._awaitableBinaryBuffer.push(data)
-      this._awaitableBinaryBufferBytes += data.byteLength
-      return
-    }
-    if (this._peerWindow <= 0) return this._sendBinaryWhenReady(data)
-    this._peerWindow -= data.byteLength
-    return this._peer.sendBinary(data)
-  }
-
-  private _flushAwaitableBinaryBuffer(): void {
-    if (!this._peer || this._awaitableBinaryBuffer.length === 0) return
-    for (const chunk of this._awaitableBinaryBuffer) {
-      this._peerWindow -= chunk.byteLength
-      this._peer.sendBinary(chunk)
-    }
-    this._awaitableBinaryBuffer.length = 0
-    this._awaitableBinaryBufferBytes = 0
-    this._notifySendReady()
-  }
-
-  private async _sendBinaryWhenReady(data: Uint8Array): Promise<void> {
-    while ((!this._peer || this._peerWindow <= 0) && !this._isClosed) {
-      await this._waitUntilSendReady()
-    }
-    if (this._isClosed) throw new ChannelClosedError()
-    this._peerWindow -= data.byteLength
-    return this._peer!.sendBinary(data)
   }
 
   _onPeerMessage(text: string): void {
@@ -333,7 +361,16 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     return this._trackAck(this._dispatchAckReq(text, seq))
   }
 
+  _onPeerBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
+    return this._trackAck(this._dispatchBinaryAckReq(data, seq))
+  }
+
   _onPeerBinaryMessage(data: Uint8Array): void {
+    this._consumedBinaryBytes += data.byteLength
+    if (this._consumedBinaryBytes >= WINDOW_UPDATE_THRESHOLD_BYTES) {
+      this._consumedBinaryBytes = 0
+      this._sendWindowUpdate(CREDIT_WINDOW_BYTES)
+    }
     for (const cb of this._binaryListeners) {
       try {
         cb(data)
@@ -405,7 +442,8 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 
   _onPeerWindowUpdate(bytes: number): void {
     this._peerWindow = bytes
-    this._notifySendReady()
+    const waiters = this._sendWaiters.splice(0)
+    for (const waiter of waiters) waiter()
   }
 
   /** Advertise free buffer space to the peer so it can unblock. */
@@ -473,6 +511,18 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     }
   }
 
+  private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
+    for (const cb of this._binaryListeners) {
+      try {
+        const result = await cb(data)
+        this._peer?.sendAckRes(seq, stringify(result, { forbidReactElements: false }))
+      } catch (err) {
+        if (this._handleCallbackError(err)) return
+        this._peer?.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
+      }
+    }
+  }
+
   protected _trackAck<T>(promise: Promise<T>): Promise<T> {
     this._inflightAcks++
     return promise.finally(() => {
@@ -504,7 +554,8 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._shutdownCallback = null
     shutdownCb?.()
     this._fireClose(err)
-    this._notifySendReady()
+    const waiters = this._sendWaiters.splice(0)
+    for (const waiter of waiters) waiter()
     this._notifyCloseProgress()
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
@@ -579,17 +630,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       return
     }
     this._reconnectTimer = null
-  }
-
-  private _waitUntilSendReady(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      this._sendWaiters.push(resolve)
-    })
-  }
-
-  private _notifySendReady(): void {
-    const waiters = this._sendWaiters.splice(0)
-    for (const waiter of waiters) waiter()
   }
 }
 

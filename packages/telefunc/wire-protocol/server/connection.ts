@@ -22,9 +22,12 @@ type MuxServerOptions = {
   pingInterval: number
   pingDeadline: number
   serverReplayBuffer: number
+  serverReplayBufferBinary: number
   clientReplayBuffer: number
+  clientReplayBufferBinary: number
   connectTtl: number
   bufferLimit: number
+  bufferLimitBinary: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   replayMaxAge: number
@@ -58,9 +61,12 @@ function resolveMuxServerOptions(): MuxServerOptions {
     pingInterval,
     pingDeadline,
     serverReplayBuffer: c.serverReplayBuffer,
+    serverReplayBufferBinary: c.serverReplayBufferBinary,
     clientReplayBuffer: c.clientReplayBuffer,
+    clientReplayBufferBinary: c.clientReplayBufferBinary,
     connectTtl: c.connectTtl,
     bufferLimit: c.bufferLimit,
+    bufferLimitBinary: c.bufferLimitBinary,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
     replayMaxAge: pingDeadline + c.reconnectTimeout + 1_000,
@@ -98,6 +104,7 @@ class ServerConnection<TConnection> {
     setChannelDefaults({
       connectTtl: resolvedOptions.connectTtl,
       bufferLimit: resolvedOptions.bufferLimit,
+      bufferLimitBinary: resolvedOptions.bufferLimitBinary,
     })
   }
 
@@ -159,7 +166,7 @@ class ServerConnection<TConnection> {
    *    earlier frames on the wire.
    *
    *  This method knows nothing about per-channel pause/disconnect state; that is handled earlier
-   *  by `ServerChannel._sendBinaryAwaitable()`. That is also where ws-side flow control is applied:
+   *  by `ServerChannel.sendBinary()`. That is also where ws-side flow control is applied:
    *  client pause/resume signals toggle per-channel sendability before a frame reaches this layer.
    *
    *  `_sendNow()` is the transport-specific leaf:
@@ -317,7 +324,11 @@ class ServerConnection<TConnection> {
       if (!channel || channel._didShutdown) continue
 
       const {
-        replay = new ReplayBuffer(this.options.serverReplayBuffer, this.options.replayMaxAge),
+        replay = new ReplayBuffer(
+          this.options.serverReplayBuffer,
+          this.options.replayMaxAge,
+          this.options.serverReplayBufferBinary,
+        ),
         lastClientSeq = 0,
       } = this.transportChannels.get(id) ?? {}
       const entry: ChannelEntry = { channel, lastClientSeq, replay }
@@ -373,6 +384,7 @@ class ServerConnection<TConnection> {
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
         clientReplayBuffer: this.options.clientReplayBuffer,
+        clientReplayBufferBinary: this.options.clientReplayBufferBinary,
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
         transports: this.options.transports,
@@ -421,58 +433,38 @@ class ServerConnection<TConnection> {
     frame: DecodedFrame,
     deferReconciled: boolean,
   ): null | Promise<string | null> {
+    if (frame.tag === TAG.CTRL) return this.handleCtrl(connection, frame.ctrl, deferReconciled)
+
+    const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
+    if (!entry) return null
+
+    if (frame.seq && frame.seq <= entry.lastClientSeq) return null
+    if (frame.seq) entry.lastClientSeq = frame.seq
+
     switch (frame.tag) {
-      case TAG.CTRL:
-        return this.handleCtrl(connection, frame.ctrl, deferReconciled)
-      case TAG.TEXT: {
-        const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
-        if (!entry) return null
-        if (frame.seq && frame.seq <= entry.lastClientSeq) return null
-        if (frame.seq) entry.lastClientSeq = frame.seq
+      case TAG.TEXT:
         entry.channel._onPeerMessage(frame.text)
-        return null
-      }
-      case TAG.PUBLISH_ACK_REQ: {
-        const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
-        if (!entry) return null
-        if (frame.seq && frame.seq <= entry.lastClientSeq) return null
-        if (frame.seq) entry.lastClientSeq = frame.seq
+        break
+      case TAG.TEXT_ACK_REQ:
+        entry.channel._onPeerAckReqMessage(frame.text, frame.seq)
+        break
+      case TAG.BINARY:
+        entry.channel._onPeerBinaryMessage(frame.data)
+        break
+      case TAG.BINARY_ACK_REQ:
+        entry.channel._onPeerBinaryAckReqMessage(frame.data, frame.seq)
+        break
+      case TAG.ACK_RES:
+        entry.channel._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
+        break
+      case TAG.PUBLISH_ACK_REQ:
         if (entry.channel instanceof ServerPubSub) entry.channel._onPeerPublishAckReqMessage(frame.text, frame.seq)
-        return null
-      }
-      case TAG.PUBLISH_BINARY_ACK_REQ: {
-        const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
-        if (!entry) return null
-        if (frame.seq && frame.seq <= entry.lastClientSeq) return null
-        if (frame.seq) entry.lastClientSeq = frame.seq
+        break
+      case TAG.PUBLISH_BINARY_ACK_REQ:
         if (entry.channel instanceof ServerPubSub)
           entry.channel._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
-        return null
-      }
-      case TAG.TEXT_ACK_REQ: {
-        const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
-        if (!entry) return null
-        if (frame.seq && frame.seq <= entry.lastClientSeq) return null
-        if (frame.seq) entry.lastClientSeq = frame.seq
-        entry.channel._onPeerAckReqMessage(frame.text, frame.seq)
-        return null
-      }
-      case TAG.BINARY: {
-        const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
-        if (!entry) return null
-        if (frame.seq && frame.seq <= entry.lastClientSeq) return null
-        if (frame.seq) entry.lastClientSeq = frame.seq
-        entry.channel._onPeerBinaryMessage(frame.data)
-        return null
-      }
-      case TAG.ACK_RES: {
-        const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
-        if (!entry) return null
-        entry.channel._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
-        return null
-      }
-      default:
-        return null
+        break
     }
+    return null
   }
 }

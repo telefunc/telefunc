@@ -29,10 +29,12 @@ return { channel: ch.client }
 
 | Method | Description |
 |---|---|
-| `send(data)` | Send a message. |
+| `send(data)` | Send a message. Await for backpressure. |
 | `send(data, { ack: true })` | Send and await acknowledgement. |
-| `listen(cb)` | Receive messages. Return a value to ack. |
-| `sendBinary(data)` / `listenBinary(cb)` | Binary data (`Uint8Array`). |
+| `sendBinary(data)` | Send binary data. Await for backpressure. |
+| `sendBinary(data, { ack: true })` | Send binary and await acknowledgement. |
+| `listen(cb)` | Receive messages. Return a value to ack. Returns unlisten function. |
+| `listenBinary(cb)` | Receive binary. Return a value to ack. Returns unlisten function. |
 | `onOpen(cb)` / `onClose(cb)` | Lifecycle callbacks. |
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
@@ -87,10 +89,11 @@ import { onJoinRoom } from './Room.telefunc'
 
 const { channel } = await onJoinRoom()
 
-channel.listen((message) => {
+const unlisten = channel.listen((message) => {
   console.log(message.text)
   return { delivered: true }
 })
+// unlisten() to stop receiving
 
 const ack = await channel.send({ type: 'join', roomId: 'general' })
 ack.accepted // true
@@ -106,7 +109,7 @@ On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `Cl
 ```ts
 const ch = channel<ClientToServer, ServerToClient>({ ack: true })
 
-// Every send() now returns a Promise with the listener's return value
+// Every send() returns a Promise with the listener's return value
 const ack = await ch.send({ type: 'status', text: 'OK' })
 ```
 
@@ -118,8 +121,11 @@ const ch = channel<ClientToServer, ServerToClient>()
 // Opt in for a single send
 const ack = await ch.send(data, { ack: true })
 
-// On an ack-default channel, opt out for a single send
-ch.send(data, { ack: false }) // void, not Promise
+// Opt out on an ack-default channel
+await ch.send(data, { ack: false }) // Promise<void>, no ack value
+
+// Binary acks work the same way
+const binaryAck = await ch.sendBinary(frame, { ack: true })
 ```
 
 
@@ -129,16 +135,37 @@ Send and receive raw binary alongside structured messages:
 
 ```ts
 // Server
-ch.sendBinary(new Uint8Array([1, 2, 3]))
-ch.listenBinary((data) => {
+await ch.sendBinary(new Uint8Array([1, 2, 3]))
+const unlisten = ch.listenBinary((data) => {
   console.log(data.byteLength)
+  return { processed: true } // ack value (optional)
 })
+unlisten() // stop listening
 
 // Client — same API
-channel.sendBinary(new Uint8Array(buffer))
+await channel.sendBinary(new Uint8Array(buffer))
 channel.listenBinary((data) => {
   console.log(data.byteLength)
 })
+
+// Binary acks
+const ack = await ch.sendBinary(frame, { ack: true })
+```
+
+### Backpressure
+
+Both `send()` and `sendBinary()` return a `Promise` that resolves when the receiver has capacity for more data. Await them in a loop to apply backpressure:
+
+```ts
+for (const frame of frames) {
+  await ch.sendBinary(frame) // blocks until the receiver is ready
+}
+```
+
+Fire-and-forget is also fine — data is always sent immediately regardless of whether you await:
+
+```ts
+ch.send({ type: 'ping' }) // sent immediately, no await needed
 ```
 
 
@@ -348,13 +375,18 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 import { config } from 'telefunc'
 
 config.channel = {
-  reconnectTimeout: 60_000,  // Hold channels open after disconnect (ms)
-  idleTimeout: 60_000,       // Keep connection alive after last channel closes (ms)
-  pingInterval: 5_000,       // Client ping interval (ms)
-  serverReplayBuffer: 262_144,  // Server replay buffer per channel (bytes)
-  clientReplayBuffer: 1_048_576, // Client replay buffer per channel (bytes)
-  connectTtl: 5_000,         // Wait for client to connect to new channel (ms)
-  bufferLimit: 524_288,      // Buffer for messages before client connects (bytes)
+  reconnectTimeout: 60_000,        // Hold channels open after disconnect (ms)
+  idleTimeout: 60_000,             // Keep connection alive after last channel closes (ms)
+  pingInterval: 5_000,             // Client ping interval (ms)
+  connectTtl: 5_000,               // Wait for client to connect to new channel (ms)
+  // Text buffers
+  serverReplayBuffer: 262_144,     // Server replay buffer for text frames (bytes)
+  clientReplayBuffer: 1_048_576,   // Client replay buffer for text frames (bytes)
+  bufferLimit: 524_288,            // Pre-peer buffer for text messages (bytes)
+  // Binary buffers — separate budget so binary can never evict text
+  serverReplayBufferBinary: 2_097_152,  // Server replay buffer for binary frames (bytes)
+  clientReplayBufferBinary: 2_097_152,  // Client replay buffer for binary frames (bytes)
+  bufferLimitBinary: 2_097_152,         // Pre-peer buffer for binary messages (bytes)
 }
 ```
 

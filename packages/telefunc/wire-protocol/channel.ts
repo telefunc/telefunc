@@ -12,6 +12,7 @@ export type {
   ChannelPublishMeta,
   ChannelListenReturn,
   ChannelListener,
+  ChannelBinaryListener,
   PubSub,
   PubSubListener,
   PubSubBinaryListener,
@@ -38,10 +39,11 @@ type ChannelListenReturn<T> = [T] extends [never]
     ? Awaited<R> | Promise<Awaited<R>>
     : unknown | Promise<unknown> | void
 type ChannelListener<T> = (data: ChannelData<T>) => ChannelListenReturn<T>
+type ChannelBinaryListener = (data: Uint8Array) => unknown | Promise<unknown>
 /** Callback for `pubsub.subscribe()` — receives message data and publish info. */
 type PubSubListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => ChannelListenReturn<T>
 /** Callback for `pubsub.subscribeBinary()` — receives raw binary data and publish info. */
-type PubSubBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => void | Promise<void>
+type PubSubBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
 type ChannelCloseOptions = {
   timeout?: number
 }
@@ -56,16 +58,18 @@ type ChannelCloseCallback = (err?: Error) => void | Promise<void>
 type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false> = {
   readonly id: string
   readonly isClosed: boolean
-  /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `void`. */
-  send(data: ChannelData<TOut>): TDefault extends true ? Promise<ChannelAck<TOut>> : void
+  /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`. */
+  send(data: ChannelData<TOut>): TDefault extends true ? Promise<ChannelAck<TOut>> : Promise<void>
   /** Per-send ack opt-in — always returns `Promise<ack>`. */
   send(data: ChannelData<TOut>, opts: { ack: true }): Promise<ChannelAck<TOut>>
-  /** Per-send ack opt-out — always returns `void`. */
-  send(data: ChannelData<TOut>, opts: { ack: false }): void
-  sendBinary(data: Uint8Array): void
-  /** Receive messages. Return a value to ack the sender. */
-  listen(callback: ChannelListener<TIn>): void
-  listenBinary(callback: (data: Uint8Array) => void): void
+  /** Per-send ack opt-out — always returns `Promise<void>`. */
+  send(data: ChannelData<TOut>, opts: { ack: false }): Promise<void>
+  sendBinary(data: Uint8Array): Promise<void>
+  sendBinary(data: Uint8Array, opts: { ack: true }): Promise<unknown>
+  sendBinary(data: Uint8Array, opts: { ack: false }): Promise<void>
+  /** Receive messages. Return a value to ack the sender. Returns an unlisten function. */
+  listen(callback: ChannelListener<TIn>): () => void
+  listenBinary(callback: ChannelBinaryListener): () => void
   onClose(callback: ChannelCloseCallback): void
   onOpen(callback: () => void): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>

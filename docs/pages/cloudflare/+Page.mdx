@@ -151,7 +151,7 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 | Guarantee | Details |
 |---|---|
 | Ordering | Messages are delivered in order. |
-| Buffering | The server buffers messages while the client is disconnected, up to `config.channel.bufferLimit` (default: 512 KB). |
+| Buffering | The server buffers messages while the client is disconnected, up to `config.channel.bufferLimit` for text (default: 512 KB) and `config.channel.bufferLimitBinary` for binary (default: 2 MB). Binary frames have a separate budget and can never evict text. |
 | Replay | Both sides keep a replay buffer. On reconnect, missing messages are replayed and duplicates are ignored. |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
 | Loss | If the disconnect exceeds `config.channel.reconnectTimeout`, the channel closes with `ChannelNetworkError`. |

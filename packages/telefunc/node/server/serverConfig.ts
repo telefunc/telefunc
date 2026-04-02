@@ -13,12 +13,15 @@ import { toPosixPath, pathIsAbsolute } from '../../utils/path.js'
 import { setPubSubAdapter, DefaultPubSubAdapter, type PubSubAdapter } from '../../wire-protocol/server/pubsub.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
+  CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
+  CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
+  CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
   DEFAULT_SERVER_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,
   SSE_FLUSH_THROTTLE_MS,
@@ -70,21 +73,27 @@ type ChannelConfigUser = {
    * reconnect recovery.
    */
   serverReplayBuffer?: number
+  /** Per-channel replay buffer size for binary frames, in bytes, kept on the server. */
+  serverReplayBufferBinary?: number
   /**
    * Per-channel replay buffer size, in bytes, advertised to the client so it
    * can replay recent client-to-server frames after reconnect.
    */
   clientReplayBuffer?: number
+  /** Per-channel replay buffer size for binary frames, in bytes, advertised to the client. */
+  clientReplayBufferBinary?: number
   /**
    * How long, in milliseconds, a newly created channel waits for the client to
    * connect before it is closed automatically.
    */
   connectTtl?: number
   /**
-   * Maximum number of bytes buffered per channel for server-to-client messages
+   * Maximum number of bytes buffered per channel for text messages
    * while no client peer is currently attached.
    */
   bufferLimit?: number
+  /** Maximum number of bytes buffered per channel for binary messages while no client peer is attached. */
+  bufferLimitBinary?: number
   /**
    * When using SSE channels, upstream client-to-server frames are batched for at
    * most this many milliseconds before Telefunc sends a POST.
@@ -109,9 +118,12 @@ type ChannelConfigResolved = {
   idleTimeout: number
   pingInterval: number
   serverReplayBuffer: number
+  serverReplayBufferBinary: number
   clientReplayBuffer: number
+  clientReplayBufferBinary: number
   connectTtl: number
   bufferLimit: number
+  bufferLimitBinary: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
 }
@@ -303,9 +315,14 @@ function getServerConfig(): ConfigResolved {
       idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
       pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
       serverReplayBuffer: configState.channel.serverReplayBuffer ?? CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
+      serverReplayBufferBinary:
+        configState.channel.serverReplayBufferBinary ?? CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
       clientReplayBuffer: configState.channel.clientReplayBuffer ?? CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
+      clientReplayBufferBinary:
+        configState.channel.clientReplayBufferBinary ?? CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
       connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
       bufferLimit: configState.channel.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
+      bufferLimitBinary: configState.channel.bufferLimitBinary ?? CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
       ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
@@ -433,9 +450,12 @@ function applyChannelConfig(val: unknown): void {
       case 'idleTimeout':
       case 'pingInterval':
       case 'serverReplayBuffer':
+      case 'serverReplayBufferBinary':
       case 'clientReplayBuffer':
+      case 'clientReplayBufferBinary':
       case 'connectTtl':
       case 'bufferLimit':
+      case 'bufferLimitBinary':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
         assertUsage(typeof value === 'number', `\`${configPath}\` should be a number`)

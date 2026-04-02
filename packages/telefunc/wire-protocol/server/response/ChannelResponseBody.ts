@@ -85,7 +85,7 @@ function pumpProducerToChannel(
               producer.chunks.next(),
             ])
             if (done || cancelled) break
-            const pending = channel._sendBinaryAwaitable(concat(TAG_DATA, value))
+            const pending = channel._sendBinary(concat(TAG_DATA, value))
             if (pending) await pending
           }
         }),
@@ -96,7 +96,7 @@ function pumpProducerToChannel(
           runContext.requestContext.responseAbort.abort(err.abortValue)
         }
         const errorFrame = concat(TAG_ERROR, encodeErrorPayload(err, telefuncId))
-        const pending = channel._sendBinaryAwaitable(errorFrame)
+        const pending = channel._sendBinary(errorFrame)
         if (pending) await pending
       }
     } finally {

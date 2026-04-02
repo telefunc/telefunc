@@ -290,7 +290,7 @@ function ChannelDemo() {
     const msg = { type: 'echo' as const, text: 'no-ack-test' }
     addLog('out', `${JSON.stringify(msg)} [no-ack]`)
     const ret = channelRef.current.send(msg, { ack: false })
-    setChannelState((s) => ({ ...s, noAckSendVoid: ret === undefined }))
+    ret.then((val) => setChannelState((s) => ({ ...s, noAckSendVoid: val === undefined })))
   }, [addLog])
 
   const testClientAbort = useCallback(() => {

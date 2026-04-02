@@ -107,7 +107,7 @@ describe('keyed channel pubsub', () => {
           },
         },
         7,
-        new ReplayBuffer(1024 * 1024, 60_000),
+        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
       ),
     )
 
