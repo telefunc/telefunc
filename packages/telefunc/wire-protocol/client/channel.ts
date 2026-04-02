@@ -59,7 +59,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _pendingCloseCallbacks = 0
   protected _inflightAcks = 0
   private _peerWindow: number = CREDIT_WINDOW_BYTES
-  private _consumedBinaryBytes = 0
+  private _consumedBytes = 0
   private _sendWaiters: Array<() => void> = []
 
   constructor({
@@ -217,12 +217,22 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onTransportMessage(data: string): void {
     const parsed = parse(data) as ChannelData<ServerToClient>
+    const pending: Promise<unknown>[] = []
     for (const cb of this._listeners) {
       try {
-        cb(parsed)
+        const result = cb(parsed)
+        if (isPromise(result)) {
+          pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
+        }
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
+    }
+    const bytes = utf8ByteLength(data)
+    if (pending.length > 0) {
+      Promise.all(pending).finally(() => this._trackConsumption(bytes))
+    } else {
+      this._trackConsumption(bytes)
     }
   }
 
@@ -235,17 +245,22 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onTransportBinaryMessage(data: Uint8Array<ArrayBuffer>): void {
-    this._consumedBinaryBytes += data.byteLength
-    if (this._consumedBinaryBytes >= WINDOW_UPDATE_THRESHOLD_BYTES) {
-      this._consumedBinaryBytes = 0
-      this._sendWindowUpdate(CREDIT_WINDOW_BYTES)
-    }
+    const pending: Promise<unknown>[] = []
     for (const cb of this._binaryListeners) {
       try {
-        cb(data)
+        const result = cb(data)
+        if (isPromise(result)) {
+          pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
+        }
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
+    }
+    const bytes = data.byteLength
+    if (pending.length > 0) {
+      Promise.all(pending).finally(() => this._trackConsumption(bytes))
+    } else {
+      this._trackConsumption(bytes)
     }
   }
 
@@ -257,6 +272,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _notifySendReady(): void {
     const waiters = this._sendWaiters.splice(0)
     for (const waiter of waiters) waiter()
+  }
+
+  private _trackConsumption(bytes: number): void {
+    this._consumedBytes += bytes
+    if (this._consumedBytes >= WINDOW_UPDATE_THRESHOLD_BYTES) {
+      this._consumedBytes = 0
+      this._sendWindowUpdate(CREDIT_WINDOW_BYTES)
+    }
   }
 
   _onTransportCloseRequest(timeoutMs: number): void {
@@ -360,29 +383,39 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private async _dispatchAckReq(data: string, seq: number): Promise<void> {
-    const parsed = parse(data) as ChannelData<ServerToClient>
-    for (const cb of this._listeners) {
-      try {
-        const result = await cb(parsed)
-        this._connection.sendAckRes(this, seq, stringify(result, { forbidReactElements: false }))
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-        this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', 'error')
-        return
+    try {
+      const parsed = parse(data) as ChannelData<ServerToClient>
+      let lastResult: unknown
+      for (const cb of this._listeners) {
+        try {
+          lastResult = await cb(parsed)
+        } catch (err) {
+          if (this._handleCallbackError(err)) return
+          this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', 'error')
+          return
+        }
       }
+      this._connection.sendAckRes(this, seq, stringify(lastResult, { forbidReactElements: false }))
+    } finally {
+      this._trackConsumption(utf8ByteLength(data))
     }
   }
 
   private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
-    for (const cb of this._binaryListeners) {
-      try {
-        const result = await cb(data)
-        this._connection.sendAckRes(this, seq, stringify(result, { forbidReactElements: false }))
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-        this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', 'error')
-        return
+    try {
+      let lastResult: unknown
+      for (const cb of this._binaryListeners) {
+        try {
+          lastResult = await cb(data)
+        } catch (err) {
+          if (this._handleCallbackError(err)) return
+          this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', 'error')
+          return
+        }
       }
+      this._connection.sendAckRes(this, seq, stringify(lastResult, { forbidReactElements: false }))
+    } finally {
+      this._trackConsumption(data.byteLength)
     }
   }
 

@@ -199,10 +199,10 @@ class ServerPubSub<T = unknown> extends ServerChannel {
     try {
       this._ensurePubSub()
       const result = await this._publishPubSub(serialized)
-      this._peer?.sendAckRes(seq, stringify(result, { forbidReactElements: false }))
+      this._sendAckRes(seq, stringify(result, { forbidReactElements: false }))
     } catch (err) {
       if (this._handleCallbackError(err)) return
-      this._peer?.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
+      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
     }
   }
 
@@ -210,10 +210,10 @@ class ServerPubSub<T = unknown> extends ServerChannel {
     try {
       this._ensurePubSub()
       const result = await this._publishBinaryPubSub(data)
-      this._peer?.sendAckRes(seq, stringify(result, { forbidReactElements: false }))
+      this._sendAckRes(seq, stringify(result, { forbidReactElements: false }))
     } catch (err) {
       if (this._handleCallbackError(err)) return
-      this._peer?.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
+      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
     }
   }
 }

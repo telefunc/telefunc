@@ -2,18 +2,15 @@ export { ChannelChunkReader }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { textDecoder } from './frame.js'
-import { CHANNEL_PUMP_TAG_ERROR, CREDIT_WINDOW_BYTES, WINDOW_UPDATE_THRESHOLD_BYTES } from './constants.js'
+import { CHANNEL_PUMP_TAG_ERROR } from './constants.js'
 import { isObject } from '../utils/isObject.js'
 import { assert } from '../utils/assert.js'
 
-/** Minimal channel interface — both ClientChannel and ServerChannel satisfy this.
- *
- *  `_sendWindowUpdate(bytes)` advertises free buffer space to the peer. */
+/** Minimal channel interface — both ClientChannel and ServerChannel satisfy this. */
 type ChannelSurface = {
-  listenBinary(cb: (data: Uint8Array) => void): void
+  listenBinary(cb: (data: Uint8Array) => Promise<unknown>): void
   onClose(cb: (err?: Error) => void): void
   close(): void
-  _sendWindowUpdate(bytes: number): void
 }
 
 /**
@@ -36,25 +33,24 @@ type ChannelSurface = {
  * Internally uses a read-head index for O(1) dequeues with periodic compaction.
  */
 class ChannelChunkReader {
-  private queue: Uint8Array<ArrayBuffer>[] = []
-  private queueBytes = 0
+  private queue: Array<{ frame: Uint8Array<ArrayBuffer>; onConsumed: () => void }> = []
   private readHead = 0
   private wake: (() => void) | null = null
   private closed = false
   private closeError: Error | null = null
   private readonly channel: ChannelSurface
   private readonly throwError?: (errorPayload: Record<string, unknown>) => never
-  private consumedSinceLastWindowUpdate = 0
 
   private constructor(channel: ChannelSurface, throwError?: (errorPayload: Record<string, unknown>) => never) {
     this.channel = channel
     this.throwError = throwError
 
     channel.listenBinary((frame) => {
-      this.queue.push(frame as Uint8Array<ArrayBuffer>)
-      this.queueBytes += frame.byteLength
-      this.wake?.()
-      this.wake = null
+      return new Promise<void>((resolve) => {
+        this.queue.push({ frame: frame as Uint8Array<ArrayBuffer>, onConsumed: resolve })
+        this.wake?.()
+        this.wake = null
+      })
     })
 
     channel.onClose((err) => {
@@ -108,25 +104,19 @@ class ChannelChunkReader {
         this.wake = r
       })
     }
-    const frame = this.queue[this.readHead]!
+    const entry = this.queue[this.readHead]!
     this.queue[this.readHead] = undefined! // release reference
     this.readHead++
-    this.queueBytes -= frame.byteLength
+    // Signal the channel that this frame has been consumed — drives window updates.
+    entry.onConsumed()
     // Compact when half the array is consumed to avoid unbounded growth.
     if (this.readHead > 16 && this.readHead >= this.queue.length >>> 1) {
       this.queue = this.queue.slice(this.readHead)
       this.readHead = 0
     }
-    // Window-based flow control: advertise free buffer space so the sender can unblock.
-    // Debounced to 10ms so rapid consumption coalesces into one update.
-    this.consumedSinceLastWindowUpdate += frame.byteLength
-    if (this.consumedSinceLastWindowUpdate >= WINDOW_UPDATE_THRESHOLD_BYTES) {
-      this.consumedSinceLastWindowUpdate = 0
-      this.channel._sendWindowUpdate(CREDIT_WINDOW_BYTES - this.queueBytes)
-    }
     // Tag is the first byte: 0x00 = data, 0x01 = error.
-    const tag = frame[0]
-    const payload = frame.subarray(1)
+    const tag = entry.frame[0]
+    const payload = entry.frame.subarray(1)
     if (tag === CHANNEL_PUMP_TAG_ERROR) {
       const errorPayload: unknown = parse(textDecoder.decode(payload))
       assert(isObject(errorPayload))
