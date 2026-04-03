@@ -21,8 +21,10 @@ type ResponseAbortSource = {
 type RequestContext = {
   /** The current Web Request for this telefunc execution. */
   request: Request
-  /** The request's AbortSignal — fires when the client disconnects. */
+  /** The POST request's AbortSignal. */
   abortSignal: AbortSignal
+  /** AbortSignal that fires when all channels, streams, and pumps are done (same timing as onClose). */
+  signal: AbortSignal
   /** Response-wide abort source used by returned values and response transports. */
   responseAbort: ResponseAbortSource
   /** Fires when the telefunction throws (or has already thrown) at the top level. */
@@ -70,9 +72,13 @@ function createRequestContext(request: Request): RequestContext {
     errorCallbacks.length = 0
   }
 
+  const closeController = new AbortController()
+  closeCallbacks.push(() => closeController.abort())
+
   const ctx: RequestContext = {
     request,
     abortSignal: request.signal,
+    signal: closeController.signal,
     responseAbort,
     onTopLevelError(cb) {
       if (errored) {

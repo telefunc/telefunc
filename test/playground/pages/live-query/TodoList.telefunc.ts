@@ -1,25 +1,39 @@
-export { onGetTodos, onAddTodo, onRemoveTodo, onClearTodos }
+export { onGetLocalTodos, onAddLocalTodo, onClearLocalTodos, onGetGlobalTodos, onAddGlobalTodo, onClearGlobalTodos }
 
 type Todo = { id: string; text: string }
 
-let todos: Todo[] = [
-  { id: '1', text: 'Buy milk' },
-  { id: '2', text: 'Walk the dog' },
-]
-let nextId = 3
+// --- Local todos (per-client, in-memory per request context) ---
 
-async function onGetTodos() {
-  return todos
+let localTodos: Todo[] = [{ id: '1', text: 'Local todo 1' }]
+let localNextId = 2
+
+async function onGetLocalTodos() {
+  return localTodos
 }
 
-async function onAddTodo(text: string) {
-  todos.push({ id: String(nextId++), text })
+async function onAddLocalTodo(text: string) {
+  localTodos.push({ id: String(localNextId++), text })
 }
 
-async function onRemoveTodo(id: string) {
-  todos = todos.filter((t) => t.id !== id)
+async function onClearLocalTodos() {
+  localTodos = []
+  localNextId = 1
 }
 
-async function onClearTodos() {
-  todos = []
+// --- Global todos (shared across all clients) ---
+
+let globalTodos: Todo[] = [{ id: '1', text: 'Global todo 1' }]
+let globalNextId = 2
+
+async function onGetGlobalTodos() {
+  return globalTodos
+}
+
+async function onAddGlobalTodo(text: string) {
+  globalTodos.push({ id: String(globalNextId++), text })
+}
+
+async function onClearGlobalTodos() {
+  globalTodos = []
+  globalNextId = 1
 }

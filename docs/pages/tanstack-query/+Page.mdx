@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-Invalidate [TanStack Query](https://tanstack.com/query) queries from the server — every connected client refetches.
+Invalidate [TanStack Query](https://tanstack.com/query) queries after mutations — locally or across all connected clients.
 
 ## Setup
 
@@ -31,87 +31,87 @@ import '@telefunc/tanstack-query/server'
 ```
 
 
-## Client-side invalidation
+## Local vs global keys
 
-Use `meta.invalidates` on mutations to automatically invalidate queries through the server:
-
-```ts
-// todos.telefunc.ts
-
-export async function getTodos() {
-  return db.todo.findMany()
-}
-
-export async function addTodo(text: string) {
-  await db.todo.create({ data: { text, done: false } })
-}
-```
+Keys prefixed with `global:` invalidate through the server — every connected client with a matching query refetches. All other keys invalidate locally (current tab only).
 
 ```tsx
-// Todos.tsx
-import { useQuery, useMutation } from '@tanstack/react-query'
-import { getTodos, addTodo } from './todos.telefunc'
-
-function Todos() {
-  const { data: todos } = useQuery({
-    queryKey: ['todos'],
-    queryFn: () => getTodos(),
-  })
-
-  const add = useMutation({
-    mutationFn: (text: string) => addTodo(text),
-    meta: { invalidates: [['todos']] },
-  })
-
-  return (
-    <>
-      <ul>{todos?.map(todo => <li key={todo.id}>{todo.text}</li>)}</ul>
-      <button onClick={() => add.mutate('New todo')}>Add</button>
-    </>
-  )
-}
+queryKey: ['todos']                              // local — current tab only
+queryKey: ['global:todos', `user:${userId}`]     // global — all clients with a matching query refetch
+queryKey: ['global:documents', docId]            // global
 ```
 
-The `invalidates` metadata travels with the telefunc call to the server, which publishes through <Link text="pub/sub" href="/channel#pubsub" />. Every connected client with a matching query refetches.
 
-A mutation can invalidate multiple query keys:
+## Mutations
+
+Use `meta.invalidates` on mutations to automatically invalidate matching queries:
 
 ```tsx
-useMutation({
-  mutationFn: (id: string) => assignTodoToProject(id),
-  meta: { invalidates: [['todos'], ['projects']] },
+const { data: todos } = useQuery({
+  queryKey: ['todos'],
+  queryFn: () => getTodos(),
 })
+
+const add = useMutation({
+  mutationFn: (text: string) => addTodo(text),
+  meta: { invalidates: [['todos']] },
+})
+```
+
+Global keys work the same way — when a collaborator edits a document, every client viewing it refetches:
+
+```tsx
+const { data: doc } = useQuery({
+  queryKey: ['global:documents', docId],
+  queryFn: () => getDocument(docId),
+})
+
+const edit = useMutation({
+  mutationFn: (content: string) => updateDocument(docId, content),
+  meta: { invalidates: [['global:documents', docId]] },
+})
+```
+
+Local and global keys can be mixed in a single mutation:
+
+```js
+meta: {
+  invalidates: [
+    ['my-drafts'],            // local — this client only
+    ['global:documents'],     // global — every connected client
+  ],
+}
 ```
 
 
 ## Server-side invalidation
 
-For changes not triggered by a client mutation (background jobs, webhooks, other services), use `invalidate()` directly:
+For changes not triggered by a client mutation (background jobs, webhooks, other services), use `invalidate()` directly. This only works with global keys since it broadcasts to all clients:
 
 ```ts
 import { invalidate } from '@telefunc/tanstack-query/server'
 
-// e.g. in a webhook handler
-app.post('/webhooks/stripe', async (req) => {
-  await processPayment(req.body)
-  invalidate(['billing'])
-})
+// e.g. a CMS publishes new content
+invalidate(['global:articles'])
+
+// a specific document was updated
+invalidate(['global:documents', docId])
 ```
 
-```ts
-invalidate(['todos'])       // all queries starting with ['todos']
-invalidate(['todos', 1])    // only ['todos', 1]
-```
-
-Prefix matching — same behavior as TanStack Query's `invalidateQueries`.
+Prefix matching — invalidating `['global:documents']` hits `['global:documents', docId]` too. Same behavior as TanStack Query's [`invalidateQueries`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
 
 
 ## How it works
 
-1. `QueryClient` passes each query's `queryKey` alongside the telefunc call.
-2. The server subscribes to invalidation events for that key.
-3. Mutations with `meta.invalidates` (or explicit `invalidate()` calls) publish through <Link text="pub/sub" href="/channel#pubsub" />.
-4. The client receives the event and calls `invalidateQueries()`.
+**Local keys:**
+1. Mutation succeeds.
+2. `QueryClient` calls `invalidateQueries()` on the current client for matching local keys.
+
+**Global keys:**
+1. `QueryClient` sends each global query's `queryKey` alongside the telefunc call.
+2. The telefunction executes (including auth). Only after it succeeds, the server subscribes to invalidation events for that key.
+3. Mutations work the same way — the telefunction runs first, then global keys from `meta.invalidates` are published through <Link text="pub/sub" href="/channel#pubsub" />.
+4. Every connected client with a matching subscription calls `invalidateQueries()`.
 
 Works across multiple servers via the <Link text="pub/sub adapter" href="/channel#multi-server" />.
 

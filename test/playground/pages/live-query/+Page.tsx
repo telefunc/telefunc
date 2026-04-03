@@ -13,7 +13,7 @@ function Page() {
       <div className="max-w-3xl mx-auto px-8 py-10">
         <h1>Live Query</h1>
         <p className="mb-4 text-sm text-zinc-500">
-          Open this page in two tabs. Adding or removing todos in one tab should update the other in real time.
+          Local todos invalidate on this tab only. Global todos invalidate across all connected tabs.
         </p>
         <TodoList />
       </div>

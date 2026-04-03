@@ -18,6 +18,7 @@ const nav = [
   { href: '/video-chat', label: 'Video Chat' },
   { href: '/live-query', label: 'Live Query' },
   { href: '/kitchen-sink', label: 'Kitchen Sink' },
+  { href: '/tanstack-ai-chat', label: 'TanStack AI' },
 ]
 
 function Layout({ children }: { children: React.ReactNode }) {

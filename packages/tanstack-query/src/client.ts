@@ -12,10 +12,12 @@ import {
   EXTENSION_NAME,
   __TQ__DATA_KEY,
   __TQ__CHANNEL_KEY,
+  isGlobalKey,
   type TanstackQueryExtensionData,
   type TanstackQueryResult,
 } from './shared.js'
 import { assignDeep } from './utils/assignDeep.js'
+import { partition } from './utils/partition.js'
 
 function isTanstackQueryResult(v: unknown): v is TanstackQueryResult {
   return v !== null && typeof v === 'object' && __TQ__DATA_KEY in v && __TQ__CHANNEL_KEY in v
@@ -35,9 +37,11 @@ class QueryClient extends BaseQueryClient {
     const userPersister = config?.defaultOptions?.queries?.persister
     const persister: QueryPersister = (queryFn, context, query) => {
       const queryKey = context.queryKey
-      const wrappedQueryFn = withContext(() => queryFn(context), {
-        extensions: { [EXTENSION_NAME]: { queryKey } satisfies TanstackQueryExtensionData },
-      })
+      const wrappedQueryFn = isGlobalKey(queryKey)
+        ? withContext(() => queryFn(context), {
+            extensions: { [EXTENSION_NAME]: { queryKey } satisfies TanstackQueryExtensionData },
+          })
+        : () => queryFn(context)
       const execute = userPersister ? () => userPersister(wrappedQueryFn, context, query) : wrappedQueryFn
       const result = execute()
       if (isPromise(result)) {
@@ -95,14 +99,28 @@ class QueryClient extends BaseQueryClient {
   }
 
   override defaultMutationOptions<T extends MutationOptions<any, any, any, any>>(options?: T): T {
-    const merged = super.defaultMutationOptions(options)
-    const invalidates = merged.meta?.invalidates
-    if (Array.isArray(invalidates) && merged.mutationFn) {
-      merged.mutationFn = withContext(merged.mutationFn, {
-        extensions: { [EXTENSION_NAME]: { invalidates } satisfies TanstackQueryExtensionData },
-      })
-    }
-    return merged
+    const invalidates = options?.meta?.invalidates
+    if (!Array.isArray(invalidates)) return super.defaultMutationOptions(options)
+
+    const [globalKeys, localKeys] = partition(invalidates, isGlobalKey)
+
+    const userOnSuccess = options?.onSuccess
+    return super.defaultMutationOptions({
+      ...options,
+      mutationFn:
+        globalKeys.length > 0 && options?.mutationFn
+          ? withContext(options.mutationFn, {
+              extensions: { [EXTENSION_NAME]: { invalidates: globalKeys } satisfies TanstackQueryExtensionData },
+            })
+          : options?.mutationFn,
+      onSuccess:
+        localKeys.length > 0
+          ? (...args) => {
+              for (const key of localKeys) this.invalidateQueries({ queryKey: key })
+              return userOnSuccess?.(...args)
+            }
+          : userOnSuccess,
+    } as T)
   }
 
   override clear() {

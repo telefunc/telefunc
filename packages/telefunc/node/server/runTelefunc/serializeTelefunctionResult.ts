@@ -48,12 +48,16 @@ function serializeTelefunctionResult(runContext: {
   const useChannelPump = runContext.streamTransport === STREAM_TRANSPORT.CHANNEL
   const streamingValues: StreamingValueServer[] = []
   let nextStreamingIndex = 0
-  let activePumps = 0
+  let pendingCount = 0
   const context: ServerReplacerContext = {
     useChannelPump,
     registerChannel(channel) {
       channel._setResponseAbort(requestContext.responseAbort.abort)
       requestContext.responseAbort.onAbort((abortError) => channel.abort(abortError.abortValue))
+      pendingCount++
+      channel.onClose(() => {
+        if (--pendingCount === 0) requestContext.markComplete()
+      })
     },
     registerStreamingValue(createProducer) {
       assert(!useChannelPump, 'registerStreamingValue called in channel transport mode')
@@ -63,9 +67,9 @@ function serializeTelefunctionResult(runContext: {
     },
     pumpToChannel(createProducer) {
       assert(useChannelPump, 'pumpToChannel called in inline transport mode')
-      activePumps++
+      pendingCount++
       return pumpProducerToChannel(createProducer, runContext, () => {
-        if (--activePumps === 0) requestContext.markComplete()
+        if (--pendingCount === 0) requestContext.markComplete()
       })
     },
   }
@@ -73,11 +77,7 @@ function serializeTelefunctionResult(runContext: {
 
   let httpResponseBody: string
   try {
-    // Placeholder serialization may register channels synchronously, so restore
-    // the request context immediately before stringification.
-    httpResponseBody = restoreRequestContext(requestContext, () =>
-      stringify(bodyValue, { forbidReactElements: true, replacer }),
-    )
+    httpResponseBody = stringify(bodyValue, { forbidReactElements: true, replacer })
   } catch (err: unknown) {
     assert(hasProp(err, 'message', 'string'))
     assertUsage(
@@ -90,12 +90,10 @@ function serializeTelefunctionResult(runContext: {
     )
   }
 
-  // Channel pump: each streaming value owns its own channel + pump (set up by the replacer).
-  // No streaming values: nothing to multiplex.
-  // In both cases, return a plain text response. markComplete fires when all pumps finish
-  // (via activePumps counter), or immediately if there are none.
+  // markComplete fires when all pending channels and pumps are done,
+  // or immediately if there are none.
   if (useChannelPump || streamingValues.length === 0) {
-    if (activePumps === 0) requestContext.markComplete()
+    if (pendingCount === 0) requestContext.markComplete()
     return { type: 'text', body: httpResponseBody }
   }
 

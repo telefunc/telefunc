@@ -39,6 +39,8 @@ type TelefuncBuiltins = {
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onClose: (cb: () => void) => void
+  /** AbortSignal that fires when the request lifecycle ends. Same timing as onClose. */
+  signal: AbortSignal
 }
 
 function augmentContext(context: Record<string, unknown>): void {
@@ -46,9 +48,11 @@ function augmentContext(context: Record<string, unknown>): void {
   if (!reqCtx) {
     // SSR implementation not trivial
     context.onClose = () => {}
+    context.signal = new AbortController().signal
     return
   }
   context.onClose = (cb: () => void) => reqCtx.onClose(cb)
+  context.signal = reqCtx.signal
 }
 
 function provideTelefuncContext<Context extends object = Telefunc.Context>(context: Context): void {

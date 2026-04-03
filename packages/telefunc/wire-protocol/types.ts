@@ -91,10 +91,7 @@ type ServerReviverContext = {
   registerChannel(channel: { close(): void }): void
 }
 
-type ResponseAbortableChannel = {
-  _setResponseAbort(abortResponse: (abortValue?: unknown) => void): void
-  abort(abortValue?: unknown): void
-}
+type ResponseAbortableChannel = Pick<ServerChannel, '_setResponseAbort' | 'abort' | 'onClose'>
 
 /** Context for all server-side response replacers (streaming + placeholder). */
 type ServerReplacerContext = {

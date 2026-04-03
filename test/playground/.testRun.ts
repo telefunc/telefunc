@@ -9,6 +9,7 @@ import { testClose } from './pages/close/e2e-test'
 import { testChannel } from './pages/channel/e2e-test'
 import { testFunction } from './pages/function/e2e-test'
 import { testStreamToServer } from './pages/stream-to-server/e2e-test'
+import { testLiveQuery } from './pages/live-query/e2e-test'
 
 function testRun(cmd: 'npm run dev' | 'npm run preview') {
   run(cmd, {
@@ -64,6 +65,8 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
   testFunction()
 
   testStreamToServer()
+
+  testLiveQuery()
 
   if (!isDev) {
     test('shield() generation', async () => {
