@@ -72,8 +72,8 @@ function remoteTelefunctionCall(
   const abortController = createAbortController(callClientContext?.signal)
   objectAssign(callContext, { abortController })
 
-  const httpRequestBody = serializeTelefunctionArguments(callContext)
-  objectAssign(callContext, { httpRequestBody })
+  const { httpRequestBody, requestCloseHandlers } = serializeTelefunctionArguments(callContext)
+  objectAssign(callContext, { httpRequestBody, requestCloseHandlers })
 
   const telefunctionReturnPromise = makeHttpRequest(callContext)
 

@@ -1,12 +1,24 @@
 export { Close }
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { close } from 'telefunc/client'
-import { onMixedForClose, onCloseGen, onCloseStream, onCloseChannel, onCloseFn } from './Close.telefunc'
+import type { ClientChannel } from 'telefunc'
+import {
+  onMixedForClose,
+  onCloseGen,
+  onCloseStream,
+  onCloseChannel,
+  onCloseFn,
+  onCloseChannelOnClose,
+  onCloseStreamAndChannelOnClose,
+  onClosePassedFnOnClose,
+} from './Close.telefunc'
 
 function Close() {
   const [hydrated, setHydrated] = useState(false)
   const [result, setResult] = useState<string>('')
+  const pendingChannelRef = useRef<ClientChannel | null>(null)
+  const pendingPassedFnRef = useRef<object | null>(null)
   useEffect(() => setHydrated(true), [])
 
   return (
@@ -101,6 +113,91 @@ function Close() {
         }}
       >
         Fn: close(fn)
+      </button>
+
+      <h2>Channel onClose ordering</h2>
+
+      <button
+        id="test-close-channel-onclose"
+        onClick={async () => {
+          setResult('')
+          const channel = await onCloseChannelOnClose()
+          const channelClosed = new Promise<void>((resolve) => {
+            channel.onClose(() => resolve())
+          })
+          channel.close()
+          await channelClosed
+          setResult(JSON.stringify({ method: 'close(channel-onclose)', done: true }))
+        }}
+      >
+        Channel: context.onClose waits for channel
+      </button>
+
+      <h2>Stream + Channel onClose ordering</h2>
+
+      <button
+        id="test-close-stream-channel-onclose"
+        onClick={async () => {
+          setResult('')
+          const { stream, channel } = await onCloseStreamAndChannelOnClose()
+          const reader = stream.getReader()
+          const decoder = new TextDecoder()
+          const chunks: string[] = []
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            chunks.push(decoder.decode(value, { stream: true }))
+          }
+          // Stream is done but channel is still open
+          setResult(JSON.stringify({ method: 'close(stream-channel-onclose)', phase: 'stream-done', chunks }))
+          // Store channel ref so the close button can access it
+          pendingChannelRef.current = channel
+        }}
+      >
+        Stream + Channel: context.onClose waits for both
+      </button>
+      <button
+        id="test-close-stream-channel-close-now"
+        onClick={async () => {
+          const ch = pendingChannelRef.current
+          if (!ch) return
+          pendingChannelRef.current = null
+          const channelClosed = new Promise<void>((resolve) => {
+            ch.onClose(() => resolve())
+          })
+          ch.close()
+          await channelClosed
+          setResult(JSON.stringify({ method: 'close(stream-channel-onclose)', phase: 'all-done' }))
+        }}
+      >
+        Close channel now
+      </button>
+
+      <h2>Passed function onClose ordering</h2>
+
+      <button
+        id="test-close-passed-fn-onclose"
+        onClick={async () => {
+          setResult('')
+          const res = await onClosePassedFnOnClose(() => {})
+          // Telefunc returned — the request-side channel backing the callback is still open
+          pendingPassedFnRef.current = res
+          setResult(JSON.stringify({ method: 'close(passed-fn-onclose)', phase: 'returned' }))
+        }}
+      >
+        Passed fn: context.onClose waits for request channel
+      </button>
+      <button
+        id="test-close-passed-fn-close-now"
+        onClick={async () => {
+          const res = pendingPassedFnRef.current
+          if (!res) return
+          pendingPassedFnRef.current = null
+          await close(res)
+          setResult(JSON.stringify({ method: 'close(passed-fn-onclose)', phase: 'closed' }))
+        }}
+      >
+        Close passed fn result
       </button>
 
       <h2>{'Mixed: { generator, stream, channel, fn }'}</h2>

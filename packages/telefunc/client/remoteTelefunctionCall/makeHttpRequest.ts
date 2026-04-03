@@ -6,6 +6,7 @@ import { isObject } from '../../utils/isObject.js'
 import { parseResponse } from '../../wire-protocol/client/response/parse.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire-protocol/request-kind.js'
 import { throwAbortError, throwBugError } from './errors.js'
+import type { CloseHandler } from '../close.js'
 import { ConnectionError } from '../ConnectionError.js'
 import { setSessionToken } from '../../wire-protocol/client/session-registry.js'
 import { TELEFUNC_SESSION_HEADER, type ChannelTransports } from '../../wire-protocol/constants.js'
@@ -32,6 +33,7 @@ async function makeHttpRequest(callContext: {
   fetch: typeof globalThis.fetch | null
   abortController: AbortController
   channel: { transports: ChannelTransports }
+  requestCloseHandlers: CloseHandler[]
 }): Promise<unknown> {
   const isBinaryFrame = typeof callContext.httpRequestBody !== 'string'
   const requestKind = isBinaryFrame ? REQUEST_KIND.BINARY : REQUEST_KIND.TEXT

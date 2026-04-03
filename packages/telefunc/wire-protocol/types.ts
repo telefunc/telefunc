@@ -88,14 +88,12 @@ type ClientReviverContext = {
 type ServerReviverContext = {
   registerFile(index: number, size: number): void
   consumeFile(index: number, size: number): Promise<ReadableStream<Uint8Array>>
-  registerChannel(channel: { close(): void }): void
+  registerChannel(channel: ServerChannel<any, any>): void
 }
-
-type ResponseAbortableChannel = Pick<ServerChannel, '_setResponseAbort' | 'abort' | 'onClose'>
 
 /** Context for all server-side response replacers (streaming + placeholder). */
 type ServerReplacerContext = {
-  registerChannel(channel: ResponseAbortableChannel): void
+  registerChannel(channel: ServerChannel<any, any>): void
   registerStreamingValue(createProducer: () => StreamingProducer): number
   pumpToChannel(createProducer: () => StreamingProducer): string
   useChannelPump: boolean

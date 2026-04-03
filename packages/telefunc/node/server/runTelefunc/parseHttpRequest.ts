@@ -66,6 +66,7 @@ async function parseHttpRequest(runContext: {
         registerChannel: (ch) => {
           runContext.requestContext.onTopLevelError(() => ch.close())
           runContext.requestContext.responseAbort.onAbort(() => ch.close())
+          ch.onClose(runContext.requestContext.trackPending())
         },
       })
       return parseTelefuncPayload(metaText, runContext, reviver)
@@ -79,6 +80,7 @@ async function parseHttpRequest(runContext: {
         registerChannel: (ch) => {
           runContext.requestContext.onTopLevelError(() => ch.close())
           runContext.requestContext.responseAbort.onAbort(() => ch.close())
+          ch.onClose(runContext.requestContext.trackPending())
         },
       })
       return parseTelefuncPayload(text, runContext, reviver)

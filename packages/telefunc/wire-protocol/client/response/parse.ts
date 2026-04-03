@@ -8,7 +8,7 @@ import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { createStreamingReviver } from './registry.js'
 import type { ClientReviverContext } from '../../types.js'
 import { setAbortController } from '../../../client/abort.js'
-import { setCloseHandlers } from '../../../client/close.js'
+import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { StreamReader } from './StreamReader.js'
@@ -25,6 +25,7 @@ type CallContext = {
   telefuncFilePath: string
   abortController: AbortController
   channel: { transports: ChannelTransports }
+  requestCloseHandlers: CloseHandler[]
 }
 
 // ===== Public entry point =====
@@ -115,6 +116,7 @@ function reviveResponse(
     },
   }
 
+  const allCloseHandlers = [...callContext.requestCloseHandlers]
   const reviver = createStreamingReviver(
     //
     context,
@@ -122,15 +124,24 @@ function reviveResponse(
       if (!revived.close) return
       assert(isObjectOrFunction(revived.value))
       closeHandlers.set(revived.value, revived.close)
+      allCloseHandlers.push(revived.close)
     },
   )
-  const parsed: unknown = parse(body, { reviver })
+
+  let parsed: unknown
+  try {
+    parsed = parse(body, { reviver })
+  } catch (err) {
+    for (const close of allCloseHandlers) close()
+    throw err
+  }
   if (!isObject(parsed)) return parsed
 
   const { ret } = parsed
   if (isObjectOrFunction(ret)) {
     setAbortController(ret, callContext.abortController)
     setCloseHandlers(ret, closeHandlers)
+    addExtraCloseHandlers(ret, callContext.requestCloseHandlers)
   }
 
   return { ret }

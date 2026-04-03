@@ -1,7 +1,7 @@
 export { testClose }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, waitForHydration, getResult } from '../../e2e-utils'
+import { resetCleanupState, getCleanupState, waitForHydration, getResult, sleep } from '../../e2e-utils'
 
 function testClose() {
   // ── Targeted: generator ──────────────────────────────────────────────
@@ -84,6 +84,109 @@ function testClose() {
       const state = await getCleanupState()
       // retFn() was called before close
       expect(state.closeFn_retFnCalled).toBe('true')
+    })
+  })
+
+  // ── context.onClose waits for channel to close ───────────────────────
+
+  test('close: channel onClose ordering — context.onClose fires only after channel closes', async () => {
+    await page.goto(`${getServerUrl()}/close`)
+    await waitForHydration()
+    await resetCleanupState()
+
+    await page.click('#test-close-channel-onclose')
+
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.method).toBe('close(channel-onclose)')
+      expect(result.done).toBe(true)
+    })
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      // context.onClose must have seen the channel already closed
+      expect(state.closeChannelOnClose_contextOnClose).toBe('true')
+    })
+  })
+
+  // ── context.onClose waits for both stream and channel ────────────────
+
+  test('close: stream + channel onClose ordering — context.onClose fires only after channel closes, not after stream ends', async () => {
+    await page.goto(`${getServerUrl()}/close`)
+    await waitForHydration()
+    await resetCleanupState()
+
+    await page.click('#test-close-stream-channel-onclose')
+
+    // Wait for stream to complete on client
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.method).toBe('close(stream-channel-onclose)')
+      expect(result.phase).toBe('stream-done')
+      expect(result.chunks).deep.equal(['only-chunk'])
+    })
+
+    // Wait 3 seconds — stream is done, channel still open.
+    // If context.onClose incorrectly fires after stream end, it would have fired by now.
+    await sleep(3000)
+    {
+      const state = await getCleanupState()
+      expect(state.closeStreamChannelOnClose_streamDone).toBe('true')
+      expect(state.closeStreamChannelOnClose_contextOnClose).toBe('not-fired')
+    }
+
+    // Close the channel
+    await page.click('#test-close-stream-channel-close-now')
+
+    // context.onClose fires only after channel closes
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.phase).toBe('all-done')
+    })
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.closeStreamChannelOnClose_contextOnClose).toBe('true')
+    })
+  })
+
+  // ── Passed function: context.onClose waits for request-side channel ──
+
+  test('close: passed function onClose ordering — context.onClose does not fire while request-side channel is open', async () => {
+    await page.goto(`${getServerUrl()}/close`)
+    await waitForHydration()
+    await resetCleanupState()
+
+    await page.click('#test-close-passed-fn-onclose')
+
+    // Wait for telefunc to return
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.method).toBe('close(passed-fn-onclose)')
+      expect(result.phase).toBe('returned')
+    })
+
+    // Callback was called on server
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.closePassedFnOnClose_callbackCalled).toBe('true')
+    })
+
+    // Wait 3 seconds — context.onClose should NOT have fired
+    // (request-side channel backing the passed callback is still open)
+    await sleep(3000)
+    {
+      const state = await getCleanupState()
+      expect(state.closePassedFnOnClose_contextOnClose).toBe('not-fired')
+    }
+
+    // Close the result — closes both response-side and request-side channels
+    await page.click('#test-close-passed-fn-close-now')
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.phase).toBe('closed')
+    })
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.closePassedFnOnClose_contextOnClose).toBe('fired')
     })
   })
 

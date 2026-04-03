@@ -10,6 +10,7 @@ import { pumpClientProducerToChannel } from '../../wire-protocol/client/request/
 import { makeAbortError } from './errors.js'
 import type { ClientReplacerContext } from '../../wire-protocol/types.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
+import { CloseHandler } from '../close.js'
 
 type CallContext = {
   telefuncFilePath: string
@@ -21,7 +22,12 @@ type CallContext = {
   extensions?: Record<string, unknown>
 }
 
-function serializeTelefunctionArguments(callContext: CallContext): string | Blob {
+type SerializeResult = {
+  httpRequestBody: string | Blob
+  requestCloseHandlers: CloseHandler[]
+}
+
+function serializeTelefunctionArguments(callContext: CallContext): SerializeResult {
   const dataMain: Record<string, unknown> = {
     file: callContext.telefuncFilePath,
     name: callContext.telefunctionName,
@@ -40,6 +46,7 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
   const channelTransports = callContext.channel.transports
   const abortSignal = callContext.abortController.signal
   const files: Blob[] = []
+  const requestCloseHandlers: CloseHandler[] = []
 
   const context: ClientReplacerContext = {
     channelTransports,
@@ -57,6 +64,7 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
         },
         { once: true },
       )
+      requestCloseHandlers.push(() => channel.close())
     },
     pumpToChannel(createProducer) {
       const channel = pumpClientProducerToChannel(createProducer, channelTransports)
@@ -67,8 +75,8 @@ function serializeTelefunctionArguments(callContext: CallContext): string | Blob
 
   const replacer = createRequestReplacer(context)
   const dataMainSerialized = serialize(dataMain, callContext, replacer)
-  if (files.length > 0) return encodeRequestEnvelope(dataMainSerialized, files)
-  return dataMainSerialized
+  const httpRequestBody = files.length > 0 ? encodeRequestEnvelope(dataMainSerialized, files) : dataMainSerialized
+  return { httpRequestBody, requestCloseHandlers }
 }
 
 type Replacer = Parameters<typeof stringify>[1] extends infer O ? (O extends { replacer?: infer R } ? R : never) : never

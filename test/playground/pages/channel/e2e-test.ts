@@ -47,6 +47,9 @@ type ChannelState = {
   serverPendingAckCloseReconnectOnOpenFired: boolean | null
   serverPendingAckCloseReconnectClientOnCloseClean: boolean | null
   upstreamReconnectChannelId: string | null
+  noListenerAckServerChannelId: string | null
+  noListenerAckServerErr: string | null
+  noListenerAckClientErr: string | null
 }
 
 function testChannel(isDev: boolean) {
@@ -629,6 +632,34 @@ function testChannel(isDev: boolean) {
     await autoRetry(async () => {
       const state = await getResult<ChannelState>('#channel-state')
       expect(state.clientPendingAckCloseErr).toBe('ChannelClosedError')
+    })
+  })
+
+  // ── No listener ack rejection ───────────────────────────────────────
+
+  test('channel: no listener ack (server→client) — server send({ ack: true }) rejects when client has no listener', async () => {
+    await page.click('#channel-test-no-listener-ack-server')
+
+    let channelId: string | null = null
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+      expect(state.noListenerAckServerChannelId).not.toBe(null)
+      channelId = state.noListenerAckServerChannelId
+    })
+
+    await autoRetry(async () => {
+      const ss = await getCleanupState()
+      expect(ss[`noListenerAck_server_${channelId}_rejected`]).toBe('true')
+      expect(ss[`noListenerAck_server_${channelId}_errMsg`]).toContain('No listener')
+    })
+  })
+
+  test('channel: no listener ack (client→server) — client send({ ack: true }) rejects when server has no listener', async () => {
+    await page.click('#channel-test-no-listener-ack-client')
+
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+      expect(state.noListenerAckClientErr).toContain('No listener')
     })
   })
 }

@@ -17,6 +17,8 @@ export {
   onChannelClientPendingAckClose,
   onChannelServerPendingAckCloseReconnectOpen,
   onChannelUpstreamReconnect,
+  onChannelNoListenerAckServer,
+  onChannelNoListenerAckClient,
 }
 
 import { channel, Abort } from 'telefunc'
@@ -332,6 +334,7 @@ async function onChannelClientAbortThenSend() {
  */
 async function onChannelClientPendingAckClose() {
   const ch = channel<(msg: string) => void, never>()
+  ch.listen(() => new Promise(() => {}))
   return { channel: ch.client }
 }
 
@@ -438,4 +441,37 @@ async function onChannelMulti() {
   ch2.onClose(() => clearInterval(t2))
 
   return { channel1: ch1.client, channel2: ch2.client }
+}
+
+/**
+ * Server sends with ack but client has no listener.
+ * The client should respond with an error, rejecting the server's send.
+ */
+async function onChannelNoListenerAckServer() {
+  const ch = channel<never, (msg: string) => string>()
+  const id = ch.id
+
+  cleanupState[`noListenerAck_server_${id}_rejected`] = 'false'
+  cleanupState[`noListenerAck_server_${id}_errMsg`] = ''
+
+  ch.onOpen(async () => {
+    try {
+      await ch.send('hello', { ack: true })
+    } catch (err: any) {
+      cleanupState[`noListenerAck_server_${id}_rejected`] = 'true'
+      cleanupState[`noListenerAck_server_${id}_errMsg`] = err?.message ?? 'unknown'
+    }
+  })
+
+  return { channel: ch.client, channelId: id }
+}
+
+/**
+ * Client sends with ack but server has no listener.
+ * The server should respond with an error, rejecting the client's send.
+ */
+async function onChannelNoListenerAckClient() {
+  const ch = channel<(msg: string) => string, never>()
+  // No ch.listen() — intentionally missing
+  return { channel: ch.client }
 }

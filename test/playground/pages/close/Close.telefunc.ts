@@ -1,6 +1,15 @@
-export { onMixedForClose, onCloseGen, onCloseStream, onCloseChannel, onCloseFn }
+export {
+  onMixedForClose,
+  onCloseGen,
+  onCloseStream,
+  onCloseChannel,
+  onCloseFn,
+  onCloseChannelOnClose,
+  onCloseStreamAndChannelOnClose,
+  onClosePassedFnOnClose,
+}
 
-import { channel } from 'telefunc'
+import { channel, getContext } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -52,6 +61,56 @@ async function onCloseFn(callback: () => void) {
   return () => {
     cleanupState.closeFn_retFnCalled = 'true'
   }
+}
+
+async function onCloseChannelOnClose() {
+  const ch = channel<never, never>()
+  cleanupState.closeChannelOnClose_contextOnClose = 'not-fired'
+  getContext().onClose(() => {
+    cleanupState.closeChannelOnClose_contextOnClose =
+      cleanupState.closeChannelOnClose_channelClosed ?? 'channel-still-open'
+  })
+  ch.onClose(() => {
+    cleanupState.closeChannelOnClose_channelClosed = 'true'
+  })
+  return ch.client
+}
+
+async function onCloseStreamAndChannelOnClose() {
+  const ch = channel<never, never>()
+  cleanupState.closeStreamChannelOnClose_contextOnClose = 'not-fired'
+  cleanupState.closeStreamChannelOnClose_streamDone = ''
+  getContext().onClose(() => {
+    cleanupState.closeStreamChannelOnClose_contextOnClose =
+      cleanupState.closeStreamChannelOnClose_channelClosed ?? 'channel-still-open'
+  })
+  ch.onClose(() => {
+    cleanupState.closeStreamChannelOnClose_channelClosed = 'true'
+  })
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(encoder.encode('only-chunk'))
+      controller.close()
+      cleanupState.closeStreamChannelOnClose_streamDone = 'true'
+    },
+  })
+  return { stream, channel: ch.client }
+}
+
+/**
+ * Client passes a function (backed by a request-side channel).
+ * context.onClose should not fire until that channel closes.
+ */
+async function onClosePassedFnOnClose(callback: () => void) {
+  cleanupState.closePassedFnOnClose_contextOnClose = 'not-fired'
+  cleanupState.closePassedFnOnClose_callbackCalled = 'false'
+  callback()
+  cleanupState.closePassedFnOnClose_callbackCalled = 'true'
+  getContext().onClose(() => {
+    cleanupState.closePassedFnOnClose_contextOnClose = 'fired'
+  })
+  return { callback }
 }
 
 // ── Mixed ────────────────────────────────────────────────────────────

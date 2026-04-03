@@ -28,7 +28,7 @@ function Participant({ name }: { name: string }) {
     videoRef.current!.srcObject = stream
     videoRef.current!.play()
 
-    const { channel } = await onJoinRoom('demo')
+    const channel = await onJoinRoom('demo')
 
     // Receive: decode VP8 → draw to canvas (with 300ms jitter buffer)
     const decoder = createDecoder(remoteRef.current!)

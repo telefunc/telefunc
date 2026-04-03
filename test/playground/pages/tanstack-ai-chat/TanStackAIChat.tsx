@@ -16,7 +16,7 @@ function getTextContent(msg: UIMessage): string {
 function TanStackAIChat() {
   const { messages, sendMessage, isLoading, stop, clear } = useChat({
     connection: {
-      connect: (messages, _data, signal) => withContext(onChat, { signal })(messages),
+      connect: (messages, _data, signal) => withContext(onChat, { signal })(messages as UIMessage[]),
     },
   })
   const bottomRef = useRef<HTMLDivElement>(null)

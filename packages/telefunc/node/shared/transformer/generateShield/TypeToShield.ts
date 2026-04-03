@@ -17,7 +17,13 @@ type ShieldRes<S extends string, Acc extends string[] = []> = {
 
 // prettier-ignore
 // biome-ignore format:
-type SimpleType<T, Acc extends any[] = []> = Equals<T, string> extends true
+type SimpleType<T, Acc extends any[] = []> = [T] extends [never]
+  ? false
+  : Equals<T, any> extends true
+  ? ShieldRes<'__telefunc_t.any', Acc>
+  : unknown extends T
+  ? ShieldRes<'__telefunc_t.any', Acc>
+  : Equals<T, string> extends true
   ? ShieldRes<'__telefunc_t.string', Acc>
   : Equals<T, number> extends true
   ? ShieldRes<'__telefunc_t.number', Acc>
@@ -33,8 +39,8 @@ type SimpleType<T, Acc extends any[] = []> = Equals<T, string> extends true
   ? ShieldRes<'__telefunc_t.readableStream', Acc>
   : Equals<T, ReadableStream> extends true
   ? ShieldRes<'__telefunc_t.readableStream', Acc>
-  : Equals<T, any> extends true
-  ? ShieldRes<'__telefunc_t.any', Acc>
+  : T extends (...args: any[]) => any
+  ? ShieldRes<'__telefunc_t.function', Acc>
   : false
 
 // prettier-ignore
@@ -110,8 +116,6 @@ type Shield<T, Acc extends any[] = []> = SimpleType<T> extends ShieldRes<any>
   ? Shield<Exclude<T, null>, ['nullable', ...Acc]>
   : IsUnion<T> extends true
   ? ShieldUnion<T, Acc>
-  : T extends (...args: any[]) => any
-  ? ShieldRes<'__telefunc_t.function', Acc>
   : T extends any[]
   ? ArrayLike<T, Acc>
   : T extends Record<any, any>

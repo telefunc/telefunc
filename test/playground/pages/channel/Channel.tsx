@@ -21,6 +21,8 @@ import {
   onChannelClientPendingAckClose,
   onChannelServerPendingAckCloseReconnectOpen,
   onChannelUpstreamReconnect,
+  onChannelNoListenerAckServer,
+  onChannelNoListenerAckClient,
 } from './Channel.telefunc'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -81,6 +83,9 @@ type ChannelState = {
   serverPendingAckCloseReconnectClientOnCloseClean: boolean | null
   /** Channel ID for the upstream reconnect test channel. */
   upstreamReconnectChannelId: string | null
+  noListenerAckServerChannelId: string | null
+  noListenerAckServerErr: string | null
+  noListenerAckClientErr: string | null
 }
 
 const initialState: ChannelState = {
@@ -127,6 +132,9 @@ const initialState: ChannelState = {
   serverPendingAckCloseReconnectOnOpenFired: null,
   serverPendingAckCloseReconnectClientOnCloseClean: null,
   upstreamReconnectChannelId: null,
+  noListenerAckServerChannelId: null,
+  noListenerAckServerErr: null,
+  noListenerAckClientErr: null,
 }
 
 function timestamp() {
@@ -515,8 +523,10 @@ function ChannelDemo() {
   const testServerPendingAckAbort = useCallback(async () => {
     addLog('system', 'Starting server-pending-ack-abort test...')
     const { channel, channelId } = await onChannelServerPendingAckAbort()
+    console.log('server-pending-ack-abort channel opened:', { channelId, channelId2: channel.id })
     serverPendingAckAbortChannelRef.current = channel
     setChannelState((s) => ({ ...s, serverPendingAckAbortChannelId: channelId }))
+    channel.listen(() => new Promise(() => {}))
     channel.onClose((err) => {
       const e = err as any
       addLog('system', `server-pending-ack-abort onClose: isAbort=${e instanceof TelefuncAbort}`)
@@ -651,6 +661,28 @@ function ChannelDemo() {
     const n = ++upstreamReconnectSeqRef.current
     ch.send(n)
     addLog('out', `[upstream] seq ${n}`)
+  }, [addLog])
+
+  const testNoListenerAckServer = useCallback(async () => {
+    addLog('system', 'Starting no-listener-ack-server test...')
+    const { channel, channelId } = await onChannelNoListenerAckServer()
+    setChannelState((s) => ({ ...s, noListenerAckServerChannelId: channelId }))
+    // No listener — server's send({ ack: true }) should reject
+    channel.onClose(() => {
+      addLog('system', `no-listener-ack-server channel closed`)
+    })
+  }, [addLog])
+
+  const testNoListenerAckClient = useCallback(async () => {
+    addLog('system', 'Starting no-listener-ack-client test...')
+    const { channel } = await onChannelNoListenerAckClient()
+    channel.onOpen(async () => {
+      try {
+        await channel.send('hello', { ack: true })
+      } catch (err: any) {
+        setChannelState((s) => ({ ...s, noListenerAckClientErr: err?.message ?? 'unknown' }))
+      }
+    })
   }, [addLog])
 
   // ── Render ───────────────────────────────────────────────────────────────
@@ -866,6 +898,22 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-teal-700 text-white hover:bg-teal-800"
           >
             Send Upstream Seq
+          </button>
+          <button
+            id="channel-test-no-listener-ack-server"
+            type="button"
+            onClick={testNoListenerAckServer}
+            className="px-3 py-1.5 text-sm rounded bg-rose-600 text-white hover:bg-rose-700"
+          >
+            No Listener Ack (Server→Client)
+          </button>
+          <button
+            id="channel-test-no-listener-ack-client"
+            type="button"
+            onClick={testNoListenerAckClient}
+            className="px-3 py-1.5 text-sm rounded bg-rose-700 text-white hover:bg-rose-800"
+          >
+            No Listener Ack (Client→Server)
           </button>
         </div>
       </div>

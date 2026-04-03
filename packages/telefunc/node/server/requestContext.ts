@@ -34,17 +34,18 @@ type RequestContext = {
   /** Register a callback that fires when the request lifecycle ends for any reason
    *  (response sent, stream complete, or client disconnect). Fires exactly once. */
   onClose: (cb: () => void) => void
-  /** Mark the response as complete.
-   *  Fires onClose callbacks. */
+  /** Mark the response as complete. Fires onClose callbacks.
+   *  Gated by trackPending: if pending items exist, defers until all complete. */
   markComplete: () => void
+  /** Register a pending item (channel, stream pump, inline stream).
+   *  Returns a completion callback. markComplete is deferred until all pending items complete. */
+  trackPending: () => () => void
 }
 
-/** Create a RequestContext and wire the abort signal to markComplete(). */
+/** Create a RequestContext and wire the abort signal to markComplete. */
 function createRequestContext(request: Request): RequestContext {
   const closeCallbacks: Array<() => void> = []
   let closed = false
-
-  const responseAbort = createResponseAbortSource(() => fireClose())
 
   const fireClose = () => {
     if (closed) return
@@ -75,6 +76,24 @@ function createRequestContext(request: Request): RequestContext {
   const closeController = new AbortController()
   closeCallbacks.push(() => closeController.abort())
 
+  // Reference counting: fireClose fires when all holds are released.
+  // Each trackPending() adds a hold and returns a one-shot release function.
+  let pendingCount = 0
+  const trackPending = () => {
+    pendingCount++
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      if (--pendingCount === 0) fireClose()
+    }
+  }
+  // markComplete is the initial hold — released when serialization finishes
+  // or when the client disconnects, whichever comes first.
+  const markComplete = trackPending()
+
+  const responseAbort = createResponseAbortSource(markComplete)
+
   const ctx: RequestContext = {
     request,
     abortSignal: request.signal,
@@ -95,14 +114,17 @@ function createRequestContext(request: Request): RequestContext {
       }
       closeCallbacks.push(cb)
     },
-    markComplete: fireClose,
+    markComplete,
+    trackPending,
   }
 
-  // Wire abort signal → markComplete
+  // request.signal fires on abnormal client disconnect.
+  // During telefunc execution (pendingCount=1): releasePending fires onClose immediately.
+  // After serialization (pending channels/streams): defers until they all complete.
   if (request.signal.aborted) {
-    fireClose()
+    markComplete()
   } else {
-    request.signal.addEventListener('abort', () => fireClose(), { once: true })
+    request.signal.addEventListener('abort', markComplete, { once: true })
   }
 
   return ctx

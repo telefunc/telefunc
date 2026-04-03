@@ -11,7 +11,7 @@ import {
   handleTelefunctionBug,
   validateTelefunctionError,
 } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import type { ResponseAbortSource, RequestContext } from '../../../node/server/requestContext.js'
+import type { ResponseAbortSource } from '../../../node/server/requestContext.js'
 import type { TelefuncId } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
 
 const EMPTY = new Uint8Array(0)
@@ -27,11 +27,19 @@ function buildInlineResponseBody(runContext: {
   metadataSerialized: string
   streamingValues: StreamingValueServer[]
   telefuncId: TelefuncId
-  requestContext: Pick<RequestContext, 'markComplete' | 'abortSignal' | 'responseAbort'>
+  abortSignal: AbortSignal
+  responseAbort: Pick<ResponseAbortSource, 'errorPromise' | 'abort'>
+  onComplete: () => void
   encodeFrame: (frame: Uint8Array<ArrayBuffer>) => Uint8Array<ArrayBuffer>
 }): ReadableStream<Uint8Array<ArrayBuffer>> {
-  const { metadataSerialized, streamingValues, telefuncId, requestContext, encodeFrame } = runContext
-  const { markComplete: onStreamClose, abortSignal, responseAbort } = requestContext
+  const { metadataSerialized, streamingValues, telefuncId, abortSignal, responseAbort, onComplete, encodeFrame } =
+    runContext
+  let completed = false
+  const onStreamClose = () => {
+    if (completed) return
+    completed = true
+    onComplete()
+  }
   let cancelled = false
   let streamController: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | null = null
 

@@ -537,6 +537,10 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 
   private async _dispatchAckReq(text: string, seq: number): Promise<void> {
     try {
+      if (this._listeners.length === 0) {
+        this._sendAckRes(seq, 'No listener registered for ack request', 'error')
+        return
+      }
       const data = parse(text) as ChannelData<ClientToServer>
       let lastResult: unknown
       for (const cb of this._listeners) {
@@ -556,6 +560,10 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 
   private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
     try {
+      if (this._binaryListeners.length === 0) {
+        this._sendAckRes(seq, 'No listener registered for ack request', 'error')
+        return
+      }
       let lastResult: unknown
       for (const cb of this._binaryListeners) {
         try {
