@@ -9,6 +9,7 @@ import {
   onSlowConsumer,
   onBackpressure,
   onAbortMidStream,
+  onAbortMidRelay,
   onLiveLoopback,
 } from './StreamToServer.telefunc'
 import { Abort, abort } from 'telefunc/client'
@@ -164,6 +165,24 @@ function StreamToServer() {
         }}
       >
         Server abort after 3 chunks
+      </button>
+
+      <button
+        id="test-abort-mid-relay"
+        onClick={async () => {
+          setResult('')
+          const values: string[] = []
+          try {
+            for await (const v of onAbortMidRelay(makeTextStream(['x', 'y', 'z', 'w']))) {
+              values.push(v)
+            }
+            setResult(JSON.stringify({ error: false, values }))
+          } catch (e: any) {
+            setResult(JSON.stringify({ error: true, values, isAbort: e instanceof Abort, abortValue: e.abortValue }))
+          }
+        }}
+      >
+        Server abort mid-relay (stream→generator)
       </button>
 
       <button

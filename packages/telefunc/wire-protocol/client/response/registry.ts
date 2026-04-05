@@ -8,6 +8,7 @@ import { pubsubReviver } from './pubsub.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
 import type { ClientReviverContext } from '../../types.js'
+import type { AbortError } from '../../../shared/Abort.js'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 
@@ -23,7 +24,11 @@ const clientTypes = [
 /** Creates a JSON-serializer reviver that delegates to type-specific plugins. */
 function createStreamingReviver(
   context: ClientReviverContext,
-  onRevived: (revived: { value: unknown; close?: () => void }) => void,
+  onRevived: (revived: {
+    value: unknown
+    close: () => Promise<void> | void
+    abort: (abortError: AbortError) => void
+  }) => void,
 ) {
   const reviver: Reviver = (_key: undefined | string, value: string, parser: (str: string) => unknown) => {
     for (const type of clientTypes) {

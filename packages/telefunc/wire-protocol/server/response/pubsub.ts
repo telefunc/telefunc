@@ -11,12 +11,16 @@ const pubsubReplacer: ReplacerType<PubSubContract, ServerReplacerContext> = {
   detect(value): value is PubSubContract['value'] {
     return ServerPubSub.isServerPubSub(value)
   },
-  getMetadata(ps, { registerChannel }) {
-    ps._registerChannel()
-    registerChannel(ps)
+  getMetadata(ps, context) {
+    context.registerChannel(ps)
     return {
-      channelId: ps.id,
-      key: ps.key,
+      metadata: { channelId: ps.id, key: ps.key },
+      async close() {
+        await ps.close()
+      },
+      abort(abortError) {
+        ps.abort(abortError.abortValue)
+      },
     }
   },
 }

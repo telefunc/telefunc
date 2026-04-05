@@ -6,5 +6,6 @@ import { LazyFile } from './LazyFile.js'
 
 const fileReviver: ReviverType<FileRequestContract, ServerReviverContext> = {
   prefix: SERIALIZER_PREFIX_FILE,
-  createValue: (metadata, reader) => ({ value: new LazyFile(metadata, reader) }),
+  // Files are fully consumed during request parsing — no ongoing resource to clean up.
+  createValue: (metadata, reader) => ({ value: new LazyFile(metadata, reader), close() {}, abort() {} }),
 }

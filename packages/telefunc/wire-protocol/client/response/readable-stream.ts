@@ -2,19 +2,11 @@ export { readableStreamReviver }
 
 import type { ReviverType, ReadableStreamContract, ClientReviverContext } from '../../types.js'
 import { SERIALIZER_PREFIX_STREAM } from '../../constants.js'
-import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-
-const globalObject = getGlobalObject('wire-protocol/client/response/readable-stream.ts', {
-  gcRegistry: new FinalizationRegistry<() => void>((cancel) => cancel()),
-})
 
 const readableStreamReviver: ReviverType<ReadableStreamContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_STREAM,
   createValue: (metadata, context) => {
-    const { readNextChunk, cancel } =
-      'channelId' in metadata
-        ? context.createChannelChunkReader(metadata.channelId)
-        : context.createInlineChunkReader(metadata.__index)
+    const { readNextChunk, cancel, abort } = context.receiveStream(metadata)
     const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
       async pull(controller) {
         try {
@@ -28,10 +20,10 @@ const readableStreamReviver: ReviverType<ReadableStreamContract, ClientReviverCo
       },
       cancel,
     })
-    globalObject.gcRegistry.register(stream, cancel)
     return {
       value: stream,
       close: cancel,
+      abort,
     }
   },
 }

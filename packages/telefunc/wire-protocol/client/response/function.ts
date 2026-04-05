@@ -2,12 +2,6 @@ export { functionReviver }
 
 import type { FunctionContract, ClientReviverContext, ReviverType } from '../../types.js'
 import { SERIALIZER_PREFIX_FUNCTION } from '../../constants.js'
-import { ClientChannel } from '../channel.js'
-import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-const globalObject = getGlobalObject('wire-protocol/client/response/function.ts', {
-  /** Close the channel when the proxy is GC'd. `fn` is weak target. */
-  gcRegistry: new FinalizationRegistry<ClientChannel>((channel) => channel.close()),
-})
 
 /**
  * Reconstructs a server function returned from a telefunction as a callable proxy.
@@ -17,18 +11,18 @@ const globalObject = getGlobalObject('wire-protocol/client/response/function.ts'
 const functionReviver: ReviverType<FunctionContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
   createValue(metadata, context) {
-    const channel = new ClientChannel({
+    const channel = context.createChannel({
       channelId: metadata.channelId,
-      ackMode: true,
-      transports: context.channelTransports,
-      sessionToken: context.sessionToken,
+      ack: true,
     })
-    const fn = (...args: unknown[]) => channel.send(args, { ack: true })
-    globalObject.gcRegistry.register(fn, channel)
-    context.registerChannel(channel)
     return {
-      value: fn,
-      close: () => channel.close(),
+      value: (...args: unknown[]) => channel.send(args, { ack: true }),
+      async close() {
+        await channel.close()
+      },
+      abort(abortError) {
+        channel._abortWithValue(abortError.abortValue, abortError.message)
+      },
     }
   },
 }

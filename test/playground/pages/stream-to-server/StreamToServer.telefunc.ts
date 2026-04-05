@@ -1,4 +1,14 @@
-export { onEcho, onCollect, onRelay, onPassthrough, onSlowConsumer, onBackpressure, onAbortMidStream, onLiveLoopback }
+export {
+  onEcho,
+  onCollect,
+  onRelay,
+  onPassthrough,
+  onSlowConsumer,
+  onBackpressure,
+  onAbortMidStream,
+  onLiveLoopback,
+  onAbortMidRelay,
+}
 
 import { Abort } from 'telefunc'
 import { sleep } from '../../sleep'
@@ -89,6 +99,20 @@ async function onAbortMidStream(stream: ReadableStream<Uint8Array>) {
     chunks.push(decoder.decode(value))
   }
   throw Abort({ reason: 'enough', chunksRead: chunks.length })
+}
+
+/** Relay 2 chunks then throw Abort — tests abort propagation from request stream listener to response generator. */
+async function* onAbortMidRelay(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let count = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    count++
+    yield decoder.decode(value)
+    if (count >= 2) throw Abort({ reason: 'mid-relay-abort', chunksRelayed: count })
+  }
 }
 
 /** Pure loopback: read each chunk from client stream, yield it back immediately. */

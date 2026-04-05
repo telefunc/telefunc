@@ -6,7 +6,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
-import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
+import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { buildInlineResponseBody } from '../../../wire-protocol/server/response/StreamingResponseBody.js'
 import { pumpProducerToChannel } from '../../../wire-protocol/server/response/ChannelResponseBody.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
@@ -48,25 +48,43 @@ function serializeTelefunctionResult(runContext: {
   const useChannelPump = runContext.streamTransport === STREAM_TRANSPORT.CHANNEL
   const streamingValues: StreamingValueServer[] = []
   let nextStreamingIndex = 0
-  const context: ServerReplacerContext = {
-    useChannelPump,
-    registerChannel(channel) {
-      channel._setResponseAbort(requestContext.responseAbort.abort)
-      requestContext.responseAbort.onAbort((abortError) => channel.abort(abortError.abortValue))
-      channel.onClose(requestContext.trackPending())
-    },
-    registerStreamingValue(createProducer) {
-      assert(!useChannelPump, 'registerStreamingValue called in channel transport mode')
-      const index = nextStreamingIndex++
-      streamingValues.push({ createProducer, index })
-      return index
-    },
-    pumpToChannel(createProducer) {
-      assert(useChannelPump, 'pumpToChannel called in inline transport mode')
-      return pumpProducerToChannel(createProducer, runContext, requestContext.trackPending())
-    },
+  function registerChannel(channel: ServerChannel<any, any>) {
+    channel._registerChannel()
+    channel._setResponseAbort(requestContext.responseAbort.abort)
+    channel.onClose(requestContext.trackPending())
   }
-  const replacer = createStreamingReplacer(context)
+  const replacer = createStreamingReplacer(
+    {
+      createChannel<TOut, TIn>(opts?: { ack?: boolean }) {
+        const channel = new ServerChannel<TOut, TIn>(opts)
+        registerChannel(channel)
+        return channel
+      },
+      registerChannel,
+      sendStream(createProducer) {
+        if (useChannelPump) {
+          const channelId = pumpProducerToChannel(createProducer, runContext, requestContext.trackPending())
+          return {
+            metadata: { channelId },
+            // Pump self-manages lifecycle: close in finally, abort via responseAbort.errorPromise race.
+            close() {},
+            abort() {},
+          }
+        }
+        const index = nextStreamingIndex++
+        streamingValues.push({ createProducer, index })
+        return {
+          metadata: { __index: index },
+          // Inline streaming lifecycle is managed by the HTTP body stream.
+          close() {},
+          abort() {},
+        }
+      },
+    },
+    function onReplaced({ abort }) {
+      requestContext.responseAbort.onAbort(abort)
+    },
+  )
 
   let httpResponseBody: string
   try {

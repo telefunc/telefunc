@@ -120,6 +120,7 @@ class ServerPubSub<T = unknown> extends ServerChannel {
       this._peer.sendPublishBinary(wireData)
       return
     }
+    console.log(`[pubsub:${this.key}] buffering (no peer yet)`)
     this._prePeerBuffer.pushPublishBinary(wireData)
   }
 

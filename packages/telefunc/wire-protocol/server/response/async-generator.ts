@@ -10,9 +10,8 @@ const asyncGeneratorReplacer: StreamingReplacerType<AsyncGeneratorContract, Serv
   prefix: SERIALIZER_PREFIX_GENERATOR,
   detect: (value): value is AsyncGenerator<unknown> => isAsyncGenerator(value),
   getMetadata: (value, context) => {
-    if (context.useChannelPump)
-      return { channelId: context.pumpToChannel(() => asyncGeneratorReplacer.createProducer(value)) }
-    return { __index: context.registerStreamingValue(() => asyncGeneratorReplacer.createProducer(value)) }
+    const { metadata, close, abort } = context.sendStream(() => asyncGeneratorReplacer.createProducer(value))
+    return { metadata, close, abort }
   },
   createProducer: (value) => {
     const chunks = (async function* () {

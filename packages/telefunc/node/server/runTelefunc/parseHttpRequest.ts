@@ -10,6 +10,7 @@ import { createRequestReviver } from '../../../wire-protocol/server/request/regi
 import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
 import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
 import type { RequestContext } from '../requestContext.js'
+import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
 
@@ -60,29 +61,47 @@ async function parseHttpRequest(runContext: {
       assert(request.body)
       const reader = new StreamReader(request.body)
       const metaText = await reader.readMetadata()
-      const reviver = createRequestReviver({
-        registerFile: (index, size) => reader.registerFile(index, size),
-        consumeFile: (index, size) => reader.consumeFile(index, size),
-        registerChannel: (ch) => {
-          runContext.requestContext.onTopLevelError(() => ch.close())
-          runContext.requestContext.responseAbort.onAbort(() => ch.close())
-          ch.onClose(runContext.requestContext.trackPending())
+      const { requestContext } = runContext
+      const reviver = createRequestReviver(
+        {
+          registerFile: (index, size) => reader.registerFile(index, size),
+          consumeFile: (index, size) => reader.consumeFile(index, size),
+          createChannel<TOut, TIn>(opts: { id: string; ack?: boolean }) {
+            const channel = new ServerChannel<TOut, TIn>(opts)
+            channel._registerChannel()
+            channel._setResponseAbort(requestContext.responseAbort.abort)
+            channel.onClose(requestContext.trackPending())
+            return channel
+          },
         },
-      })
+        function onRevived({ close, abort }) {
+          requestContext.onTopLevelError(close)
+          requestContext.responseAbort.onAbort(abort)
+        },
+      )
       return parseTelefuncPayload(metaText, runContext, reviver)
     }
     case REQUEST_KIND.TEXT:
     case null: {
       const text = await request.text()
-      const reviver = createRequestReviver({
-        registerFile: () => {},
-        consumeFile: () => Promise.reject(new Error('No binary frame')),
-        registerChannel: (ch) => {
-          runContext.requestContext.onTopLevelError(() => ch.close())
-          runContext.requestContext.responseAbort.onAbort(() => ch.close())
-          ch.onClose(runContext.requestContext.trackPending())
+      const { requestContext } = runContext
+      const reviver = createRequestReviver(
+        {
+          registerFile: () => {},
+          consumeFile: () => Promise.reject(new Error('No binary frame')),
+          createChannel<TOut, TIn>(opts: { id: string; ack?: boolean }) {
+            const channel = new ServerChannel<TOut, TIn>(opts)
+            channel._registerChannel()
+            channel._setResponseAbort(requestContext.responseAbort.abort)
+            channel.onClose(requestContext.trackPending())
+            return channel
+          },
         },
-      })
+        function onRevived({ close, abort }) {
+          requestContext.onTopLevelError(close)
+          requestContext.responseAbort.onAbort(abort)
+        },
+      )
       return parseTelefuncPayload(text, runContext, reviver)
     }
   }

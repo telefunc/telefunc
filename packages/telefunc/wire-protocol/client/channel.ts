@@ -38,7 +38,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel
 {
   readonly id: string
-  readonly ackMode: boolean
+  readonly ack: boolean
   readonly defer: boolean
   readonly key: string | undefined
   protected _connection: MuxConnection
@@ -64,21 +64,21 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   constructor({
     channelId,
-    ackMode = false,
+    ack = false,
     key,
     transports,
     sessionToken,
     defer = false,
   }: {
     channelId: string
-    ackMode?: boolean
+    ack?: boolean
     key?: string
     transports: ChannelTransports
     sessionToken?: string
     defer?: boolean
   }) {
     this.id = channelId
-    this.ackMode = ackMode
+    this.ack = ack
     this.key = key
     this.defer = defer
     const config = resolveClientConfig()
@@ -111,7 +111,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     opts?: { ack?: boolean },
   ): void | Promise<ChannelAck<ClientToServer>> | Promise<void> {
     if (this._isClosed) throw new ChannelClosedError()
-    const needsAck = opts?.ack !== false && (opts?.ack === true || this.ackMode === true)
+    const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringify(data, { forbidReactElements: false })
     if (needsAck) {
       return this._trackAck(this._connection.sendTextAckReq(this, serialized) as Promise<ChannelAck<ClientToServer>>)
@@ -191,10 +191,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   abort(): void {
-    this._abortLocally()
+    this._abortWithValue()
   }
 
-  _abortLocally(abortValue?: unknown, message?: string): void {
+  _abortWithValue(abortValue?: unknown, message?: string): void {
     if (this._didTerminate || this._isClosed) return
     this._isClosed = true
     const abortError = createAbortError(abortValue, message)
@@ -473,7 +473,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _handleCallbackError(err: unknown): boolean {
     if (isAbort(err)) {
       const abortError = err
-      this._abortLocally(abortError.abortValue, abortError.message)
+      this._abortWithValue(abortError.abortValue, abortError.message)
       return true
     }
     reportChannelError(err)

@@ -96,6 +96,17 @@ function testStreamToServer() {
     })
   })
 
+  test('stream-to-server: server abort mid-relay (stream→generator)', async () => {
+    await page.click('#test-abort-mid-relay')
+    await autoRetry(async () => {
+      const result = await getResult('#stream-result')
+      expect(result.error).toBe(true)
+      expect(result.isAbort).toBe(true)
+      expect(result.abortValue).deep.equal({ reason: 'mid-relay-abort', chunksRelayed: 2 })
+      expect(result.values).deep.equal(['x', 'y'])
+    })
+  })
+
   test('stream-to-server: client abort(res)', async () => {
     await page.click('#test-client-abort')
     await autoRetry(async () => {

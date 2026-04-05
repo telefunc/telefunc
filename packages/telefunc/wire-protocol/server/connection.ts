@@ -458,10 +458,10 @@ class ServerConnection<TConnection> {
         entry.channel._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
         break
       case TAG.PUBLISH_ACK_REQ:
-        if (entry.channel instanceof ServerPubSub) entry.channel._onPeerPublishAckReqMessage(frame.text, frame.seq)
+        if (ServerPubSub.isServerPubSub(entry.channel)) entry.channel._onPeerPublishAckReqMessage(frame.text, frame.seq)
         break
       case TAG.PUBLISH_BINARY_ACK_REQ:
-        if (entry.channel instanceof ServerPubSub)
+        if (ServerPubSub.isServerPubSub(entry.channel))
           entry.channel._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
         break
     }

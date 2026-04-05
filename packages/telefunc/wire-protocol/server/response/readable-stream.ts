@@ -8,9 +8,8 @@ const readableStreamReplacer: StreamingReplacerType<ReadableStreamContract, Serv
   prefix: SERIALIZER_PREFIX_STREAM,
   detect: (value): value is ReadableStream<Uint8Array<ArrayBuffer>> => value instanceof ReadableStream,
   getMetadata: (value, context) => {
-    if (context.useChannelPump)
-      return { channelId: context.pumpToChannel(() => readableStreamReplacer.createProducer(value)) }
-    return { __index: context.registerStreamingValue(() => readableStreamReplacer.createProducer(value)) }
+    const { metadata, close, abort } = context.sendStream(() => readableStreamReplacer.createProducer(value))
+    return { metadata, close, abort }
   },
   createProducer: (value) => {
     // Acquire the reader here so cancel() can call reader.cancel() directly.

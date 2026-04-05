@@ -5,12 +5,11 @@ import { textDecoder } from './frame.js'
 import { CHANNEL_PUMP_TAG_ERROR } from './constants.js'
 import { isObject } from '../utils/isObject.js'
 import { assert } from '../utils/assert.js'
+import type { Channel } from './channel.js'
+import type { AbortError } from '../shared/Abort.js'
 
-/** Minimal channel interface — both ClientChannel and ServerChannel satisfy this. */
-type ChannelSurface = {
-  listenBinary(cb: (data: Uint8Array) => Promise<unknown>): void
-  onClose(cb: (err?: Error) => void): void
-  close(): void
+type ChunkReaderChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 'abort'> & {
+  _abortWithValue(abortValue?: unknown, message?: string): void
 }
 
 /**
@@ -38,10 +37,10 @@ class ChannelChunkReader {
   private wake: (() => void) | null = null
   private closed = false
   private closeError: Error | null = null
-  private readonly channel: ChannelSurface
+  private readonly channel: ChunkReaderChannel
   private readonly throwError?: (errorPayload: Record<string, unknown>) => never
 
-  private constructor(channel: ChannelSurface, throwError?: (errorPayload: Record<string, unknown>) => never) {
+  private constructor(channel: ChunkReaderChannel, throwError?: (errorPayload: Record<string, unknown>) => never) {
     this.channel = channel
     this.throwError = throwError
 
@@ -67,16 +66,19 @@ class ChannelChunkReader {
    * `throwError` is called when an error frame is dequeued. If omitted,
    * error frames throw a generic Error.
    */
-  static create(channel: ChannelSurface, throwError?: (errorPayload: Record<string, unknown>) => never) {
+  static create(channel: ChunkReaderChannel, throwError?: (errorPayload: Record<string, unknown>) => never) {
     const reader = new ChannelChunkReader(channel, throwError)
     return {
       readNextChunk: () => reader.readNextChunk(),
       cancel: () => reader.cancel(),
+      abort(abortError: AbortError) {
+        channel._abortWithValue(abortError.abortValue, abortError.message)
+      },
     }
   }
 
   /** Create a pull-based ReadableStream backed by this reader. */
-  static toReadableStream(channel: ChannelSurface, throwError?: (errorPayload: Record<string, unknown>) => never) {
+  static toReadableStream(channel: ChunkReaderChannel, throwError?: (errorPayload: Record<string, unknown>) => never) {
     const reader = new ChannelChunkReader(channel, throwError)
     return new ReadableStream<Uint8Array<ArrayBuffer>>(
       {

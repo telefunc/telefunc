@@ -122,6 +122,7 @@ function createJitterBuffer(decoder: VideoDecoder, bufferMs: number, fps: number
   }
   return {
     push(data: Uint8Array) {
+      console.log('received frame', data.byteLength, 'bytes')
       queue.push(data)
       if (!started) {
         started = true

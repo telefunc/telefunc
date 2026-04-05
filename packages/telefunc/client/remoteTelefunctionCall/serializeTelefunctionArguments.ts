@@ -7,10 +7,15 @@ import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
 import { encodeRequestEnvelope } from '../../wire-protocol/frame.js'
 import { pumpClientProducerToChannel } from '../../wire-protocol/client/request/pumpToChannel.js'
+import { ClientChannel } from '../../wire-protocol/client/channel.js'
+import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
-import type { ClientReplacerContext } from '../../wire-protocol/types.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
 import { CloseHandler } from '../close.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
+const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {
+  gcRegistry: new FinalizationRegistry<() => void | Promise<void>>((close) => close()),
+})
 
 type CallContext = {
   telefuncFilePath: string
@@ -48,32 +53,40 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
   const files: Blob[] = []
   const requestCloseHandlers: CloseHandler[] = []
 
-  const context: ClientReplacerContext = {
-    channelTransports,
-    registerFile(body) {
-      const index = files.length
-      files.push(body)
-      return index
+  const replacer = createRequestReplacer(
+    {
+      registerFile(body) {
+        const index = files.length
+        files.push(body)
+        return index
+      },
+      createChannel(opts) {
+        return new ClientChannel({
+          channelId: crypto.randomUUID(),
+          ack: opts?.ack,
+          transports: channelTransports,
+          defer: true,
+        })
+      },
+      sendStream(createProducer) {
+        return pumpClientProducerToChannel(createProducer, channelTransports)
+      },
     },
-    registerChannel(channel) {
+    function onReplaced({ value, close, abort }) {
+      if (isObjectOrFunction(value)) {
+        globalObject.gcRegistry.register(value, close)
+      }
       abortSignal.addEventListener(
         'abort',
         () => {
           const abortError = makeAbortError(undefined, callContext)
-          channel._abortLocally(abortError.abortValue, abortError.message)
+          abort(abortError)
         },
         { once: true },
       )
-      requestCloseHandlers.push(() => channel.close())
+      requestCloseHandlers.push(close)
     },
-    pumpToChannel(createProducer) {
-      const channel = pumpClientProducerToChannel(createProducer, channelTransports)
-      context.registerChannel(channel)
-      return { channelId: channel.id, close: () => channel.close() }
-    },
-  }
-
-  const replacer = createRequestReplacer(context)
+  )
   const dataMainSerialized = serialize(dataMain, callContext, replacer)
   const httpRequestBody = files.length > 0 ? encodeRequestEnvelope(dataMainSerialized, files) : dataMainSerialized
   return { httpRequestBody, requestCloseHandlers }

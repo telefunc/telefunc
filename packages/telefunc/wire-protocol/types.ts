@@ -30,7 +30,7 @@ export type {
 import type { ServerChannel } from './server/channel.js'
 import type { ServerPubSub } from './server/server-pubsub.js'
 import type { ClientChannel, ClientPubSub } from './client/channel.js'
-import type { ChannelTransports } from './constants.js'
+import type { AbortError } from '../shared/Abort.js'
 
 // ===== Base types =====
 
@@ -45,7 +45,10 @@ type TypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = 
 type ReplacerType<C extends TypeContract = TypeContract, Context = unknown> = {
   prefix: string
   detect(value: unknown): value is C['value']
-  getMetadata(value: C['value'], context: Context): C['metadata']
+  getMetadata(
+    value: C['value'],
+    context: Context,
+  ): { metadata: C['metadata']; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }
 }
 
 /** Streaming replacer: replacer + producer factory for chunk-based streaming. */
@@ -56,7 +59,10 @@ type StreamingReplacerType<C extends TypeContract = TypeContract, Context = unkn
 /** Reviver: reconstruct a live value from prefix+metadata during deserialization. */
 type ReviverType<C extends TypeContract = TypeContract, Context = unknown> = {
   prefix: string
-  createValue(metadata: C['metadata'], context: Context): { value: C['result']; close?: () => void }
+  createValue(
+    metadata: C['metadata'],
+    context: Context,
+  ): { value: C['result']; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }
 }
 
 // ===== Producer =====
@@ -73,38 +79,46 @@ type StreamingValueServer = {
 
 // ===== Contexts =====
 
-type ChunkReader = { readNextChunk: () => Promise<Uint8Array<ArrayBuffer> | null>; cancel: () => void }
+type ChunkReader = {
+  readNextChunk: () => Promise<Uint8Array<ArrayBuffer> | null>
+  cancel: () => void
+  abort: (abortError: AbortError) => void
+}
 
 /** Context for all client-side response revivers (streaming + placeholder). */
 type ClientReviverContext = {
-  channelTransports: ChannelTransports
-  sessionToken?: string
-  registerChannel(channel: ClientChannel): void
-  createInlineChunkReader(index: number): ChunkReader
-  createChannelChunkReader(channelId: string): ChunkReader
+  createChannel<TOut = unknown, TIn = unknown>(opts: { channelId: string; ack?: boolean }): ClientChannel<TOut, TIn>
+  createPubSub<T = unknown>(opts: { channelId: string; key: string }): ClientPubSub<T>
+  receiveStream(metadata: StreamingMetadata): ChunkReader
 }
 
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
 type ServerReviverContext = {
   registerFile(index: number, size: number): void
   consumeFile(index: number, size: number): Promise<ReadableStream<Uint8Array>>
-  registerChannel(channel: ServerChannel<any, any>): void
+  createChannel<TOut = unknown, TIn = unknown>(opts: { id: string; ack?: boolean }): ServerChannel<TOut, TIn>
 }
 
 /** Context for all server-side response replacers (streaming + placeholder). */
 type ServerReplacerContext = {
+  createChannel<TOut = unknown, TIn = unknown>(opts?: { ack?: boolean }): ServerChannel<TOut, TIn>
   registerChannel(channel: ServerChannel<any, any>): void
-  registerStreamingValue(createProducer: () => StreamingProducer): number
-  pumpToChannel(createProducer: () => StreamingProducer): string
-  useChannelPump: boolean
+  sendStream(createProducer: () => StreamingProducer): {
+    metadata: StreamingMetadata
+    close: () => Promise<void> | void
+    abort: (abortError: AbortError) => void
+  }
 }
 
 /** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */
 type ClientReplacerContext = {
-  channelTransports: ChannelTransports
   registerFile(body: Blob): number
-  registerChannel(channel: ClientChannel<any, any>): void
-  pumpToChannel(createProducer: () => StreamingProducer): { channelId: string; close: () => void }
+  createChannel<TOut = unknown, TIn = unknown>(opts?: { ack?: boolean }): ClientChannel<TOut, TIn>
+  sendStream(createProducer: () => StreamingProducer): {
+    metadata: { channelId: string }
+    close: () => Promise<void> | void
+    abort: (abortError: AbortError) => void
+  }
 }
 
 // ===== Metadata =====

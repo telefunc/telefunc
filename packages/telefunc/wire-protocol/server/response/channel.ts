@@ -12,12 +12,19 @@ const channelReplacer: ReplacerType<ChannelContract, ServerReplacerContext> = {
   detect(value): value is ChannelContract['value'] {
     return ServerChannel.isServerChannel(value)
   },
-  getMetadata(channel, { registerChannel }) {
-    channel._registerChannel()
-    registerChannel(channel)
+  getMetadata(channel, context) {
+    context.registerChannel(channel)
     return {
-      channelId: channel.id,
-      ...(channel.ackMode && { ack: channel.ackMode }),
+      metadata: {
+        channelId: channel.id,
+        ...(channel.ack && { ack: channel.ack }),
+      },
+      async close() {
+        await channel.close()
+      },
+      abort(abortError) {
+        channel.abort(abortError.abortValue)
+      },
     }
   },
 }

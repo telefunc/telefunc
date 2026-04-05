@@ -1,6 +1,7 @@
 export { createRequestReplacer }
 
 import type { ClientReplacerContext, ReplacerType } from '../../types.js'
+import type { AbortError } from '../../../shared/Abort.js'
 import { fileReplacer } from './file.js'
 import { blobReplacer } from './blob.js'
 import { functionReplacer } from './function.js'
@@ -15,12 +16,21 @@ const clientRequestTypes: ReplacerType<any, ClientReplacerContext>[] = [
   functionReplacer,
 ]
 
-function createRequestReplacer(context: ClientReplacerContext) {
+function createRequestReplacer(
+  context: ClientReplacerContext,
+  onReplaced: (replaced: {
+    value: unknown
+    close: () => Promise<void> | void
+    abort: (abortError: AbortError) => void
+  }) => void,
+) {
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of clientRequestTypes) {
       if (type.detect(value)) {
+        const { metadata, close, abort } = type.getMetadata(value, context)
+        onReplaced({ value, close, abort })
         return {
-          replacement: type.prefix + serializer(type.getMetadata(value, context)),
+          replacement: type.prefix + serializer(metadata),
           resolved: true,
         }
       }

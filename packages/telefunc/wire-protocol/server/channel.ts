@@ -74,7 +74,7 @@ function channel<ClientToServer = UntypedChannelHandler, ServerToClient = Untype
 }): Channel<ServerToClient, ClientToServer, false>
 function channel(opts?: { ack?: boolean }): any {
   return new ServerChannel({
-    ackMode: opts?.ack === true,
+    ack: opts?.ack === true,
   })
 }
 
@@ -83,7 +83,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 {
   readonly [SERVER_CHANNEL_BRAND] = true
   readonly id: string
-  readonly ackMode: boolean
+  readonly ack: boolean
 
   get client(): ClientChannel<ClientToServer, ServerToClient> {
     return this as unknown as ClientChannel<ClientToServer, ServerToClient>
@@ -127,15 +127,15 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _pendingCloseAck = false
 
   constructor({
-    ackMode = false,
+    ack = false,
     id,
     bufferLimit,
   }: {
-    ackMode?: boolean
+    ack?: boolean
     id?: string
     bufferLimit?: number
   } = {}) {
-    this.ackMode = ackMode
+    this.ack = ack
     this.id = id ?? crypto.randomUUID()
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
       bufferLimit ?? globalObject.bufferLimit,
@@ -170,7 +170,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     opts?: { ack?: boolean },
   ): void | Promise<ChannelAck<ServerToClient>> | Promise<void> {
     if (this._isClosed) throw new ChannelClosedError()
-    const needsAck = opts?.ack !== false && (opts?.ack === true || this.ackMode === true)
+    const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringify(data, { forbidReactElements: false })
     if (!this._peer) {
       if (needsAck) {
@@ -276,6 +276,10 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   }
 
   abort(abortValue?: unknown): void {
+    this._abortWithValue(abortValue)
+  }
+
+  _abortWithValue(abortValue?: unknown, message?: string): void {
     if (this._didShutdown || this._isClosed) return
     this._isClosed = true
     const serializedAbortValue = stringify(abortValue, { forbidReactElements: false })
@@ -283,7 +287,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       this._peer.sendAbort(serializedAbortValue)
       this._peer = null
     }
-    this._shutdown(createAbortError(abortValue))
+    this._shutdown(createAbortError(abortValue, message))
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {

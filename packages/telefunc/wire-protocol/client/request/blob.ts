@@ -9,9 +9,10 @@ const blobReplacer: ReplacerType<BlobRequestContract, ClientReplacerContext> = {
   getMetadata: (value, context) => {
     const index = context.registerFile(value)
     return {
-      index,
-      size: value.size,
-      type: value.type,
+      metadata: { index, size: value.size, type: value.type },
+      // Blobs are fully consumed during request parsing — no ongoing resource to clean up.
+      close() {},
+      abort() {},
     }
   },
 }

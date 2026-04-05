@@ -10,8 +10,8 @@ const promiseReplacer: StreamingReplacerType<PromiseContract, ServerReplacerCont
   prefix: SERIALIZER_PREFIX_PROMISE,
   detect: (value): value is Promise<unknown> => isPromise(value),
   getMetadata: (value, context) => {
-    if (context.useChannelPump) return { channelId: context.pumpToChannel(() => promiseReplacer.createProducer(value)) }
-    return { __index: context.registerStreamingValue(() => promiseReplacer.createProducer(value)) }
+    const { metadata, close, abort } = context.sendStream(() => promiseReplacer.createProducer(value))
+    return { metadata, close, abort }
   },
   createProducer: (value) => {
     return {

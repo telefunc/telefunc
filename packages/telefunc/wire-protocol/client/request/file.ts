@@ -9,11 +9,10 @@ const fileReplacer: ReplacerType<FileRequestContract, ClientReplacerContext> = {
   getMetadata: (value, context) => {
     const index = context.registerFile(value)
     return {
-      index,
-      name: value.name,
-      size: value.size,
-      type: value.type,
-      lastModified: value.lastModified,
+      metadata: { index, name: value.name, size: value.size, type: value.type, lastModified: value.lastModified },
+      // Files are fully consumed during request parsing — no ongoing resource to clean up.
+      close() {},
+      abort() {},
     }
   },
 }

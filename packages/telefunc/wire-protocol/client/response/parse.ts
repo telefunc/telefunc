@@ -13,10 +13,15 @@ import { makeAbortError, throwAbortError, throwBugError } from '../../../client/
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
-import { ClientChannel } from '../channel.js'
+import { ClientChannel, ClientPubSub } from '../channel.js'
+import { wrapProxy } from '../../wrapProxy.js'
 import { ChannelChunkReader } from '../../ChannelChunkReader.js'
 import { STREAMING_ERROR_TYPE } from '../../constants.js'
 import type { ChannelTransports } from '../../constants.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+const globalObject = getGlobalObject('wire-protocol/client/response/parse.ts', {
+  gcRegistry: new FinalizationRegistry<() => void | Promise<void>>((close) => close()),
+})
 
 // ===== Types =====
 
@@ -78,41 +83,31 @@ function reviveResponse(
   let demuxer: FrameDemuxer | null = null
 
   const context: ClientReviverContext = {
-    channelTransports: transports,
-    sessionToken,
-    registerChannel(channel) {
-      callContext.abortController.signal.addEventListener(
-        'abort',
-        () => {
-          const abortError = makeAbortError(undefined, callContext)
-          channel._abortLocally(abortError.abortValue, abortError.message)
-        },
-        { once: true },
-      )
+    createChannel(opts) {
+      return wrapProxy(new ClientChannel({ channelId: opts.channelId, ack: opts.ack, transports, sessionToken }))
     },
-    createInlineChunkReader(index) {
-      assert(bodyStreamReader, 'Unexpected createInlineChunkReader call in non-streaming response')
-      demuxer ??= new FrameDemuxer(bodyStreamReader)
-      demuxer.registerConsumer()
-      return {
-        readNextChunk: () => demuxer!.readNextChunkForIndex(index),
-        cancel: () => demuxer!.cancelIndex(index),
-      }
+    createPubSub(opts) {
+      return wrapProxy(new ClientPubSub({ channelId: opts.channelId, key: opts.key, transports, sessionToken }))
     },
-    createChannelChunkReader(channelId) {
-      const channel = new ClientChannel({ channelId, transports, sessionToken, defer: false })
-      // Register so abort(res) propagates to pump channels.
-      context.registerChannel(channel)
-      return ChannelChunkReader.create(
-        //
-        channel,
-        function throwError(errorPayload) {
+    receiveStream(metadata) {
+      if ('channelId' in metadata) {
+        const channel = new ClientChannel({ channelId: metadata.channelId, transports, sessionToken, defer: false })
+        return ChannelChunkReader.create(channel, function throwError(errorPayload) {
           if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT && 'abortValue' in errorPayload) {
             throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, errorPayload.abortValue)
           }
           throwBugError()
-        },
-      )
+        })
+      }
+      assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
+      demuxer ??= new FrameDemuxer(bodyStreamReader)
+      demuxer.registerConsumer()
+      return {
+        readNextChunk: () => demuxer!.readNextChunkForIndex(metadata.__index),
+        cancel: () => demuxer!.cancelIndex(metadata.__index),
+        // Inline streams abort via HTTP body reader cancellation (StreamReader.ts), not per-stream.
+        abort(_abortError) {},
+      }
     },
   }
 
@@ -121,10 +116,17 @@ function reviveResponse(
     //
     context,
     function onRevived(revived) {
-      if (!revived.close) return
       assert(isObjectOrFunction(revived.value))
+      globalObject.gcRegistry.register(revived.value, revived.close)
       closeHandlers.set(revived.value, revived.close)
       allCloseHandlers.push(revived.close)
+      callContext.abortController.signal.addEventListener(
+        'abort',
+        () => {
+          revived.abort(makeAbortError(undefined, callContext))
+        },
+        { once: true },
+      )
     },
   )
 
