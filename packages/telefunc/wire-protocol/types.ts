@@ -89,7 +89,12 @@ type ChunkReader = {
 type ClientReviverContext = {
   createChannel<TOut = unknown, TIn = unknown>(opts: { channelId: string; ack?: boolean }): ClientChannel<TOut, TIn>
   createPubSub<T = unknown>(opts: { channelId: string; key: string }): ClientPubSub<T>
-  receiveStream(metadata: StreamingMetadata): ChunkReader
+  receiveStreamReader(metadata: StreamingMetadata): ChunkReader
+  receiveStream(metadata: StreamingMetadata): {
+    stream: ReadableStream<Uint8Array<ArrayBuffer>>
+    cancel: () => void
+    abort: (abortError: AbortError) => void
+  }
 }
 
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
@@ -97,6 +102,12 @@ type ServerReviverContext = {
   registerFile(index: number, size: number): void
   consumeFile(index: number, size: number): Promise<ReadableStream<Uint8Array>>
   createChannel<TOut = unknown, TIn = unknown>(opts: { id: string; ack?: boolean }): ServerChannel<TOut, TIn>
+  receiveStreamReader(metadata: { channelId: string }): ChunkReader
+  receiveStream(metadata: { channelId: string }): {
+    stream: ReadableStream<Uint8Array<ArrayBuffer>>
+    cancel: () => void
+    abort: (abortError: AbortError) => void
+  }
 }
 
 /** Context for all server-side response replacers (streaming + placeholder). */

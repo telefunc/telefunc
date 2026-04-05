@@ -80,20 +80,28 @@ class ChannelChunkReader {
   /** Create a pull-based ReadableStream backed by this reader. */
   static toReadableStream(channel: ChunkReaderChannel, throwError?: (errorPayload: Record<string, unknown>) => never) {
     const reader = new ChannelChunkReader(channel, throwError)
-    return new ReadableStream<Uint8Array<ArrayBuffer>>(
+    const cancel = () => reader.cancel()
+    const abort = (abortError: AbortError) => channel._abortWithValue(abortError.abortValue, abortError.message)
+    const stream = new ReadableStream<Uint8Array<ArrayBuffer>>(
       {
         pull: async (controller) => {
-          const chunk = await reader.readNextChunk()
-          if (chunk === null) controller.close()
-          else controller.enqueue(chunk)
+          try {
+            const chunk = await reader.readNextChunk()
+            if (chunk === null) controller.close()
+            else controller.enqueue(chunk)
+          } catch (err) {
+            reader.cancel()
+            controller.error(err)
+          }
         },
-        cancel: () => reader.cancel(),
+        cancel,
       },
       // No pre-fetching — pull is only called when the consumer actually reads.
       // This ensures window updates reflect true application consumption, not
       // data sitting in the ReadableStream's internal buffer.
       { highWaterMark: 0 },
     )
+    return { stream, cancel, abort }
   }
 
   private async readNextChunk(): Promise<Uint8Array<ArrayBuffer> | null> {

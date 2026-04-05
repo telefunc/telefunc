@@ -77,7 +77,7 @@ vi.mock('../../../../node/server/serverConfig.js', () => ({
 }))
 
 vi.mock('../../../../node/server/telefunc.js', () => ({
-  telefunc: mocks.telefuncMock,
+  serve: mocks.telefuncMock,
 }))
 
 vi.mock('../../pubsub.js', () => ({
@@ -221,28 +221,28 @@ describe('cloudflare adapter entrypoint', () => {
     expect(stored).toEqual({ s: 'telefunc-shard-weur-0', b: 'weur' })
   })
 
-  it('returns undefined for non-telefunc traffic', () => {
+  it('returns undefined for non-telefunc traffic', async () => {
     const tf = telefunc()
 
-    expect(
+    await expect(
       tf.serve({
         request: new Request('https://telefunc.test/other'),
         env: {} as Cloudflare.Env,
         ctx: {} as ExecutionContext,
       }),
-    ).toBeUndefined()
+    ).resolves.toBeUndefined()
   })
 
-  it('asserts when binding is missing for telefunc traffic', () => {
+  it('asserts when binding is missing for telefunc traffic', async () => {
     const tf = telefunc()
 
-    expect(() =>
+    await expect(
       tf.serve({
         request: new Request('https://telefunc.test/_telefunc'),
         env: {} as Cloudflare.Env,
         ctx: {} as ExecutionContext,
       }),
-    ).toThrow('Missing Cloudflare Durable Object binding')
+    ).rejects.toThrow('Missing Cloudflare Durable Object binding')
   })
 
   it('returns 400 for websocket upgrades when websocket transport is disabled', async () => {
@@ -287,7 +287,15 @@ describe('cloudflare adapter entrypoint', () => {
     const tf = telefunc({ context: vi.fn(async () => ({ userId: 'user-1' })) })
     const DurableClass = tf.TelefuncDurableObject
     const ctx = { id: { name: 'telefunc-shard-weur-1' } } as DurableObjectState
-    const instance = new DurableClass(ctx, { TelefuncDurableObject: binding } as unknown as Cloudflare.Env)
+    const instance = new DurableClass(ctx, {
+      TelefuncDurableObject: binding,
+    } as unknown as Cloudflare.Env) as InstanceType<typeof DurableClass> & {
+      fetch(request: Request): Promise<Response>
+      webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void
+      webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void
+      telefuncPubSubPublish(request: unknown): unknown
+      telefuncPubSubDeliver(request: unknown): void
+    }
 
     expect(mocks.transportInstances[0]?.attachBinding).toHaveBeenCalledWith(binding, 'TelefuncDurableObject')
     expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {

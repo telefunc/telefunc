@@ -80,7 +80,14 @@ function reviveResponse(
 ): unknown {
   const closeHandlers = new WeakMap<object, () => void>()
 
-  let demuxer: FrameDemuxer | null = null
+  const createStreamChannel = (channelId: string) =>
+    new ClientChannel({ channelId, transports, sessionToken, defer: false })
+  const throwStreamError = (errorPayload: Record<string, unknown>): never => {
+    if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT && 'abortValue' in errorPayload) {
+      throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, errorPayload.abortValue)
+    }
+    throwBugError()
+  }
 
   const context: ClientReviverContext = {
     createChannel(opts) {
@@ -89,25 +96,19 @@ function reviveResponse(
     createPubSub(opts) {
       return wrapProxy(new ClientPubSub({ channelId: opts.channelId, key: opts.key, transports, sessionToken }))
     },
+    receiveStreamReader(metadata) {
+      if ('channelId' in metadata) {
+        return ChannelChunkReader.create(createStreamChannel(metadata.channelId), throwStreamError)
+      }
+      assert(bodyStreamReader, 'Unexpected receiveStreamReader call in non-streaming response')
+      return FrameDemuxer.getInstance(bodyStreamReader).create(metadata.__index)
+    },
     receiveStream(metadata) {
       if ('channelId' in metadata) {
-        const channel = new ClientChannel({ channelId: metadata.channelId, transports, sessionToken, defer: false })
-        return ChannelChunkReader.create(channel, function throwError(errorPayload) {
-          if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT && 'abortValue' in errorPayload) {
-            throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, errorPayload.abortValue)
-          }
-          throwBugError()
-        })
+        return ChannelChunkReader.toReadableStream(createStreamChannel(metadata.channelId), throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
-      demuxer ??= new FrameDemuxer(bodyStreamReader)
-      demuxer.registerConsumer()
-      return {
-        readNextChunk: () => demuxer!.readNextChunkForIndex(metadata.__index),
-        cancel: () => demuxer!.cancelIndex(metadata.__index),
-        // Inline streams abort via HTTP body reader cancellation (StreamReader.ts), not per-stream.
-        abort(_abortError) {},
-      }
+      return FrameDemuxer.getInstance(bodyStreamReader).toReadableStream(metadata.__index)
     },
   }
 
@@ -182,11 +183,22 @@ class FrameDemuxer {
   private doneIndices = new Set<number>()
   private totalConsumers = 0
 
-  constructor(streamReader: BaseStreamReader) {
+  private static instances = new Map<BaseStreamReader, FrameDemuxer>()
+
+  static getInstance(streamReader: BaseStreamReader) {
+    let instance = FrameDemuxer.instances.get(streamReader)
+    if (!instance) {
+      instance = new FrameDemuxer(streamReader)
+      FrameDemuxer.instances.set(streamReader, instance)
+    }
+    return instance
+  }
+
+  private constructor(streamReader: BaseStreamReader) {
     this.streamReader = streamReader
   }
 
-  registerConsumer() {
+  private registerConsumer() {
     this.totalConsumers++
   }
 
@@ -233,6 +245,37 @@ class FrameDemuxer {
     this.indexWaiters.set(index, { resolve: resolve!, reject: reject! })
     this.ensureReading()
     return promise
+  }
+
+  create(index: number) {
+    this.registerConsumer()
+    const cancel = () => this.cancelIndex(index)
+    return {
+      readNextChunk: () => this.readNextChunkForIndex(index),
+      cancel,
+      // Inline streams abort via HTTP body reader cancellation, not per-index.
+      abort() {},
+    }
+  }
+
+  toReadableStream(index: number) {
+    this.registerConsumer()
+    const cancel = () => this.cancelIndex(index)
+    const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
+      pull: async (controller) => {
+        try {
+          const chunk = await this.readNextChunkForIndex(index)
+          if (chunk === null) controller.close()
+          else controller.enqueue(chunk)
+        } catch (err) {
+          this.cancelIndex(index)
+          controller.error(err)
+        }
+      },
+      cancel,
+    })
+    // Inline streams abort via HTTP body reader cancellation, not per-index.
+    return { stream, cancel, abort() {} }
   }
 
   private async ensureReading() {

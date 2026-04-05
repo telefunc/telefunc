@@ -11,6 +11,7 @@ import { StreamReader } from '../../../wire-protocol/server/request/StreamReader
 import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
 import type { RequestContext } from '../requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
+import { ChannelChunkReader } from '../../../wire-protocol/ChannelChunkReader.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
 
@@ -57,21 +58,31 @@ async function parseHttpRequest(runContext: {
       if (!sseResponse) return { isMalformedRequest: true }
       return { isMalformedRequest: false, isSseRequest: true, sseResponse }
     }
+  }
+
+  const { requestContext } = runContext
+  const createChannel = <TOut, TIn>(opts: { id: string; ack?: boolean }) => {
+    const channel = new ServerChannel<TOut, TIn>(opts)
+    channel._registerChannel()
+    channel._setResponseAbort(requestContext.responseAbort.abort)
+    channel.onClose(requestContext.trackPending())
+    return channel
+  }
+  switch (requestKind) {
     case REQUEST_KIND.BINARY: {
       assert(request.body)
       const reader = new StreamReader(request.body)
       const metaText = await reader.readMetadata()
-      const { requestContext } = runContext
       const reviver = createRequestReviver(
         {
           registerFile: (index, size) => reader.registerFile(index, size),
           consumeFile: (index, size) => reader.consumeFile(index, size),
-          createChannel<TOut, TIn>(opts: { id: string; ack?: boolean }) {
-            const channel = new ServerChannel<TOut, TIn>(opts)
-            channel._registerChannel()
-            channel._setResponseAbort(requestContext.responseAbort.abort)
-            channel.onClose(requestContext.trackPending())
-            return channel
+          createChannel,
+          receiveStreamReader({ channelId }) {
+            return ChannelChunkReader.create(createChannel({ id: channelId }))
+          },
+          receiveStream({ channelId }) {
+            return ChannelChunkReader.toReadableStream(createChannel({ id: channelId }))
           },
         },
         function onRevived({ close, abort }) {
@@ -84,17 +95,16 @@ async function parseHttpRequest(runContext: {
     case REQUEST_KIND.TEXT:
     case null: {
       const text = await request.text()
-      const { requestContext } = runContext
       const reviver = createRequestReviver(
         {
           registerFile: () => {},
           consumeFile: () => Promise.reject(new Error('No binary frame')),
-          createChannel<TOut, TIn>(opts: { id: string; ack?: boolean }) {
-            const channel = new ServerChannel<TOut, TIn>(opts)
-            channel._registerChannel()
-            channel._setResponseAbort(requestContext.responseAbort.abort)
-            channel.onClose(requestContext.trackPending())
-            return channel
+          createChannel,
+          receiveStreamReader({ channelId }) {
+            return ChannelChunkReader.create(createChannel({ id: channelId }))
+          },
+          receiveStream({ channelId }) {
+            return ChannelChunkReader.toReadableStream(createChannel({ id: channelId }))
           },
         },
         function onRevived({ close, abort }) {
@@ -104,6 +114,8 @@ async function parseHttpRequest(runContext: {
       )
       return parseTelefuncPayload(text, runContext, reviver)
     }
+    default:
+      assert(false, 'Unexpected request kind: ' + requestKind)
   }
 }
 
