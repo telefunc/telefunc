@@ -12,6 +12,7 @@ import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kin
 import type { RequestContext } from '../requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { ChannelChunkReader } from '../../../wire-protocol/ChannelChunkReader.js'
+import type { ReviverType, TypeContract, ServerReviverContext } from '../../../wire-protocol/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
 
@@ -40,6 +41,7 @@ async function parseHttpRequest(runContext: {
   serverConfig: {
     telefuncUrl: string
     stream: { transport: StreamTransport }
+    extensionRequestTypes: ReviverType<TypeContract, ServerReviverContext>[]
   }
 }): Promise<ParseResult> {
   assertUrl(runContext)
@@ -61,6 +63,7 @@ async function parseHttpRequest(runContext: {
   }
 
   const { requestContext } = runContext
+  const { extensionRequestTypes } = runContext.serverConfig
   const createChannel = <TOut, TIn>(opts: { id: string; ack?: boolean }) => {
     const channel = new ServerChannel<TOut, TIn>(opts)
     channel._registerChannel()
@@ -89,6 +92,7 @@ async function parseHttpRequest(runContext: {
           requestContext.onTopLevelError(close)
           requestContext.responseAbort.onAbort(abort)
         },
+        extensionRequestTypes,
       )
       return parseTelefuncPayload(metaText, runContext, reviver)
     }
@@ -111,6 +115,7 @@ async function parseHttpRequest(runContext: {
           requestContext.onTopLevelError(close)
           requestContext.responseAbort.onAbort(abort)
         },
+        extensionRequestTypes,
       )
       return parseTelefuncPayload(text, runContext, reviver)
     }

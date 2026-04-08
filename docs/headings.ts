@@ -26,6 +26,16 @@ const headingsDetached = [
     url: '/cloudflare',
     category: 'API',
   },
+  {
+    title: '`@telefunc/rxjs`',
+    url: '/extensions/rxjs',
+    category: 'Guides',
+  },
+  {
+    title: '`@telefunc/tanstack-query`',
+    url: '/tanstack-query',
+    category: 'Guides',
+  },
   ...misc(),
 ] satisfies HeadingDetachedDefinition[]
 
@@ -162,8 +172,8 @@ const headings = [
   },
   {
     level: 2,
-    title: 'TanStack Query',
-    url: '/tanstack-query',
+    title: 'Extensions',
+    url: '/extensions',
   },
   {
     level: 1,

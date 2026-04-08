@@ -2,6 +2,7 @@ export default BabelPluginTelefunc
 
 import { parse } from '@babel/parser'
 import { transformTelefuncFileClientSideSync } from '../shared/transformer/transformTelefuncFileClientSideSync.js'
+import { getExtensionImports } from '../shared/discoverExtensions.js'
 import { toPosixPath } from '../../utils/path.js'
 import type { PluginObj, NodePath } from '@babel/core'
 import type { types as BabelTypes } from '@babel/core'
@@ -61,6 +62,8 @@ function getExportsFromBabelAST(programNodePath: NodePath<BabelTypes.Program>, t
   return exported
 }
 
+let clientExtensionImports: string[] | undefined
+
 function BabelPluginTelefunc(babel: { types: typeof BabelTypes }): PluginObj {
   return {
     visitor: {
@@ -73,15 +76,15 @@ function BabelPluginTelefunc(babel: { types: typeof BabelTypes }): PluginObj {
         const exportNames = getExportsFromBabelAST(path, babel.types)
 
         const root: string = context.file.opts.root!
-        const transformed: string = transformTelefuncFileClientSideSync(
+        clientExtensionImports ??= getExtensionImports(toPosixPath(root), 'client')
+        const code: string = transformTelefuncFileClientSideSync(
           toPosixPath(filename),
           toPosixPath(root),
           exportNames,
+          clientExtensionImports,
         ).code
 
-        const parsed = parse(transformed, {
-          sourceType: 'module',
-        })
+        const parsed = parse(code, { sourceType: 'module' })
 
         path.replaceWith(parsed.program)
       },

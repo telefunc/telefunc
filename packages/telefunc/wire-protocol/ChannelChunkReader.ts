@@ -8,9 +8,7 @@ import { assert } from '../utils/assert.js'
 import type { Channel } from './channel.js'
 import type { AbortError } from '../shared/Abort.js'
 
-type ChunkReaderChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 'abort'> & {
-  _abortWithValue(abortValue?: unknown, message?: string): void
-}
+type ChunkReaderChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 'abort'>
 
 /**
  * Receives tagged binary frames from a channel with credit-based backpressure.
@@ -72,7 +70,7 @@ class ChannelChunkReader {
       readNextChunk: () => reader.readNextChunk(),
       cancel: () => reader.cancel(),
       abort(abortError: AbortError) {
-        channel._abortWithValue(abortError.abortValue, abortError.message)
+        channel.abort(abortError.abortValue, abortError.message)
       },
     }
   }
@@ -81,7 +79,7 @@ class ChannelChunkReader {
   static toReadableStream(channel: ChunkReaderChannel, throwError?: (errorPayload: Record<string, unknown>) => never) {
     const reader = new ChannelChunkReader(channel, throwError)
     const cancel = () => reader.cancel()
-    const abort = (abortError: AbortError) => channel._abortWithValue(abortError.abortValue, abortError.message)
+    const abort = (abortError: AbortError) => channel.abort(abortError.abortValue, abortError.message)
     const stream = new ReadableStream<Uint8Array<ArrayBuffer>>(
       {
         pull: async (controller) => {

@@ -9,9 +9,17 @@ export { onBug } from './runTelefunc/onBug.js'
 export { channel } from '../../wire-protocol/server/channel.js'
 export { pubsub } from '../../wire-protocol/server/server-pubsub.js'
 export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'
-export type { Channel, ClientChannel, PubSub } from '../../wire-protocol/channel.js'
+export type { ChannelBase, Channel, ClientChannel, PubSub } from '../../wire-protocol/channel.js'
 export type { PubSubAdapter } from '../../wire-protocol/server/pubsub.js'
 export type { TelefuncServerExtension } from './extensions.js'
+export type {
+  TypeContract,
+  ReplacerType,
+  ReviverType,
+  StreamingReplacerType,
+  ServerReplacerContext,
+  ServerReviverContext,
+} from '../../wire-protocol/types.js'
 
 // In order to allow users to override `Telefunc.Context`, we need to export `Telefunc` (even if the user never imports `Telefunc`)
 export type { Telefunc } from './getContext/TelefuncNamespace.js'

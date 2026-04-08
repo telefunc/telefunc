@@ -5,7 +5,7 @@ import { fileReviver } from './file.js'
 import { blobReviver } from './blob.js'
 import { functionReviver } from './function.js'
 import { readableStreamReviver } from './readable-stream.js'
-import type { ServerReviverContext } from '../../types.js'
+import type { ServerReviverContext, ReviverType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../shared/Abort.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { assert } from '../../../utils/assert.js'
@@ -22,9 +22,11 @@ function createRequestReviver(
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
   }) => void,
+  extensionTypes: ReviverType<TypeContract, ServerReviverContext>[],
 ): Reviver {
+  const allTypes = [...serverRequestTypes, ...extensionTypes]
   return (_key: undefined | string, value: string, parser: (str: string) => unknown) => {
-    for (const type of serverRequestTypes) {
+    for (const type of allTypes) {
       if (value.startsWith(type.prefix)) {
         const metadata = parser(value.slice(type.prefix.length))
         assert(isObject(metadata))

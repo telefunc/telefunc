@@ -6,7 +6,7 @@ import { promiseReplacer } from './promise.js'
 import { pubsubReplacer } from './pubsub.js'
 import { channelReplacer } from './channel.js'
 import { functionReplacer } from './function.js'
-import type { ServerReplacerContext } from '../../types.js'
+import type { ServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../shared/Abort.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -25,9 +25,11 @@ const serverTypes = [
 function createStreamingReplacer(
   context: ServerReplacerContext,
   onReplaced: (replaced: { close: () => Promise<void> | void; abort: (abortError: AbortError) => void }) => void,
+  extensionTypes: ReplacerType<TypeContract, ServerReplacerContext>[],
 ) {
+  const allTypes = [...serverTypes, ...extensionTypes]
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
-    for (const type of serverTypes) {
+    for (const type of allTypes) {
       if (type.detect(value)) {
         const { metadata, close, abort } = type.getMetadata(value as never, context)
         onReplaced({ close, abort })

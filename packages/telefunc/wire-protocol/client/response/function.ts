@@ -21,7 +21,7 @@ const functionReviver: ReviverType<FunctionContract, ClientReviverContext> = {
         await channel.close()
       },
       abort(abortError) {
-        channel._abortWithValue(abortError.abortValue, abortError.message)
+        channel.abort(abortError.abortValue, abortError.message)
       },
     }
   },

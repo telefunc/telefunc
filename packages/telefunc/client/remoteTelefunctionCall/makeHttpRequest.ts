@@ -4,6 +4,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { parseResponse } from '../../wire-protocol/client/response/parse.js'
+import type { ReviverType, TypeContract, ClientReviverContext } from '../../wire-protocol/types.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire-protocol/request-kind.js'
 import { throwAbortError, throwBugError } from './errors.js'
 import type { CloseHandler } from '../close.js'
@@ -34,6 +35,7 @@ async function makeHttpRequest(callContext: {
   abortController: AbortController
   channel: { transports: ChannelTransports }
   requestCloseHandlers: CloseHandler[]
+  extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
 }): Promise<unknown> {
   const isBinaryFrame = typeof callContext.httpRequestBody !== 'string'
   const requestKind = isBinaryFrame ? REQUEST_KIND.BINARY : REQUEST_KIND.TEXT

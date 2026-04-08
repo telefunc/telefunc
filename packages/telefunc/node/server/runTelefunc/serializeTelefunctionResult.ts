@@ -15,6 +15,7 @@ import { uint8ArrayToBase64url } from '../../../wire-protocol/base64url.js'
 import type { StreamingValueServer } from '../../../wire-protocol/types.js'
 import { type RequestContext } from '../requestContext.js'
 import type { Telefunc } from '../getContext.js'
+import type { ReplacerType, TypeContract, ServerReplacerContext } from '../../../wire-protocol/types.js'
 
 type TelefuncId = {
   telefunctionName: string
@@ -38,8 +39,10 @@ function serializeTelefunctionResult(runContext: {
   requestContext: RequestContext
   abortSignal: AbortSignal
   streamTransport: StreamTransport
+  serverConfig: { extensionResponseTypes: ReplacerType<TypeContract, ServerReplacerContext>[] }
 }): SerializeResult {
   const { requestContext } = runContext
+  const { extensionResponseTypes } = runContext.serverConfig
 
   const bodyValue = runContext.telefunctionAborted
     ? { ret: runContext.telefunctionReturn, abort: true }
@@ -84,6 +87,7 @@ function serializeTelefunctionResult(runContext: {
     function onReplaced({ abort }) {
       requestContext.responseAbort.onAbort(abort)
     },
+    extensionResponseTypes,
   )
 
   let httpResponseBody: string

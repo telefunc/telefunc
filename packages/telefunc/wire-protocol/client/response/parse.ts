@@ -6,7 +6,7 @@ import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { createStreamingReviver } from './registry.js'
-import type { ClientReviverContext } from '../../types.js'
+import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { setAbortController } from '../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
@@ -15,12 +15,14 @@ import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
 import { ClientChannel, ClientPubSub } from '../channel.js'
 import { wrapProxy } from '../../wrapProxy.js'
+import { GcRegistry } from '../../gcRegistry.js'
 import { ChannelChunkReader } from '../../ChannelChunkReader.js'
 import { STREAMING_ERROR_TYPE } from '../../constants.js'
 import type { ChannelTransports } from '../../constants.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+
 const globalObject = getGlobalObject('wire-protocol/client/response/parse.ts', {
-  gcRegistry: new FinalizationRegistry<() => void | Promise<void>>((close) => close()),
+  gcRegistry: new GcRegistry(),
 })
 
 // ===== Types =====
@@ -31,6 +33,7 @@ type CallContext = {
   abortController: AbortController
   channel: { transports: ChannelTransports }
   requestCloseHandlers: CloseHandler[]
+  extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
 }
 
 // ===== Public entry point =====
@@ -78,10 +81,9 @@ function reviveResponse(
   sessionToken: string | undefined,
   bodyStreamReader: BaseStreamReader | null,
 ): unknown {
+  const { extensionResponseTypes } = callContext
   const closeHandlers = new WeakMap<object, () => void>()
 
-  const createStreamChannel = (channelId: string) =>
-    new ClientChannel({ channelId, transports, sessionToken, defer: false })
   const throwStreamError = (errorPayload: Record<string, unknown>): never => {
     if (errorPayload.type === STREAMING_ERROR_TYPE.ABORT && 'abortValue' in errorPayload) {
       throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, errorPayload.abortValue)
@@ -91,21 +93,23 @@ function reviveResponse(
 
   const context: ClientReviverContext = {
     createChannel(opts) {
-      return wrapProxy(new ClientChannel({ channelId: opts.channelId, ack: opts.ack, transports, sessionToken }))
+      return new ClientChannel({ channelId: opts.channelId, ack: opts.ack, transports, sessionToken })
     },
     createPubSub(opts) {
-      return wrapProxy(new ClientPubSub({ channelId: opts.channelId, key: opts.key, transports, sessionToken }))
+      return new ClientPubSub({ channelId: opts.channelId, key: opts.key, transports, sessionToken })
     },
     receiveStreamReader(metadata) {
       if ('channelId' in metadata) {
-        return ChannelChunkReader.create(createStreamChannel(metadata.channelId), throwStreamError)
+        const channel = new ClientChannel({ channelId: metadata.channelId, transports, sessionToken })
+        return ChannelChunkReader.create(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStreamReader call in non-streaming response')
       return FrameDemuxer.getInstance(bodyStreamReader).create(metadata.__index)
     },
     receiveStream(metadata) {
       if ('channelId' in metadata) {
-        return ChannelChunkReader.toReadableStream(createStreamChannel(metadata.channelId), throwStreamError)
+        const channel = new ClientChannel({ channelId: metadata.channelId, transports, sessionToken })
+        return ChannelChunkReader.toReadableStream(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
       return FrameDemuxer.getInstance(bodyStreamReader).toReadableStream(metadata.__index)
@@ -113,22 +117,34 @@ function reviveResponse(
   }
 
   const allCloseHandlers = [...callContext.requestCloseHandlers]
+
   const reviver = createStreamingReviver(
-    //
     context,
     function onRevived(revived) {
-      assert(isObjectOrFunction(revived.value))
-      globalObject.gcRegistry.register(revived.value, revived.close)
-      closeHandlers.set(revived.value, revived.close)
-      allCloseHandlers.push(revived.close)
-      callContext.abortController.signal.addEventListener(
-        'abort',
-        () => {
-          revived.abort(makeAbortError(undefined, callContext))
-        },
-        { once: true },
-      )
+      {
+        const { value, close } = revived
+        assert(isObjectOrFunction(value))
+        const wrapper = wrapProxy(value)
+        globalObject.gcRegistry.register(wrapper, close)
+        // This is what the user gets
+        revived.value = wrapper
+      }
+
+      {
+        const { value, abort, close } = revived
+        assert(isObjectOrFunction(value))
+        closeHandlers.set(value, close)
+        allCloseHandlers.push(close)
+        callContext.abortController.signal.addEventListener(
+          'abort',
+          () => {
+            abort(makeAbortError(undefined, callContext))
+          },
+          { once: true },
+        )
+      }
     },
+    extensionResponseTypes,
   )
 
   let parsed: unknown

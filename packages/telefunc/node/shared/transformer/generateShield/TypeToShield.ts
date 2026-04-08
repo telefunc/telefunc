@@ -15,6 +15,25 @@ type ShieldRes<S extends string, Acc extends string[] = []> = {
   acc: Acc
 }
 
+/** Extensions augment this via `declare global { namespace Telefunc { interface ShieldTypeMap { foo: Foo } } }`. */
+declare global {
+  namespace Telefunc {
+    interface ShieldTypeMap {}
+  }
+}
+
+// prettier-ignore
+// biome-ignore format:
+type ExtensionType<T, Acc extends any[] = [], Keys = keyof Telefunc.ShieldTypeMap> =
+  Keys extends infer K extends keyof Telefunc.ShieldTypeMap & string
+    ? T extends Telefunc.ShieldTypeMap[K]
+      ? ShieldRes<`__telefunc_t.${K}`, Acc>
+      : never
+    : false
+type ExtensionTypeResult<T, Acc extends any[] = []> = [ExtensionType<T, Acc>] extends [never]
+  ? false
+  : ExtensionType<T, Acc>
+
 // prettier-ignore
 // biome-ignore format:
 type SimpleType<T, Acc extends any[] = []> = [T] extends [never]
@@ -41,6 +60,8 @@ type SimpleType<T, Acc extends any[] = []> = [T] extends [never]
   ? ShieldRes<'__telefunc_t.readableStream', Acc>
   : T extends (...args: any[]) => any
   ? ShieldRes<'__telefunc_t.function', Acc>
+  : ExtensionTypeResult<T, Acc> extends ShieldRes<any, any>
+  ? ExtensionTypeResult<T, Acc>
   : false
 
 // prettier-ignore

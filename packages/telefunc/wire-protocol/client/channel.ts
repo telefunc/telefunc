@@ -190,11 +190,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this._closePromise
   }
 
-  abort(): void {
-    this._abortWithValue()
-  }
-
-  _abortWithValue(abortValue?: unknown, message?: string): void {
+  abort(): void
+  abort(abortValue: unknown, message?: string): void
+  abort(abortValue?: unknown, message?: string): void {
     if (this._didTerminate || this._isClosed) return
     this._isClosed = true
     const abortError = createAbortError(abortValue, message)
@@ -473,7 +471,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _handleCallbackError(err: unknown): boolean {
     if (isAbort(err)) {
       const abortError = err
-      this._abortWithValue(abortError.abortValue, abortError.message)
+      this.abort(abortError.abortValue, abortError.message)
       return true
     }
     reportChannelError(err)

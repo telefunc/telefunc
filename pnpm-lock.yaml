@@ -319,6 +319,18 @@ importers:
         specifier: ^7.2.2
         version: 7.3.1(@types/node@24.12.0)(jiti@2.6.1)(lightningcss@1.31.1)
 
+  packages/rxjs:
+    devDependencies:
+      rxjs:
+        specifier: ^7.8.0
+        version: 7.8.2
+      telefunc:
+        specifier: link:../telefunc
+        version: link:../telefunc
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
   packages/tanstack-query:
     devDependencies:
       '@tanstack/query-core':
@@ -464,6 +476,9 @@ importers:
       '@tanstack/react-query':
         specifier: ^5.95.2
         version: 5.95.2(react@19.2.4)
+      '@telefunc/rxjs':
+        specifier: workspace:*
+        version: link:../../packages/rxjs
       '@telefunc/tanstack-query':
         specifier: workspace:*
         version: link:../../packages/tanstack-query
@@ -488,6 +503,9 @@ importers:
       react-dom:
         specifier: ^19.2.0
         version: 19.2.4(react@19.2.4)
+      rxjs:
+        specifier: ^7.8.0
+        version: 7.8.2
       tailwindcss:
         specifier: ^4.2.1
         version: 4.2.1
@@ -5609,6 +5627,9 @@ packages:
 
   run-parallel@1.2.0:
     resolution: {integrity: sha512-5l4VyZR86LZ/lDxZTR6jqL8AFE2S0IFLMP26AbjsLVADxHdhB/c0GUsH+y39UfCi3dzz8OlQuPmnaJOMoDHQBA==}
+
+  rxjs@7.8.2:
+    resolution: {integrity: sha512-dhKf903U/PQZY6boNNtAGdWbG85WAbjT/1xYoZIC7FAY0yWapOBQVsVrDl58W86//e1VpMNBtRV4MaXfdMySFA==}
 
   sade@1.8.1:
     resolution: {integrity: sha512-xal3CZX1Xlo/k4ApwCFrHVACi9fBqJ7V+mwhBsuf/1IOKbBy098Fex+Wa/5QMubw09pSZ/u8EY8PWgevJsXp1A==}
@@ -12211,6 +12232,10 @@ snapshots:
   run-parallel@1.2.0:
     dependencies:
       queue-microtask: 1.2.3
+
+  rxjs@7.8.2:
+    dependencies:
+      tslib: 2.8.1
 
   sade@1.8.1:
     dependencies:

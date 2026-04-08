@@ -1,30 +1,31 @@
 {
-  "name": "@telefunc/tanstack-query",
+  "name": "@telefunc/rxjs",
   "version": "0.1.0",
-  "description": "Live queries for TanStack Query — server-side invalidation that automatically refetches connected clients.",
-  "homepage": "https://github.com/brillout/telefunc/tree/main/packages/tanstack-query#readme",
+  "description": "RxJS Observable and Subject support for Telefunc — pass rxjs primitives transparently between client and server.",
+  "homepage": "https://github.com/brillout/telefunc/tree/main/packages/rxjs#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/brillout/telefunc.git",
-    "directory": "packages/tanstack-query"
+    "directory": "packages/rxjs"
   },
   "license": "MIT",
   "telefunc": {
-    "server": "@telefunc/tanstack-query/server"
+    "server": "@telefunc/rxjs/server",
+    "client": "@telefunc/rxjs/client"
   },
   "type": "module",
-  "sideEffects": ["./dist/server.js"],
+  "sideEffects": ["./dist/server.js", "./dist/client.js"],
   "exports": {
     "./package.json": "./package.json",
-    ".": {
-      "types": "./dist/client.d.ts",
-      "browser": "./dist/client.js",
-      "default": "./dist/client.js"
-    },
     "./server": {
       "types": "./dist/server.d.ts",
       "worker": "./dist/server.js",
       "default": "./dist/server.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "browser": "./dist/client.js",
+      "default": "./dist/client.js"
     }
   },
   "files": [
@@ -36,11 +37,11 @@
   },
   "peerDependencies": {
     "telefunc": ">=0.2.0",
-    "@tanstack/query-core": ">=5.0.0"
+    "rxjs": ">=7.0.0"
   },
   "devDependencies": {
     "telefunc": "workspace:*",
-    "@tanstack/query-core": "^5.0.0",
+    "rxjs": "^7.8.0",
     "typescript": "^5.9.2"
   }
 }

@@ -1,0 +1,111 @@
+import { Link } from '@brillout/docpress'
+
+`@telefunc/rxjs` lets you pass [RxJS](https://rxjs.dev/) `Observable`, `Subject`, `BehaviorSubject`, and `ReplaySubject` transparently between client and server — both directions. All rxjs operators work out of the box.
+
+## Install
+
+```bash
+npm install @telefunc/rxjs rxjs
+```
+
+
+## Observable (server to client)
+
+```ts
+// StockPrice.telefunc.ts
+import { interval, map } from 'rxjs'
+
+export async function onStockPrice(symbol: string) {
+  return interval(1000).pipe(
+    map(() => ({ symbol, price: getLatestPrice(symbol) }))
+  )
+}
+```
+
+```tsx
+// StockPrice.tsx
+const price$ = await onStockPrice('AAPL')
+price$.pipe(
+  filter(p => p.price > 150),
+  take(5)
+).subscribe(p => console.log(p))
+```
+
+
+## Observable (client to server)
+
+```ts
+// Analytics.telefunc.ts
+import { Observable } from 'rxjs'
+
+export async function onTrackClicks(clicks$: Observable<{ x: number; y: number }>) {
+  clicks$.subscribe(click => saveToDb(click))
+}
+```
+
+```tsx
+// Analytics.tsx
+import { fromEvent, map } from 'rxjs'
+
+const clicks$ = fromEvent(document, 'click').pipe(
+  map(e => ({ x: e.clientX, y: e.clientY }))
+)
+await onTrackClicks(clicks$)
+```
+
+
+## Subject (bidirectional)
+
+```ts
+// Collaboration.telefunc.ts
+import { Subject } from 'rxjs'
+
+const edits = new Subject<{ userId: string; text: string }>()
+
+export async function onJoinEditor() {
+  return edits
+}
+```
+
+```tsx
+// Editor.tsx
+const edits = await onJoinEditor()
+
+// Receive edits from other users
+edits.subscribe(edit => applyEdit(edit))
+
+// Send local edits
+edits.next({ userId: 'alice', text: 'Hello' })
+```
+
+Both sides can `subscribe()` and `next()` — the Subject is kept in sync over the wire.
+
+
+## BehaviorSubject & ReplaySubject
+
+`BehaviorSubject` and `ReplaySubject` are fully supported. `getValue()`, replay-on-subscribe, and all variant-specific semantics are preserved transparently.
+
+```ts
+// Settings.telefunc.ts
+import { BehaviorSubject } from 'rxjs'
+
+const theme = new BehaviorSubject('light')
+
+export async function onGetTheme() {
+  return theme
+}
+```
+
+```tsx
+// Settings.tsx
+const theme = await onGetTheme()
+console.log(theme.getValue()) // 'light' — always in sync
+theme.subscribe(t => applyTheme(t))
+theme.next('dark') // updates both client and server
+```
+
+
+## See also
+
+- <Link href="/real-time" /> — overview of Telefunc's real-time primitives
+- <Link href="/extensions" /> — other Telefunc extensions

@@ -10,4 +10,13 @@ export { withContext } from './withContext.js'
 export { ConnectionError } from './ConnectionError.js'
 export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../wire-protocol/channel-errors.js'
 
+export type { TelefuncClientExtension } from './extensions.js'
+export type {
+  TypeContract,
+  ReplacerType,
+  ReviverType,
+  ClientReplacerContext,
+  ClientReviverContext,
+} from '../wire-protocol/types.js'
+
 export { remoteTelefunctionCall as __remoteTelefunctionCall } from './remoteTelefunctionCall.js'

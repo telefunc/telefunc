@@ -8,6 +8,14 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import type { TelefuncServerExtension } from './extensions.js'
+import type {
+  ReplacerType,
+  ReviverType,
+  TypeContract,
+  ServerReplacerContext,
+  ServerReviverContext,
+} from '../../wire-protocol/types.js'
+import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute } from '../../utils/path.js'
 import { setPubSubAdapter, DefaultPubSubAdapter, type PubSubAdapter } from '../../wire-protocol/server/pubsub.js'
@@ -199,6 +207,8 @@ type ConfigResolved = {
   }
   channel: ChannelConfigResolved
   extensions: TelefuncServerExtension[]
+  extensionResponseTypes: ReplacerType<TypeContract, ServerReplacerContext>[]
+  extensionRequestTypes: ReviverType<TypeContract, ServerReviverContext>[]
 }
 
 const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
@@ -221,6 +231,11 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
                   target[idx] = ext
                 } else {
                   target.push(ext)
+                }
+                if (ext.shieldTypes) {
+                  for (const [name, verify] of Object.entries(ext.shieldTypes)) {
+                    registerShieldType(name, verify)
+                  }
                 }
               }
               return target.length
@@ -327,6 +342,8 @@ function getServerConfig(): ConfigResolved {
       ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
     extensions: configState.extensions,
+    extensionResponseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),
+    extensionRequestTypes: configState.extensions.flatMap((ext) => ext.requestTypes ?? []),
   }
 }
 

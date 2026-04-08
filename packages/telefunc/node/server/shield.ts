@@ -2,6 +2,7 @@ export { shield }
 export { shieldIsMissing }
 export { shieldApply }
 export { shieldToHumandReadable }
+export { registerShieldType }
 
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isCallable } from '../../utils/isCallable.js'
@@ -358,6 +359,15 @@ const type = (() => {
   }
 })()
 shield.type = type
+
+function registerShieldType(name: string, verify: (input: unknown) => boolean) {
+  const verifier = (input: unknown, breadcrumbs: string) =>
+    verify(input) ? true : errorMessage(breadcrumbs, getTypeName(input), name)
+  markVerifier(verifier)
+  verifier.toString = () => name
+  const typeBag: Record<string, unknown> = type
+  typeBag[name] = verifier
+}
 
 function errorMessage(breadcrumbs: string, is: string, should: string) {
   return `${breadcrumbs} is \`${is}\` but should be \`${should}\`.`

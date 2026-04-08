@@ -19,6 +19,7 @@ const nav = [
   { href: '/live-query', label: 'Live Query' },
   { href: '/kitchen-sink', label: 'Kitchen Sink' },
   { href: '/tanstack-ai-chat', label: 'TanStack AI' },
+  { href: '/rxjs', label: 'RxJS' },
 ]
 
 function Layout({ children }: { children: React.ReactNode }) {
@@ -30,7 +31,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           <div className="px-5 pt-6 pb-4">
             <span className="text-sm font-semibold tracking-tight text-zinc-900">Telefunc</span>
           </div>
-          <div className="flex-1 flex flex-col gap-0.5 px-3">
+          <div className="flex-1 flex flex-col gap-0.5 px-3 overflow-y-auto">
             {nav.map(({ href, label }) => (
               <a
                 key={href}

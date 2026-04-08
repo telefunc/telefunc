@@ -1,5 +1,6 @@
 export { makePublishInfo }
 export type {
+  ChannelBase,
   Channel,
   ClientChannel,
   ChannelCloseCallback,
@@ -53,7 +54,7 @@ type ChannelCloseCallback = (err?: Error) => void | Promise<void>
 /**
  * Internal base — `TOut` is what this side sends, `TIn` is what this side receives.
  * Each can be a raw message type or a handler signature `(msg) => ack`.
- * Not exported — use `Channel` or `ClientChannel`.
+ * Shared base for `Channel` and `ClientChannel`.
  */
 type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false> = {
   readonly id: string
@@ -73,6 +74,8 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   onClose(callback: ChannelCloseCallback): void
   onOpen(callback: () => void): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
+  abort(): void
+  abort(abortValue: unknown, message?: string): void
 }
 
 /** Server-side channel. `ServerToClient` = messages the server sends; `ClientToServer` = messages the server receives. */
@@ -83,7 +86,6 @@ type Channel<ServerToClient = unknown, ClientToServer = unknown, TDefault extend
 > & {
   /** The client-side end of the channel — return this from a telefunction. */
   readonly client: ClientChannel<ClientToServer, ServerToClient, TDefault>
-  abort(abortValue?: unknown): void
 }
 
 /** Client-side channel. `ClientToServer` = messages the client sends; `ServerToClient` = messages the client receives. */
@@ -91,9 +93,7 @@ type ClientChannel<ClientToServer = unknown, ServerToClient = unknown, TDefault 
   ClientToServer,
   ServerToClient,
   TDefault
-> & {
-  abort(): void
-}
+>
 
 /** Pub/sub instance — publish and subscribe to a keyed topic. Returnable from telefunctions. */
 type PubSub<T = unknown> = {

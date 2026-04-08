@@ -2,7 +2,6 @@ import { apply, serve } from '@photonjs/hono'
 import { Hono } from 'hono'
 import { config } from 'telefunc'
 import { telefunc } from 'telefunc/node'
-import '@telefunc/tanstack-query/server'
 import { cleanupState, resetCleanupState } from '../cleanup-state'
 config.channel.pingInterval = 1000
 

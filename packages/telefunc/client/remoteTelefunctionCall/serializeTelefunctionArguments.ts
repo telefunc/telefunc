@@ -11,10 +11,13 @@ import { ClientChannel } from '../../wire-protocol/client/channel.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
+import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/types.js'
 import { CloseHandler } from '../close.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { GcRegistry } from '../../wire-protocol/gcRegistry.js'
+
 const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {
-  gcRegistry: new FinalizationRegistry<() => void | Promise<void>>((close) => close()),
+  gcRegistry: new GcRegistry(),
 })
 
 type CallContext = {
@@ -25,6 +28,7 @@ type CallContext = {
   channel: { transports: ChannelTransports }
   abortController: AbortController
   extensions?: Record<string, unknown>
+  extensionRequestTypes: ReplacerType<TypeContract, ClientReplacerContext>[]
 }
 
 type SerializeResult = {
@@ -72,20 +76,29 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
         return pumpClientProducerToChannel(createProducer, channelTransports)
       },
     },
-    function onReplaced({ value, close, abort }) {
-      if (isObjectOrFunction(value)) {
+    function onReplaced(replaced) {
+      {
+        // Track the user's actual value — when they drop all references to it, close.
+        // (Unlike the response side, we don't create a value here; the user already
+        //  holds the original, so it serves as its own GC anchor.)
+        const { value, close } = replaced
+        assert(isObjectOrFunction(value))
         globalObject.gcRegistry.register(value, close)
       }
-      abortSignal.addEventListener(
-        'abort',
-        () => {
-          const abortError = makeAbortError(undefined, callContext)
-          abort(abortError)
-        },
-        { once: true },
-      )
-      requestCloseHandlers.push(close)
+
+      {
+        const { close, abort } = replaced
+        abortSignal.addEventListener(
+          'abort',
+          () => {
+            abort(makeAbortError(undefined, callContext))
+          },
+          { once: true },
+        )
+        requestCloseHandlers.push(close)
+      }
     },
+    callContext.extensionRequestTypes,
   )
   const dataMainSerialized = serialize(dataMain, callContext, replacer)
   const httpRequestBody = files.length > 0 ? encodeRequestEnvelope(dataMainSerialized, files) : dataMainSerialized

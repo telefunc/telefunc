@@ -7,21 +7,32 @@ import { generateShield } from './generateShield/generateShield.js'
 import { getServerConfig } from '../../server/serverConfig.js'
 import { getMagicString } from '../../shared/getMagicString.js'
 
-async function transformTelefuncFileServerSide(src: string, id: string, appRootDir: string, isDev: boolean) {
+async function transformTelefuncFileServerSide(
+  src: string,
+  id: string,
+  appRootDir: string,
+  isDev: boolean,
+  extensionImports: string[],
+) {
   assertPosixPath(id)
   assertPosixPath(appRootDir)
 
-  const exportList = await getExportList(src)
+  // Prepend extension imports to the source so they're visible to:
+  //   1. shield generation (ts-morph follows them to load global namespace augmentations)
+  //   2. the magicString output (so the runtime extension registers at module load)
+  const srcWithImports = [...extensionImports, src].join('\n')
+
+  const exportList = await getExportList(srcWithImports)
   const codeDecoration = decorateTelefunctions(exportList, id.replace(appRootDir, ''), appRootDir)
 
   let codeShield: string | undefined
   const config = getServerConfig()
   const isShieldEnabled = isDev ? config.shield.dev : config.shield.prod
   if (id.endsWith('.ts') && isShieldEnabled) {
-    codeShield = generateShield(src, id, appRootDir, exportList)
+    codeShield = generateShield(srcWithImports, id, appRootDir, exportList)
   }
 
-  const { magicString, getMagicStringResult } = getMagicString(src, id)
+  const { magicString, getMagicStringResult } = getMagicString(srcWithImports, id)
 
   // We append everything in order to avoid breaking source map lines for environments that don't support source maps
   magicString.append(['', codeDecoration, codeShield].filter(isNotNullish).join('\n\n'))

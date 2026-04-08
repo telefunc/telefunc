@@ -7,7 +7,7 @@ import { promiseReviver } from './promise.js'
 import { pubsubReviver } from './pubsub.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
-import type { ClientReviverContext } from '../../types.js'
+import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../shared/Abort.js'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
@@ -29,9 +29,11 @@ function createStreamingReviver(
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
   }) => void,
+  extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
+  const allTypes = [...clientTypes, ...extensionTypes]
   const reviver: Reviver = (_key: undefined | string, value: string, parser: (str: string) => unknown) => {
-    for (const type of clientTypes) {
+    for (const type of allTypes) {
       if (value.startsWith(type.prefix)) {
         const metadata = parser(value.slice(type.prefix.length))
         assert(isObject(metadata))

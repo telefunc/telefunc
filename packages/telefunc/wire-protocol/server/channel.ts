@@ -275,11 +275,9 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._responseAbort = abortResponse
   }
 
-  abort(abortValue?: unknown): void {
-    this._abortWithValue(abortValue)
-  }
-
-  _abortWithValue(abortValue?: unknown, message?: string): void {
+  abort(): void
+  abort(abortValue: unknown, message?: string): void
+  abort(abortValue?: unknown, message?: string): void {
     if (this._didShutdown || this._isClosed) return
     this._isClosed = true
     const serializedAbortValue = stringify(abortValue, { forbidReactElements: false })
