@@ -47,6 +47,8 @@ function decorateTelefunctions(exportList: ExportList, filePath: string, appRoot
     'import { __decorateTelefunction } from "telefunc";',
     ...exportList.map(
       ({ exportName, localName }) =>
+        // TODO: change to `fn = __decorateTelefunction(fn, ...)` so the returned wrapper sets up
+        // context — enables server-side context aware telefunction calls (currently no context for direct calls).
         `__decorateTelefunction(${localName || exportName}, "${exportName}", "${filePath}", "${appRootDir}");`,
     ),
   ].join('\n')

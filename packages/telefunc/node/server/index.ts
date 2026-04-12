@@ -2,7 +2,11 @@ export { serve, telefunc } from './telefunc.js'
 import { config } from './serverConfig.js'
 export { config }
 export { config as telefuncConfig }
-export { getContext, provideTelefuncContext } from './getContext.js'
+export { getContext, provideTelefuncContext } from './context/getContext.js'
+export { getRawContext } from './context/context.js'
+export { PROVIDED_CONTEXT } from './context/getContext.js'
+export { REQUEST_CONTEXT } from './context/requestContext.js'
+export type { Context } from './context/context.js'
 export { Abort } from './Abort.js'
 export { shield } from './shield.js'
 export { onBug } from './runTelefunc/onBug.js'
@@ -22,7 +26,7 @@ export type {
 } from '../../wire-protocol/types.js'
 
 // In order to allow users to override `Telefunc.Context`, we need to export `Telefunc` (even if the user never imports `Telefunc`)
-export type { Telefunc } from './getContext/TelefuncNamespace.js'
+export type { Telefunc } from './context/TelefuncNamespace.js'
 
 export { decorateTelefunction as __decorateTelefunction } from './runTelefunc/decorateTelefunction.js'
 

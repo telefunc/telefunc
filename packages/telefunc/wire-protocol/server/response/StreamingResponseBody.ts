@@ -11,7 +11,7 @@ import {
   handleTelefunctionBug,
   validateTelefunctionError,
 } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import type { ResponseAbortSource } from '../../../node/server/requestContext.js'
+import type { ResponseAbortSource } from '../../../node/server/context/requestContext.js'
 import type { TelefuncId } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
 
 const EMPTY = new Uint8Array(0)

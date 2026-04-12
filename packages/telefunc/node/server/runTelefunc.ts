@@ -5,7 +5,8 @@ import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
 import { isProduction } from '../../utils/isProduction.js'
 import { objectAssign } from '../../utils/objectAssign.js'
 import { hasProp } from '../../utils/hasProp.js'
-import { Telefunc } from './getContext.js'
+import { Telefunc, PROVIDED_CONTEXT } from './context/getContext.js'
+import { REQUEST_CONTEXT } from './context/requestContext.js'
 import { loadTelefuncFiles } from './runTelefunc/loadTelefuncFiles.js'
 import { parseHttpRequest } from './runTelefunc/parseHttpRequest.js'
 // import { getEtag } from './runTelefunc/getEtag.js'
@@ -29,7 +30,7 @@ import {
   STATUS_CODE_SUCCESS,
 } from '../../shared/constants.js'
 import { STREAM_TRANSPORT } from '../../wire-protocol/constants.js'
-import { createRequestContext } from './requestContext.js'
+import { createRequestContext } from './context/requestContext.js'
 
 type StreamWritableWeb = WritableStream
 type StreamReadableWeb = ReadableStream
@@ -275,7 +276,10 @@ async function runTelefunc_({
   }
 
   objectAssign(runContext, {
-    providedContext: context || null,
+    context: {
+      [PROVIDED_CONTEXT]: context,
+      [REQUEST_CONTEXT]: requestContext,
+    },
   })
   {
     const parsed = await parseHttpRequest(runContext)

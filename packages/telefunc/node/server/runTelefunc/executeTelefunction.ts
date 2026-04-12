@@ -1,8 +1,9 @@
 export { executeTelefunction }
 
 import { isAbort } from '../Abort.js'
-import { restoreContext, Telefunc } from '../getContext.js'
-import { createRequestContext, restoreRequestContext } from '../requestContext.js'
+import { restoreContext } from '../context/context.js'
+import type { Context } from '../context/context.js'
+import { createRequestContext } from '../context/requestContext.js'
 import type { Telefunction } from '../types.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
@@ -15,7 +16,7 @@ async function executeTelefunction(runContext: {
   telefunctionName: string
   telefuncFilePath: string
   telefunctionArgs: unknown[]
-  providedContext: Telefunc.Context | null
+  context: Context
   requestContext: ReturnType<typeof createRequestContext>
   request: Request
   requestExtensions: Record<string, Record<string, unknown>>
@@ -24,9 +25,8 @@ async function executeTelefunction(runContext: {
   const { telefunction, telefunctionArgs, requestExtensions } = runContext
   const { extensions } = runContext.serverConfig
 
-  /** Restore request + user context before executing `fn`. */
-  const withContext = <T>(fn: () => T): T =>
-    restoreContext(runContext.providedContext, () => restoreRequestContext(runContext.requestContext, fn))
+  /** Restore unified context before executing `fn`. */
+  const withContext = <T>(fn: () => T): T => restoreContext(runContext.context, fn)
 
   let telefunctionReturn: unknown
   let telefunctionTopLevelError: unknown

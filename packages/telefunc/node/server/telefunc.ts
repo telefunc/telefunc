@@ -1,7 +1,7 @@
 export { serve, telefunc }
 
 import { runTelefunc, HttpResponse } from './runTelefunc.js'
-import { Telefunc } from './getContext.js'
+import { Telefunc } from './context/getContext.js'
 import { assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'

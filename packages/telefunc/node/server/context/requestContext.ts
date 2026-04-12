@@ -1,12 +1,11 @@
 export { createRequestContext }
-export { restoreRequestContext }
-export { getRequestContext }
-export { installAsyncRequestContext }
+export { REQUEST_CONTEXT }
 export type { RequestContext, ResponseAbortSource }
 
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { Abort } from './Abort.js'
-import type { AbortError } from './Abort.js'
+import { Abort } from '../Abort.js'
+import type { AbortError } from '../Abort.js'
+
+const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
 
 type ResponseAbortSource = {
   /** Abort the whole telefunc response with Abort semantics. Fires exactly once. */
@@ -165,57 +164,4 @@ function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
     },
     errorPromise,
   }
-}
-
-type GetRequestContext = () => RequestContext | null
-type RestoreRequestContext = <T>(ctx: RequestContext | null, fn: () => T) => T
-
-const globalObject = getGlobalObject<{
-  getRequestContext: GetRequestContext
-  restoreRequestContext: RestoreRequestContext
-}>('requestContext.ts', {
-  getRequestContext: getRequestContext_sync,
-  restoreRequestContext: restoreRequestContext_sync,
-})
-
-// ── Sync mode (default) ─────────────────────────────────────────────
-
-const syncState = getGlobalObject<{ requestContext: RequestContext | null }>('requestContext/sync.ts', {
-  requestContext: null,
-})
-
-function getRequestContext_sync(): RequestContext | null {
-  return syncState.requestContext
-}
-
-function restoreRequestContext_sync<T>(ctx: RequestContext | null, fn: () => T): T {
-  syncState.requestContext = ctx
-  // Same lifecycle as user context: cleared on next macrotask
-  setTimeout(() => {
-    syncState.requestContext = null
-  }, 0)
-  return fn()
-}
-
-// ── Async mode (AsyncLocalStorage) ──────────────────────────────────
-
-function installAsyncRequestContext({
-  getRequestContext_async,
-  restoreRequestContext_async,
-}: {
-  getRequestContext_async: GetRequestContext
-  restoreRequestContext_async: RestoreRequestContext
-}): void {
-  globalObject.getRequestContext = getRequestContext_async
-  globalObject.restoreRequestContext = restoreRequestContext_async
-}
-
-// ── Internal accessors ──────────────────────────────────────────────
-
-function restoreRequestContext<T>(ctx: RequestContext | null, fn: () => T): T {
-  return globalObject.restoreRequestContext(ctx, fn)
-}
-
-function getRequestContext(): RequestContext | null {
-  return globalObject.getRequestContext()
 }

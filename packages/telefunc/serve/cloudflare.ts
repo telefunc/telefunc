@@ -21,7 +21,7 @@ import {
   resolveSessionRoutingTarget,
 } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { assertUsage } from '../utils/assert.js'
-import type { Telefunc } from '../node/server/getContext.js'
+import type { Telefunc } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 

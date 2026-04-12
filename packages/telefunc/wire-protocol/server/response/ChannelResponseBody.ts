@@ -7,15 +7,16 @@ import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_ERROR } from '../../constants.j
 import { ChannelClosedError, ServerChannel } from '../channel.js'
 import { isAbort } from '../../../node/server/Abort.js'
 import { encodeErrorPayload } from './StreamingResponseBody.js'
-import { restoreContext, Telefunc } from '../../../node/server/getContext.js'
-import { RequestContext, restoreRequestContext } from '../../../node/server/requestContext.js'
+import { restoreContext } from '../../../node/server/context/context.js'
+import type { Context } from '../../../node/server/context/context.js'
+import type { RequestContext } from '../../../node/server/context/requestContext.js'
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
 
 type ChannelPumpRunContext = {
+  context: Context
   requestContext: RequestContext
-  providedContext: Telefunc.Context | null
   telefunctionName: string
   telefuncFilePath: string
 }
@@ -75,21 +76,19 @@ function pumpProducerToChannel(
         channel.onOpen(resolve)
         channel.onClose(() => reject(new ChannelClosedError()))
       })
-      await restoreContext(runContext.providedContext, () =>
-        restoreRequestContext(runContext.requestContext, async () => {
-          const { responseAbort } = runContext.requestContext
-          while (true) {
-            const { done, value } = await Promise.race([
-              responseAbort.errorPromise,
-              cancelledPromise,
-              producer.chunks.next(),
-            ])
-            if (done || cancelled) break
-            const pending = channel._sendBinary(concat(TAG_DATA, value))
-            if (pending) await pending
-          }
-        }),
-      )
+      await restoreContext(runContext.context, async () => {
+        const { responseAbort } = runContext.requestContext
+        while (true) {
+          const { done, value } = await Promise.race([
+            responseAbort.errorPromise,
+            cancelledPromise,
+            producer.chunks.next(),
+          ])
+          if (done || cancelled) break
+          const pending = channel._sendBinary(concat(TAG_DATA, value))
+          if (pending) await pending
+        }
+      })
     } catch (err) {
       if (!(err instanceof ChannelClosedError)) {
         if (isAbort(err)) {

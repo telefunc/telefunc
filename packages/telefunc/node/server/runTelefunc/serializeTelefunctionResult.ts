@@ -13,8 +13,8 @@ import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/c
 import { textEncoder } from '../../../wire-protocol/frame.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/base64url.js'
 import type { StreamingValueServer } from '../../../wire-protocol/types.js'
-import { type RequestContext } from '../requestContext.js'
-import type { Telefunc } from '../getContext.js'
+import { type RequestContext } from '../context/requestContext.js'
+import type { Context } from '../context/context.js'
 import type { ReplacerType, TypeContract, ServerReplacerContext } from '../../../wire-protocol/types.js'
 
 type TelefuncId = {
@@ -35,7 +35,7 @@ function serializeTelefunctionResult(runContext: {
   telefunctionName: string
   telefuncFilePath: string
   telefunctionAborted: boolean
-  providedContext: Telefunc.Context | null
+  context: Context
   requestContext: RequestContext
   abortSignal: AbortSignal
   streamTransport: StreamTransport
