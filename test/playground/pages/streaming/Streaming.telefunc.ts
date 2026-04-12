@@ -22,6 +22,8 @@ export {
 }
 
 import { Abort, channel, getContext } from 'telefunc'
+import { Subject, interval } from 'rxjs'
+import { map, take } from 'rxjs/operators'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -251,7 +253,22 @@ const onAbortOneOfManyStreamingValues = async () => {
 
   const promise = new Promise<string>((resolve) => setTimeout(() => resolve('promise-done'), 200))
 
-  return { aborting: aborting(), other: other(), stream, promise }
+  // rxjs Observable that keeps emitting
+  const observable = interval(20).pipe(
+    map((i) => `obs-${i}`),
+    take(1000),
+  )
+
+  // rxjs Subject that the server pushes to
+  const subject = new Subject<string>()
+  let subjectCount = 0
+  const subjectInterval = setInterval(() => {
+    if (subject.observed) subject.next(`subj-${subjectCount++}`)
+  }, 25)
+  const { onClose } = getContext()
+  onClose(() => clearInterval(subjectInterval))
+
+  return { aborting: aborting(), other: other(), stream, promise, observable, subject }
 }
 
 const onChannelAbortAbortsSiblingStreamingValues = async () => {

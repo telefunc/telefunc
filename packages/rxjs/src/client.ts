@@ -6,22 +6,36 @@ import type {
   ClientReplacerContext,
   ClientReviverContext,
 } from 'telefunc/client'
-import { Observable, Subject, BehaviorSubject, ReplaySubject } from 'rxjs'
+import { Observable, Subject, config as rxjsConfig } from 'rxjs'
 import {
   SERIALIZER_PREFIX_OBSERVABLE,
   SERIALIZER_PREFIX_SUBJECT,
-  wireSourceSubject,
-  wireProxySubject,
+  wireSubject,
   wireSourceObservable,
   wireProxyObservable,
+  swallowedErrors,
+  markSwallowed,
   type ObservableContract,
   type SubjectContract,
   type ObservableMessage,
   type SubjectMessage,
-  type SubjectVariant,
   type SubjectMetadata,
   type ObservableMetadata,
 } from './shared.js'
+import { isObject } from './isObject.js'
+
+// Client-side: only swallow telefunc-originated errors. Non-telefunc errors
+// fall through to rxjs's default (throw), preserving the user's own rxjs
+// error-handling semantics in the browser.
+const prevOnUnhandledError = rxjsConfig.onUnhandledError
+rxjsConfig.onUnhandledError = (err) => {
+  if (isObject(err) && swallowedErrors.has(err)) {
+    swallowedErrors.delete(err)
+    return
+  }
+  if (prevOnUnhandledError) prevOnUnhandledError(err)
+  else throw err
+}
 
 // === Server→client revivers ===
 
@@ -29,26 +43,17 @@ const subjectReviver: ReviverType<SubjectContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_SUBJECT,
   createValue(metadata, context) {
     const channel = context.createChannel<SubjectMessage, SubjectMessage>({ channelId: metadata.channelId })
+    const subject = new Subject<unknown>()
+    const wire = wireSubject(subject, channel)
 
-    let subject: Subject<unknown>
-    switch (metadata.variant) {
-      case 'BehaviorSubject':
-        subject = new BehaviorSubject(metadata.initialValue)
-        break
-      case 'ReplaySubject': {
-        const rs = new ReplaySubject(metadata.bufferSize)
-        if (metadata.replayBuffer) {
-          for (const v of metadata.replayBuffer) rs.next(v)
-        }
-        subject = rs
-        break
+    // Proxy side: Subject is per-request (created here). Propagate abort errors
+    // to local subscribers so the user's `subscribe({ error })` fires.
+    channel.onClose((err) => {
+      if (err) {
+        markSwallowed(err)
+        subject.error(err)
       }
-      default:
-        subject = new Subject()
-    }
-
-    const alwaysForward = metadata.variant === 'BehaviorSubject' || metadata.variant === 'ReplaySubject'
-    const wire = wireProxySubject(subject, channel, alwaysForward)
+    })
 
     return {
       value: subject,
@@ -88,32 +93,19 @@ const subjectReplacer: ReplacerType<SubjectContract, ClientReplacerContext> = {
     return value instanceof Subject
   },
   getMetadata(subject, context) {
-    let variant: SubjectVariant = 'Subject'
-    const metadata: SubjectMetadata = { channelId: '', variant }
-
-    if (subject instanceof BehaviorSubject) {
-      variant = 'BehaviorSubject'
-      metadata.variant = variant
-      metadata.initialValue = subject.getValue()
-    } else if (subject instanceof ReplaySubject) {
-      variant = 'ReplaySubject'
-      metadata.variant = variant
-      metadata.bufferSize = (subject as any)._bufferSize
-      const buffer: unknown[] = []
-      const sub = subject.subscribe({
-        next(v) {
-          buffer.push(v)
-        },
-      })
-      sub.unsubscribe()
-      metadata.replayBuffer = buffer
-    }
-
     const channel = context.createChannel<SubjectMessage, SubjectMessage>({ ack: false })
-    metadata.channelId = channel.id
+    const metadata: SubjectMetadata = { channelId: channel.id }
 
-    const alwaysForward = subject instanceof BehaviorSubject || subject instanceof ReplaySubject
-    const wire = wireSourceSubject(subject, channel, alwaysForward)
+    const wire = wireSubject(subject, channel)
+
+    // Source side on client: the Subject is owned by this call. If the server
+    // aborts, terminate the Subject so local subscribers see the error.
+    channel.onClose((err) => {
+      if (err) {
+        markSwallowed(err)
+        subject.error(err)
+      }
+    })
 
     return {
       metadata,

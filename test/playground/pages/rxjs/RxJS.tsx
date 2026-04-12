@@ -1,204 +1,422 @@
 export { RxJSDemo }
 
-import React, { useState, useEffect, useRef } from 'react'
-import { onObservable, onSubject, onBehaviorSubject, onReplaySubject, onObservableFromClient } from './RxJS.telefunc'
-import { Subject as RxSubject } from 'rxjs'
+import React, { useState, useEffect } from 'react'
+import {
+  onObservable,
+  onObservableComplete,
+  onObservableError,
+  onSubject,
+  onSharedSubject,
+  onSubjectServerComplete,
+  onObservableFromClient,
+  onSubjectEcho,
+  onSubjectMultiSubscribe,
+  onObservableServerError,
+  onSubjectServerError,
+  onSubjectArgNoErrorHandler,
+  onSharedSubjectOneErrors,
+  onSubjectNoHandler,
+} from './RxJS.telefunc'
+import { Subject as RxSubject, Observable as RxObservable } from 'rxjs'
+import { close } from 'telefunc/client'
 
 function RxJSDemo() {
+  const [result, setResult] = useState('')
+  const [hydrated, setHydrated] = useState(false)
+  useEffect(() => setHydrated(true), [])
   return (
-    <div className="max-w-3xl mx-auto px-8 py-10 space-y-8">
+    <div className="max-w-3xl mx-auto px-8 py-10 space-y-4">
       <h1 className="text-2xl font-bold">RxJS Playground</h1>
-      <ObservableDemo />
-      <SubjectDemo />
-      <BehaviorSubjectDemo />
-      <ReplaySubjectDemo />
-      <ObservableToServerDemo />
+      {hydrated && <span id="hydrated" />}
+
+      {/* Observable: server emits 5 ticks then completes */}
+      <button
+        id="test-obs-ticks"
+        onClick={async () => {
+          setResult('')
+          const obs = await onObservable()
+          const values: string[] = []
+          obs.subscribe({
+            next(v) {
+              values.push(v)
+              setResult(JSON.stringify({ values: [...values], done: false }))
+            },
+            complete() {
+              setResult(JSON.stringify({ values, done: true }))
+            },
+            error(err) {
+              setResult(JSON.stringify({ values, error: String(err) }))
+            },
+          })
+        }}
+      >
+        Observable ticks
+      </button>
+
+      {/* Observable: synchronous complete */}
+      <button
+        id="test-obs-complete"
+        onClick={async () => {
+          setResult('')
+          const obs = await onObservableComplete()
+          const values: string[] = []
+          obs.subscribe({
+            next(v) {
+              values.push(v)
+            },
+            complete() {
+              setResult(JSON.stringify({ values, done: true }))
+            },
+          })
+        }}
+      >
+        Observable sync complete
+      </button>
+
+      {/* Observable: error */}
+      <button
+        id="test-obs-error"
+        onClick={async () => {
+          setResult('')
+          const obs = await onObservableError()
+          const values: string[] = []
+          obs.subscribe({
+            next(v) {
+              values.push(v)
+            },
+            error(err) {
+              setResult(JSON.stringify({ values, error: String(err) }))
+            },
+          })
+        }}
+      >
+        Observable error
+      </button>
+
+      {/* Observable: close() cancellation */}
+      <button
+        id="test-obs-close"
+        onClick={async () => {
+          setResult('')
+          const obs = await onObservable()
+          const values: string[] = []
+          let completed = false
+          let errored = false
+          obs.subscribe({
+            next(v) {
+              values.push(v)
+              if (values.length === 2) {
+                close(obs)
+              }
+            },
+            complete() {
+              completed = true
+            },
+            error() {
+              errored = true
+            },
+          })
+          setTimeout(() => {
+            setResult(JSON.stringify({ values, completed, errored, closedAfter: 2 }))
+          }, 3000)
+        }}
+      >
+        Observable close() after 2
+      </button>
+
+      {/* Subject: bidirectional */}
+      <button
+        id="test-subject-bidir"
+        onClick={async () => {
+          setResult('')
+          const subject = await onSubject()
+          const received: string[] = []
+          subject.subscribe((v) => {
+            received.push(v)
+            setResult(JSON.stringify({ received: [...received] }))
+          })
+          // Send from client after a short delay
+          setTimeout(() => subject.next('client-hello'), 800)
+        }}
+      >
+        Subject bidirectional
+      </button>
+
+      {/* Subject: close from client */}
+      <button
+        id="test-subject-close"
+        onClick={async () => {
+          setResult('')
+          const subject = await onSubject()
+          const received: string[] = []
+          subject.subscribe((v) => {
+            received.push(v)
+          })
+          setTimeout(async () => {
+            try {
+              await close(subject)
+              setResult(JSON.stringify({ received, closed: true }))
+            } catch (err: any) {
+              setResult(JSON.stringify({ received, closed: false, error: String(err?.message ?? err) }))
+            }
+          }, 1200)
+        }}
+      >
+        Subject close()
+      </button>
+
+      {/* Subject: echo (server subscribes and echoes back) */}
+      <button
+        id="test-subject-echo"
+        onClick={async () => {
+          setResult('')
+          const subject = await onSubjectEcho()
+          const received: string[] = []
+          subject.subscribe((v) => {
+            received.push(v)
+            setResult(JSON.stringify({ received: [...received] }))
+          })
+          // Delay: both sides need the MSG.SUBSCRIBE roundtrip to complete
+          // before values flow bidirectionally.
+          setTimeout(() => subject.next('ping'), 200)
+        }}
+      >
+        Subject echo
+      </button>
+
+      {/* Subject: server completes */}
+      <button
+        id="test-subject-server-complete"
+        onClick={async () => {
+          setResult('')
+          const subject = await onSubjectServerComplete()
+          const received: string[] = []
+          let completed = false
+          subject.subscribe({
+            next(v) {
+              received.push(v)
+            },
+            complete() {
+              completed = true
+              setResult(JSON.stringify({ received, completed }))
+            },
+          })
+          // Also report if not completed after timeout
+          setTimeout(() => {
+            if (!completed) setResult(JSON.stringify({ received, completed }))
+          }, 2000)
+        }}
+      >
+        Subject server complete
+      </button>
+
+      {/* Shared subject: multicast */}
+      <button
+        id="test-shared-subject"
+        onClick={async () => {
+          setResult('')
+          // Two "clients" subscribing to same shared subject
+          const s1 = await onSharedSubject()
+          const s2 = await onSharedSubject()
+          const received1: string[] = []
+          const received2: string[] = []
+          s1.subscribe((v) => {
+            received1.push(v)
+            setResult(JSON.stringify({ received1: [...received1], received2: [...received2] }))
+          })
+          s2.subscribe((v) => {
+            received2.push(v)
+            setResult(JSON.stringify({ received1: [...received1], received2: [...received2] }))
+          })
+          // Send from s1 — s2 should receive it too
+          setTimeout(() => s1.next('from-s1'), 500)
+          // Send from s2 — s1 should receive it too
+          setTimeout(() => s2.next('from-s2'), 1000)
+        }}
+      >
+        Shared subject multicast
+      </button>
+
+      {/* Observable from client: client → server */}
+      <button
+        id="test-obs-from-client"
+        onClick={async () => {
+          setResult('')
+          const input$ = new RxObservable<string>((subscriber) => {
+            subscriber.next('a')
+            subscriber.next('b')
+            subscriber.next('c')
+            subscriber.complete()
+          })
+          const serverReceived = await onObservableFromClient(input$)
+          setResult(JSON.stringify({ serverReceived }))
+        }}
+      >
+        Observable client→server
+      </button>
+
+      {/* Subject: multiple subscriptions (unicast check) */}
+      <button
+        id="test-subject-multi-sub"
+        onClick={async () => {
+          setResult('')
+          const subject = await onSubjectMultiSubscribe()
+          const sub1: number[] = []
+          const sub2: number[] = []
+          let completed1 = false
+          let completed2 = false
+          subject.subscribe({
+            next(v) {
+              sub1.push(v)
+            },
+            complete() {
+              completed1 = true
+              if (completed2) setResult(JSON.stringify({ sub1, sub2, completed1, completed2 }))
+            },
+          })
+          subject.subscribe({
+            next(v) {
+              sub2.push(v)
+            },
+            complete() {
+              completed2 = true
+              if (completed1) setResult(JSON.stringify({ sub1, sub2, completed1, completed2 }))
+            },
+          })
+        }}
+      >
+        Subject multi-subscribe
+      </button>
+
+      {/* Observable: server-side error propagates to client */}
+      <button
+        id="test-obs-server-error"
+        onClick={async () => {
+          setResult('')
+          const obs = await onObservableServerError()
+          const values: string[] = []
+          obs.subscribe({
+            next(v) {
+              values.push(v)
+            },
+            error(err) {
+              setResult(JSON.stringify({ values, error: String(err?.message ?? err) }))
+            },
+          })
+        }}
+      >
+        Observable server-error
+      </button>
+
+      {/* Subject: server-side error propagates to client */}
+      <button
+        id="test-subject-server-error"
+        onClick={async () => {
+          setResult('')
+          const subject = await onSubjectServerError()
+          const received: string[] = []
+          subject.subscribe({
+            next(v) {
+              received.push(v)
+            },
+            error(err) {
+              setResult(JSON.stringify({ received, error: String(err?.message ?? err) }))
+            },
+          })
+        }}
+      >
+        Subject server-error
+      </button>
+
+      {/* Subject passed as arg; server has no error handler; client errors its subject */}
+      <button
+        id="test-subject-arg-no-handler"
+        onClick={async () => {
+          setResult('')
+          const input$ = new RxSubject<string>()
+          await onSubjectArgNoErrorHandler(input$)
+          // Wait for the wire's MSG.SUBSCRIBE roundtrip, then send a value + error
+          setTimeout(() => {
+            input$.next('hello')
+            setTimeout(() => {
+              input$.error(new Error('client-triggered-error'))
+            }, 100)
+          }, 200)
+        }}
+      >
+        Subject arg no-handler server-survive
+      </button>
+
+      {/* Shared subject: client A errors locally, client B keeps receiving */}
+      <button
+        id="test-shared-error-one"
+        onClick={async () => {
+          setResult('')
+          const a = await onSharedSubjectOneErrors()
+          const b = await onSharedSubjectOneErrors()
+          const received_a: string[] = []
+          const received_b: string[] = []
+          let a_errored = false
+          let b_errored = false
+          a.subscribe({
+            next(v) {
+              received_a.push(v)
+            },
+            error() {
+              a_errored = true
+              render()
+            },
+          })
+          b.subscribe({
+            next(v) {
+              received_b.push(v)
+              render()
+            },
+            error() {
+              b_errored = true
+              render()
+            },
+          })
+          const render = () =>
+            setResult(
+              JSON.stringify({ received_a: [...received_a], received_b: [...received_b], a_errored, b_errored }),
+            )
+
+          // Error A — transparent: kills the shared server Subject, B should also error
+          setTimeout(() => {
+            a.error(new Error('client-A-aborted'))
+            // Give time for error to propagate through server to B
+            setTimeout(render, 500)
+          }, 200)
+        }}
+      >
+        Shared Subject one-aborts
+      </button>
+
+      {/* Server subscribes without error handler — server should not crash */}
+      <button
+        id="test-subject-no-handler"
+        onClick={async () => {
+          setResult('')
+          const subject = await onSubjectNoHandler()
+          const received: string[] = []
+          subject.subscribe({
+            next(v) {
+              received.push(v)
+            },
+            error(err) {
+              setResult(JSON.stringify({ received, error: String(err?.message ?? err) }))
+            },
+          })
+          setTimeout(() => subject.next('hello-from-client'), 200)
+        }}
+      >
+        Subject no-handler (server survives)
+      </button>
+
+      <pre id="rxjs-result" className="mt-4 p-2 bg-gray-100 text-sm font-mono min-h-[2em]">
+        {result}
+      </pre>
     </div>
-  )
-}
-
-function ObservableDemo() {
-  const [ticks, setTicks] = useState<{ tick: number; time: number }[]>([])
-  const [status, setStatus] = useState<string>('idle')
-
-  const start = async () => {
-    setStatus('subscribing...')
-    setTicks([])
-    const ticker$ = await onObservable()
-    setStatus('subscribed')
-    ticker$.subscribe({
-      next: (v) => setTicks((prev) => [...prev, v]),
-      complete: () => setStatus('completed'),
-      error: (err) => setStatus(`error: ${err}`),
-    })
-  }
-
-  return (
-    <section>
-      <h2 className="text-xl font-semibold">Observable (server → client)</h2>
-      <p className="text-sm text-gray-600 mb-2">Server emits ticks via interval(1000), client subscribes.</p>
-      <button onClick={start} className="px-3 py-1 bg-blue-600 text-white rounded mr-2">
-        Subscribe
-      </button>
-      <span className="text-sm" data-testid="observable-status">
-        {status}
-      </span>
-      <ul className="mt-2 text-sm font-mono" data-testid="observable-ticks">
-        {ticks.map((t, i) => (
-          <li key={i}>tick #{t.tick}</li>
-        ))}
-      </ul>
-    </section>
-  )
-}
-
-function SubjectDemo() {
-  const [messages, setMessages] = useState<string[]>([])
-  const [input, setInput] = useState('')
-  const subjectRef = useRef<Awaited<ReturnType<typeof onSubject>> | null>(null)
-
-  const connect = async () => {
-    const subject = await onSubject()
-    subjectRef.current = subject
-    subject.subscribe((v) => setMessages((prev) => [...prev, v]))
-  }
-
-  const send = () => {
-    if (subjectRef.current && input) {
-      subjectRef.current.next(`client-${input}`)
-      setInput('')
-    }
-  }
-
-  return (
-    <section>
-      <h2 className="text-xl font-semibold">Subject (bidirectional)</h2>
-      <p className="text-sm text-gray-600 mb-2">Server pushes every second. Client can push too.</p>
-      <button onClick={connect} className="px-3 py-1 bg-blue-600 text-white rounded mr-2">
-        Connect
-      </button>
-      <input
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => e.key === 'Enter' && send()}
-        placeholder="type and enter"
-        className="border px-2 py-1 rounded mr-2"
-      />
-      <button onClick={send} className="px-3 py-1 bg-green-600 text-white rounded">
-        Send
-      </button>
-      <ul className="mt-2 text-sm font-mono max-h-40 overflow-y-auto" data-testid="subject-messages">
-        {messages.map((m, i) => (
-          <li key={i}>{m}</li>
-        ))}
-      </ul>
-    </section>
-  )
-}
-
-function BehaviorSubjectDemo() {
-  const [theme, setTheme] = useState<string>('(not connected)')
-  const subjectRef = useRef<Awaited<ReturnType<typeof onBehaviorSubject>> | null>(null)
-
-  const connect = async () => {
-    const bs = await onBehaviorSubject()
-    subjectRef.current = bs
-    bs.subscribe((v) => setTheme(v))
-  }
-
-  const toggle = () => {
-    if (subjectRef.current) {
-      const current = subjectRef.current.getValue()
-      subjectRef.current.next(current === 'light' ? 'dark' : 'light')
-    }
-  }
-
-  return (
-    <section>
-      <h2 className="text-xl font-semibold">BehaviorSubject</h2>
-      <p className="text-sm text-gray-600 mb-2">
-        Initial value &quot;light&quot;. Server switches to &quot;dark&quot; after 3s. Client can toggle.
-      </p>
-      <button onClick={connect} className="px-3 py-1 bg-blue-600 text-white rounded mr-2">
-        Connect
-      </button>
-      <button onClick={toggle} className="px-3 py-1 bg-purple-600 text-white rounded mr-2">
-        Toggle
-      </button>
-      <span className="text-sm font-mono" data-testid="behavior-theme">
-        theme: {theme}
-      </span>
-    </section>
-  )
-}
-
-function ReplaySubjectDemo() {
-  const [events, setEvents] = useState<string[]>([])
-  const [status, setStatus] = useState('idle')
-
-  const connect = async () => {
-    setStatus('connecting...')
-    setEvents([])
-    const log = await onReplaySubject()
-    setStatus('connected')
-    log.subscribe({
-      next: (v) => setEvents((prev) => [...prev, v]),
-      complete: () => setStatus('completed'),
-    })
-  }
-
-  return (
-    <section>
-      <h2 className="text-xl font-semibold">ReplaySubject</h2>
-      <p className="text-sm text-gray-600 mb-2">
-        Server pre-fills 3 events. On subscribe, replays buffer + live events every 2s.
-      </p>
-      <button onClick={connect} className="px-3 py-1 bg-blue-600 text-white rounded mr-2">
-        Connect
-      </button>
-      <span className="text-sm" data-testid="replay-status">
-        {status}
-      </span>
-      <ul className="mt-2 text-sm font-mono max-h-40 overflow-y-auto" data-testid="replay-events">
-        {events.map((e, i) => (
-          <li key={i}>{e}</li>
-        ))}
-      </ul>
-    </section>
-  )
-}
-
-function ObservableToServerDemo() {
-  const [status, setStatus] = useState('idle')
-  const subjectRef = useRef<RxSubject<{ x: number; y: number }> | null>(null)
-
-  const start = async () => {
-    const clicks$ = new RxSubject<{ x: number; y: number }>()
-    subjectRef.current = clicks$
-    await onObservableFromClient(clicks$)
-    setStatus('connected — click anywhere')
-  }
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      subjectRef.current?.next({ x: e.clientX, y: e.clientY })
-    }
-    document.addEventListener('click', handler)
-    return () => document.removeEventListener('click', handler)
-  }, [])
-
-  return (
-    <section>
-      <h2 className="text-xl font-semibold">Observable (client → server)</h2>
-      <p className="text-sm text-gray-600 mb-2">
-        Client sends click coordinates to server via Subject passed as Observable argument.
-      </p>
-      <button onClick={start} className="px-3 py-1 bg-blue-600 text-white rounded mr-2">
-        Start
-      </button>
-      <span className="text-sm" data-testid="obs-to-server-status">
-        {status}
-      </span>
-    </section>
   )
 }

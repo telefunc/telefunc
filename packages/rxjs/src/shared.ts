@@ -3,15 +3,15 @@ export {
   SERIALIZER_PREFIX_SUBJECT,
   MSG,
   OBS_MSG,
-  wireSourceSubject,
-  wireProxySubject,
+  wireSubject,
   wireSourceObservable,
   wireProxyObservable,
+  swallowedErrors,
+  markSwallowed,
 }
 export type {
   ObservableMetadata,
   SubjectMetadata,
-  SubjectVariant,
   ObservableContract,
   SubjectContract,
   SubjectMessage,
@@ -19,13 +19,23 @@ export type {
 }
 
 import type { TypeContract, ChannelBase } from 'telefunc'
+import { Abort } from 'telefunc/client'
 import type { Subject, Subscriber } from 'rxjs'
 import { Observable, type Subscription } from 'rxjs'
+import { isObject } from './isObject.js'
+import { assert } from './assert.js'
+
+/** WeakSet of errors that `onUnhandledError` handlers may use to suppress
+ *  telefunc-originated errors. Populated by markSwallowed() before any call
+ *  to subject.error()/sub.error() in the wire layer. */
+const swallowedErrors = new WeakSet<object>()
+function markSwallowed(err: unknown) {
+  assert(isObject(err))
+  swallowedErrors.add(err)
+}
 
 const SERIALIZER_PREFIX_OBSERVABLE = '!TelefuncObservable:'
 const SERIALIZER_PREFIX_SUBJECT = '!TelefuncSubject:'
-
-type SubjectVariant = 'Subject' | 'BehaviorSubject' | 'ReplaySubject'
 
 type ObservableMetadata = {
   channelId: string
@@ -33,10 +43,6 @@ type ObservableMetadata = {
 
 type SubjectMetadata = {
   channelId: string
-  variant: SubjectVariant
-  initialValue?: unknown
-  bufferSize?: number
-  replayBuffer?: unknown[]
 }
 
 type ObservableContract = TypeContract<Observable<unknown>, Observable<unknown>, ObservableMetadata>
@@ -56,7 +62,7 @@ type SubjectMessage =
   | { t: typeof MSG.SUBSCRIBE }
   | { t: typeof MSG.UNSUBSCRIBE }
   | { t: typeof MSG.NEXT; v: unknown }
-  | { t: typeof MSG.ERROR; v: unknown }
+  | { t: typeof MSG.ERROR }
   | { t: typeof MSG.COMPLETE }
 
 // === Observable protocol ===
@@ -73,168 +79,120 @@ type ObservableMessage =
   | { t: typeof OBS_MSG.SUBSCRIBE; id: number }
   | { t: typeof OBS_MSG.UNSUBSCRIBE; id: number }
   | { t: typeof OBS_MSG.NEXT; id: number; v: unknown }
-  | { t: typeof OBS_MSG.ERROR; id: number; v: unknown }
+  | { t: typeof OBS_MSG.ERROR; id: number }
   | { t: typeof OBS_MSG.COMPLETE; id: number }
 
 // === Subject wiring ===
 
 /**
- * Wire the SOURCE Subject (replacer side — owns the original Subject).
+ * Wire a Subject to a channel. Symmetric — both sides use the same function.
  *
- * Intercepts next/error/complete to forward to remote.
- * No _subscribe override — prevents interference with Observable replacer on same Subject.
- *
- * @param alwaysForward true for BehaviorSubject/ReplaySubject (state must stay in sync),
- *                      false for plain Subject (lazy — only forward when remote has subscribers)
+ * - Overrides `_subscribe` to send MSG.SUBSCRIBE/MSG.UNSUBSCRIBE when local
+ *   code subscribes/unsubscribes.
+ * - On MSG.SUBSCRIBE from remote: creates a real `subject.subscribe()` that
+ *   forwards values to the channel.
+ * - On MSG.NEXT/ERROR/COMPLETE from remote: calls `subject.next/error/complete`
+ *   directly. The re-entrancy guard prevents the forwarding subscription from
+ *   echoing back to the originating channel.
+ * - On channel close: just unsubscribes. Does NOT error the Subject — that's
+ *   the caller's responsibility (reviver/replacer) because only they know
+ *   whether the Subject is safe to terminate (per-request vs potentially shared).
  */
-function wireSourceSubject(
-  subject: Subject<unknown>,
-  channel: ChannelBase<SubjectMessage, SubjectMessage>,
-  alwaysForward: boolean,
-) {
-  let remoteSubscribed = false
-
-  const origNext = subject.next.bind(subject)
-  const origError = subject.error.bind(subject)
-  const origComplete = subject.complete.bind(subject)
-
-  subject.next = (v: unknown) => {
-    origNext(v)
-    if (channel.isClosed) return
-    if (alwaysForward || remoteSubscribed) channel.send({ t: MSG.NEXT, v })
-  }
-
-  subject.error = (err: unknown) => {
-    origError(err)
-    if (channel.isClosed) return
-    channel.send({ t: MSG.ERROR, v: err })
-  }
-
-  subject.complete = () => {
-    origComplete()
-    if (channel.isClosed) return
-    channel.send({ t: MSG.COMPLETE })
-  }
-
-  channel.listen((msg) => {
-    switch (msg.t) {
-      case MSG.SUBSCRIBE:
-        remoteSubscribed = true
-        break
-      case MSG.UNSUBSCRIBE:
-        remoteSubscribed = false
-        break
-      case MSG.NEXT:
-        origNext(msg.v)
-        break
-      case MSG.ERROR:
-        origError(msg.v)
-        break
-      case MSG.COMPLETE:
-        origComplete()
-        break
-    }
-  })
-
-  // Source side: always complete the local subject when the transport goes away.
-  // Transport errors (timeouts, disconnects) aren't actionable for local subscribers
-  // — they just need the completion signal so resources (intervals, subscriptions)
-  // get cleaned up. Erroring would also surface as an unhandled error in subscribers
-  // that only registered a `complete` handler, which can crash the host process.
-  channel.onClose(() => {
-    origComplete()
-  })
-
-  return {
-    async close() {
-      origComplete()
-      await channel.close()
-    },
-    abort(abortValue?: unknown) {
-      channel.abort(abortValue)
-    },
-  }
-}
-
-/**
- * Wire the PROXY Subject (reviver side — the reconstructed Subject).
- *
- * Intercepts next/error/complete to forward to remote.
- * For plain Subject (alwaysForward=false): overrides _subscribe to detect all subscription
- * paths (direct, pipe, operators) and signal remote via MSG.SUBSCRIBE/MSG.UNSUBSCRIBE.
- * For BehaviorSubject/ReplaySubject (alwaysForward=true): no _subscribe override needed.
- *
- * @param alwaysForward true for BehaviorSubject/ReplaySubject, false for plain Subject
- */
-function wireProxySubject(
-  subject: Subject<unknown>,
-  channel: ChannelBase<SubjectMessage, SubjectMessage>,
-  alwaysForward: boolean,
-) {
+function wireSubject(subject: Subject<unknown>, channel: ChannelBase<SubjectMessage, SubjectMessage>) {
+  let isProcessingRemote = false
+  let remoteSub: Subscription | null = null
   let localSubscriberCount = 0
 
-  const origNext = subject.next.bind(subject)
-  const origError = subject.error.bind(subject)
-  const origComplete = subject.complete.bind(subject)
-
-  subject.next = (v: unknown) => {
-    origNext(v)
-    if (channel.isClosed) return
-    if (alwaysForward || localSubscriberCount > 0) channel.send({ t: MSG.NEXT, v })
+  const remoteSubscribe = () => {
+    if (remoteSub) return
+    remoteSub = subject.subscribe({
+      next(v) {
+        if (channel.isClosed || isProcessingRemote) return
+        channel.send({ t: MSG.NEXT, v })
+      },
+      error(err) {
+        if (channel.isClosed || isProcessingRemote) return
+        if (err instanceof Abort) {
+          channel.abort(err.abortValue, err.message)
+          return
+        }
+        console.error('[telefunc:rxjs] Subject error:', err)
+        channel.send({ t: MSG.ERROR })
+        void channel.close()
+      },
+      complete() {
+        if (channel.isClosed || isProcessingRemote) return
+        channel.send({ t: MSG.COMPLETE })
+        void channel.close()
+      },
+    })
   }
 
-  subject.error = (err: unknown) => {
-    origError(err)
-    if (channel.isClosed) return
-    channel.send({ t: MSG.ERROR, v: err })
+  const remoteUnsubscribe = () => {
+    remoteSub?.unsubscribe()
+    remoteSub = null
   }
 
-  subject.complete = () => {
-    origComplete()
-    if (channel.isClosed) return
-    channel.send({ t: MSG.COMPLETE })
+  const origInternalSubscribe = (subject as any)._subscribe.bind(subject)
+  ;(subject as any)._subscribe = function (subscriber: any) {
+    const subscription = origInternalSubscribe(subscriber)
+    if (subscription.closed) return subscription
+
+    localSubscriberCount++
+    if (localSubscriberCount === 1 && !channel.isClosed) channel.send({ t: MSG.SUBSCRIBE })
+
+    subscription.add(() => {
+      localSubscriberCount--
+      if (localSubscriberCount === 0 && !channel.isClosed) channel.send({ t: MSG.UNSUBSCRIBE })
+    })
+
+    return subscription
   }
 
-  if (!alwaysForward) {
-    const origInternalSubscribe = (subject as any)._subscribe.bind(subject)
-    ;(subject as any)._subscribe = function (subscriber: any) {
-      const subscription = origInternalSubscribe(subscriber)
-      if (subscription.closed) return subscription
-
-      localSubscriberCount++
-      if (localSubscriberCount === 1 && !channel.isClosed) channel.send({ t: MSG.SUBSCRIBE })
-
-      subscription.add(() => {
-        localSubscriberCount--
-        if (localSubscriberCount === 0 && !channel.isClosed) channel.send({ t: MSG.UNSUBSCRIBE })
-      })
-
-      return subscription
-    }
+  // If the Subject already has observers (subscribed before wiring), notify
+  // the remote so it creates a remoteSub and starts forwarding values.
+  if (subject.observed && !channel.isClosed) {
+    localSubscriberCount = 1
+    channel.send({ t: MSG.SUBSCRIBE })
   }
 
   channel.listen((msg) => {
-    switch (msg.t) {
-      case MSG.NEXT:
-        origNext(msg.v)
-        break
-      case MSG.ERROR:
-        origError(msg.v)
-        break
-      case MSG.COMPLETE:
-        origComplete()
-        break
+    isProcessingRemote = true
+    try {
+      switch (msg.t) {
+        case MSG.SUBSCRIBE:
+          remoteSubscribe()
+          break
+        case MSG.UNSUBSCRIBE:
+          remoteUnsubscribe()
+          break
+        case MSG.NEXT:
+          subject.next(msg.v)
+          break
+        case MSG.ERROR: {
+          const err = new Error('Internal error — see logs')
+          markSwallowed(err)
+          subject.error(err)
+          void channel.close()
+          break
+        }
+        case MSG.COMPLETE:
+          subject.complete()
+          void channel.close()
+          break
+      }
+    } finally {
+      isProcessingRemote = false
     }
   })
 
-  channel.onClose((err) => {
-    if (err) origError(err)
-    else origComplete()
+  channel.onClose(() => {
+    remoteUnsubscribe()
   })
 
   return {
     async close() {
-      origComplete()
+      remoteUnsubscribe()
       await channel.close()
     },
     abort(abortValue?: unknown) {
@@ -274,7 +232,12 @@ function wireSourceObservable(
           error(v) {
             subscriptions.delete(id)
             if (channel.isClosed) return
-            channel.send({ t: OBS_MSG.ERROR, id, v })
+            if (v instanceof Abort) {
+              channel.abort(v.abortValue, v.message)
+              return
+            }
+            console.error('[telefunc:rxjs] Observable error:', v)
+            channel.send({ t: OBS_MSG.ERROR, id })
           },
           complete() {
             subscriptions.delete(id)
@@ -323,10 +286,13 @@ function wireProxyObservable(channel: ChannelBase<ObservableMessage, ObservableM
       case OBS_MSG.NEXT:
         sub.next(msg.v)
         break
-      case OBS_MSG.ERROR:
-        sub.error(msg.v)
+      case OBS_MSG.ERROR: {
+        const err = new Error('Internal error — see logs')
+        markSwallowed(err)
+        sub.error(err)
         subscribers.delete(msg.id)
         break
+      }
       case OBS_MSG.COMPLETE:
         sub.complete()
         subscribers.delete(msg.id)
@@ -337,8 +303,12 @@ function wireProxyObservable(channel: ChannelBase<ObservableMessage, ObservableM
   channel.onClose((err) => {
     if (subscribers.size === 0) return
     for (const sub of subscribers.values()) {
-      if (err) sub.error(err)
-      else sub.complete()
+      if (err) {
+        markSwallowed(err)
+        sub.error(err)
+      } else {
+        sub.complete()
+      }
     }
     subscribers.clear()
   })

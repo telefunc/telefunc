@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-`@telefunc/rxjs` lets you pass [RxJS](https://rxjs.dev/) `Observable`, `Subject`, `BehaviorSubject`, and `ReplaySubject` transparently between client and server — both directions. All rxjs operators work out of the box.
+`@telefunc/rxjs` lets you pass [RxJS](https://rxjs.dev/) `Observable` and `Subject` transparently between client and server — both directions. All rxjs operators work out of the box.
 
 ## Install
 
@@ -9,7 +9,9 @@ npm install @telefunc/rxjs rxjs
 ```
 
 
-## Observable (server to client)
+## Live stock ticker
+
+Server pushes prices every second. Client applies operators locally — filtering and limiting happen on the client with standard rxjs.
 
 ```ts
 // StockPrice.telefunc.ts
@@ -17,47 +19,29 @@ import { interval, map } from 'rxjs'
 
 export async function onStockPrice(symbol: string) {
   return interval(1000).pipe(
-    map(() => ({ symbol, price: getLatestPrice(symbol) }))
+    map(() => ({ symbol, price: getLatestPrice(symbol), time: Date.now() }))
   )
 }
 ```
 
 ```tsx
 // StockPrice.tsx
+import { filter, take } from 'rxjs'
+
 const price$ = await onStockPrice('AAPL')
 price$.pipe(
   filter(p => p.price > 150),
-  take(5)
-).subscribe(p => console.log(p))
+  take(10)
+).subscribe(p => updateChart(p))
 ```
 
 
-## Observable (client to server)
+## Collaborative editor
+
+A shared `Subject` returned to multiple clients multicasts: when any client calls `next()`, all other clients' subscribers receive the value.
 
 ```ts
-// Analytics.telefunc.ts
-import { Observable } from 'rxjs'
-
-export async function onTrackClicks(clicks$: Observable<{ x: number; y: number }>) {
-  clicks$.subscribe(click => saveToDb(click))
-}
-```
-
-```tsx
-// Analytics.tsx
-import { fromEvent, map } from 'rxjs'
-
-const clicks$ = fromEvent(document, 'click').pipe(
-  map(e => ({ x: e.clientX, y: e.clientY }))
-)
-await onTrackClicks(clicks$)
-```
-
-
-## Subject (bidirectional)
-
-```ts
-// Collaboration.telefunc.ts
+// Editor.telefunc.ts
 import { Subject } from 'rxjs'
 
 const edits = new Subject<{ userId: string; text: string }>()
@@ -71,38 +55,109 @@ export async function onJoinEditor() {
 // Editor.tsx
 const edits = await onJoinEditor()
 
-// Receive edits from other users
 edits.subscribe(edit => applyEdit(edit))
-
-// Send local edits
 edits.next({ userId: 'alice', text: 'Hello' })
 ```
 
-Both sides can `subscribe()` and `next()` — the Subject is kept in sync over the wire.
 
 
-## BehaviorSubject & ReplaySubject
+## Click heatmap (client to server)
 
-`BehaviorSubject` and `ReplaySubject` are fully supported. `getValue()`, replay-on-subscribe, and all variant-specific semantics are preserved transparently.
+Pass an Observable as a telefunction argument. The server subscribes and processes the stream — useful for telemetry, analytics, or any client-driven event stream.
 
 ```ts
-// Settings.telefunc.ts
-import { BehaviorSubject } from 'rxjs'
+// Heatmap.telefunc.ts
+import { Observable, bufferTime, filter } from 'rxjs'
 
-const theme = new BehaviorSubject('light')
-
-export async function onGetTheme() {
-  return theme
+export async function onTrackClicks(clicks$: Observable<{ x: number; y: number }>) {
+  clicks$.pipe(
+    bufferTime(5000),
+    filter(batch => batch.length > 0)
+  ).subscribe(batch => saveHeatmapBatch(batch))
 }
 ```
 
 ```tsx
-// Settings.tsx
-const theme = await onGetTheme()
-console.log(theme.getValue()) // 'light' — always in sync
-theme.subscribe(t => applyTheme(t))
-theme.next('dark') // updates both client and server
+// Heatmap.tsx
+import { fromEvent, map } from 'rxjs'
+
+const clicks$ = fromEvent<MouseEvent>(document, 'click').pipe(
+  map(e => ({ x: e.clientX, y: e.clientY }))
+)
+await onTrackClicks(clicks$)
 ```
+
+
+## Live cursors
+
+A shared Subject multicasts cursor positions between all connected users. The server attaches the user identity from context.
+
+```ts
+// Whiteboard.telefunc.ts
+import { Subject } from 'rxjs'
+import { getContext } from 'telefunc'
+
+const cursors = new Subject<{ userId: string; x: number; y: number }>()
+
+export async function onCursors() {
+  const { user } = getContext()
+  const input = new Subject<{ x: number; y: number }>()
+  input.subscribe(pos => cursors.next({ ...pos, userId: user.id }))
+  return { cursors, input }
+}
+```
+
+```tsx
+// Whiteboard.tsx
+const { cursors, input } = await onCursors()
+
+cursors.subscribe(pos => drawCursor(pos.userId, pos.x, pos.y))
+
+document.addEventListener('mousemove', e => {
+  input.next({ x: e.clientX, y: e.clientY })
+})
+```
+
+
+## Angular
+
+Angular uses rxjs extensively. With `@telefunc/rxjs`, telefunctions return Observables directly — pipe them into templates with `| async`, use them in services, or compose them with the rest of your rxjs code.
+
+```ts
+// Dashboard.telefunc.ts
+import { interval, map } from 'rxjs'
+
+export async function onMetrics() {
+  return interval(1000).pipe(
+    map(() => ({ cpu: getCpu(), memory: getMemory() }))
+  )
+}
+```
+
+The `| async` pipe subscribes and auto-unsubscribes on component destroy:
+
+```ts
+// dashboard.component.ts
+@Component({
+  template: `
+    @if (metrics$ | async; as m) {
+      CPU: {{ m.cpu }}% — Memory: {{ m.memory }}MB
+    }
+  `
+})
+export class DashboardComponent {
+  metrics$!: Observable<{ cpu: number; memory: number }>
+
+  async ngOnInit() {
+    this.metrics$ = await onMetrics()
+  }
+}
+```
+
+
+## Lifecycle
+
+Unsubscribing stops data flow immediately. The underlying <Link href="/channel" text="channel" /> is cleaned up automatically via GC, or immediately with <Link href="/close" text="close()" />.
 
 
 ## See also

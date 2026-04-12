@@ -216,81 +216,9 @@ const slow = await res.slow
 > Multiple generators and promises resolve concurrently without blocking each other.
 
 
-## Cancellation
+## Cancellation & cleanup
 
-Stop consuming a stream gracefully from the client using `close()`, `break`, `gen.return()`, or `reader.cancel()`. All of these cleanly signal the server to stop producing and release resources.
-
-### `close()`
-
-`close()` from `telefunc/client` gracefully closes any streaming value — generators, streams, channels, and passed functions. It walks the return value recursively and closes everything in one call.
-
-```ts
-// Environment: client
-
-import { close } from 'telefunc/client'
-import { onLoadDashboard } from './Dashboard.telefunc'
-
-const result = await onLoadDashboard()
-
-// Read what you need...
-const first = await result.stream.next()
-
-// Then close everything at once
-close(result)
-```
-
-### `break` / `gen.return()`
-
-Breaking out of a `for await` loop implicitly calls `gen.return()`, which gracefully stops the generator:
-
-```ts
-const gen = onChat('Tell me a story')
-for await (const token of gen) {
-  if (shouldStop) break // Gracefully stops the server-side generator
-}
-```
-
-You can also call `gen.return()` directly:
-
-```ts
-const gen = onChat('Tell me a story')
-const first = await gen.next()
-gen.return() // Gracefully stops
-```
-
-### `reader.cancel()`
-
-For `ReadableStream`, call `cancel()` on the reader:
-
-```ts
-const stream = await onDownload('large-file.zip')
-const reader = stream.getReader()
-const first = await reader.read()
-reader.cancel() // Gracefully stops the server-side stream
-```
-
-
-## Cleanup
-
-Use `onClose()` on the server to detect when the response ends — whether the stream finished, the client disconnected, or an error occurred:
-
-```ts
-// Environment: server
-
-import { onClose } from 'telefunc'
-
-export async function* onChat(prompt: string) {
-  onClose(() => {
-    // Release resources, cancel upstream work
-  })
-
-  for await (const token of ai.streamText({ prompt })) {
-    yield token
-  }
-}
-```
-
-See <Link href="/getContext" /> for details.
+See <Link href="/close" /> for all cancellation methods (`close()`, `break`, `gen.return()`, `reader.cancel()`) and server-side cleanup via `onClose()`.
 
 
 ## Transport

@@ -6,23 +6,27 @@ import type {
   ServerReplacerContext,
   ServerReviverContext,
 } from 'telefunc'
-import { Observable, Subject, BehaviorSubject, ReplaySubject } from 'rxjs'
+import { Observable, Subject, config as rxjsConfig } from 'rxjs'
 
 import {
   SERIALIZER_PREFIX_OBSERVABLE,
   SERIALIZER_PREFIX_SUBJECT,
-  wireSourceSubject,
-  wireProxySubject,
+  wireSubject,
   wireSourceObservable,
   wireProxyObservable,
   type ObservableContract,
   type SubjectContract,
   type ObservableMessage,
   type SubjectMessage,
-  type SubjectVariant,
   type SubjectMetadata,
   type ObservableMetadata,
 } from './shared.js'
+
+// Server-side: swallow ALL unhandled rxjs errors to prevent process crash.
+// Still log them so bugs are visible in server logs.
+rxjsConfig.onUnhandledError = (err) => {
+  console.error('[telefunc:rxjs] Unhandled rxjs error:', err)
+}
 
 // === Server→client replacers ===
 // Detection order: Subject before Observable (Subject extends Observable)
@@ -33,32 +37,10 @@ const subjectReplacer: ReplacerType<SubjectContract, ServerReplacerContext> = {
     return value instanceof Subject
   },
   getMetadata(subject, context) {
-    let variant: SubjectVariant = 'Subject'
-    const metadata: SubjectMetadata = { channelId: '', variant }
-
-    if (subject instanceof BehaviorSubject) {
-      variant = 'BehaviorSubject'
-      metadata.variant = variant
-      metadata.initialValue = subject.getValue()
-    } else if (subject instanceof ReplaySubject) {
-      variant = 'ReplaySubject'
-      metadata.variant = variant
-      metadata.bufferSize = (subject as any)._bufferSize
-      const buffer: unknown[] = []
-      const sub = subject.subscribe({
-        next(v) {
-          buffer.push(v)
-        },
-      })
-      sub.unsubscribe()
-      metadata.replayBuffer = buffer
-    }
-
     const channel = context.createChannel<SubjectMessage, SubjectMessage>({ ack: false })
-    metadata.channelId = channel.id
+    const metadata: SubjectMetadata = { channelId: channel.id }
 
-    const alwaysForward = subject instanceof BehaviorSubject || subject instanceof ReplaySubject
-    const wire = wireSourceSubject(subject, channel, alwaysForward)
+    const wire = wireSubject(subject, channel)
 
     return {
       metadata,
@@ -101,25 +83,14 @@ const subjectReviver: ReviverType<SubjectContract, ServerReviverContext> = {
   createValue(metadata, context) {
     const channel = context.createChannel<SubjectMessage, SubjectMessage>({ id: metadata.channelId })
 
-    let subject: Subject<unknown>
-    switch (metadata.variant) {
-      case 'BehaviorSubject':
-        subject = new BehaviorSubject(metadata.initialValue)
-        break
-      case 'ReplaySubject': {
-        const rs = new ReplaySubject(metadata.bufferSize)
-        if (metadata.replayBuffer) {
-          for (const v of metadata.replayBuffer) rs.next(v)
-        }
-        subject = rs
-        break
-      }
-      default:
-        subject = new Subject()
-    }
+    const subject = new Subject<unknown>()
+    const wire = wireSubject(subject, channel)
 
-    const alwaysForward = metadata.variant === 'BehaviorSubject' || metadata.variant === 'ReplaySubject'
-    const wire = wireProxySubject(subject, channel, alwaysForward)
+    // Proxy side: Subject is per-request (created here). Propagate abort errors
+    // to local subscribers so the server function sees the error.
+    channel.onClose((err) => {
+      if (err) subject.error(err)
+    })
 
     return {
       value: subject,

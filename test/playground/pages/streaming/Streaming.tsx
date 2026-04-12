@@ -470,11 +470,15 @@ function Streaming() {
           const abortingValues: string[] = []
           const otherValues: string[] = []
           const streamChunks: string[] = []
+          const obsValues: string[] = []
+          const subjectValues: string[] = []
           const decoder = new TextDecoder()
           let abortingErr: { isAbort: boolean; abortValue: unknown } | null = null
           let otherErr: { isAbort: boolean; abortValue: unknown } | null = null
           let streamErr: { isAbort: boolean; abortValue: unknown } | null = null
           let promiseErr: { isAbort: boolean; abortValue: unknown } | null = null
+          let obsErr: { isAbort: boolean; abortValue: unknown } | null = null
+          let subjectErr: { isAbort: boolean; abortValue: unknown } | null = null
 
           await Promise.all([
             (async () => {
@@ -514,10 +518,46 @@ function Streaming() {
                 promiseErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
               }
             })(),
+            new Promise<void>((resolve) => {
+              res.observable.subscribe({
+                next(v) {
+                  obsValues.push(v as string)
+                },
+                error(e: any) {
+                  obsErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
+                  resolve()
+                },
+                complete: () => resolve(),
+              })
+            }),
+            new Promise<void>((resolve) => {
+              res.subject.subscribe({
+                next(v) {
+                  subjectValues.push(v as string)
+                },
+                error(e: any) {
+                  subjectErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
+                  resolve()
+                },
+                complete: () => resolve(),
+              })
+            }),
           ])
 
           setResult(
-            JSON.stringify({ abortingValues, otherValues, streamChunks, abortingErr, otherErr, streamErr, promiseErr }),
+            JSON.stringify({
+              abortingValues,
+              otherValues,
+              streamChunks,
+              obsValues,
+              subjectValues,
+              abortingErr,
+              otherErr,
+              streamErr,
+              promiseErr,
+              obsErr,
+              subjectErr,
+            }),
           )
         }}
       >

@@ -33,7 +33,7 @@ const headingsDetached = [
   },
   {
     title: '`@telefunc/tanstack-query`',
-    url: '/tanstack-query',
+    url: '/extensions/tanstack-query',
     category: 'Guides',
   },
   ...misc(),
@@ -223,6 +223,11 @@ const headings = [
     level: 2,
     title: '`channel()` / `pubsub()`',
     url: '/channel',
+  },
+  {
+    level: 2,
+    title: '`close()` / `onClose()`',
+    url: '/close',
   },
   {
     level: 4,

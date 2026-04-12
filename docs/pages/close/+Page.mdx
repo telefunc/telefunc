@@ -1,0 +1,69 @@
+import { Link } from '@brillout/docpress'
+
+`close()` and `onClose()` manage the lifecycle of telefunction values — anything returned from or passed to a telefunction that holds an open connection.
+
+## `close()` (client)
+
+`close()` from `telefunc/client` gracefully closes any value returned by a telefunction. It walks the return value recursively and closes everything in one call.
+
+```ts
+import { close } from 'telefunc/client'
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const result = await onLoadDashboard()
+
+// Read what you need...
+const first = await result.stream.next()
+
+// Then close everything at once
+close(result)
+```
+
+### Other ways to close
+
+For specific value types, you can also use the standard JS APIs directly:
+
+```ts
+// AsyncGenerator — break out of the loop
+for await (const token of gen) {
+  if (shouldStop) break
+}
+
+// Or call return() directly
+gen.return()
+
+// ReadableStream — cancel the reader
+reader.cancel()
+
+// Channel — close explicitly
+await channel.close()
+```
+
+All of these signal the server to stop producing and release resources.
+
+
+## `onClose()` (server)
+
+Use `onClose()` from <Link href="/getContext" text="getContext()" /> on the server to detect when the response ends — whether the value was consumed, the client disconnected, or an error occurred:
+
+```ts
+import { getContext } from 'telefunc'
+
+export async function* onChat(prompt: string) {
+  const { onClose } = getContext()
+  onClose(() => {
+    // Release resources, cancel upstream work
+  })
+
+  for await (const token of ai.streamText({ prompt })) {
+    yield token
+  }
+}
+```
+
+
+## Automatic cleanup (GC)
+
+If the client drops all references to a returned value without explicitly closing it, the underlying resources are cleaned up automatically via garbage collection. There is a short delay (typically a few seconds) between the value becoming unreachable and the cleanup firing.
+
+Explicit `close()` is instant. GC cleanup is the fallback for when user code forgets.

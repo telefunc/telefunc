@@ -24,7 +24,7 @@ class AbortError extends Error {
 
 type AbortFactory = {
   (abortValue?: unknown): AbortError
-  [Symbol.hasInstance](thing: unknown): boolean
+  [Symbol.hasInstance](thing: unknown): thing is AbortError
 }
 
 const Abort = function Abort(abortValue?: unknown): AbortError {
