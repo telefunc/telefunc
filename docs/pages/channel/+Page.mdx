@@ -101,6 +101,8 @@ ack.accepted // true
 
 On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `ch.client` type swaps the directions.
 
+Both generic parameters also drive runtime validation: Telefunc auto-generates shields that check every message and ack arriving at the server against its declared type. See <Link href="/shield#channels">Shields — Channels</Link>.
+
 
 ### Acknowledgements
 
@@ -259,66 +261,52 @@ info.ts   // server timestamp
 
 `publish()` returns a `Promise` that resolves to `info` once the message is accepted. `subscribe()` receives `info` alongside each message — useful for ordering and gap detection.
 
-> In-memory pub/sub works out of the box for single-server deployments. For multi-server, set `config.pubsub.adapter` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
+> In-memory pub/sub works out of the box for single-server deployments. For multi-server, set `config.pubsub.transport` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
 
 
 ## Multi-server
 
-By default, pub/sub is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, set `config.pubsub.adapter`:
+By default, pub/sub is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, configure a transport on `config.pubsub.transport`.
+
+### `@telefunc/redis`
+
+The first-party Redis adapter wires pub/sub to Redis with a single config line:
+
+```bash
+npm install @telefunc/redis ioredis
+```
 
 ```ts
 // Environment: server
 
 import { config } from 'telefunc'
+import { RedisTransport } from '@telefunc/redis'
 import Redis from 'ioredis'
 
-const pub = new Redis()
-const sub = new Redis()
-
-config.pubsub.adapter = {
-  subscribe(key, deliver) {
-    sub.subscribe(key)
-    sub.on('message', (ch, msg) => {
-      if (ch === key) deliver(msg, { seq: 0, ts: Date.now() })
-    })
-    return () => { sub.unsubscribe(key) }
-  },
-  subscribeBinary(key, deliver) {
-    // Binary subscriptions if needed
-    return () => {}
-  },
-  async publish(key, message) {
-    const [, seq] = await pub
-      .multi()
-      .publish(key, message)
-      .incr(`telefunc:seq:${key}`)
-      .exec()
-    return { seq: seq[1] as number }
-  },
-  async publishBinary(key, data) {
-    return { seq: 0 }
-  },
-}
+config.pubsub.transport = new RedisTransport({
+  publisher: new Redis(),
+  subscriber: new Redis(),  // Redis requires a dedicated connection for subscriptions
+})
 ```
 
-### Adapter interface
+Telefunc assigns a global `seq` per key via Redis `INCR`, so subscribers see messages in order even across nodes.
+
+### Custom transport
+
+For other backends (NATS, Kafka, …), implement `PubSubTransport` and assign it to `config.pubsub.transport`. Telefunc wraps it with subscriber multiplexing and same-node delivery, so each `key` only opens one upstream subscription no matter how many local subscribers attach.
 
 ```ts
-type PubSubAdapter = {
-  subscribe(key: string, onMessage: (message: string, info: PubSubInfo) => void): () => void
-  publish(key: string, message: string): PubSubResult | Promise<PubSubResult>
-  subscribeBinary(key: string, onMessage: (data: Uint8Array, info: PubSubInfo) => void): () => void
-  publishBinary(key: string, data: Uint8Array): PubSubResult | Promise<PubSubResult>
+type PubSubTransport = {
+  send(key: string, payload: string): { seq: number; ts: number } | Promise<{ seq: number; ts: number }>
+  listen(key: string, onMessage: (payload: string, info: { seq: number; ts: number }) => void): () => void
+  sendBinary(key: string, payload: Uint8Array): { seq: number; ts: number } | Promise<{ seq: number; ts: number }>
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; ts: number }) => void): () => void
 }
-
-type PubSubInfo = { seq: number; ts: number }
-type PubSubResult = { seq?: number; ts?: number }
-
 ```
 
-`subscribe` returns an unsubscribe function. All messages flow through the adapter, including delivery to same-node subscribers. This ensures subscribers see messages in the global sequence order assigned by the adapter.
+`send` / `sendBinary` must return the assigned `{ seq, ts }` so subscribers across nodes see a single global order per key. `listen` / `listenBinary` return an unsubscribe function and are called at most once per key.
 
-> On Cloudflare Workers, Telefunc handles distributed pub/sub automatically via Durable Objects — no adapter needed. See <Link href="/cloudflare" />.
+> On Cloudflare Workers, Telefunc handles distributed pub/sub automatically via Durable Objects — no transport needed. See <Link href="/cloudflare" />.
 
 
 ## Lifecycle

@@ -11,7 +11,7 @@ const pubsubReplacer: ReplacerType<PubSubContract, ServerReplacerContext> = {
   detect(value): value is PubSubContract['value'] {
     return ServerPubSub.isServerPubSub(value)
   },
-  getMetadata(ps, context) {
+  replace(ps, context) {
     context.registerChannel(ps)
     return {
       metadata: { channelId: ps.id, key: ps.key },

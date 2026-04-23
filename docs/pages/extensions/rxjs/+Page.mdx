@@ -155,6 +155,13 @@ export class DashboardComponent {
 ```
 
 
+## Shields
+
+A `Subject<T>` or `Observable<T>` passed as a telefunction argument gets a shield on each `next(v)` value arriving at the server. Terminal signals (`error`, `complete`) are untyped and pass through unshielded.
+
+See <Link href="/shield" /> for how telefunction arguments are validated in general.
+
+
 ## Lifecycle
 
 Unsubscribing stops data flow immediately. The underlying <Link href="/channel" text="channel" /> is cleaned up automatically via GC, or immediately with <Link href="/close" text="close()" />.

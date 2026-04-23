@@ -11,7 +11,7 @@ const functionReplacer: ReplacerType<FunctionContract, ServerReplacerContext> = 
   detect(value): value is FunctionContract['value'] {
     return typeof value === 'function'
   },
-  getMetadata(fn, { createChannel, validators }) {
+  replace(fn, { createChannel, validators }) {
     const channel = createChannel<unknown, readonly unknown[]>({ ack: true })
     const validateArgs = validators.get('args')
     channel.listen((args) => {

@@ -55,7 +55,7 @@ type ExtensionTypeResult<T, Acc extends any[] = []> = [ExtensionType<T, Acc>] ex
 // prettier-ignore
 // biome-ignore format:
 type SimpleType<T, Acc extends any[] = []> = [T] extends [never]
-  ? false
+  ? ShieldRes<'__telefunc_t.never', Acc>
   : Equals<T, any> extends true
   ? ShieldRes<'__telefunc_t.any', Acc>
   : unknown extends T
@@ -66,6 +66,10 @@ type SimpleType<T, Acc extends any[] = []> = [T] extends [never]
   ? ShieldRes<'__telefunc_t.number', Acc>
   : Equals<T, boolean> extends true
   ? ShieldRes<'__telefunc_t.boolean', Acc>
+  : Equals<T, void> extends true
+  ? ShieldRes<'__telefunc_t.const(undefined)', Acc>
+  : Equals<T, undefined> extends true
+  ? ShieldRes<'__telefunc_t.const(undefined)', Acc>
   : Equals<T, Date> extends true
   ? ShieldRes<'__telefunc_t.date', Acc>
   : Equals<T, File> extends true
@@ -240,6 +244,14 @@ type _test = [
   Expect<Equals<ShieldStr<boolean>, '__telefunc_t.boolean'>>,
   Expect<Equals<ShieldStr<Date>, '__telefunc_t.date'>>,
   Expect<Equals<ShieldStr<any>, '__telefunc_t.any'>>,
+  // `void` and `undefined` both assert "runtime value is `undefined`" — the shield must enforce
+  // the TS type at runtime. A callback typed `() => void` returning `true` would otherwise slip
+  // through unchecked and violate caller assumptions (e.g. `if (await cb()) …`).
+  Expect<Equals<ShieldStr<void>, '__telefunc_t.const(undefined)'>>,
+  Expect<Equals<ShieldStr<undefined>, '__telefunc_t.const(undefined)'>>,
+  // `never` = "no value is permitted." Emitted for e.g. `ChannelData<never>` when a direction
+  // is disabled. Any value a non-TS client manages to send is rejected.
+  Expect<Equals<ShieldStr<never>, '__telefunc_t.never'>>,
   Expect<Equals<ShieldStr<string | null>, '__telefunc_t.nullable(__telefunc_t.string)'>>,
   Expect<Equals<ShieldStr<string | undefined>, '__telefunc_t.optional(__telefunc_t.string)'>>,
   Expect<

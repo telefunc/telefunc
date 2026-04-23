@@ -9,7 +9,7 @@ overrides:
 
 patchedDependencies:
   '@brillout/json-serializer@0.5.22':
-    hash: ppujafqijnzlizneyiflc7ejzq
+    hash: btbauxbd3gzfvwgrcvmlvosjcm
     path: patches/@brillout__json-serializer@0.5.22.patch
 
 importers:
@@ -364,7 +364,7 @@ importers:
         version: 0.2.6
       '@brillout/json-serializer':
         specifier: ^0.5.22
-        version: 0.5.22(patch_hash=ppujafqijnzlizneyiflc7ejzq)
+        version: 0.5.22(patch_hash=btbauxbd3gzfvwgrcvmlvosjcm)
       '@brillout/picocolors':
         specifier: ^1.0.28
         version: 1.0.30
@@ -7359,7 +7359,7 @@ snapshots:
 
   '@brillout/import@0.2.6': {}
 
-  '@brillout/json-serializer@0.5.22(patch_hash=ppujafqijnzlizneyiflc7ejzq)': {}
+  '@brillout/json-serializer@0.5.22(patch_hash=btbauxbd3gzfvwgrcvmlvosjcm)': {}
 
   '@brillout/part-regex@0.1.4': {}
 
@@ -11996,7 +11996,7 @@ snapshots:
   react-streaming@0.4.16(react-dom@19.2.4(react@19.2.4))(react@19.2.4):
     dependencies:
       '@brillout/import': 0.2.6
-      '@brillout/json-serializer': 0.5.22(patch_hash=ppujafqijnzlizneyiflc7ejzq)
+      '@brillout/json-serializer': 0.5.22(patch_hash=btbauxbd3gzfvwgrcvmlvosjcm)
       '@brillout/picocolors': 1.0.30
       isbot-fast: 1.2.0
       react: 19.2.4
@@ -13027,7 +13027,7 @@ snapshots:
       '@babel/core': 7.29.0
       '@babel/types': 7.29.0
       '@brillout/import': 0.2.6
-      '@brillout/json-serializer': 0.5.22(patch_hash=ppujafqijnzlizneyiflc7ejzq)
+      '@brillout/json-serializer': 0.5.22(patch_hash=btbauxbd3gzfvwgrcvmlvosjcm)
       '@brillout/picocolors': 1.0.30
       '@brillout/vite-plugin-server-entry': 0.7.18
       cac: 6.7.14

@@ -90,10 +90,10 @@ class RedisTransport implements PubSubTransport {
     const i = message.indexOf('\n')
     const j = message.indexOf('\n', i + 1)
     if (i === -1 || j === -1) return
-    this.textCallbacks.get(channel.slice(tp.length))?.(
-      message.slice(j + 1),
-      { seq: parseInt(message.slice(0, i), 10), ts: parseInt(message.slice(i + 1, j), 10) },
-    )
+    this.textCallbacks.get(channel.slice(tp.length))?.(message.slice(j + 1), {
+      seq: parseInt(message.slice(0, i), 10),
+      ts: parseInt(message.slice(i + 1, j), 10),
+    })
   }
 
   private _onBinary = (channelBuf: Uint8Array, buf: Uint8Array): void => {

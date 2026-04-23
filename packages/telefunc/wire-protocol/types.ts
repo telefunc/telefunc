@@ -42,11 +42,15 @@ type TypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = 
   metadata: M
 }
 
-/** Replacer: detect a value during serialization and replace with prefix+metadata. */
+/** Replacer: detect a value during serialization and replace it with prefix+metadata on the wire.
+ *  `replace` is the primary verb of the Replacer API — it runs once per serialized value and may
+ *  perform side effects (register channels, install listeners, wire lifecycle). The returned
+ *  `metadata` is what crosses the wire; `close` / `abort` are lifecycle hooks tracked by the
+ *  registry and invoked when the carrier message completes or is aborted. */
 type ReplacerType<C extends TypeContract = TypeContract, Context = unknown> = {
   prefix: string
   detect(value: unknown): value is C['value']
-  getMetadata(
+  replace(
     value: C['value'],
     context: Context,
   ): { metadata: C['metadata']; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }
@@ -57,10 +61,13 @@ type StreamingReplacerType<C extends TypeContract = TypeContract, Context = unkn
   createProducer(value: C['value']): StreamingProducer
 }
 
-/** Reviver: reconstruct a live value from prefix+metadata during deserialization. */
+/** Reviver: reconstruct a live value from prefix+metadata during deserialization.
+ *  `revive` is the primary verb of the Reviver API — it runs once per deserialized value and may
+ *  perform side effects (create channels, start readers, attach validators). Mirrors `replace`
+ *  on the Replacer side. */
 type ReviverType<C extends TypeContract = TypeContract, Context = unknown> = {
   prefix: string
-  createValue(
+  revive(
     metadata: C['metadata'],
     context: Context,
   ): { value: C['result']; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }

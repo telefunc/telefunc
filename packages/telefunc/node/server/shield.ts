@@ -416,6 +416,15 @@ const type = (() => {
     verifier.toString = () => 'any'
     return verifier as any
   })()
+  // Matches TypeScript's `never`: no runtime value is permitted. Emitted by the generator
+  // for positions whose type resolves to `never` (e.g. `ChannelData<never>` when a direction
+  // is disabled). A malicious non-TS client bypassing the typed API gets rejected here.
+  const never_ = ((): never => {
+    const verifier = (input: unknown, breadcrumbs: string) => errorMessage(breadcrumbs, getTypeName(input), 'never')
+    markVerifier(verifier)
+    verifier.toString = () => 'never'
+    return verifier as unknown as never
+  })()
 
   return {
     string,
@@ -434,6 +443,7 @@ const type = (() => {
     optional: <T>(param: T): T | undefined => or(param, const_(undefined)),
     nullable: <T>(param: T): T | null => or(param, const_(null)),
     any,
+    never: never_,
   }
 })()
 shield.type = type
@@ -529,8 +539,7 @@ function resolveReturnShields(result: unknown, telefunction: Function): ValueShi
 }
 
 /** Returns the telefunction's argument shield map (path → ShieldMap), or undefined if none declared.
- *  Consumed by the request-side reviver to build per-path validators at createValue time. */
+ *  Consumed by the request-side reviver to build per-path validators at revive time. */
 function getArgumentShields(telefunction: Function): Record<string, ShieldMap> | undefined {
   return (telefunction as any)[argumentShieldsKey]
 }
-

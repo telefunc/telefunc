@@ -29,7 +29,7 @@ function createRequestReplacer(
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of allTypes) {
       if (type.detect(value)) {
-        const { metadata, close, abort } = type.getMetadata(value, context)
+        const { metadata, close, abort } = type.replace(value, context)
         onReplaced({ value, close, abort })
         return {
           replacement: type.prefix + serializer(metadata),

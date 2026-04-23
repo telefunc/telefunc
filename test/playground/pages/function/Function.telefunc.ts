@@ -1,4 +1,4 @@
-export { onGetGreeter, onGetAdder, onGetEchoWithState, onMap, onReduce, onUpload, onGetTypedAdder }
+export { onGetGreeter, onGetAdder, onGetEchoWithState, onMap, onReduce, onUpload, onGetTypedAdder, onCallBack }
 
 /** Returns a plain function — transparently proxied over an ack channel on the client. */
 async function onGetGreeter() {
@@ -44,6 +44,11 @@ async function onReduce(items: number[], reducer: (acc: number, n: number) => Pr
 /** Returns a typed function — shield validates the args when the client calls it. */
 async function onGetTypedAdder() {
   return async (a: number, b: number) => a + b
+}
+
+/** Shield: client-provided callback must return a number — server-side validator catches a bad return. */
+async function onCallBack(cb: () => Promise<number>) {
+  return await cb()
 }
 
 /** File upload with progress callback — server streams file and calls onProgress with percentage. */

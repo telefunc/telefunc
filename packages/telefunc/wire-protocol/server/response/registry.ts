@@ -33,7 +33,7 @@ function createStreamingReplacer(
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of allTypes) {
       if (type.detect(value)) {
-        const { metadata, close, abort } = type.getMetadata(value as never, getContext(value))
+        const { metadata, close, abort } = type.replace(value as never, getContext(value))
         onReplaced({ close, abort })
         return {
           replacement: type.prefix + serializer(metadata),

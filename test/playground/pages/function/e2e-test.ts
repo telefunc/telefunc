@@ -70,6 +70,23 @@ function testFunction() {
     })
   })
 
+  test('function: shield validates client-callback return value', async () => {
+    await page.click('#shield-callback-run')
+
+    await autoRetry(async () => {
+      // Valid callback return passes through.
+      const ok = await getResult<number>('#shield-callback-ok')
+      expect(ok).toBe(42)
+
+      // When the client-provided callback returns a bad type the server's reviver throws a
+      // branded ShieldValidationError; the runTelefunc boundary surfaces it as the canonical
+      // 422 so the client sees "Shield Validation Error" rather than a generic bug-error.
+      const error = await getResult<string>('#shield-callback-error')
+      expect(error).not.toMatch(/^NO_ERROR/)
+      expect(error).toMatch(/shield validation error/i)
+    })
+  })
+
   test('function: file upload with progress callback receives incremental updates', async () => {
     await page.click('#upload-run')
 

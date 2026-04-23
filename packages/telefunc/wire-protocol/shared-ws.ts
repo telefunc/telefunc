@@ -118,7 +118,13 @@ type CtrlMessage =
   | CtrlPubSubSub
   | CtrlPubSubUnsub
 
-type AckResultStatus = 'ok' | 'error' | 'abort'
+/** Ack result outcome on the wire.
+ *  - `ok`: `text` is the serialized ack value.
+ *  - `error`: a generic listener/channel error; `text` is the user-facing message.
+ *  - `abort`: `text` is the serialized abort value.
+ *  - `shield-error`: a shield validator rejected the data/ack; `text` is the validator message.
+ *    Kept distinct from `error` so the receiving side can throw `ShieldValidationError`. */
+type AckResultStatus = 'ok' | 'error' | 'abort' | 'shield-error'
 
 /** Ordering metadata embedded in PUBLISH frames on the wire. */
 type WirePublishInfo = { seq: number; ts: number }
@@ -141,6 +147,7 @@ const ACK_RESULT_STATUS = {
   ok: 0x00,
   error: 0x01,
   abort: 0x02,
+  'shield-error': 0x03,
 } as const
 
 function encodeAckResultStatus(status: AckResultStatus): number {
@@ -151,6 +158,8 @@ function encodeAckResultStatus(status: AckResultStatus): number {
       return ACK_RESULT_STATUS.error
     case 'abort':
       return ACK_RESULT_STATUS.abort
+    case 'shield-error':
+      return ACK_RESULT_STATUS['shield-error']
   }
 }
 
@@ -162,6 +171,8 @@ function decodeAckResultStatus(value: number): AckResultStatus {
       return 'error'
     case ACK_RESULT_STATUS.abort:
       return 'abort'
+    case ACK_RESULT_STATUS['shield-error']:
+      return 'shield-error'
     default:
       assert(false, 'ACK_RES status is invalid')
   }

@@ -139,7 +139,11 @@ class DefaultPubSubAdapter implements PubSubAdapter {
 
   // ── In-memory ──
 
-  private _publishInMemory<T>(subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>, key: string, data: T): PubSubPublishResult {
+  private _publishInMemory<T>(
+    subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
+    key: string,
+    data: T,
+  ): PubSubPublishResult {
     const seq = (this.keySeqs.get(key) ?? 0) + 1
     this.keySeqs.set(key, seq)
     const ts = Date.now()
@@ -157,7 +161,12 @@ class DefaultPubSubAdapter implements PubSubAdapter {
 
   // ── Shared ──
 
-  private _deliver<T>(subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>, key: string, data: T, info: WirePublishInfo): void {
+  private _deliver<T>(
+    subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
+    key: string,
+    data: T,
+    info: WirePublishInfo,
+  ): void {
     const set = subs.get(key)
     if (!set) return
     for (const onMessage of set) onMessage(data, info)

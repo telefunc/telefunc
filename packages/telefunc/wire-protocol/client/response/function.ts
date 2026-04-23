@@ -3,6 +3,7 @@ export { functionReviver }
 import type { FunctionContract, ClientReviverContext, ReviverType } from '../../types.js'
 import { SERIALIZER_PREFIX_FUNCTION, FN_SHIELD_ERROR_KEY } from '../../constants.js'
 import { STATUS_BODY_SHIELD_VALIDATION_ERROR } from '../../../shared/constants.js'
+import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { hasProp } from '../../../utils/hasProp.js'
 
 /**
@@ -15,7 +16,7 @@ import { hasProp } from '../../../utils/hasProp.js'
  */
 const functionReviver: ReviverType<FunctionContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
-  createValue(metadata, context) {
+  revive(metadata, context) {
     const channel = context.createChannel({
       channelId: metadata.channelId,
       ack: true,
@@ -24,7 +25,7 @@ const functionReviver: ReviverType<FunctionContract, ClientReviverContext> = {
       value: async (...args: unknown[]) => {
         const res = await channel.send(args, { ack: true })
         if (hasProp(res, FN_SHIELD_ERROR_KEY, 'true')) {
-          throw new Error(`${STATUS_BODY_SHIELD_VALIDATION_ERROR} — see server logs`)
+          throw new ShieldValidationError(`${STATUS_BODY_SHIELD_VALIDATION_ERROR} — see server logs`)
         }
         return res
       },

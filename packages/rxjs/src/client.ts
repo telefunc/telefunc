@@ -41,7 +41,7 @@ rxjsConfig.onUnhandledError = (err) => {
 
 const subjectReviver: ReviverType<SubjectContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_SUBJECT,
-  createValue(metadata, context) {
+  revive(metadata, context) {
     const channel = context.createChannel<SubjectMessage, SubjectMessage>({ channelId: metadata.channelId })
     const subject = new Subject<unknown>()
     const wire = wireSubject(subject, channel)
@@ -69,7 +69,7 @@ const subjectReviver: ReviverType<SubjectContract, ClientReviverContext> = {
 
 const observableReviver: ReviverType<ObservableContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_OBSERVABLE,
-  createValue(metadata, context) {
+  revive(metadata, context) {
     const channel = context.createChannel<ObservableMessage, ObservableMessage>({ channelId: metadata.channelId })
     const wire = wireProxyObservable(channel)
 
@@ -92,7 +92,7 @@ const subjectReplacer: ReplacerType<SubjectContract, ClientReplacerContext> = {
   detect(value): value is Subject<unknown> {
     return value instanceof Subject
   },
-  getMetadata(subject, context) {
+  replace(subject, context) {
     const channel = context.createChannel<SubjectMessage, SubjectMessage>({ ack: false })
     const metadata: SubjectMetadata = { channelId: channel.id }
 
@@ -124,7 +124,7 @@ const observableReplacer: ReplacerType<ObservableContract, ClientReplacerContext
   detect(value): value is Observable<unknown> {
     return value instanceof Observable
   },
-  getMetadata(observable, context) {
+  replace(observable, context) {
     const channel = context.createChannel<ObservableMessage, ObservableMessage>({ ack: false })
     const wire = wireSourceObservable(observable, channel)
 

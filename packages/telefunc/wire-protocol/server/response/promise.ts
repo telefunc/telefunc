@@ -9,7 +9,7 @@ import { SERIALIZER_PREFIX_PROMISE } from '../../constants.js'
 const promiseReplacer: StreamingReplacerType<PromiseContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_PROMISE,
   detect: (value): value is Promise<unknown> => isPromise(value),
-  getMetadata: (value, context) => {
+  replace: (value, context) => {
     const { metadata, close, abort } = context.sendStream(() => promiseReplacer.createProducer(value))
     return { metadata, close, abort }
   },

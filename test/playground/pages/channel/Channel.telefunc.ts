@@ -364,7 +364,7 @@ async function onChannelClientPendingAckCloseReconnect() {
 
 // Global store keyed by channel id — survives across telefunc invocations.
 const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
-function getServerCloseReconnectStore(): Map<string, ReturnType<typeof channel<(msg: string) => string, never>>> {
+function getServerCloseReconnectStore(): Map<string, ReturnType<typeof channel<never, (msg: string) => string>>> {
   return ((globalThis as any)[SERVER_CLOSE_RECONNECT_STORE_KEY] ??= new Map())
 }
 
@@ -379,7 +379,7 @@ function getServerCloseReconnectStore(): Map<string, ReturnType<typeof channel<(
  *   serverClose_<id>_serverOnCloseErr = 'pending' | 'none' | error message
  */
 async function onChannelServerPendingAckCloseReconnectOpen() {
-  const ch = channel<(msg: string) => string, never>()
+  const ch = channel<never, (msg: string) => string>()
   const id = ch.id
   cleanupState[`serverClose_${id}_closeResult`] = 'pending'
   cleanupState[`serverClose_${id}_serverOnCloseErr`] = 'pending'

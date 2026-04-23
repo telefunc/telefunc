@@ -7,6 +7,7 @@ import { parseResponse } from '../../wire-protocol/client/response/parse.js'
 import type { ReviverType, TypeContract, ClientReviverContext } from '../../wire-protocol/types.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire-protocol/request-kind.js'
 import { throwAbortError, throwBugError } from './errors.js'
+import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { CloseHandler } from '../close.js'
 import { ConnectionError } from '../ConnectionError.js'
 import { setSessionToken } from '../../wire-protocol/client/session-registry.js'
@@ -88,7 +89,7 @@ async function makeHttpRequest(callContext: {
       callContext,
       ' (if enabled: https://telefunc.com/log)',
     )
-    throw new Error(errMsg)
+    throw new ShieldValidationError(errMsg)
   } else if (statusCode === STATUS_CODE_MALFORMED_REQUEST) {
     const responseBody = await response.text()
     assertUsage(responseBody === STATUS_BODY_MALFORMED_REQUEST, wrongInstallation({ method, callContext }))

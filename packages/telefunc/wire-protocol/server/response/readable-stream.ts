@@ -7,7 +7,7 @@ import { SERIALIZER_PREFIX_STREAM } from '../../constants.js'
 const readableStreamReplacer: StreamingReplacerType<ReadableStreamContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_STREAM,
   detect: (value): value is ReadableStream<Uint8Array<ArrayBuffer>> => value instanceof ReadableStream,
-  getMetadata: (value, context) => {
+  replace: (value, context) => {
     const { metadata, close, abort } = context.sendStream(() => readableStreamReplacer.createProducer(value))
     return { metadata, close, abort }
   },

@@ -17,7 +17,7 @@ assertIsNotBrowser()
 /** File before Blob — File extends Blob, so must be checked first. */
 const serverRequestTypes = [fileReviver, blobReviver, readableStreamReviver, functionReviver]
 
-/** Captures a pending revival: prefix matched and metadata parsed, but `createValue` is deferred
+/** Captures a pending revival: prefix matched and metadata parsed, but `revive` is deferred
  *  until the telefunction's argument shields are known. `path` is the raw key sequence from
  *  brillout (generic `string[]`), e.g. `['args', '0', 'callback']`. */
 type DeferredRevival = {
@@ -26,11 +26,12 @@ type DeferredRevival = {
   path: string[]
 }
 
-/** Brillout-shape reviver that defers `createValue`. The same instance is returned to the parser
+/** Brillout-shape reviver that defers `revive`. The same instance is returned to the parser
  *  as the placeholder AND collected into `deferreds` for later resolution. */
-function createRequestReviver(
-  extensionTypes: ReviverType<TypeContract, ServerReviverContext>[],
-): { reviver: Reviver; deferreds: DeferredRevival[] } {
+function createRequestReviver(extensionTypes: ReviverType<TypeContract, ServerReviverContext>[]): {
+  reviver: Reviver
+  deferreds: DeferredRevival[]
+} {
   const deferreds: DeferredRevival[] = []
   const allTypes = [...serverRequestTypes, ...extensionTypes]
   const reviver: Reviver = (path, value, parser) => {
@@ -47,7 +48,7 @@ function createRequestReviver(
   return { reviver, deferreds }
 }
 
-/** Runs each deferred `createValue` with a per-path ServerReviverContext, then writes the result
+/** Runs each deferred `revive` with a per-path ServerReviverContext, then writes the result
  *  back to its slot in `args`. `getContext` receives the raw key segments; it's the caller's job
  *  to translate them into whatever lookup key its shield metadata uses. */
 function resolveDeferredRevivals(
@@ -63,7 +64,7 @@ function resolveDeferredRevivals(
   for (const entry of deferreds) {
     assert(entry.path[0] === 'args', `deferred revival outside args tree: ${entry.path.join('.')}`)
     const subPath = entry.path.slice(1)
-    const revived = entry.type.createValue(entry.metadata as never, getContext(subPath))
+    const revived = entry.type.revive(entry.metadata as never, getContext(subPath))
     onRevived(revived)
     set(args, subPath, revived.value)
   }

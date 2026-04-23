@@ -37,7 +37,7 @@ function createStreamingReviver(
       if (value.startsWith(type.prefix)) {
         const metadata = parser(value.slice(type.prefix.length))
         assert(isObject(metadata))
-        const revived = type.createValue(metadata as never, context)
+        const revived = type.revive(metadata as never, context)
         onRevived(revived)
         return { replacement: revived.value }
       }

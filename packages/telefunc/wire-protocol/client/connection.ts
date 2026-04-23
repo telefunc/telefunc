@@ -3,6 +3,7 @@ export type { MuxChannel, MuxConnection }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
+import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { assert } from '../../utils/assert.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import {
@@ -843,6 +844,11 @@ class ClientConnection implements MuxConnection {
         return
       case 'error':
         pending.reject(makeBugError(text || undefined))
+        return
+      case 'shield-error':
+        // Server-declared data shield rejected what this channel sent — same branded class as
+        // every other shield-fail surface so user code can catch with `isShieldValidationError`.
+        pending.reject(new ShieldValidationError(text))
     }
   }
 

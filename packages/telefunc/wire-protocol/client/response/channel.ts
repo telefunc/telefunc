@@ -5,7 +5,7 @@ import { SERIALIZER_PREFIX_CHANNEL } from '../../constants.js'
 
 const channelReviver: ReviverType<ChannelContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_CHANNEL,
-  createValue(metadata, context) {
+  revive(metadata, context) {
     const channel = context.createChannel({
       channelId: metadata.channelId,
       ack: metadata.ack,

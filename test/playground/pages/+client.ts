@@ -1,7 +1,9 @@
 import { config } from 'telefunc/client'
 
-const channelTransports = parseChannelTransports(import.meta.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
+// config.stream.transport = "binary-inline"
+// config.channel.transports = ["sse"]
 
+const channelTransports = parseChannelTransports(import.meta.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
 config.stream.transport = (import.meta.env.PUBLIC_ENV__STREAM_TRANSPORT || 'channel') as
   | 'binary-inline'
   | 'sse-inline'

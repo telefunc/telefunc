@@ -493,9 +493,7 @@ function applyPubSubConfig(val: unknown): void {
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transport') {
       assertUsage(
-        isObject(value) &&
-          typeof (value as any).send === 'function' &&
-          typeof (value as any).listen === 'function',
+        isObject(value) && typeof (value as any).send === 'function' && typeof (value as any).listen === 'function',
         'config.pubsub.transport must be a PubSubTransport with send() and listen() methods',
       )
       configState.pubsub.transport = value as PubSubTransport

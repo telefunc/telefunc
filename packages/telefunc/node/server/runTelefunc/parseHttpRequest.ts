@@ -55,9 +55,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   if (requestKind === REQUEST_KIND.MISMATCH) return { isMalformedRequest: true }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request)
-    return sseResponse
-      ? { isMalformedRequest: false, isSseRequest: true, sseResponse }
-      : { isMalformedRequest: true }
+    return sseResponse ? { isMalformedRequest: false, isSseRequest: true, sseResponse } : { isMalformedRequest: true }
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).
@@ -118,7 +116,11 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 async function readBody(
   request: Request,
   requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT | null,
-): Promise<{ text: string; registerFile: ServerReviverContext['registerFile']; consumeFile: ServerReviverContext['consumeFile'] }> {
+): Promise<{
+  text: string
+  registerFile: ServerReviverContext['registerFile']
+  consumeFile: ServerReviverContext['consumeFile']
+}> {
   if (requestKind === REQUEST_KIND.BINARY) {
     assert(request.body)
     const reader = new StreamReader(request.body)
@@ -156,10 +158,7 @@ function parseEnvelope(text: string, reviver: Reviver, runContext: RunContext): 
     parsed = parse(text, { reviver })
   } catch (err: unknown) {
     logParseError(
-      [
-        "Telefunc request body couldn't be parsed.",
-        !hasProp(err, 'message') ? null : `Parse error: ${err.message}.`,
-      ]
+      ["Telefunc request body couldn't be parsed.", !hasProp(err, 'message') ? null : `Parse error: ${err.message}.`]
         .filter(Boolean)
         .join(' '),
       runContext,

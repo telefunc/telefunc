@@ -24,6 +24,7 @@ import { assertUsage } from '../../utils/assert.js'
 import { isAbort } from '../../node/server/Abort.js'
 import type { ShieldValidators } from '../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../shared/Abort.js'
+import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
@@ -368,6 +369,10 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   _onPeerMessage(text: string): void {
     const data = parse(text) as ChannelData<ClientToServer>
     const validateData = this._validators.get('data')
+    // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
+    // await a response, so there's no `ShieldValidationError` to surface — listeners simply
+    // never see the bad value. Ack-bearing sends go through `_dispatchAckReq` and *do*
+    // reject the sender's promise via the `shield-error` wire status.
     if (validateData && validateData(data) !== true) return
     const pending: Promise<unknown>[] = []
     for (const cb of this._listeners) {
@@ -426,7 +431,12 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         const validateAck = this._validators.get('ack')
         if (validateAck) {
           const result = validateAck(parsed)
-          if (result !== true) { pending.reject(new Error(result)); return }
+          // Server-declared ack shield rejected the peer's response — same class as every
+          // other shield-fail surface, so user code can catch with `isShieldValidationError`.
+          if (result !== true) {
+            pending.reject(new ShieldValidationError(result))
+            return
+          }
         }
         pending.resolve(parsed)
         return
@@ -436,6 +446,9 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         return
       case 'error':
         pending.reject(new Error(resultText || 'Internal client channel error — see client logs'))
+        return
+      case 'shield-error':
+        pending.reject(new ShieldValidationError(resultText))
     }
   }
 
@@ -568,7 +581,12 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       const validateData = this._validators.get('data')
       if (validateData) {
         const result = validateData(data)
-        if (result !== true) { this._sendAckRes(seq, result, 'error'); return }
+        // `shield-error` status lets the client reject its `send()` promise with a branded
+        // ShieldValidationError — same identity every other shield-fail surface produces.
+        if (result !== true) {
+          this._sendAckRes(seq, result, 'shield-error')
+          return
+        }
       }
       let lastResult: unknown
       for (const cb of this._listeners) {

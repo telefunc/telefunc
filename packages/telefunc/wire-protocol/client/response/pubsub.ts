@@ -5,7 +5,7 @@ import { SERIALIZER_PREFIX_PUBSUB } from '../../constants.js'
 
 const pubsubReviver: ReviverType<PubSubContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_PUBSUB,
-  createValue(metadata, context) {
+  revive(metadata, context) {
     const channel = context.createPubSub({
       channelId: metadata.channelId,
       key: metadata.key,

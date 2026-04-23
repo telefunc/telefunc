@@ -9,7 +9,7 @@ import { SERIALIZER_PREFIX_GENERATOR } from '../../constants.js'
 const asyncGeneratorReplacer: StreamingReplacerType<AsyncGeneratorContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_GENERATOR,
   detect: (value): value is AsyncGenerator<unknown> => isAsyncGenerator(value),
-  getMetadata: (value, context) => {
+  replace: (value, context) => {
     const { metadata, close, abort } = context.sendStream(() => asyncGeneratorReplacer.createProducer(value))
     return { metadata, close, abort }
   },

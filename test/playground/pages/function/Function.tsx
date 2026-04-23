@@ -1,7 +1,16 @@
 export { FunctionDemo }
 
 import React, { useEffect, useState } from 'react'
-import { onGetGreeter, onGetAdder, onGetEchoWithState, onMap, onReduce, onUpload, onGetTypedAdder } from './Function.telefunc'
+import {
+  onGetGreeter,
+  onGetAdder,
+  onGetEchoWithState,
+  onMap,
+  onReduce,
+  onUpload,
+  onGetTypedAdder,
+  onCallBack,
+} from './Function.telefunc'
 
 type FunctionState = {
   greeterResult: string | null
@@ -13,6 +22,8 @@ type FunctionState = {
   uploadResult: { name: string; size: number } | null
   shieldReturnOk: number | null
   shieldReturnError: string | null
+  shieldCallbackOk: number | null
+  shieldCallbackError: string | null
 }
 
 function FunctionDemo() {
@@ -26,6 +37,8 @@ function FunctionDemo() {
     uploadResult: null,
     shieldReturnOk: null,
     shieldReturnError: null,
+    shieldCallbackOk: null,
+    shieldCallbackError: null,
   })
   const [log, setLog] = useState<string[]>([])
 
@@ -91,6 +104,21 @@ function FunctionDemo() {
     } catch (err: any) {
       addLog(`add("not", "numbers") → error: ${err.message}`)
       setState((s) => ({ ...s, shieldReturnError: err.message }))
+    }
+  }
+
+  async function runCallbackShield() {
+    addLog('shield: calling onCallBack(() => 42)...')
+    const ok = await onCallBack(async () => 42)
+    addLog(`onCallBack(() => 42) → ${ok}`)
+    setState((s) => ({ ...s, shieldCallbackOk: ok }))
+    try {
+      // Client returns a string; server-side shield on the callback's return type rejects it.
+      const bad = await onCallBack((async () => 'not-a-number') as any)
+      setState((s) => ({ ...s, shieldCallbackError: `NO_ERROR:${bad}` }))
+    } catch (err: any) {
+      addLog(`onCallBack(() => 'not-a-number') → error: ${err.message}`)
+      setState((s) => ({ ...s, shieldCallbackError: err.message }))
     }
   }
 
@@ -191,6 +219,23 @@ function FunctionDemo() {
         </pre>
         <pre id="shield-return-error" className="text-sm bg-zinc-50 p-2 rounded">
           {JSON.stringify(state.shieldReturnError)}
+        </pre>
+      </section>
+
+      {/* Shield: callback return value */}
+      <section className="space-y-2">
+        <h2 className="font-medium">Shield: client-callback return value</h2>
+        <p className="text-xs text-zinc-500">
+          Server expects <code>cb(): Promise&lt;number&gt;</code>; client returns a string on the bad call
+        </p>
+        <button id="shield-callback-run" onClick={runCallbackShield} className="px-3 py-1 border rounded text-sm">
+          Run
+        </button>
+        <pre id="shield-callback-ok" className="text-sm bg-zinc-50 p-2 rounded">
+          {JSON.stringify(state.shieldCallbackOk)}
+        </pre>
+        <pre id="shield-callback-error" className="text-sm bg-zinc-50 p-2 rounded">
+          {JSON.stringify(state.shieldCallbackError)}
         </pre>
       </section>
 

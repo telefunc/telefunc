@@ -25,19 +25,6 @@ import { Observable, type Subscription } from 'rxjs'
 import { isObject } from './isObject.js'
 import { assert } from './assert.js'
 
-/** Module augmentation: declares inbound-data shields for rxjs values.
- *  The generateShield walker descends into `__DEFINE_TELEFUNC_SHIELDS` to emit a `next` validator
- *  that fires on the server side where client-sent `msg.v` arrives (wireSubject / wireProxyObservable).
- *  Type-only — the property is never read at runtime. */
-declare module 'rxjs' {
-  interface Subject<T> {
-    readonly __DEFINE_TELEFUNC_SHIELDS: { next: T }
-  }
-  interface Observable<T> {
-    readonly __DEFINE_TELEFUNC_SHIELDS: { next: T }
-  }
-}
-
 /** WeakSet of errors that `onUnhandledError` handlers may use to suppress
  *  telefunc-originated errors. Populated by markSwallowed() before any call
  *  to subject.error()/sub.error() in the wire layer. */
@@ -187,6 +174,9 @@ function wireSubject(
           remoteUnsubscribe()
           break
         case MSG.NEXT:
+          // Shield fail = silent drop (validator auto-logs). We deliberately don't throw a
+          // `ShieldValidationError` into the Subject here: the Subject may be shared across
+          // subscribers and terminating it on one bad client value would be disproportionate.
           if (validateNext && validateNext(msg.v) !== true) break
           subject.next(msg.v)
           break
@@ -311,6 +301,8 @@ function wireProxyObservable(
     if (!sub) return
     switch (msg.t) {
       case OBS_MSG.NEXT:
+        // Shield fail = silent drop (validator auto-logs). Same rationale as wireSubject:
+        // an Observable subscription shouldn't terminate on a single bad value.
         if (validateNext && validateNext(msg.v) !== true) break
         sub.next(msg.v)
         break

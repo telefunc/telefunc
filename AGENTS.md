@@ -28,6 +28,3 @@ Before answering ANY question, you MUST enumerate every relevant fact, constrain
 - **Never fabricate results.** If you didn't run a command, don't describe its output. If you didn't read a file, don't quote it. If a test failed, show the failure — don't say it passed.
 - **Never stop mid-feature and call it complete.** If a task has multiple steps, finish all of them. If you genuinely can't continue (blocked, need input, hitting a wall), list every unfinished step explicitly. "The rest is straightforward" is not acceptable — if it's straightforward, do it.
 - **If you're unsure whether something works, that means it doesn't work yet.** Uncertainty = unverified = not done.
-
-## Active project context
-- **`node/` folder split (TODO):** `node/server/**` and `node/react-streaming/**` are *runtime* (worker-safe — no `node:*` except dynamic-imported with fallback). Everything else under `node/` (`vite/`, `webpack/`, `babel/`, `next/`, `nuxt/`, `shared/transformer/`, `shared/discoverExtensions.ts`) is *build-time*. The naming is misleading — eventually split into `runtime/` vs `build/`. Until then, treat the boundary as real.

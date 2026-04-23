@@ -12,7 +12,7 @@ const channelReplacer: ReplacerType<ChannelContract, ServerReplacerContext> = {
   detect(value): value is ChannelContract['value'] {
     return ServerChannel.isServerChannel(value)
   },
-  getMetadata(channel, context) {
+  replace(channel, context) {
     context.registerChannel(channel)
     return {
       metadata: {

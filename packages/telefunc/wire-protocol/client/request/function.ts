@@ -6,7 +6,7 @@ import { SERIALIZER_PREFIX_FUNCTION } from '../../constants.js'
 const functionReplacer: ReplacerType<FunctionContract, ClientReplacerContext> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
   detect: (value): value is FunctionContract['value'] => typeof value === 'function',
-  getMetadata: (fn, context) => {
+  replace: (fn, context) => {
     const channel = context.createChannel<unknown, readonly unknown[]>({ ack: true })
     channel.listen((args) => fn(...args))
     return {

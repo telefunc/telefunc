@@ -22,6 +22,20 @@ import {
   type ObservableMetadata,
 } from './shared.js'
 
+/** Module augmentation: declares inbound-data shields for rxjs values.
+ *  The generateShield walker descends into `__DEFINE_TELEFUNC_SHIELDS` to emit a `next` validator
+ *  that fires on the server side where client-sent `msg.v` arrives (wireSubject / wireProxyObservable).
+ *  Type-only — the property is never read at runtime — and server-only, because the shield generator
+ *  runs server-side and no client code depends on the marker. */
+declare module 'rxjs' {
+  interface Subject<T> {
+    readonly __DEFINE_TELEFUNC_SHIELDS: { next: T }
+  }
+  interface Observable<T> {
+    readonly __DEFINE_TELEFUNC_SHIELDS: { next: T }
+  }
+}
+
 // Server-side: swallow ALL unhandled rxjs errors to prevent process crash.
 // Still log them so bugs are visible in server logs.
 rxjsConfig.onUnhandledError = (err) => {
@@ -36,7 +50,7 @@ const subjectReplacer: ReplacerType<SubjectContract, ServerReplacerContext> = {
   detect(value): value is Subject<unknown> {
     return value instanceof Subject
   },
-  getMetadata(subject, context) {
+  replace(subject, context) {
     const channel = context.createChannel<SubjectMessage, SubjectMessage>({ ack: false })
     const metadata: SubjectMetadata = { channelId: channel.id }
 
@@ -61,7 +75,7 @@ const observableReplacer: ReplacerType<ObservableContract, ServerReplacerContext
   detect(value): value is Observable<unknown> {
     return value instanceof Observable
   },
-  getMetadata(observable, context) {
+  replace(observable, context) {
     const channel = context.createChannel<ObservableMessage, ObservableMessage>({ ack: false })
     const wire = wireSourceObservable(observable, channel)
 
@@ -82,7 +96,7 @@ const observableReplacer: ReplacerType<ObservableContract, ServerReplacerContext
 
 const subjectReviver: ReviverType<SubjectContract, ServerReviverContext> = {
   prefix: SERIALIZER_PREFIX_SUBJECT,
-  createValue(metadata, context) {
+  revive(metadata, context) {
     const channel = context.createChannel<SubjectMessage, SubjectMessage>({ id: metadata.channelId })
 
     const subject = new Subject<unknown>()
@@ -110,7 +124,7 @@ const subjectReviver: ReviverType<SubjectContract, ServerReviverContext> = {
 
 const observableReviver: ReviverType<ObservableContract, ServerReviverContext> = {
   prefix: SERIALIZER_PREFIX_OBSERVABLE,
-  createValue(metadata, context) {
+  revive(metadata, context) {
     const channel = context.createChannel<ObservableMessage, ObservableMessage>({ id: metadata.channelId })
     // Client-passed Observable arg: client emits → server's proxy receives via `msg.v`.
     // Those arrivals are untrusted client data — validate.

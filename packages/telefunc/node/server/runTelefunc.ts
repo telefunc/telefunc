@@ -18,6 +18,7 @@ import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
 import { resolveReturnShields } from './shield.js'
 import { getServerConfig } from './serverConfig.js'
+import { isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { Readable as StreamReadableNode, Writable as StreamWritableNode } from 'node:stream'
 import { loadStreamNodeModule } from '../../utils/loadStreamNodeModule.js'
 import {
@@ -317,7 +318,7 @@ async function runTelefunc_({
 
   // Revive arguments now that we know the telefunction — per-value ServerReviverContext carries the
   // shield validators built from the telefunction's argumentShields metadata, so revivers have them
-  // at createValue time and can wire inline validation symmetric to the response-side replacers.
+  // at revive time and can wire inline validation symmetric to the response-side replacers.
   objectAssign(runContext, { telefunctionArgs: runContext.reviveArgs(runContext.telefunction) })
 
   {
@@ -356,6 +357,9 @@ async function runTelefunc_({
   }
 
   if (runContext.telefunctionHasErrored) {
+    if (isShieldValidationError(runContext.telefunctionTopLevelError)) {
+      return createHttpResponse({ ...shieldValidationError })
+    }
     throw runContext.telefunctionTopLevelError
   }
 

@@ -149,3 +149,60 @@ List of `shield()` types:
 `t.optional(T)` | <code>T &#x7c; undefined</code> | <code>isT(value) &#x7c;&#x7c; value === undefined</code>
 `t.nullable(T)` | <code>T &#x7c; null</code> | <code>isT(value) &#x7c;&#x7c; value === null</code>
 `t.any` | `any` | `true`
+
+
+## Beyond top-level arguments
+
+Telefunc's automatic `shield()` generation isn't limited to a telefunction's direct arguments. It also emits **sub-shields** for values nested inside your types wherever the RPC boundary extends — callbacks and channels below, and <Link href="/extensions/rxjs#shields" text="RxJS streams" /> via `@telefunc/rxjs`. Sub-shields come from the same TypeScript types, so the runtime check always matches the declared type.
+
+The invariant: **only values arriving at the server are validated.** Values flowing the other way are trusted (the server is the trust boundary).
+
+### Function arguments
+
+A callback passed as an argument, or a function returned to the client, extends the RPC boundary to a second call site:
+
+- **Client-passed callback** — its **return value** is validated when the server invokes it.
+- **Server-returned function** — its **arguments** are validated when the client invokes it.
+
+```ts
+// Upload.telefunc.ts
+export async function onUpload(
+  file: File,
+  onProgress: (percent: number) => void,  // void → client must resolve with `undefined`
+) {
+  onProgress(50)
+}
+
+export async function getUser(id: string) {
+  return {
+    refresh: (after: number) => fetchUser(id),  // `after` is validated when the client calls refresh(n)
+  }
+}
+```
+
+> `void` return types compile to a shield that accepts only `undefined`. A callback typed `() => Promise<void>` that returns a truthy value is rejected — otherwise `if (await cb()) …` would branch on client-returned garbage.
+
+
+### Channels
+
+[`channel<ClientToServer, ServerToClient>()`](/channel) declares two typed directions, each a function signature `(msg) => ack`. Telefunc generates two sub-shields that fire on the server:
+
+- **`data`** — validates messages arriving from the client (input to `listen()`).
+- **`ack`** — validates the ack returned by the client's `listen()` to a server-initiated `send(..., { ack: true })`.
+
+```ts
+const ch = channel<
+  (msg: { text: string }) => { received: true },  // client → server
+  (msg: { tick: number }) => void                  // server → client
+>()
+
+ch.listen((msg) => {
+  // `msg.text` is shield-checked before this runs; non-matching messages are dropped.
+  return { received: true }
+})
+
+// ack from the client's listen is shield-checked against `void` (= undefined).
+await ch.send({ tick: 1 }, { ack: true })
+```
+
+> A direction typed `never` rejects any value at runtime — it means "no traffic expected on this direction." If you send traffic on a `never` direction anyway, the corresponding `data` or `ack` shield will fail. Make sure the direction you actually use at runtime isn't `never`.
