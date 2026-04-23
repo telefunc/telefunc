@@ -53,6 +53,23 @@ function testFunction() {
     })
   })
 
+  test('function: shield validates returned function args', async () => {
+    await page.click('#shield-return-run')
+
+    await autoRetry(async () => {
+      // Valid call should succeed
+      const ok = await getResult<number>('#shield-return-ok')
+      expect(ok).toBe(7)
+
+      // Invalid call (strings instead of numbers) — the server-side listener returns a
+      // marker object (`FN_SHIELD_ERROR_KEY`) as its ack payload and the client-side
+      // function reviver throws with the validator's message.
+      const error = await getResult<string>('#shield-return-error')
+      expect(error).not.toBe('NO_ERROR')
+      expect(error).toMatch(/shield validation error/i)
+    })
+  })
+
   test('function: file upload with progress callback receives incremental updates', async () => {
     await page.click('#upload-run')
 

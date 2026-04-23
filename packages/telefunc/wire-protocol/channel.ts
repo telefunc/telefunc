@@ -57,6 +57,14 @@ type ChannelCloseCallback = (err?: Error) => void | Promise<void>
  * Shared base for `Channel` and `ClientChannel`.
  */
 type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false> = {
+  readonly __DEFINE_TELEFUNC_SHIELDS: {
+    /** Data that flows through `send` (TOut). When the server inspects the `ClientChannel` returned
+     *  by a telefunction, TOut = client→server messages — the shield validates those on arrival. */
+    data: ChannelData<TOut>
+    /** Ack response for what this side listens to (TIn). For a `ClientChannel` returned to the client,
+     *  the client's `listen` acks back to the server's send — the shield validates the arriving ack. */
+    ack: ChannelAck<TIn>
+  }
   readonly id: string
   readonly isClosed: boolean
   /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`. */

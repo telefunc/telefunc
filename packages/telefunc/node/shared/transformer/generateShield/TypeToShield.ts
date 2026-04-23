@@ -22,13 +22,31 @@ declare global {
   }
 }
 
+// On multi-match (e.g. `Subject<T>` matches both `subject` and `observable` since
+// Subject extends Observable), pick the key whose value type isn't a proper supertype
+// of another matched key's value — the most specific.
 // prettier-ignore
 // biome-ignore format:
 type ExtensionType<T, Acc extends any[] = [], Keys = keyof Telefunc.ShieldTypeMap> =
   Keys extends infer K extends keyof Telefunc.ShieldTypeMap & string
     ? T extends Telefunc.ShieldTypeMap[K]
-      ? ShieldRes<`__telefunc_t.${K}`, Acc>
+      ? true extends HasStricterMatch<T, K>
+        ? never
+        : ShieldRes<`__telefunc_t.${K}`, Acc>
       : never
+    : false
+// prettier-ignore
+// biome-ignore format:
+type HasStricterMatch<T, K extends keyof Telefunc.ShieldTypeMap> =
+  keyof Telefunc.ShieldTypeMap extends infer K2
+    ? K2 extends keyof Telefunc.ShieldTypeMap
+      ? K2 extends K ? false
+        : T extends Telefunc.ShieldTypeMap[K2]
+          ? Telefunc.ShieldTypeMap[K2] extends Telefunc.ShieldTypeMap[K]
+            ? Telefunc.ShieldTypeMap[K] extends Telefunc.ShieldTypeMap[K2] ? false : true
+            : false
+          : false
+      : false
     : false
 type ExtensionTypeResult<T, Acc extends any[] = []> = [ExtensionType<T, Acc>] extends [never]
   ? false
@@ -199,7 +217,7 @@ type JoinStrings<T extends any[], Acc extends string = ''> = T extends [infer He
     : Acc
   : Acc
 
-type ShieldStr<T, Res = Shield<T>> = Res extends ShieldRes<any, any> ? WrapShieldRes<Res> : never
+export type ShieldStr<T, Res = Shield<T>> = Res extends ShieldRes<any, any> ? WrapShieldRes<Res> : never
 
 type Tail<L extends any[]> = L extends readonly [] ? [] : L extends readonly [any?, ...infer LTail] ? LTail : []
 

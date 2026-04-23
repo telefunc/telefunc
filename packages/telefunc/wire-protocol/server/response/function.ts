@@ -1,7 +1,7 @@
 export { functionReplacer }
 
 import type { FunctionContract, ReplacerType, ServerReplacerContext } from '../../types.js'
-import { SERIALIZER_PREFIX_FUNCTION } from '../../constants.js'
+import { SERIALIZER_PREFIX_FUNCTION, FN_SHIELD_ERROR_KEY } from '../../constants.js'
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -11,9 +11,17 @@ const functionReplacer: ReplacerType<FunctionContract, ServerReplacerContext> = 
   detect(value): value is FunctionContract['value'] {
     return typeof value === 'function'
   },
-  getMetadata(fn, { createChannel }) {
+  getMetadata(fn, { createChannel, validators }) {
     const channel = createChannel<unknown, readonly unknown[]>({ ack: true })
-    channel.listen((args) => fn(...args))
+    const validateArgs = validators.get('args')
+    channel.listen((args) => {
+      if (validateArgs) {
+        // The validator auto-logs the full message server-side via `config.log.shieldErrors`.
+        // Return a marker-only payload so the client sees just the canonical generic message.
+        if (validateArgs(...args) !== true) return { [FN_SHIELD_ERROR_KEY]: true }
+      }
+      return fn(...args)
+    })
     return {
       metadata: { channelId: channel.id },
       async close() {

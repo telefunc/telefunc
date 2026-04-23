@@ -18,12 +18,25 @@ export type {
   ObservableMessage,
 }
 
-import type { TypeContract, ChannelBase } from 'telefunc'
+import type { TypeContract, ChannelBase, ShieldValidators } from 'telefunc'
 import { Abort } from 'telefunc/client'
 import type { Subject, Subscriber } from 'rxjs'
 import { Observable, type Subscription } from 'rxjs'
 import { isObject } from './isObject.js'
 import { assert } from './assert.js'
+
+/** Module augmentation: declares inbound-data shields for rxjs values.
+ *  The generateShield walker descends into `__DEFINE_TELEFUNC_SHIELDS` to emit a `next` validator
+ *  that fires on the server side where client-sent `msg.v` arrives (wireSubject / wireProxyObservable).
+ *  Type-only — the property is never read at runtime. */
+declare module 'rxjs' {
+  interface Subject<T> {
+    readonly __DEFINE_TELEFUNC_SHIELDS: { next: T }
+  }
+  interface Observable<T> {
+    readonly __DEFINE_TELEFUNC_SHIELDS: { next: T }
+  }
+}
 
 /** WeakSet of errors that `onUnhandledError` handlers may use to suppress
  *  telefunc-originated errors. Populated by markSwallowed() before any call
@@ -98,7 +111,14 @@ type ObservableMessage =
  *   the caller's responsibility (reviver/replacer) because only they know
  *   whether the Subject is safe to terminate (per-request vs potentially shared).
  */
-function wireSubject(subject: Subject<unknown>, channel: ChannelBase<SubjectMessage, SubjectMessage>) {
+function wireSubject(
+  subject: Subject<unknown>,
+  channel: ChannelBase<SubjectMessage, SubjectMessage>,
+  validators?: ShieldValidators,
+) {
+  // Only populated on the server side — see subjectReplacer/subjectReviver in server.ts.
+  // Client side passes `undefined` since the server's emissions are trusted.
+  const validateNext = validators?.get('next')
   let isProcessingRemote = false
   let remoteSub: Subscription | null = null
   let localSubscriberCount = 0
@@ -167,6 +187,7 @@ function wireSubject(subject: Subject<unknown>, channel: ChannelBase<SubjectMess
           remoteUnsubscribe()
           break
         case MSG.NEXT:
+          if (validateNext && validateNext(msg.v) !== true) break
           subject.next(msg.v)
           break
         case MSG.ERROR: {
@@ -275,7 +296,13 @@ function wireSourceObservable(
  * Each subscribe() sends OBS_MSG.SUBSCRIBE with a unique id, triggering a fresh
  * server-side subscription. Messages are routed by id.
  */
-function wireProxyObservable(channel: ChannelBase<ObservableMessage, ObservableMessage>) {
+function wireProxyObservable(
+  channel: ChannelBase<ObservableMessage, ObservableMessage>,
+  validators?: ShieldValidators,
+) {
+  // Only populated on the server side when an Observable arrives as a telefunc arg.
+  // Client side leaves `undefined` — server-emitted values are trusted.
+  const validateNext = validators?.get('next')
   const subscribers = new Map<number, Subscriber<unknown>>()
   let nextId = 0
 
@@ -284,6 +311,7 @@ function wireProxyObservable(channel: ChannelBase<ObservableMessage, ObservableM
     if (!sub) return
     switch (msg.t) {
       case OBS_MSG.NEXT:
+        if (validateNext && validateNext(msg.v) !== true) break
         sub.next(msg.v)
         break
       case OBS_MSG.ERROR: {

@@ -13,6 +13,9 @@ export {
   onSubjectArgNoErrorHandler,
   onSharedSubjectOneErrors,
   onSubjectNoHandler,
+  onShieldSubjectArg,
+  onShieldSubjectReturn,
+  onShieldObservableArg,
 }
 
 import { Observable, Subject, interval } from 'rxjs'
@@ -165,6 +168,54 @@ async function onSubjectArgNoErrorHandler(input$: Subject<string>) {
 const sharedErrorSubject = new Subject<string>()
 async function onSharedSubjectOneErrors() {
   return sharedErrorSubject
+}
+
+// === Shield: data-flow validation on Subject/Observable ===
+//
+// Client-sent `.next(v)` flowing into the server must be validated against the
+// inner type (`T` in `Subject<T>` / `Observable<T>`). Invalid values are silently
+// dropped by the server wire — the server's subscription never sees them.
+
+// Subject as arg: client sends a mix of valid strings and an invalid number.
+// The shield drops the invalid value before `subject.next()` fires on the server.
+async function onShieldSubjectArg(input$: Subject<string>) {
+  const received: string[] = []
+  input$.subscribe((v) => {
+    received.push(v)
+  })
+  return {
+    getReceived: async () => received,
+  }
+}
+
+// Subject as return: the server subscribes to its own returned Subject so client-sent
+// values land in `received`. Shield drops invalid client values.
+async function onShieldSubjectReturn() {
+  const subject = new Subject<string>()
+  const received: string[] = []
+  subject.subscribe((v) => {
+    received.push(v)
+  })
+  return {
+    subject,
+    getReceived: async () => received,
+  }
+}
+
+// Observable as arg: client emits a mix of valid numbers and an invalid string.
+// The shield drops the invalid value before `subscriber.next()` fires on the server.
+async function onShieldObservableArg(input$: Observable<number>) {
+  const received: number[] = []
+  return new Promise<number[]>((resolve) => {
+    input$.subscribe({
+      next(v) {
+        received.push(v)
+      },
+      complete() {
+        resolve(received)
+      },
+    })
+  })
 }
 
 // Server returns a Subject, subscribes to it with NO error handler, then

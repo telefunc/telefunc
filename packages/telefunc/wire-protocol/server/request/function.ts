@@ -7,10 +7,19 @@ assertIsNotBrowser()
 
 const functionReviver: ReviverType<FunctionContract, ServerReviverContext> = {
   prefix: SERIALIZER_PREFIX_FUNCTION,
-  createValue: ({ channelId }, context) => {
-    const channel = context.createChannel({ id: channelId, ack: true })
+  createValue: ({ channelId }, { createChannel, validators }) => {
+    const channel = createChannel({ id: channelId, ack: true })
+    const validateReturn = validators.get('return')
+    const fn = async (...args: unknown[]) => {
+      const res = await channel.send(args, { ack: true })
+      if (validateReturn) {
+        const r = validateReturn(res)
+        if (r !== true) throw new Error(r)
+      }
+      return res
+    }
     return {
-      value: (...args) => channel.send(args, { ack: true }),
+      value: fn,
       async close() {
         await channel.close()
       },

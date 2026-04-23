@@ -12,18 +12,24 @@ import { testStreamToServer } from './pages/stream-to-server/e2e-test'
 import { testLiveQuery } from './pages/live-query/e2e-test'
 import { testRxjs } from './pages/rxjs/e2e-test'
 
-function testRun(cmd: 'npm run dev' | 'npm run preview') {
+function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   run(cmd, {
     tolerateError(log) {
       return (
         log.logText.includes('File arguments are being consumed out of order') ||
         log.logText.includes('multiple streaming values') ||
         log.logText.includes('the server responded with a status of 500') ||
+        log.logText.includes('the server responded with a status of 422') ||
         log.logText.includes('[telefunc:channel-error]') ||
         log.logText.includes('Error: server-listener-bug') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('[telefunc:rxjs]') ||
         log.logText.includes('Unhandled rxjs error') ||
+        log.logText.includes('Shield Validation Error') ||
+        // Transitions between tests close the previous page's channels; the server-side
+        // Subject/Observable wire waits for a reconnect within the grace period and logs this
+        // if the browser has already navigated away.
+        log.logText.includes('Channel timed out: client did not reconnect') ||
         log.logText.includes('The user aborted a request') ||
         log.logText.includes('Telefunc call cancelled') ||
         log.logText.includes('ERR_INTERNET_DISCONNECTED') ||
@@ -34,7 +40,7 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
     },
   })
 
-  const isDev = cmd === 'npm run dev'
+  const isDev = cmd === 'pnpm dev'
 
   test('hello', async () => {
     {

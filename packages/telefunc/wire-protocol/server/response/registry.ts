@@ -21,9 +21,11 @@ const serverTypes = [
   functionReplacer,
 ]
 
-/** Creates a JSON-serializer replacer that delegates to type-specific plugins. */
+/** Creates a JSON-serializer replacer that delegates to type-specific plugins.
+ *  The caller provides `getContext(value)` which returns a per-value ServerReplacerContext —
+ *  the registry has no shield logic, it just iterates types and forwards the context. */
 function createStreamingReplacer(
-  context: ServerReplacerContext,
+  getContext: (value: unknown) => ServerReplacerContext,
   onReplaced: (replaced: { close: () => Promise<void> | void; abort: (abortError: AbortError) => void }) => void,
   extensionTypes: ReplacerType<TypeContract, ServerReplacerContext>[],
 ) {
@@ -31,7 +33,7 @@ function createStreamingReplacer(
   const replacer = (_key: string, value: unknown, serializer: (v: unknown) => string) => {
     for (const type of allTypes) {
       if (type.detect(value)) {
-        const { metadata, close, abort } = type.getMetadata(value as never, context)
+        const { metadata, close, abort } = type.getMetadata(value as never, getContext(value))
         onReplaced({ close, abort })
         return {
           replacement: type.prefix + serializer(metadata),

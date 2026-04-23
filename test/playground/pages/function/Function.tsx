@@ -1,7 +1,7 @@
 export { FunctionDemo }
 
 import React, { useEffect, useState } from 'react'
-import { onGetGreeter, onGetAdder, onGetEchoWithState, onMap, onReduce, onUpload } from './Function.telefunc'
+import { onGetGreeter, onGetAdder, onGetEchoWithState, onMap, onReduce, onUpload, onGetTypedAdder } from './Function.telefunc'
 
 type FunctionState = {
   greeterResult: string | null
@@ -11,6 +11,8 @@ type FunctionState = {
   reduceResult: number | null
   uploadProgress: number[]
   uploadResult: { name: string; size: number } | null
+  shieldReturnOk: number | null
+  shieldReturnError: string | null
 }
 
 function FunctionDemo() {
@@ -22,6 +24,8 @@ function FunctionDemo() {
     reduceResult: null,
     uploadProgress: [],
     uploadResult: null,
+    shieldReturnOk: null,
+    shieldReturnError: null,
   })
   const [log, setLog] = useState<string[]>([])
 
@@ -71,6 +75,23 @@ function FunctionDemo() {
     const result = await onReduce([1, 2, 3, 4, 5], async (acc, n) => acc + n, 0)
     addLog(`reduce result → ${result}`)
     setState((s) => ({ ...s, reduceResult: result }))
+  }
+
+  async function runShieldReturn() {
+    addLog('shield: calling onGetTypedAdder()...')
+    const add = await onGetTypedAdder()
+    // Valid call
+    const ok = await add(3, 4)
+    addLog(`add(3, 4) → ${ok}`)
+    setState((s) => ({ ...s, shieldReturnOk: ok }))
+    // Invalid call — pass strings instead of numbers
+    try {
+      await (add as any)('not', 'numbers')
+      setState((s) => ({ ...s, shieldReturnError: 'NO_ERROR' }))
+    } catch (err: any) {
+      addLog(`add("not", "numbers") → error: ${err.message}`)
+      setState((s) => ({ ...s, shieldReturnError: err.message }))
+    }
   }
 
   async function runUpload() {
@@ -153,6 +174,23 @@ function FunctionDemo() {
         </button>
         <pre id="reduce-result" className="text-sm bg-zinc-50 p-2 rounded">
           {JSON.stringify(state.reduceResult)}
+        </pre>
+      </section>
+
+      {/* Shield: returned function args */}
+      <section className="space-y-2">
+        <h2 className="font-medium">Shield: returned function args</h2>
+        <p className="text-xs text-zinc-500">
+          Server returns <code>(a: number, b: number) =&gt; number</code>; client calls with wrong types
+        </p>
+        <button id="shield-return-run" onClick={runShieldReturn} className="px-3 py-1 border rounded text-sm">
+          Run
+        </button>
+        <pre id="shield-return-ok" className="text-sm bg-zinc-50 p-2 rounded">
+          {JSON.stringify(state.shieldReturnOk)}
+        </pre>
+        <pre id="shield-return-error" className="text-sm bg-zinc-50 p-2 rounded">
+          {JSON.stringify(state.shieldReturnError)}
         </pre>
       </section>
 

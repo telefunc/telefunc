@@ -7,6 +7,11 @@ export const SERIALIZER_PREFIX_CHANNEL = '!TelefuncChannel:'
 export const SERIALIZER_PREFIX_FUNCTION = '!TelefuncFunction:'
 export const SERIALIZER_PREFIX_PUBSUB = '!TelefuncPubSub:'
 
+/** Marker key used on the ack payload of a server-returned function when its arg shield
+ *  rejects the incoming args. The client-side reviver detects this and throws on the
+ *  caller's side — keeps the channel oblivious to shield semantics. */
+export const FN_SHIELD_ERROR_KEY = '__telefunc_fn_shield_error'
+
 // ===== WS transport =====
 
 // ===== Channel pump frame tags =====

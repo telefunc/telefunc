@@ -40,7 +40,9 @@ const subjectReplacer: ReplacerType<SubjectContract, ServerReplacerContext> = {
     const channel = context.createChannel<SubjectMessage, SubjectMessage>({ ack: false })
     const metadata: SubjectMetadata = { channelId: channel.id }
 
-    const wire = wireSubject(subject, channel)
+    // Server-returned Subject: client calls `.next()` on its proxy → the server's `wireSubject`
+    // receives those values via `msg.v`. Those arrivals are untrusted client data — validate.
+    const wire = wireSubject(subject, channel, context.validators)
 
     return {
       metadata,
@@ -84,7 +86,9 @@ const subjectReviver: ReviverType<SubjectContract, ServerReviverContext> = {
     const channel = context.createChannel<SubjectMessage, SubjectMessage>({ id: metadata.channelId })
 
     const subject = new Subject<unknown>()
-    const wire = wireSubject(subject, channel)
+    // Client-passed Subject arg: the client owns the Subject; server receives `msg.v` from it.
+    // Those arrivals are untrusted client data — validate.
+    const wire = wireSubject(subject, channel, context.validators)
 
     // Proxy side: Subject is per-request (created here). Propagate abort errors
     // to local subscribers so the server function sees the error.
@@ -108,7 +112,9 @@ const observableReviver: ReviverType<ObservableContract, ServerReviverContext> =
   prefix: SERIALIZER_PREFIX_OBSERVABLE,
   createValue(metadata, context) {
     const channel = context.createChannel<ObservableMessage, ObservableMessage>({ id: metadata.channelId })
-    const wire = wireProxyObservable(channel)
+    // Client-passed Observable arg: client emits → server's proxy receives via `msg.v`.
+    // Those arrivals are untrusted client data — validate.
+    const wire = wireProxyObservable(channel, context.validators)
 
     return {
       value: wire.observable,

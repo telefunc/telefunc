@@ -1,7 +1,13 @@
 export { getPubSubAdapter, setPubSubAdapter, DefaultPubSubAdapter }
-export type { PubSubAdapter, PubSubUnsubscribe, PubSubPublishResult, PubSubOnMessage, PubSubBinaryOnMessage }
+export type {
+  PubSubAdapter,
+  PubSubTransport,
+  PubSubUnsubscribe,
+  PubSubPublishResult,
+  PubSubOnMessage,
+  PubSubBinaryOnMessage,
+}
 
-import { assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
 import type { WirePublishInfo } from '../shared-ws.js'
@@ -23,21 +29,38 @@ type PubSubAdapter = {
   publishBinary(key: string, data: Uint8Array): PubSubPublishResult | Promise<PubSubPublishResult>
 }
 
+/**
+ * Minimal interface for a pub/sub transport backend.
+ *
+ * Implement these 4 methods to get a full PubSubAdapter via `new DefaultPubSubAdapter(transport)`.
+ * Subscriber multiplexing and lifecycle are handled for you.
+ */
+type PubSubTransport = {
+  /** Send a text message. Must return the assigned seq and ts. */
+  send(key: string, payload: string): { seq: number; ts: number } | Promise<{ seq: number; ts: number }>
+  /** Listen for text messages on a key. Called at most once per key. Return an unsubscribe function. */
+  listen(key: string, onMessage: (payload: string, info: { seq: number; ts: number }) => void): () => void
+  /** Send a binary message. Must return the assigned seq and ts. */
+  sendBinary(key: string, payload: Uint8Array): { seq: number; ts: number } | Promise<{ seq: number; ts: number }>
+  /** Listen for binary messages on a key. Called at most once per key. Return an unsubscribe function. */
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; ts: number }) => void): () => void
+}
+
 // ---------------------------------------------------------------------------
-// Default adapter — handles in-memory + wrapped (user-provided adapter)
+// Default adapter — subscriber multiplexer + in-memory fallback
 // ---------------------------------------------------------------------------
 
 class DefaultPubSubAdapter implements PubSubAdapter {
-  private readonly wrappedAdapter: PubSubAdapter | null
+  private readonly transport: PubSubTransport | null
   private readonly subscriptions = new Map<string, Set<PubSubOnMessage>>()
   private readonly binarySubscriptions = new Map<string, Set<PubSubBinaryOnMessage>>()
-  private readonly adapterUnsubs = new Map<string, () => void>()
-  private readonly adapterBinaryUnsubs = new Map<string, () => void>()
+  private readonly transportUnsubs = new Map<string, () => void>()
+  private readonly transportBinaryUnsubs = new Map<string, () => void>()
   /** Per-key seq counter for in-memory mode. */
   private readonly keySeqs = new Map<string, number>()
 
-  constructor(adapter?: PubSubAdapter) {
-    this.wrappedAdapter = adapter ?? null
+  constructor(transport?: PubSubTransport) {
+    this.transport = transport ?? null
   }
 
   subscribe(key: string, onMessage: PubSubOnMessage): PubSubUnsubscribe {
@@ -48,11 +71,11 @@ class DefaultPubSubAdapter implements PubSubAdapter {
     }
     subs.add(onMessage)
 
-    if (this.wrappedAdapter && !this.adapterUnsubs.has(key)) {
-      this.adapterUnsubs.set(
+    if (this.transport && !this.transportUnsubs.has(key)) {
+      this.transportUnsubs.set(
         key,
-        this.wrappedAdapter.subscribe(key, (message, info) => {
-          this._onAdapterMessage(key, message, info)
+        this.transport.listen(key, (payload, info) => {
+          this._deliver(this.subscriptions, key, payload, info)
         }),
       )
     }
@@ -63,68 +86,19 @@ class DefaultPubSubAdapter implements PubSubAdapter {
       s.delete(onMessage)
       if (s.size === 0) {
         this.subscriptions.delete(key)
-        return this._resolveAdapterUnsub(this.adapterUnsubs, key)
+        this._releaseUnsub(this.transportUnsubs, key)
       }
     }
-  }
-
-  private _resolveAdapterUnsub(map: Map<string, () => void>, key: string): void {
-    const unsub = map.get(key)
-    if (!unsub) return
-    map.delete(key)
-    unsub()
   }
 
   publish(key: string, serialized: string): PubSubPublishResult | Promise<PubSubPublishResult> {
-    if (this.wrappedAdapter) {
-      return this._publishViaAdapter(key, serialized)
+    if (this.transport) {
+      const result = this.transport.send(key, serialized)
+      if (isPromise(result)) return result
+      return result
     }
-    return this._publishInMemory(key, serialized)
+    return this._publishInMemory(this.subscriptions, key, serialized)
   }
-
-  private _publishInMemory(key: string, serialized: string): PubSubPublishResult {
-    const subs = this.subscriptions.get(key)
-    const seq = (this.keySeqs.get(key) ?? 0) + 1
-    this.keySeqs.set(key, seq)
-    const ts = Date.now()
-    let delivered = 0
-
-    if (subs) {
-      for (const onMessage of subs.values()) {
-        delivered++
-        onMessage(serialized, { seq, ts })
-      }
-    }
-
-    return { seq, ts, meta: { delivered, transport: 'in-memory' } }
-  }
-
-  private _publishViaAdapter(key: string, serialized: string): PubSubPublishResult | Promise<PubSubPublishResult> {
-    const result = this.wrappedAdapter!.publish(key, serialized)
-    if (isPromise(result)) return result.then((r) => this._toResult(r))
-    return this._toResult(result)
-  }
-
-  private _toResult(result: PubSubPublishResult): PubSubPublishResult {
-    const seq = result.seq ?? 0
-    const ts = result.ts ?? Date.now()
-    assertUsage(Number.isFinite(seq) && Number.isFinite(ts), 'PubSubAdapter.publish() must return finite seq and ts')
-    return { seq, ts, meta: result.meta }
-  }
-
-  private _onAdapterMessage(key: string, serialized: string, adapterInfo: WirePublishInfo): void {
-    assertUsage(
-      Number.isFinite(adapterInfo.seq) && Number.isFinite(adapterInfo.ts),
-      'PubSubAdapter deliver callback must provide finite seq and ts',
-    )
-    const subs = this.subscriptions.get(key)
-    if (!subs) return
-    for (const onMessage of subs.values()) {
-      onMessage(serialized, adapterInfo)
-    }
-  }
-
-  // ── Binary pub/sub ──
 
   subscribeBinary(key: string, onMessage: PubSubBinaryOnMessage): PubSubUnsubscribe {
     let subs = this.binarySubscriptions.get(key)
@@ -134,11 +108,11 @@ class DefaultPubSubAdapter implements PubSubAdapter {
     }
     subs.add(onMessage)
 
-    if (this.wrappedAdapter && !this.adapterBinaryUnsubs.has(key)) {
-      this.adapterBinaryUnsubs.set(
+    if (this.transport && !this.transportBinaryUnsubs.has(key)) {
+      this.transportBinaryUnsubs.set(
         key,
-        this.wrappedAdapter.subscribeBinary(key, (data, info) => {
-          this._onAdapterBinaryMessage(key, data, info)
+        this.transport.listenBinary(key, (payload, info) => {
+          this._deliver(this.binarySubscriptions, key, payload, info)
         }),
       )
     }
@@ -149,51 +123,51 @@ class DefaultPubSubAdapter implements PubSubAdapter {
       s.delete(onMessage)
       if (s.size === 0) {
         this.binarySubscriptions.delete(key)
-        return this._resolveAdapterUnsub(this.adapterBinaryUnsubs, key)
+        this._releaseUnsub(this.transportBinaryUnsubs, key)
       }
     }
   }
 
   publishBinary(key: string, data: Uint8Array): PubSubPublishResult | Promise<PubSubPublishResult> {
-    if (this.wrappedAdapter) {
-      return this._publishBinaryViaAdapter(key, data)
+    if (this.transport) {
+      const result = this.transport.sendBinary(key, data)
+      if (isPromise(result)) return result
+      return result
     }
-    return this._publishBinaryInMemory(key, data)
+    return this._publishInMemory(this.binarySubscriptions, key, data)
   }
 
-  private _publishBinaryInMemory(key: string, data: Uint8Array): PubSubPublishResult {
-    const subs = this.binarySubscriptions.get(key)
+  // ── In-memory ──
+
+  private _publishInMemory<T>(subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>, key: string, data: T): PubSubPublishResult {
     const seq = (this.keySeqs.get(key) ?? 0) + 1
     this.keySeqs.set(key, seq)
     const ts = Date.now()
+    const info = { seq, ts }
     let delivered = 0
-
-    if (subs) {
-      for (const onMessage of subs.values()) {
+    const set = subs.get(key)
+    if (set) {
+      for (const onMessage of set) {
         delivered++
-        onMessage(data, { seq, ts })
+        onMessage(data, info)
       }
     }
-
     return { seq, ts, meta: { delivered, transport: 'in-memory' } }
   }
 
-  private _publishBinaryViaAdapter(key: string, data: Uint8Array): PubSubPublishResult | Promise<PubSubPublishResult> {
-    const result = this.wrappedAdapter!.publishBinary(key, data)
-    if (isPromise(result)) return result.then((r) => this._toResult(r))
-    return this._toResult(result)
+  // ── Shared ──
+
+  private _deliver<T>(subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>, key: string, data: T, info: WirePublishInfo): void {
+    const set = subs.get(key)
+    if (!set) return
+    for (const onMessage of set) onMessage(data, info)
   }
 
-  private _onAdapterBinaryMessage(key: string, data: Uint8Array, adapterInfo: WirePublishInfo): void {
-    assertUsage(
-      Number.isFinite(adapterInfo.seq) && Number.isFinite(adapterInfo.ts),
-      'PubSubAdapter deliver callback must provide finite seq and ts',
-    )
-    const subs = this.binarySubscriptions.get(key)
-    if (!subs) return
-    for (const onMessage of subs.values()) {
-      onMessage(data, adapterInfo)
-    }
+  private _releaseUnsub(map: Map<string, () => void>, key: string): void {
+    const unsub = map.get(key)
+    if (!unsub) return
+    map.delete(key)
+    unsub()
   }
 }
 

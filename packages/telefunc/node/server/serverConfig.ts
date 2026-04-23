@@ -1,7 +1,7 @@
 export { configUser as config }
 export { getServerConfig }
 export { enableChannelTransports }
-export type { ConfigUser, ConfigResolved, StreamConfigUser, ChannelConfigUser, ChannelConfigResolved }
+export type { ConfigUser, ConfigResolved, StreamConfigUser, ChannelConfigUser, ChannelConfigResolved, PubSubConfigUser }
 
 import { assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -18,7 +18,7 @@ import type {
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute } from '../../utils/path.js'
-import { setPubSubAdapter, DefaultPubSubAdapter, type PubSubAdapter } from '../../wire-protocol/server/pubsub.js'
+import { setPubSubAdapter, DefaultPubSubAdapter, type PubSubTransport } from '../../wire-protocol/server/pubsub.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
@@ -47,6 +47,11 @@ type StreamConfigUser = {
    * - `'channel'`: stream over the configured channel transport
    */
   transport?: StreamTransport
+}
+
+type PubSubConfigUser = {
+  /** Transport for cross-node pub/sub delivery. */
+  transport?: PubSubTransport
 }
 
 type ChannelConfigUser = {
@@ -184,10 +189,7 @@ type ConfigUser = {
   /** Enabled transports and runtime settings for Telefunc channels. */
   channel: ChannelConfigUser
   /** Pub/sub configuration. */
-  pubsub: {
-    /** Adapter for cross-node pub/sub delivery. */
-    adapter?: PubSubAdapter
-  }
+  pubsub: PubSubConfigUser
   /** Registered server extensions. Use `config.extensions.push(ext)` to add. */
   extensions: TelefuncServerExtension[]
 }
@@ -489,15 +491,15 @@ function applyChannelConfig(val: unknown): void {
 function applyPubSubConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.pubsub should be an object')
   for (const [key, value] of Object.entries(val)) {
-    if (key === 'adapter') {
+    if (key === 'transport') {
       assertUsage(
         isObject(value) &&
-          typeof (value as any).subscribe === 'function' &&
-          typeof (value as any).publish === 'function',
-        'config.pubsub.adapter must be an object with subscribe() and publish() methods',
+          typeof (value as any).send === 'function' &&
+          typeof (value as any).listen === 'function',
+        'config.pubsub.transport must be a PubSubTransport with send() and listen() methods',
       )
-      configState.pubsub.adapter = value as PubSubAdapter
-      setPubSubAdapter(new DefaultPubSubAdapter(value as PubSubAdapter))
+      configState.pubsub.transport = value as PubSubTransport
+      setPubSubAdapter(new DefaultPubSubAdapter(value as PubSubTransport))
     } else {
       assertUsage(false, `Unknown config.pubsub.${key}`)
     }

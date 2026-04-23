@@ -1,0 +1,34 @@
+{
+  "name": "@telefunc/redis",
+  "version": "0.1.0",
+  "description": "Redis pub/sub adapter for Telefunc — scale channels and pub/sub across multiple server instances.",
+  "homepage": "https://github.com/brillout/telefunc/tree/main/packages/redis#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brillout/telefunc.git",
+    "directory": "packages/redis"
+  },
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --watch"
+  },
+  "peerDependencies": {
+    "telefunc": ">=0.2.0"
+  },
+  "devDependencies": {
+    "telefunc": "workspace:*",
+    "typescript": "^5.9.2"
+  }
+}

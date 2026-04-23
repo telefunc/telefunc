@@ -4,6 +4,7 @@ import { config } from 'telefunc'
 import { telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState } from '../cleanup-state'
 config.channel.pingInterval = 1000
+config.shield = true
 
 const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
 

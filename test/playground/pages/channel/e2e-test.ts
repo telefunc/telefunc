@@ -50,6 +50,13 @@ type ChannelState = {
   noListenerAckServerChannelId: string | null
   noListenerAckServerErr: string | null
   noListenerAckClientErr: string | null
+  shieldClientSendNoAckReceived: string[] | null
+  shieldClientSendNoAckInvalidReceived: string[] | null
+  shieldClientSendNoAckInvalidThrew: boolean | null
+  shieldClientSendAckValid: number | null
+  shieldClientSendAckInvalidError: string | null
+  shieldServerAckValid: { ok: boolean; value?: string; error?: string } | null
+  shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
 }
 
 function testChannel(isDev: boolean) {
@@ -660,6 +667,39 @@ function testChannel(isDev: boolean) {
     await autoRetry(async () => {
       const state = await getResult<ChannelState>('#channel-state')
       expect(state.noListenerAckClientErr).toContain('No listener')
+    })
+  })
+
+  // ── Shield validation ─────────────────────────────────────────────────
+
+  test('channel: shield covers all client→server and server→client validation paths', async () => {
+    await page.click('#channel-test-shield')
+
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+
+      // A1: valid client sends without ack reach the server listener.
+      expect(state.shieldClientSendNoAckReceived).to.deep.equal(['hello', 'world'])
+
+      // A2: invalid client sends without ack are silently dropped — listener set doesn't grow,
+      // and the client's send does not throw.
+      expect(state.shieldClientSendNoAckInvalidReceived).to.deep.equal(['hello', 'world'])
+      expect(state.shieldClientSendNoAckInvalidThrew).toBe(false)
+
+      // B1: valid client send with ack resolves with the listener's return (length of 'hi!' = 3).
+      expect(state.shieldClientSendAckValid).toBe(3)
+
+      // B2: invalid client send with ack rejects with a shield validation error.
+      expect(state.shieldClientSendAckInvalidError).not.toBe('NO_ERROR')
+      expect(state.shieldClientSendAckInvalidError).toBeTruthy()
+
+      // C1: server-sent message acked by client's string return → server's send resolves.
+      expect(state.shieldServerAckValid?.ok).toBe(true)
+      expect(state.shieldServerAckValid?.value).toBe('got-100')
+
+      // C2: server-sent message acked by client's wrong-typed return → server's send rejects.
+      expect(state.shieldServerAckInvalid?.ok).toBe(false)
+      expect(state.shieldServerAckInvalid?.error).toBeTruthy()
     })
   })
 }

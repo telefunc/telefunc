@@ -16,6 +16,7 @@ import { handleTelefunctionBug } from './runTelefunc/validateTelefunctionError.j
 import { handleError } from './runTelefunc/handleError.js'
 import { applyShield } from './runTelefunc/applyShield.js'
 import { findTelefunction } from './runTelefunc/findTelefunction.js'
+import { resolveReturnShields } from './shield.js'
 import { getServerConfig } from './serverConfig.js'
 import type { Readable as StreamReadableNode, Writable as StreamWritableNode } from 'node:stream'
 import { loadStreamNodeModule } from '../../utils/loadStreamNodeModule.js'
@@ -289,21 +290,14 @@ async function runTelefunc_({
     if (parsed.isSseRequest) {
       return createHttpResponse(parsed.sseResponse)
     }
-    const {
-      telefunctionKey,
-      telefunctionArgs,
-      telefuncFilePath,
-      telefunctionName,
-      streamTransport,
-      requestExtensions,
-    } = parsed
+    const { telefunctionKey, telefuncFilePath, telefunctionName, streamTransport, requestExtensions } = parsed
     objectAssign(runContext, {
       telefunctionKey,
-      telefunctionArgs,
       telefuncFilePath,
       telefunctionName,
       streamTransport,
       requestExtensions,
+      reviveArgs: parsed.reviveArgs,
     })
   }
 
@@ -320,6 +314,11 @@ async function runTelefunc_({
     }
     objectAssign(runContext, { telefunction })
   }
+
+  // Revive arguments now that we know the telefunction — per-value ServerReviverContext carries the
+  // shield validators built from the telefunction's argumentShields metadata, so revivers have them
+  // at createValue time and can wire inline validation symmetric to the response-side replacers.
+  objectAssign(runContext, { telefunctionArgs: runContext.reviveArgs(runContext.telefunction) })
 
   {
     const { isValidRequest } = applyShield(runContext)
@@ -342,6 +341,13 @@ async function runTelefunc_({
       telefunctionHasErrored,
       telefunctionAborted,
       telefunctionTopLevelError,
+    })
+  }
+
+  // Resolve return shields into per-value bindings; serialization picks them up via the replacer context.
+  if (!runContext.telefunctionHasErrored) {
+    objectAssign(runContext, {
+      valueShields: resolveReturnShields(runContext.telefunctionReturn, runContext.telefunction),
     })
   }
 

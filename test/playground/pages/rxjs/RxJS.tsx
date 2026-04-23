@@ -16,6 +16,9 @@ import {
   onSubjectArgNoErrorHandler,
   onSharedSubjectOneErrors,
   onSubjectNoHandler,
+  onShieldSubjectArg,
+  onShieldSubjectReturn,
+  onShieldObservableArg,
 } from './RxJS.telefunc'
 import { Subject as RxSubject, Observable as RxObservable } from 'rxjs'
 import { close } from 'telefunc/client'
@@ -412,6 +415,46 @@ function RxJSDemo() {
         }}
       >
         Subject no-handler (server survives)
+      </button>
+
+      {/* Shield: all three data-flow paths (Subject arg, Subject return, Observable arg) */}
+      <button
+        id="test-shield-all"
+        onClick={async () => {
+          setResult('')
+
+          // A: Subject as arg — client sends a mix; shield drops the non-string.
+          const subjectArg = new RxSubject<string>()
+          const argHandle = await onShieldSubjectArg(subjectArg)
+          await new Promise((r) => setTimeout(r, 200))
+          subjectArg.next('hello')
+          subjectArg.next(12345 as unknown as string)
+          subjectArg.next('world')
+          await new Promise((r) => setTimeout(r, 300))
+          const subjectArgReceived = await argHandle.getReceived()
+
+          // B: Subject as return — client sends on the server's returned Subject.
+          const retHandle = await onShieldSubjectReturn()
+          await new Promise((r) => setTimeout(r, 200))
+          retHandle.subject.next('foo')
+          retHandle.subject.next(999 as unknown as string)
+          retHandle.subject.next('bar')
+          await new Promise((r) => setTimeout(r, 300))
+          const subjectReturnReceived = await retHandle.getReceived()
+
+          // C: Observable as arg — client emits a mix; shield drops the non-number.
+          const obsArg = new RxObservable<number>((subscriber) => {
+            subscriber.next(1)
+            subscriber.next('bad' as unknown as number)
+            subscriber.next(2)
+            subscriber.complete()
+          })
+          const observableArgReceived = await onShieldObservableArg(obsArg)
+
+          setResult(JSON.stringify({ subjectArgReceived, subjectReturnReceived, observableArgReceived }))
+        }}
+      >
+        Shield data-flow
       </button>
 
       <pre id="rxjs-result" className="mt-4 p-2 bg-gray-100 text-sm font-mono min-h-[2em]">

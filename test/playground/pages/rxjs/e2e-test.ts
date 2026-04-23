@@ -248,6 +248,29 @@ function testRxjs() {
     })
   })
 
+  // ── Shield data-flow validation ───────────────────────────────────────
+  //
+  // Shield generation walks `__DEFINE_TELEFUNC_SHIELDS` on `Subject<T>` / `Observable<T>`,
+  // producing a `next` validator that fires on the server side wherever the wire
+  // receives `msg.v` from the client. Invalid values are silently dropped — the
+  // server's subscription never sees them.
+  test('rxjs: shield — Subject arg / Subject return / Observable arg reject invalid next values', async () => {
+    await page.goto(`${getServerUrl()}/rxjs`)
+    await waitForHydration()
+
+    await page.click('#test-shield-all')
+
+    await autoRetry(async () => {
+      const result = await getResult('#rxjs-result')
+      // A: Subject as arg — client sent 'hello', 12345 (invalid), 'world'.
+      expect(result.subjectArgReceived).deep.equal(['hello', 'world'])
+      // B: Subject as return — client sent 'foo', 999 (invalid), 'bar'.
+      expect(result.subjectReturnReceived).deep.equal(['foo', 'bar'])
+      // C: Observable as arg — client emitted 1, 'bad' (invalid), 2.
+      expect(result.observableArgReceived).deep.equal([1, 2])
+    })
+  })
+
   test('rxjs: subject — server subscribes without error handler, no crash on error', async () => {
     await page.goto(`${getServerUrl()}/rxjs`)
     await waitForHydration()

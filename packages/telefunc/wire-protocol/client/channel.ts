@@ -37,6 +37,11 @@ const CLIENT_PUBSUB_BRAND = Symbol.for('ClientPubSub')
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel
 {
+  /** @see __DEFINE_TELEFUNC_SHIELDS on ChannelBase — client's TOut/TIn are ClientToServer/ServerToClient. */
+  declare readonly __DEFINE_TELEFUNC_SHIELDS: {
+    data: ChannelData<ClientToServer>
+    ack: ChannelAck<ServerToClient>
+  }
   readonly id: string
   readonly ack: boolean
   readonly defer: boolean

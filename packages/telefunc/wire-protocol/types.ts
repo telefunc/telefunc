@@ -31,6 +31,7 @@ import type { ServerChannel } from './server/channel.js'
 import type { ServerPubSub } from './server/server-pubsub.js'
 import type { ClientChannel, ClientPubSub } from './client/channel.js'
 import type { AbortError } from '../shared/Abort.js'
+import type { ShieldValidators } from '../node/server/shield.js'
 
 // ===== Base types =====
 
@@ -108,17 +109,26 @@ type ServerReviverContext = {
     cancel: () => void
     abort: (abortError: AbortError) => void
   }
+  /** Shield validators for the value being revived, keyed by the name declared in __DEFINE_TELEFUNC_SHIELDS.
+   *  Populated per-value based on the telefunction's argument shield metadata. Revivers pick the names
+   *  relevant to their data flow and call them inline at the point where client data enters. */
+  validators: ShieldValidators
 }
 
 /** Context for all server-side response replacers (streaming + placeholder). */
 type ServerReplacerContext = {
   createChannel<TOut = unknown, TIn = unknown>(opts?: { ack?: boolean }): ServerChannel<TOut, TIn>
+  /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
   registerChannel(channel: ServerChannel<any, any>): void
   sendStream(createProducer: () => StreamingProducer): {
     metadata: StreamingMetadata
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
   }
+  /** Shield validators for the value being serialized, keyed by the name declared in __DEFINE_TELEFUNC_SHIELDS.
+   *  Replacers pick the names relevant to their data flow. Each returns `true` on success or an error
+   *  string — call sites decide the action (throw, drop, ...). */
+  validators: ShieldValidators
 }
 
 /** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */

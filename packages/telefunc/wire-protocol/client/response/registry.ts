@@ -32,7 +32,7 @@ function createStreamingReviver(
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
   const allTypes = [...clientTypes, ...extensionTypes]
-  const reviver: Reviver = (_key: undefined | string, value: string, parser: (str: string) => unknown) => {
+  const reviver: Reviver = (_path, value, parser) => {
     for (const type of allTypes) {
       if (value.startsWith(type.prefix)) {
         const metadata = parser(value.slice(type.prefix.length))

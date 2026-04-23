@@ -22,6 +22,7 @@ import { hasProp } from '../../utils/hasProp.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { assertUsage } from '../../utils/assert.js'
 import { isAbort } from '../../node/server/Abort.js'
+import type { ShieldValidators } from '../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../shared/Abort.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
@@ -82,6 +83,11 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   implements Channel<ServerToClient, ClientToServer>
 {
   readonly [SERVER_CHANNEL_BRAND] = true
+  /** @see __DEFINE_TELEFUNC_SHIELDS on ChannelBase — server's TOut/TIn are ServerToClient/ClientToServer. */
+  declare readonly __DEFINE_TELEFUNC_SHIELDS: {
+    data: ChannelData<ServerToClient>
+    ack: ChannelAck<ClientToServer>
+  }
   readonly id: string
   readonly ack: boolean
 
@@ -125,6 +131,12 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
   private _shutdownCallback: (() => void) | null = null
   private _pendingCloseAck = false
+
+  /** Shield validators keyed by name (see __DEFINE_TELEFUNC_SHIELDS on ChannelBase).
+   *  - `data`: validates incoming client data (_onPeerMessage / _dispatchAckReq)
+   *  - `ack`: validates client ack responses (_onPeerAckRes)
+   *  Each returns `true` on success or an error string — callers decide the action (drop, throw). */
+  _validators: ShieldValidators = new Map()
 
   constructor({
     ack = false,
@@ -355,6 +367,8 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
 
   _onPeerMessage(text: string): void {
     const data = parse(text) as ChannelData<ClientToServer>
+    const validateData = this._validators.get('data')
+    if (validateData && validateData(data) !== true) return
     const pending: Promise<unknown>[] = []
     for (const cb of this._listeners) {
       try {
@@ -407,9 +421,16 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     if (!pending) return
     this._pendingAcks.delete(ackedSeq)
     switch (status) {
-      case 'ok':
-        pending.resolve(parse(resultText) as ChannelAck<ServerToClient>)
+      case 'ok': {
+        const parsed = parse(resultText) as ChannelAck<ServerToClient>
+        const validateAck = this._validators.get('ack')
+        if (validateAck) {
+          const result = validateAck(parsed)
+          if (result !== true) { pending.reject(new Error(result)); return }
+        }
+        pending.resolve(parsed)
         return
+      }
       case 'abort':
         pending.reject(createAbortError(parse(resultText)))
         return
@@ -544,6 +565,11 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         return
       }
       const data = parse(text) as ChannelData<ClientToServer>
+      const validateData = this._validators.get('data')
+      if (validateData) {
+        const result = validateData(data)
+        if (result !== true) { this._sendAckRes(seq, result, 'error'); return }
+      }
       let lastResult: unknown
       for (const cb of this._listeners) {
         try {

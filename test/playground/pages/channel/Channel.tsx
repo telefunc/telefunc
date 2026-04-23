@@ -23,6 +23,8 @@ import {
   onChannelUpstreamReconnect,
   onChannelNoListenerAckServer,
   onChannelNoListenerAckClient,
+  onChannelShieldClient,
+  onChannelShieldServerAck,
 } from './Channel.telefunc'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -86,6 +88,19 @@ type ChannelState = {
   noListenerAckServerChannelId: string | null
   noListenerAckServerErr: string | null
   noListenerAckClientErr: string | null
+  /** A1: client.send(valid) without ack — server receives. */
+  shieldClientSendNoAckReceived: string[] | null
+  /** A2: client.send(invalid) without ack — silently dropped; client send didn't throw. */
+  shieldClientSendNoAckInvalidReceived: string[] | null
+  shieldClientSendNoAckInvalidThrew: boolean | null
+  /** B1: client.send(valid, {ack:true}) → ack (number = string length). */
+  shieldClientSendAckValid: number | null
+  /** B2: client.send(invalid, {ack:true}) → rejects with shield error. */
+  shieldClientSendAckInvalidError: string | null
+  /** C1: server.send(valid, {ack:true}), client listener returns valid string → resolves. */
+  shieldServerAckValid: { ok: boolean; value?: string; error?: string } | null
+  /** C2: server.send(valid, {ack:true}), client listener returns invalid → rejects. */
+  shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
 }
 
 const initialState: ChannelState = {
@@ -135,6 +150,13 @@ const initialState: ChannelState = {
   noListenerAckServerChannelId: null,
   noListenerAckServerErr: null,
   noListenerAckClientErr: null,
+  shieldClientSendNoAckReceived: null,
+  shieldClientSendNoAckInvalidReceived: null,
+  shieldClientSendNoAckInvalidThrew: null,
+  shieldClientSendAckValid: null,
+  shieldClientSendAckInvalidError: null,
+  shieldServerAckValid: null,
+  shieldServerAckInvalid: null,
 }
 
 function timestamp() {
@@ -685,6 +707,68 @@ function ChannelDemo() {
     })
   }, [addLog])
 
+  const testShieldChannel = useCallback(async () => {
+    addLog('system', 'Starting channel shield tests...')
+
+    // ── A1/A2/B1/B2 — client sends, server validates incoming data ────────────
+    {
+      const { channel: ch, getReceived } = await onChannelShieldClient()
+      await new Promise<void>((resolve) => ch.onOpen(resolve))
+
+      // A1: valid no-ack — server listener should receive.
+      await ch.send('hello')
+      await ch.send('world')
+      const afterValid = await getReceived()
+      setChannelState((s) => ({ ...s, shieldClientSendNoAckReceived: afterValid }))
+
+      // A2: invalid no-ack — server silently drops; client.send doesn't throw.
+      let threw = false
+      try {
+        await (ch.send as any)(12345)
+      } catch {
+        threw = true
+      }
+      const afterInvalid = await getReceived()
+      setChannelState((s) => ({
+        ...s,
+        shieldClientSendNoAckInvalidReceived: afterInvalid,
+        shieldClientSendNoAckInvalidThrew: threw,
+      }))
+
+      // B1: valid with ack — returns string length.
+      const ack = await ch.send('hi!', { ack: true })
+      setChannelState((s) => ({ ...s, shieldClientSendAckValid: ack }))
+
+      // B2: invalid with ack — rejects with shield error.
+      try {
+        await (ch.send as any)(42, { ack: true })
+        setChannelState((s) => ({ ...s, shieldClientSendAckInvalidError: 'NO_ERROR' }))
+      } catch (err: any) {
+        setChannelState((s) => ({ ...s, shieldClientSendAckInvalidError: err?.message ?? 'unknown' }))
+      }
+    }
+
+    // ── C1 — server sends, client listener returns valid ──────────────────────
+    {
+      const { channel: ch, trigger, getOutcome } = await onChannelShieldServerAck()
+      ch.listen((msg: number) => `got-${msg}`)
+      await trigger()
+      const outcome = await getOutcome()
+      setChannelState((s) => ({ ...s, shieldServerAckValid: outcome }))
+    }
+
+    // ── C2 — server sends, client listener returns invalid (wrong type) ───────
+    {
+      const { channel: ch, trigger, getOutcome } = await onChannelShieldServerAck()
+      ;(ch.listen as any)((msg: number) => msg * 9) // returns number, expected string
+      await trigger()
+      const outcome = await getOutcome()
+      setChannelState((s) => ({ ...s, shieldServerAckInvalid: outcome }))
+    }
+
+    addLog('system', 'Shield tests complete.')
+  }, [addLog])
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
@@ -914,6 +998,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-rose-700 text-white hover:bg-rose-800"
           >
             No Listener Ack (Client→Server)
+          </button>
+          <button
+            id="channel-test-shield"
+            type="button"
+            onClick={testShieldChannel}
+            className="px-3 py-1.5 text-sm rounded bg-amber-700 text-white hover:bg-amber-800"
+          >
+            Shield Validation
           </button>
         </div>
       </div>

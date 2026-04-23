@@ -5,7 +5,7 @@ import { ReplayBuffer } from '../replay-buffer.js'
 import { TAG, decode } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { getPubSubAdapter, setPubSubAdapter, DefaultPubSubAdapter } from './pubsub.js'
-import type { PubSubAdapter } from './pubsub.js'
+import type { PubSubTransport } from './pubsub.js'
 
 const previousPubSubAdapter = getPubSubAdapter()
 
@@ -171,16 +171,28 @@ describe('keyed channel pubsub', () => {
   })
 })
 
-describe('DefaultPubSubAdapter with adapter', () => {
+describe('DefaultPubSubAdapter with transport', () => {
+  type TextListener = (payload: string, info: { seq: number; ts: number }) => void
+
   /** Simulates a multi-node message bus with synchronous delivery. */
-  function createMockAdapter(): PubSubAdapter & {
-    _listeners: Map<string, Set<(message: string, info: { seq: number; ts: number }) => void>>
+  function createMockTransport(): PubSubTransport & {
+    _listeners: Map<string, Set<TextListener>>
   } {
-    const listeners = new Map<string, Set<(message: string, info: { seq: number; ts: number }) => void>>()
+    const listeners = new Map<string, Set<TextListener>>()
     const seqs = new Map<string, number>()
     return {
       _listeners: listeners,
-      subscribe(key, onMessage) {
+      send(key, payload) {
+        const seq = (seqs.get(key) ?? 0) + 1
+        seqs.set(key, seq)
+        const ts = Date.now()
+        const set = listeners.get(key)
+        if (set) {
+          for (const cb of set) cb(payload, { seq, ts })
+        }
+        return { seq, ts }
+      },
+      listen(key, onMessage) {
         let set = listeners.get(key)
         if (!set) {
           set = new Set()
@@ -191,28 +203,18 @@ describe('DefaultPubSubAdapter with adapter', () => {
           listeners.delete(key)
         }
       },
-      publish(key, message) {
-        const seq = (seqs.get(key) ?? 0) + 1
-        seqs.set(key, seq)
-        const ts = Date.now()
-        const set = listeners.get(key)
-        if (set) {
-          for (const cb of set) cb(message, { seq, ts })
-        }
-        return { seq, ts }
-      },
-      subscribeBinary() {
-        return () => {}
-      },
-      publishBinary() {
+      sendBinary(_key, _payload) {
         return { seq: 0, ts: Date.now() }
+      },
+      listenBinary() {
+        return () => {}
       },
     }
   }
 
-  it('delivers locally and returns adapter seq', async () => {
-    const adapter = createMockAdapter()
-    const registry = new DefaultPubSubAdapter(adapter)
+  it('delivers locally and returns transport seq', async () => {
+    const transport = createMockTransport()
+    const registry = new DefaultPubSubAdapter(transport)
     setPubSubAdapter(registry)
 
     const sender = pubsub<{ text: string }>('room:adapted:basic')
@@ -231,8 +233,8 @@ describe('DefaultPubSubAdapter with adapter', () => {
   })
 
   it('does not double-deliver from same node echo', () => {
-    const adapter = createMockAdapter()
-    const registry = new DefaultPubSubAdapter(adapter)
+    const transport = createMockTransport()
+    const registry = new DefaultPubSubAdapter(transport)
     setPubSubAdapter(registry)
 
     const sender = pubsub<{ text: string }>('room:adapted:echo')
@@ -246,63 +248,34 @@ describe('DefaultPubSubAdapter with adapter', () => {
     sender.publish({ text: 'hello' })
 
     // Receiver should get the message exactly once, not twice
-    // (once from local delivery, adapter echo should be filtered by nodeId)
     expect(received).toEqual([{ text: 'hello' }])
   })
 
   it('delivers from a different node (different adapter instance)', () => {
-    const adapter = createMockAdapter()
-    const node1 = new DefaultPubSubAdapter(adapter)
-    const node2 = new DefaultPubSubAdapter(adapter)
+    const transport = createMockTransport()
+    const node1 = new DefaultPubSubAdapter(transport)
+    const node2 = new DefaultPubSubAdapter(transport)
 
-    // node2 has a subscriber
     const received: string[] = []
     node2.subscribe('room:cross-node', (serialized: string) => received.push(serialized))
 
-    // node1 publishes
     node1.publish('room:cross-node', '{"text":"from-node1"}')
 
     expect(received).toEqual(['{"text":"from-node1"}'])
   })
 
-  it('unsubscribes from adapter when last local subscriber leaves', () => {
-    const adapter = createMockAdapter()
-    const registry = new DefaultPubSubAdapter(adapter)
+  it('unsubscribes from transport when last local subscriber leaves', () => {
+    const transport = createMockTransport()
+    const registry = new DefaultPubSubAdapter(transport)
 
     const unsub1 = registry.subscribe('room:unsub', () => {})
     const unsub2 = registry.subscribe('room:unsub', () => {})
-    expect(adapter._listeners.get('room:unsub')?.size).toBe(1) // one adapter subscription
+    expect(transport._listeners.get('room:unsub')?.size).toBe(1) // one transport subscription
 
     unsub1()
-    expect(adapter._listeners.has('room:unsub')).toBe(true) // still subscribed
+    expect(transport._listeners.has('room:unsub')).toBe(true) // still subscribed
 
     unsub2()
-    expect(adapter._listeners.has('room:unsub')).toBe(false) // adapter unsubscribed
-  })
-
-  it('returns seq: 0 when adapter omits seq', async () => {
-    const adapter = {
-      subscribe() {
-        return () => {}
-      },
-      publish() {
-        return {} // no seq, no ts
-      },
-      subscribeBinary() {
-        return () => {}
-      },
-      publishBinary() {
-        return {}
-      },
-    } as unknown as PubSubAdapter
-    const registry = new DefaultPubSubAdapter(adapter)
-    setPubSubAdapter(registry)
-
-    const ps = pubsub<{ text: string }>('room:no-seq')
-    ;(ps as any)._registerChannel()
-
-    const receipt = await ps.publish({ text: 'hello' })
-    expect(receipt.seq).toBe(0)
-    expect(receipt.ts).toEqual(expect.any(Number))
+    expect(transport._listeners.has('room:unsub')).toBe(false) // transport unsubscribed
   })
 })

@@ -19,6 +19,8 @@ export {
   onChannelUpstreamReconnect,
   onChannelNoListenerAckServer,
   onChannelNoListenerAckClient,
+  onChannelShieldClient,
+  onChannelShieldServerAck,
 }
 
 import { channel, Abort } from 'telefunc'
@@ -474,4 +476,38 @@ async function onChannelNoListenerAckClient() {
   const ch = channel<(msg: string) => string, never>()
   // No ch.listen() — intentionally missing
   return { channel: ch.client }
+}
+
+/** Shield validates client-sent data. Typed as `(msg: string) => number`:
+ *  - No-ack: valid string arrives, invalid is silently dropped server-side (no client error).
+ *  - With-ack: valid returns the length; invalid rejects the client's send with a shield error. */
+async function onChannelShieldClient() {
+  const ch = channel<(msg: string) => number>()
+  const received: string[] = []
+  ch.listen((msg) => {
+    received.push(msg)
+    return msg.length
+  })
+  return { channel: ch.client, getReceived: async () => received }
+}
+
+/** Shield validates the client's ack response when the server sends with `{ ack: true }`.
+ *  Typed as server→client `(msg: number) => string`:
+ *  - Client listener returns string → server's send resolves with the string.
+ *  - Client listener returns a non-string → server's send rejects with a shield error. */
+async function onChannelShieldServerAck() {
+  const ch = channel<never, (msg: number) => string>({ ack: true })
+  let outcome: { ok: boolean; value?: string; error?: string } | null = null
+  return {
+    channel: ch.client,
+    trigger: async () => {
+      try {
+        const ack = await ch.send(100, { ack: true })
+        outcome = { ok: true, value: ack }
+      } catch (err: any) {
+        outcome = { ok: false, error: err?.message ?? 'unknown' }
+      }
+    },
+    getOutcome: async (): Promise<{ ok: boolean; value?: string; error?: string } | null> => outcome,
+  }
 }

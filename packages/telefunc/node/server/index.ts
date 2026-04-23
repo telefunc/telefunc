@@ -9,12 +9,14 @@ export { REQUEST_CONTEXT } from './context/requestContext.js'
 export type { Context } from './context/context.js'
 export { Abort } from './Abort.js'
 export { shield } from './shield.js'
+export type { ShieldValidator, ShieldValidators } from './shield.js'
 export { onBug } from './runTelefunc/onBug.js'
 export { channel } from '../../wire-protocol/server/channel.js'
 export { pubsub } from '../../wire-protocol/server/server-pubsub.js'
 export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'
 export type { ChannelBase, Channel, ClientChannel, PubSub } from '../../wire-protocol/channel.js'
-export type { PubSubAdapter } from '../../wire-protocol/server/pubsub.js'
+export { DefaultPubSubAdapter } from '../../wire-protocol/server/pubsub.js'
+export type { PubSubAdapter, PubSubTransport } from '../../wire-protocol/server/pubsub.js'
 export type { TelefuncServerExtension } from './extensions.js'
 export type {
   TypeContract,
@@ -29,6 +31,7 @@ export type {
 export type { Telefunc } from './context/TelefuncNamespace.js'
 
 export { decorateTelefunction as __decorateTelefunction } from './runTelefunc/decorateTelefunction.js'
+export { __applyReturnShields, __applyArgumentShields } from './shield.js'
 
 import { assertUsage } from '../../utils/assert.js'
 
