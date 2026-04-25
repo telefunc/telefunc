@@ -23,7 +23,7 @@ const serverRequestTypes = [fileReviver, blobReviver, readableStreamReviver, fun
 type DeferredRevival = {
   type: ReviverType<TypeContract, ServerReviverContext>
   metadata: object
-  path: string[]
+  path: readonly string[]
 }
 
 /** Brillout-shape reviver that defers `revive`. The same instance is returned to the parser
@@ -39,7 +39,7 @@ function createRequestReviver(extensionTypes: ReviverType<TypeContract, ServerRe
       if (!value.startsWith(type.prefix)) continue
       const metadata = parser(value.slice(type.prefix.length))
       assert(isObject(metadata))
-      const entry: DeferredRevival = { type, metadata, path: path ?? [] }
+      const entry: DeferredRevival = { type, metadata, path }
       deferreds.push(entry)
       return { replacement: entry, resolved: true }
     }

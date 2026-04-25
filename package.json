@@ -45,9 +45,6 @@
   "pnpm": {
     "overrides": {
       "telefunc": "link:./packages/telefunc/"
-    },
-    "patchedDependencies": {
-      "@brillout/json-serializer@0.5.22": "patches/@brillout__json-serializer@0.5.22.patch"
     }
   },
   "packageManager": "pnpm@9.15.9"
