@@ -11,6 +11,7 @@ import { StreamReader } from '../../../wire-protocol/server/request/StreamReader
 import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
+import { getChannelMux } from '../../../wire-protocol/server/substrate.js'
 import { ChannelChunkReader } from '../../../wire-protocol/ChannelChunkReader.js'
 import type { ReviverType, TypeContract, ServerReviverContext } from '../../../wire-protocol/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
@@ -59,9 +60,10 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).
+  const mux = getChannelMux()
   const createChannel = <TOut, TIn>(opts: { id: string; ack?: boolean }) => {
     const channel = new ServerChannel<TOut, TIn>(opts)
-    channel._registerChannel()
+    mux.registerChannel(channel)
     channel._setResponseAbort(requestContext.responseAbort.abort)
     channel.onClose(requestContext.trackPending())
     return channel

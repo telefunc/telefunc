@@ -8,7 +8,7 @@ import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import { setPubSubAdapter } from '../wire-protocol/server/pubsub.js'
+import { installPubSubAdapter } from '../wire-protocol/server/pubsub.js'
 import {
   CloudflarePubSubAuthorityState,
   CloudflarePubSubTransport,
@@ -81,7 +81,7 @@ function telefunc(options?: CloudflareWebSocketOptions): TelefuncServe {
     return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
   }
 
-  setPubSubAdapter(pubSub)
+  installPubSubAdapter(pubSub)
 
   const getContext = options?.context
 

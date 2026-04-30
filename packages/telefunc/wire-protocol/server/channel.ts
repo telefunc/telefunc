@@ -1,4 +1,4 @@
-export { channel, getChannelRegistry, onChannelCreated, setChannelDefaults, ServerChannel, SERVER_CHANNEL_BRAND }
+export { channel, setChannelDefaults, ServerChannel, SERVER_CHANNEL_BRAND }
 export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../channel-errors.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
@@ -34,16 +34,19 @@ import {
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
   CHANNEL_CLOSE_TIMEOUT_MS,
   CHANNEL_CONNECT_TTL_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
   CREDIT_WINDOW_BYTES,
   WINDOW_UPDATE_THRESHOLD_BYTES,
 } from '../constants.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
-import type { AckResultStatus } from '../shared-ws.js'
+import { ReplayBuffer } from '../replay-buffer.js'
+import { getServerConfig } from '../../node/server/serverConfig.js'
+import { assert } from '../../utils/assert.js'
+import { TAG } from '../shared-ws.js'
+import type { AckResultStatus, CtrlMessage, DecodedFrame } from '../shared-ws.js'
 
 const globalObject = getGlobalObject('channel.ts', {
-  channelRegistry: new Map<string, ServerChannel<unknown, unknown>>(),
-  creationHooks: new Map<string, () => void>(),
   connectTtlMs: CHANNEL_CONNECT_TTL_MS,
   bufferLimit: CHANNEL_BUFFER_LIMIT_BYTES,
   bufferLimitBinary: CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
@@ -53,14 +56,6 @@ function setChannelDefaults(opts: { connectTtl: number; bufferLimit: number; buf
   globalObject.connectTtlMs = opts.connectTtl
   globalObject.bufferLimit = opts.bufferLimit
   globalObject.bufferLimitBinary = opts.bufferLimitBinary
-}
-
-function getChannelRegistry(): Map<string, ServerChannel<unknown, unknown>> {
-  return globalObject.channelRegistry
-}
-
-function onChannelCreated(id: string, cb: () => void): void {
-  globalObject.creationHooks.set(id, cb)
 }
 
 type UntypedChannelHandler = (data: unknown) => unknown
@@ -132,6 +127,21 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
   private _shutdownCallback: (() => void) | null = null
   private _pendingCloseAck = false
+
+  // ── Wire state — channel-owned, persistent across attach-mode transitions ────
+  //
+  // Lives on the channel itself so the same buffer/seq counter serves a client
+  // whether the wire is local (`ServerConnection`'s `IndexedPeer`) or substrate-
+  // mediated (the runtime's substrate-backed `IndexedPeer`). Both paths reuse
+  // these fields rather than maintaining parallel external maps.
+  /** Buffer of outgoing wire frames, used to replay missed frames on reconnect.
+   *  Allocated in `_registerChannel`; disposed in `_shutdown`. Null only between
+   *  construction and registration (no peer can attach before registration). */
+  /** @internal */ _replayBuffer: ReplayBuffer | null = null
+  /** Highest client→server seq the channel has received and dispatched. Used
+   *  for both local-frame and substrate-frame deduplication, and reported back
+   *  to the client in `CtrlReconciled.open[].lastSeq`. */
+  /** @internal */ _lastClientSeq = 0
 
   /** Shield validators keyed by name (see __DEFINE_TELEFUNC_SHIELDS on ChannelBase).
    *  - `data`: validates incoming client data (_onPeerMessage / _dispatchAckReq)
@@ -313,15 +323,21 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     return this._closePromise
   }
 
+  /** @internal — Prepare channel state so the mux can register it. Called by
+   *  `ChannelMux.registerChannel`; external code should call that instead. */
   _registerChannel(): void {
     if (this._didShutdown || this._peer || this._didRegister) return
     this._didRegister = true
-    getChannelRegistry().set(this.id, this as ServerChannel<unknown, unknown>)
-    const hook = globalObject.creationHooks.get(this.id)
-    if (hook) {
-      globalObject.creationHooks.delete(this.id)
-      hook()
-    }
+    // Allocate the replay buffer up-front: registration is the moment the channel
+    // becomes addressable on the wire, so a peer can attach immediately after this
+    // returns. Its TTL covers a full ping-deadline + reconnect-timeout window.
+    const c = getServerConfig().channel
+    const pingDeadline = Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2
+    this._replayBuffer = new ReplayBuffer(
+      c.serverReplayBuffer,
+      pingDeadline + c.reconnectTimeout + 1_000,
+      c.serverReplayBufferBinary,
+    )
     this._clearTimer('_ttlTimer')
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
@@ -364,6 +380,64 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       return
     }
     this._fireOpen()
+  }
+
+  /** @internal — Entry point for an incoming wire frame. Both the local connection
+   *  (`ServerConnection.handleFrame`) and the cross-instance substrate runtime
+   *  (`ChannelSubstrateRuntime.dispatchHomeFrame`) call this. Handles ctrl routing,
+   *  client→server seq dedup, and delegation to `_dispatchDataFrame`. */
+  _dispatchFrame(frame: DecodedFrame): void {
+    if (frame.tag === TAG.CTRL) {
+      this._dispatchCtrl(frame.ctrl)
+      return
+    }
+    if (frame.seq) {
+      if (frame.seq <= this._lastClientSeq) return
+      this._lastClientSeq = frame.seq
+    }
+    this._dispatchDataFrame(frame)
+  }
+
+  /** @internal — Tag-keyed data-frame switch. Subclasses (`ServerPubSub`) override
+   *  to handle their extra tags and fall back to `super` for the common cases. */
+  protected _dispatchDataFrame(frame: Exclude<DecodedFrame, { tag: typeof TAG.CTRL }>): void {
+    switch (frame.tag) {
+      case TAG.TEXT:
+        this._onPeerMessage(frame.text)
+        return
+      case TAG.TEXT_ACK_REQ:
+        void this._onPeerAckReqMessage(frame.text, frame.seq)
+        return
+      case TAG.BINARY:
+        this._onPeerBinaryMessage(frame.data)
+        return
+      case TAG.BINARY_ACK_REQ:
+        void this._onPeerBinaryAckReqMessage(frame.data, frame.seq)
+        return
+      case TAG.ACK_RES:
+        this._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
+        return
+      case TAG.PUBLISH:
+      case TAG.PUBLISH_BINARY:
+        assert(false, `Server received unexpected ${frame.tag} frame from peer`)
+    }
+  }
+
+  /** @internal — Per-channel ctrl-message switch. Connection-level ctrls (ping,
+   *  reconcile, fin) never reach here — they're handled in `ServerConnection`. */
+  _dispatchCtrl(ctrl: CtrlMessage): void {
+    switch (ctrl.t) {
+      case 'close':
+        this._onPeerCloseRequest(ctrl.timeoutMs)
+        return
+      case 'close-ack':
+        this._onPeerCloseAck()
+        return
+      case 'window':
+        this._onPeerWindowUpdate(ctrl.bytes)
+        return
+      // pubsub-sub / pubsub-unsub: dropped on plain channels; ServerPubSub overrides.
+    }
   }
 
   _onPeerMessage(text: string): void {
@@ -652,7 +726,12 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._awaitingCloseAck = false
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
-    getChannelRegistry().delete(this.id)
+    if (this._replayBuffer) {
+      this._replayBuffer.dispose()
+      this._replayBuffer = null
+    }
+    // The mux subscribes to this callback in `registerChannel` to evict its bookkeeping —
+    // keeping the channel agnostic of who's listening.
     const shutdownCb = this._shutdownCallback
     this._shutdownCallback = null
     shutdownCb?.()

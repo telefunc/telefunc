@@ -117,6 +117,10 @@ export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
  */
 export const CHANNEL_CONNECT_TTL_MS = 5_000
 
+/** Bound on the proxy's wait for a `attach-ack` from the channel's home — keeps a stuck
+ *  home from blocking the client's reconcile forever. */
+export const SUBSTRATE_ATTACH_ACK_TIMEOUT_MS = 10_000
+
 // Client-side channel reconnect defaults
 export const CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500
 export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000

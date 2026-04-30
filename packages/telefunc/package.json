@@ -105,6 +105,10 @@
     "./cloudflare": {
       "types": "./dist/serve/cloudflare.d.ts",
       "default": "./dist/serve/cloudflare.js"
+    },
+    "./__internal": {
+      "types": "./dist/node/server/__internal.d.ts",
+      "default": "./dist/node/server/__internal.js"
     }
   },
   "type": "module",

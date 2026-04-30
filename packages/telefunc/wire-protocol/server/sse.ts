@@ -109,14 +109,20 @@ class SseConnectionTransport {
   }
 
   /** Data POST — waits for the connection's reconcile to complete, then dispatches its frames.
-   *  Tracked in `pendingDispatches` so `runStreamPost` can drain it before `sendReconciled`. */
+   *  Tracked in `pendingDispatches` so `runStreamPost` can drain it before `sendReconciled`.
+   *
+   *  If the data POST's body contains a reconcile (e.g. the client added a new channel
+   *  after the initial reconcile, so the late reconcile rides over the upload stream or
+   *  an outbox flush POST), we must emit `reconciled` here — `runStreamPost` only fires
+   *  for the initial stream POST. */
   private async handleDataPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = this.connections.get(connId) ?? (await this.waitForConnection(connId))
     if (!connection) return badRequest()
 
+    let reconcileSessionId: string | null = null
     const dispatch = (async (): Promise<'ok' | 'timeout'> => {
       if (!(await this.waitReady(connection))) return 'timeout'
-      await this.processFrameReader(connection, reader)
+      reconcileSessionId = await this.processFrameReader(connection, reader)
       return 'ok'
     })()
     connection.pendingDispatches.add(dispatch)
@@ -124,6 +130,10 @@ class SseConnectionTransport {
       if ((await dispatch) === 'timeout') return badRequest()
     } finally {
       connection.pendingDispatches.delete(dispatch)
+    }
+    if (reconcileSessionId !== null && !connection.closed) {
+      const pending = this.connection.sendReconciled(connection, reconcileSessionId)
+      if (pending) await pending
     }
     return { statusCode: 200, contentType: 'text/plain', headers: [], body: '' }
   }

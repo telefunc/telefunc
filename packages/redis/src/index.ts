@@ -1,109 +1,165 @@
-export { createRedisPubSubAdapter, RedisTransport }
-export type { RedisPubSubOptions, RedisPublisher, RedisSubscriber }
+export { installRedis, RedisTransport }
+export type { InstallRedisOptions, RedisPubSubOptions }
+export { RedisChannelSubstrate } from './substrate.js'
+export type { RedisChannelSubstrateOptions } from './substrate.js'
 
-import { DefaultPubSubAdapter, type PubSubAdapter, type PubSubTransport } from 'telefunc'
+import type { Cluster, Redis } from 'ioredis'
+import { config, type PubSubTransport } from 'telefunc'
+import { assert } from './assert.js'
+import { callDefinedCommand } from './callDefinedCommand.js'
+import { RedisChannelSubstrate } from './substrate.js'
 
-type RedisPublisher = {
-  publish(channel: string, message: string | Uint8Array): Promise<number>
-  incr(key: string): Promise<number>
+/** Wires pub/sub fan-out + cross-instance channel routing onto one ioredis client.
+ *  The adapter and substrate each `duplicate()` for their own subscriber/blocking
+ *  sockets — your primary `redis` stays usable for ordinary commands. */
+function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
+  config.pubsub.transport = new RedisTransport({ redis, prefix: options.prefix })
+  config.channel.substrate = new RedisChannelSubstrate({
+    redis,
+    prefix: options.prefix,
+    instanceId: options.instanceId,
+    pinTtlSeconds: options.pinTtlSeconds,
+    inboxMaxLen: options.inboxMaxLen,
+  })
 }
 
-type RedisSubscriber = {
-  subscribe(...channels: string[]): Promise<unknown>
-  unsubscribe(...channels: string[]): Promise<unknown>
-  on(event: string, listener: (...args: any[]) => void): unknown
-  off(event: string, listener: (...args: any[]) => void): unknown
+type InstallRedisOptions = {
+  /** Default: `tf:`. */
+  prefix?: string
+  /** Stable per-process id. Default: random UUID. */
+  instanceId?: string
+  /** Default: 30s. Refreshed by heartbeat. */
+  pinTtlSeconds?: number
+  /** `XADD MAXLEN ~ N` bound on the inbox stream. Default: 10_000. */
+  inboxMaxLen?: number
 }
 
 type RedisPubSubOptions = {
-  publisher: RedisPublisher
-  subscriber: RedisSubscriber
+  /** ioredis client (Redis or Cluster). `duplicate()`-d for the subscriber connection. */
+  redis: Redis | Cluster
+  /** Default: `tf:`. */
   prefix?: string
 }
 
-function createRedisPubSubAdapter(options: RedisPubSubOptions): PubSubAdapter {
-  return new DefaultPubSubAdapter(new RedisTransport(options))
-}
+// Wire frame: [u32 BE seq][u32 BE ts_hi][u32 BE ts_lo][payload bytes]. `ts` split into two
+// u32s to keep ms-Unix accurate beyond ~50 days. `INCR` + `PUBLISH` happen in one Lua call;
+// `TIME` from the single Redis clock orders concurrent publishers across instances.
 
-const HEADER_BYTES = 8
-const TS_EPOCH = 1577836800000 // 2020-01-01T00:00:00Z
+const DEFAULT_PREFIX = 'tf:'
+const HEADER_BYTES = 12
+const U32_RANGE = 0x1_0000_0000
+
+/** KEYS[1]=seq counter, KEYS[2]=pubsub channel, ARGV[1]=payload bytes; returns [seq,ts]. */
+const PUBLISH_LUA = `
+local seq = redis.call('INCR', KEYS[1])
+local t = redis.call('TIME')
+local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local ts_hi = math.floor(ts / 4294967296)
+local ts_lo = ts - ts_hi * 4294967296
+local header = struct.pack('>I4I4I4', seq, ts_hi, ts_lo)
+redis.call('PUBLISH', KEYS[2], header .. ARGV[1])
+return {seq, ts}
+`.trim()
+
+const PUBLISH_CMD = 'tfPublish'
 
 class RedisTransport implements PubSubTransport {
-  private readonly pub: RedisPublisher
-  private readonly sub: RedisSubscriber
+  private readonly publisher: Redis | Cluster
+  private readonly subscriber: Redis | Cluster
   private readonly prefix: string
-  private readonly textCallbacks = new Map<string, (payload: string, info: { seq: number; ts: number }) => void>()
-  private readonly binaryCallbacks = new Map<string, (payload: Uint8Array, info: { seq: number; ts: number }) => void>()
+  private readonly textCallbacks = new Map<string, TextOnMessage>()
+  private readonly binaryCallbacks = new Map<string, BinaryOnMessage>()
 
   constructor(options: RedisPubSubOptions) {
-    this.pub = options.publisher
-    this.sub = options.subscriber
-    this.prefix = options.prefix ?? 'telefunc:'
-    this.sub.on('message', this._onText)
-    this.sub.on('messageBuffer', this._onBinary)
+    this.publisher = options.redis
+    this.subscriber = options.redis.duplicate()
+    this.prefix = options.prefix ?? DEFAULT_PREFIX
+    this.publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
+    this.subscriber.on('messageBuffer', this._onMessage)
   }
 
-  async send(key: string, payload: string) {
-    const seq = await this.pub.incr(this.prefix + 'seq:' + key)
-    const ts = Date.now()
-    await this.pub.publish(this.prefix + 't:' + key, seq + '\n' + ts + '\n' + payload)
-    return { seq, ts }
+  async send(key: string, payload: string): Promise<{ seq: number; ts: number }> {
+    return this._publish(this.channelKey(key, 't'), this.seqKey(key), textEncoder.encode(payload))
   }
 
-  listen(key: string, onMessage: (payload: string, info: { seq: number; ts: number }) => void) {
-    const channel = this.prefix + 't:' + key
-    this.textCallbacks.set(key, onMessage)
-    this.sub.subscribe(channel)
+  async sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; ts: number }> {
+    return this._publish(this.channelKey(key, 'b'), this.seqKey(key), payload)
+  }
+
+  listen(key: string, onMessage: TextOnMessage): () => void {
+    const channel = this.channelKey(key, 't')
+    assert(!this.textCallbacks.has(channel), `Duplicate text listener for key "${key}"`)
+    this.textCallbacks.set(channel, onMessage)
+    void this.subscriber.subscribe(channel)
     return () => {
-      this.textCallbacks.delete(key)
-      this.sub.unsubscribe(channel)
+      this.textCallbacks.delete(channel)
+      void this.subscriber.unsubscribe(channel)
     }
   }
 
-  async sendBinary(key: string, payload: Uint8Array) {
-    const seq = await this.pub.incr(this.prefix + 'seq:' + key)
-    const ts = Date.now()
-    const envelope = new Uint8Array(HEADER_BYTES + payload.byteLength)
-    const view = new DataView(envelope.buffer)
-    view.setUint32(0, seq)
-    view.setUint32(4, ts - TS_EPOCH)
-    envelope.set(payload, HEADER_BYTES)
-    await this.pub.publish(this.prefix + 'b:' + key, envelope)
-    return { seq, ts }
-  }
-
-  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; ts: number }) => void) {
-    const channel = this.prefix + 'b:' + key
-    this.binaryCallbacks.set(key, onMessage)
-    this.sub.subscribe(channel)
+  listenBinary(key: string, onMessage: BinaryOnMessage): () => void {
+    const channel = this.channelKey(key, 'b')
+    assert(!this.binaryCallbacks.has(channel), `Duplicate binary listener for key "${key}"`)
+    this.binaryCallbacks.set(channel, onMessage)
+    void this.subscriber.subscribe(channel)
     return () => {
-      this.binaryCallbacks.delete(key)
-      this.sub.unsubscribe(channel)
+      this.binaryCallbacks.delete(channel)
+      void this.subscriber.unsubscribe(channel)
     }
   }
 
-  // ── Internal: route ioredis events to per-key callbacks ──
-
-  private _onText = (channel: string, message: string): void => {
-    const tp = this.prefix + 't:'
-    if (!channel.startsWith(tp)) return
-    const i = message.indexOf('\n')
-    const j = message.indexOf('\n', i + 1)
-    if (i === -1 || j === -1) return
-    this.textCallbacks.get(channel.slice(tp.length))?.(message.slice(j + 1), {
-      seq: parseInt(message.slice(0, i), 10),
-      ts: parseInt(message.slice(i + 1, j), 10),
-    })
+  private readonly _onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
+    assert(frame.byteLength >= HEADER_BYTES, 'Malformed publish frame: header too short')
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+    const seq = view.getUint32(0, false)
+    const ts = view.getUint32(4, false) * U32_RANGE + view.getUint32(8, false)
+    const payload = frame.subarray(HEADER_BYTES)
+    const channel = utf8.decode(channelBytes)
+    const text = this.textCallbacks.get(channel)
+    if (text) {
+      text(utf8.decode(payload), { seq, ts })
+      return
+    }
+    const binary = this.binaryCallbacks.get(channel)
+    if (binary) binary(payload, { seq, ts })
   }
 
-  private _onBinary = (channelBuf: Uint8Array, buf: Uint8Array): void => {
-    const channel = new TextDecoder().decode(channelBuf)
-    const bp = this.prefix + 'b:'
-    if (!channel.startsWith(bp) || buf.byteLength < HEADER_BYTES) return
-    const view = new DataView(buf.buffer, buf.byteOffset)
-    this.binaryCallbacks.get(channel.slice(bp.length))?.(
-      new Uint8Array(buf.buffer, buf.byteOffset + HEADER_BYTES, buf.byteLength - HEADER_BYTES),
-      { seq: view.getUint32(0), ts: view.getUint32(4) + TS_EPOCH },
-    )
+  // ── Publish (private) ─────────────────────────────────────────────────
+
+  private async _publish(
+    channelKey: string,
+    seqKey: string,
+    payload: Uint8Array,
+  ): Promise<{ seq: number; ts: number }> {
+    // ioredis 5.x checks `arg instanceof Buffer` to pick its binary path; a raw
+    // `Uint8Array` falls into `String(arg)` and gets serialised as a comma-joined
+    // string of byte values, corrupting the bytes. `Buffer.from(buf, off, len)`
+    // constructs a zero-copy Buffer view over the same ArrayBuffer.
+    const buf = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength)
+    const reply = await callDefinedCommand(this.publisher, PUBLISH_CMD, [seqKey, channelKey, buf])
+    assert(Array.isArray(reply) && reply.length === 2, 'Publish script returned an unexpected shape')
+    const [seq, ts] = reply
+    assert(typeof seq === 'number' && typeof ts === 'number', 'Publish script returned non-numeric seq/ts')
+    return { seq, ts }
+  }
+
+  // ── Key naming (private) ──────────────────────────────────────────────
+  //
+  // `{<key>}` braces force seq counter and pubsub channel onto the same Redis
+  // Cluster hash slot, so the publish Lua script can touch both keys atomically.
+
+  private seqKey(key: string): string {
+    return `${this.prefix}seq:{${key}}`
+  }
+
+  private channelKey(key: string, kind: 't' | 'b'): string {
+    return `${this.prefix}${kind}:{${key}}`
   }
 }
+
+type TextOnMessage = (payload: string, info: { seq: number; ts: number }) => void
+type BinaryOnMessage = (payload: Uint8Array, info: { seq: number; ts: number }) => void
+
+/** Module-level codec — allocating one per call would burn measurable CPU on hot paths. */
+const utf8 = new TextDecoder('utf-8')
+const textEncoder = new TextEncoder()

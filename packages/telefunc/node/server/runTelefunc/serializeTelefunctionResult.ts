@@ -7,6 +7,7 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
+import { getChannelMux } from '../../../wire-protocol/server/substrate.js'
 import {
   buildShieldValidators,
   type ShieldValidators,
@@ -82,8 +83,9 @@ function serializeTelefunctionResult(runContext: {
     telefuncFilePath: runContext.telefuncFilePath,
     shieldErrors: runContext.serverConfig.log.shieldErrors,
   }
+  const mux = getChannelMux()
   function registerChannel(channel: ServerChannel<any, any>) {
-    channel._registerChannel()
+    mux.registerChannel(channel as ServerChannel<unknown, unknown>)
     channel._setResponseAbort(requestContext.responseAbort.abort)
     channel.onClose(requestContext.trackPending())
     channel._validators = makeValidators(channel, valueShields, shieldCtx)

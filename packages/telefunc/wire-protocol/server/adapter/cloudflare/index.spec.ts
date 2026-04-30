@@ -43,7 +43,7 @@ const mocks = vi.hoisted(() => {
         return new ReadableStream()
       },
     })),
-    setPubSubAdapter: vi.fn(),
+    installPubSubAdapter: vi.fn(),
     transportInstances: [] as MockCloudflarePubSubTransport[],
     authorityInstances: [] as MockCloudflarePubSubAuthorityState[],
     MockCloudflarePubSubAuthorityState,
@@ -81,7 +81,7 @@ vi.mock('../../../../node/server/telefunc.js', () => ({
 }))
 
 vi.mock('../../pubsub.js', () => ({
-  setPubSubAdapter: mocks.setPubSubAdapter,
+  installPubSubAdapter: mocks.installPubSubAdapter,
 }))
 
 vi.mock('./pubsub.js', () => ({
@@ -161,7 +161,7 @@ beforeEach(() => {
       return new ReadableStream()
     },
   })
-  mocks.setPubSubAdapter.mockClear()
+  mocks.installPubSubAdapter.mockClear()
   mocks.transportInstances.length = 0
   mocks.authorityInstances.length = 0
 })
@@ -181,7 +181,7 @@ describe('cloudflare adapter entrypoint', () => {
     })
 
     expect(mocks.enableChannelTransports).toHaveBeenCalled()
-    expect(mocks.setPubSubAdapter).toHaveBeenCalledWith(mocks.transportInstances[0])
+    expect(mocks.installPubSubAdapter).toHaveBeenCalledWith(mocks.transportInstances[0])
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-1' }), {
       locationHint: 'weur',
     })

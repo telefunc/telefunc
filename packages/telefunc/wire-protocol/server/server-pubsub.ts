@@ -1,4 +1,4 @@
-export { pubsub, ServerPubSub, SERVER_PUBSUB_BRAND }
+export { pubsub, ServerPubSub }
 
 import type { ChannelData, ChannelPublishAck, PubSub, PubSubBinaryListener, PubSubListener } from '../channel.js'
 import { makePublishInfo } from '../channel.js'
@@ -7,16 +7,16 @@ import { getPubSubAdapter } from './pubsub.js'
 import type { PubSubPublishResult, PubSubAdapter, PubSubUnsubscribe } from './pubsub.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { assert } from '../../utils/assert.js'
+import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { ChannelClosedError } from '../channel-errors.js'
-import { encodePublishText, encodePublishBinary } from '../shared-ws.js'
-import type { WirePublishInfo } from '../shared-ws.js'
+import { encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
+import type { CtrlMessage, DecodedFrame, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
-const SERVER_PUBSUB_BRAND = Symbol.for('ServerPubSub')
+const SERVER_PUBSUB_BRAND: unique symbol = Symbol.for('ServerPubSub')
 
 class ServerPubSub<T = unknown> extends ServerChannel {
   readonly [SERVER_PUBSUB_BRAND] = true
@@ -37,6 +37,21 @@ class ServerPubSub<T = unknown> extends ServerChannel {
 
   static isServerPubSub(value: unknown): value is ServerPubSub {
     return value !== null && typeof value === 'object' && SERVER_PUBSUB_BRAND in value
+  }
+
+  // Channel methods that don't apply to pubsub: throw at runtime so the contract
+  // matches the public `PubSub<T>` interface (which hides them at the type level).
+  override send(): never {
+    assertUsage(false, '`send()` is not available on a `pubsub()` channel — use `publish()`.')
+  }
+  override sendBinary(): never {
+    assertUsage(false, '`sendBinary()` is not available on a `pubsub()` channel — use `publishBinary()`.')
+  }
+  override listen(): never {
+    assertUsage(false, '`listen()` is not available on a `pubsub()` channel — use `subscribe()`.')
+  }
+  override listenBinary(): never {
+    assertUsage(false, '`listenBinary()` is not available on a `pubsub()` channel — use `subscribeBinary()`.')
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -77,6 +92,30 @@ class ServerPubSub<T = unknown> extends ServerChannel {
   }
 
   // --- Transport callbacks ---
+
+  protected override _dispatchDataFrame(frame: Exclude<DecodedFrame, { tag: typeof TAG.CTRL }>): void {
+    if (frame.tag === TAG.PUBLISH_ACK_REQ) {
+      void this._onPeerPublishAckReqMessage(frame.text, frame.seq)
+      return
+    }
+    if (frame.tag === TAG.PUBLISH_BINARY_ACK_REQ) {
+      void this._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
+      return
+    }
+    super._dispatchDataFrame(frame)
+  }
+
+  override _dispatchCtrl(ctrl: CtrlMessage): void {
+    if (ctrl.t === 'pubsub-sub') {
+      this._onPeerPubSubSubscribe(ctrl.binary ?? false)
+      return
+    }
+    if (ctrl.t === 'pubsub-unsub') {
+      this._onPeerPubSubUnsubscribe(ctrl.binary ?? false)
+      return
+    }
+    super._dispatchCtrl(ctrl)
+  }
 
   _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
     return this._trackAck(this._dispatchPublishAckReq(text, seq))

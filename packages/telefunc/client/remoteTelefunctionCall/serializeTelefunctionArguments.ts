@@ -69,7 +69,6 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
           channelId: crypto.randomUUID(),
           ack: opts?.ack,
           transports: channelTransports,
-          defer: true,
         })
       },
       sendStream(createProducer) {

@@ -82,7 +82,12 @@ type CtrlReconcile = {
   /** Set when the client is upgrading from SSE to WS and has kept SSE alive.
    *  Server should drain the SSE send chain before replaying and attaching. */
   upgrade?: true
-  open: { id: string; ix: number; lastSeq: number; defer?: boolean }[]
+  /** `initial: true` means this is the first reconcile for that channel — the server may
+   *  not have created it yet (late-creation race during request body parse), so the server
+   *  should wait up to `connectTtl` for it. Established channels (already reconciled at
+   *  least once) omit `initial`; the server fails them fast if they're missing rather than
+   *  stalling the entire reconcile. */
+  open: { id: string; ix: number; lastSeq: number; initial?: true }[]
 }
 /** Server → client after reconcile: all channels the server actually attached, with lastSeq the server received per channel. */
 type CtrlReconciled = {

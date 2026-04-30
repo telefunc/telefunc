@@ -1,24 +1,24 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { channel } from './channel.js'
-import { pubsub } from './server-pubsub.js'
+import { ServerPubSub } from './server-pubsub.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { TAG, decode } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
-import { getPubSubAdapter, setPubSubAdapter, DefaultPubSubAdapter } from './pubsub.js'
+import { getPubSubAdapter, _resetPubSubAdapterForTesting, DefaultPubSubAdapter } from './pubsub.js'
 import type { PubSubTransport } from './pubsub.js'
 
 const previousPubSubAdapter = getPubSubAdapter()
 
 afterEach(() => {
-  setPubSubAdapter(previousPubSubAdapter)
+  _resetPubSubAdapterForTesting(previousPubSubAdapter)
 })
 
 describe('keyed channel pubsub', () => {
   it('delivers published messages to other channels with the same key', () => {
-    const sender = pubsub<{ text: string }>('room:test:deliver')
-    const receiver = pubsub<{ text: string }>('room:test:deliver')
-    ;(sender as any)._registerChannel()
-    ;(receiver as any)._registerChannel()
+    const sender = new ServerPubSub<{ text: string }>({ key: 'room:test:deliver' })
+    const receiver = new ServerPubSub<{ text: string }>({ key: 'room:test:deliver' })
+    sender._registerChannel()
+    receiver._registerChannel()
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((message) => {
@@ -31,8 +31,8 @@ describe('keyed channel pubsub', () => {
   })
 
   it('delivers published messages back to the source channel', () => {
-    const ps = pubsub<{ text: string }>('room:test:self')
-    ;(ps as any)._registerChannel()
+    const ps = new ServerPubSub<{ text: string }>({ key: 'room:test:self' })
+    ps._registerChannel()
 
     const received: Array<{ text: string }> = []
     ps.subscribe((message) => {
@@ -44,38 +44,25 @@ describe('keyed channel pubsub', () => {
     expect(received).toEqual([{ text: 'hello' }])
   })
 
-  it('keeps listen() separate from subscribe()', () => {
-    const sender = pubsub<{ text: string }>('room:test:separate')
-    const receiver = pubsub<{ text: string }>('room:test:separate')
-    ;(sender as any)._registerChannel()
-    ;(receiver as any)._registerChannel()
+  it('throws on Channel methods that do not apply to pubsub', () => {
+    const ps = new ServerPubSub<{ text: string }>({ key: 'room:test:disallowed' })
 
-    const listened: Array<{ text: string }> = []
-    const subscribed: Array<{ text: string }> = []
-
-    receiver.listen((message) => {
-      listened.push(message)
-    })
-    receiver.subscribe((message) => {
-      subscribed.push(message)
-    })
-
-    sender.publish({ text: 'hello' })
-
-    expect(subscribed).toEqual([{ text: 'hello' }])
-    expect(listened).toEqual([])
+    expect(() => ps.listen()).toThrow(/`listen\(\)` is not available/)
+    expect(() => ps.listenBinary()).toThrow(/`listenBinary\(\)` is not available/)
+    expect(() => ps.send()).toThrow(/`send\(\)` is not available/)
+    expect(() => ps.sendBinary()).toThrow(/`sendBinary\(\)` is not available/)
   })
 
   it('channel() does not have publish or subscribe', () => {
     const ch = channel<{ text: string }, { text: string }>()
 
-    expect((ch as any).publish).toBeUndefined()
-    expect((ch as any).subscribe).toBeUndefined()
+    expect((ch as { publish?: unknown }).publish).toBeUndefined()
+    expect((ch as { subscribe?: unknown }).subscribe).toBeUndefined()
   })
 
   it('buffers keyed publishes until the channel is registered', () => {
-    const sender = pubsub<{ text: string }>('room:test:late-register')
-    const receiver = pubsub<{ text: string }>('room:test:late-register')
+    const sender = new ServerPubSub<{ text: string }>({ key: 'room:test:late-register' })
+    const receiver = new ServerPubSub<{ text: string }>({ key: 'room:test:late-register' })
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((message) => {
@@ -88,18 +75,18 @@ describe('keyed channel pubsub', () => {
   })
 
   it('buffers delivered pubsub frames until a peer attaches', () => {
-    const sender = pubsub<{ text: string }>('room:test:buffered-delivery')
-    const receiver = pubsub<{ text: string }>('room:test:buffered-delivery')
-    ;(sender as any)._registerChannel()
-    ;(receiver as any)._registerChannel()
+    const sender = new ServerPubSub<{ text: string }>({ key: 'room:test:buffered-delivery' })
+    const receiver = new ServerPubSub<{ text: string }>({ key: 'room:test:buffered-delivery' })
+    sender._registerChannel()
+    receiver._registerChannel()
 
     // Simulate client-initiated subscribe so frames are forwarded to peer
-    ;(receiver as any)._onPeerPubSubSubscribe(false)
+    receiver._onPeerPubSubSubscribe(false)
 
     sender.publish({ text: 'hello' })
 
     const frames: Uint8Array[] = []
-    ;(receiver as any)._attachPeer(
+    receiver._attachPeer(
       new IndexedPeer(
         {
           send(frame) {
@@ -112,17 +99,17 @@ describe('keyed channel pubsub', () => {
     )
 
     expect(frames).toHaveLength(1)
-    const decoded = decode(frames[0]!)
+    const decoded = decode(frames[0]! as Uint8Array<ArrayBuffer>)
     expect(decoded.tag).toBe(TAG.PUBLISH)
     if (decoded.tag !== TAG.PUBLISH) throw new Error('Expected publish frame')
     expect(decoded.text).toBe('{"text":"hello"}')
   })
 
   it('returns a publish receipt when ack is requested', async () => {
-    const sender = pubsub<{ text: string }>('room:test:ack')
-    const receiver = pubsub<{ text: string }>('room:test:ack')
-    ;(sender as any)._registerChannel()
-    ;(receiver as any)._registerChannel()
+    const sender = new ServerPubSub<{ text: string }>({ key: 'room:test:ack' })
+    const receiver = new ServerPubSub<{ text: string }>({ key: 'room:test:ack' })
+    sender._registerChannel()
+    receiver._registerChannel()
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((message) => {
@@ -150,10 +137,10 @@ describe('keyed channel pubsub', () => {
   })
 
   it('uses channel ack mode as the default for keyed publish', async () => {
-    const sender = pubsub<{ text: string }>('room:test:ack-default')
-    const receiver = pubsub<{ text: string }>('room:test:ack-default')
-    ;(sender as any)._registerChannel()
-    ;(receiver as any)._registerChannel()
+    const sender = new ServerPubSub<{ text: string }>({ key: 'room:test:ack-default' })
+    const receiver = new ServerPubSub<{ text: string }>({ key: 'room:test:ack-default' })
+    sender._registerChannel()
+    receiver._registerChannel()
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((message) => {
@@ -215,12 +202,12 @@ describe('DefaultPubSubAdapter with transport', () => {
   it('delivers locally and returns transport seq', async () => {
     const transport = createMockTransport()
     const registry = new DefaultPubSubAdapter(transport)
-    setPubSubAdapter(registry)
+    _resetPubSubAdapterForTesting(registry)
 
-    const sender = pubsub<{ text: string }>('room:adapted:basic')
-    const receiver = pubsub<{ text: string }>('room:adapted:basic')
-    ;(sender as any)._registerChannel()
-    ;(receiver as any)._registerChannel()
+    const sender = new ServerPubSub<{ text: string }>({ key: 'room:adapted:basic' })
+    const receiver = new ServerPubSub<{ text: string }>({ key: 'room:adapted:basic' })
+    sender._registerChannel()
+    receiver._registerChannel()
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((msg) => received.push(msg))
@@ -235,12 +222,12 @@ describe('DefaultPubSubAdapter with transport', () => {
   it('does not double-deliver from same node echo', () => {
     const transport = createMockTransport()
     const registry = new DefaultPubSubAdapter(transport)
-    setPubSubAdapter(registry)
+    _resetPubSubAdapterForTesting(registry)
 
-    const sender = pubsub<{ text: string }>('room:adapted:echo')
-    const receiver = pubsub<{ text: string }>('room:adapted:echo')
-    ;(sender as any)._registerChannel()
-    ;(receiver as any)._registerChannel()
+    const sender = new ServerPubSub<{ text: string }>({ key: 'room:adapted:echo' })
+    const receiver = new ServerPubSub<{ text: string }>({ key: 'room:adapted:echo' })
+    sender._registerChannel()
+    receiver._registerChannel()
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((msg) => received.push(msg))

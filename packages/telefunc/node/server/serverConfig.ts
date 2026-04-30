@@ -18,7 +18,8 @@ import type {
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute } from '../../utils/path.js'
-import { setPubSubAdapter, DefaultPubSubAdapter, type PubSubTransport } from '../../wire-protocol/server/pubsub.js'
+import { installPubSubAdapter, DefaultPubSubAdapter, type PubSubTransport } from '../../wire-protocol/server/pubsub.js'
+import { installChannelSubstrate, type ChannelSubstrate } from '../../wire-protocol/server/substrate.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
@@ -66,6 +67,13 @@ type ChannelConfigUser = {
    * Connections arriving on a transport not listed here are immediately rejected.
    */
   transports?: ChannelTransports
+  /**
+   * Substrate that pins each channel's home instance and routes wire frames
+   * across instances on cross-instance reconnect. Defaults to an in-memory
+   * substrate (single-process). Multi-instance deployments install a Redis,
+   * Cloudflare, or other cross-instance substrate here.
+   */
+  substrate?: ChannelSubstrate
   /**
    * How long, in milliseconds, the server keeps channel state after a client
    * disconnects while waiting for a reconnect.
@@ -465,6 +473,19 @@ function applyChannelConfig(val: unknown): void {
       case 'transports':
         next.transports = validateChannelTransports(value, configPath)
         break
+      case 'substrate': {
+        const candidate = value as unknown as ChannelSubstrate
+        assertUsage(
+          isObject(value) &&
+            typeof candidate.pinChannel === 'function' &&
+            typeof candidate.unpinChannel === 'function' &&
+            typeof candidate.locateRemoteHome === 'function',
+          `\`${configPath}\` must be a ChannelSubstrate`,
+        )
+        next.substrate = candidate
+        installChannelSubstrate(candidate)
+        break
+      }
       case 'reconnectTimeout':
       case 'idleTimeout':
       case 'pingInterval':
@@ -497,7 +518,7 @@ function applyPubSubConfig(val: unknown): void {
         'config.pubsub.transport must be a PubSubTransport with send() and listen() methods',
       )
       configState.pubsub.transport = value as PubSubTransport
-      setPubSubAdapter(new DefaultPubSubAdapter(value as PubSubTransport))
+      installPubSubAdapter(new DefaultPubSubAdapter(value as PubSubTransport))
     } else {
       assertUsage(false, `Unknown config.pubsub.${key}`)
     }

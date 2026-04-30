@@ -25,7 +25,6 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, ch
   const channel = new ClientChannel({
     channelId: crypto.randomUUID(),
     transports: channelTransports,
-    defer: true,
   })
 
   const producer = createProducer()

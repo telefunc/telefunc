@@ -60,7 +60,6 @@ type OutboundFrame = {
 
 interface MuxChannel {
   readonly id: string
-  readonly defer: boolean
   readonly isClosed: boolean
   _onTransportOpen(): void
   _onTransportMessage(data: string): void
@@ -186,6 +185,10 @@ class ClientConnection implements MuxConnection {
   private reconcileIxes = new Set<number>()
   private channels = new Map<number, MuxChannel>()
   private channelIndex = new Map<MuxChannel, number>()
+  /** Ixs that have not yet been confirmed by a `CtrlReconciled`. They're flagged
+   *  `initial: true` in the next `reconcile` so the server waits up to `connectTtl` for
+   *  late-creation. Cleared once the server confirms the ix in a `reconciled.open`. */
+  private initialPendingIxes = new Set<number>()
   private sendBuffer: BufferedFrame[] = []
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
@@ -248,6 +251,7 @@ class ClientConnection implements MuxConnection {
     const ix = this.nextIndex++
     this.channels.set(ix, channel)
     this.channelIndex.set(channel, ix)
+    this.initialPendingIxes.add(ix)
     this.replayBuffers.set(
       ix,
       new ReplayBuffer(this.clientReplayBufferBytes, this.reconnectTimeoutMs, this.clientReplayBufferBinaryBytes),
@@ -741,7 +745,7 @@ class ClientConnection implements MuxConnection {
     for (const [ix, channel] of this.channels) {
       this.reconcileIxes.add(ix)
       const entry: CtrlReconcile['open'][number] = { id: channel.id, ix, lastSeq: this.lastSeqByChannel.get(ix) ?? 0 }
-      if (channel.defer) entry.defer = true
+      if (this.initialPendingIxes.has(ix)) entry.initial = true
       open.push(entry)
     }
     const reconcile: CtrlReconcile = { t: 'reconcile', open }
@@ -785,6 +789,9 @@ class ClientConnection implements MuxConnection {
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) {
       serverMap.set(channel.ix, channel.lastSeq)
+      // Server confirmed this ix — it now exists on the server side, so subsequent reconciles
+      // shouldn't flag it as `initial`.
+      this.initialPendingIxes.delete(channel.ix)
     }
     const reconcileIxes = this.reconcileIxes
     this.reconcileIxes = new Set()
@@ -935,6 +942,7 @@ class ClientConnection implements MuxConnection {
     this.channels.delete(ix)
     this.channelIndex.delete(channel)
     this.lastSeqByChannel.delete(ix)
+    this.initialPendingIxes.delete(ix)
     const replayBuffer = this.replayBuffers.get(ix)
     replayBuffer?.dispose()
     this.replayBuffers.delete(ix)

@@ -44,7 +44,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
   readonly id: string
   readonly ack: boolean
-  readonly defer: boolean
   readonly key: string | undefined
   protected _connection: MuxConnection
   private _listeners: Array<ChannelListener<ServerToClient>> = []
@@ -73,19 +72,16 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     key,
     transports,
     sessionToken,
-    defer = false,
   }: {
     channelId: string
     ack?: boolean
     key?: string
     transports: ChannelTransports
     sessionToken?: string
-    defer?: boolean
   }) {
     this.id = channelId
     this.ack = ack
     this.key = key
-    this.defer = defer
     const config = resolveClientConfig()
     const url = sessionToken ? appendSessionParam(config.telefuncUrl, sessionToken) : config.telefuncUrl
     this._connection = ClientConnection.getOrCreate(url, this, {

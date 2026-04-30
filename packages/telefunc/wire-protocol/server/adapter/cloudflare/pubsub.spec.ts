@@ -11,7 +11,7 @@ import '../../../../node/server/async_hooks.js'
 import { CloudflarePubSubAuthorityState, CloudflarePubSubTransport } from './pubsub.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { pubsub } from '../../server-pubsub.js'
-import { getPubSubAdapter, setPubSubAdapter } from '../../pubsub.js'
+import { getPubSubAdapter, _resetPubSubAdapterForTesting } from '../../pubsub.js'
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 
@@ -244,7 +244,7 @@ describe('cloudflare pubsub routing', () => {
     transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
     transport.attachKV(kv)
     transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
-    setPubSubAdapter(transport)
+    _resetPubSubAdapterForTesting(transport)
 
     transport.subscribe('room:test', () => {})
     await flushMicrotasks()
@@ -253,7 +253,7 @@ describe('cloudflare pubsub routing', () => {
     const value = await kv.get(`tfps:${encodeURIComponent('room:test')}:weur:telefunc-shard-weur-0`)
     expect(value).toBe('telefunc-shard-weur-0')
 
-    setPubSubAdapter(previousTransport)
+    _resetPubSubAdapterForTesting(previousTransport)
   })
 
   it('keeps the first-touch authority bucket in publish receipts', async () => {
@@ -319,7 +319,7 @@ describe('cloudflare pubsub routing', () => {
     )
     transport.attachKV(kv)
     transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
-    setPubSubAdapter(transport)
+    _resetPubSubAdapterForTesting(transport)
 
     const ps = pubsub<{ text: string }>('room:test')
     // subscribe() triggers KV presence setup — publish should wait for it
@@ -334,7 +334,7 @@ describe('cloudflare pubsub routing', () => {
 
     expect(publishTargets).toEqual(['telefunc:pubsub:authority:room:test'])
 
-    setPubSubAdapter(previousTransport)
+    _resetPubSubAdapterForTesting(previousTransport)
   })
 
   it('does not deliver locally before ordered publish setup completes', async () => {
@@ -378,7 +378,7 @@ describe('cloudflare pubsub routing', () => {
       'TelefuncDurableObject',
     )
     transport.attachKV(kv)
-    setPubSubAdapter(transport)
+    _resetPubSubAdapterForTesting(transport)
 
     const subscriber = pubsub<{ text: string }>('room:test')
     subscriber.subscribe((message) => {
@@ -395,7 +395,7 @@ describe('cloudflare pubsub routing', () => {
 
     expect(received).toEqual(['hello'])
 
-    setPubSubAdapter(previousTransport)
+    _resetPubSubAdapterForTesting(previousTransport)
   })
 
   it('resolves publish ack with authority metadata after cold-path setup completes', async () => {
@@ -430,7 +430,7 @@ describe('cloudflare pubsub routing', () => {
       'TelefuncDurableObject',
     )
     transport.attachKV(kv)
-    setPubSubAdapter(transport)
+    _resetPubSubAdapterForTesting(transport)
 
     const subscriber = pubsub<{ text: string }>('room:test:ack')
     subscriber.subscribe(() => undefined)
@@ -452,7 +452,7 @@ describe('cloudflare pubsub routing', () => {
     })
     expect(receipt.ts).toEqual(expect.any(Number))
 
-    setPubSubAdapter(previousTransport)
+    _resetPubSubAdapterForTesting(previousTransport)
   })
 
   it('authority forwards once to each populated bucket coordinator', async () => {
@@ -537,7 +537,7 @@ describe('cloudflare pubsub routing', () => {
     )
     transport.attachKV(kv)
     transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
-    setPubSubAdapter(transport)
+    _resetPubSubAdapterForTesting(transport)
 
     // No request context needed — isolate state provides locationBucket
     const ps = pubsub<{ text: string }>('room:test:no-ctx')
@@ -555,7 +555,7 @@ describe('cloudflare pubsub routing', () => {
       },
     ])
 
-    setPubSubAdapter(previousTransport)
+    _resetPubSubAdapterForTesting(previousTransport)
   })
 
   it('asserts when isolate info is not attached before subscribe', () => {
@@ -565,11 +565,11 @@ describe('cloudflare pubsub routing', () => {
 
     transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
     transport.attachKV(kv)
-    setPubSubAdapter(transport)
+    _resetPubSubAdapterForTesting(transport)
 
     expect(() => transport.subscribe('room:test', () => {})).toThrow('attachIsolateInfo()')
 
-    setPubSubAdapter(previousTransport)
+    _resetPubSubAdapterForTesting(previousTransport)
   })
 
   it('serializes authority dispatch without blocking later publishes on remote delivery completion', async () => {
@@ -653,7 +653,7 @@ describe('cloudflare pubsub routing', () => {
     transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
     transport.attachKV(kv)
     transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
-    setPubSubAdapter(transport)
+    _resetPubSubAdapterForTesting(transport)
 
     const unsub = transport.subscribe('room:test', () => {})
     await flushMicrotasks()
@@ -666,6 +666,6 @@ describe('cloudflare pubsub routing', () => {
 
     expect(await kv.get(presenceKey)).toBeNull()
 
-    setPubSubAdapter(previousTransport)
+    _resetPubSubAdapterForTesting(previousTransport)
   })
 })

@@ -4,25 +4,17 @@ export type { ServerTransport }
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
-import type { ServerChannel } from './channel.js'
-import { getChannelRegistry, onChannelCreated, setChannelDefaults } from './channel.js'
-import { ServerPubSub } from './server-pubsub.js'
-import { ReplayBuffer } from '../replay-buffer.js'
-import { IndexedPeer } from './IndexedPeer.js'
-import type { PeerSender } from './IndexedPeer.js'
+import { setChannelDefaults } from './channel.js'
+import { getChannelMux, type ChannelMux, type SendFn } from './substrate.js'
 import { TAG, decode, encodeCtrl } from '../shared-ws.js'
-import type { CtrlMessage, CtrlReconcile } from '../shared-ws.js'
+import type { CtrlReconcile } from '../shared-ws.js'
 import { CHANNEL_PING_INTERVAL_MIN_MS, type ChannelTransports } from '../constants.js'
-
-type DecodedFrame = ReturnType<typeof decode>
 
 type MuxServerOptions = {
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
   pingDeadline: number
-  serverReplayBuffer: number
-  serverReplayBufferBinary: number
   clientReplayBuffer: number
   clientReplayBufferBinary: number
   connectTtl: number
@@ -30,23 +22,27 @@ type MuxServerOptions = {
   bufferLimitBinary: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
-  replayMaxAge: number
   transports: ChannelTransports
 }
 
-type ChannelEntry = { channel: ServerChannel; lastClientSeq: number; replay: ReplayBuffer }
+/** Returned by `handleFrame`/`handleCtrl` only when a reconcile completed: lets the caller
+ *  branch on object identity (`if (result)`) rather than a magic `string | null` value. */
+type ReconcileOutcome = { sessionId: string }
+
 type SessionState = {
-  ixMap: Map<number, ChannelEntry>
+  /** `CtrlReconciled.open[]` snapshot returned by the most recent `reconcileSession`. */
+  openList: CtrlReconcile['open']
   /** Waits until the currently attached transport has fully drained its send chain. */
   drainActiveTransport: (() => Promise<void>) | null
   /** Sends a fin ctrl frame on the current transport. Set at end of each reconcile. */
   sendFin: (() => void | Promise<void>) | null
+  /** Set when this reconcile carries an `upgrade`: drains the previous transport and sends
+   *  fin on it. Fired by `sendReconciled` once the new transport has emitted reconciled. */
+  finalizeUpgrade: (() => void) | null
 }
-type ReconcileResult = { sessionId: string; finalizeUpgrade?: () => void }
 
 const globalObject = getGlobalObject('wire-protocol/server/connection.ts', {
   sessionStates: new Map<string, SessionState>(),
-  transportChannels: new Map<string, ChannelEntry>(),
 })
 
 class ProtocolViolationError extends Error {}
@@ -60,8 +56,6 @@ function resolveMuxServerOptions(): MuxServerOptions {
     idleTimeout: c.idleTimeout,
     pingInterval,
     pingDeadline,
-    serverReplayBuffer: c.serverReplayBuffer,
-    serverReplayBufferBinary: c.serverReplayBufferBinary,
     clientReplayBuffer: c.clientReplayBuffer,
     clientReplayBufferBinary: c.clientReplayBufferBinary,
     connectTtl: c.connectTtl,
@@ -69,7 +63,6 @@ function resolveMuxServerOptions(): MuxServerOptions {
     bufferLimitBinary: c.bufferLimitBinary,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
-    replayMaxAge: pingDeadline + c.reconnectTimeout + 1_000,
     transports: c.transports,
   }
 }
@@ -93,8 +86,10 @@ class ServerConnection<TConnection> {
   private readonly options: MuxServerOptions
   private readonly transport: ServerTransport<TConnection>
   private readonly sessionStates = globalObject.sessionStates
-  private readonly transportChannels = globalObject.transportChannels
   private readonly connectionStates = new Map<TConnection, ConnectionState>()
+  /** `installChannelSubstrate` is boot-time only (asserts no channels exist), so caching the
+   *  mux once per connection is safe and avoids re-resolving the global on every frame. */
+  private readonly mux: ChannelMux = getChannelMux()
 
   constructor(transport: ServerTransport<TConnection>) {
     this.transport = transport
@@ -116,8 +111,13 @@ class ServerConnection<TConnection> {
   async onConnectionRawMessage(connection: TConnection, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
     const state = this.getOrCreateConnectionState(connection)
     try {
-      const pending = this.handleFrame(connection, decode(rawFrame), false)
-      if (pending) await pending
+      const pending = this.handleFrame(connection, rawFrame)
+      if (!pending) return
+      // If the frame was a `reconcile`, `handleFrame` resolves to the new sessionId — emit
+      // `reconciled` immediately. SSE takes the deferred path and emits later (after
+      // draining concurrent data POSTs); see `onConnectionRawMessageDeferredReconciled`.
+      const outcome = await pending
+      if (outcome) this.sendReconciled(connection, outcome.sessionId)
     } catch {
       state.terminatePermanently = true
       this.transport.terminateConnection(connection)
@@ -130,9 +130,9 @@ class ServerConnection<TConnection> {
   ): Promise<string | null> {
     const state = this.getOrCreateConnectionState(connection)
     try {
-      const result = this.handleFrame(connection, decode(rawFrame), true)
-      if (result) return await result
-      return result
+      const pending = this.handleFrame(connection, rawFrame)
+      if (!pending) return null
+      return (await pending)?.sessionId ?? null
     } catch {
       state.terminatePermanently = true
       this.transport.terminateConnection(connection)
@@ -150,29 +150,14 @@ class ServerConnection<TConnection> {
     return this.getOrCreateConnectionState(connection).terminatePermanently
   }
 
-  /** Connection-scoped outbound send gate.
+  /** Connection-scoped outbound send gate. Preserves wire order across the whole
+   *  connection: every server→client frame for one transport flows through here, whether
+   *  it originates from mux control handling (`reconcile` replay, `reconciled`, `pong`) or
+   *  from a `ServerChannel` via the `SendFn` closure passed into `reconcileSession`.
    *
-   *  Every server-to-client frame for one transport connection flows through here, whether it
-   *  originates from mux control handling (`reconcile` replay, `reconciled`, `pong`) or from a
-   *  `ServerChannel` via `IndexedPeer` and the `PeerSender` closure created during reconcile.
-   *
-   *  Its job is to preserve strict wire order across the whole connection while still keeping an
-   *  idle fast path cheap:
-   *  - if no prior send is in flight, it calls `_sendNow()` immediately;
-   *  - if `_sendNow()` completes synchronously, this method returns `void` and the connection
-   *    stays idle;
+   *  - if no prior send is in flight, calls `_sendNow()` immediately;
    *  - if `_sendNow()` returns a promise, that promise becomes the connection's active send chain;
-   *  - while a send chain exists, later sends are appended behind it and therefore cannot overtake
-   *    earlier frames on the wire.
-   *
-   *  This method knows nothing about per-channel pause/disconnect state; that is handled earlier
-   *  by `ServerChannel.sendBinary()`. That is also where ws-side flow control is applied:
-   *  client pause/resume signals toggle per-channel sendability before a frame reaches this layer.
-   *
-   *  `_sendNow()` is the transport-specific leaf:
-   *  - ws sends synchronously once the channel has already been deemed sendable;
-   *  - sse may return a promise here when stream backpressure requires waiting.
-   */
+   *  - while a send chain exists, later sends append behind it and cannot overtake earlier frames. */
   protected send(connection: TConnection, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void | Promise<void> {
     const state = this.getOrCreateConnectionState(connection)
     if (!state.sendChain) {
@@ -199,187 +184,96 @@ class ServerConnection<TConnection> {
 
   handleConnectionClose(connection: TConnection, permanent: boolean): void {
     const sessionId = this.transport.getSessionId(connection)
+    // No sessionId: the connection closed before reconciling (e.g., handshake error or immediate
+    // disconnect). No session state to clean up.
     if (!sessionId) return
+    // No sessionState: a previous permanent close already deleted it (e.g., this transport was
+    // bound to a sessionId that's since been replaced or finalized by another close).
     const sessionState = this.sessionStates.get(sessionId)
     if (!sessionState) return
 
     sessionState.drainActiveTransport = null
     sessionState.sendFin = null
 
-    if (permanent) {
-      for (const entry of sessionState.ixMap.values()) {
-        if (!entry.channel._didShutdown) entry.channel._onPeerClose()
-      }
-      sessionState.ixMap.clear()
-      this.sessionStates.delete(sessionId)
-      return
-    }
-
-    for (const entry of sessionState.ixMap.values()) {
-      entry.channel._onPeerDisconnect(this.options.reconnectTimeout)
-    }
+    this.mux.detachSession(sessionId, permanent ? 'permanent' : 'transient')
+    if (permanent) this.sessionStates.delete(sessionId)
   }
 
-  private async handleCtrl(
-    connection: TConnection,
-    ctrl: CtrlMessage,
-    deferReconciled: boolean,
-  ): Promise<string | null> {
-    if (ctrl.t === 'reconcile') {
-      const { sessionId, finalizeUpgrade } = await this.reconcile(connection, ctrl)
-      if (!deferReconciled) {
-        this.sendReconciled(connection, sessionId)
-        finalizeUpgrade?.()
-        return null
-      }
-      return sessionId
-    }
-    if (ctrl.t === 'ping') {
-      this.resetPingTimer(connection)
-      this.send(connection, encodeCtrl({ t: 'pong' }))
-      return null
-    }
-    const sessionState = this.getSessionStateOrThrow(this.transport.getSessionId(connection))
-    switch (ctrl.t) {
-      case 'close': {
-        const entry = sessionState.ixMap.get(ctrl.ix)
-        if (!entry) return null
-        entry.channel._onPeerCloseRequest(ctrl.timeoutMs)
-        return null
-      }
-      case 'close-ack': {
-        const entry = sessionState.ixMap.get(ctrl.ix)
-        if (!entry) return null
-        entry.channel._onPeerCloseAck()
-        return null
-      }
-      case 'window': {
-        const entry = sessionState.ixMap.get(ctrl.ix)
-        if (entry) entry.channel._onPeerWindowUpdate(ctrl.bytes)
-        return null
-      }
-      case 'pubsub-sub': {
-        const entry = sessionState.ixMap.get(ctrl.ix)
-        if (entry && ServerPubSub.isServerPubSub(entry.channel))
-          entry.channel._onPeerPubSubSubscribe(ctrl.binary ?? false)
-        return null
-      }
-      case 'pubsub-unsub': {
-        const entry = sessionState.ixMap.get(ctrl.ix)
-        if (entry && ServerPubSub.isServerPubSub(entry.channel))
-          entry.channel._onPeerPubSubUnsubscribe(ctrl.binary ?? false)
-        return null
-      }
-    }
-    return null
-  }
-
-  private async reconcile(connection: TConnection, ctrl: CtrlReconcile): Promise<ReconcileResult> {
+  private async reconcile(connection: TConnection, ctrl: CtrlReconcile): Promise<ReconcileOutcome> {
     const state = this.getOrCreateConnectionState(connection)
-    const prevSessionId = ctrl.sessionId
-    const sessionState = prevSessionId
-      ? this.getSessionStateOrThrow(prevSessionId)
-      : { ixMap: new Map<number, ChannelEntry>(), drainActiveTransport: null, sendFin: null }
+    const sessionState = this.resumeOrCreateSessionState(ctrl.sessionId)
     state.reconciling = true
     this.resetPingTimer(connection)
-    const registry = getChannelRegistry()
-    const reconciledIxs = new Set<number>()
-    const prevIxMap = new Map(sessionState.ixMap)
-    sessionState.ixMap.clear()
-    let finalizeUpgrade: (() => void) | undefined
+    // Snapshot the previous transport's drain/fin handlers BEFORE we overwrite them with
+    // the new transport's handlers below — `prepareUpgradeFinalizer` reads from sessionState.
+    const finalizeUpgrade = ctrl.upgrade ? this.prepareUpgradeFinalizer(sessionState) : null
+    const send: SendFn = (frame, onCommit) => this.send(connection, frame, onCommit)
+    const newSessionId = crypto.randomUUID()
 
-    if (ctrl.upgrade) {
-      const drainPreviousTransport = sessionState.drainActiveTransport
-      const sendPreviousFin = sessionState.sendFin
-      sessionState.drainActiveTransport = null
-      sessionState.sendFin = null
-      finalizeUpgrade = () => {
-        void (async () => {
-          if (drainPreviousTransport) await drainPreviousTransport()
-          const finPending = sendPreviousFin?.()
-          if (finPending) await finPending
-        })()
-      }
+    // The mux attaches every channel in `ctrl.open` (parallel home-lookups + parallel
+    // local replay drains and proxy attach-acks), detaches anything from the previous
+    // session that the client did NOT re-include, and returns the open list for CtrlReconciled.
+    sessionState.openList = await this.mux.reconcileSession({
+      prevSessionId: ctrl.sessionId,
+      newSessionId,
+      open: ctrl.open,
+      send,
+    })
+
+    // The connection may have closed during the await
+    if (!this.connectionStates.has(connection)) {
+      this.mux.detachSession(newSessionId, 'permanent')
+      throw new ProtocolViolationError()
     }
 
-    await Promise.all(
-      ctrl.open
-        .filter(({ id, defer }) => defer && (!registry.get(id) || registry.get(id)!._didShutdown))
-        .map(
-          ({ id }) =>
-            new Promise<void>((resolve) => {
-              onChannelCreated(id, resolve)
-              setTimeout(resolve, this.options.connectTtl)
-            }),
-        ),
-    )
-
-    const sender: PeerSender = {
-      send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
-    }
-
-    for (const { id, ix, lastSeq } of ctrl.open) {
-      reconciledIxs.add(ix)
-      const channel = registry.get(id)
-      if (!channel || channel._didShutdown) continue
-
-      const {
-        replay = new ReplayBuffer(
-          this.options.serverReplayBuffer,
-          this.options.replayMaxAge,
-          this.options.serverReplayBufferBinary,
-        ),
-        lastClientSeq = 0,
-      } = this.transportChannels.get(id) ?? {}
-      const entry: ChannelEntry = { channel, lastClientSeq, replay }
-
-      for (const frame of replay.getAfter(lastSeq)) {
-        const pending = this.send(connection, frame as Uint8Array<ArrayBuffer>)
-        if (pending) await pending
-      }
-
-      sessionState.ixMap.set(ix, entry)
-      this.transportChannels.set(id, entry)
-      channel._onShutdown(() => {
-        this.transportChannels.delete(id)
-        replay.dispose()
-      })
-
-      channel._attachPeer(new IndexedPeer(sender, ix, replay))
-    }
-
-    for (const [ix, entry] of prevIxMap) {
-      if (reconciledIxs.has(ix)) continue
-      if (!entry.channel._didShutdown) entry.channel._onPeerRecoveryFailure()
-    }
-
-    const sessionId = crypto.randomUUID()
-    if (prevSessionId) this.sessionStates.delete(prevSessionId)
-    this.sessionStates.set(sessionId, sessionState)
-    this.transport.setSessionId(connection, sessionId)
+    if (ctrl.sessionId) this.sessionStates.delete(ctrl.sessionId)
+    this.sessionStates.set(newSessionId, sessionState)
+    this.transport.setSessionId(connection, newSessionId)
     sessionState.drainActiveTransport = async () => {
       const pending = state.sendChain
       if (pending) await pending
     }
-
     sessionState.sendFin = () => this.send(connection, encodeCtrl({ t: 'fin' }))
+    sessionState.finalizeUpgrade = finalizeUpgrade
+
     state.reconciling = false
     this.resetPingTimer(connection)
-    return { sessionId, finalizeUpgrade }
+    return { sessionId: newSessionId }
+  }
+
+  /** Resume the session attached to a previous reconnect (when `ctrl.sessionId` is given)
+   *  or create a fresh `SessionState` for a first-time reconcile. The mux owns the per-channel
+   *  state; this side just carries the open-list snapshot and transport drain handlers. */
+  private resumeOrCreateSessionState(prevSessionId: string | undefined): SessionState {
+    if (prevSessionId) return this.getSessionStateOrThrow(prevSessionId)
+    return { openList: [], drainActiveTransport: null, sendFin: null, finalizeUpgrade: null }
+  }
+
+  /** Snapshot the previous transport's drain + fin handlers, then return a finalizer the
+   *  caller invokes after the new transport has emitted CtrlReconciled. The finalizer drains
+   *  the old transport and sends its `fin` so the client can fully release it. */
+  private prepareUpgradeFinalizer(sessionState: SessionState): () => void {
+    const drainPreviousTransport = sessionState.drainActiveTransport
+    const sendPreviousFin = sessionState.sendFin
+    sessionState.drainActiveTransport = null
+    sessionState.sendFin = null
+    return () => {
+      void (async () => {
+        if (drainPreviousTransport) await drainPreviousTransport()
+        const finPending = sendPreviousFin?.()
+        if (finPending) await finPending
+      })()
+    }
   }
 
   sendReconciled(connection: TConnection, sessionId: string): void | Promise<void> {
     const sessionState = this.getSessionStateOrThrow(sessionId)
-    const open: CtrlReconcile['open'] = []
-    for (const [ix, entry] of sessionState.ixMap) {
-      open.push({ id: entry.channel.id, ix, lastSeq: entry.lastClientSeq })
-    }
-    return this.send(
+    const pending = this.send(
       connection,
       encodeCtrl({
         t: 'reconciled',
         sessionId,
-        open,
+        open: sessionState.openList,
         reconnectTimeout: this.options.reconnectTimeout,
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
@@ -390,6 +284,15 @@ class ServerConnection<TConnection> {
         transports: this.options.transports,
       }),
     )
+    // Upgrade carries over from the previous transport: drain and `fin` it now that the
+    // new transport has accepted `reconciled`. Each transport has its own send chain, so
+    // firing this synchronously is safe — it doesn't reorder anything on the new wire.
+    const finalizeUpgrade = sessionState.finalizeUpgrade
+    if (finalizeUpgrade) {
+      sessionState.finalizeUpgrade = null
+      finalizeUpgrade()
+    }
+    return pending
   }
 
   private getSessionStateOrThrow(sessionId: string | undefined): SessionState {
@@ -428,43 +331,42 @@ class ServerConnection<TConnection> {
     )
   }
 
+  /** Single dispatch for an inbound wire frame. Data frames go to the mux for per-ix routing;
+   *  ctrl frames branch by `t`. Returns a `ReconcileOutcome` only on reconcile (so the caller
+   *  can decide when to send `reconciled`); null in every other case.
+   *
+   *  Any frame other than `reconcile` or `ping` arriving before this connection has reconciled
+   *  is a protocol violation — the spec says the first frame must be `reconcile`. We throw
+   *  `ProtocolViolationError`; the caller's `catch` terminates the connection. */
   private handleFrame(
     connection: TConnection,
-    frame: DecodedFrame,
-    deferReconciled: boolean,
-  ): null | Promise<string | null> {
-    if (frame.tag === TAG.CTRL) return this.handleCtrl(connection, frame.ctrl, deferReconciled)
+    rawFrame: Uint8Array<ArrayBuffer>,
+  ): null | Promise<ReconcileOutcome | null> {
+    const frame = decode(rawFrame)
 
-    const entry = this.getSessionStateOrThrow(this.transport.getSessionId(connection)).ixMap.get(frame.index)
-    if (!entry) return null
-
-    if (frame.seq && frame.seq <= entry.lastClientSeq) return null
-    if (frame.seq) entry.lastClientSeq = frame.seq
-
-    switch (frame.tag) {
-      case TAG.TEXT:
-        entry.channel._onPeerMessage(frame.text)
-        break
-      case TAG.TEXT_ACK_REQ:
-        entry.channel._onPeerAckReqMessage(frame.text, frame.seq)
-        break
-      case TAG.BINARY:
-        entry.channel._onPeerBinaryMessage(frame.data)
-        break
-      case TAG.BINARY_ACK_REQ:
-        entry.channel._onPeerBinaryAckReqMessage(frame.data, frame.seq)
-        break
-      case TAG.ACK_RES:
-        entry.channel._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
-        break
-      case TAG.PUBLISH_ACK_REQ:
-        if (ServerPubSub.isServerPubSub(entry.channel)) entry.channel._onPeerPublishAckReqMessage(frame.text, frame.seq)
-        break
-      case TAG.PUBLISH_BINARY_ACK_REQ:
-        if (ServerPubSub.isServerPubSub(entry.channel))
-          entry.channel._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
-        break
+    // Pre-session ctrls: only `reconcile` (creates the session) and `ping` (heartbeat) are
+    // legal before reconcile. Handle them first so the session-existence check below can
+    // be unconditional for everything that follows.
+    if (frame.tag === TAG.CTRL && frame.ctrl.t === 'reconcile') return this.reconcile(connection, frame.ctrl)
+    if (frame.tag === TAG.CTRL && frame.ctrl.t === 'ping') {
+      this.resetPingTimer(connection)
+      this.send(connection, encodeCtrl({ t: 'pong' }))
+      return null
     }
+
+    // Everything else requires an established session.
+    const sessionId = this.transport.getSessionId(connection)
+    if (!sessionId) throw new ProtocolViolationError()
+
+    if (frame.tag !== TAG.CTRL) {
+      this.mux.handleClientFrame(sessionId, rawFrame)
+      return null
+    }
+
+    // `pong`/`fin`/`reconciled` are server→client only; a client sending one is a protocol
+    // violation. Everything else carries `ix` and goes to the mux for per-channel routing.
+    if (!('ix' in frame.ctrl)) throw new ProtocolViolationError()
+    this.mux.handleClientCtrl(sessionId, frame.ctrl)
     return null
   }
 }

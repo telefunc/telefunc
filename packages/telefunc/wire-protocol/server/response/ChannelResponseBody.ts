@@ -5,6 +5,7 @@ import type { StreamingProducer } from '../../types.js'
 import { concat } from '../../frame.js'
 import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
 import { ChannelClosedError, ServerChannel } from '../channel.js'
+import { getChannelMux } from '../substrate.js'
 import { isAbort } from '../../../node/server/Abort.js'
 import { encodeErrorPayload } from './StreamingResponseBody.js'
 import { restoreContext } from '../../../node/server/context/context.js'
@@ -49,7 +50,7 @@ function pumpProducerToChannel(
   onComplete?: () => void,
 ): string {
   const channel = new ServerChannel<never, never>()
-  channel._registerChannel()
+  getChannelMux().registerChannel(channel as unknown as ServerChannel<unknown, unknown>)
   const producer = createProducer()
 
   const telefuncId = {

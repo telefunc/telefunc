@@ -1,4 +1,4 @@
-export { getPubSubAdapter, setPubSubAdapter, DefaultPubSubAdapter }
+export { getPubSubAdapter, installPubSubAdapter, _resetPubSubAdapterForTesting, DefaultPubSubAdapter }
 export type {
   PubSubAdapter,
   PubSubTransport,
@@ -184,14 +184,29 @@ class DefaultPubSubAdapter implements PubSubAdapter {
 // Global adapter state
 // ---------------------------------------------------------------------------
 
-const globalObject = getGlobalObject('wire-protocol/server/pubsub.ts', {
-  adapter: new DefaultPubSubAdapter() as PubSubAdapter,
-})
+const globalObject = getGlobalObject<{
+  adapter: PubSubAdapter
+  installed: boolean
+}>('wire-protocol/server/pubsub.ts', () => ({
+  adapter: new DefaultPubSubAdapter(),
+  installed: false,
+}))
 
 function getPubSubAdapter(): PubSubAdapter {
   return globalObject.adapter
 }
 
-function setPubSubAdapter(adapter: PubSubAdapter): void {
+/** First-time install only. Idempotent: subsequent calls are silent no-ops so a
+ *  Vite HMR reload of the user's entry file doesn't leak a fresh transport's
+ *  subscriber connection on every cycle. */
+function installPubSubAdapter(adapter: PubSubAdapter): void {
+  if (globalObject.installed) return
   globalObject.adapter = adapter
+  globalObject.installed = true
+}
+
+/** @internal — test-only escape hatch. */
+function _resetPubSubAdapterForTesting(adapter: PubSubAdapter): void {
+  globalObject.adapter = adapter
+  globalObject.installed = true
 }
