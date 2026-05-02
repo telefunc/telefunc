@@ -1,10 +1,18 @@
 import { apply, serve } from '@photonjs/hono'
 import { Hono } from 'hono'
+import { installRedis } from '@telefunc/redis'
 import { config } from 'telefunc'
 import { telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState } from '../cleanup-state'
 config.channel.pingInterval = 1000
 config.shield = true
+
+const INST = process.env.INSTANCE_ID ?? '?'
+
+if (process.env.REDIS_URL) {
+  installRedis(process.env.REDIS_URL, { instanceId: INST })
+  console.log(`[INST=${INST}] Redis substrate installed`)
+}
 
 const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
 
@@ -50,13 +58,20 @@ function startServer() {
   apply(app)
 
   app.all('/_telefunc', async (c) => {
+    const url = new URL(c.req.url)
+    const kind = c.req.header('x-telefunc-request') ?? '-'
+    const len = c.req.header('content-length') ?? '-'
+    const accept = c.req.header('accept') ?? '-'
+    console.log(
+      `[INST=${INST}] ${c.req.method} ${url.pathname}${url.search} kind=${kind} bytes=${len} accept=${accept}`,
+    )
     const response = await tf.serve({ request: c.req.raw })
     if (response) return response
     return c.text('Not found', 404)
   })
 
   return serve(app, {
-    port: 3000,
+    port: Number(process.env.PORT) || 3000,
     onCreate(server) {
       // @ts-expect-error srvx types not exposed
       tf.installWebSocket(server.node.server)

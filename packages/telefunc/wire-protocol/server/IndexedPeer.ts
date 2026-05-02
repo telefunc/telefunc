@@ -1,7 +1,7 @@
 export { IndexedPeer }
 export type { PeerSender }
 
-import { encode, encodeCtrl } from '../shared-ws.js'
+import { ACK_STATUS, encode } from '../shared-ws.js'
 import type { AckResultStatus } from '../shared-ws.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 
@@ -51,7 +51,7 @@ class IndexedPeer {
 
   /** Send an acknowledgement response for a message the client sent.
    *  ACK_RES frames use the normal sequenced send path and are replayable on reconnect. */
-  sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = 'ok'): void {
+  sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const seq = this.replay.nextSeq()
     const frame = encode.ackRes(this.index, seq, ackedSeq, result, status)
     try {
@@ -63,7 +63,7 @@ class IndexedPeer {
 
   sendCloseRequest(timeoutMs: number): void {
     try {
-      this.sender.send(encodeCtrl({ t: 'close', ix: this.index, timeoutMs }))
+      this.sender.send(encode.close(this.index, timeoutMs))
     } catch {
       /* transport may already be closed */
     }
@@ -71,7 +71,7 @@ class IndexedPeer {
 
   sendCloseAck(): void {
     try {
-      this.sender.send(encodeCtrl({ t: 'close-ack', ix: this.index }))
+      this.sender.send(encode.closeAck(this.index))
     } catch {
       /* transport may already be closed */
     }
@@ -79,7 +79,7 @@ class IndexedPeer {
 
   sendAbort(abortValue: string): void {
     try {
-      this.sender.send(encodeCtrl({ t: 'abort', ix: this.index, abortValue }))
+      this.sender.send(encode.abort(this.index, abortValue))
     } catch {
       /* transport may already be closed */
     }
@@ -87,7 +87,7 @@ class IndexedPeer {
 
   sendError(): void {
     try {
-      this.sender.send(encodeCtrl({ t: 'error', ix: this.index }))
+      this.sender.send(encode.error(this.index))
     } catch {
       /* transport may already be closed */
     }
@@ -95,7 +95,7 @@ class IndexedPeer {
 
   sendWindowUpdate(bytes: number): void {
     try {
-      this.sender.send(encodeCtrl({ t: 'window', ix: this.index, bytes }))
+      this.sender.send(encode.window(this.index, bytes))
     } catch {
       /* transport may already be closed */
     }

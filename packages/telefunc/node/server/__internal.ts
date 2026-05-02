@@ -3,6 +3,7 @@
 
 export {
   decodeProxyEnvelope,
+  DETACH_REASON,
   dispatchEnvelope,
   encodeProxyEnvelope,
   ENVELOPE_KIND,
@@ -12,5 +13,7 @@ export {
 export type {
   ChannelSubstrate,
   ChannelSubstrateHandlers,
+  ConnectionRecord,
+  DetachReason,
   ProxyEnvelope,
 } from '../../wire-protocol/server/substrate.js'

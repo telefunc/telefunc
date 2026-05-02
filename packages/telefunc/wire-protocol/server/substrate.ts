@@ -6,6 +6,7 @@ export {
   InMemoryChannelSubstrate,
   PROXY_DIRECTION,
   ENVELOPE_KIND,
+  DETACH_REASON,
   encodeProxyEnvelope,
   decodeProxyEnvelope,
   dispatchEnvelope,
@@ -13,12 +14,14 @@ export {
 export type {
   ChannelSubstrate,
   ChannelSubstrateHandlers,
+  ConnectionRecord,
   ProxyDirection,
   ProxyEnvelope,
   ProxyAttachPayload,
   ProxyAttachAckPayload,
   ProxyDetachPayload,
   ProxyFramePayload,
+  ProxyConnectionFramePayload,
   ProxyPayload,
   DetachReason,
   SendFn,
@@ -27,7 +30,7 @@ export type {
 import { assert, assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { concat, decodeU32, encodeLengthPrefixedString, encodeU32, readLengthPrefixedString } from '../frame.js'
-import { ChannelMux, type DetachReason, type SendFn } from './substrate-runtime.js'
+import { ChannelMux, type SendFn } from './substrate-runtime.js'
 export type { ChannelMux }
 
 // Cross-instance routing primitive. Channels are single-homed (their runtime state —
@@ -52,19 +55,20 @@ const ENVELOPE_KIND = {
   ATTACH_ACK: 0x02 as const,
   DETACH: 0x03 as const,
   FRAME: 0x04 as const,
+  /** POST receiver → owner: a connection-level wire frame (alias 0 — `ping`, in-body
+   *  `reconcile`) from a data POST that landed on a non-owner instance. The owner
+   *  re-injects on its local connection. The envelope's `channelId` field carries the
+   *  connId so the owner can resolve which local connection to dispatch on. */
+  CONNECTION_FRAME: 0x05 as const,
 }
 
-const DETACH_REASON_TAG = {
-  transient: 0x01,
-  permanent: 0x02,
-  'recovery-failed': 0x03,
-} as const
-
-const DETACH_REASON_BY_TAG: Record<number, DetachReason> = {
-  [DETACH_REASON_TAG.transient]: 'transient',
-  [DETACH_REASON_TAG.permanent]: 'permanent',
-  [DETACH_REASON_TAG['recovery-failed']]: 'recovery-failed',
+const DETACH_REASON = {
+  TRANSIENT: 0x01 as const,
+  PERMANENT: 0x02 as const,
+  RECOVERY_FAILED: 0x03 as const,
 }
+
+type DetachReason = (typeof DETACH_REASON)[keyof typeof DETACH_REASON]
 
 type ProxyEnvelope = {
   channelId: string
@@ -90,12 +94,22 @@ type ProxyAttachPayload = {
 type ProxyAttachAckPayload = { kind: typeof ENVELOPE_KIND.ATTACH_ACK; lastClientSeq: number }
 
 /** `reason` selects the home's lifecycle method:
- *    `'transient'`       → `_onPeerDisconnect` (start reconnect timer)
- *    `'permanent'`       → `_onPeerClose` (terminal)
- *    `'recovery-failed'` → `_onPeerRecoveryFailure` (client dropped the channel) */
+ *    `TRANSIENT`        → `_onPeerDisconnect` (start reconnect timer)
+ *    `PERMANENT`        → `_onPeerClose` (terminal)
+ *    `RECOVERY_FAILED`  → `_onPeerRecoveryFailure` (client dropped the channel) */
 type ProxyDetachPayload = { kind: typeof ENVELOPE_KIND.DETACH; reason: DetachReason }
 
-type ProxyPayload = ProxyFramePayload | ProxyAttachPayload | ProxyAttachAckPayload | ProxyDetachPayload
+/** A connection-level client wire frame from a data POST that landed on a non-owner
+ *  instance, being forwarded to the owner for re-injection on its local connection.
+ *  The envelope's `channelId` field carries the connId for this kind. */
+type ProxyConnectionFramePayload = { kind: typeof ENVELOPE_KIND.CONNECTION_FRAME; frame: Uint8Array }
+
+type ProxyPayload =
+  | ProxyFramePayload
+  | ProxyAttachPayload
+  | ProxyAttachAckPayload
+  | ProxyDetachPayload
+  | ProxyConnectionFramePayload
 
 type ChannelSubstrateHandlers = {
   /** TO_HOME `attach` — proxy is announcing itself for this channel. */
@@ -110,6 +124,9 @@ type ChannelSubstrateHandlers = {
   onPeerDetach?: (env: ProxyEnvelope, payload: ProxyDetachPayload) => void
   /** TO_PEER `attach-ack` — home's response to this peer's `attach`. */
   onAttachAck?: (env: ProxyEnvelope, payload: ProxyAttachAckPayload) => void
+  /** Raw client wire frame from a non-owner POST receiver, to be re-injected on this
+   *  instance's local connection. `env.channelId` is the connId. Direction unused. */
+  onConnectionFrame?: (env: ProxyEnvelope, payload: ProxyConnectionFramePayload) => void
 }
 
 function dispatchEnvelope(handlers: ChannelSubstrateHandlers, env: ProxyEnvelope): void {
@@ -117,6 +134,10 @@ function dispatchEnvelope(handlers: ChannelSubstrateHandlers, env: ProxyEnvelope
   if (p.kind === ENVELOPE_KIND.FRAME) {
     if (env.direction === PROXY_DIRECTION.TO_HOME) handlers.onHomeFrame?.(env, p)
     else handlers.onPeerFrame?.(env, p)
+    return
+  }
+  if (p.kind === ENVELOPE_KIND.CONNECTION_FRAME) {
+    handlers.onConnectionFrame?.(env, p)
     return
   }
   if (p.kind === ENVELOPE_KIND.DETACH) {
@@ -128,10 +149,24 @@ function dispatchEnvelope(handlers: ChannelSubstrateHandlers, env: ProxyEnvelope
   else handlers.onAttachAck?.(env, p)
 }
 
+/** The cluster-visible state of a single client connection. Consulted only at reconcile
+ *  (sessionId verification when the client lands on a non-issuing instance). Per-frame
+ *  routing on the data hot path uses metadata supplied by the client in each data POST,
+ *  so this record stays minimal. */
+type ConnectionRecord = {
+  /** The instance holding this connection's SSE response wire. */
+  owner: string
+  /** The currently-rotated session token. Used by reconcile on a non-local instance to
+   *  verify a client's claimed `prevSessionId` against what the cluster believes. */
+  sessionId: string
+}
+
 interface ChannelSubstrate {
   readonly selfInstanceId: string
-  /** Heartbeat cadence the runtime uses for `refreshPins` (ms). */
+  /** Heartbeat cadence the runtime uses for refreshing every kind of pin (ms). */
   readonly heartbeatIntervalMs: number
+
+  // ── Channel directory ─────────────────────────────────────────────────
 
   /** Announce this instance as home for `channelId` — cluster-wide only. Same-process
    *  waiters are the runtime's job and fire synchronously before this is called. */
@@ -139,17 +174,49 @@ interface ChannelSubstrate {
 
   unpinChannel(channelId: string): Promise<void>
 
-  /** Refresh TTL on every supplied pin in one batch. Implementations should pipeline. */
-  refreshPins(channelIds: readonly string[]): Promise<void>
+  /** Refresh TTL on every supplied channel pin in one batch. Implementations pipeline. */
+  refreshChannels(channelIds: readonly string[]): Promise<void>
 
-  /** Locate the home for `channelId` *on a different instance*.
-   *
-   *  `timeoutMs` is the additional wait *after* the synchronous lookup completes —
-   *  implementations MUST always perform the lookup first, so `timeoutMs=0` means
-   *  "fail fast if the directory is empty." Self pins MUST NOT be returned: the
+  /** Locate the home for `channelId` *on a different instance*. `timeoutMs` bounds the
+   *  total wait (including the lookup itself). Self pins MUST NOT be returned: the
    *  runtime races this against its own local-channel waiter. */
   locateRemoteHome(channelId: string, timeoutMs: number): Promise<string | null>
 
+  // ── Connection directory ──────────────────────────────────────────────
+
+  /** Atomically replace the connection record so re-reconciles invalidate the previous
+   *  sessionId cluster-wide. */
+  pinConnection(connId: string, record: ConnectionRecord): Promise<void>
+
+  unpinConnection(connId: string): Promise<void>
+
+  /** Refresh TTL on every supplied connection record in one batch. */
+  refreshConnections(connIds: readonly string[]): Promise<void>
+
+  /** Read the entire connection record in one round trip. Returns null if the record
+   *  doesn't exist (connection unpinned, never reconciled, or TTL'd out). */
+  locateConnection(connId: string): Promise<ConnectionRecord | null>
+
+  // ── Instance liveness ─────────────────────────────────────────────────
+
+  /** Announce this instance is alive cluster-wide and refresh the TTL. Called once at
+   *  mux init and again on every heartbeat so peers can detect silent death (instance
+   *  crashed, network-partitioned from Redis, etc.) when the pin's TTL elapses. */
+  pinInstance(): Promise<void>
+
+  unpinInstance(): Promise<void>
+
+  /** True iff `instanceId`'s alive-pin is still present. Used by homes to detect dead
+   *  owners (clears proxy attachment, fires per-channel `_onPeerDisconnect`) and by
+   *  owners to detect dead homes (synthesizes per-channel `abort` to the client). */
+  isInstanceAlive(instanceId: string): Promise<boolean>
+
+  // ── Cluster messaging ─────────────────────────────────────────────────
+
+  /** Send an opaque envelope to another cluster instance. Envelope kinds and their
+   *  semantics live in `ENVELOPE_KIND` + `ChannelSubstrateHandlers`; the substrate
+   *  itself just delivers bytes. The `ChannelMux` constructs envelopes inline at every
+   *  call site — keeping shape inside one module. */
   forward(targetInstance: string, envelope: ProxyEnvelope): Promise<void>
 
   /** Subscribe to envelopes destined for this instance. Each envelope is dispatched
@@ -167,9 +234,21 @@ class InMemoryChannelSubstrate implements ChannelSubstrate {
 
   async pinChannel(_channelId: string): Promise<void> {}
   async unpinChannel(_channelId: string): Promise<void> {}
-  async refreshPins(_channelIds: readonly string[]): Promise<void> {}
+  async refreshChannels(_channelIds: readonly string[]): Promise<void> {}
   async locateRemoteHome(_channelId: string, _timeoutMs: number): Promise<string | null> {
     return null
+  }
+  async pinConnection(_connId: string, _record: ConnectionRecord): Promise<void> {}
+  async unpinConnection(_connId: string): Promise<void> {}
+  async refreshConnections(_connIds: readonly string[]): Promise<void> {}
+  async locateConnection(_connId: string): Promise<ConnectionRecord | null> {
+    return null
+  }
+  async pinInstance(): Promise<void> {}
+  async unpinInstance(): Promise<void> {}
+  async isInstanceAlive(_instanceId: string): Promise<boolean> {
+    // Single-process — only one instance ever exists; treat any reachable instanceId as alive.
+    return true
   }
   async forward(_targetInstance: string, _envelope: ProxyEnvelope): Promise<void> {}
   listen(_handlers: ChannelSubstrateHandlers): () => void {
@@ -182,15 +261,16 @@ class InMemoryChannelSubstrate implements ChannelSubstrate {
 // Envelope wire format
 //
 //   [u8 kind][u8 direction]
-//   [u32 BE channelIdLen][channelId UTF-8]
+//   [u32 BE channelIdLen][channelId UTF-8]      (= connId for CONNECTION_FRAME)
 //   [u32 BE fromInstanceLen][fromInstance UTF-8]
 //   [payload]
 //
 // Payload by kind:
-//   ATTACH:     [u32 reconnectTimeout][u32 ix][u32 lastSeq]
-//   ATTACH_ACK: [u32 lastClientSeq]
-//   DETACH:     [u8 reasonTag]
-//   FRAME:      [bytes…] (length implied by remaining buffer)
+//   ATTACH:      [u32 reconnectTimeout][u32 ix][u32 lastSeq]
+//   ATTACH_ACK:  [u32 lastClientSeq]
+//   DETACH:      [u8 reasonTag]
+//   FRAME:       [bytes…] (length implied by remaining buffer)
+//   CONNECTION_FRAME: [bytes…] (raw wire frame — owner re-injects on local connection)
 // ───────────────────────────────────────────────────────────────────────────
 
 function encodeProxyEnvelope(env: ProxyEnvelope): Uint8Array<ArrayBuffer> {
@@ -199,12 +279,10 @@ function encodeProxyEnvelope(env: ProxyEnvelope): Uint8Array<ArrayBuffer> {
   const fromInstance = encodeLengthPrefixedString(env.fromInstance)
   const payload = env.payload
   let payloadBytes: Uint8Array<ArrayBuffer>
-  if (payload.kind === ENVELOPE_KIND.FRAME) {
+  if (payload.kind === ENVELOPE_KIND.FRAME || payload.kind === ENVELOPE_KIND.CONNECTION_FRAME) {
     payloadBytes = payload.frame as Uint8Array<ArrayBuffer>
   } else if (payload.kind === ENVELOPE_KIND.DETACH) {
-    const tag = DETACH_REASON_TAG[payload.reason]
-    assert(tag !== undefined, `Unknown detach reason "${payload.reason}"`)
-    payloadBytes = new Uint8Array([tag])
+    payloadBytes = new Uint8Array([payload.reason])
   } else if (payload.kind === ENVELOPE_KIND.ATTACH_ACK) {
     payloadBytes = encodeU32(payload.lastClientSeq)
   } else {
@@ -220,7 +298,8 @@ function decodeProxyEnvelope(bytes: Uint8Array): ProxyEnvelope {
     kind === ENVELOPE_KIND.ATTACH ||
       kind === ENVELOPE_KIND.ATTACH_ACK ||
       kind === ENVELOPE_KIND.DETACH ||
-      kind === ENVELOPE_KIND.FRAME,
+      kind === ENVELOPE_KIND.FRAME ||
+      kind === ENVELOPE_KIND.CONNECTION_FRAME,
     `Malformed substrate envelope — unknown kind ${kind}`,
   )
   const direction = bytes[1]
@@ -233,13 +312,16 @@ function decodeProxyEnvelope(bytes: Uint8Array): ProxyEnvelope {
   const offset = fromInstanceResult.offsetAfter
   const view = bytes as Uint8Array<ArrayBuffer>
   let payload: ProxyPayload
-  if (kind === ENVELOPE_KIND.FRAME) {
+  if (kind === ENVELOPE_KIND.FRAME || kind === ENVELOPE_KIND.CONNECTION_FRAME) {
     payload = { kind, frame: bytes.subarray(offset) }
   } else if (kind === ENVELOPE_KIND.DETACH) {
-    const reasonTag = bytes[offset]
-    assert(reasonTag !== undefined, 'Malformed substrate envelope — detach payload truncated')
-    const reason = DETACH_REASON_BY_TAG[reasonTag]
-    assert(reason !== undefined, `Malformed substrate envelope — unknown detach reason tag ${reasonTag}`)
+    const reason = bytes[offset]
+    assert(
+      reason === DETACH_REASON.TRANSIENT ||
+        reason === DETACH_REASON.PERMANENT ||
+        reason === DETACH_REASON.RECOVERY_FAILED,
+      `Malformed substrate envelope — unknown detach reason ${reason}`,
+    )
     payload = { kind, reason }
   } else if (kind === ENVELOPE_KIND.ATTACH_ACK) {
     payload = { kind, lastClientSeq: decodeU32(view, offset) }

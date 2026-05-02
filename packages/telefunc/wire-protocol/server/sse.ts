@@ -7,9 +7,15 @@ import { getServerConfig } from '../../node/server/serverConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
 import { PushToPullStream } from '../push-to-pull-stream.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
-import { parseSseRequestMetadata } from '../sse-request.js'
-import { ServerConnection } from './connection.js'
+import {
+  METADATA_REFRESH_ALIAS,
+  parseSseChannels,
+  parseSseRequestMetadata,
+  type SseDataPostMetadata,
+} from '../sse-request.js'
 import { StreamReader } from './request/StreamReader.js'
+import { getChannelMux } from './substrate.js'
+import type { ServerTransport } from './substrate-runtime.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
@@ -23,18 +29,19 @@ type SseConnection = {
   stream: PushToPullStream<Uint8Array>
   closed: boolean
   sessionId: string | null
-  /** Resolved by `runStreamPost` once the stream POST's body is consumed. Data POSTs gate on
-   *  this before dispatching frames, so they can't race ahead of the reconcile and hit a
-   *  `getSessionStateOrThrow(undefined)`. */
+  /** Resolved by `runStreamResponse` once the stream-response POST's body is consumed.
+   *  Data POSTs gate on this before dispatching frames, so they can't race ahead of the
+   *  reconcile and hit a `getSessionStateOrThrow(undefined)`. */
   ready: Promise<void>
   resolveReady: () => void
-  /** Data POSTs whose dispatch is in flight. Drained by `runStreamPost` before `sendReconciled`,
-   *  so any `entry.lastClientSeq` mutations from those dispatches are reflected in the
-   *  `reconciled` frame's reported `lastSeq`. */
+  /** Data POSTs whose dispatch is in flight. Drained by `runStreamResponse` before
+   *  `sendReconciled`, so any `entry.lastClientSeq` mutations from those dispatches are
+   *  reflected in the `reconciled` frame's reported `lastSeq`. */
   pendingDispatches: Set<Promise<unknown>>
 }
 
 const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
 const sseOpenComment = textEncoder.encode(': open\n\n')
 
 const globalObject = getGlobalObject('wire-protocol/server/sse.ts', {
@@ -42,17 +49,21 @@ const globalObject = getGlobalObject('wire-protocol/server/sse.ts', {
 })
 
 class SseConnectionTransport {
-  private readonly connections = new Map<string, SseConnection>()
-  /** Resolvers for data POSTs that arrived before the stream POST registered the connection. */
+  /** Resolvers for data POSTs that arrived before the stream-response POST registered the
+   *  connection. Same-instance race only — the SSE stream-response POST and the persistent
+   *  stream-request POST open in parallel on the client, so the stream-request can land
+   *  before the stream-response registers. */
   private readonly pendingConnections = new Map<string, Array<(connection: SseConnection | null) => void>>()
-  private readonly connection = new ServerConnection<SseConnection>({
+  private readonly mux = getChannelMux()
+  private readonly transport: ServerTransport<SseConnection> = {
     getSessionId: (connection) => connection.sessionId ?? undefined,
     setSessionId: (connection, sessionId) => {
       connection.sessionId = sessionId
     },
+    getConnId: (connection) => connection.connId,
     sendNow: (connection, frame) => this.sendNow(connection, frame),
     terminateConnection: (connection) => this.terminateConnection(connection),
-  })
+  }
 
   async handleRequest(request: Request): Promise<SseChannelHttpResponse | null> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return badRequest()
@@ -61,21 +72,23 @@ class SseConnectionTransport {
     assert(body)
     try {
       const reader = new StreamReader(body)
-      const { connId, stream } = parseSseRequestMetadata(await reader.readMetadata())
-      return stream ? this.handleStreamPost(connId, reader) : await this.handleDataPost(connId, reader)
+      const metadata = parseSseRequestMetadata(await reader.readMetadata())
+      if ('streamResponse' in metadata) return this.handleStreamResponse(metadata.connId, reader)
+      return await this.handleDataPost(metadata, reader)
     } catch {
       return badRequest()
     }
   }
 
-  /** Stream POST — opens the SSE downstream, registers the connection, and asynchronously drives
-   *  its lifecycle (`runStreamPost`). Returns immediately so the response headers can flush. */
-  private handleStreamPost(connId: string, reader: StreamReader): SseChannelHttpResponse {
-    const existing = this.connections.get(connId)
+  /** Stream-response POST — opens the SSE downstream, registers the connection, and
+   *  asynchronously drives its lifecycle (`runStreamResponse`). Returns immediately so
+   *  the response headers can flush. */
+  private handleStreamResponse(connId: string, reader: StreamReader): SseChannelHttpResponse {
+    const existing = this.mux.getConnectionByConnId<SseConnection>(connId)
     if (existing) this.closeConnection(existing, false)
 
     const stream = new PushToPullStream<Uint8Array>(() => {
-      const conn = this.connections.get(connId)
+      const conn = this.mux.getConnectionByConnId<SseConnection>(connId)
       if (conn) this.closeConnection(conn, false)
     })
     let resolveReady!: () => void
@@ -91,11 +104,10 @@ class SseConnectionTransport {
       resolveReady,
       pendingDispatches: new Set(),
     }
-    this.connections.set(connId, connection)
+    this.mux.onConnectionOpen(connection, this.transport)
     this.resolvePendingConnections(connId, connection)
     stream.push(sseOpenComment)
-    this.connection.onConnectionOpen(connection)
-    void this.runStreamPost(connection, reader)
+    void this.runStreamResponse(connection, reader)
 
     return {
       statusCode: 200,
@@ -108,76 +120,107 @@ class SseConnectionTransport {
     }
   }
 
-  /** Data POST — waits for the connection's reconcile to complete, then dispatches its frames.
-   *  Tracked in `pendingDispatches` so `runStreamPost` can drain it before `sendReconciled`.
-   *
-   *  If the data POST's body contains a reconcile (e.g. the client added a new channel
-   *  after the initial reconcile, so the late reconcile rides over the upload stream or
-   *  an outbox flush POST), we must emit `reconciled` here — `runStreamPost` only fires
-   *  for the initial stream POST. */
-  private async handleDataPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
-    const connection = this.connections.get(connId) ?? (await this.waitForConnection(connId))
-    if (!connection) return badRequest()
+  /** Data POST — orchestration: resolve the local connection (owner-side only), run the
+   *  alias-routing body loop in `processDataPostBody`, then emit a deferred `reconciled`
+   *  if one was captured. Tracked in `pendingDispatches` so `runStreamResponse` can drain
+   *  in-flight POSTs before its own `sendReconciled`. */
+  private async handleDataPost(metadata: SseDataPostMetadata, reader: StreamReader): Promise<SseChannelHttpResponse> {
+    const isOwner = metadata.ownerInstance === this.mux.selfInstanceId
+    const localConnection = isOwner
+      ? (this.mux.getConnectionByConnId<SseConnection>(metadata.connId) ??
+        (await this.waitForConnection(metadata.connId)))
+      : null
+    if (isOwner && !localConnection) return badRequest()
 
-    let reconcileSessionId: string | null = null
+    let deferredReconcileSessionId: string | null = null
     const dispatch = (async (): Promise<'ok' | 'timeout'> => {
-      if (!(await this.waitReady(connection))) return 'timeout'
-      reconcileSessionId = await this.processFrameReader(connection, reader)
+      if (localConnection && !(await this.waitReady(localConnection))) return 'timeout'
+      deferredReconcileSessionId = await this.processDataPostBody(metadata, localConnection, reader)
       return 'ok'
     })()
-    connection.pendingDispatches.add(dispatch)
+    if (localConnection) localConnection.pendingDispatches.add(dispatch)
     try {
       if ((await dispatch) === 'timeout') return badRequest()
     } finally {
-      connection.pendingDispatches.delete(dispatch)
+      if (localConnection) localConnection.pendingDispatches.delete(dispatch)
     }
-    if (reconcileSessionId !== null && !connection.closed) {
-      const pending = this.connection.sendReconciled(connection, reconcileSessionId)
+    if (deferredReconcileSessionId !== null && localConnection && !localConnection.closed) {
+      const pending = this.mux.sendReconciled(localConnection, deferredReconcileSessionId)
       if (pending) await pending
     }
     return { statusCode: 200, contentType: 'text/plain', headers: [], body: '' }
   }
 
-  /** Stream POST lifecycle: consume the initial batch, release the `ready` gate, drain in-flight
-   *  data POSTs (so their `lastClientSeq` mutations land first), then emit `reconciled`. */
-  private async runStreamPost(connection: SseConnection, reader: StreamReader): Promise<void> {
-    let reconcileSessionId: string | null
-    try {
-      reconcileSessionId = await this.processFrameReader(connection, reader)
-    } finally {
-      connection.resolveReady()
-    }
-    if (reconcileSessionId === null || connection.closed) return
-    if (connection.pendingDispatches.size > 0) await Promise.allSettled(connection.pendingDispatches)
-    const pending = this.connection.sendReconciled(connection, reconcileSessionId)
-    if (pending) await pending
-  }
-
-  /** Pure body→dispatch loop. Returns the new `sessionId` if a reconcile completed in this body. */
-  private async processFrameReader(connection: SseConnection, reader: StreamReader): Promise<string | null> {
-    let reconcileSessionId: string | null = null
+  /** Body loop for data POSTs. Each entry is `[u8 alias][bytes]`:
+   *    alias `0`     — connection-level frame (ping, in-body reconcile)
+   *    alias `1..FE` — channel-data frame, routes to `channels[alias − 1]`
+   *    alias `0xFF`  — JSON `channels[]` refresh, swaps the routing table in-band
+   *
+   *  Returns the `sessionId` of a deferred reconcile if one fired in this body so the
+   *  caller can emit `reconciled` at body end with all dispatched frames' `lastSeq`
+   *  reflected. Long-lived stream-request POSTs use the inline path instead — their
+   *  body never ends, so deferring would never emit. */
+  private async processDataPostBody(
+    metadata: SseDataPostMetadata,
+    localConnection: SseConnection | null,
+    reader: StreamReader,
+  ): Promise<string | null> {
+    let channels = metadata.channels
+    let deferredReconcileSessionId: string | null = null
     while (true) {
       const raw = await reader.readLengthPrefixedBytesOrNull()
-      if (!raw) break
-      if (connection.closed) return reconcileSessionId
-      const sessionId = await this.connection.onConnectionRawMessageDeferredReconciled(connection, raw)
-      if (sessionId !== null) reconcileSessionId = sessionId
+      if (!raw || raw.byteLength === 0) break
+      if (localConnection?.closed) break
+      const alias = raw[0] as number
+      const payload = raw.subarray(1) as Uint8Array<ArrayBuffer>
+
+      if (alias === METADATA_REFRESH_ALIAS) {
+        channels = parseSseChannels(JSON.parse(textDecoder.decode(payload)))
+        continue
+      }
+      if (alias === 0) {
+        const sessionId = await this.dispatchConnectionFrame(metadata, localConnection, payload)
+        if (sessionId !== null) deferredReconcileSessionId = sessionId
+        continue
+      }
+      const ch = channels[alias - 1]
+      if (ch) await this.mux.routeClientFrame(ch.id, ch.home, payload)
     }
-    return reconcileSessionId
+    return deferredReconcileSessionId
   }
 
-  private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void | Promise<void> {
-    if (connection.closed) return
-    return connection.stream.push(textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`))
+  /** Alias-0 dispatch: forward to the owner if the connection lives elsewhere, dispatch
+   *  inline on a long-lived stream-request POST (so `reconciled` emits without waiting
+   *  for body-end), or defer on a short-lived outbox batch (so subsequent frames in the
+   *  same body lift `lastSeq` before `reconciled` is sent). Returns the deferred reconcile
+   *  `sessionId` only on the deferred path. */
+  private async dispatchConnectionFrame(
+    metadata: SseDataPostMetadata,
+    localConnection: SseConnection | null,
+    payload: Uint8Array<ArrayBuffer>,
+  ): Promise<string | null> {
+    if (!localConnection) {
+      await this.mux.forwardConnectionFrame(metadata.ownerInstance, metadata.connId, payload)
+      return null
+    }
+    if (metadata.streamRequest) {
+      await this.mux.onConnectionRawMessage(localConnection, payload)
+      return null
+    }
+    return this.mux.onConnectionRawMessageDeferredReconciled(localConnection, payload)
   }
 
-  /** Wait for a stream POST to register a connection for `connId`. Returns null on timeout. */
+  /** Wait for the stream-response POST to register a connection for `connId` on this
+   *  instance. Used only for the same-instance race where the stream-request POST and the
+   *  stream-response POST both hit this server but the stream-request arrives first.
+   *  Cross-instance POSTs never reach here — `handleDataPost` reads `ownerInstance` from
+   *  metadata and forwards directly. */
   private waitForConnection(connId: string): Promise<SseConnection | null> {
     return new Promise<SseConnection | null>((resolve) => {
       let pending = this.pendingConnections.get(connId)
       if (!pending) this.pendingConnections.set(connId, (pending = []))
       pending.push(resolve)
-      setTimeout(() => resolve(null), this.connection.connectTtl)
+      setTimeout(() => resolve(null), this.mux.connectTtl)
     })
   }
 
@@ -188,10 +231,37 @@ class SseConnectionTransport {
     for (const resolve of pending) resolve(connection)
   }
 
+  /** Stream-response POST lifecycle: consume the initial batch (no alias prefixes —
+   *  frames flow through `onConnectionRawMessage` so the mux's session registry routes
+   *  them), release the `ready` gate, drain in-flight data POSTs, then emit `reconciled`. */
+  private async runStreamResponse(connection: SseConnection, reader: StreamReader): Promise<void> {
+    let reconcileSessionId: string | null = null
+    try {
+      while (true) {
+        const raw = await reader.readLengthPrefixedBytesOrNull()
+        if (!raw) break
+        if (connection.closed) break
+        const sessionId = await this.mux.onConnectionRawMessageDeferredReconciled(connection, raw)
+        if (sessionId !== null) reconcileSessionId = sessionId
+      }
+    } finally {
+      connection.resolveReady()
+    }
+    if (reconcileSessionId === null || connection.closed) return
+    if (connection.pendingDispatches.size > 0) await Promise.allSettled(connection.pendingDispatches)
+    const pending = this.mux.sendReconciled(connection, reconcileSessionId)
+    if (pending) await pending
+  }
+
+  private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void | Promise<void> {
+    if (connection.closed) return
+    return connection.stream.push(textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`))
+  }
+
   /** Wait for the stream POST's reconcile to complete on this connection. False on timeout. */
   private waitReady(connection: SseConnection): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(false), this.connection.connectTtl)
+      const timer = setTimeout(() => resolve(false), this.mux.connectTtl)
       connection.ready.then(() => {
         clearTimeout(timer)
         resolve(true)
@@ -204,13 +274,12 @@ class SseConnectionTransport {
     connection.closed = true
     // Unblock any data POST awaiting `ready`. Their dispatch sees the closed connection and bails.
     connection.resolveReady()
-    this.connections.delete(connection.connId)
-    this.connection.onConnectionClosed(connection, permanent)
+    this.mux.onConnectionClosed(connection, permanent)
     connection.stream.close()
   }
 
   private terminateConnection(connection: SseConnection): void {
-    const terminatePermanently = this.connection.consumePermanentTermination(connection)
+    const terminatePermanently = this.mux.consumePermanentTermination(connection)
     this.closeConnection(connection, terminatePermanently === true)
   }
 }

@@ -8,6 +8,7 @@ import {
   encodeProxyEnvelope,
   type ChannelSubstrate,
   type ChannelSubstrateHandlers,
+  type ConnectionRecord,
   type ProxyEnvelope,
 } from 'telefunc/__internal'
 import { assert } from './assert.js'
@@ -47,6 +48,8 @@ const HEARTBEAT_FRACTION = 3
 const FIELD_ENVELOPE = 'e'
 const FIELD_CHANNEL = 'c'
 const FIELD_HOME = 'h'
+const FIELD_OWNER = 'owner'
+const FIELD_SESSION = 'session'
 const REGISTER_STREAM_MAX_LEN = 10_000
 const REGISTER_CMD = 'tfRegisterChannel'
 
@@ -107,11 +110,55 @@ class RedisChannelSubstrate implements ChannelSubstrate {
     await this.client.del(this.pinKey(channelId))
   }
 
-  async refreshPins(channelIds: readonly string[]): Promise<void> {
+  async refreshChannels(channelIds: readonly string[]): Promise<void> {
     if (channelIds.length === 0) return
     const pipeline = this.client.pipeline()
     for (const id of channelIds) pipeline.expire(this.pinKey(id), this.pinTtlSeconds)
     await pipeline.exec()
+  }
+
+  async pinConnection(connId: string, record: ConnectionRecord): Promise<void> {
+    // DEL + HSET ensures a re-reconcile invalidates the previous sessionId cluster-wide;
+    // pipelining keeps it to one round trip.
+    const key = this.connKey(connId)
+    const pipeline = this.client.pipeline()
+    pipeline.del(key)
+    pipeline.hset(key, { [FIELD_OWNER]: record.owner, [FIELD_SESSION]: record.sessionId })
+    pipeline.expire(key, this.pinTtlSeconds)
+    await pipeline.exec()
+  }
+
+  async unpinConnection(connId: string): Promise<void> {
+    await this.client.del(this.connKey(connId))
+  }
+
+  async refreshConnections(connIds: readonly string[]): Promise<void> {
+    if (connIds.length === 0) return
+    const pipeline = this.client.pipeline()
+    for (const id of connIds) pipeline.expire(this.connKey(id), this.pinTtlSeconds)
+    await pipeline.exec()
+  }
+
+  async locateConnection(connId: string): Promise<ConnectionRecord | null> {
+    const [owner, sessionId] = await this.client.hmget(this.connKey(connId), FIELD_OWNER, FIELD_SESSION)
+    if (owner == null || sessionId == null) {
+      return null
+    }
+    return { owner, sessionId }
+  }
+
+  async pinInstance(): Promise<void> {
+    await this.client.set(this.aliveKey(this.selfInstanceId), '1', 'EX', this.pinTtlSeconds)
+  }
+
+  async unpinInstance(): Promise<void> {
+    await this.client.del(this.aliveKey(this.selfInstanceId))
+  }
+
+  async isInstanceAlive(instanceId: string): Promise<boolean> {
+    // EXISTS returns 1 if the key exists (and hasn't TTL-expired), 0 otherwise.
+    const exists = await this.client.exists(this.aliveKey(instanceId))
+    return exists === 1
   }
 
   /** Subscribe BEFORE GET so any register hitting Redis from now on lands in a live
@@ -272,6 +319,14 @@ class RedisChannelSubstrate implements ChannelSubstrate {
 
   private inboxKey(instanceId: string): string {
     return `${this.prefix}proxy:inbox:${instanceId}`
+  }
+
+  private connKey(connId: string): string {
+    return `${this.prefix}conn:${connId}`
+  }
+
+  private aliveKey(instanceId: string): string {
+    return `${this.prefix}alive:${instanceId}`
   }
 }
 

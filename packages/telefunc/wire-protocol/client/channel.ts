@@ -18,7 +18,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../client/clientConfig.js'
 import { createAbortError, isAbort } from '../../shared/Abort.js'
-import type { WirePublishInfo } from '../shared-ws.js'
+import { ACK_STATUS, type WirePublishInfo } from '../shared-ws.js'
 import { ClientConnection } from './connection.js'
 import {
   CHANNEL_CLOSE_TIMEOUT_MS,
@@ -185,7 +185,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const timeout = normalizeCloseTimeout(opts?.timeout)
     this._closeDeadline = Date.now() + timeout
     this._expectCloseAck = true
-    this._startClose()
+    this._isClosed = true
     this._connection.sendCloseRequest(this, timeout)
     this._closePromise = this._runFinalizationLoop()
     return this._closePromise
@@ -289,7 +289,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._isClosed) {
       this._notifyCloseProgress()
     } else {
-      this._startClose()
+      this._isClosed = true
       void this._runFinalizationLoop()
     }
   }
@@ -334,15 +334,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._notifyCloseProgress()
   }
 
-  private _startClose(err?: Error): void {
-    if (this._isClosed) return
-    this._isClosed = true
-    this._fireClose(err)
-  }
-
   private async _runFinalizationLoop(): Promise<ChannelCloseResult> {
     while (!this._didTerminate) {
-      if (this._isCloseWorkComplete()) {
+      // Fire onClose only once the close roundtrip is settled and no inbound work is in flight,
+      // so listeners see "closed" only after the channel can no longer receive frames.
+      if (this._isCloseRoundtripDone()) this._fireClose()
+      if (this._didFireClose && this._pendingCloseCallbacks === 0) {
         this._finalizeClose()
         break
       }
@@ -354,6 +351,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       await this._waitForCloseProgress(remaining)
     }
     return this._didReceiveCloseAck ? 0 : 1
+  }
+
+  private _isCloseRoundtripDone(): boolean {
+    return this._inflightAcks === 0 && (!this._expectCloseAck || this._didReceiveCloseAck)
   }
 
   private _waitForCloseProgress(timeoutMs: number): Promise<void> {
@@ -384,7 +385,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private async _dispatchAckReq(data: string, seq: number): Promise<void> {
     try {
       if (this._listeners.length === 0) {
-        this._connection.sendAckRes(this, seq, 'No listener registered for ack request', 'error')
+        this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
         return
       }
       const parsed = parse(data) as ChannelData<ServerToClient>
@@ -394,7 +395,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
           lastResult = await cb(parsed)
         } catch (err) {
           if (this._handleCallbackError(err)) return
-          this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', 'error')
+          this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
           return
         }
       }
@@ -407,7 +408,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
     try {
       if (this._binaryListeners.length === 0) {
-        this._connection.sendAckRes(this, seq, 'No listener registered for ack request', 'error')
+        this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
         return
       }
       let lastResult: unknown
@@ -416,7 +417,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
           lastResult = await cb(data)
         } catch (err) {
           if (this._handleCallbackError(err)) return
-          this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', 'error')
+          this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
           return
         }
       }
@@ -432,14 +433,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._inflightAcks--
       this._notifyCloseProgress()
     })
-  }
-
-  private _isCloseWorkComplete(): boolean {
-    return (
-      this._inflightAcks === 0 &&
-      this._pendingCloseCallbacks === 0 &&
-      (!this._expectCloseAck || this._didReceiveCloseAck)
-    )
   }
 
   private _finalizeClose(err?: Error): void {

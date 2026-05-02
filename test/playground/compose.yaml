@@ -1,0 +1,46 @@
+configs:
+  caddyfile:
+    content: |
+      :80 {
+          reverse_proxy playground-a:3000 playground-b:3000 {
+              lb_policy round_robin
+              flush_interval -1
+          }
+      }
+
+services:
+  redis:
+    image: redis:8-alpine
+
+  playground-a: &playground
+    image: node:24-slim
+    working_dir: /repo/test/playground
+    command: node dist/nested/server/index.mjs
+    volumes:
+      - ../..:/repo
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: A
+      TELEFUNC_DEBUG_SUBSTRATE: "1"
+    depends_on:
+      - redis
+
+  playground-b:
+    <<: *playground
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: B
+      TELEFUNC_DEBUG_SUBSTRATE: "1"
+
+  proxy:
+    image: caddy:2-alpine
+    ports:
+      - "8080:80"
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    depends_on:
+      - playground-a
+      - playground-b

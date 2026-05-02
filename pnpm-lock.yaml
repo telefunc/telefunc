@@ -489,6 +489,9 @@ importers:
       '@tanstack/react-query':
         specifier: ^5.95.2
         version: 5.95.2(react@19.2.4)
+      '@telefunc/redis':
+        specifier: workspace:*
+        version: link:../../packages/redis
       '@telefunc/rxjs':
         specifier: workspace:*
         version: link:../../packages/rxjs

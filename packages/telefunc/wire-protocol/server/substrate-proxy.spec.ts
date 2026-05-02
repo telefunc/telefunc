@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { TAG, decode, encode } from '../shared-ws.js'
+import { TAG, decode, encode, type ChannelFrame } from '../shared-ws.js'
 import { channel, type ServerChannel } from './channel.js'
 import {
+  DETACH_REASON,
   ENVELOPE_KIND,
   PROXY_DIRECTION,
   dispatchEnvelope,
@@ -10,11 +11,12 @@ import {
   _resetChannelSubstrateForTesting,
   type ChannelSubstrate,
   type ChannelSubstrateHandlers,
+  type ConnectionRecord,
   type ProxyEnvelope,
 } from './substrate.js'
 
 // Loopback substrate — captures `forward()` calls and lets the test deliver envelopes
-// to the runtime's listener directly, without running a second ServerConnection.
+// to the mux's listener directly, without running a second instance.
 
 class LoopbackSubstrate implements ChannelSubstrate {
   readonly selfInstanceId: string
@@ -41,7 +43,7 @@ class LoopbackSubstrate implements ChannelSubstrate {
 
   async unpinChannel(_channelId: string): Promise<void> {}
 
-  async refreshPins(_channelIds: readonly string[]): Promise<void> {}
+  async refreshChannels(_channelIds: readonly string[]): Promise<void> {}
 
   async locateRemoteHome(channelId: string, _timeoutMs: number): Promise<string | null> {
     const remote = this.remoteHomes.get(channelId)
@@ -67,6 +69,18 @@ class LoopbackSubstrate implements ChannelSubstrate {
     if (!set) return
     this.watchers.delete(channelId)
     for (const cb of set) cb(home)
+  }
+
+  async pinConnection(_connId: string, _record: ConnectionRecord): Promise<void> {}
+  async unpinConnection(_connId: string): Promise<void> {}
+  async refreshConnections(_connIds: readonly string[]): Promise<void> {}
+  async locateConnection(_connId: string): Promise<ConnectionRecord | null> {
+    return null
+  }
+  async pinInstance(): Promise<void> {}
+  async unpinInstance(): Promise<void> {}
+  async isInstanceAlive(_instanceId: string): Promise<boolean> {
+    return true
   }
 
   async forward(target: string, envelope: ProxyEnvelope): Promise<void> {
@@ -200,12 +214,12 @@ describe('cross-instance prePeerBuffer flush via ChannelSubstrate', () => {
       payload: { kind: ENVELOPE_KIND.ATTACH_ACK, lastClientSeq: 42 },
     })
     const open = await openPromise
-    expect(open).toEqual([{ id: 'pubsub:room:foo', ix: 3, lastSeq: 42 }])
+    expect(open).toEqual([{ id: 'pubsub:room:foo', ix: 3, lastSeq: 42, home: 'home-A' }])
 
     // A client frame routed through the mux becomes a TO_HOME envelope. The frame must be
     // a valid encoded TEXT frame at ix=3 so the mux can extract the index for routing.
     const clientFrame = encode.text(3, '"hello"', 1)
-    getChannelMux().handleClientFrame(sessionId, clientFrame)
+    getChannelMux().handleClientFrame(sessionId, decode(clientFrame) as ChannelFrame, clientFrame)
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(substrate.capturedForwards).toHaveLength(2)
     const forwarded = substrate.capturedForwards[1]!
@@ -227,12 +241,12 @@ describe('cross-instance prePeerBuffer flush via ChannelSubstrate', () => {
     expect(Array.from(writtenFrames[0]!)).toEqual([0x11, 0x22])
 
     // detachSession removes the local proxy state and forwards a TO_HOME detach envelope.
-    getChannelMux().detachSession(sessionId, 'permanent')
+    getChannelMux().detachSession(sessionId, DETACH_REASON.PERMANENT)
     expect(substrate.capturedForwards).toHaveLength(3)
     const detach = substrate.capturedForwards[2]!
     expect(detach.target).toBe('home-A')
     expect(detach.envelope.direction).toBe(PROXY_DIRECTION.TO_HOME)
-    expect(detach.envelope.payload).toEqual({ kind: ENVELOPE_KIND.DETACH, reason: expect.any(String) })
+    expect(detach.envelope.payload).toEqual({ kind: ENVELOPE_KIND.DETACH, reason: DETACH_REASON.PERMANENT })
 
     // After detach, TO_PEER envelopes for that channel are dropped.
     substrate.deliver({

@@ -169,6 +169,7 @@ function ChannelDemo() {
   const [hydrated, setHydrated] = useState(false)
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [connected, setConnected] = useState(false)
+  const [disconnecting, setDisconnecting] = useState(false)
   const [echoInput, setEchoInput] = useState('')
   const [channelState, setChannelState] = useState<ChannelState>(initialState)
 
@@ -295,10 +296,15 @@ function ChannelDemo() {
     }
   }, [addLog])
 
-  const disconnect = useCallback(() => {
+  const disconnect = useCallback(async () => {
     const ch = channelRef.current
     if (!ch) return
-    ch.close()
+    setDisconnecting(true)
+    try {
+      await ch.close()
+    } finally {
+      setDisconnecting(false)
+    }
     setChannelState((s) => ({ ...s, connected: false, isClosedAfterClose: ch.isClosed }))
     channelRef.current = null
     setConnected(false)
@@ -792,10 +798,13 @@ function ChannelDemo() {
             id="channel-disconnect"
             type="button"
             onClick={disconnect}
-            disabled={!connected}
-            className="px-3 py-1.5 text-sm rounded bg-red-600 text-white disabled:opacity-40 hover:bg-red-700"
+            disabled={!connected || disconnecting}
+            className="px-3 py-1.5 text-sm rounded bg-red-600 text-white disabled:opacity-40 hover:bg-red-700 inline-flex items-center gap-2"
           >
-            Disconnect
+            {disconnecting && (
+              <span className="w-3 h-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+            )}
+            {disconnecting ? 'Disconnecting…' : 'Disconnect'}
           </button>
           <button
             id="channel-send-no-ack"

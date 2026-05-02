@@ -1,43 +1,50 @@
 export {
   TAG,
+  ACK_STATUS,
   encode,
   decode,
-  encodeCtrl,
+  isChannelCtrlTag,
+  isConnCtrlTag,
   encodePublishText,
   decodePublishText,
   encodePublishBinary,
   decodePublishBinary,
 }
-export type { AckResultStatus, CtrlMessage, CtrlReconcile, CtrlReconciled, DecodedFrame, WirePublishInfo }
+export type {
+  AckResultStatus,
+  DecodedFrame,
+  ChannelFrame,
+  ChannelCtrlFrame,
+  ChannelDataFrame,
+  ReconcilePayload,
+  ReconciledPayload,
+  WirePublishInfo,
+}
 
 import { assert } from '../utils/assert.js'
 import type { ChannelTransports } from './constants.js'
 
-// ===== WebSocket Wire Protocol =====
+// ===== Wire protocol =====
 //
-// Every message is binary.
-//
-// CTRL frames (lifecycle & flow control) — 3-byte header, no seq:
-//   [u8 TAG_CTRL][u16 LE 0][JSON payload...]
-//
-// Data frames (TEXT / PUBLISH / BINARY) — 7-byte header with sequence number:
+// Every frame has a uniform 7-byte header:
 //   [u8 tag][u16 LE index][u32 LE seq][payload...]
 //
-//   TAG_CTRL   (0x01) — lifecycle & flow control, index unused (0)
-//   TAG_TEXT   (0x02) — user channel text data, index = channel
-//   TAG_BINARY (0x03) — user channel binary data, index = channel
-//   TAG_PUBLISH (0x06) — keyed-channel pub/sub text data, index = channel
-//   TAG_PUBLISH_ACK_REQ (0x07) — keyed-channel pub/sub text data that requests an ACK_RES receipt
+// `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
+// `index` is the channel ix for per-channel frames; 0 for connection-level frames.
+// `seq` is the replay sequence number for sequenced data frames; 0 for ctrl frames.
 //
-// Sequence numbers are assigned by the sender for replayable data frames in
-// both directions. Each side tracks the highest seq received and sends it in
-// reconcile so the peer can replay missed data after reconnect.
-// CTRL frames remain unsequenced.
+// Tag layout — sparse ranges so range checks classify:
+//   0x01–0x05  connection-level control (no ix, no seq)
+//   0x10–0x18  data plane (carries seq, payload varies)
+//   0x30–0x36  per-channel control (carries ix, no seq)
 //
 // Channel indices are client-owned and stable for the channel's lifetime.
+// Sequence numbers are sender-assigned for replayable data frames in both directions.
+// Each side tracks the highest seq received and replays after reconnect via reconcile.
 
-const HEADER_CTRL = 3
-const HEADER_DATA = 7
+const HEADER = 7
+const DATA_TAG_MIN = 0x10
+const CHANNEL_CTRL_TAG_MIN = 0x30
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
@@ -45,39 +52,56 @@ const textDecoder = new TextDecoder()
 // ===== Tags =====
 
 const TAG = {
-  CTRL: 0x01 as const,
-  TEXT: 0x02 as const,
-  BINARY: 0x03 as const,
-  /** ACK response — carries receiver's ack_seq + serialized result. */
-  ACK_RES: 0x04 as const,
-  /** Text frame that requests an acknowledgement from the receiver. */
-  TEXT_ACK_REQ: 0x05 as const,
+  // ─── Connection-level control (no ix, no seq) ───
+  PING: 0x01 as const,
+  PONG: 0x02 as const,
+  /** Server → client on old transport after upgrade drain: signals last frame on this transport. */
+  FIN: 0x03 as const,
+  /** Client → server on every (re)connect. JSON payload (`ReconcilePayload`). */
+  RECONCILE: 0x04 as const,
+  /** Server → client after reconcile. JSON payload (`ReconciledPayload`). */
+  RECONCILED: 0x05 as const,
+
+  // ─── Data plane ───
+  TEXT: 0x10 as const,
+  BINARY: 0x11 as const,
+  TEXT_ACK_REQ: 0x12 as const,
+  BINARY_ACK_REQ: 0x13 as const,
+  /** ACK response — carries `ackedSeq` + serialized result. */
+  ACK_RES: 0x14 as const,
   /** Replayable publish frame delivered to keyed-channel subscribers. */
-  PUBLISH: 0x06 as const,
+  PUBLISH: 0x15 as const,
   /** Replayable keyed publish frame that requests an acknowledgement receipt. */
-  PUBLISH_ACK_REQ: 0x07 as const,
+  PUBLISH_ACK_REQ: 0x16 as const,
   /** Replayable binary publish frame delivered to keyed-channel subscribers. */
-  PUBLISH_BINARY: 0x08 as const,
+  PUBLISH_BINARY: 0x17 as const,
   /** Replayable keyed binary publish frame that requests an acknowledgement receipt. */
-  PUBLISH_BINARY_ACK_REQ: 0x09 as const,
-  /** Binary frame that requests an acknowledgement from the receiver. */
-  BINARY_ACK_REQ: 0x0a as const,
+  PUBLISH_BINARY_ACK_REQ: 0x18 as const,
+
+  // ─── Per-channel control (carries ix, no seq) ───
+  CLOSE: 0x30 as const,
+  CLOSE_ACK: 0x31 as const,
+  /** Server → client: channel closed with an abort value (analogous to `throw Abort()`). */
+  ABORT: 0x32 as const,
+  /** Server → client: channel closed due to an unhandled server error (no payload). */
+  ERROR: 0x33 as const,
+  /** Flow-control window update: peer has consumed N bytes, may send N more. */
+  WINDOW: 0x34 as const,
+  PUBSUB_SUB: 0x35 as const,
+  PUBSUB_UNSUB: 0x36 as const,
 }
 
-// ===== Control message types =====
+function isConnCtrlTag(tag: number): boolean {
+  return tag < DATA_TAG_MIN
+}
 
-type CtrlClose = { t: 'close'; ix: number; timeoutMs: number }
-type CtrlCloseAck = { t: 'close-ack'; ix: number }
-type CtrlWindow = { t: 'window'; ix: number; bytes: number }
-type CtrlPing = { t: 'ping' }
-type CtrlPong = { t: 'pong' }
-/** Server → client: channel closed with an abort value (analogous to throw Abort() in streaming). */
-type CtrlAbort = { t: 'abort'; ix: number; abortValue: string }
-/** Server → client: channel closed due to an unhandled server error (no details sent, analogous to BUG in streaming). */
-type CtrlError = { t: 'error'; ix: number }
-/** Client → server on every (re)connect: all open channels with client-owned indices. */
-type CtrlReconcile = {
-  t: 'reconcile'
+function isChannelCtrlTag(tag: number): boolean {
+  return tag >= CHANNEL_CTRL_TAG_MIN
+}
+
+// ===== Reconcile payloads (JSON-encoded after the header) =====
+
+type ReconcilePayload = {
   sessionId?: string
   /** Set when the client is upgrading from SSE to WS and has kept SSE alive.
    *  Server should drain the SSE send chain before replaying and attaching. */
@@ -89,11 +113,17 @@ type CtrlReconcile = {
    *  stalling the entire reconcile. */
   open: { id: string; ix: number; lastSeq: number; initial?: true }[]
 }
-/** Server → client after reconcile: all channels the server actually attached, with lastSeq the server received per channel. */
-type CtrlReconciled = {
-  t: 'reconciled'
+
+/** All channels the server actually attached, with the cluster instance hosting each
+ *  channel's runtime state (`home`) and the instance holding the SSE response wire
+ *  (`ownerInstance`). The client mirrors these into every subsequent data-POST metadata
+ *  so the receiver can route per-frame from a 1-byte alias alone — no cluster lookup,
+ *  no frame decoding. Alias 0 routes to `ownerInstance` (connection-level frames);
+ *  alias N (≥ 1) routes to `open[N − 1]` (`home` + `id`). */
+type ReconciledPayload = {
   sessionId: string
-  open: { id: string; ix: number; lastSeq: number }[]
+  open: { id: string; ix: number; lastSeq: number; home: string }[]
+  ownerInstance: string
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
@@ -103,89 +133,62 @@ type CtrlReconciled = {
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
 }
-/** Server → client on old transport after upgrade drain: signals the client that this is the last frame on this transport. */
-type CtrlFin = { t: 'fin' }
-/** Client → server: subscribe this channel to pubsub. binary flag selects text or binary pubsub. */
-type CtrlPubSubSub = { t: 'pubsub-sub'; ix: number; binary?: true }
-/** Client → server: unsubscribe this channel from pubsub. */
-type CtrlPubSubUnsub = { t: 'pubsub-unsub'; ix: number; binary?: true }
-type CtrlMessage =
-  | CtrlClose
-  | CtrlCloseAck
-  | CtrlAbort
-  | CtrlError
-  | CtrlWindow
-  | CtrlPing
-  | CtrlPong
-  | CtrlReconcile
-  | CtrlReconciled
-  | CtrlFin
-  | CtrlPubSubSub
-  | CtrlPubSubUnsub
 
-/** Ack result outcome on the wire.
- *  - `ok`: `text` is the serialized ack value.
- *  - `error`: a generic listener/channel error; `text` is the user-facing message.
- *  - `abort`: `text` is the serialized abort value.
- *  - `shield-error`: a shield validator rejected the data/ack; `text` is the validator message.
- *    Kept distinct from `error` so the receiving side can throw `ShieldValidationError`. */
-type AckResultStatus = 'ok' | 'error' | 'abort' | 'shield-error'
+/** Ack result outcome on the wire — same byte value in memory and on the wire.
+ *  - `OK`: `text` is the serialized ack value.
+ *  - `ERROR`: a generic listener/channel error; `text` is the user-facing message.
+ *  - `ABORT`: `text` is the serialized abort value.
+ *  - `SHIELD_ERROR`: a shield validator rejected the data/ack; `text` is the validator message.
+ *    Kept distinct from `ERROR` so the receiving side can throw `ShieldValidationError`. */
+const ACK_STATUS = {
+  OK: 0x00 as const,
+  ERROR: 0x01 as const,
+  ABORT: 0x02 as const,
+  SHIELD_ERROR: 0x03 as const,
+}
+
+type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 
 /** Ordering metadata embedded in PUBLISH frames on the wire. */
 type WirePublishInfo = { seq: number; ts: number }
 
 // ===== Decoded frame =====
 
-type DecodedFrame =
-  | { tag: typeof TAG.CTRL; ctrl: CtrlMessage }
+type ChannelDataFrame =
   | { tag: typeof TAG.TEXT; index: number; seq: number; text: string }
+  | { tag: typeof TAG.BINARY; index: number; seq: number; data: Uint8Array }
+  | { tag: typeof TAG.TEXT_ACK_REQ; index: number; seq: number; text: string }
+  | { tag: typeof TAG.BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
+  | { tag: typeof TAG.ACK_RES; index: number; seq: number; ackedSeq: number; status: AckResultStatus; text: string }
   | { tag: typeof TAG.PUBLISH; index: number; seq: number; text: string; info: WirePublishInfo }
   | { tag: typeof TAG.PUBLISH_ACK_REQ; index: number; seq: number; text: string }
-  | { tag: typeof TAG.BINARY; index: number; seq: number; data: Uint8Array }
-  | { tag: typeof TAG.ACK_RES; index: number; seq: number; ackedSeq: number; status: AckResultStatus; text: string }
-  | { tag: typeof TAG.TEXT_ACK_REQ; index: number; seq: number; text: string }
   | { tag: typeof TAG.PUBLISH_BINARY; index: number; seq: number; data: Uint8Array; info: WirePublishInfo }
   | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
-  | { tag: typeof TAG.BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
 
-const ACK_RESULT_STATUS = {
-  ok: 0x00,
-  error: 0x01,
-  abort: 0x02,
-  'shield-error': 0x03,
-} as const
+type ChannelCtrlFrame =
+  | { tag: typeof TAG.CLOSE; index: number; timeoutMs: number }
+  | { tag: typeof TAG.CLOSE_ACK; index: number }
+  | { tag: typeof TAG.ABORT; index: number; abortValue: string }
+  | { tag: typeof TAG.ERROR; index: number }
+  | { tag: typeof TAG.WINDOW; index: number; bytes: number }
+  | { tag: typeof TAG.PUBSUB_SUB; index: number; binary: boolean }
+  | { tag: typeof TAG.PUBSUB_UNSUB; index: number; binary: boolean }
 
-function encodeAckResultStatus(status: AckResultStatus): number {
-  switch (status) {
-    case 'ok':
-      return ACK_RESULT_STATUS.ok
-    case 'error':
-      return ACK_RESULT_STATUS.error
-    case 'abort':
-      return ACK_RESULT_STATUS.abort
-    case 'shield-error':
-      return ACK_RESULT_STATUS['shield-error']
-  }
-}
+/** Frames that carry an `index` (channel ix) — both data and per-channel ctrl. */
+type ChannelFrame = ChannelDataFrame | ChannelCtrlFrame
 
-function decodeAckResultStatus(value: number): AckResultStatus {
-  switch (value) {
-    case ACK_RESULT_STATUS.ok:
-      return 'ok'
-    case ACK_RESULT_STATUS.error:
-      return 'error'
-    case ACK_RESULT_STATUS.abort:
-      return 'abort'
-    case ACK_RESULT_STATUS['shield-error']:
-      return 'shield-error'
-    default:
-      assert(false, 'ACK_RES status is invalid')
-  }
-}
+type ConnCtrlFrame =
+  | { tag: typeof TAG.PING }
+  | { tag: typeof TAG.PONG }
+  | { tag: typeof TAG.FIN }
+  | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
+  | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
+
+type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
 // ===== Encode =====
 
-function writeDataHeader(frame: Uint8Array, tag: number, index: number, seq: number): void {
+function writeHeader(frame: Uint8Array, tag: number, index: number, seq: number): void {
   frame[0] = tag
   frame[1] = index & 0xff
   frame[2] = (index >> 8) & 0xff
@@ -195,155 +198,202 @@ function writeDataHeader(frame: Uint8Array, tag: number, index: number, seq: num
   frame[6] = (seq >> 24) & 0xff
 }
 
+function writeU32(frame: Uint8Array, offset: number, n: number): void {
+  frame[offset] = n & 0xff
+  frame[offset + 1] = (n >> 8) & 0xff
+  frame[offset + 2] = (n >> 16) & 0xff
+  frame[offset + 3] = (n >> 24) & 0xff
+}
+
+function readU32(buf: Uint8Array, offset: number): number {
+  return (
+    (buf[offset] as number) |
+    ((buf[offset + 1] as number) << 8) |
+    ((buf[offset + 2] as number) << 16) |
+    ((buf[offset + 3] as number) << 24)
+  )
+}
+
+function encodeTextFrame(tag: number, index: number, text: string, seq: number): Uint8Array<ArrayBuffer> {
+  const payload = textEncoder.encode(text)
+  const frame = new Uint8Array(HEADER + payload.byteLength)
+  writeHeader(frame, tag, index, seq)
+  frame.set(payload, HEADER)
+  return frame
+}
+
+function encodeBinaryFrame(tag: number, index: number, data: Uint8Array, seq: number): Uint8Array<ArrayBuffer> {
+  const frame = new Uint8Array(HEADER + data.byteLength)
+  writeHeader(frame, tag, index, seq)
+  frame.set(data, HEADER)
+  return frame
+}
+
+function encodeBareFrame(tag: number, index = 0): Uint8Array<ArrayBuffer> {
+  const frame = new Uint8Array(HEADER)
+  writeHeader(frame, tag, index, 0)
+  return frame
+}
+
+function encodeJsonFrame(tag: number, payload: unknown): Uint8Array<ArrayBuffer> {
+  const json = textEncoder.encode(JSON.stringify(payload))
+  const frame = new Uint8Array(HEADER + json.byteLength)
+  writeHeader(frame, tag, 0, 0)
+  frame.set(json, HEADER)
+  return frame
+}
+
 const encode = {
-  ctrl(msg: CtrlMessage): Uint8Array<ArrayBuffer> {
-    const json = textEncoder.encode(JSON.stringify(msg))
-    const frame = new Uint8Array(HEADER_CTRL + json.byteLength)
-    frame[0] = TAG.CTRL
-    frame.set(json, HEADER_CTRL)
-    return frame
-  },
+  text: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.TEXT, index, text, seq),
+  publish: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.PUBLISH, index, text, seq),
+  publishAckReq: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.PUBLISH_ACK_REQ, index, text, seq),
+  textAckReq: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.TEXT_ACK_REQ, index, text, seq),
 
-  text(index: number, text: string, seq = 0): Uint8Array<ArrayBuffer> {
-    const payload = textEncoder.encode(text)
-    const frame = new Uint8Array(HEADER_DATA + payload.byteLength)
-    writeDataHeader(frame, TAG.TEXT, index, seq)
-    frame.set(payload, HEADER_DATA)
-    return frame
-  },
+  binary: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.BINARY, index, data, seq),
+  publishBinary: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.PUBLISH_BINARY, index, data, seq),
+  publishBinaryAckReq: (index: number, data: Uint8Array, seq = 0) =>
+    encodeBinaryFrame(TAG.PUBLISH_BINARY_ACK_REQ, index, data, seq),
+  binaryAckReq: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.BINARY_ACK_REQ, index, data, seq),
 
-  publish(index: number, text: string, seq = 0): Uint8Array<ArrayBuffer> {
-    const payload = textEncoder.encode(text)
-    const frame = new Uint8Array(HEADER_DATA + payload.byteLength)
-    writeDataHeader(frame, TAG.PUBLISH, index, seq)
-    frame.set(payload, HEADER_DATA)
-    return frame
-  },
-
-  publishAckReq(index: number, text: string, seq = 0): Uint8Array<ArrayBuffer> {
-    const payload = textEncoder.encode(text)
-    const frame = new Uint8Array(HEADER_DATA + payload.byteLength)
-    writeDataHeader(frame, TAG.PUBLISH_ACK_REQ, index, seq)
-    frame.set(payload, HEADER_DATA)
-    return frame
-  },
-
-  binary(index: number, data: Uint8Array, seq = 0): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER_DATA + data.byteLength)
-    writeDataHeader(frame, TAG.BINARY, index, seq)
-    frame.set(data, HEADER_DATA)
-    return frame
-  },
-
-  publishBinary(index: number, data: Uint8Array, seq = 0): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER_DATA + data.byteLength)
-    writeDataHeader(frame, TAG.PUBLISH_BINARY, index, seq)
-    frame.set(data, HEADER_DATA)
-    return frame
-  },
-
-  publishBinaryAckReq(index: number, data: Uint8Array, seq = 0): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER_DATA + data.byteLength)
-    writeDataHeader(frame, TAG.PUBLISH_BINARY_ACK_REQ, index, seq)
-    frame.set(data, HEADER_DATA)
-    return frame
-  },
-
-  /** Identical wire layout to BINARY, but signals to the receiver: send ACK_RES when done. */
-  binaryAckReq(index: number, data: Uint8Array, seq = 0): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER_DATA + data.byteLength)
-    writeDataHeader(frame, TAG.BINARY_ACK_REQ, index, seq)
-    frame.set(data, HEADER_DATA)
-    return frame
-  },
-
-  /** Identical wire layout to TEXT, but signals to the receiver: send ACK_RES when done. */
-  textAckReq(index: number, text: string, seq = 0): Uint8Array<ArrayBuffer> {
-    const payload = textEncoder.encode(text)
-    const frame = new Uint8Array(HEADER_DATA + payload.byteLength)
-    writeDataHeader(frame, TAG.TEXT_ACK_REQ, index, seq)
-    frame.set(payload, HEADER_DATA)
-    return frame
-  },
-
-  /** Acknowledgement response frame.
-   *  Wire: [u8 TAG.ACK_RES][u16 LE index][u32 LE own_seq][u32 LE ack_seq][u8 status][result bytes...]
-   *  `ownSeq`  — this frame's own replay sequence number.
-   *  `ackedSeq` — the seq of the TEXT_ACK_REQ frame being acknowledged. */
+  /** Wire: [header][u32 ackedSeq][u8 status][result bytes...]
+   *  `ownSeq` — this frame's own replay sequence number.
+   *  `ackedSeq` — the seq of the ACK_REQ frame being acknowledged. */
   ackRes(
     index: number,
     ownSeq: number,
     ackedSeq: number,
     result: string,
-    status: AckResultStatus = 'ok',
+    status: AckResultStatus = ACK_STATUS.OK,
   ): Uint8Array<ArrayBuffer> {
     const payload = textEncoder.encode(result)
-    const frame = new Uint8Array(HEADER_DATA + 5 + payload.byteLength)
-    writeDataHeader(frame, TAG.ACK_RES, index, ownSeq)
-    frame[7] = ackedSeq & 0xff
-    frame[8] = (ackedSeq >> 8) & 0xff
-    frame[9] = (ackedSeq >> 16) & 0xff
-    frame[10] = (ackedSeq >> 24) & 0xff
-    frame[11] = encodeAckResultStatus(status)
-    frame.set(payload, HEADER_DATA + 5)
+    const frame = new Uint8Array(HEADER + 5 + payload.byteLength)
+    writeHeader(frame, TAG.ACK_RES, index, ownSeq)
+    writeU32(frame, HEADER, ackedSeq)
+    frame[HEADER + 4] = status
+    frame.set(payload, HEADER + 5)
+    return frame
+  },
+
+  // ── Connection-level ctrls ──
+  ping: () => encodeBareFrame(TAG.PING),
+  pong: () => encodeBareFrame(TAG.PONG),
+  fin: () => encodeBareFrame(TAG.FIN),
+  reconcile: (payload: ReconcilePayload) => encodeJsonFrame(TAG.RECONCILE, payload),
+  reconciled: (payload: ReconciledPayload) => encodeJsonFrame(TAG.RECONCILED, payload),
+
+  // ── Per-channel ctrls ──
+  close(index: number, timeoutMs: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 4)
+    writeHeader(frame, TAG.CLOSE, index, 0)
+    writeU32(frame, HEADER, timeoutMs)
+    return frame
+  },
+  closeAck: (index: number) => encodeBareFrame(TAG.CLOSE_ACK, index),
+  abort(index: number, abortValue: string): Uint8Array<ArrayBuffer> {
+    const payload = textEncoder.encode(abortValue)
+    const frame = new Uint8Array(HEADER + payload.byteLength)
+    writeHeader(frame, TAG.ABORT, index, 0)
+    frame.set(payload, HEADER)
+    return frame
+  },
+  error: (index: number) => encodeBareFrame(TAG.ERROR, index),
+  window(index: number, bytes: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 4)
+    writeHeader(frame, TAG.WINDOW, index, 0)
+    writeU32(frame, HEADER, bytes)
+    return frame
+  },
+  pubsubSub(index: number, binary: boolean): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 1)
+    writeHeader(frame, TAG.PUBSUB_SUB, index, 0)
+    frame[HEADER] = binary ? 1 : 0
+    return frame
+  },
+  pubsubUnsub(index: number, binary: boolean): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 1)
+    writeHeader(frame, TAG.PUBSUB_UNSUB, index, 0)
+    frame[HEADER] = binary ? 1 : 0
     return frame
   },
 }
 
-/** Shorthand for encode.ctrl — used frequently in transport code. */
-const encodeCtrl = encode.ctrl
-
 // ===== Decode =====
 
 function decode(frame: Uint8Array): DecodedFrame {
+  assert(frame.length >= HEADER, 'frame too short')
   const tag = frame[0] as number
-
-  if (tag === TAG.CTRL) {
-    assert(frame.length >= HEADER_CTRL, 'CTRL frame too short')
-    const payload = frame.subarray(HEADER_CTRL)
-    return { tag: TAG.CTRL, ctrl: JSON.parse(textDecoder.decode(payload)) }
-  }
-
-  assert(frame.length >= HEADER_DATA, 'data frame too short')
   const index = (frame[1] as number) | ((frame[2] as number) << 8)
-  const seq =
-    (frame[3] as number) | ((frame[4] as number) << 8) | ((frame[5] as number) << 16) | ((frame[6] as number) << 24)
-  const payload = frame.subarray(HEADER_DATA)
+  const seq = readU32(frame, 3)
+  const payload = frame.subarray(HEADER)
 
-  if (tag === TAG.TEXT) {
-    return { tag: TAG.TEXT, index, seq, text: textDecoder.decode(payload) }
+  switch (tag) {
+    case TAG.TEXT:
+      return { tag: TAG.TEXT, index, seq, text: textDecoder.decode(payload) }
+    case TAG.BINARY:
+      return { tag: TAG.BINARY, index, seq, data: payload }
+    case TAG.TEXT_ACK_REQ:
+      return { tag: TAG.TEXT_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
+    case TAG.BINARY_ACK_REQ:
+      return { tag: TAG.BINARY_ACK_REQ, index, seq, data: payload }
+    case TAG.PUBLISH: {
+      const { text, info } = decodePublishText(textDecoder.decode(payload))
+      return { tag: TAG.PUBLISH, index, seq, text, info }
+    }
+    case TAG.PUBLISH_ACK_REQ:
+      return { tag: TAG.PUBLISH_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
+    case TAG.PUBLISH_BINARY: {
+      const { data, info } = decodePublishBinary(payload)
+      return { tag: TAG.PUBLISH_BINARY, index, seq, data, info }
+    }
+    case TAG.PUBLISH_BINARY_ACK_REQ:
+      return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, data: payload }
+    case TAG.ACK_RES: {
+      assert(payload.length >= 5, 'ACK_RES payload too short')
+      const ackedSeq = readU32(payload, 0)
+      const status = payload[4] as number
+      assert(
+        status === ACK_STATUS.OK ||
+          status === ACK_STATUS.ERROR ||
+          status === ACK_STATUS.ABORT ||
+          status === ACK_STATUS.SHIELD_ERROR,
+        `ACK_RES unknown status ${status}`,
+      )
+      return { tag: TAG.ACK_RES, index, seq, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
+    }
+
+    case TAG.PING:
+      return { tag: TAG.PING }
+    case TAG.PONG:
+      return { tag: TAG.PONG }
+    case TAG.FIN:
+      return { tag: TAG.FIN }
+    case TAG.RECONCILE:
+      return { tag: TAG.RECONCILE, payload: JSON.parse(textDecoder.decode(payload)) as ReconcilePayload }
+    case TAG.RECONCILED:
+      return { tag: TAG.RECONCILED, payload: JSON.parse(textDecoder.decode(payload)) as ReconciledPayload }
+
+    case TAG.CLOSE:
+      assert(payload.length >= 4, 'CLOSE payload too short')
+      return { tag: TAG.CLOSE, index, timeoutMs: readU32(payload, 0) }
+    case TAG.CLOSE_ACK:
+      return { tag: TAG.CLOSE_ACK, index }
+    case TAG.ABORT:
+      return { tag: TAG.ABORT, index, abortValue: textDecoder.decode(payload) }
+    case TAG.ERROR:
+      return { tag: TAG.ERROR, index }
+    case TAG.WINDOW:
+      assert(payload.length >= 4, 'WINDOW payload too short')
+      return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0) }
+    case TAG.PUBSUB_SUB:
+      assert(payload.length >= 1, 'PUBSUB_SUB payload too short')
+      return { tag: TAG.PUBSUB_SUB, index, binary: payload[0] === 1 }
+    case TAG.PUBSUB_UNSUB:
+      assert(payload.length >= 1, 'PUBSUB_UNSUB payload too short')
+      return { tag: TAG.PUBSUB_UNSUB, index, binary: payload[0] === 1 }
+
+    default:
+      assert(false, `Unknown wire frame tag ${tag}`)
   }
-  if (tag === TAG.PUBLISH) {
-    const { text, info } = decodePublishText(textDecoder.decode(payload))
-    return { tag: TAG.PUBLISH, index, seq, text, info }
-  }
-  if (tag === TAG.PUBLISH_ACK_REQ) {
-    return { tag: TAG.PUBLISH_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
-  }
-  if (tag === TAG.PUBLISH_BINARY) {
-    const { data, info } = decodePublishBinary(payload)
-    return { tag: TAG.PUBLISH_BINARY, index, seq, data, info }
-  }
-  if (tag === TAG.PUBLISH_BINARY_ACK_REQ) {
-    return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, data: payload }
-  }
-  if (tag === TAG.TEXT_ACK_REQ) {
-    return { tag: TAG.TEXT_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
-  }
-  if (tag === TAG.ACK_RES) {
-    assert(payload.length >= 5, 'ACK_RES frame payload too short')
-    const ackedSeq =
-      (payload[0] as number) |
-      ((payload[1] as number) << 8) |
-      ((payload[2] as number) << 16) |
-      ((payload[3] as number) << 24)
-    const status = decodeAckResultStatus(payload[4] as number)
-    return { tag: TAG.ACK_RES, index, seq, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
-  }
-  if (tag === TAG.BINARY_ACK_REQ) {
-    return { tag: TAG.BINARY_ACK_REQ, index, seq, data: payload }
-  }
-  return { tag: TAG.BINARY, index, seq, data: payload }
 }
 
 // ===== Publish info helpers =====

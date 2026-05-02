@@ -19,24 +19,22 @@ function createPeer(frames: Uint8Array[]) {
 
 function expectCloseFrame(frame: Uint8Array) {
   const decoded = decode(frame)
-  expect(decoded.tag).toBe(TAG.CTRL)
-  if (decoded.tag !== TAG.CTRL) throw new Error('Expected CTRL frame')
-  expect(decoded.ctrl.t).toBe('close')
-  if (decoded.ctrl.t !== 'close') throw new Error('Expected close ctrl')
-  return decoded.ctrl
+  expect(decoded.tag).toBe(TAG.CLOSE)
+  if (decoded.tag !== TAG.CLOSE) throw new Error('Expected CLOSE frame')
+  return decoded
 }
 
 function expectCloseAckFrame(frame: Uint8Array) {
   const decoded = decode(frame)
-  expect(decoded.tag).toBe(TAG.CTRL)
-  if (decoded.tag !== TAG.CTRL) throw new Error('Expected CTRL frame')
-  expect(decoded.ctrl).toEqual({ t: 'close-ack', ix: 7 })
+  expect(decoded.tag).toBe(TAG.CLOSE_ACK)
+  if (decoded.tag !== TAG.CLOSE_ACK) throw new Error('Expected CLOSE_ACK frame')
+  expect(decoded.index).toBe(7)
 }
 
 // ── Self-initiated close ──
 
 describe('self-initiated close', () => {
-  test('isClosed=true and onClose fire immediately on close()', async () => {
+  test('isClosed=true on close(); onClose fires after close-ack roundtrip', async () => {
     const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
     let didFireClose = false
@@ -50,14 +48,14 @@ describe('self-initiated close', () => {
     channel._attachPeer(createPeer(frames))
     const closePromise = channel.close()
 
-    // Immediately synchronous — before any await
     expect(channel.isClosed).toBe(true)
-    expect(didFireClose).toBe(true)
-    expect(closeErr).toBe(undefined)
+    expect(didFireClose).toBe(false)
     expect(channel._didShutdown).toBe(false)
 
     channel._onPeerCloseAck()
     await expect(closePromise).resolves.toBe(0)
+    expect(didFireClose).toBe(true)
+    expect(closeErr).toBe(undefined)
     expect(channel._didShutdown).toBe(true)
   })
 
@@ -70,7 +68,7 @@ describe('self-initiated close', () => {
 
     expect(frames).toHaveLength(1)
     const ctrl = expectCloseFrame(frames[0]!)
-    expect(ctrl.ix).toBe(7)
+    expect(ctrl.index).toBe(7)
     expect(ctrl.timeoutMs).toBeGreaterThanOrEqual(0)
 
     channel._onPeerCloseAck()

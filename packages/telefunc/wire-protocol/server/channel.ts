@@ -43,8 +43,8 @@ import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
-import { TAG } from '../shared-ws.js'
-import type { AckResultStatus, CtrlMessage, DecodedFrame } from '../shared-ws.js'
+import { ACK_STATUS, TAG, isChannelCtrlTag } from '../shared-ws.js'
+import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
 
 const globalObject = getGlobalObject('channel.ts', {
   connectTtlMs: CHANNEL_CONNECT_TTL_MS,
@@ -131,9 +131,9 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   // ── Wire state — channel-owned, persistent across attach-mode transitions ────
   //
   // Lives on the channel itself so the same buffer/seq counter serves a client
-  // whether the wire is local (`ServerConnection`'s `IndexedPeer`) or substrate-
-  // mediated (the runtime's substrate-backed `IndexedPeer`). Both paths reuse
-  // these fields rather than maintaining parallel external maps.
+  // whether the wire is local (mux's `IndexedPeer`) or substrate-mediated (the
+  // mux's substrate-backed `IndexedPeer`). Both paths reuse these fields rather
+  // than maintaining parallel external maps.
   /** Buffer of outgoing wire frames, used to replay missed frames on reconnect.
    *  Allocated in `_registerChannel`; disposed in `_shutdown`. Null only between
    *  construction and registration (no peer can attach before registration). */
@@ -382,25 +382,26 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._fireOpen()
   }
 
-  /** @internal — Entry point for an incoming wire frame. Both the local connection
-   *  (`ServerConnection.handleFrame`) and the cross-instance substrate runtime
-   *  (`ChannelSubstrateRuntime.dispatchHomeFrame`) call this. Handles ctrl routing,
-   *  client→server seq dedup, and delegation to `_dispatchDataFrame`. */
-  _dispatchFrame(frame: DecodedFrame): void {
-    if (frame.tag === TAG.CTRL) {
-      this._dispatchCtrl(frame.ctrl)
+  /** @internal — Entry point for an incoming wire frame. The mux calls this from both
+   *  the local-dispatch path (`handleClientFrame`) and the cross-instance home-side
+   *  path (`dispatchHomeFrame`). Handles ctrl routing, client→server seq dedup, and
+   *  delegation to `_dispatchDataFrame`. */
+  _dispatchFrame(frame: ChannelFrame): void {
+    if (isChannelCtrlTag(frame.tag)) {
+      this._dispatchCtrl(frame as ChannelCtrlFrame)
       return
     }
-    if (frame.seq) {
-      if (frame.seq <= this._lastClientSeq) return
-      this._lastClientSeq = frame.seq
+    const data = frame as ChannelDataFrame
+    if (data.seq) {
+      if (data.seq <= this._lastClientSeq) return
+      this._lastClientSeq = data.seq
     }
-    this._dispatchDataFrame(frame)
+    this._dispatchDataFrame(data)
   }
 
   /** @internal — Tag-keyed data-frame switch. Subclasses (`ServerPubSub`) override
    *  to handle their extra tags and fall back to `super` for the common cases. */
-  protected _dispatchDataFrame(frame: Exclude<DecodedFrame, { tag: typeof TAG.CTRL }>): void {
+  protected _dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
       case TAG.TEXT:
         this._onPeerMessage(frame.text)
@@ -424,19 +425,19 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   }
 
   /** @internal — Per-channel ctrl-message switch. Connection-level ctrls (ping,
-   *  reconcile, fin) never reach here — they're handled in `ServerConnection`. */
-  _dispatchCtrl(ctrl: CtrlMessage): void {
-    switch (ctrl.t) {
-      case 'close':
-        this._onPeerCloseRequest(ctrl.timeoutMs)
+   *  reconcile, fin) never reach here — the mux's `handleFrame` handles them. */
+  _dispatchCtrl(frame: ChannelCtrlFrame): void {
+    switch (frame.tag) {
+      case TAG.CLOSE:
+        this._onPeerCloseRequest(frame.timeoutMs)
         return
-      case 'close-ack':
+      case TAG.CLOSE_ACK:
         this._onPeerCloseAck()
         return
-      case 'window':
-        this._onPeerWindowUpdate(ctrl.bytes)
+      case TAG.WINDOW:
+        this._onPeerWindowUpdate(frame.bytes)
         return
-      // pubsub-sub / pubsub-unsub: dropped on plain channels; ServerPubSub overrides.
+      // PUBSUB_SUB / PUBSUB_UNSUB: dropped on plain channels; ServerPubSub overrides.
     }
   }
 
@@ -495,12 +496,12 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     }
   }
 
-  _onPeerAckRes(ackedSeq: number, resultText: string, status: AckResultStatus = 'ok'): void {
+  _onPeerAckRes(ackedSeq: number, resultText: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const pending = this._pendingAcks.get(ackedSeq)
     if (!pending) return
     this._pendingAcks.delete(ackedSeq)
     switch (status) {
-      case 'ok': {
+      case ACK_STATUS.OK: {
         const parsed = parse(resultText) as ChannelAck<ServerToClient>
         const validateAck = this._validators.get('ack')
         if (validateAck) {
@@ -515,13 +516,13 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         pending.resolve(parsed)
         return
       }
-      case 'abort':
+      case ACK_STATUS.ABORT:
         pending.reject(createAbortError(parse(resultText)))
         return
-      case 'error':
+      case ACK_STATUS.ERROR:
         pending.reject(new Error(resultText || 'Internal client channel error — see client logs'))
         return
-      case 'shield-error':
+      case ACK_STATUS.SHIELD_ERROR:
         pending.reject(new ShieldValidationError(resultText))
     }
   }
@@ -577,7 +578,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   }
 
   /** Send an ack response, buffering it if the peer is currently disconnected. */
-  protected _sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = 'ok'): void {
+  protected _sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     if (this._peer) {
       this._peer.sendAckRes(ackedSeq, result, status)
     } else {
@@ -598,15 +599,16 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     }
   }
 
-  private _startClose(err?: Error): void {
-    if (this._isClosed) return
+  private _startClose(): void {
     this._isClosed = true
-    this._fireClose(err)
   }
 
   private async _runFinalizationLoop(): Promise<ChannelCloseResult> {
     while (!this._didShutdown) {
-      if (this._isCloseWorkComplete()) {
+      // Fire onClose only once the close roundtrip is settled and no inbound work is in flight,
+      // so listeners see "closed" only after the channel can no longer receive frames.
+      if (this._isCloseRoundtripDone()) this._fireClose()
+      if (this._didFireClose && this._pendingCloseCallbacks === 0) {
         this._shutdown()
         break
       }
@@ -618,6 +620,10 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       await this._waitForCloseProgress(remaining)
     }
     return this._didReceiveCloseAck ? 0 : 1
+  }
+
+  private _isCloseRoundtripDone(): boolean {
+    return this._inflightAcks === 0 && (!this._awaitingCloseAck || this._didReceiveCloseAck)
   }
 
   private _waitForCloseProgress(timeoutMs: number): Promise<void> {
@@ -648,7 +654,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private async _dispatchAckReq(text: string, seq: number): Promise<void> {
     try {
       if (this._listeners.length === 0) {
-        this._sendAckRes(seq, 'No listener registered for ack request', 'error')
+        this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
         return
       }
       const data = parse(text) as ChannelData<ClientToServer>
@@ -658,7 +664,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
         // `shield-error` status lets the client reject its `send()` promise with a branded
         // ShieldValidationError — same identity every other shield-fail surface produces.
         if (result !== true) {
-          this._sendAckRes(seq, result, 'shield-error')
+          this._sendAckRes(seq, result, ACK_STATUS.SHIELD_ERROR)
           return
         }
       }
@@ -668,7 +674,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
           lastResult = await cb(data)
         } catch (err) {
           if (this._handleCallbackError(err)) return
-          this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
+          this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
           return
         }
       }
@@ -681,7 +687,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
   private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
     try {
       if (this._binaryListeners.length === 0) {
-        this._sendAckRes(seq, 'No listener registered for ack request', 'error')
+        this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
         return
       }
       let lastResult: unknown
@@ -690,7 +696,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
           lastResult = await cb(data)
         } catch (err) {
           if (this._handleCallbackError(err)) return
-          this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
+          this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
           return
         }
       }
@@ -706,14 +712,6 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       this._inflightAcks--
       this._notifyCloseProgress()
     })
-  }
-
-  private _isCloseWorkComplete(): boolean {
-    return (
-      this._inflightAcks === 0 &&
-      this._pendingCloseCallbacks === 0 &&
-      (!this._awaitingCloseAck || this._didReceiveCloseAck)
-    )
   }
 
   protected _shutdown(err?: Error): void {

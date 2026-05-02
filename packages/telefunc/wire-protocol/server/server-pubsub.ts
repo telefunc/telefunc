@@ -10,8 +10,8 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { ChannelClosedError } from '../channel-errors.js'
-import { encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
-import type { CtrlMessage, DecodedFrame, WirePublishInfo } from '../shared-ws.js'
+import { ACK_STATUS, encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
+import type { ChannelCtrlFrame, ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -93,7 +93,7 @@ class ServerPubSub<T = unknown> extends ServerChannel {
 
   // --- Transport callbacks ---
 
-  protected override _dispatchDataFrame(frame: Exclude<DecodedFrame, { tag: typeof TAG.CTRL }>): void {
+  protected override _dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH_ACK_REQ) {
       void this._onPeerPublishAckReqMessage(frame.text, frame.seq)
       return
@@ -105,16 +105,16 @@ class ServerPubSub<T = unknown> extends ServerChannel {
     super._dispatchDataFrame(frame)
   }
 
-  override _dispatchCtrl(ctrl: CtrlMessage): void {
-    if (ctrl.t === 'pubsub-sub') {
-      this._onPeerPubSubSubscribe(ctrl.binary ?? false)
+  override _dispatchCtrl(frame: ChannelCtrlFrame): void {
+    if (frame.tag === TAG.PUBSUB_SUB) {
+      this._onPeerPubSubSubscribe(frame.binary)
       return
     }
-    if (ctrl.t === 'pubsub-unsub') {
-      this._onPeerPubSubUnsubscribe(ctrl.binary ?? false)
+    if (frame.tag === TAG.PUBSUB_UNSUB) {
+      this._onPeerPubSubUnsubscribe(frame.binary)
       return
     }
-    super._dispatchCtrl(ctrl)
+    super._dispatchCtrl(frame)
   }
 
   _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
@@ -159,7 +159,6 @@ class ServerPubSub<T = unknown> extends ServerChannel {
       this._peer.sendPublishBinary(wireData)
       return
     }
-    console.log(`[pubsub:${this.key}] buffering (no peer yet)`)
     this._prePeerBuffer.pushPublishBinary(wireData)
   }
 
@@ -242,7 +241,7 @@ class ServerPubSub<T = unknown> extends ServerChannel {
       this._sendAckRes(seq, stringify(result, { forbidReactElements: false }))
     } catch (err) {
       if (this._handleCallbackError(err)) return
-      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
+      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
     }
   }
 
@@ -253,7 +252,7 @@ class ServerPubSub<T = unknown> extends ServerChannel {
       this._sendAckRes(seq, stringify(result, { forbidReactElements: false }))
     } catch (err) {
       if (this._handleCallbackError(err)) return
-      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, 'error')
+      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
     }
   }
 }

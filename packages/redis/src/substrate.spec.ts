@@ -264,7 +264,7 @@ describe('RedisChannelSubstrate — pin / locate', () => {
     redis.expire.mockClear()
     redis.pipeline.mockClear()
 
-    await substrate.refreshPins(['room:1', 'room:2', 'room:3'])
+    await substrate.refreshChannels(['room:1', 'room:2', 'room:3'])
 
     // One pipeline → one round-trip. Three EXPIRE commands queued onto it.
     expect(redis.pipeline).toHaveBeenCalledTimes(1)

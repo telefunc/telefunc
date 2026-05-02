@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   decodeProxyEnvelope,
+  DETACH_REASON,
   encodeProxyEnvelope,
   ENVELOPE_KIND,
   InMemoryChannelSubstrate,
@@ -27,7 +28,7 @@ describe('proxy envelope codec', () => {
       channelId: 'room:abc',
       fromInstance: 'instance-A',
       direction: PROXY_DIRECTION.TO_HOME,
-      payload: { kind: ENVELOPE_KIND.DETACH, reason: 'transient' },
+      payload: { kind: ENVELOPE_KIND.DETACH, reason: DETACH_REASON.TRANSIENT },
     }
 
     const decoded = decodeProxyEnvelope(encodeProxyEnvelope(envelope))
