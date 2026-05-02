@@ -3,8 +3,7 @@ export type { InstallRedisOptions, RedisPubSubOptions }
 export { RedisChannelSubstrate } from './substrate.js'
 export type { RedisChannelSubstrateOptions } from './substrate.js'
 
-import { Redis } from 'ioredis'
-import type { Cluster } from 'ioredis'
+import type { Cluster, Redis } from 'ioredis'
 import { config, type PubSubTransport } from 'telefunc'
 import { assert } from './assert.js'
 import { callDefinedCommand } from './callDefinedCommand.js'
@@ -12,14 +11,12 @@ import { RedisChannelSubstrate } from './substrate.js'
 
 /** Wires pub/sub fan-out + cross-instance channel routing.
  *
- *  Pass a `redis://` URL (simplest), or an existing `ioredis` Redis/Cluster client if
- *  you want to share a connection with your own code or pass custom options. Both adapter
+ *  Pass an existing `ioredis` Redis or Cluster client. Both adapter
  *  and substrate `duplicate()` internally for their subscriber/blocking sockets. */
-function installRedis(redis: string | Redis | Cluster, options: InstallRedisOptions = {}): void {
-  const client = typeof redis === 'string' ? new Redis(redis) : redis
-  config.pubsub.transport = new RedisTransport({ redis: client, prefix: options.prefix })
+function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
+  config.pubsub.transport = new RedisTransport({ redis, prefix: options.prefix })
   config.channel.substrate = new RedisChannelSubstrate({
-    redis: client,
+    redis,
     prefix: options.prefix,
     instanceId: options.instanceId,
     pinTtlSeconds: options.pinTtlSeconds,

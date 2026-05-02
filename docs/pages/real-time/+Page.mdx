@@ -9,7 +9,7 @@ Telefunc handles real-time flows — chat, upload progress, live updates — usi
 | **Function passing** | Short-lived callbacks — progress updates, one-off server-to-client pushes | None |
 | **`channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE) or <Link text="WebSocket server setup" href="/server" /> (WS) |
 | **`pubsub()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
-| **[RxJS](https://rxjs.dev/) `Observable` / `Subject`** | Reactive streams with full operator support — pass rxjs primitives transparently | <Link href="/extensions/rxjs" text={<code>@telefunc/rxjs</code>} /> |
+| **[RxJS](https://rxjs.dev/) `Observable` / `Subject`** | Reactive streams with full operator support — pass rxjs primitives transparently | <Link href="/integrations/rxjs" text={<code>@telefunc/rxjs</code>} /> |
 | **`config.stream.transport = 'channel'`** | <Link href="/stream">Streamed values</Link> over the same reconnecting transport as channels | Same as channels |
 
 
@@ -120,7 +120,7 @@ See <Link href="/channel#pubsub" /> for the full pub/sub API.
 
 ## RxJS
 
-For reactive streams with full operator support, see <Link href="/extensions/rxjs" text={<code>@telefunc/rxjs</code>} /> — pass `Observable` and `Subject` transparently in both directions.
+For reactive streams with full operator support, see <Link href="/integrations/rxjs" text={<code>@telefunc/rxjs</code>} /> — pass `Observable` and `Subject` transparently in both directions.
 
 
 ## Reconnection

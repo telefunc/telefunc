@@ -1,5 +1,6 @@
 import { apply, serve } from '@photonjs/hono'
 import { Hono } from 'hono'
+import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 import { config } from 'telefunc'
 import { telefunc } from 'telefunc/node'
@@ -10,7 +11,7 @@ config.shield = true
 const INST = process.env.INSTANCE_ID ?? '?'
 
 if (process.env.REDIS_URL) {
-  installRedis(process.env.REDIS_URL, { instanceId: INST })
+  installRedis(new IORedis(process.env.REDIS_URL), { instanceId: INST })
   console.log(`[INST=${INST}] Redis substrate installed`)
 }
 

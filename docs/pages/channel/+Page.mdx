@@ -19,10 +19,13 @@ By default, channels and pubsub use **SSE** and work without extra server setup.
 ## channel()
 
 ```ts
+// Chat.telefunc.ts
 import { channel } from 'telefunc'
 
-const ch = channel<ClientToServer, ServerToClient>()
-return { channel: ch.client }
+export async function onChat() {
+  const ch = channel<ClientToServer, ServerToClient>()
+  return { channel: ch.client }
+}
 ```
 
 ### Methods
@@ -176,10 +179,13 @@ ch.send({ type: 'ping' }) // sent immediately, no await needed
 Use `pubsub()` for broadcast messaging. All pubsub instances sharing a key form a broadcast group.
 
 ```ts
+// Chat.telefunc.ts
 import { pubsub } from 'telefunc'
 
-const ps = pubsub<ChatMessage>('chat:lobby')
-return ps
+export async function onJoinChat() {
+  const ps = pubsub<ChatMessage>('chat:lobby')
+  return ps
+}
 ```
 
 Return the pubsub instance directly from a telefunction — no `.client` needed (unlike channels, pubsub has no directional type flip).
@@ -268,28 +274,7 @@ info.ts   // server timestamp
 
 By default, pub/sub is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, configure a transport on `config.pubsub.transport`.
 
-### `@telefunc/redis`
-
-The first-party Redis adapter wires pub/sub to Redis with a single config line:
-
-```bash
-npm install @telefunc/redis ioredis
-```
-
-```ts
-// Environment: server
-
-import { config } from 'telefunc'
-import { RedisTransport } from '@telefunc/redis'
-import Redis from 'ioredis'
-
-config.pubsub.transport = new RedisTransport({
-  publisher: new Redis(),
-  subscriber: new Redis(),  // Redis requires a dedicated connection for subscriptions
-})
-```
-
-Telefunc assigns a global `seq` per key via Redis `INCR`, so subscribers see messages in order even across nodes.
+For Redis-backed multi-server routing and pub/sub fan-out, see <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} />.
 
 ### Custom transport
 

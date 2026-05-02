@@ -25,13 +25,12 @@
     "dev": "tsc --watch"
   },
   "peerDependencies": {
+    "ioredis": "^5.10.1",
     "telefunc": ">=0.2.0"
   },
   "devDependencies": {
+    "ioredis": "5.10.1",
     "telefunc": "workspace:*",
     "typescript": "^5.9.2"
-  },
-  "dependencies": {
-    "ioredis": "5.10.1"
   }
 }

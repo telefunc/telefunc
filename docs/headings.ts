@@ -28,12 +28,17 @@ const headingsDetached = [
   },
   {
     title: '`@telefunc/rxjs`',
-    url: '/extensions/rxjs',
+    url: '/integrations/rxjs',
     category: 'Guides',
   },
   {
     title: '`@telefunc/tanstack-query`',
-    url: '/extensions/tanstack-query',
+    url: '/integrations/tanstack-query',
+    category: 'Guides',
+  },
+  {
+    title: '`@telefunc/redis`',
+    url: '/integrations/redis',
     category: 'Guides',
   },
   ...misc(),
@@ -172,8 +177,8 @@ const headings = [
   },
   {
     level: 2,
-    title: 'Extensions',
-    url: '/extensions',
+    title: 'Integrations',
+    url: '/integrations',
   },
   {
     level: 1,

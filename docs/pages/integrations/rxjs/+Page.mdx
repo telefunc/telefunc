@@ -138,19 +138,19 @@ The `| async` pipe subscribes and auto-unsubscribes on component destroy:
 
 ```ts
 // dashboard.component.ts
-@Component({
-  template: `
-    @if (metrics$ | async; as m) {
-      CPU: {{ m.cpu }}% — Memory: {{ m.memory }}MB
-    }
-  `
-})
 export class DashboardComponent {
   metrics$!: Observable<{ cpu: number; memory: number }>
 
   async ngOnInit() {
     this.metrics$ = await onMetrics()
   }
+}
+```
+
+```html
+<!-- dashboard.component.html -->
+@if (metrics$ | async; as m) {
+  CPU: {{ m.cpu }}% — Memory: {{ m.memory }}MB
 }
 ```
 
@@ -170,4 +170,4 @@ Unsubscribing stops data flow immediately. The underlying <Link href="/channel" 
 ## See also
 
 - <Link href="/real-time" /> — overview of Telefunc's real-time primitives
-- <Link href="/extensions" /> — other Telefunc extensions
+- <Link href="/integrations" /> — other Telefunc integrations
