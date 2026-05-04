@@ -23,7 +23,7 @@ export {
   onChannelShieldServerAck,
 }
 
-import { channel, Abort } from 'telefunc'
+import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
@@ -34,7 +34,7 @@ type ServerToClient = (msg: ServerMessage) => Ack
 type CloseError = { message?: string; abortValue?: unknown } | undefined
 
 function exerciseChannelTypeApi() {
-  const ch = channel<(msg: string) => undefined, (msg: number) => Promise<void>>({ ack: true })
+  const ch = new Channel<(msg: string) => undefined, (msg: number) => Promise<void>>({ ack: true })
 
   const ackFromClient: Promise<void> = ch.send(1)
   void ackFromClient
@@ -45,7 +45,7 @@ function exerciseChannelTypeApi() {
     return undefined
   })
 
-  const oneWay = channel<never, (msg: string) => void>()
+  const oneWay = new Channel<never, (msg: string) => void>()
   const ackFromServer: Promise<void> = oneWay.send('hello', { ack: true })
   void ackFromServer
 }
@@ -57,7 +57,7 @@ function formatCloseError(err: CloseError): string {
 }
 
 async function onChannelInit() {
-  const ch = channel<ClientToServer, ServerToClient>({ ack: true })
+  const ch = new Channel<ClientToServer, ServerToClient>({ ack: true })
   const swallowClosedChannel = (err: any) => {
     if (ch.isClosed && err?.name === 'ChannelClosedError') return
     throw err
@@ -106,7 +106,7 @@ async function onChannelInit() {
  * Tests: server-side abort(value) -> client onClose receives { isAbort: true, abortValue }.
  */
 async function onChannelAbortTest() {
-  const ch = channel<never, (msg: string) => void>()
+  const ch = new Channel<never, (msg: string) => void>()
   setTimeout(() => {
     ch.abort({ reason: 'test-abort', code: 42 })
   }, 400)
@@ -118,7 +118,7 @@ async function onChannelAbortTest() {
  * Server listener returns an ack string so the client can test per-send { ack: true }.
  */
 async function onChannelPerSendAck() {
-  const ch = channel<(msg: string) => string, (msg: string) => void>()
+  const ch = new Channel<(msg: string) => string, (msg: string) => void>()
   ch.listen((msg) => `ack:${msg}`)
   return { channel: ch.client }
 }
@@ -138,7 +138,7 @@ async function onChannelPerSendAck() {
 type HookServerMsg = { type: 'server-hook'; hook: string }
 
 async function onChannelHookInstrument() {
-  const ch = channel<never, (msg: HookServerMsg) => void>()
+  const ch = new Channel<never, (msg: HookServerMsg) => void>()
   const id = ch.id
 
   cleanupState[`hook_${id}_serverOnOpen`] = 'false'
@@ -164,7 +164,7 @@ async function onChannelHookInstrument() {
  * Used to test sendBinary/listenBinary round-trip with byte-exact verification.
  */
 async function onChannelBinary() {
-  const ch = channel()
+  const ch = new Channel()
   ch.listenBinary((data) => {
     ch.sendBinary(data)
   })
@@ -177,7 +177,7 @@ async function onChannelBinary() {
  *   clientAbort_<id>_serverOnCloseErr = 'pending' | 'none' | 'abort:<json>' | error message
  */
 async function onChannelClientAbortInstrument() {
-  const ch = channel()
+  const ch = new Channel()
   const id = ch.id
   cleanupState[`clientAbort_${id}_serverOnClose`] = 'false'
   cleanupState[`clientAbort_${id}_serverOnCloseErr`] = 'pending'
@@ -194,7 +194,7 @@ async function onChannelClientAbortInstrument() {
  * { isAbort: true, abortValue } when the server listener aborts mid-ack.
  */
 async function onChannelAckListenerAbort() {
-  const ch = channel<(msg: string) => void, never>()
+  const ch = new Channel<(msg: string) => void, never>()
   ch.listen(() => {
     throw Abort({ reason: 'listener-abort', code: 7 })
   })
@@ -202,7 +202,7 @@ async function onChannelAckListenerAbort() {
 }
 
 async function onChannelAckListenerBug() {
-  const ch = channel<(msg: string) => string, never>()
+  const ch = new Channel<(msg: string) => string, never>()
   ch.listen((msg) => {
     if (msg === 'bug') throw new Error('server-listener-bug')
     return `ack:${msg}`
@@ -211,7 +211,7 @@ async function onChannelAckListenerBug() {
 }
 
 async function onChannelClientAckListenerBug() {
-  const ch = channel<never, (msg: string) => string>()
+  const ch = new Channel<never, (msg: string) => string>()
   const id = ch.id
   cleanupState[`clientAckBug_${id}_rejected`] = 'false'
   cleanupState[`clientAckBug_${id}_followupAck`] = 'pending'
@@ -246,7 +246,7 @@ async function onChannelClientAckListenerBug() {
  *   serverPendingAck_<id>_isAbort   = 'false' | 'true'
  */
 async function onChannelServerPendingAckAbort() {
-  const ch = channel<never, (msg: string) => void>()
+  const ch = new Channel<never, (msg: string) => void>()
   const id = ch.id
 
   cleanupState[`serverPendingAck_${id}_rejected`] = 'false'
@@ -274,7 +274,7 @@ async function onChannelServerPendingAckAbort() {
  *   abortThenSend_<id>_isClosedErr  = 'false' | 'true'
  */
 async function onChannelAbortThenSend() {
-  const ch = channel<never, (msg: string) => void>()
+  const ch = new Channel<never, (msg: string) => void>()
   const id = ch.id
   cleanupState[`abortThenSend_${id}_thrown`] = 'false'
   cleanupState[`abortThenSend_${id}_isClosedErr`] = 'false'
@@ -300,7 +300,7 @@ async function onChannelAbortThenSend() {
  *   pendingAbort_<id>_isAbortErr      = 'false' | 'true'
  */
 async function onChannelPendingAckAbort() {
-  const ch = channel<never, (msg: string) => void>()
+  const ch = new Channel<never, (msg: string) => void>()
   const id = ch.id
   cleanupState[`pendingAbort_${id}_rejected`] = 'false'
   cleanupState[`pendingAbort_${id}_isAbortErr`] = 'false'
@@ -324,7 +324,7 @@ async function onChannelPendingAckAbort() {
  * The client connects, calls abort() then send() to verify ChannelClosedError is thrown.
  */
 async function onChannelClientAbortThenSend() {
-  const ch = channel<(msg: string) => void, never>()
+  const ch = new Channel<(msg: string) => void, never>()
   return { channel: ch.client }
 }
 
@@ -335,7 +335,7 @@ async function onChannelClientAbortThenSend() {
  * then rejects with ChannelClosedError carrying the timeout message.
  */
 async function onChannelClientPendingAckClose() {
-  const ch = channel<(msg: string) => void, never>()
+  const ch = new Channel<(msg: string) => void, never>()
   ch.listen(() => new Promise(() => {}))
   return { channel: ch.client }
 }
@@ -350,7 +350,7 @@ async function onChannelClientPendingAckClose() {
  *   clientClose_<id>_serverOnCloseErr = 'pending' | 'none' | 'abort:<json>' | error message
  */
 async function onChannelClientPendingAckCloseReconnect() {
-  const ch = channel<(msg: string) => string, never>()
+  const ch = new Channel<(msg: string) => string, never>()
   const id = ch.id
   cleanupState[`clientClose_${id}_serverOnClose`] = 'false'
   cleanupState[`clientClose_${id}_serverOnCloseErr`] = 'pending'
@@ -364,7 +364,7 @@ async function onChannelClientPendingAckCloseReconnect() {
 
 // Global store keyed by channel id — survives across telefunc invocations.
 const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
-function getServerCloseReconnectStore(): Map<string, ReturnType<typeof channel<never, (msg: string) => string>>> {
+function getServerCloseReconnectStore(): Map<string, Channel<never, (msg: string) => string>> {
   return ((globalThis as any)[SERVER_CLOSE_RECONNECT_STORE_KEY] ??= new Map())
 }
 
@@ -379,7 +379,7 @@ function getServerCloseReconnectStore(): Map<string, ReturnType<typeof channel<n
  *   serverClose_<id>_serverOnCloseErr = 'pending' | 'none' | error message
  */
 async function onChannelServerPendingAckCloseReconnectOpen() {
-  const ch = channel<never, (msg: string) => string>()
+  const ch = new Channel<never, (msg: string) => string>()
   const id = ch.id
   cleanupState[`serverClose_${id}_closeResult`] = 'pending'
   cleanupState[`serverClose_${id}_serverOnCloseErr`] = 'pending'
@@ -404,7 +404,7 @@ async function onChannelServerPendingAckCloseReconnectOpen() {
  *   upstream_<id>_hasGap         = 'true' if any value arrived out of order or skipped
  */
 async function onChannelUpstreamReconnect() {
-  const ch = channel<(msg: number) => void, never>()
+  const ch = new Channel<(msg: number) => void, never>()
   const id = ch.id
   cleanupState[`upstream_${id}_receivedCount`] = '0'
   cleanupState[`upstream_${id}_lastSeq`] = '0'
@@ -431,8 +431,8 @@ async function onChannelUpstreamReconnect() {
  * Used to verify ix-level multiplexing over a shared WS connection.
  */
 async function onChannelMulti() {
-  const ch1 = channel<never, (msg: number) => void>()
-  const ch2 = channel<never, (msg: number) => void>()
+  const ch1 = new Channel<never, (msg: number) => void>()
+  const ch2 = new Channel<never, (msg: number) => void>()
 
   let n1 = 0
   const t1 = setInterval(() => ch1.send(++n1), 200)
@@ -450,7 +450,7 @@ async function onChannelMulti() {
  * The client should respond with an error, rejecting the server's send.
  */
 async function onChannelNoListenerAckServer() {
-  const ch = channel<never, (msg: string) => string>()
+  const ch = new Channel<never, (msg: string) => string>()
   const id = ch.id
 
   cleanupState[`noListenerAck_server_${id}_rejected`] = 'false'
@@ -473,7 +473,7 @@ async function onChannelNoListenerAckServer() {
  * The server should respond with an error, rejecting the client's send.
  */
 async function onChannelNoListenerAckClient() {
-  const ch = channel<(msg: string) => string, never>()
+  const ch = new Channel<(msg: string) => string, never>()
   // No ch.listen() — intentionally missing
   return { channel: ch.client }
 }
@@ -482,7 +482,7 @@ async function onChannelNoListenerAckClient() {
  *  - No-ack: valid string arrives, invalid is silently dropped server-side (no client error).
  *  - With-ack: valid returns the length; invalid rejects the client's send with a shield error. */
 async function onChannelShieldClient() {
-  const ch = channel<(msg: string) => number>()
+  const ch = new Channel<(msg: string) => number>()
   const received: string[] = []
   ch.listen((msg) => {
     received.push(msg)
@@ -496,7 +496,7 @@ async function onChannelShieldClient() {
  *  - Client listener returns string → server's send resolves with the string.
  *  - Client listener returns a non-string → server's send rejects with a shield error. */
 async function onChannelShieldServerAck() {
-  const ch = channel<never, (msg: number) => string>({ ack: true })
+  const ch = new Channel<never, (msg: number) => string>({ ack: true })
   let outcome: { ok: boolean; value?: string; error?: string } | null = null
   return {
     channel: ch.client,

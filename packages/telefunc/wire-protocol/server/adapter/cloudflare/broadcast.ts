@@ -1,18 +1,18 @@
 /// <reference types="@cloudflare/workers-types" />
-export { CloudflarePubSubTransport, CloudflarePubSubAuthorityState }
-export type { PubSubDeliverRequest, PubSubPublishRequest, TelefuncPubSubStub }
+export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
+export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncBroadcastStub }
 
 import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../../constants.js'
-import { KNOWN_PUBSUB_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
+import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert, assertUsage } from '../../../../utils/assert.js'
 import { utf8ByteLength } from '../../../../utils/utf8ByteLength.js'
 import type {
-  PubSubBinaryOnMessage,
-  PubSubOnMessage,
-  PubSubPublishResult,
-  PubSubAdapter,
-  PubSubUnsubscribe,
-} from '../../pubsub.js'
+  BroadcastBinaryOnMessage,
+  BroadcastOnMessage,
+  BroadcastPublishResult,
+  BroadcastAdapter,
+  BroadcastUnsubscribe,
+} from '../../broadcast.js'
 import type { WirePublishInfo } from '../../../shared-ws.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
@@ -21,13 +21,13 @@ const PRESENCE_REFRESH_INTERVAL_MS = 30_000
 
 /** Unwrap Cloudflare DO RPC proxy into a plain object.
  *  RPC properties are lazy stubs that must be awaited to resolve their values. */
-async function unwrapRpcResult(rpc: Promise<PubSubPublishResult>): Promise<PubSubPublishResult> {
+async function unwrapRpcResult(rpc: Promise<BroadcastPublishResult>): Promise<BroadcastPublishResult> {
   const r = await rpc
   const [seq, ts, meta] = await Promise.all([r.seq, r.ts, r.meta])
   return { seq, ts, ...(meta ? { meta } : undefined) }
 }
 
-type PubSubPublishRequest = {
+type BroadcastPublishRequest = {
   key: string
   locationBucket: LocationBucket
   forwarded?: boolean
@@ -37,25 +37,25 @@ type PubSubPublishRequest = {
   binaryData?: Uint8Array
 }
 
-type PubSubDeliverRequest = {
+type BroadcastDeliverRequest = {
   key: string
   info: WirePublishInfo
   serialized?: string
   binaryData?: Uint8Array
 }
 
-type TelefuncPubSubStub = DurableObjectStub & {
-  telefuncPubSubPublish(request: PubSubPublishRequest): Promise<PubSubPublishResult>
-  telefuncPubSubDeliver(request: PubSubDeliverRequest): Promise<void>
+type TelefuncBroadcastStub = DurableObjectStub & {
+  telefuncBroadcastPublish(request: BroadcastPublishRequest): Promise<BroadcastPublishResult>
+  telefuncBroadcastDeliver(request: BroadcastDeliverRequest): Promise<void>
 }
 
 type PendingBucketPublish = {
-  resolve: (ack: PubSubPublishResult) => void
+  resolve: (ack: BroadcastPublishResult) => void
   reject: (err: Error) => void
 }
 
 type BufferedPublish = {
-  send: () => Promise<PubSubPublishResult>
+  send: () => Promise<BroadcastPublishResult>
   bytes: number
   pending: PendingBucketPublish
 }
@@ -149,20 +149,20 @@ class MemberBucketState {
   setupInFlight = true
   teardownRequested = false
   refreshTimer: ReturnType<typeof setInterval> | null = null
-  private readonly authority: TelefuncPubSubStub
+  private readonly authority: TelefuncBroadcastStub
   private readonly key: string
   private readonly locationBucket: LocationBucket
 
-  constructor(key: string, locationBucket: LocationBucket, authority: TelefuncPubSubStub) {
+  constructor(key: string, locationBucket: LocationBucket, authority: TelefuncBroadcastStub) {
     this.key = key
     this.locationBucket = locationBucket
     this.authority = authority
     this.pendingPublishes = new CloudflareBucketPublishBuffer(CHANNEL_BUFFER_LIMIT_BYTES)
   }
 
-  publish(serialized: string): Promise<PubSubPublishResult> {
+  publish(serialized: string): Promise<BroadcastPublishResult> {
     return unwrapRpcResult(
-      this.authority.telefuncPubSubPublish({
+      this.authority.telefuncBroadcastPublish({
         key: this.key,
         locationBucket: this.locationBucket,
         serialized,
@@ -170,9 +170,9 @@ class MemberBucketState {
     )
   }
 
-  publishBinary(data: Uint8Array): Promise<PubSubPublishResult> {
+  publishBinary(data: Uint8Array): Promise<BroadcastPublishResult> {
     return unwrapRpcResult(
-      this.authority.telefuncPubSubPublish({
+      this.authority.telefuncBroadcastPublish({
         key: this.key,
         locationBucket: this.locationBucket,
         binaryData: data,
@@ -189,11 +189,11 @@ class MemberBucketState {
 }
 
 // ---------------------------------------------------------------------------
-// CloudflarePubSubAuthorityState — wraps DurableObjectState for seq counters
+// CloudflareBroadcastAuthorityState — wraps DurableObjectState for seq counters
 // and authority bucket persistence. One per DO instance, passed to publishToSubscribers.
 // ---------------------------------------------------------------------------
 
-class CloudflarePubSubAuthorityState {
+class CloudflareBroadcastAuthorityState {
   private readonly state: DurableObjectState
   private authorityPublishChain: Promise<void> = Promise.resolve()
   private readonly keySeqCache = new Map<string, number>()
@@ -205,10 +205,10 @@ class CloudflarePubSubAuthorityState {
 
   async getNextKeySeq(key: string): Promise<number> {
     const cachedSeq = this.keySeqCache.get(key)
-    const currentSeq = cachedSeq ?? (await this.state.storage.get<number>(`pubsub:${key}:sequence`)) ?? 0
+    const currentSeq = cachedSeq ?? (await this.state.storage.get<number>(`broadcast:${key}:sequence`)) ?? 0
     const nextSeq = currentSeq + 1
     this.keySeqCache.set(key, nextSeq)
-    await this.state.storage.put(`pubsub:${key}:sequence`, nextSeq)
+    await this.state.storage.put(`broadcast:${key}:sequence`, nextSeq)
     return nextSeq
   }
 
@@ -230,7 +230,7 @@ class CloudflarePubSubAuthorityState {
     const cachedBucket = this.authorityBucketCache.get(key)
     if (cachedBucket) return cachedBucket
 
-    const storageKey = `pubsub:${key}:authority-bucket`
+    const storageKey = `broadcast:${key}:authority-bucket`
     const authorityBucket = (await this.state.storage.get<LocationBucket>(storageKey)) ?? preferredBucket
 
     this.authorityBucketCache.set(key, authorityBucket)
@@ -240,9 +240,9 @@ class CloudflarePubSubAuthorityState {
 }
 
 // ---------------------------------------------------------------------------
-// CloudflarePubSubTransport — per-isolate pub/sub transport.
+// CloudflareBroadcastTransport — per-isolate pub/sub transport.
 //
-// A single CloudflarePubSubTransport instance exists per worker isolate.
+// A single CloudflareBroadcastTransport instance exists per worker isolate.
 // Multiple Durable Object instances in the same isolate share this transport.
 //
 // State stored here:
@@ -251,7 +251,7 @@ class CloudflarePubSubAuthorityState {
 //   - representativeDOName: the first shard DO name, used for RPC delivery
 // ---------------------------------------------------------------------------
 
-class CloudflarePubSubTransport implements PubSubAdapter {
+class CloudflareBroadcastTransport implements BroadcastAdapter {
   private readonly baseInstanceName: string
   private readonly scale: CloudflareScale | undefined
   private bindingName: string | null = null
@@ -260,8 +260,8 @@ class CloudflarePubSubTransport implements PubSubAdapter {
   private locationBucket: LocationBucket | null = null
   private representativeDOName: string | null = null
   private readonly memberStates = new Map<string, MemberBucketState>()
-  private readonly textSubs = new Map<string, Set<PubSubOnMessage>>()
-  private readonly binarySubs = new Map<string, Set<PubSubBinaryOnMessage>>()
+  private readonly textSubs = new Map<string, Set<BroadcastOnMessage>>()
+  private readonly binarySubs = new Map<string, Set<BroadcastBinaryOnMessage>>()
 
   constructor({ baseInstanceName, scale }: { baseInstanceName: string; scale?: CloudflareScale }) {
     this.baseInstanceName = baseInstanceName
@@ -279,7 +279,7 @@ class CloudflarePubSubTransport implements PubSubAdapter {
 
   attachIsolateInfo(doName: string, locationBucket: LocationBucket): void {
     assert(
-      KNOWN_PUBSUB_BUCKETS.has(locationBucket),
+      KNOWN_BROADCAST_BUCKETS.has(locationBucket),
       `attachIsolateInfo received invalid locationBucket "${locationBucket}".`,
     )
     if (!this.locationBucket) {
@@ -360,7 +360,7 @@ class CloudflarePubSubTransport implements PubSubAdapter {
     return binary !== undefined && binary.size > 0
   }
 
-  private deliverLocal({ key, serialized, binaryData, info }: PubSubDeliverRequest): void {
+  private deliverLocal({ key, serialized, binaryData, info }: BroadcastDeliverRequest): void {
     if (serialized !== undefined) {
       const subs = this.textSubs.get(key)
       if (subs) for (const cb of subs) cb(serialized, info)
@@ -371,9 +371,9 @@ class CloudflarePubSubTransport implements PubSubAdapter {
     }
   }
 
-  // --- PubSubAdapter interface ---
+  // --- BroadcastAdapter interface ---
 
-  subscribe(key: string, onMessage: PubSubOnMessage): PubSubUnsubscribe {
+  subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe {
     const locationBucket = this.requireLocationBucket()
     let subs = this.textSubs.get(key)
     if (!subs) {
@@ -392,7 +392,7 @@ class CloudflarePubSubTransport implements PubSubAdapter {
     }
   }
 
-  subscribeBinary(key: string, onMessage: PubSubBinaryOnMessage): PubSubUnsubscribe {
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
     const locationBucket = this.requireLocationBucket()
     let subs = this.binarySubs.get(key)
     if (!subs) {
@@ -411,12 +411,12 @@ class CloudflarePubSubTransport implements PubSubAdapter {
     }
   }
 
-  publish(key: string, serialized: string): Promise<PubSubPublishResult> {
+  publish(key: string, serialized: string): Promise<BroadcastPublishResult> {
     const memberState = this.memberStates.get(key)
 
     if (memberState) {
       if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
-        return new Promise<PubSubPublishResult>((resolve, reject) => {
+        return new Promise<BroadcastPublishResult>((resolve, reject) => {
           memberState.pendingPublishes.push({
             send: () => memberState.publish(serialized),
             bytes: utf8ByteLength(serialized),
@@ -429,15 +429,15 @@ class CloudflarePubSubTransport implements PubSubAdapter {
 
     const locationBucket = this.requireLocationBucket()
     const authority = this.getAuthorityStub(key, locationBucket)
-    return unwrapRpcResult(authority.telefuncPubSubPublish({ key, locationBucket, serialized }))
+    return unwrapRpcResult(authority.telefuncBroadcastPublish({ key, locationBucket, serialized }))
   }
 
-  publishBinary(key: string, data: Uint8Array): Promise<PubSubPublishResult> {
+  publishBinary(key: string, data: Uint8Array): Promise<BroadcastPublishResult> {
     const memberState = this.memberStates.get(key)
 
     if (memberState) {
       if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
-        return new Promise<PubSubPublishResult>((resolve, reject) => {
+        return new Promise<BroadcastPublishResult>((resolve, reject) => {
           memberState.pendingPublishes.push({
             send: () => memberState.publishBinary(data),
             bytes: data.byteLength,
@@ -450,7 +450,7 @@ class CloudflarePubSubTransport implements PubSubAdapter {
 
     const locationBucket = this.requireLocationBucket()
     const authority = this.getAuthorityStub(key, locationBucket)
-    return unwrapRpcResult(authority.telefuncPubSubPublish({ key, locationBucket, binaryData: data }))
+    return unwrapRpcResult(authority.telefuncBroadcastPublish({ key, locationBucket, binaryData: data }))
   }
 
   /**
@@ -460,9 +460,9 @@ class CloudflarePubSubTransport implements PubSubAdapter {
    * Forwarded: delivers to listed DO names without reading KV again.
    */
   async publishToSubscribers(
-    authorityState: CloudflarePubSubAuthorityState,
-    request: PubSubPublishRequest,
-  ): Promise<PubSubPublishResult> {
+    authorityState: CloudflareBroadcastAuthorityState,
+    request: BroadcastPublishRequest,
+  ): Promise<BroadcastPublishResult> {
     const { key, locationBucket, serialized, binaryData, forwarded = false } = request
 
     if (forwarded) {
@@ -470,7 +470,9 @@ class CloudflarePubSubTransport implements PubSubAdapter {
       const info = request.info
       const doNames = request.doNames ?? []
       await Promise.all(
-        doNames.map((doName) => this.getBoundStub(doName).telefuncPubSubDeliver({ key, serialized, binaryData, info })),
+        doNames.map((doName) =>
+          this.getBoundStub(doName).telefuncBroadcastDeliver({ key, serialized, binaryData, info }),
+        ),
       )
       return { seq: info.seq, ts: info.ts }
     }
@@ -486,7 +488,7 @@ class CloudflarePubSubTransport implements PubSubAdapter {
     const activeBuckets = Array.from(presenceByBucket.keys())
     await Promise.all(
       activeBuckets.map((activeBucket) =>
-        this.getBucketCoordinatorStub(key, activeBucket).telefuncPubSubPublish({
+        this.getBucketCoordinatorStub(key, activeBucket).telefuncBroadcastPublish({
           key,
           serialized,
           binaryData,
@@ -503,7 +505,7 @@ class CloudflarePubSubTransport implements PubSubAdapter {
   /**
    * Delivers a publish to local subscribers. Called via RPC on the representative DO for this isolate.
    */
-  deliverToLocal(request: PubSubDeliverRequest): void {
+  deliverToLocal(request: BroadcastDeliverRequest): void {
     this.deliverLocal(request)
   }
 
@@ -551,21 +553,24 @@ class CloudflarePubSubTransport implements PubSubAdapter {
     }
   }
 
-  private getBucketCoordinatorStub(key: string, locationBucket: LocationBucket): TelefuncPubSubStub {
+  private getBucketCoordinatorStub(key: string, locationBucket: LocationBucket): TelefuncBroadcastStub {
     const bucketShardCount = getBucketCoordinatorShardIndices(this.scale, locationBucket).length
     const bucketShardOrdinal = getDeterministicKeyBucketIndex(key, bucketShardCount)
-    return this.getBoundStub(`${this.baseInstanceName}:pubsub:${locationBucket}:${bucketShardOrdinal}`, locationBucket)
+    return this.getBoundStub(
+      `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`,
+      locationBucket,
+    )
   }
 
-  private getAuthorityStub(key: string, locationHint?: DurableObjectLocationHint): TelefuncPubSubStub {
-    return this.getBoundStub(`${this.baseInstanceName}:pubsub:authority:${key}`, locationHint)
+  private getAuthorityStub(key: string, locationHint?: DurableObjectLocationHint): TelefuncBroadcastStub {
+    return this.getBoundStub(`${this.baseInstanceName}:broadcast:authority:${key}`, locationHint)
   }
 
-  private getBoundStub(instanceName: string, locationHint?: DurableObjectLocationHint): TelefuncPubSubStub {
+  private getBoundStub(instanceName: string, locationHint?: DurableObjectLocationHint): TelefuncBroadcastStub {
     assert(this.binding, `Missing Cloudflare Durable Object binding "${this.bindingName ?? 'unknown'}".`)
     return this.binding.get(
       this.binding.idFromName(instanceName),
       locationHint ? { locationHint } : undefined,
-    ) as TelefuncPubSubStub
+    ) as TelefuncBroadcastStub
   }
 }

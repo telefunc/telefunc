@@ -87,8 +87,8 @@ const TAG = {
   ERROR: 0x33 as const,
   /** Flow-control window update: peer has consumed N bytes, may send N more. */
   WINDOW: 0x34 as const,
-  PUBSUB_SUB: 0x35 as const,
-  PUBSUB_UNSUB: 0x36 as const,
+  BROADCAST_SUB: 0x35 as const,
+  BROADCAST_UNSUB: 0x36 as const,
 }
 
 function isConnCtrlTag(tag: number): boolean {
@@ -171,8 +171,8 @@ type ChannelCtrlFrame =
   | { tag: typeof TAG.ABORT; index: number; abortValue: string }
   | { tag: typeof TAG.ERROR; index: number }
   | { tag: typeof TAG.WINDOW; index: number; bytes: number }
-  | { tag: typeof TAG.PUBSUB_SUB; index: number; binary: boolean }
-  | { tag: typeof TAG.PUBSUB_UNSUB; index: number; binary: boolean }
+  | { tag: typeof TAG.BROADCAST_SUB; index: number; binary: boolean }
+  | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
 
 /** Frames that carry an `index` (channel ix) — both data and per-channel ctrl. */
 type ChannelFrame = ChannelDataFrame | ChannelCtrlFrame
@@ -303,15 +303,15 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     return frame
   },
-  pubsubSub(index: number, binary: boolean): Uint8Array<ArrayBuffer> {
+  broadcastSub(index: number, binary: boolean): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
-    writeHeader(frame, TAG.PUBSUB_SUB, index, 0)
+    writeHeader(frame, TAG.BROADCAST_SUB, index, 0)
     frame[HEADER] = binary ? 1 : 0
     return frame
   },
-  pubsubUnsub(index: number, binary: boolean): Uint8Array<ArrayBuffer> {
+  broadcastUnsub(index: number, binary: boolean): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
-    writeHeader(frame, TAG.PUBSUB_UNSUB, index, 0)
+    writeHeader(frame, TAG.BROADCAST_UNSUB, index, 0)
     frame[HEADER] = binary ? 1 : 0
     return frame
   },
@@ -384,12 +384,12 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.WINDOW:
       assert(payload.length >= 4, 'WINDOW payload too short')
       return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0) }
-    case TAG.PUBSUB_SUB:
-      assert(payload.length >= 1, 'PUBSUB_SUB payload too short')
-      return { tag: TAG.PUBSUB_SUB, index, binary: payload[0] === 1 }
-    case TAG.PUBSUB_UNSUB:
-      assert(payload.length >= 1, 'PUBSUB_UNSUB payload too short')
-      return { tag: TAG.PUBSUB_UNSUB, index, binary: payload[0] === 1 }
+    case TAG.BROADCAST_SUB:
+      assert(payload.length >= 1, 'BROADCAST_SUB payload too short')
+      return { tag: TAG.BROADCAST_SUB, index, binary: payload[0] === 1 }
+    case TAG.BROADCAST_UNSUB:
+      assert(payload.length >= 1, 'BROADCAST_UNSUB payload too short')
+      return { tag: TAG.BROADCAST_UNSUB, index, binary: payload[0] === 1 }
 
     default:
       assert(false, `Unknown wire frame tag ${tag}`)

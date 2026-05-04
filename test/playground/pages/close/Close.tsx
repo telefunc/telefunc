@@ -159,13 +159,13 @@ function Close() {
       <button
         id="test-close-stream-channel-close-now"
         onClick={async () => {
-          const ch = pendingChannelRef.current
-          if (!ch) return
+          const channel = pendingChannelRef.current
+          if (!channel) return
           pendingChannelRef.current = null
           const channelClosed = new Promise<void>((resolve) => {
-            ch.onClose(() => resolve())
+            channel.onClose(() => resolve())
           })
-          ch.close()
+          channel.close()
           await channelClosed
           setResult(JSON.stringify({ method: 'close(stream-channel-onclose)', phase: 'all-done' }))
         }}

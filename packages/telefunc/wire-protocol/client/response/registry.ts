@@ -4,7 +4,7 @@ import type { Reviver } from '@brillout/json-serializer/parse'
 import { asyncGeneratorReviver } from './async-generator.js'
 import { readableStreamReviver } from './readable-stream.js'
 import { promiseReviver } from './promise.js'
-import { pubsubReviver } from './pubsub.js'
+import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
 import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
@@ -16,7 +16,7 @@ const clientTypes = [
   asyncGeneratorReviver,
   readableStreamReviver,
   promiseReviver,
-  pubsubReviver,
+  broadcastReviver,
   channelReviver,
   functionReviver,
 ]

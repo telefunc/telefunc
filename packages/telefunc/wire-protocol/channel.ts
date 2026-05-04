@@ -3,6 +3,7 @@ export type {
   ChannelBase,
   Channel,
   ClientChannel,
+  Broadcast,
   ChannelCloseCallback,
   ChannelCloseOptions,
   ChannelCloseResult,
@@ -14,9 +15,8 @@ export type {
   ChannelListenReturn,
   ChannelListener,
   ChannelBinaryListener,
-  PubSub,
-  PubSubListener,
-  PubSubBinaryListener,
+  BroadcastListener,
+  BroadcastBinaryListener,
 }
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
@@ -41,10 +41,10 @@ type ChannelListenReturn<T> = [T] extends [never]
     : unknown | Promise<unknown> | void
 type ChannelListener<T> = (data: ChannelData<T>) => ChannelListenReturn<T>
 type ChannelBinaryListener = (data: Uint8Array) => unknown | Promise<unknown>
-/** Callback for `pubsub.subscribe()` — receives message data and publish info. */
-type PubSubListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => ChannelListenReturn<T>
-/** Callback for `pubsub.subscribeBinary()` — receives raw binary data and publish info. */
-type PubSubBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
+/** Callback for `Broadcast.subscribe()` — receives message data and publish info. */
+type BroadcastListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => ChannelListenReturn<T>
+/** Callback for `Broadcast.subscribeBinary()` — receives raw binary data and publish info. */
+type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
 type ChannelCloseOptions = {
   timeout?: number
 }
@@ -104,14 +104,19 @@ type ClientChannel<ClientToServer = unknown, ServerToClient = unknown, TDefault 
 >
 
 /** Pub/sub instance — publish and subscribe to a keyed topic. Returnable from telefunctions. */
-type PubSub<T = unknown> = {
+type Broadcast<T = unknown> = {
+  /** Shield contract for incoming client→server publishes; ack is unused (publish receipts are server-generated). */
+  readonly __DEFINE_TELEFUNC_SHIELDS: {
+    data: ChannelData<T>
+    ack: unknown
+  }
   readonly id: string
   readonly key: string
   readonly isClosed: boolean
   publish(data: ChannelData<T>): Promise<ChannelPublishAck>
-  subscribe(callback: PubSubListener<T>): () => void
+  subscribe(callback: BroadcastListener<T>): () => void
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
-  subscribeBinary(callback: PubSubBinaryListener): () => void
+  subscribeBinary(callback: BroadcastBinaryListener): () => void
   onClose(callback: ChannelCloseCallback): void
   onOpen(callback: () => void): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>

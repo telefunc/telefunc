@@ -5,7 +5,7 @@ import { textDecoder } from './frame.js'
 import { CHANNEL_PUMP_TAG_ERROR } from './constants.js'
 import { isObject } from '../utils/isObject.js'
 import { assert } from '../utils/assert.js'
-import type { Channel } from './channel.js'
+import type { Channel } from './server/channel.js'
 import type { AbortError } from '../shared/Abort.js'
 
 type ChunkReaderChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 'abort'>

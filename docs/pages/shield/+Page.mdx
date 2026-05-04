@@ -185,24 +185,45 @@ export async function getUser(id: string) {
 
 ### Channels
 
-[`channel<ClientToServer, ServerToClient>()`](/channel) declares two typed directions, each a function signature `(msg) => ack`. Telefunc generates two sub-shields that fire on the server:
+[`new Channel<ClientToServer, ServerToClient>()`](/channel) declares two typed directions, each a function signature `(msg) => ack`. Telefunc generates two sub-shields that fire on the server:
 
 - **`data`** — validates messages arriving from the client (input to `listen()`).
 - **`ack`** — validates the ack returned by the client's `listen()` to a server-initiated `send(..., { ack: true })`.
 
 ```ts
-const ch = channel<
+const events = new Channel<
   (msg: { text: string }) => { received: true },  // client → server
   (msg: { tick: number }) => void                  // server → client
 >()
 
-ch.listen((msg) => {
+events.listen((msg) => {
   // `msg.text` is shield-checked before this runs; non-matching messages are dropped.
   return { received: true }
 })
 
 // ack from the client's listen is shield-checked against `void` (= undefined).
-await ch.send({ tick: 1 }, { ack: true })
+await events.send({ tick: 1 }, { ack: true })
 ```
 
 > A direction typed `never` rejects any value at runtime — it means "no traffic expected on this direction." If you send traffic on a `never` direction anyway, the corresponding `data` or `ack` shield will fail. Make sure the direction you actually use at runtime isn't `never`.
+
+
+### Broadcast
+
+[`new Broadcast<T>({ key })`](/channel#new-broadcast) declares the message type `T` flowing through a keyed pub/sub topic. Telefunc generates a `data` sub-shield that fires on the server when a client calls `publish()` on a `Broadcast` returned from a telefunction:
+
+```ts
+const room = new Broadcast<{ user: string; text: string }>({ key: `chat:${roomId}` })
+return room
+```
+
+```ts
+// Client side
+const chat = await onJoinChat(roomId)
+await chat.publish({ user: 'Alice', text: 'Hello!' })
+// Server validates `{ user: string; text: string }` against the declared `T` before
+// fanning out to subscribers. A failing shield rejects this `publish()` promise with
+// `ShieldValidationError` and the message is not delivered.
+```
+
+Server-side `publish()` calls (from inside a telefunction or via the static `Broadcast.publish(key, data)`) are not shield-validated — the server is the trust boundary, so values originating there flow through as-is.

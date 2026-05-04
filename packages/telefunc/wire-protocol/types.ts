@@ -23,13 +23,13 @@ export type {
   FileMetadata,
   BlobMetadata,
   ChannelContract,
-  PubSubContract,
+  BroadcastContract,
   FunctionContract,
 }
 
 import type { ServerChannel } from './server/channel.js'
-import type { ServerPubSub } from './server/server-pubsub.js'
-import type { ClientChannel, ClientPubSub } from './client/channel.js'
+import type { ServerBroadcast } from './server/server-broadcast.js'
+import type { ClientChannel, ClientBroadcast } from './client/channel.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
 
@@ -96,7 +96,7 @@ type ChunkReader = {
 /** Context for all client-side response revivers (streaming + placeholder). */
 type ClientReviverContext = {
   createChannel<TOut = unknown, TIn = unknown>(opts: { channelId: string; ack?: boolean }): ClientChannel<TOut, TIn>
-  createPubSub<T = unknown>(opts: { channelId: string; key: string }): ClientPubSub<T>
+  createBroadcast<T = unknown>(opts: { channelId: string; key: string }): ClientBroadcast<T>
   receiveStreamReader(metadata: StreamingMetadata): ChunkReader
   receiveStream(metadata: StreamingMetadata): {
     stream: ReadableStream<Uint8Array<ArrayBuffer>>
@@ -174,7 +174,7 @@ type BlobRequestContract = TypeContract<Blob, Blob, BlobMetadata>
 
 type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
 
-type PubSubContract = TypeContract<ServerPubSub, ClientPubSub, { channelId: string; key: string }>
+type BroadcastContract = TypeContract<ServerBroadcast, ClientBroadcast, { channelId: string; key: string }>
 
 type FunctionContract = TypeContract<
   (...args: readonly unknown[]) => unknown,

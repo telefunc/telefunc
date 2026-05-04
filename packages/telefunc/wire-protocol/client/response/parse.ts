@@ -13,7 +13,7 @@ import { makeAbortError, throwAbortError, throwBugError } from '../../../client/
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
-import { ClientChannel, ClientPubSub } from '../channel.js'
+import { ClientChannel, ClientBroadcast } from '../channel.js'
 import { wrapProxy } from '../../wrapProxy.js'
 import { GcRegistry } from '../../gcRegistry.js'
 import { ChannelChunkReader } from '../../ChannelChunkReader.js'
@@ -95,8 +95,8 @@ function reviveResponse(
     createChannel(opts) {
       return new ClientChannel({ channelId: opts.channelId, ack: opts.ack, transports, sessionToken })
     },
-    createPubSub(opts) {
-      return new ClientPubSub({ channelId: opts.channelId, key: opts.key, transports, sessionToken })
+    createBroadcast(opts) {
+      return new ClientBroadcast({ channelId: opts.channelId, key: opts.key, transports, sessionToken })
     },
     receiveStreamReader(metadata) {
       if ('channelId' in metadata) {

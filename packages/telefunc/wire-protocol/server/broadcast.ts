@@ -1,11 +1,11 @@
-export { getPubSubAdapter, installPubSubAdapter, _resetPubSubAdapterForTesting, DefaultPubSubAdapter }
+export { getBroadcastAdapter, installBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter }
 export type {
-  PubSubAdapter,
-  PubSubTransport,
-  PubSubUnsubscribe,
-  PubSubPublishResult,
-  PubSubOnMessage,
-  PubSubBinaryOnMessage,
+  BroadcastAdapter,
+  BroadcastTransport,
+  BroadcastUnsubscribe,
+  BroadcastPublishResult,
+  BroadcastOnMessage,
+  BroadcastBinaryOnMessage,
 }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -13,29 +13,29 @@ import { isPromise } from '../../utils/isPromise.js'
 import type { WirePublishInfo } from '../shared-ws.js'
 
 /** Transport-level publish result. */
-type PubSubPublishResult = WirePublishInfo & { meta?: Record<string, unknown> }
+type BroadcastPublishResult = WirePublishInfo & { meta?: Record<string, unknown> }
 
 /** Callback for delivering a pub/sub message to a subscriber. */
-type PubSubOnMessage = (serialized: string, info: WirePublishInfo) => void
+type BroadcastOnMessage = (serialized: string, info: WirePublishInfo) => void
 
-type PubSubBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => void
+type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => void
 
-type PubSubUnsubscribe = () => void
+type BroadcastUnsubscribe = () => void
 
-type PubSubAdapter = {
-  subscribe(key: string, onMessage: PubSubOnMessage): PubSubUnsubscribe
-  publish(key: string, serialized: string): PubSubPublishResult | Promise<PubSubPublishResult>
-  subscribeBinary(key: string, onMessage: PubSubBinaryOnMessage): PubSubUnsubscribe
-  publishBinary(key: string, data: Uint8Array): PubSubPublishResult | Promise<PubSubPublishResult>
+type BroadcastAdapter = {
+  subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe
+  publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult>
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe
+  publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
 }
 
 /**
  * Minimal interface for a pub/sub transport backend.
  *
- * Implement these 4 methods to get a full PubSubAdapter via `new DefaultPubSubAdapter(transport)`.
+ * Implement these 4 methods to get a full BroadcastAdapter via `new DefaultBroadcastAdapter(transport)`.
  * Subscriber multiplexing and lifecycle are handled for you.
  */
-type PubSubTransport = {
+type BroadcastTransport = {
   /** Send a text message. Must return the assigned seq and ts. */
   send(key: string, payload: string): { seq: number; ts: number } | Promise<{ seq: number; ts: number }>
   /** Listen for text messages on a key. Called at most once per key. Return an unsubscribe function. */
@@ -50,20 +50,20 @@ type PubSubTransport = {
 // Default adapter — subscriber multiplexer + in-memory fallback
 // ---------------------------------------------------------------------------
 
-class DefaultPubSubAdapter implements PubSubAdapter {
-  private readonly transport: PubSubTransport | null
-  private readonly subscriptions = new Map<string, Set<PubSubOnMessage>>()
-  private readonly binarySubscriptions = new Map<string, Set<PubSubBinaryOnMessage>>()
+class DefaultBroadcastAdapter implements BroadcastAdapter {
+  private readonly transport: BroadcastTransport | null
+  private readonly subscriptions = new Map<string, Set<BroadcastOnMessage>>()
+  private readonly binarySubscriptions = new Map<string, Set<BroadcastBinaryOnMessage>>()
   private readonly transportUnsubs = new Map<string, () => void>()
   private readonly transportBinaryUnsubs = new Map<string, () => void>()
   /** Per-key seq counter for in-memory mode. */
   private readonly keySeqs = new Map<string, number>()
 
-  constructor(transport?: PubSubTransport) {
+  constructor(transport?: BroadcastTransport) {
     this.transport = transport ?? null
   }
 
-  subscribe(key: string, onMessage: PubSubOnMessage): PubSubUnsubscribe {
+  subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe {
     let subs = this.subscriptions.get(key)
     if (!subs) {
       subs = new Set()
@@ -91,7 +91,7 @@ class DefaultPubSubAdapter implements PubSubAdapter {
     }
   }
 
-  publish(key: string, serialized: string): PubSubPublishResult | Promise<PubSubPublishResult> {
+  publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult> {
     if (this.transport) {
       const result = this.transport.send(key, serialized)
       if (isPromise(result)) return result
@@ -100,7 +100,7 @@ class DefaultPubSubAdapter implements PubSubAdapter {
     return this._publishInMemory(this.subscriptions, key, serialized)
   }
 
-  subscribeBinary(key: string, onMessage: PubSubBinaryOnMessage): PubSubUnsubscribe {
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
     let subs = this.binarySubscriptions.get(key)
     if (!subs) {
       subs = new Set()
@@ -128,7 +128,7 @@ class DefaultPubSubAdapter implements PubSubAdapter {
     }
   }
 
-  publishBinary(key: string, data: Uint8Array): PubSubPublishResult | Promise<PubSubPublishResult> {
+  publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
     if (this.transport) {
       const result = this.transport.sendBinary(key, data)
       if (isPromise(result)) return result
@@ -143,7 +143,7 @@ class DefaultPubSubAdapter implements PubSubAdapter {
     subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
     key: string,
     data: T,
-  ): PubSubPublishResult {
+  ): BroadcastPublishResult {
     const seq = (this.keySeqs.get(key) ?? 0) + 1
     this.keySeqs.set(key, seq)
     const ts = Date.now()
@@ -185,28 +185,28 @@ class DefaultPubSubAdapter implements PubSubAdapter {
 // ---------------------------------------------------------------------------
 
 const globalObject = getGlobalObject<{
-  adapter: PubSubAdapter
+  adapter: BroadcastAdapter
   installed: boolean
-}>('wire-protocol/server/pubsub.ts', () => ({
-  adapter: new DefaultPubSubAdapter(),
+}>('wire-protocol/server/broadcast.ts', () => ({
+  adapter: new DefaultBroadcastAdapter(),
   installed: false,
 }))
 
-function getPubSubAdapter(): PubSubAdapter {
+function getBroadcastAdapter(): BroadcastAdapter {
   return globalObject.adapter
 }
 
 /** First-time install only. Idempotent: subsequent calls are silent no-ops so a
  *  Vite HMR reload of the user's entry file doesn't leak a fresh transport's
  *  subscriber connection on every cycle. */
-function installPubSubAdapter(adapter: PubSubAdapter): void {
+function installBroadcastAdapter(adapter: BroadcastAdapter): void {
   if (globalObject.installed) return
   globalObject.adapter = adapter
   globalObject.installed = true
 }
 
 /** @internal — test-only escape hatch. */
-function _resetPubSubAdapterForTesting(adapter: PubSubAdapter): void {
+function _resetBroadcastAdapterForTesting(adapter: BroadcastAdapter): void {
   globalObject.adapter = adapter
   globalObject.installed = true
 }

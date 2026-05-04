@@ -1,10 +1,10 @@
 export { installRedis, RedisTransport }
-export type { InstallRedisOptions, RedisPubSubOptions }
+export type { InstallRedisOptions, RedisBroadcastOptions }
 export { RedisChannelSubstrate } from './substrate.js'
 export type { RedisChannelSubstrateOptions } from './substrate.js'
 
 import type { Cluster, Redis } from 'ioredis'
-import { config, type PubSubTransport } from 'telefunc'
+import { config, type BroadcastTransport } from 'telefunc'
 import { assert } from './assert.js'
 import { callDefinedCommand } from './callDefinedCommand.js'
 import { RedisChannelSubstrate } from './substrate.js'
@@ -14,7 +14,7 @@ import { RedisChannelSubstrate } from './substrate.js'
  *  Pass an existing `ioredis` Redis or Cluster client. Both adapter
  *  and substrate `duplicate()` internally for their subscriber/blocking sockets. */
 function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
-  config.pubsub.transport = new RedisTransport({ redis, prefix: options.prefix })
+  config.broadcast.transport = new RedisTransport({ redis, prefix: options.prefix })
   config.channel.substrate = new RedisChannelSubstrate({
     redis,
     prefix: options.prefix,
@@ -35,7 +35,7 @@ type InstallRedisOptions = {
   inboxMaxLen?: number
 }
 
-type RedisPubSubOptions = {
+type RedisBroadcastOptions = {
   /** ioredis client (Redis or Cluster). `duplicate()`-d for the subscriber connection. */
   redis: Redis | Cluster
   /** Default: `tf:`. */
@@ -50,7 +50,7 @@ const DEFAULT_PREFIX = 'tf:'
 const HEADER_BYTES = 12
 const U32_RANGE = 0x1_0000_0000
 
-/** KEYS[1]=seq counter, KEYS[2]=pubsub channel, ARGV[1]=payload bytes; returns [seq,ts]. */
+/** KEYS[1]=seq counter, KEYS[2]=broadcast channel, ARGV[1]=payload bytes; returns [seq,ts]. */
 const PUBLISH_LUA = `
 local seq = redis.call('INCR', KEYS[1])
 local t = redis.call('TIME')
@@ -64,14 +64,14 @@ return {seq, ts}
 
 const PUBLISH_CMD = 'tfPublish'
 
-class RedisTransport implements PubSubTransport {
+class RedisTransport implements BroadcastTransport {
   private readonly publisher: Redis | Cluster
   private readonly subscriber: Redis | Cluster
   private readonly prefix: string
   private readonly textCallbacks = new Map<string, TextOnMessage>()
   private readonly binaryCallbacks = new Map<string, BinaryOnMessage>()
 
-  constructor(options: RedisPubSubOptions) {
+  constructor(options: RedisBroadcastOptions) {
     this.publisher = options.redis
     this.subscriber = options.redis.duplicate()
     this.prefix = options.prefix ?? DEFAULT_PREFIX
@@ -146,7 +146,7 @@ class RedisTransport implements PubSubTransport {
 
   // ── Key naming (private) ──────────────────────────────────────────────
   //
-  // `{<key>}` braces force seq counter and pubsub channel onto the same Redis
+  // `{<key>}` braces force seq counter and broadcast channel onto the same Redis
   // Cluster hash slot, so the publish Lua script can touch both keys atomically.
 
   private seqKey(key: string): string {

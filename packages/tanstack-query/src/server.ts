@@ -1,10 +1,10 @@
 export { invalidate }
 
-import { channel, pubsub, config } from 'telefunc'
+import { Channel, Broadcast, config } from 'telefunc'
 import type { TelefuncServerExtension } from 'telefunc'
 import { partialMatchKey } from '@tanstack/query-core'
 import {
-  __TQ__PUBSUB_KEY_PREFIX,
+  __TQ__BROADCAST_KEY_PREFIX,
   __TQ__DATA_KEY,
   __TQ__CHANNEL_KEY,
   type TanstackQueryExtensionData,
@@ -12,7 +12,7 @@ import {
 } from './shared.js'
 
 function topLevelKey(queryKey: readonly unknown[]): string {
-  return __TQ__PUBSUB_KEY_PREFIX + String(queryKey[0] ?? '')
+  return __TQ__BROADCAST_KEY_PREFIX + String(queryKey[0] ?? '')
 }
 
 // --- Extension ---
@@ -31,17 +31,17 @@ const extension = {
       }
 
       const { queryKey } = data
-      const ch = channel<never, 'invalidate'>()
+      const invalidations = new Channel<never, 'invalidate'>()
 
-      const unsub = pubsub.subscribe<readonly unknown[]>(topLevelKey(queryKey), (invalidatedKey) => {
+      const unsub = Broadcast.subscribe<readonly unknown[]>(topLevelKey(queryKey), (invalidatedKey) => {
         if (partialMatchKey(queryKey, invalidatedKey)) {
-          ch.send('invalidate')
+          invalidations.send('invalidate')
         }
       })
 
-      ch.onClose(() => unsub())
+      invalidations.onClose(() => unsub())
 
-      return { [__TQ__DATA_KEY]: ctx.result, [__TQ__CHANNEL_KEY]: ch.client } satisfies TanstackQueryResult
+      return { [__TQ__DATA_KEY]: ctx.result, [__TQ__CHANNEL_KEY]: invalidations.client } satisfies TanstackQueryResult
     },
   },
 } satisfies TelefuncServerExtension
@@ -50,5 +50,5 @@ config.extensions.push(extension)
 // --- Publishing ---
 
 function invalidate(queryKey: readonly unknown[]) {
-  pubsub.publish(topLevelKey(queryKey), queryKey)
+  Broadcast.publish(topLevelKey(queryKey), queryKey)
 }

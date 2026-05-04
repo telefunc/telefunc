@@ -1,7 +1,14 @@
 export { configUser as config }
 export { getServerConfig }
 export { enableChannelTransports }
-export type { ConfigUser, ConfigResolved, StreamConfigUser, ChannelConfigUser, ChannelConfigResolved, PubSubConfigUser }
+export type {
+  ConfigUser,
+  ConfigResolved,
+  StreamConfigUser,
+  ChannelConfigUser,
+  ChannelConfigResolved,
+  BroadcastConfigUser,
+}
 
 import { assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -18,7 +25,11 @@ import type {
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute } from '../../utils/path.js'
-import { installPubSubAdapter, DefaultPubSubAdapter, type PubSubTransport } from '../../wire-protocol/server/pubsub.js'
+import {
+  installBroadcastAdapter,
+  DefaultBroadcastAdapter,
+  type BroadcastTransport,
+} from '../../wire-protocol/server/broadcast.js'
 import { installChannelSubstrate, type ChannelSubstrate } from '../../wire-protocol/server/substrate.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
@@ -50,9 +61,9 @@ type StreamConfigUser = {
   transport?: StreamTransport
 }
 
-type PubSubConfigUser = {
+type BroadcastConfigUser = {
   /** Transport for cross-node pub/sub delivery. */
-  transport?: PubSubTransport
+  transport?: BroadcastTransport
 }
 
 type ChannelConfigUser = {
@@ -197,7 +208,7 @@ type ConfigUser = {
   /** Enabled transports and runtime settings for Telefunc channels. */
   channel: ChannelConfigUser
   /** Pub/sub configuration. */
-  pubsub: PubSubConfigUser
+  broadcast: BroadcastConfigUser
   /** Registered server extensions. Use `config.extensions.push(ext)` to add. */
   extensions: TelefuncServerExtension[]
 }
@@ -224,7 +235,7 @@ type ConfigResolved = {
 const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
   stream: {},
   channel: {},
-  pubsub: {},
+  broadcast: {},
   extensions: [],
 })
 
@@ -279,14 +290,14 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         },
       })
     }
-    if (prop === 'pubsub') {
-      return new Proxy({} as ConfigUser['pubsub'], {
+    if (prop === 'broadcast') {
+      return new Proxy({} as ConfigUser['broadcast'], {
         get(_t, subProp) {
-          return configState.pubsub[subProp as keyof ConfigUser['pubsub']]
+          return configState.broadcast[subProp as keyof ConfigUser['broadcast']]
         },
         set(_t, subProp, val) {
           if (typeof subProp !== 'string') return true
-          applyPubSubConfig({ ...configState.pubsub, [subProp]: val })
+          applyBroadcastConfig({ ...configState.broadcast, [subProp]: val })
           return true
         },
       })
@@ -441,8 +452,8 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
     applyStreamConfig(val)
   } else if (prop === 'channel') {
     applyChannelConfig(val)
-  } else if (prop === 'pubsub') {
-    applyPubSubConfig(val)
+  } else if (prop === 'broadcast') {
+    applyBroadcastConfig(val)
   } else if (prop === 'extensions') {
     assertUsage(Array.isArray(val), 'config.extensions should be an array')
     configState.extensions = val as TelefuncServerExtension[]
@@ -509,18 +520,18 @@ function applyChannelConfig(val: unknown): void {
   configState.channel = next
 }
 
-function applyPubSubConfig(val: unknown): void {
-  assertUsage(isObject(val), 'config.pubsub should be an object')
+function applyBroadcastConfig(val: unknown): void {
+  assertUsage(isObject(val), 'config.broadcast should be an object')
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transport') {
       assertUsage(
         isObject(value) && typeof (value as any).send === 'function' && typeof (value as any).listen === 'function',
-        'config.pubsub.transport must be a PubSubTransport with send() and listen() methods',
+        'config.broadcast.transport must be a BroadcastTransport with send() and listen() methods',
       )
-      configState.pubsub.transport = value as PubSubTransport
-      installPubSubAdapter(new DefaultPubSubAdapter(value as PubSubTransport))
+      configState.broadcast.transport = value as BroadcastTransport
+      installBroadcastAdapter(new DefaultBroadcastAdapter(value as BroadcastTransport))
     } else {
-      assertUsage(false, `Unknown config.pubsub.${key}`)
+      assertUsage(false, `Unknown config.broadcast.${key}`)
     }
   }
 }

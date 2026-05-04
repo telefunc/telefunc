@@ -5,7 +5,7 @@ export const SERIALIZER_PREFIX_GENERATOR = '!TelefuncGenerator:'
 export const SERIALIZER_PREFIX_PROMISE = '!TelefuncPromise:'
 export const SERIALIZER_PREFIX_CHANNEL = '!TelefuncChannel:'
 export const SERIALIZER_PREFIX_FUNCTION = '!TelefuncFunction:'
-export const SERIALIZER_PREFIX_PUBSUB = '!TelefuncPubSub:'
+export const SERIALIZER_PREFIX_BROADCAST = '!TelefuncBroadcast:'
 
 /** Marker key used on the ack payload of a server-returned function when its arg shield
  *  rejects the incoming args. The client-side reviver detects this and throws on the
@@ -63,7 +63,7 @@ export const CHANNEL_TRANSPORT = {
 export type StreamTransport = (typeof STREAM_TRANSPORT)[keyof typeof STREAM_TRANSPORT]
 export const DEFAULT_STREAM_TRANSPORT: StreamTransport = STREAM_TRANSPORT.BINARY_INLINE
 
-/** Transport for persistent channels created with `channel()`. */
+/** Transport for persistent channels created with `new Channel()`. */
 export type ChannelTransport = (typeof CHANNEL_TRANSPORT)[keyof typeof CHANNEL_TRANSPORT]
 /** Ordered list of transports to use for channels. `['sse', 'ws']` starts on SSE and upgrades to WebSocket. */
 export type ChannelTransports = ChannelTransport[]

@@ -10,20 +10,20 @@ function ChatDemo() {
   const [joined, setJoined] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const channelRef = useRef<Awaited<ReturnType<typeof onJoinChat>>['channel'] | null>(null)
+  const channelRef = useRef<Awaited<ReturnType<typeof onJoinChat>> | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   const join = useCallback(async () => {
     const name = username.trim()
     if (!name) return
-    const { channel } = await onJoinChat(name)
-    channelRef.current = channel
+    const chat = await onJoinChat(name)
+    channelRef.current = chat
 
-    channel.subscribe((msg) => {
+    chat.subscribe((msg) => {
       setMessages((prev) => [...prev, msg])
     })
 
-    channel.onClose(() => {
+    chat.onClose(() => {
       setMessages((prev) => [...prev, { user: 'system', text: 'Disconnected', ts: Date.now() }])
       setJoined(false)
       channelRef.current = null

@@ -1,24 +1,40 @@
 export { Publish }
 
 import React, { useEffect, useState } from 'react'
-import { onTextPubSub, onBinaryPubSub, onBinaryBroadcast } from './Publish.telefunc'
+import { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient } from './Publish.telefunc'
+
+type ShieldState = {
+  validReceiptKey: string | null
+  validReceived: Array<{ text: string }> | null
+  invalidThrew: boolean | null
+  invalidErrorMessage: string | null
+  receivedAfterInvalid: Array<{ text: string }> | null
+}
 
 function Publish() {
   const [result, setResult] = useState<string>('')
+  const [shieldState, setShieldState] = useState<ShieldState>({
+    validReceiptKey: null,
+    validReceived: null,
+    invalidThrew: null,
+    invalidErrorMessage: null,
+    receivedAfterInvalid: null,
+  })
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
 
   return (
     <div id={hydrated ? 'hydrated' : undefined}>
       <pre id="publish-result">{result}</pre>
+      <pre id="publish-shield-state">{JSON.stringify(shieldState)}</pre>
 
       <h2>Text Pub/Sub</h2>
 
       <button
-        id="test-text-pubsub"
+        id="test-text-broadcast"
         onClick={async () => {
           setResult('')
-          const { publisher, getReceived } = await onTextPubSub()
+          const { publisher, getReceived } = await onTextBroadcast()
           // Publish 3 messages from the publisher
           const acks = []
           for (let i = 0; i < 3; i++) {
@@ -37,10 +53,10 @@ function Publish() {
       <h2>Binary Pub/Sub</h2>
 
       <button
-        id="test-binary-pubsub"
+        id="test-binary-broadcast-pair"
         onClick={async () => {
           setResult('')
-          const { publisher, getReceived } = await onBinaryPubSub()
+          const { publisher, getReceived } = await onBinaryBroadcastPair()
           // Publish 3 binary frames
           const acks = []
           for (let i = 0; i < 3; i++) {
@@ -62,15 +78,56 @@ function Publish() {
         id="test-binary-broadcast"
         onClick={async () => {
           setResult('')
-          const ps = await onBinaryBroadcast()
+          const room = await onBinaryBroadcast()
           const received: Array<{ size: number; firstByte: number }> = []
-          ps.subscribeBinary((data, info) => {
+          room.subscribeBinary((data, info) => {
             received.push({ size: data.byteLength, firstByte: data[0]! })
             setResult(JSON.stringify({ received, done: received.length >= 5 }))
           })
         }}
       >
         Server broadcasts 5 binary frames
+      </button>
+
+      <h2>Broadcast Shield Validation</h2>
+
+      <button
+        id="test-broadcast-shield"
+        onClick={async () => {
+          const { room, getReceived } = await onBroadcastShieldClient()
+          await new Promise<void>((resolve) => room.onOpen(resolve))
+
+          // Valid publish: matches `{ text: string }` — server validates, fans out, resolves with receipt.
+          const validAck = await room.publish({ text: 'hi' })
+          // Brief delay so the subscribe callback runs.
+          await new Promise((r) => setTimeout(r, 100))
+          const validReceived = await getReceived()
+          setShieldState((s) => ({
+            ...s,
+            validReceiptKey: validAck.key,
+            validReceived,
+          }))
+
+          // Invalid publish: wrong type — server shield rejects, publish() rejects with ShieldValidationError.
+          let threw = false
+          let errorMessage: string | null = null
+          try {
+            await (room.publish as any)({ text: 42 })
+          } catch (err: any) {
+            threw = true
+            errorMessage = err?.message ?? 'unknown'
+          }
+          await new Promise((r) => setTimeout(r, 100))
+          const receivedAfterInvalid = await getReceived()
+          setShieldState((s) => ({
+            ...s,
+            invalidThrew: threw,
+            invalidErrorMessage: errorMessage,
+            receivedAfterInvalid,
+          }))
+        }}
+      >
+        Broadcast Shield
       </button>
     </div>
   )

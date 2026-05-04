@@ -202,7 +202,7 @@ function testChannel(isDev: boolean) {
 
     await autoRetry(async () => {
       const state = await getResult<ChannelState>('#channel-state')
-      // true only when ch.isClosed === true AND err instanceof TelefuncAbort
+      // true only when channel.isClosed === true AND err instanceof TelefuncAbort
       // (proves the channel was closed with abort error, not a clean close)
       expect(state.clientAbortClosed).toBe(true)
     })
@@ -227,7 +227,7 @@ function testChannel(isDev: boolean) {
 
     await autoRetry(async () => {
       const state = await getResult<ChannelState>('#channel-state')
-      // ch.isClosed was true immediately after ch.close() was called
+      // channel.isClosed was true immediately after channel.close() was called
       expect(state.isClosedAfterClose).toBe(true)
       expect(state.connected).toBe(false)
       // Client's onClose callback fired with err===undefined (clean close)

@@ -24,7 +24,7 @@ import {
 import { encodeU32, encodeLengthPrefixedFrames, textEncoder } from '../frame.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
-import { ClientPubSub } from './channel.js'
+import { ClientBroadcast } from './channel.js'
 import { encodeSseRequest, METADATA_REFRESH_ALIAS, type SseRouteChannel } from '../sse-request.js'
 import { ACK_STATUS, TAG, decode, encode } from '../shared-ws.js'
 import type {
@@ -93,8 +93,8 @@ interface MuxConnection {
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
   sendWindowUpdate(channel: MuxChannel, bytes: number): void
-  sendPubSubSubscribe(channel: MuxChannel, binary: boolean): void
-  sendPubSubUnsubscribe(channel: MuxChannel, binary: boolean): void
+  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
+  sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel, err?: Error): void
 }
 
@@ -453,10 +453,10 @@ class ClientConnection implements MuxConnection {
     this.transport.sendFrame({ kind: 'control', frame: encode.window(ix, bytes) })
   }
 
-  sendPubSubSubscribe(channel: MuxChannel, binary: boolean): void {
+  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const frame = encode.pubsubSub(ix, binary)
+    const frame = encode.broadcastSub(ix, binary)
     if (!this.canSendImmediately()) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
       return
@@ -464,10 +464,10 @@ class ClientConnection implements MuxConnection {
     this.transport.sendFrame({ kind: 'control', frame })
   }
 
-  sendPubSubUnsubscribe(channel: MuxChannel, binary: boolean): void {
+  sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const frame = encode.pubsubUnsub(ix, binary)
+    const frame = encode.broadcastUnsub(ix, binary)
     if (!this.canSendImmediately()) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
       return
@@ -893,13 +893,14 @@ class ClientConnection implements MuxConnection {
       return
     }
     if (frame.tag === TAG.PUBLISH) {
-      const ch = this.channels.get(frame.index)
-      if (ch && ClientPubSub.isClientPubSub(ch)) ch._onTransportPublish(frame.text!, frame.info!)
+      const channel = this.channels.get(frame.index)
+      if (channel && ClientBroadcast.isClientBroadcast(channel)) channel._onTransportPublish(frame.text!, frame.info!)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
-      const ch = this.channels.get(frame.index)
-      if (ch && ClientPubSub.isClientPubSub(ch)) ch._onTransportPublishBinary(frame.data!, frame.info!)
+      const channel = this.channels.get(frame.index)
+      if (channel && ClientBroadcast.isClientBroadcast(channel))
+        channel._onTransportPublishBinary(frame.data!, frame.info!)
       return
     }
     if (frame.tag === TAG.TEXT) {

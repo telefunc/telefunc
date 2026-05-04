@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { Redis } from 'ioredis'
-import { DefaultPubSubAdapter } from 'telefunc'
+import { DefaultBroadcastAdapter } from 'telefunc'
 import { RedisTransport } from './index.js'
 
-// Fake `ioredis` — `defineCommand` + `duplicate()` + pubsub subscribe/dispatch. Lua
+// Fake `ioredis` — `defineCommand` + `duplicate()` + broadcast subscribe/dispatch. Lua
 // execution emulated in TS so we exercise the adapter's call graph without a real Redis.
 
 class FakeIoredis {
@@ -78,7 +78,7 @@ function encodeFrame(seq: number, ts: number, payload: Uint8Array): Uint8Array {
 
 function newAdapter() {
   const fake = new FakeIoredis()
-  const adapter = new DefaultPubSubAdapter(new RedisTransport({ redis: fake as unknown as Redis }))
+  const adapter = new DefaultBroadcastAdapter(new RedisTransport({ redis: fake as unknown as Redis }))
   return { fake, adapter }
 }
 

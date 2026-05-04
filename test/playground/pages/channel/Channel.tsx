@@ -297,15 +297,15 @@ function ChannelDemo() {
   }, [addLog])
 
   const disconnect = useCallback(async () => {
-    const ch = channelRef.current
-    if (!ch) return
+    const channel = channelRef.current
+    if (!channel) return
     setDisconnecting(true)
     try {
-      await ch.close()
+      await channel.close()
     } finally {
       setDisconnecting(false)
     }
-    setChannelState((s) => ({ ...s, connected: false, isClosedAfterClose: ch.isClosed }))
+    setChannelState((s) => ({ ...s, connected: false, isClosedAfterClose: channel.isClosed }))
     channelRef.current = null
     setConnected(false)
     addLog('system', 'Disconnected')
@@ -331,13 +331,13 @@ function ChannelDemo() {
 
   const testClientAbort = useCallback(() => {
     const result = initResultRef.current
-    const ch = channelRef.current
-    if (!result || !ch) {
+    const channel = channelRef.current
+    if (!result || !channel) {
       addLog('system', 'No active connection to abort')
       return
     }
-    ch.onClose((err) =>
-      setChannelState((s) => ({ ...s, clientAbortClosed: ch.isClosed && err instanceof TelefuncAbort })),
+    channel.onClose((err) =>
+      setChannelState((s) => ({ ...s, clientAbortClosed: channel.isClosed && err instanceof TelefuncAbort })),
     )
     addLog('system', 'Calling abort(result)...')
     initResultRef.current = null
@@ -684,10 +684,10 @@ function ChannelDemo() {
   }, [addLog])
 
   const testUpstreamReconnectSend = useCallback(() => {
-    const ch = upstreamReconnectChannelRef.current
-    if (!ch || ch.isClosed) return
+    const channel = upstreamReconnectChannelRef.current
+    if (!channel || channel.isClosed) return
     const n = ++upstreamReconnectSeqRef.current
-    ch.send(n)
+    channel.send(n)
     addLog('out', `[upstream] seq ${n}`)
   }, [addLog])
 
@@ -718,19 +718,19 @@ function ChannelDemo() {
 
     // ── A1/A2/B1/B2 — client sends, server validates incoming data ────────────
     {
-      const { channel: ch, getReceived } = await onChannelShieldClient()
-      await new Promise<void>((resolve) => ch.onOpen(resolve))
+      const { channel, getReceived } = await onChannelShieldClient()
+      await new Promise<void>((resolve) => channel.onOpen(resolve))
 
       // A1: valid no-ack — server listener should receive.
-      await ch.send('hello')
-      await ch.send('world')
+      await channel.send('hello')
+      await channel.send('world')
       const afterValid = await getReceived()
       setChannelState((s) => ({ ...s, shieldClientSendNoAckReceived: afterValid }))
 
       // A2: invalid no-ack — server silently drops; client.send doesn't throw.
       let threw = false
       try {
-        await (ch.send as any)(12345)
+        await (channel.send as any)(12345)
       } catch {
         threw = true
       }
@@ -742,12 +742,12 @@ function ChannelDemo() {
       }))
 
       // B1: valid with ack — returns string length.
-      const ack = await ch.send('hi!', { ack: true })
+      const ack = await channel.send('hi!', { ack: true })
       setChannelState((s) => ({ ...s, shieldClientSendAckValid: ack }))
 
       // B2: invalid with ack — rejects with shield error.
       try {
-        await (ch.send as any)(42, { ack: true })
+        await (channel.send as any)(42, { ack: true })
         setChannelState((s) => ({ ...s, shieldClientSendAckInvalidError: 'NO_ERROR' }))
       } catch (err: any) {
         setChannelState((s) => ({ ...s, shieldClientSendAckInvalidError: err?.message ?? 'unknown' }))
@@ -756,8 +756,8 @@ function ChannelDemo() {
 
     // ── C1 — server sends, client listener returns valid ──────────────────────
     {
-      const { channel: ch, trigger, getOutcome } = await onChannelShieldServerAck()
-      ch.listen((msg: number) => `got-${msg}`)
+      const { channel, trigger, getOutcome } = await onChannelShieldServerAck()
+      channel.listen((msg: number) => `got-${msg}`)
       await trigger()
       const outcome = await getOutcome()
       setChannelState((s) => ({ ...s, shieldServerAckValid: outcome }))
@@ -765,8 +765,8 @@ function ChannelDemo() {
 
     // ── C2 — server sends, client listener returns invalid (wrong type) ───────
     {
-      const { channel: ch, trigger, getOutcome } = await onChannelShieldServerAck()
-      ;(ch.listen as any)((msg: number) => msg * 9) // returns number, expected string
+      const { channel, trigger, getOutcome } = await onChannelShieldServerAck()
+      ;(channel.listen as any)((msg: number) => msg * 9) // returns number, expected string
       await trigger()
       const outcome = await getOutcome()
       setChannelState((s) => ({ ...s, shieldServerAckInvalid: outcome }))

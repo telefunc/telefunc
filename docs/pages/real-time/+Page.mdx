@@ -7,8 +7,8 @@ Telefunc handles real-time flows — chat, upload progress, live updates — usi
 | Primitive | Best for | Setup |
 |---|---|---|
 | **Function passing** | Short-lived callbacks — progress updates, one-off server-to-client pushes | None |
-| **`channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE) or <Link text="WebSocket server setup" href="/server" /> (WS) |
-| **`pubsub()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
+| **`new Channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE) or <Link text="WebSocket server setup" href="/server" /> (WS) |
+| **`new Broadcast()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
 | **[RxJS](https://rxjs.dev/) `Observable` / `Subject`** | Reactive streams with full operator support — pass rxjs primitives transparently | <Link href="/integrations/rxjs" text={<code>@telefunc/rxjs</code>} /> |
 | **`config.stream.transport = 'channel'`** | <Link href="/stream">Streamed values</Link> over the same reconnecting transport as channels | Same as channels |
 
@@ -41,10 +41,12 @@ await onUpload(file, (percent) => setProgress(percent))
 
 If you only need callback-style interaction, function passing is simpler than a channel.
 
+> Function arguments are **shield-validated at runtime** from your TypeScript types — when the client invokes a server-returned function, its arguments are checked against the declared type before reaching server code; when the server invokes a client-passed callback, its return value is checked. See <Link href="/shield#function-arguments" text="Shield — Function arguments" />.
+
 
 ## Channels
 
-Use <Link text={<code>channel()</code>} href="/channel" /> for point-to-point messaging — direct messages between one server and one client.
+Use <Link text={<code>new Channel()</code>} href="/channel" /> for point-to-point messaging — direct messages between one server and one client.
 
 ### Dashboard
 
@@ -52,18 +54,18 @@ A channel that stays open for the lifetime of a page, pushing live metrics from 
 
 ```ts
 // Dashboard.telefunc.ts
-import { channel } from 'telefunc'
+import { Channel } from 'telefunc'
 
 export async function onDashboard() {
-  const ch = channel()
+  const dashboard = new Channel()
 
   const interval = setInterval(() => {
-    ch.send(getMetrics())
+    dashboard.send(getMetrics())
   }, 1000)
 
-  ch.onClose(() => clearInterval(interval))
+  dashboard.onClose(() => clearInterval(interval))
 
-  return { channel: ch.client }
+  return { channel: dashboard.client }
 }
 ```
 
@@ -75,52 +77,58 @@ channel.listen((metrics) => updateCharts(metrics))
 
 See <Link href="/channel" /> for the full API.
 
+> Channel messages are **shield-validated at runtime** from your TypeScript types — every client→server message passed to `listen()` is checked against the declared client-to-server type before reaching server code, and every ack response from the client is checked against the declared server-to-client type. See <Link href="/shield#channels" text="Shield — Channels" />.
+
 
 ## Pub/sub
 
-Use <Link text={<code>pubsub()</code>} href="/channel#pubsub" /> for broadcast messaging — all instances sharing a key form a broadcast group.
+Use <Link text={<code>new Broadcast()</code>} href="/channel#new-broadcast" /> for broadcast messaging — all instances sharing a key form a broadcast group.
 
 ### Notifications
 
 ```ts
 // Notifications.telefunc.ts
-import { pubsub } from 'telefunc'
+import { Broadcast } from 'telefunc'
 
 export async function onListenNotifications(userId: string) {
-  return pubsub(`notifications:${userId}`)
+  return new Broadcast({ key: `notifications:${userId}` })
 }
 ```
 
 ```ts
 // Notifications.tsx
-const ps = await onListenNotifications(userId)
-ps.subscribe((n) => showToast(n))
+const notifications = await onListenNotifications(userId)
+notifications.subscribe((n) => showToast(n))
 ```
 
 ### Chat room
 
 ```ts
 // Chat.telefunc.ts
-import { pubsub } from 'telefunc'
+import { Broadcast } from 'telefunc'
 
 export async function onJoinChat(room: string) {
-  return pubsub(`chat:${room}`)
+  return new Broadcast({ key: `chat:${room}` })
 }
 ```
 
 ```ts
 // Chat.tsx
-const ps = await onJoinChat('lobby')
-ps.subscribe((msg) => console.log(msg))
-ps.publish({ user: 'Alice', text: 'Hello!' })
+const chat = await onJoinChat('lobby')
+chat.subscribe((msg) => console.log(msg))
+chat.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
-See <Link href="/channel#pubsub" /> for the full pub/sub API.
+See <Link href="/channel#new-broadcast" /> for the full pub/sub API.
+
+> Client-published messages are **shield-validated at runtime** from your TypeScript types — when the client calls `publish()` on a `Broadcast<T>` returned from a telefunction, the value is checked against `T` on the server before fanning out to subscribers. A failing shield rejects the client's `publish()` promise with `ShieldValidationError`. See <Link href="/shield" />.
 
 
 ## RxJS
 
 For reactive streams with full operator support, see <Link href="/integrations/rxjs" text={<code>@telefunc/rxjs</code>} /> — pass `Observable` and `Subject` transparently in both directions.
+
+> Each value emitted into a client-side `Subject<T>` is **shield-validated at runtime** when it arrives at the server, against the `T` from your TypeScript types. Terminal signals (`error`, `complete`) are untyped and pass through unshielded. See <Link href="/integrations/rxjs#shields" text="RxJS — Shields" />.
 
 
 ## Reconnection

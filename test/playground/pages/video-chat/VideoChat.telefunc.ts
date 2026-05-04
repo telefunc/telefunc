@@ -1,8 +1,8 @@
 export { onJoinRoom }
 
-import { pubsub } from 'telefunc'
+import { Broadcast } from 'telefunc'
 
-async function onJoinRoom(room: string) {
-  const ps = pubsub(`video:${room}`)
-  return ps
+async function onJoinRoom(roomId: string) {
+  const room = new Broadcast({ key: `video:${roomId}` })
+  return room
 }

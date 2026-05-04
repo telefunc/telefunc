@@ -1,4 +1,4 @@
-export { ClientChannel, ClientPubSub }
+export { ClientChannel, ClientBroadcast }
 
 import type {
   ChannelAck,
@@ -10,8 +10,8 @@ import type {
   ChannelListener,
   ChannelBinaryListener,
   ChannelPublishAck,
-  PubSubBinaryListener,
-  PubSubListener,
+  BroadcastBinaryListener,
+  BroadcastListener,
 } from '../channel.js'
 import { makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
@@ -32,7 +32,7 @@ import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
 
-const CLIENT_PUBSUB_BRAND = Symbol.for('ClientPubSub')
+const CLIENT_BROADCAST_BRAND = Symbol.for('ClientBroadcast')
 
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel
@@ -473,13 +473,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 }
 
-class ClientPubSub<T = unknown> extends ClientChannel {
-  readonly [CLIENT_PUBSUB_BRAND] = true
-  private _pubSubListeners: Array<PubSubListener<T>> = []
-  private _pubSubBinaryListeners: Array<PubSubBinaryListener> = []
+class ClientBroadcast<T = unknown> extends ClientChannel {
+  readonly [CLIENT_BROADCAST_BRAND] = true
+  private _broadcastListeners: Array<BroadcastListener<T>> = []
+  private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
 
-  static isClientPubSub(value: unknown): value is ClientPubSub {
-    return hasProp(value, CLIENT_PUBSUB_BRAND)
+  static isClientBroadcast(value: unknown): value is ClientBroadcast {
+    return hasProp(value, CLIENT_BROADCAST_BRAND)
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -490,16 +490,16 @@ class ClientPubSub<T = unknown> extends ClientChannel {
     return ret
   }
 
-  subscribe(callback: PubSubListener<T>): () => void {
-    if (this._pubSubListeners.length === 0) {
-      this._connection.sendPubSubSubscribe(this, false)
+  subscribe(callback: BroadcastListener<T>): () => void {
+    if (this._broadcastListeners.length === 0) {
+      this._connection.sendBroadcastSubscribe(this, false)
     }
-    this._pubSubListeners.push(callback)
+    this._broadcastListeners.push(callback)
     return () => {
-      const index = this._pubSubListeners.indexOf(callback)
-      if (index >= 0) this._pubSubListeners.splice(index, 1)
-      if (this._pubSubListeners.length === 0) {
-        this._connection.sendPubSubUnsubscribe(this, false)
+      const index = this._broadcastListeners.indexOf(callback)
+      if (index >= 0) this._broadcastListeners.splice(index, 1)
+      if (this._broadcastListeners.length === 0) {
+        this._connection.sendBroadcastUnsubscribe(this, false)
       }
     }
   }
@@ -511,16 +511,16 @@ class ClientPubSub<T = unknown> extends ClientChannel {
     return ret
   }
 
-  subscribeBinary(callback: PubSubBinaryListener): () => void {
-    if (this._pubSubBinaryListeners.length === 0) {
-      this._connection.sendPubSubSubscribe(this, true)
+  subscribeBinary(callback: BroadcastBinaryListener): () => void {
+    if (this._broadcastBinaryListeners.length === 0) {
+      this._connection.sendBroadcastSubscribe(this, true)
     }
-    this._pubSubBinaryListeners.push(callback)
+    this._broadcastBinaryListeners.push(callback)
     return () => {
-      const index = this._pubSubBinaryListeners.indexOf(callback)
-      if (index >= 0) this._pubSubBinaryListeners.splice(index, 1)
-      if (this._pubSubBinaryListeners.length === 0) {
-        this._connection.sendPubSubUnsubscribe(this, true)
+      const index = this._broadcastBinaryListeners.indexOf(callback)
+      if (index >= 0) this._broadcastBinaryListeners.splice(index, 1)
+      if (this._broadcastBinaryListeners.length === 0) {
+        this._connection.sendBroadcastUnsubscribe(this, true)
       }
     }
   }
@@ -528,7 +528,7 @@ class ClientPubSub<T = unknown> extends ClientChannel {
   _onTransportPublish(data: string, wireInfo: WirePublishInfo): void {
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.ts)
-    for (const cb of this._pubSubListeners) {
+    for (const cb of this._broadcastListeners) {
       try {
         cb(parsed, info)
       } catch (err) {
@@ -539,7 +539,7 @@ class ClientPubSub<T = unknown> extends ClientChannel {
 
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.ts)
-    for (const cb of this._pubSubBinaryListeners) {
+    for (const cb of this._broadcastBinaryListeners) {
       try {
         cb(data, info)
       } catch (err) {

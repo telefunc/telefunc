@@ -180,13 +180,13 @@ class SessionRegistry {
  *  transport-specific hooks at `onConnectionOpen` and from then on identify connections
  *  by object identity. The substrate has exactly one parent (this class). */
 class ChannelMux {
-  // Channel runtime
+  // ServerChannel runtime
   private readonly substrate: ChannelSubstrate
   private readonly localChannels = new Map<string, ServerChannel>()
   /** Same-process attach waiters, fired synchronously by `registerChannel` so a
    *  deferred-attach race resolves locally without involving the substrate. */
   private readonly localWaiters = new Map<string, Set<(channel: ServerChannel) => void>>()
-  /** sessionId → ix → handle. Channel-attach registry, separate from per-session
+  /** sessionId → ix → handle. ServerChannel-attach registry, separate from per-session
    *  connection state (`sessionStates`). */
   private readonly sessions = new SessionRegistry()
   /** Channels substrate-attached here (HOME role) → owning proxy instance. The
@@ -252,7 +252,7 @@ class ChannelMux {
     return this.options.connectTtl
   }
 
-  // ── Channel registry ──────────────────────────────────────────────────
+  // ── ServerChannel registry ──────────────────────────────────────────────────
 
   /** Callers must not invoke `channel._registerChannel()` directly. */
   registerChannel(channel: ServerChannel<any, any>): void {
@@ -682,7 +682,7 @@ class ChannelMux {
   // ── Heartbeat + peer liveness ─────────────────────────────────────────
 
   /** Refresh own pins and detect dead peer instances. The instance-alive pin is refreshed
-   *  unconditionally so peers can ride this single TTL to learn we're still up. Channel
+   *  unconditionally so peers can ride this single TTL to learn we're still up. ServerChannel
    *  and connection pins are batched into pipelined calls — O(1) round trips regardless
    *  of locally-hosted count. After refreshing, we check every unique remote instance
    *  this mux talks to: dead OWNERs (in `homeAttached`) trigger per-channel
@@ -1050,7 +1050,7 @@ async function attachLocalChannel(
   args: { ix: number; lastSeq: number; send: SendFn },
 ): Promise<ChannelHandle | null> {
   const replay = channel._replayBuffer
-  assert(replay !== null, `Channel "${channel.id}" attached without a replay buffer`)
+  assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
   for (const frame of replay.getAfter(args.lastSeq)) {
     const pending = args.send(frame as Uint8Array<ArrayBuffer>)
     if (pending) await pending

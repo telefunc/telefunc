@@ -3,7 +3,7 @@ export { createStreamingReplacer }
 import { asyncGeneratorReplacer } from './async-generator.js'
 import { readableStreamReplacer } from './readable-stream.js'
 import { promiseReplacer } from './promise.js'
-import { pubsubReplacer } from './pubsub.js'
+import { broadcastReplacer } from './broadcast.js'
 import { channelReplacer } from './channel.js'
 import { functionReplacer } from './function.js'
 import type { ServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
@@ -11,12 +11,12 @@ import type { AbortError } from '../../../shared/Abort.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
-// pubsubReplacer must come before channelReplacer because ServerPubSub extends ServerChannel
+// broadcastReplacer must come before channelReplacer because ServerBroadcast extends ServerChannel
 const serverTypes = [
   asyncGeneratorReplacer,
   readableStreamReplacer,
   promiseReplacer,
-  pubsubReplacer,
+  broadcastReplacer,
   channelReplacer,
   functionReplacer,
 ]

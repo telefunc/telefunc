@@ -183,8 +183,8 @@ class SseConnectionTransport {
         if (sessionId !== null) deferredReconcileSessionId = sessionId
         continue
       }
-      const ch = channels[alias - 1]
-      if (ch) await this.mux.routeClientFrame(ch.id, ch.home, payload)
+      const channel = channels[alias - 1]
+      if (channel) await this.mux.routeClientFrame(channel.id, channel.home, payload)
     }
     return deferredReconcileSessionId
   }

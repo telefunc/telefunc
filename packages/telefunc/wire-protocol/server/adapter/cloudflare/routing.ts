@@ -1,8 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 export {
-  DEFAULT_PUBSUB_BUCKETS,
-  KNOWN_PUBSUB_BUCKETS,
-  TELEFUNC_PUBSUB_BUCKET_HEADER,
+  DEFAULT_BROADCAST_BUCKETS,
+  KNOWN_BROADCAST_BUCKETS,
+  TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
   getBucketCoordinatorShardIndices,
@@ -23,7 +23,7 @@ import { assert } from '../../../../utils/assert.js'
  * Routing now always resolves to one of Telefunc's canonical Cloudflare location hints.
  * If Cloudflare doesn't provide a precise mapping, Telefunc uses `locationFallback`.
  */
-const DEFAULT_PUBSUB_BUCKETS = [
+const DEFAULT_BROADCAST_BUCKETS = [
   'wnam',
   'enam',
   'weur',
@@ -31,10 +31,10 @@ const DEFAULT_PUBSUB_BUCKETS = [
   'apac',
   'oc',
 ] as const satisfies readonly DurableObjectLocationHint[]
-const TELEFUNC_PUBSUB_BUCKET_HEADER = 'x-telefunc-pubsub-bucket'
+const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
 /** Internal: forwarded to the DO so it knows its own instance name. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
-const KNOWN_PUBSUB_BUCKETS = new Set<string>(DEFAULT_PUBSUB_BUCKETS as readonly string[])
+const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
 
 type LocationBucket = DurableObjectLocationHint
 type CloudflareScale = number | Partial<Record<DurableObjectLocationHint, number>>
@@ -107,12 +107,12 @@ function resolveSessionRoutingTarget(
 
 /**
  * Deterministically maps one channel key into one bucket index.
- * Shared by both coordinator-bucket selection and in-bucket shard selection so all keyed pubsub routing uses the same hash.
+ * Shared by both coordinator-bucket selection and in-bucket shard selection so all keyed broadcast routing uses the same hash.
  */
 function getDeterministicKeyBucketIndex(key: string, bucketCount: number): number {
   assert(
     Number.isInteger(bucketCount) && bucketCount > 0,
-    `Cloudflare keyed pubsub routing requires a positive bucket count. Received ${String(bucketCount)}.`,
+    `Cloudflare keyed broadcast routing requires a positive bucket count. Received ${String(bucketCount)}.`,
   )
 
   let hash = 0
@@ -130,8 +130,8 @@ function resolveCloudflareLocationHint(
   locationFallback: DurableObjectLocationHint,
 ): DurableObjectLocationHint {
   assert(
-    KNOWN_PUBSUB_BUCKETS.has(locationFallback),
-    `Cloudflare locationFallback must be one of ${DEFAULT_PUBSUB_BUCKETS.join(', ')}. Received ${String(locationFallback)}.`,
+    KNOWN_BROADCAST_BUCKETS.has(locationFallback),
+    `Cloudflare locationFallback must be one of ${DEFAULT_BROADCAST_BUCKETS.join(', ')}. Received ${String(locationFallback)}.`,
   )
 
   const cf = (request as CloudflareRequest).cf

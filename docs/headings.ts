@@ -226,7 +226,7 @@ const headings = [
   },
   {
     level: 2,
-    title: '`channel()` / `pubsub()`',
+    title: '`Channel` / `Broadcast`',
     url: '/channel',
   },
   {

@@ -9,7 +9,7 @@ export {
   onClosePassedFnOnClose,
 }
 
-import { channel, getContext } from 'telefunc'
+import { Channel, getContext } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -47,7 +47,7 @@ async function onCloseStream(): Promise<ReadableStream<Uint8Array>> {
 }
 
 async function onCloseChannel() {
-  const ch = channel<never, never>()
+  const ch = new Channel<never, never>()
   cleanupState.closeChannel_onCloseErr = 'pending'
   ch.onClose((err) => {
     cleanupState.closeChannel_onCloseErr = err ? ((err as any).message ?? 'error') : 'none'
@@ -64,7 +64,7 @@ async function onCloseFn(callback: () => void) {
 }
 
 async function onCloseChannelOnClose() {
-  const ch = channel<never, never>()
+  const ch = new Channel<never, never>()
   cleanupState.closeChannelOnClose_contextOnClose = 'not-fired'
   getContext().onClose(() => {
     cleanupState.closeChannelOnClose_contextOnClose =
@@ -77,7 +77,7 @@ async function onCloseChannelOnClose() {
 }
 
 async function onCloseStreamAndChannelOnClose() {
-  const ch = channel<never, never>()
+  const ch = new Channel<never, never>()
   cleanupState.closeStreamChannelOnClose_contextOnClose = 'not-fired'
   cleanupState.closeStreamChannelOnClose_streamDone = ''
   getContext().onClose(() => {
@@ -156,7 +156,7 @@ async function onMixedForClose(callback: (msg: string) => void) {
   })
 
   // Channel — close(result) closes it cleanly; onClose tracks no-error close
-  const ch = channel<never, never>()
+  const ch = new Channel<never, never>()
   cleanupState.closeMixed_channel_onCloseErr = 'pending'
   ch.onClose((err) => {
     cleanupState.closeMixed_channel_onCloseErr = err ? ((err as any).message ?? 'error') : 'none'

@@ -1,5 +1,4 @@
 export {
-  getChannelSubstrate,
   installChannelSubstrate,
   _resetChannelSubstrateForTesting,
   getChannelMux,
@@ -166,7 +165,7 @@ interface ChannelSubstrate {
   /** Heartbeat cadence the runtime uses for refreshing every kind of pin (ms). */
   readonly heartbeatIntervalMs: number
 
-  // ── Channel directory ─────────────────────────────────────────────────
+  // ── ServerChannel directory ─────────────────────────────────────────────────
 
   /** Announce this instance as home for `channelId` — cluster-wide only. Same-process
    *  waiters are the runtime's job and fire synchronously before this is called. */
@@ -344,10 +343,6 @@ const globalObject = getGlobalObject<{
   const substrate = new InMemoryChannelSubstrate()
   return { substrate, mux: new ChannelMux(substrate), installed: false }
 })
-
-function getChannelSubstrate(): ChannelSubstrate {
-  return globalObject.substrate
-}
 
 function getChannelMux(): ChannelMux {
   return globalObject.mux

@@ -104,7 +104,7 @@ Prefix matching — invalidating `['global:documents']` hits `['global:documents
 **Global keys:**
 1. `QueryClient` sends each global query's `queryKey` alongside the telefunc call.
 2. The telefunction executes (including auth). Only after it succeeds, the server subscribes to invalidation events for that key.
-3. Mutations work the same way — the telefunction runs first, then global keys from `meta.invalidates` are published through <Link text="pub/sub" href="/channel#pubsub" />.
+3. Mutations work the same way — the telefunction runs first, then global keys from `meta.invalidates` are published through <Link text="pub/sub" href="/channel#new-broadcast" />.
 4. Every connected client with a matching subscription calls `invalidateQueries()`.
 
 Works across multiple servers via the <Link text="pub/sub adapter" href="/channel#multi-server" />.

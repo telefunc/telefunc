@@ -1,4 +1,4 @@
-export { channel, setChannelDefaults, ServerChannel, SERVER_CHANNEL_BRAND }
+export { Channel, setChannelDefaults, ServerChannel, SERVER_CHANNEL_BRAND }
 export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../channel-errors.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
@@ -56,23 +56,6 @@ function setChannelDefaults(opts: { connectTtl: number; bufferLimit: number; buf
   globalObject.connectTtlMs = opts.connectTtl
   globalObject.bufferLimit = opts.bufferLimit
   globalObject.bufferLimitBinary = opts.bufferLimitBinary
-}
-
-type UntypedChannelHandler = (data: unknown) => unknown
-
-function channel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts?: {
-  ack?: false
-}): Channel<ServerToClient, ClientToServer>
-function channel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts: {
-  ack: true
-}): Channel<ServerToClient, ClientToServer, true>
-function channel<ClientToServer = UntypedChannelHandler, ServerToClient = UntypedChannelHandler>(opts?: {
-  ack?: boolean
-}): Channel<ServerToClient, ClientToServer, false>
-function channel(opts?: { ack?: boolean }): any {
-  return new ServerChannel({
-    ack: opts?.ack === true,
-  })
 }
 
 class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
@@ -399,7 +382,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
     this._dispatchDataFrame(data)
   }
 
-  /** @internal — Tag-keyed data-frame switch. Subclasses (`ServerPubSub`) override
+  /** @internal — Tag-keyed data-frame switch. Subclasses (`ServerBroadcast`) override
    *  to handle their extra tags and fall back to `super` for the common cases. */
   protected _dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
@@ -437,7 +420,7 @@ class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
       case TAG.WINDOW:
         this._onPeerWindowUpdate(frame.bytes)
         return
-      // PUBSUB_SUB / PUBSUB_UNSUB: dropped on plain channels; ServerPubSub overrides.
+      // BROADCAST_SUB / BROADCAST_UNSUB: dropped on plain channels; ServerBroadcast overrides.
     }
   }
 
@@ -822,4 +805,21 @@ function normalizeCloseTimeout(timeout: number | undefined): number {
   if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
   assertUsage(Number.isFinite(timeout) && timeout >= 0, 'Channel close timeout must be a non-negative finite number')
   return timeout
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Public constructor — proxies to ServerChannel impl, but typed against the
+// public `Channel` interface so internal `_method` members stay hidden.
+// ─────────────────────────────────────────────────────────────────────────
+
+const Channel = ServerChannel as unknown as {
+  new <ClientToServer = unknown, ServerToClient = unknown>(opts?: {
+    ack?: false
+  }): Channel<ServerToClient, ClientToServer, false>
+  new <ClientToServer = unknown, ServerToClient = unknown>(opts: {
+    ack: true
+  }): Channel<ServerToClient, ClientToServer, true>
+  new <ClientToServer = unknown, ServerToClient = unknown>(opts?: {
+    ack?: boolean
+  }): Channel<ServerToClient, ClientToServer, false>
 }

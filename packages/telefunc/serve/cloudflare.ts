@@ -8,14 +8,17 @@ import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import { installPubSubAdapter } from '../wire-protocol/server/pubsub.js'
+import { installBroadcastAdapter } from '../wire-protocol/server/broadcast.js'
 import {
-  CloudflarePubSubAuthorityState,
-  CloudflarePubSubTransport,
-} from '../wire-protocol/server/adapter/cloudflare/pubsub.js'
-import type { PubSubDeliverRequest, PubSubPublishRequest } from '../wire-protocol/server/adapter/cloudflare/pubsub.js'
+  CloudflareBroadcastAuthorityState,
+  CloudflareBroadcastTransport,
+} from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
+import type {
+  BroadcastDeliverRequest,
+  BroadcastPublishRequest,
+} from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import {
-  TELEFUNC_PUBSUB_BUCKET_HEADER,
+  TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
   resolveSessionRoutingTarget,
@@ -67,7 +70,7 @@ function telefunc(options?: CloudflareWebSocketOptions): TelefuncServe {
     instanceName: baseInstanceName,
     hooks: getTelefuncChannelHooks(),
   })
-  const pubSub = new CloudflarePubSubTransport({
+  const broadcast = new CloudflareBroadcastTransport({
     baseInstanceName,
     scale,
   })
@@ -81,29 +84,29 @@ function telefunc(options?: CloudflareWebSocketOptions): TelefuncServe {
     return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
   }
 
-  installPubSubAdapter(pubSub)
+  installBroadcastAdapter(broadcast)
 
   const getContext = options?.context
 
   const TelefuncDurableObject = class extends DurableObject {
-    private readonly authorityState: CloudflarePubSubAuthorityState
+    private readonly authorityState: CloudflareBroadcastAuthorityState
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
       const binding = getBinding(env)
       assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}" in Durable Object constructor.`)
-      pubSub.attachBinding(binding, bindingName)
+      broadcast.attachBinding(binding, bindingName)
       const kv = getKVBinding(env)
-      if (kv) pubSub.attachKV(kv)
-      this.authorityState = new CloudflarePubSubAuthorityState(ctx)
+      if (kv) broadcast.attachKV(kv)
+      this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
     async fetch(request: Request) {
       const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
-      const bucket = request.headers.get(TELEFUNC_PUBSUB_BUCKET_HEADER) as LocationBucket | null
+      const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
       if (shard && bucket) {
-        pubSub.attachIsolateInfo(shard, bucket)
+        broadcast.attachIsolateInfo(shard, bucket)
       }
       if (request.headers.get('upgrade') === 'websocket') {
         return crosswsAdapter.handleDurableUpgrade(this, request)
@@ -124,12 +127,12 @@ function telefunc(options?: CloudflareWebSocketOptions): TelefuncServe {
       return crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean)
     }
 
-    telefuncPubSubPublish(request: PubSubPublishRequest) {
-      return pubSub.publishToSubscribers(this.authorityState, request)
+    telefuncBroadcastPublish(request: BroadcastPublishRequest) {
+      return broadcast.publishToSubscribers(this.authorityState, request)
     }
 
-    telefuncPubSubDeliver(request: PubSubDeliverRequest) {
-      pubSub.deliverToLocal(request)
+    telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
+      broadcast.deliverToLocal(request)
     }
   }
 
@@ -174,7 +177,7 @@ function telefunc(options?: CloudflareWebSocketOptions): TelefuncServe {
 
       const forwardedHeaders = new Headers(request.headers as Headers)
       forwardedHeaders.set(TELEFUNC_SHARD_HEADER, sessionInstanceName)
-      forwardedHeaders.set(TELEFUNC_PUBSUB_BUCKET_HEADER, locationBucket)
+      forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })
 
       const doResponse = await binding
