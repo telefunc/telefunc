@@ -1,7 +1,7 @@
 export { testChannel }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { waitForHydration, getResult, getCleanupState } from '../../e2e-utils'
+import { waitForHydration, getResult, getCleanupState, restartProxy, stopProxy, startProxy } from '../../e2e-utils'
 
 type ChannelState = {
   connected: boolean
@@ -59,7 +59,7 @@ type ChannelState = {
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
 }
 
-function testChannel(isDev: boolean) {
+function testChannel(isDev: boolean, inDocker = false) {
   const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
   const channelTransport = channelTransports[channelTransports.length - 1]!
 
@@ -304,18 +304,21 @@ function testChannel(isDev: boolean) {
       const ticksBefore = stateBefore.tickCount
       const serverCountBefore = stateBefore.lastTickServerCount!
 
-      // Go offline — severs the WebSocket at the network level (unclean close).
-      await page.context().setOffline(true)
-      // Wait long enough for the ping timeout to fire and the client to mark the socket dead.
-      await page.waitForTimeout(3000)
-
-      // Arm transport-specific reconnect signal while still offline.
       const reconnectSignalPromise = waitForTransportReconnectSignal()
+      if (inDocker) {
+        // Docker setup uses streamRequest; browser offline mode doesn't sever in-flight
+        // chunked POST bodies, so the only reliable disconnect is killing Caddy at the
+        // TCP layer. `grace_period 1s` in the Caddyfile bounds the shutdown window.
+        restartProxy()
+      } else {
+        // dev/preview: single-instance, no proxy to restart — setOffline still works
+        // because batch-only SSE without streamRequest gets blocked by Chromium's offline
+        // mode, and WS also gets severed.
+        await page.context().setOffline(true)
+        await page.waitForTimeout(3000)
+        await page.context().setOffline(false)
+      }
 
-      // Come back online — client reconnects.
-      await page.context().setOffline(false)
-
-      // Block until reconnect signal is observed for the active transport.
       await reconnectSignalPromise
 
       // Ticks resume and the server count continues strictly forward — no duplicates, no replay, no data loss.
@@ -358,7 +361,8 @@ function testChannel(isDev: boolean) {
       })
 
       // Go offline
-      await page.context().setOffline(true)
+      if (inDocker) stopProxy()
+      else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
 
       // Send 3 more messages while offline — they buffer in the client replay buffer
@@ -368,7 +372,8 @@ function testChannel(isDev: boolean) {
 
       // Arm reconnect watcher, then come back online.
       const reconnectSignalPromise = waitForTransportReconnectSignal()
-      await page.context().setOffline(false)
+      if (inDocker) startProxy()
+      else await page.context().setOffline(false)
       await reconnectSignalPromise
 
       // Server must have received all 5 messages exactly once, in order, with no gaps
@@ -400,7 +405,10 @@ function testChannel(isDev: boolean) {
     })
   })
 
-  if (!isDev) {
+  // Skipped in docker: the trigger endpoint needs Caddy alive (which we stop to sever the
+  // browser), and the server-side close-store is per-instance globalThis — won't reach the
+  // owning playground container in a cluster regardless. Leave for the single-instance paths.
+  if (!isDev && !inDocker) {
     test('channel: reconnect + close — client onClose stays clean when server closes with pending ack while client is offline', async () => {
       await page.goto(`${getServerUrl()}/channel`)
       await waitForHydration()
@@ -464,13 +472,15 @@ function testChannel(isDev: boolean) {
         channelId = state.clientPendingAckCloseReconnectChannelId
       })
 
-      await page.context().setOffline(true)
+      if (inDocker) stopProxy()
+      else await page.context().setOffline(true)
       await page.waitForTimeout(3000)
 
       await page.click('#channel-test-client-pending-ack-close-reconnect')
 
       const reconnectSignalPromise = waitForTransportReconnectSignal()
-      await page.context().setOffline(false)
+      if (inDocker) startProxy()
+      else await page.context().setOffline(false)
       await reconnectSignalPromise
 
       await autoRetry(async () => {

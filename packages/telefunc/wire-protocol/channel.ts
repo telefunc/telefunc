@@ -1,9 +1,8 @@
 export { makePublishInfo }
 export type {
   ChannelBase,
-  Channel,
+  ChannelShield,
   ClientChannel,
-  Broadcast,
   ChannelCloseCallback,
   ChannelCloseOptions,
   ChannelCloseResult,
@@ -57,14 +56,6 @@ type ChannelCloseCallback = (err?: Error) => void | Promise<void>
  * Shared base for `Channel` and `ClientChannel`.
  */
 type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false> = {
-  readonly __DEFINE_TELEFUNC_SHIELDS: {
-    /** Data that flows through `send` (TOut). When the server inspects the `ClientChannel` returned
-     *  by a telefunction, TOut = client→server messages — the shield validates those on arrival. */
-    data: ChannelData<TOut>
-    /** Ack response for what this side listens to (TIn). For a `ClientChannel` returned to the client,
-     *  the client's `listen` acks back to the server's send — the shield validates the arriving ack. */
-    ack: ChannelAck<TIn>
-  }
   readonly id: string
   readonly isClosed: boolean
   /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`. */
@@ -86,14 +77,15 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   abort(abortValue: unknown, message?: string): void
 }
 
-/** Server-side channel. `ServerToClient` = messages the server sends; `ClientToServer` = messages the server receives. */
-type Channel<ServerToClient = unknown, ClientToServer = unknown, TDefault extends boolean = false> = ChannelBase<
-  ServerToClient,
-  ClientToServer,
-  TDefault
-> & {
-  /** The client-side end of the channel — return this from a telefunction. */
-  readonly client: ClientChannel<ClientToServer, ServerToClient, TDefault>
+/** Shield contract — read by the server to validate messages. `data` is incoming
+ *  client→server data; `ack` is the ack the client returns from its `listen`
+ *  handler in response to a server `send`. The same slot is used on both `Channel`
+ *  (server-side instance) and `ClientChannel` (returned from a telefunction). */
+type ChannelShield<ClientToServer, ServerToClient> = {
+  readonly __DEFINE_TELEFUNC_SHIELDS: {
+    data: ChannelData<ClientToServer>
+    ack: ChannelAck<ServerToClient>
+  }
 }
 
 /** Client-side channel. `ClientToServer` = messages the client sends; `ServerToClient` = messages the client receives. */
@@ -101,23 +93,5 @@ type ClientChannel<ClientToServer = unknown, ServerToClient = unknown, TDefault 
   ClientToServer,
   ServerToClient,
   TDefault
->
-
-/** Pub/sub instance — publish and subscribe to a keyed topic. Returnable from telefunctions. */
-type Broadcast<T = unknown> = {
-  /** Shield contract for incoming client→server publishes; ack is unused (publish receipts are server-generated). */
-  readonly __DEFINE_TELEFUNC_SHIELDS: {
-    data: ChannelData<T>
-    ack: unknown
-  }
-  readonly id: string
-  readonly key: string
-  readonly isClosed: boolean
-  publish(data: ChannelData<T>): Promise<ChannelPublishAck>
-  subscribe(callback: BroadcastListener<T>): () => void
-  publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
-  subscribeBinary(callback: BroadcastBinaryListener): () => void
-  onClose(callback: ChannelCloseCallback): void
-  onOpen(callback: () => void): void
-  close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
-}
+> &
+  ChannelShield<ClientToServer, ServerToClient>

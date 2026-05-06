@@ -37,7 +37,7 @@ const CLIENT_BROADCAST_BRAND = Symbol.for('ClientBroadcast')
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel
 {
-  /** @see __DEFINE_TELEFUNC_SHIELDS on ChannelBase — client's TOut/TIn are ClientToServer/ServerToClient. */
+  /** @see ChannelShield in ../channel.ts — `data` validates C2S; `ack` validates ack of own C2S send. */
   declare readonly __DEFINE_TELEFUNC_SHIELDS: {
     data: ChannelData<ClientToServer>
     ack: ChannelAck<ServerToClient>

@@ -4,7 +4,7 @@ import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 import { config } from 'telefunc'
 import { telefunc } from 'telefunc/node'
-import { cleanupState, resetCleanupState } from '../cleanup-state'
+import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from '../cleanup-state'
 config.channel.pingInterval = 1000
 config.shield = true
 
@@ -22,9 +22,9 @@ const tf = telefunc()
 function startServer() {
   const app = new Hono()
 
-  app.get('/api/cleanup-state', (c) => c.json(cleanupState))
-  app.post('/api/cleanup-state/reset', (c) => {
-    resetCleanupState()
+  app.get('/api/cleanup-state', async (c) => c.json(await getCleanupStateSnapshot()))
+  app.post('/api/cleanup-state/reset', async (c) => {
+    await resetCleanupState()
     return c.json({ ok: true })
   })
 

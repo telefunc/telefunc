@@ -34,9 +34,9 @@ import type { ChannelTransports } from './constants.js'
 // `seq` is the replay sequence number for sequenced data frames; 0 for ctrl frames.
 //
 // Tag layout — sparse ranges so range checks classify:
-//   0x01–0x05  connection-level control (no ix, no seq)
-//   0x10–0x18  data plane (carries seq, payload varies)
-//   0x30–0x36  per-channel control (carries ix, no seq)
+//   0x01–0x09  connection-level control (no ix, no seq)
+//   0x10–0x29  data plane (carries seq, payload varies)
+//   0x30–      per-channel control (carries ix, no seq)
 //
 // Channel indices are client-owned and stable for the channel's lifetime.
 // Sequence numbers are sender-assigned for replayable data frames in both directions.
@@ -61,6 +61,12 @@ const TAG = {
   RECONCILE: 0x04 as const,
   /** Server → client after reconcile. JSON payload (`ReconciledPayload`). */
   RECONCILED: 0x05 as const,
+  /** Server → client wire-probe ack. Sent over the SSE downstream after the long-lived
+   *  client→server stream-request POST's metadata has been parsed by the receiving server
+   *  (forwarded via substrate if it lands on a non-owner). The client awaits this within
+   *  `STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS` before declaring the transport open — confirms
+   *  the half-duplex streaming wire round-trips end-to-end. */
+  STREAM_REQUEST_OPEN_ACK: 0x06 as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -106,6 +112,12 @@ type ReconcilePayload = {
   /** Set when the client is upgrading from SSE to WS and has kept SSE alive.
    *  Server should drain the SSE send chain before replaying and attaching. */
   upgrade?: true
+  /** Cluster-stable identifier of the previous transport's wire (the SSE owner) when this
+   *  reconcile may land on a different instance than the one currently holding that wire.
+   *  The receiving instance uses it as the cluster directory key (`locateConnection`) to
+   *  verify `sessionId` and to RPC the previous wire's drain+fin to its owner. Always set
+   *  by the client when a previous wire exists — server skips the lookup on local hits. */
+  prevConnId?: string
   /** `initial: true` means this is the first reconcile for that channel — the server may
    *  not have created it yet (late-creation race during request body parse), so the server
    *  should wait up to `connectTtl` for it. Established channels (already reconciled at
@@ -183,6 +195,7 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.FIN }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
+  | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
@@ -280,6 +293,7 @@ const encode = {
   fin: () => encodeBareFrame(TAG.FIN),
   reconcile: (payload: ReconcilePayload) => encodeJsonFrame(TAG.RECONCILE, payload),
   reconciled: (payload: ReconciledPayload) => encodeJsonFrame(TAG.RECONCILED, payload),
+  streamRequestOpenAck: () => encodeBareFrame(TAG.STREAM_REQUEST_OPEN_ACK),
 
   // ── Per-channel ctrls ──
   close(index: number, timeoutMs: number): Uint8Array<ArrayBuffer> {
@@ -371,6 +385,8 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.RECONCILE, payload: JSON.parse(textDecoder.decode(payload)) as ReconcilePayload }
     case TAG.RECONCILED:
       return { tag: TAG.RECONCILED, payload: JSON.parse(textDecoder.decode(payload)) as ReconciledPayload }
+    case TAG.STREAM_REQUEST_OPEN_ACK:
+      return { tag: TAG.STREAM_REQUEST_OPEN_ACK }
 
     case TAG.CLOSE:
       assert(payload.length >= 4, 'CLOSE payload too short')

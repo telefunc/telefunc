@@ -15,7 +15,8 @@ import {
 } from '../sse-request.js'
 import { StreamReader } from './request/StreamReader.js'
 import { getChannelMux } from './substrate.js'
-import type { ServerTransport } from './substrate-runtime.js'
+import type { ReconcileOutcome, ServerTransport } from './substrate-runtime.js'
+import { encode } from '../shared-ws.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
@@ -132,20 +133,27 @@ class SseConnectionTransport {
       : null
     if (isOwner && !localConnection) return badRequest()
 
-    let deferredReconcileSessionId: string | null = null
+    // Long-lived stream-request POST: confirm the upstream wire to the client by sending a
+    // STREAM_REQUEST_OPEN_ACK frame on its SSE downstream. The mux dispatches locally if
+    // we're the owner, or forwards to the owner via substrate.
+    if (metadata.streamRequest) {
+      void this.mux.sendConnectionFrameToClient(metadata.ownerInstance, metadata.connId, encode.streamRequestOpenAck())
+    }
+
+    let deferredReconcile: ReconcileOutcome | null = null
     const dispatch = (async (): Promise<'ok' | 'timeout'> => {
       if (localConnection && !(await this.waitReady(localConnection))) return 'timeout'
-      deferredReconcileSessionId = await this.processDataPostBody(metadata, localConnection, reader)
+      deferredReconcile = await this.processDataPostBody(metadata, localConnection, reader)
       return 'ok'
     })()
-    if (localConnection) localConnection.pendingDispatches.add(dispatch)
+    if (localConnection && !metadata.streamRequest) localConnection.pendingDispatches.add(dispatch)
     try {
       if ((await dispatch) === 'timeout') return badRequest()
     } finally {
-      if (localConnection) localConnection.pendingDispatches.delete(dispatch)
+      if (localConnection && !metadata.streamRequest) localConnection.pendingDispatches.delete(dispatch)
     }
-    if (deferredReconcileSessionId !== null && localConnection && !localConnection.closed) {
-      const pending = this.mux.sendReconciled(localConnection, deferredReconcileSessionId)
+    if (deferredReconcile !== null && localConnection && !localConnection.closed) {
+      const pending = this.mux.sendReconciled(localConnection, deferredReconcile)
       if (pending) await pending
     }
     return { statusCode: 200, contentType: 'text/plain', headers: [], body: '' }
@@ -156,7 +164,7 @@ class SseConnectionTransport {
    *    alias `1..FE` — channel-data frame, routes to `channels[alias − 1]`
    *    alias `0xFF`  — JSON `channels[]` refresh, swaps the routing table in-band
    *
-   *  Returns the `sessionId` of a deferred reconcile if one fired in this body so the
+   *  Returns the `ReconcileOutcome` of a deferred reconcile if one fired in this body so the
    *  caller can emit `reconciled` at body end with all dispatched frames' `lastSeq`
    *  reflected. Long-lived stream-request POSTs use the inline path instead — their
    *  body never ends, so deferring would never emit. */
@@ -164,9 +172,9 @@ class SseConnectionTransport {
     metadata: SseDataPostMetadata,
     localConnection: SseConnection | null,
     reader: StreamReader,
-  ): Promise<string | null> {
+  ): Promise<ReconcileOutcome | null> {
     let channels = metadata.channels
-    let deferredReconcileSessionId: string | null = null
+    let deferredReconcile: ReconcileOutcome | null = null
     while (true) {
       const raw = await reader.readLengthPrefixedBytesOrNull()
       if (!raw || raw.byteLength === 0) break
@@ -179,28 +187,28 @@ class SseConnectionTransport {
         continue
       }
       if (alias === 0) {
-        const sessionId = await this.dispatchConnectionFrame(metadata, localConnection, payload)
-        if (sessionId !== null) deferredReconcileSessionId = sessionId
+        const outcome = await this.dispatchConnectionFrame(metadata, localConnection, payload)
+        if (outcome !== null) deferredReconcile = outcome
         continue
       }
       const channel = channels[alias - 1]
       if (channel) await this.mux.routeClientFrame(channel.id, channel.home, payload)
     }
-    return deferredReconcileSessionId
+    return deferredReconcile
   }
 
   /** Alias-0 dispatch: forward to the owner if the connection lives elsewhere, dispatch
    *  inline on a long-lived stream-request POST (so `reconciled` emits without waiting
    *  for body-end), or defer on a short-lived outbox batch (so subsequent frames in the
-   *  same body lift `lastSeq` before `reconciled` is sent). Returns the deferred reconcile
-   *  `sessionId` only on the deferred path. */
+   *  same body lift `lastSeq` before `reconciled` is sent). Returns the deferred
+   *  `ReconcileOutcome` only on the deferred path. */
   private async dispatchConnectionFrame(
     metadata: SseDataPostMetadata,
     localConnection: SseConnection | null,
     payload: Uint8Array<ArrayBuffer>,
-  ): Promise<string | null> {
+  ): Promise<ReconcileOutcome | null> {
     if (!localConnection) {
-      await this.mux.forwardConnectionFrame(metadata.ownerInstance, metadata.connId, payload)
+      await this.mux.forwardConnectionFrameToServer(metadata.ownerInstance, metadata.connId, payload)
       return null
     }
     if (metadata.streamRequest) {
@@ -235,21 +243,21 @@ class SseConnectionTransport {
    *  frames flow through `onConnectionRawMessage` so the mux's session registry routes
    *  them), release the `ready` gate, drain in-flight data POSTs, then emit `reconciled`. */
   private async runStreamResponse(connection: SseConnection, reader: StreamReader): Promise<void> {
-    let reconcileSessionId: string | null = null
+    let reconcileOutcome: ReconcileOutcome | null = null
     try {
       while (true) {
         const raw = await reader.readLengthPrefixedBytesOrNull()
         if (!raw) break
         if (connection.closed) break
-        const sessionId = await this.mux.onConnectionRawMessageDeferredReconciled(connection, raw)
-        if (sessionId !== null) reconcileSessionId = sessionId
+        const outcome = await this.mux.onConnectionRawMessageDeferredReconciled(connection, raw)
+        if (outcome !== null) reconcileOutcome = outcome
       }
     } finally {
       connection.resolveReady()
     }
-    if (reconcileSessionId === null || connection.closed) return
+    if (reconcileOutcome === null || connection.closed) return
     if (connection.pendingDispatches.size > 0) await Promise.allSettled(connection.pendingDispatches)
-    const pending = this.mux.sendReconciled(connection, reconcileSessionId)
+    const pending = this.mux.sendReconciled(connection, reconcileOutcome)
     if (pending) await pending
   }
 

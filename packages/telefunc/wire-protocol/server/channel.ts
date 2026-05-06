@@ -4,7 +4,8 @@ export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '.
 const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
 
 import type {
-  Channel,
+  ChannelBase,
+  ChannelShield,
   ChannelAck,
   ClientChannel,
   ChannelCloseCallback,
@@ -14,6 +15,7 @@ import type {
   ChannelListener,
   ChannelBinaryListener,
 } from '../channel.js'
+
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
@@ -58,14 +60,14 @@ function setChannelDefaults(opts: { connectTtl: number; bufferLimit: number; buf
   globalObject.bufferLimitBinary = opts.bufferLimitBinary
 }
 
-class ServerChannel<ServerToClient = unknown, ClientToServer = unknown>
-  implements Channel<ServerToClient, ClientToServer>
+class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
+  implements Channel<ClientToServer, ServerToClient>
 {
   readonly [SERVER_CHANNEL_BRAND] = true
-  /** @see __DEFINE_TELEFUNC_SHIELDS on ChannelBase — server's TOut/TIn are ServerToClient/ClientToServer. */
+  /** @see ChannelShield in ../channel.ts — `data` validates incoming C2S, `ack` validates ack of own S2C sends. */
   declare readonly __DEFINE_TELEFUNC_SHIELDS: {
-    data: ChannelData<ServerToClient>
-    ack: ChannelAck<ClientToServer>
+    data: ChannelData<ClientToServer>
+    ack: ChannelAck<ServerToClient>
   }
   readonly id: string
   readonly ack: boolean
@@ -807,19 +809,27 @@ function normalizeCloseTimeout(timeout: number | undefined): number {
   return timeout
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Public constructor — proxies to ServerChannel impl, but typed against the
-// public `Channel` interface so internal `_method` members stay hidden.
-// ─────────────────────────────────────────────────────────────────────────
-
+/** Server-side channel. `ClientToServer` = messages the server receives; `ServerToClient` = messages the server sends. */
+type Channel<ClientToServer = unknown, ServerToClient = unknown, TDefault extends boolean = false> = ChannelBase<
+  ServerToClient,
+  ClientToServer,
+  TDefault
+> &
+  ChannelShield<ClientToServer, ServerToClient> & {
+    /** The client-side end of the channel — return this from a telefunction. */
+    readonly client: ClientChannel<ClientToServer, ServerToClient, TDefault>
+  }
+// Public `Channel` constructor — proxies to the `ServerChannel` impl, but typed against the
+// `Channel` interface so internal `_method` members are hidden, and so the third generic
+// `TDefault` is inferred from `opts.ack` (gives `send()` the right ack-aware return type).
 const Channel = ServerChannel as unknown as {
   new <ClientToServer = unknown, ServerToClient = unknown>(opts?: {
     ack?: false
-  }): Channel<ServerToClient, ClientToServer, false>
+  }): Channel<ClientToServer, ServerToClient, false>
   new <ClientToServer = unknown, ServerToClient = unknown>(opts: {
     ack: true
-  }): Channel<ServerToClient, ClientToServer, true>
+  }): Channel<ClientToServer, ServerToClient, true>
   new <ClientToServer = unknown, ServerToClient = unknown>(opts?: {
     ack?: boolean
-  }): Channel<ServerToClient, ClientToServer, false>
+  }): Channel<ClientToServer, ServerToClient, false>
 }

@@ -12,7 +12,7 @@ const functionReplacer: ReplacerType<FunctionContract, ServerReplacerContext> = 
     return typeof value === 'function'
   },
   replace(fn, { createChannel, validators }) {
-    const channel = createChannel<unknown, readonly unknown[]>({ ack: true })
+    const channel = createChannel<readonly unknown[], unknown>({ ack: true })
     const validateArgs = validators.get('args')
     channel.listen((args) => {
       if (validateArgs) {

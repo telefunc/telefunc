@@ -75,6 +75,10 @@ export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRA
 /** How long to wait for a WebSocket probe ping/pong before giving up on the upgrade. */
 export const WS_PROBE_TIMEOUT_MS = 3_000
 
+/** How long to wait for the stream-request POST handshake ack on the SSE downstream
+ *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
+export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
+
 // ===== Multiplexed SSE transport =====
 
 /** Default shorter flush delay for the first SSE batch POST after an idle period. */

@@ -109,8 +109,8 @@ function serializeTelefunctionResult(runContext: {
       abort() {},
     }
   }
-  function createChannel<TOut, TIn>(opts?: { ack?: boolean }) {
-    const channel = new ServerChannel<TOut, TIn>(opts)
+  function createChannel<ClientToServer, ServerToClient>(opts?: { ack?: boolean }) {
+    const channel = new ServerChannel<ClientToServer, ServerToClient>(opts)
     registerChannel(channel)
     return channel
   }

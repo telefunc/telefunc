@@ -1,8 +1,18 @@
 configs:
   caddyfile:
     content: |
-      :80 {
-          reverse_proxy playground-a:3000 playground-b:3000 {
+      # HTTPS via Caddy's per-volume internal CA. Browsers/Playwright run with cert
+      # validation disabled, Node fetch via NODE_TLS_REJECT_UNAUTHORIZED=0 — both set in
+      # the test runner. HTTP/2 end-to-end so half-duplex `streamRequest` POSTs work.
+      {
+          # Override Caddy's default "eternal grace period" so long-lived `streamRequest`
+          # bodies don't keep the proxy alive on SIGTERM. Reconnect tests rely on
+          # `docker compose restart proxy` actually severing TCP within ~1s.
+          grace_period 1s
+      }
+      localhost {
+          tls internal
+          reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 {
               lb_policy round_robin
               flush_interval -1
           }
@@ -11,9 +21,14 @@ configs:
 services:
   redis:
     image: redis:8-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
 
   playground-a: &playground
-    image: node:24-slim
+    image: node:24-alpine
     working_dir: /repo/test/playground
     command: node dist/nested/server/index.mjs
     volumes:
@@ -22,9 +37,14 @@ services:
       REDIS_URL: redis://redis:6379
       PORT: 3000
       INSTANCE_ID: A
-      TELEFUNC_DEBUG_SUBSTRATE: "1"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/ || exit 1"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
 
   playground-b:
     <<: *playground
@@ -32,15 +52,38 @@ services:
       REDIS_URL: redis://redis:6379
       PORT: 3000
       INSTANCE_ID: B
-      TELEFUNC_DEBUG_SUBSTRATE: "1"
+
+  playground-c:
+    <<: *playground
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: C
 
   proxy:
     image: caddy:2-alpine
     ports:
-      - "8080:80"
+      - "8443:443"
     configs:
       - source: caddyfile
         target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy-data:/data
     depends_on:
-      - playground-a
-      - playground-b
+      playground-a:
+        condition: service_healthy
+      playground-b:
+        condition: service_healthy
+      playground-c:
+        condition: service_healthy
+    # Hit Caddy's HTTPS listener through the reverse_proxy block to a playground container —
+    # a 200 means the whole data path (TLS handshake → reverse_proxy → upstream) is live.
+    # `--no-check-certificate` skips local-CA validation inside the container.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider --no-check-certificate https://localhost/ || exit 1"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  caddy-data:

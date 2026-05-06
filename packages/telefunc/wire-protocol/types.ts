@@ -95,7 +95,10 @@ type ChunkReader = {
 
 /** Context for all client-side response revivers (streaming + placeholder). */
 type ClientReviverContext = {
-  createChannel<TOut = unknown, TIn = unknown>(opts: { channelId: string; ack?: boolean }): ClientChannel<TOut, TIn>
+  createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
+    channelId: string
+    ack?: boolean
+  }): ClientChannel<ClientToServer, ServerToClient>
   createBroadcast<T = unknown>(opts: { channelId: string; key: string }): ClientBroadcast<T>
   receiveStreamReader(metadata: StreamingMetadata): ChunkReader
   receiveStream(metadata: StreamingMetadata): {
@@ -109,7 +112,10 @@ type ClientReviverContext = {
 type ServerReviverContext = {
   registerFile(index: number, size: number): void
   consumeFile(index: number, size: number): Promise<ReadableStream<Uint8Array>>
-  createChannel<TOut = unknown, TIn = unknown>(opts: { id: string; ack?: boolean }): ServerChannel<TOut, TIn>
+  createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
+    id: string
+    ack?: boolean
+  }): ServerChannel<ClientToServer, ServerToClient>
   receiveStreamReader(metadata: { channelId: string }): ChunkReader
   receiveStream(metadata: { channelId: string }): {
     stream: ReadableStream<Uint8Array<ArrayBuffer>>
@@ -124,7 +130,9 @@ type ServerReviverContext = {
 
 /** Context for all server-side response replacers (streaming + placeholder). */
 type ServerReplacerContext = {
-  createChannel<TOut = unknown, TIn = unknown>(opts?: { ack?: boolean }): ServerChannel<TOut, TIn>
+  createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts?: {
+    ack?: boolean
+  }): ServerChannel<ClientToServer, ServerToClient>
   /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
   registerChannel(channel: ServerChannel<any, any>): void
   sendStream(createProducer: () => StreamingProducer): {
@@ -141,7 +149,9 @@ type ServerReplacerContext = {
 /** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */
 type ClientReplacerContext = {
   registerFile(body: Blob): number
-  createChannel<TOut = unknown, TIn = unknown>(opts?: { ack?: boolean }): ClientChannel<TOut, TIn>
+  createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts?: {
+    ack?: boolean
+  }): ClientChannel<ClientToServer, ServerToClient>
   sendStream(createProducer: () => StreamingProducer): {
     metadata: { channelId: string }
     close: () => Promise<void> | void

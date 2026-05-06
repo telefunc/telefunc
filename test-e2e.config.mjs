@@ -3,6 +3,13 @@ export default {
     jobs: getCiJobs(),
   },
   tolerateError,
+  // The dockerized e2e suite (`.test-docker.*`) hits Caddy at https://localhost:8443 with a
+  // cert from Caddy's auto-generated local CA — Chromium has no reason to trust that CA, so
+  // we tell it to skip cert validation. Same flag is harmless for non-docker tests that
+  // already speak HTTP or have a real cert chain.
+  chromiumLaunchOptions: {
+    args: ['--ignore-certificate-errors'],
+  },
 }
 
 function getCiJobs() {

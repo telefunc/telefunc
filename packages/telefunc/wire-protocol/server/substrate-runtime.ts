@@ -1,5 +1,5 @@
 export { ChannelMux }
-export type { SendFn, ServerTransport }
+export type { ReconcileOutcome, SendFn, ServerTransport }
 
 import { assert } from '../../utils/assert.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
@@ -44,23 +44,25 @@ type MuxServerOptions = {
   transports: ChannelTransports
 }
 
-/** Returned by `handleFrame` only when a reconcile completed: lets the caller branch
- *  on object identity (`if (result)`) rather than a magic `string | null` value. */
-type ReconcileOutcome = { sessionId: string }
-
-type SessionState = {
-  /** `ReconciledPayload.open[]` snapshot returned by the most recent `reconcileSession`.
-   *  Each entry carries `home` so the client can mirror it into data POST metadata for
-   *  per-frame routing. */
+/** Returned by `handleFrame` only when a reconcile completed. The caller branches on object
+ *  identity (`if (result)`) and threads the payload through to `sendReconciled` — `openList`
+ *  populates the wire frame, `finalizeUpgrade` retires the previous transport once the new
+ *  one has emitted reconciled (no-op when this isn't an upgrade). */
+type ReconcileOutcome = {
+  sessionId: string
   openList: ReconciledPayload['open']
-  /** Waits until the currently attached transport has fully drained its send chain. */
-  drainActiveTransport: (() => Promise<void>) | null
-  /** Sends a fin ctrl frame on the current transport. Set at end of each reconcile. */
-  sendFin: (() => void | Promise<void>) | null
-  /** Set when this reconcile carries an `upgrade`: drains the previous transport and sends
-   *  fin on it. Fired by `sendReconciled` once the new transport has emitted reconciled. */
   finalizeUpgrade: (() => void) | null
 }
+
+/** Per-session closure: drains its currently-attached transport's send chain, queues `fin`
+ *  on it, and drains again. Captured by the next reconcile (when `ctrl.upgrade`) to retire
+ *  the previous transport, and by the cross-instance `UPGRADE_FINALIZE` handler when this
+ *  instance is the owner of the previous wire. Same primitive in both paths.
+ *
+ *  Cross-instance variant: built locally on the WS-receiving instance with a body that fires
+ *  the substrate envelope (the actual drain+fin runs on the owner inside its own copy of
+ *  this closure, captured at its previous reconcile). */
+type SessionFinalizer = () => Promise<void>
 
 type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
@@ -92,7 +94,7 @@ type ServerTransport<TConnection> = {
 class ProtocolViolationError extends Error {}
 
 const globalObject = getGlobalObject('wire-protocol/server/substrate-runtime.ts', {
-  sessionStates: new Map<string, SessionState>(),
+  sessionFinalizers: new Map<string, SessionFinalizer>(),
 })
 
 function resolveMuxServerOptions(): MuxServerOptions {
@@ -201,7 +203,13 @@ class ChannelMux {
   // constructed at module-load (substrate.ts's globalObject) before `serverConfig` has
   // been initialized.
   private resolvedOptions: MuxServerOptions | null = null
-  private readonly sessionStates = globalObject.sessionStates
+  /** sessionId → finalizer for the transport currently attached to that session. The next
+   *  reconcile that carries `ctrl.upgrade` captures this closure (so the new wire's reconcile
+   *  can retire the previous wire); cross-instance `UPGRADE_FINALIZE` looks it up by sessionId
+   *  too. Both consumers fire it then drop the entry — entries also get dropped on connection
+   *  close. Cluster-wide there's no need to dedup: each session lives on exactly one instance,
+   *  and the connId pin in the substrate directory is what cross-instance lookups key on. */
+  private readonly sessionFinalizers = globalObject.sessionFinalizers
   private readonly connectionStates = new Map<unknown, ConnectionEntry>()
   /** Reverse map keyed by `connId`, populated for transports that report a stable connId
    *  (SSE). Lets cross-instance `CONNECTION_FRAME` envelopes resolve the local connection. */
@@ -218,15 +226,10 @@ class ChannelMux {
       onHomeFrame: (env, payload) => this.dispatchHomeFrame(env.channelId, payload.frame),
       onPeerFrame: (env, payload) => this.writePeerFrame(env.channelId, payload.frame),
       onPeerDetach: (env) => this.proxyStates.delete(env.channelId),
-      // Cross-instance CONNECTION_FRAME envelopes: a non-owner POST receiver forwarded an
-      // alias-0 frame here for re-injection on this owner's local connection. Vacuous for
-      // transports without connId (WS), since the lookup map stays empty.
-      onConnectionFrame: (env, payload) => {
-        const connection = this.connectionsByConnId.get(env.channelId)
-        if (connection !== undefined) {
-          void this.onConnectionRawMessage(connection, payload.frame as Uint8Array<ArrayBuffer>)
-        }
-      },
+      onConnectionFrameToServer: (env, payload) => this.routeConnectionFrameToServer(env.channelId, payload.frame),
+      onConnectionFrameToClient: (env, payload) => this.routeConnectionFrameToClient(env.channelId, payload.frame),
+      onUpgradeFinalize: (env, payload) =>
+        void this.routeUpgradeFinalize(env.channelId, payload.prevSessionId, new Set(payload.keptIxes)),
       // `onAttachAck` is registered ad-hoc by `awaitAttachAck` for the duration of one call.
     })
     this.heartbeatTimer = unrefTimer(
@@ -308,16 +311,86 @@ class ChannelMux {
     return this.substrate.locateConnection(connId)
   }
 
-  /** Forward a connection-level wire frame (ping, in-body reconcile) to the connection's
-   *  owner so it re-injects on its local connection. Used by SSE data POSTs that landed
-   *  on a non-owner instance. */
-  forwardConnectionFrame(ownerInstance: string, connId: string, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
+  /** Send a client→server alias-0 frame (ping, in-body reconcile) from this non-owner POST
+   *  receiver to the connection's owner so it re-injects on its local connection. */
+  forwardConnectionFrameToServer(
+    ownerInstance: string,
+    connId: string,
+    rawFrame: Uint8Array<ArrayBuffer>,
+  ): Promise<void> {
     return this.substrate.forward(ownerInstance, {
       channelId: connId,
       fromInstance: this.substrate.selfInstanceId,
       direction: PROXY_DIRECTION.TO_HOME,
       payload: { kind: ENVELOPE_KIND.CONNECTION_FRAME, frame: rawFrame },
     })
+  }
+
+  /** Emit a server→client connection-level frame to the client: locally if `ownerInstance`
+   *  is this instance (push directly onto the local SSE wire), otherwise forward to the
+   *  owner via substrate (it pushes from there). One entry point for both paths — mirrors
+   *  `routeClientFrame`'s local-or-forward shape. */
+  async sendConnectionFrameToClient(
+    ownerInstance: string,
+    connId: string,
+    rawFrame: Uint8Array<ArrayBuffer>,
+  ): Promise<void> {
+    if (ownerInstance === this.substrate.selfInstanceId) {
+      this.routeConnectionFrameToClient(connId, rawFrame)
+      return
+    }
+    await this.substrate.forward(ownerInstance, {
+      channelId: connId,
+      fromInstance: this.substrate.selfInstanceId,
+      direction: PROXY_DIRECTION.TO_PEER,
+      payload: { kind: ENVELOPE_KIND.CONNECTION_FRAME, frame: rawFrame },
+    })
+  }
+
+  /** Cross-instance SSE→WS upgrade finalize: ask the owner of the previous transport to
+   *  drain its local wire, queue a `fin` ctrl behind everything in flight, drain again,
+   *  and silently retire the previous session for the kept ix's (dropped ix's still fire
+   *  `RECOVERY_FAILED` on the owner). Fire-and-forget — the new wire's `reconciled` is
+   *  independent on a separate transport, so there's nothing for the requester to gate on. */
+  private forwardUpgradeFinalize(
+    ownerInstance: string,
+    prevConnId: string,
+    prevSessionId: string,
+    keptIxes: readonly number[],
+  ): void {
+    void this.substrate.forward(ownerInstance, {
+      channelId: prevConnId,
+      fromInstance: this.substrate.selfInstanceId,
+      direction: PROXY_DIRECTION.TO_HOME,
+      payload: { kind: ENVELOPE_KIND.UPGRADE_FINALIZE, prevSessionId, keptIxes },
+    })
+  }
+
+  /** Owner-side handler for `forwardUpgradeFinalize`. Runs the same finalizer the local
+   *  upgrade path runs (drain → fin → drain on this instance's send chain), then silently
+   *  retires the prior session — kept ix's drop their registry entries with no detach
+   *  lifecycle (they're re-attached on the requester via the new home), dropped ix's fire
+   *  `RECOVERY_FAILED`. */
+  private async routeUpgradeFinalize(
+    prevConnId: string,
+    prevSessionId: string,
+    keptIxes: ReadonlySet<number>,
+  ): Promise<void> {
+    const finalizer = this.sessionFinalizers.get(prevSessionId)
+    if (!finalizer) return // local connection already torn down — nothing to drain
+    await finalizer()
+    this.sessionFinalizers.delete(prevSessionId)
+    this.unregisterOwnedConnection(prevConnId)
+    const session = this.sessions.removeSession(prevSessionId)
+    if (!session) return
+    for (const [ix, handle] of session) {
+      if (!keptIxes.has(ix)) {
+        this.detachHandle(handle, DETACH_REASON.RECOVERY_FAILED)
+      } else if (handle.kind === 'proxy') {
+        // Channel was re-attached on the requester via the new home; this proxy entry is stale.
+        this.proxyStates.delete(handle.channelId)
+      }
+    }
   }
 
   /** Dispatch a client→server channel frame to its home: locally if `home` is this
@@ -366,11 +439,11 @@ class ChannelMux {
     try {
       const pending = this.handleFrame(entry, connection, rawFrame)
       if (!pending) return
-      // If the frame was a `reconcile`, `handleFrame` resolves to the new sessionId — emit
-      // `reconciled` immediately. SSE takes the deferred path and emits later (after
+      // If the frame was a `reconcile`, `handleFrame` resolves with a `ReconcileOutcome` —
+      // emit `reconciled` immediately. SSE takes the deferred path and emits later (after
       // draining concurrent data POSTs); see `onConnectionRawMessageDeferredReconciled`.
       const outcome = await pending
-      if (outcome) this.sendReconciled(connection, outcome.sessionId)
+      if (outcome) this.sendReconciled(connection, outcome)
     } catch {
       entry.state.terminatePermanently = true
       entry.transport.terminateConnection(connection)
@@ -380,13 +453,13 @@ class ChannelMux {
   async onConnectionRawMessageDeferredReconciled(
     connection: unknown,
     rawFrame: Uint8Array<ArrayBuffer>,
-  ): Promise<string | null> {
+  ): Promise<ReconcileOutcome | null> {
     const entry = this.getEntry(connection)
     if (!entry) return null
     try {
       const pending = this.handleFrame(entry, connection, rawFrame)
       if (!pending) return null
-      return (await pending)?.sessionId ?? null
+      return (await pending) ?? null
     } catch {
       entry.state.terminatePermanently = true
       entry.transport.terminateConnection(connection)
@@ -414,13 +487,12 @@ class ChannelMux {
     return this.connectionsByConnId.get(connId) as TConnection | undefined
   }
 
-  sendReconciled(connection: unknown, sessionId: string): void | Promise<void> {
-    const sessionState = this.getSessionStateOrThrow(sessionId)
+  sendReconciled(connection: unknown, outcome: ReconcileOutcome): void | Promise<void> {
     const pending = this.send(
       connection,
       encode.reconciled({
-        sessionId,
-        open: sessionState.openList,
+        sessionId: outcome.sessionId,
+        open: outcome.openList,
         ownerInstance: this.substrate.selfInstanceId,
         reconnectTimeout: this.options.reconnectTimeout,
         idleTimeout: this.options.idleTimeout,
@@ -432,14 +504,9 @@ class ChannelMux {
         transports: this.options.transports,
       }),
     )
-    // Upgrade carries over from the previous transport: drain and `fin` it now that the
-    // new transport has accepted `reconciled`. Each transport has its own send chain, so
-    // firing this synchronously is safe — it doesn't reorder anything on the new wire.
-    const finalizeUpgrade = sessionState.finalizeUpgrade
-    if (finalizeUpgrade) {
-      sessionState.finalizeUpgrade = null
-      finalizeUpgrade()
-    }
+    // Each transport has its own send chain, so firing the upgrade finalizer synchronously
+    // here is safe — it can't reorder anything on the new wire.
+    outcome.finalizeUpgrade?.()
     return pending
   }
 
@@ -485,24 +552,18 @@ class ChannelMux {
     if (connId !== null) this.unregisterOwnedConnection(connId)
 
     // No sessionId: the connection closed before reconciling (handshake error or immediate
-    // disconnect). No session state to clean up.
+    // disconnect). Nothing to clean up.
     const sessionId = entry.transport.getSessionId(connection)
     if (!sessionId) return
-    const sessionState = this.sessionStates.get(sessionId)
-    if (!sessionState) return
-
-    sessionState.drainActiveTransport = null
-    sessionState.sendFin = null
-
     // The transient/permanent distinction governs *channel* grace inside `detachSession` —
-    // channels survive a transient close via `_onPeerDisconnect`'s reconnectTimeout.
-    // Connection-level state (sessionState closures) is cluster-coordinated through the
-    // substrate; clearing it eagerly on any close is correct because reconcile rebuilds
-    // it from scratch on the next attach. SSE only ever fires permanent close on a
-    // protocol violation (`handleFrame` throw) — every network drop, page close, ping
-    // timeout, and stream cancel is transient.
+    // channels survive a transient close via `_onPeerDisconnect`'s reconnectTimeout. The
+    // session-level finalizer is dropped eagerly on any close: reconcile rebuilds one from
+    // scratch on the next attach, and a captured copy in some other instance's
+    // `prepareUpgradeFinalizer` is independent of the map entry. SSE only ever fires permanent
+    // close on a protocol violation; every network drop, page close, ping timeout, and stream
+    // cancel is transient.
     this.detachSession(sessionId, permanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
-    this.sessionStates.delete(sessionId)
+    this.sessionFinalizers.delete(sessionId)
   }
 
   private async reconcile(
@@ -512,19 +573,22 @@ class ChannelMux {
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
     const connId = transport.getConnId(connection)
-    const sessionState = await this.resumeOrCreateSessionState(ctrl.sessionId, connId)
+    // Verify any claimed `prevSessionId` against the cluster directory — rotation-replay
+    // defense, runs for every reconcile that carries one. The returned record (when non-null)
+    // is reused below to build the upgrade finalizer without a second round-trip.
+    const peerRecord = await this.verifyPreviousSession(ctrl, connId)
+    // On upgrade, build the finalizer that retires the previous wire (drain → fin → drain),
+    // either in-process for a local previous wire or via substrate envelope for a peer's.
+    const finalizeUpgrade = ctrl.upgrade ? this.buildUpgradeFinalizer(ctrl, connId, peerRecord) : null
     state.reconciling = true
     this.resetPingTimer(connection)
-    // Snapshot the previous transport's drain/fin handlers BEFORE we overwrite them with
-    // the new transport's handlers below — `prepareUpgradeFinalizer` reads from sessionState.
-    const finalizeUpgrade = ctrl.upgrade ? this.prepareUpgradeFinalizer(sessionState) : null
     const send: SendFn = (frame, onCommit) => this.send(connection, frame, onCommit)
     const newSessionId = crypto.randomUUID()
 
     // The mux attaches every channel in `ctrl.open` (parallel home-lookups + parallel
     // local replay drains and proxy attach-acks), detaches anything from the previous
     // session that the client did NOT re-include, and returns the open list for ReconciledPayload.
-    sessionState.openList = await this.reconcileSession({
+    const openList = await this.reconcileSession({
       prevSessionId: ctrl.sessionId,
       newSessionId,
       open: ctrl.open,
@@ -537,15 +601,17 @@ class ChannelMux {
       throw new ProtocolViolationError()
     }
 
-    if (ctrl.sessionId) this.sessionStates.delete(ctrl.sessionId)
-    this.sessionStates.set(newSessionId, sessionState)
+    if (ctrl.sessionId) this.sessionFinalizers.delete(ctrl.sessionId)
+    // Register the finalizer for *this* wire so the next reconcile (on this instance or any
+    // peer) can retire it. The closure captures `state.sendChain` and `connection` — even if
+    // the connection later closes, `this.send` no-ops gracefully when its entry is gone.
+    this.sessionFinalizers.set(newSessionId, async () => {
+      const pendingBefore = state.sendChain
+      if (pendingBefore) await pendingBefore
+      const finPending = this.send(connection, encode.fin())
+      if (finPending) await finPending
+    })
     transport.setSessionId(connection, newSessionId)
-    sessionState.drainActiveTransport = async () => {
-      const pending = state.sendChain
-      if (pending) await pending
-    }
-    sessionState.sendFin = () => this.send(connection, encode.fin())
-    sessionState.finalizeUpgrade = finalizeUpgrade
 
     state.reconciling = false
     this.resetPingTimer(connection)
@@ -553,53 +619,59 @@ class ChannelMux {
     // verify the client's claimed `prevSessionId`. The record is keyed by `connId`
     // (stable across sessionId rotations); the write replaces any prior reconcile's record.
     if (connId !== null) this.registerOwnedConnection(connId, newSessionId)
-    return { sessionId: newSessionId }
+    return { sessionId: newSessionId, openList, finalizeUpgrade }
   }
 
-  /** Verify and resume a session that may live on any instance. Local hit returns the
-   *  in-memory `SessionState` (carries this-instance transport closures used by the upgrade
-   *  flow). Local miss + cluster match (Redis records `prevSessionId` as the connection's
-   *  current sessionId) means the session was issued on a different instance — build a
-   *  fresh local `SessionState` (the closures only describe transports on the previous
-   *  instance, all dead by the time we're here). Local miss + cluster mismatch means the
-   *  client is replaying a rotated-out sessionId — throw. No prevSessionId means a fresh
-   *  reconcile, build empty. */
-  private async resumeOrCreateSessionState(
-    prevSessionId: string | undefined,
-    connId: string | null,
-  ): Promise<SessionState> {
-    if (prevSessionId) {
-      const local = this.sessionStates.get(prevSessionId)
-      if (local) return local
-      if (connId !== null) {
-        const clusterRecord = await this.substrate.locateConnection(connId)
-        if (clusterRecord !== null && clusterRecord.sessionId !== prevSessionId) throw new ProtocolViolationError()
-      }
+  /** Verify the client's claimed `prevSessionId` is still current per the cluster directory.
+   *  Throws `ProtocolViolationError` on rotation-replay (claimed sessionId differs from what
+   *  the directory has for this connection's `connId`). Returns the directory record when
+   *  the lookup ran — caller reuses it (e.g. to build a cross-instance follow-up RPC) without
+   *  a second round-trip. Returns `null` when there's nothing to verify: no claimed session,
+   *  the session lives locally (the local map is authoritative), no `connId` to look up by,
+   *  or the directory has no record (connection unpinned, never reconciled, or TTL'd out). */
+  private async verifyPreviousSession(
+    ctrl: ReconcilePayload,
+    transportConnId: string | null,
+  ): Promise<ConnectionRecord | null> {
+    if (!ctrl.sessionId) return null
+    if (this.sessionFinalizers.has(ctrl.sessionId)) return null
+    // Cluster lookup needs a connId. WS sets `prevConnId` when upgrading from SSE; SSE
+    // reconnects fall back to the (transport-stable) current connId.
+    const lookupConnId = ctrl.prevConnId ?? transportConnId
+    if (!lookupConnId) return null
+    const record = await this.substrate.locateConnection(lookupConnId)
+    if (record === null) return null
+    if (record.sessionId !== ctrl.sessionId) throw new ProtocolViolationError()
+    return record
+  }
+
+  /** Build the finalizer that retires the previous wire on `ctrl.upgrade`. Two cases:
+   *
+   *   - **Local previous wire** (`peerRecord === null` because `verifyPreviousSession`
+   *     short-circuited on the local hit): fetch the in-process finalizer from
+   *     `sessionFinalizers` and wrap it for fire-and-forget invocation.
+   *   - **Peer previous wire** (`peerRecord` set + owner ≠ self): synthesize a finalizer
+   *     whose body fires an `UPGRADE_FINALIZE` envelope at the owner. The owner runs *its*
+   *     local finalizer end-to-end (same drain → fin → drain), then silently retires the
+   *     prior session's registry entries (kept ix's drop without lifecycle; dropped ix's
+   *     fire `RECOVERY_FAILED`). */
+  private buildUpgradeFinalizer(
+    ctrl: ReconcilePayload,
+    transportConnId: string | null,
+    peerRecord: ConnectionRecord | null,
+  ): (() => void) | null {
+    if (!ctrl.sessionId) return null
+    if (peerRecord === null) {
+      const local = this.sessionFinalizers.get(ctrl.sessionId)
+      return local ? () => void local() : null
     }
-    return { openList: [], drainActiveTransport: null, sendFin: null, finalizeUpgrade: null }
-  }
-
-  /** Snapshot the previous transport's drain + fin handlers, then return a finalizer the
-   *  caller invokes after the new transport has emitted ReconciledPayload. */
-  private prepareUpgradeFinalizer(sessionState: SessionState): () => void {
-    const drainPreviousTransport = sessionState.drainActiveTransport
-    const sendPreviousFin = sessionState.sendFin
-    sessionState.drainActiveTransport = null
-    sessionState.sendFin = null
-    return () => {
-      void (async () => {
-        if (drainPreviousTransport) await drainPreviousTransport()
-        const finPending = sendPreviousFin?.()
-        if (finPending) await finPending
-      })()
-    }
-  }
-
-  private getSessionStateOrThrow(sessionId: string | undefined): SessionState {
-    if (!sessionId) throw new ProtocolViolationError()
-    const sessionState = this.sessionStates.get(sessionId)
-    if (!sessionState) throw new ProtocolViolationError()
-    return sessionState
+    if (peerRecord.owner === this.substrate.selfInstanceId) return null
+    const owner = peerRecord.owner
+    const prevConnId = ctrl.prevConnId ?? transportConnId
+    if (!prevConnId) return null
+    const prevSessionId = ctrl.sessionId
+    const keptIxes = ctrl.open.map((entry) => entry.ix)
+    return () => this.forwardUpgradeFinalize(owner, prevConnId, prevSessionId, keptIxes)
   }
 
   private getEntry(connection: unknown): ConnectionEntry | undefined {
@@ -974,6 +1046,25 @@ class ChannelMux {
       return // proxy connection has gone away; envelope is stale
     }
     void state.writeFrame(frame as Uint8Array<ArrayBuffer>)
+  }
+
+  /** Re-inject a client→server alias-0 frame on this owner's local connection (forwarded
+   *  here by a non-owner POST receiver). Vacuous for transports without a connId (WS) —
+   *  the lookup map stays empty. */
+  private routeConnectionFrameToServer(connId: string, frame: Uint8Array): void {
+    const connection = this.connectionsByConnId.get(connId)
+    if (connection === undefined) return // owner closed it between forward and arrival
+    void this.onConnectionRawMessage(connection, frame as Uint8Array<ArrayBuffer>)
+  }
+
+  /** Push a server→client frame onto this owner's local SSE wire toward the client
+   *  (forwarded here by a non-owner that received the long-lived stream-request POST and
+   *  needed the ack delivered over the SSE downstream that lives on this instance). */
+  private routeConnectionFrameToClient(connId: string, frame: Uint8Array): void {
+    const connection = this.connectionsByConnId.get(connId)
+    if (connection === undefined) return // owner closed it between forward and arrival
+    const entry = this.connectionStates.get(connection)
+    if (entry) void entry.transport.sendNow(connection, frame as Uint8Array<ArrayBuffer>)
   }
 
   private attachHome(channelId: string, proxyInstance: string, payload: ProxyAttachPayload): void {

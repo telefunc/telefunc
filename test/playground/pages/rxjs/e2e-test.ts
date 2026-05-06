@@ -3,7 +3,7 @@ export { testRxjs }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { waitForHydration, getResult, resetCleanupState, getCleanupState } from '../../e2e-utils'
 
-function testRxjs() {
+function testRxjs(inDocker = false) {
   // ── Observable: server → client ──────────────────────────────────────
 
   test('rxjs: observable — server emits 5 ticks then completes', async () => {
@@ -121,21 +121,26 @@ function testRxjs() {
   })
 
   // ── Shared subject: multicast ────────────────────────────────────────
+  // Skipped in docker: the server-side `Subject` is a plain JS object whose subscriber
+  // list lives in one process. Round-robin puts client A and B on different instances,
+  // so A's `subscribe` and B's `next` operate on different Subject instances. Cross-
+  // instance multicast would require Redis pub/sub bridging the Subject — out of scope.
+  if (!inDocker) {
+    test('rxjs: shared subject — client A sends, client B receives', async () => {
+      await page.goto(`${getServerUrl()}/rxjs`)
+      await waitForHydration()
 
-  test('rxjs: shared subject — client A sends, client B receives', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+      await page.click('#test-shared-subject')
 
-    await page.click('#test-shared-subject')
-
-    await autoRetry(async () => {
-      const result = await getResult('#rxjs-result')
-      // s1 sent 'from-s1' — s2 should have received it
-      expect(result.received2).toContain('from-s1')
-      // s2 sent 'from-s2' — s1 should have received it
-      expect(result.received1).toContain('from-s2')
+      await autoRetry(async () => {
+        const result = await getResult('#rxjs-result')
+        // s1 sent 'from-s1' — s2 should have received it
+        expect(result.received2).toContain('from-s1')
+        // s2 sent 'from-s2' — s1 should have received it
+        expect(result.received1).toContain('from-s2')
+      })
     })
-  })
+  }
 
   // ── Observable: client → server ──────────────────────────────────────
 
@@ -233,20 +238,23 @@ function testRxjs() {
     })
   })
 
-  test('rxjs: shared subject — one client errors, shared Subject dies for all', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+  // Skipped in docker — same shared-Subject cross-instance limitation.
+  if (!inDocker) {
+    test('rxjs: shared subject — one client errors, shared Subject dies for all', async () => {
+      await page.goto(`${getServerUrl()}/rxjs`)
+      await waitForHydration()
 
-    await page.click('#test-shared-error-one')
+      await page.click('#test-shared-error-one')
 
-    await autoRetry(async () => {
-      const result = await getResult('#rxjs-result')
-      // A errored — transparent: kills the shared server Subject
-      expect(result.a_errored).toBe(true)
-      // B should also error — shared Subject is dead
-      expect(result.b_errored).toBe(true)
+      await autoRetry(async () => {
+        const result = await getResult('#rxjs-result')
+        // A errored — transparent: kills the shared server Subject
+        expect(result.a_errored).toBe(true)
+        // B should also error — shared Subject is dead
+        expect(result.b_errored).toBe(true)
+      })
     })
-  })
+  }
 
   // ── Shield data-flow validation ───────────────────────────────────────
   //

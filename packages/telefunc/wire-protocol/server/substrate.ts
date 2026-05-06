@@ -21,6 +21,7 @@ export type {
   ProxyDetachPayload,
   ProxyFramePayload,
   ProxyConnectionFramePayload,
+  ProxyUpgradeFinalizePayload,
   ProxyPayload,
   DetachReason,
   SendFn,
@@ -59,6 +60,13 @@ const ENVELOPE_KIND = {
    *  re-injects on its local connection. The envelope's `channelId` field carries the
    *  connId so the owner can resolve which local connection to dispatch on. */
   CONNECTION_FRAME: 0x05 as const,
+  /** Upgrade requester (new transport's instance) → owner of the previous transport: drain
+   *  the previous wire's send chain, queue a `fin` ctrl, drain again, and silently retire
+   *  the prior session — kept channels are already re-attached on the requester via the
+   *  upgrade reconcile, so the owner must NOT fire detach lifecycle on them. Carries the
+   *  list of ix's the new session kept; everything else is `RECOVERY_FAILED`. The envelope's
+   *  `channelId` field carries the previous connId. */
+  UPGRADE_FINALIZE: 0x06 as const,
 }
 
 const DETACH_REASON = {
@@ -98,10 +106,25 @@ type ProxyAttachAckPayload = { kind: typeof ENVELOPE_KIND.ATTACH_ACK; lastClient
  *    `RECOVERY_FAILED`  → `_onPeerRecoveryFailure` (client dropped the channel) */
 type ProxyDetachPayload = { kind: typeof ENVELOPE_KIND.DETACH; reason: DetachReason }
 
-/** A connection-level client wire frame from a data POST that landed on a non-owner
- *  instance, being forwarded to the owner for re-injection on its local connection.
+/** A connection-level wire frame routed cluster-wide. `direction` selects what the
+ *  receiving owner does with it:
+ *    TO_HOME — non-owner POST receiver forwarded a *client* frame for re-injection on
+ *              the owner's local connection (e.g. alias-0 ping from a data POST).
+ *    TO_PEER — non-owner asks the owner to push a *server* frame onto its local SSE
+ *              wire toward the client (e.g. STREAM_REQUEST_OPEN_ACK from a non-owner
+ *              that received the long-lived stream-request POST).
  *  The envelope's `channelId` field carries the connId for this kind. */
 type ProxyConnectionFramePayload = { kind: typeof ENVELOPE_KIND.CONNECTION_FRAME; frame: Uint8Array }
+
+/** Cross-instance SSE→WS upgrade finalize. The envelope's `channelId` field carries the
+ *  previous connId; the payload carries the previous sessionId (so the owner can locate
+ *  the right `SessionState`) and the ix's the new session kept (so dropped channels still
+ *  fire `RECOVERY_FAILED` on the owner). */
+type ProxyUpgradeFinalizePayload = {
+  kind: typeof ENVELOPE_KIND.UPGRADE_FINALIZE
+  prevSessionId: string
+  keptIxes: readonly number[]
+}
 
 type ProxyPayload =
   | ProxyFramePayload
@@ -109,6 +132,7 @@ type ProxyPayload =
   | ProxyAttachAckPayload
   | ProxyDetachPayload
   | ProxyConnectionFramePayload
+  | ProxyUpgradeFinalizePayload
 
 type ChannelSubstrateHandlers = {
   /** TO_HOME `attach` — proxy is announcing itself for this channel. */
@@ -123,9 +147,18 @@ type ChannelSubstrateHandlers = {
   onPeerDetach?: (env: ProxyEnvelope, payload: ProxyDetachPayload) => void
   /** TO_PEER `attach-ack` — home's response to this peer's `attach`. */
   onAttachAck?: (env: ProxyEnvelope, payload: ProxyAttachAckPayload) => void
-  /** Raw client wire frame from a non-owner POST receiver, to be re-injected on this
-   *  instance's local connection. `env.channelId` is the connId. Direction unused. */
-  onConnectionFrame?: (env: ProxyEnvelope, payload: ProxyConnectionFramePayload) => void
+  /** TO_HOME `connection-frame` — non-owner forwarded a *client* alias-0 frame for this
+   *  owner to re-inject on its local connection (effective direction client→server).
+   *  `env.channelId` is the connId. */
+  onConnectionFrameToServer?: (env: ProxyEnvelope, payload: ProxyConnectionFramePayload) => void
+  /** TO_PEER `connection-frame` — non-owner asks this owner to push a *server* frame onto
+   *  its local SSE wire toward the client (effective direction server→client).
+   *  `env.channelId` is the connId. */
+  onConnectionFrameToClient?: (env: ProxyEnvelope, payload: ProxyConnectionFramePayload) => void
+  /** TO_HOME `upgrade-finalize` — upgrade requester asking this previous-transport owner to
+   *  drain its local wire, send `fin`, and retire the previous session silently for the
+   *  ix's the new session kept. `env.channelId` is the previous connId. */
+  onUpgradeFinalize?: (env: ProxyEnvelope, payload: ProxyUpgradeFinalizePayload) => void
 }
 
 function dispatchEnvelope(handlers: ChannelSubstrateHandlers, env: ProxyEnvelope): void {
@@ -136,12 +169,17 @@ function dispatchEnvelope(handlers: ChannelSubstrateHandlers, env: ProxyEnvelope
     return
   }
   if (p.kind === ENVELOPE_KIND.CONNECTION_FRAME) {
-    handlers.onConnectionFrame?.(env, p)
+    if (env.direction === PROXY_DIRECTION.TO_HOME) handlers.onConnectionFrameToServer?.(env, p)
+    else handlers.onConnectionFrameToClient?.(env, p)
     return
   }
   if (p.kind === ENVELOPE_KIND.DETACH) {
     if (env.direction === PROXY_DIRECTION.TO_HOME) handlers.onDetach?.(env, p)
     else handlers.onPeerDetach?.(env, p)
+    return
+  }
+  if (p.kind === ENVELOPE_KIND.UPGRADE_FINALIZE) {
+    handlers.onUpgradeFinalize?.(env, p)
     return
   }
   if (p.kind === ENVELOPE_KIND.ATTACH) handlers.onAttach?.(env, p)
@@ -265,11 +303,12 @@ class InMemoryChannelSubstrate implements ChannelSubstrate {
 //   [payload]
 //
 // Payload by kind:
-//   ATTACH:      [u32 reconnectTimeout][u32 ix][u32 lastSeq]
-//   ATTACH_ACK:  [u32 lastClientSeq]
-//   DETACH:      [u8 reasonTag]
-//   FRAME:       [bytes…] (length implied by remaining buffer)
+//   ATTACH:           [u32 reconnectTimeout][u32 ix][u32 lastSeq]
+//   ATTACH_ACK:       [u32 lastClientSeq]
+//   DETACH:           [u8 reasonTag]
+//   FRAME:            [bytes…] (length implied by remaining buffer)
 //   CONNECTION_FRAME: [bytes…] (raw wire frame — owner re-injects on local connection)
+//   UPGRADE_FINALIZE: [u32 prevSessionIdLen][prevSessionId UTF-8][u32 keptCount][u32 ix]…
 // ───────────────────────────────────────────────────────────────────────────
 
 function encodeProxyEnvelope(env: ProxyEnvelope): Uint8Array<ArrayBuffer> {
@@ -284,6 +323,13 @@ function encodeProxyEnvelope(env: ProxyEnvelope): Uint8Array<ArrayBuffer> {
     payloadBytes = new Uint8Array([payload.reason])
   } else if (payload.kind === ENVELOPE_KIND.ATTACH_ACK) {
     payloadBytes = encodeU32(payload.lastClientSeq)
+  } else if (payload.kind === ENVELOPE_KIND.UPGRADE_FINALIZE) {
+    const prevSessionId = encodeLengthPrefixedString(payload.prevSessionId)
+    const ixBytes = new Uint8Array(4 + payload.keptIxes.length * 4) as Uint8Array<ArrayBuffer>
+    const view = new DataView(ixBytes.buffer)
+    view.setUint32(0, payload.keptIxes.length, false)
+    for (let i = 0; i < payload.keptIxes.length; i++) view.setUint32(4 + i * 4, payload.keptIxes[i]!, false)
+    payloadBytes = concat(prevSessionId, ixBytes)
   } else {
     payloadBytes = concat(encodeU32(payload.reconnectTimeout), encodeU32(payload.ix), encodeU32(payload.lastSeq))
   }
@@ -298,7 +344,8 @@ function decodeProxyEnvelope(bytes: Uint8Array): ProxyEnvelope {
       kind === ENVELOPE_KIND.ATTACH_ACK ||
       kind === ENVELOPE_KIND.DETACH ||
       kind === ENVELOPE_KIND.FRAME ||
-      kind === ENVELOPE_KIND.CONNECTION_FRAME,
+      kind === ENVELOPE_KIND.CONNECTION_FRAME ||
+      kind === ENVELOPE_KIND.UPGRADE_FINALIZE,
     `Malformed substrate envelope — unknown kind ${kind}`,
   )
   const direction = bytes[1]
@@ -324,6 +371,13 @@ function decodeProxyEnvelope(bytes: Uint8Array): ProxyEnvelope {
     payload = { kind, reason }
   } else if (kind === ENVELOPE_KIND.ATTACH_ACK) {
     payload = { kind, lastClientSeq: decodeU32(view, offset) }
+  } else if (kind === ENVELOPE_KIND.UPGRADE_FINALIZE) {
+    const prevSessionResult = readLengthPrefixedString(bytes, offset)
+    const after = prevSessionResult.offsetAfter
+    const count = decodeU32(view, after)
+    const keptIxes = new Array<number>(count)
+    for (let i = 0; i < count; i++) keptIxes[i] = decodeU32(view, after + 4 + i * 4)
+    payload = { kind, prevSessionId: prevSessionResult.value, keptIxes }
   } else {
     payload = {
       kind,

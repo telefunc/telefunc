@@ -3,9 +3,11 @@ export { Broadcast, ServerBroadcast }
 import type {
   ChannelData,
   ChannelPublishAck,
-  Broadcast,
   BroadcastBinaryListener,
   BroadcastListener,
+  ChannelCloseCallback,
+  ChannelCloseOptions,
+  ChannelCloseResult,
 } from '../channel.js'
 import { makePublishInfo } from '../channel.js'
 import { ServerChannel } from './channel.js'
@@ -309,14 +311,31 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Public constructor — proxies to ServerBroadcast impl, but typed against the
-// public `Broadcast` interface so internal `_method` members stay hidden.
-// ─────────────────────────────────────────────────────────────────────────
+/** Public surface of `Broadcast` — same shape `Channel` uses to hide internal `_methods`
+ *  from autocomplete on user-facing `chat.` etc. The underlying class is `ServerBroadcast`. */
+type Broadcast<T = unknown> = {
+  readonly key: string
+  readonly id: string
+  readonly isClosed: boolean
+  readonly __DEFINE_TELEFUNC_SHIELDS: {
+    data: ChannelData<T>
+    ack: unknown
+  }
+  publish(data: ChannelData<T>): Promise<ChannelPublishAck>
+  subscribe(callback: BroadcastListener<T>): () => void
+  publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
+  subscribeBinary(callback: BroadcastBinaryListener): () => void
+  onClose(callback: ChannelCloseCallback): void
+  onOpen(callback: () => void): void
+  close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
+  abort(): void
+  abort(abortValue: unknown, message?: string): void
+}
 
-const Broadcast = ServerBroadcast as unknown as Pick<
-  typeof ServerBroadcast,
-  'publish' | 'subscribe' | 'publishBinary' | 'subscribeBinary'
-> & {
+const Broadcast = ServerBroadcast as {
   new <T = unknown>(opts: { key: string }): Broadcast<T>
+  publish<U = unknown>(key: string, data: ChannelData<U>): BroadcastPublishResult | Promise<BroadcastPublishResult>
+  subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe
+  publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
+  subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe
 }

@@ -19,6 +19,7 @@ import {
   SSE_RECONCILE_DEADLINE_MS,
   TELEFUNC_SESSION_HEADER,
   WS_PROBE_TIMEOUT_MS,
+  STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   type ChannelTransports,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames, textEncoder } from '../frame.js'
@@ -60,7 +61,7 @@ type BufferedFrame = {
   seq?: number
 }
 
-type OutboundFrameKind = 'reconcile' | 'reconcile-release' | 'control' | 'ack' | 'data' | 'heartbeat'
+type OutboundFrameKind = 'reconcile' | 'control' | 'ack' | 'data' | 'heartbeat'
 
 type OutboundFrame = {
   kind: OutboundFrameKind
@@ -123,6 +124,11 @@ type ClientChannelTransport = {
   readonly sendReconcileOnOpen: boolean
   /** Initial reconcile buffered frames mode for this transport. */
   readonly reconcileMode: ReconcileBufferedFramesMode
+  /** Cluster-stable wire identifier the server can resolve via `locateConnection` to find
+   *  the owning instance. Set on transports that multiplex client→server traffic across
+   *  requests (SSE — needed for cross-instance routing); `null` on transports where every
+   *  frame already lands on the owner (WS). */
+  readonly connId: string | null
   probe(): Promise<(() => void) | null>
   start(): void
   hasActiveTransport(): boolean
@@ -136,7 +142,11 @@ type ClientChannelTransport = {
    *  emits the resulting routing table on the wire. No-op for transports that don't carry a
    *  persistent upstream channel (WS — every frame already lands on the owner). */
   pushReconciledRouting(): void
-  /** Wait until the transport-specific upgrade precondition is met before attempting handoff. */
+  /** Drain everything in flight on this transport before the upgrade orchestrator switches
+   *  to the new one: outbox, in-flight batch POSTs, AND any persistent client→server stream
+   *  (closed body → server returns 200). After this resolves the server has finished
+   *  processing every frame the client ever pushed on this transport — symmetric to the
+   *  server's `TAG.FIN` drain on the downstream. */
   prepareForUpgrade(): Promise<void>
   dispose(): void
 }
@@ -480,9 +490,13 @@ class ClientConnection implements MuxConnection {
     this.connected = true
     this.reconnectAttempt = 0
     this.reconnectStart = 0
-    if (!this.transport.sendReconcileOnOpen) return
-    const reconcileBatch = this.stageReconcileBatch()
-    this.sendReconcileBatch(reconcileBatch)
+    if (this.transport.sendReconcileOnOpen) {
+      const reconcileBatch = this.stageReconcileBatch()
+      this.sendReconcileBatch(reconcileBatch)
+      return
+    }
+    const drained = this.drainBufferedFrames(this.channels, undefined)
+    for (const frame of drained) this.transport.sendFrame(frame)
   }
 
   _onTransportFrame(raw: Uint8Array<ArrayBuffer>): void {
@@ -622,8 +636,6 @@ class ClientConnection implements MuxConnection {
     }
 
     this.upgrade.probeAbort = closeProbe
-    // For SSE this waits until the current outbox and any in-flight flush complete.
-    // It does not block new sends, so sustained traffic can delay upgrade indefinitely.
     await from.prepareForUpgrade()
     if (this.upgrade.probeAbort === closeProbe) this.upgrade.probeAbort = null
     if (!this.upgrade.active) {
@@ -631,15 +643,10 @@ class ClientConnection implements MuxConnection {
       return
     }
 
-    // Everything from here to _onTransportOpen() is synchronous — no await, no
-    // microtask gap. This guarantees that any frame produced after the SSE drain
-    // goes into sendBuffer (held for WS reconcile) rather than leaking into the
-    // abandoned SSE outbox.
+    // Synchronous transport switch.
     this.upgrade.active = false
     this.transport = to
     this.reconcileBufferedFramesMode = to.reconcileMode
-    // Keep SSE alive: server drains it before replaying. SSE is closed in handleReconciled()
-    // once the server has confirmed it switched to WS.
     this.upgrade.handoffTransport = from
     this.upgrade.handoffBuffer = []
     this.handleTransportFrame = this.bufferFrameDuringHandoff
@@ -777,13 +784,20 @@ class ClientConnection implements MuxConnection {
     }
     const reconcile: ReconcilePayload = { open }
     if (this.sessionId) reconcile.sessionId = this.sessionId
-    if (this.upgrade.handoffTransport) reconcile.upgrade = true
+    if (this.upgrade.handoffTransport) {
+      reconcile.upgrade = true
+      // Identify the previous wire so the server can find it even when this reconcile
+      // lands on a different cluster instance than the one holding it. Null when the
+      // previous transport has no cluster-stable id (WS).
+      const handoffConnId = this.upgrade.handoffTransport.connId
+      if (handoffConnId !== null) reconcile.prevConnId = handoffConnId
+    }
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
   drainBufferedFramesForReconcile(): OutboundFrame[] {
     if (this.reconcileBufferedFramesMode !== 'batch-on-reconcile') return []
-    return this.drainBufferedFrames(this.channels, undefined, 'reconcile')
+    return this.drainBufferedFrames(this.channels, undefined)
   }
 
   stageReconcileBatch(): ReconcileBatch {
@@ -839,13 +853,11 @@ class ClientConnection implements MuxConnection {
       }
       const replay = this.replayBuffers.get(ix)
       if (replay)
-        for (const frame of replay.getAfter(serverMap.get(ix)!))
-          releaseFrames.push({ kind: 'reconcile-release', frame })
+        for (const frame of replay.getAfter(serverMap.get(ix)!)) releaseFrames.push({ kind: 'reconcile', frame })
       if (!channel.isClosed) channelsToOpen.push(channel)
     }
 
-    for (const frame of this.drainBufferedFrames(serverMap, this.channels, 'reconcile-release'))
-      releaseFrames.push(frame)
+    for (const frame of this.drainBufferedFrames(serverMap, this.channels)) releaseFrames.push(frame)
 
     if (hasNewChannels) {
       const reconcileBatch = this.stageReconcileBatch()
@@ -932,7 +944,6 @@ class ClientConnection implements MuxConnection {
   private drainBufferedFrames(
     releasableChannels: Set<number> | Map<number, unknown>,
     retainedChannels: Set<number> | Map<number, unknown> | undefined,
-    kind: 'reconcile' | 'reconcile-release',
   ): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.sendBuffer
@@ -951,7 +962,7 @@ class ClientConnection implements MuxConnection {
         const isBinary = tag === TAG.BINARY || tag === TAG.PUBLISH_BINARY || tag === TAG.PUBLISH_BINARY_ACK_REQ
         this.replayBuffers.get(channelIx)?.push(seq, frame, isBinary)
       }
-      frames.push({ kind, frame })
+      frames.push({ kind: 'reconcile', frame })
     }
     sendBuffer.length = writeIx
     return frames
@@ -983,6 +994,7 @@ class WsTransport implements ClientChannelTransport {
   readonly reconnectTimeoutMessage = 'WebSocket reconnect timed out'
   readonly sendReconcileOnOpen = true
   readonly reconcileMode = 'release-after-reconciled' as const
+  readonly connId = null
   private probedWs: WebSocket | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
@@ -1165,10 +1177,16 @@ class SseTransport implements ClientChannelTransport {
     throw new Error('SSE transport does not implement probe()')
   }
 
-  private readonly connId = crypto.randomUUID()
+  readonly connId = crypto.randomUUID()
   private connecting = false
   private startTimer: ReturnType<typeof setTimeout> | null = null
-  private streamAbort: AbortController | null = null
+  /** Abort handle for the active transport's fetches (SSE downstream, streamRequest, batch
+   *  POSTs, heartbeat pings). `null` means "no active transport" — set on `openStream`,
+   *  cleared on any teardown (failOpen / IIFE end / abandon / dispose). Whether we also
+   *  call `.abort()` depends on the path: failOpen and dispose abort to kill in-flight;
+   *  IIFE end and abandon don't (in-flight batch POSTs are allowed to complete on their
+   *  own; abandon's deferred abort is handled via `abandonedControllers`). */
+  private transportAbort: AbortController | null = null
   private abandonedStream: AbortController | null = null
   private readonly abandonedControllers = new WeakSet<AbortController>()
   private outboxFrames: Uint8Array<ArrayBuffer>[] = []
@@ -1185,13 +1203,21 @@ class SseTransport implements ClientChannelTransport {
   // Persistent client→server stream-request POST (half-duplex streaming request body).
   // When available, sendFrame() writes directly here instead of going through the outbox.
   // Falls back to outbox/flush if the browser/protocol doesn't support streaming request.
-  private streamRequest: PushToPullStream<Uint8Array<ArrayBuffer>> | null = null
+  /** Active client→server stream-request POST. `body` is the upstream wire (frames pushed
+   *  here flow on the persistent half-duplex POST); `fetch` resolves when the body ends
+   *  (server returns 200 after EOF) — `prepareForUpgrade` awaits it as the client→server
+   *  directional fin; `metadataPushed` tracks whether the post-reconcile routing table has
+   *  been emitted on the wire (it's pushed only after `RECONCILED` arrives, since
+   *  `ownerInstance` and per-channel `home` aren't known until then). */
+  private streamRequest: {
+    body: PushToPullStream<Uint8Array<ArrayBuffer>>
+    fetch: Promise<unknown>
+    metadataPushed: boolean
+  } | null = null
+  /** Sticky cross-attempt flag — once a stream-request fetch fails (runtime can't stream,
+   *  network drop, abort), all subsequent transport opens skip the streamRequest path and
+   *  flow upstream frames through outbox+batch POSTs. */
   private streamRequestFailed = false
-  /** Metadata is pushed onto the stream-request body once the post-reconcile routing
-   *  table is known. The stream-request POST is opened in parallel with the SSE
-   *  stream-response POST and races reconciled, so at open time we don't yet know
-   *  `ownerInstance` or per-channel `home`. */
-  private streamRequestMetadataPushed = false
   // Routing table populated by `applyReconciledSettings`. The receiver builds aliases
   // straight from `channels[]` (alias N = `channels[N − 1]`); alias 0 routes to `ownerInstance`.
   private ownerInstance = ''
@@ -1205,27 +1231,37 @@ class SseTransport implements ClientChannelTransport {
     private readonly owner: ClientConnection,
   ) {}
 
-  prepareForUpgrade(): Promise<void> {
-    if (!this.flushing && this.outboxFrames.length === 0) return Promise.resolve()
-    return new Promise<void>((resolve) => {
-      this.drainCallbacks.push(resolve)
-    })
+  async prepareForUpgrade(): Promise<void> {
+    // 1. Drain outbox + in-flight batch POST.
+    if (this.flushing || this.outboxFrames.length > 0) {
+      await new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
+    }
+    // 2. Drain the persistent client→server stream-request: close body → server reads EOF
+    //    → returns 200. After this resolves, every frame the client ever pushed has been
+    //    server-acknowledged. Symmetric to the server's `TAG.FIN` drain on the downstream.
+    if (this.streamRequest) {
+      const fetch = this.streamRequest.fetch
+      this.closeStreamRequest()
+      try {
+        await fetch
+      } catch {}
+    }
   }
 
   start(): void {
-    if (this.connecting || this.streamAbort) return
+    if (this.connecting || this.hasActiveTransport()) return
     this.connecting = true
     // Match WS batching behavior: wait one reconcile window so startup code can
     // register channels and queue payload before we build the initial SSE batch.
     this.startTimer = setTimeout(() => {
       this.startTimer = null
-      if (!this.connecting || this.streamAbort) return
+      if (!this.connecting || this.hasActiveTransport()) return
       void this.openStream()
     }, SSE_RECONCILE_DEADLINE_MS)
   }
 
   hasActiveTransport(): boolean {
-    return this.streamAbort !== null
+    return this.transportAbort !== null
   }
 
   isConnecting(): boolean {
@@ -1239,8 +1275,8 @@ class SseTransport implements ClientChannelTransport {
     }
     if (this.streamRequest) {
       const aliased = this.aliasPrepend(frame.frame)
-      this.streamRequest.push(encodeU32(aliased.byteLength))
-      this.streamRequest.push(aliased)
+      this.streamRequest.body.push(encodeU32(aliased.byteLength))
+      this.streamRequest.body.push(aliased)
       return
     }
     const now = Date.now()
@@ -1269,7 +1305,7 @@ class SseTransport implements ClientChannelTransport {
 
   private async openStream(): Promise<void> {
     const abortController = new AbortController()
-    this.streamAbort = abortController
+    this.transportAbort = abortController
     const stage = this.stageInitialBatch()
 
     // Fire stream-response (SSE downstream) + stream-request (client→server upstream)
@@ -1291,53 +1327,103 @@ class SseTransport implements ClientChannelTransport {
       }),
       signal: abortController.signal,
     })
-    const streamRequestPromise = this.streamRequestFailed ? undefined : this.openStreamRequest(abortController.signal)
+    // Fire the stream-request POST. With browser fetch + `duplex:'half'` its response
+    // Promise doesn't resolve until the body ends, and the body never ends — so we don't
+    // await it. The body is wired up to `this.streamRequest` immediately so
+    // `pushReconciledRouting` can write to it as soon as `RECONCILED` arrives via SSE;
+    // that first push is what unblocks the server's `readMetadata()`. The fetch's
+    // rejection (runtime can't stream, network drop, abort) is consumed eagerly by the
+    // `fetchEndedP` IIFE — built up-front so a rejection is always handled even if
+    // `openStream` exits early via the `await ssePromise` catch below. The handshake
+    // race uses `fetchEndedP` to detect a dead wire and fall back to outbox+batch.
+    let fetchEndedP: Promise<'fetch-ended'> | undefined
+    if (!this.streamRequestFailed) {
+      const body = new PushToPullStream<Uint8Array<ArrayBuffer>>()
+      const fetch = this.openStreamRequest(body, abortController.signal)
+      this.streamRequest = { body, fetch, metadataPushed: false }
+      fetchEndedP = (async (): Promise<'fetch-ended'> => {
+        try {
+          await fetch
+        } catch {}
+        return 'fetch-ended'
+      })()
+    }
+
+    const failOpen = (permanent: boolean): void => {
+      this.rollbackInitialBatch(stage)
+      this.closeStreamRequest()
+      abortController.abort()
+      this.transportAbort = null
+      this.connecting = false
+      this.owner._onTransportClosed(this, permanent)
+    }
 
     let response: Response
     try {
-      const results = await Promise.all([ssePromise, streamRequestPromise])
-      response = results[0]
+      response = await ssePromise
     } catch {
-      this.rollbackInitialBatch(stage)
-      this.closeStreamRequest()
-      if (this.streamAbort === abortController) this.streamAbort = null
-      this.connecting = false
-      this.owner._onTransportClosed(this, false)
+      failOpen(false)
       return
     }
 
     if (!response.ok || !response.body) {
-      this.rollbackInitialBatch(stage)
-      this.closeStreamRequest()
-      if (this.streamAbort === abortController) this.streamAbort = null
-      this.connecting = false
-      this.owner._onTransportClosed(this, true)
+      failOpen(true)
       return
     }
 
-    this.connecting = false
-    this.streamAbort = abortController
-    this.owner._onTransportOpen()
-    // By this point this.streamRequest is either set (stream-request POST succeeded)
-    // or null (failed/unsupported). No race — both awaited via Promise.all before
-    // _onTransportOpen fires.
-    if (this.outboxFrames.length > 0) void this.flushOutbox()
-
     const reader = createSseEventStreamReader(response.body.getReader(), abortController)
-    try {
-      while (true) {
-        const entry = await reader.readNextEntry()
-        if (!entry) break
-        if (entry.frame) this.owner._onTransportFrame(entry.frame)
+
+    // Start the SSE event loop. It dispatches frames AND signals `handshakeOk` on
+    // STREAM_REQUEST_OPEN_ACK. We start it before awaiting the handshake so RECONCILED
+    // frames received during the wait are still dispatched (their `pushReconciledRouting`
+    // writes the metadata into the streamRequest body, which is what unblocks the server's
+    // `readMetadata()` and prompts it to emit the ack back).
+    let resolveHandshakeOk!: () => void
+    const handshakeOkP = new Promise<'ok'>((resolve) => {
+      resolveHandshakeOk = () => resolve('ok')
+    })
+    ;(async () => {
+      try {
+        while (true) {
+          const entry = await reader.readNextEntry()
+          if (!entry) break
+          if (!entry.frame) continue
+          // Peek the tag without full decode — STREAM_REQUEST_OPEN_ACK is a bare ConnCtrl
+          // frame with no payload, so we just read the tag byte and short-circuit.
+          if (entry.frame[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
+            resolveHandshakeOk()
+            continue
+          }
+          this.owner._onTransportFrame(entry.frame)
+        }
+      } catch {
+        if (abortController.signal.aborted) return
+      } finally {
+        reader.cancel()
+        this.closeStreamRequest()
+        this.transportAbort = null
+        // Skip notifying transport-closed if this controller was moved to the abandoned
+        // pool by an SSE→WS upgrade — the new (WS) transport has taken over.
+        if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this, false)
       }
-    } catch {
-      if (abortController.signal.aborted) return
-    } finally {
-      reader.cancel()
-      this.closeStreamRequest()
-      if (this.streamAbort === abortController) this.streamAbort = null
-      if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this, false)
+    })()
+
+    // Three-way race for the upstream wire: handshake ack (ok), fetch ended (rejected =
+    // streamRequest is dead), or timeout. Non-`ok` outcomes flip us to outbox+batch.
+    if (fetchEndedP) {
+      const timeoutP = new Promise<'timeout'>((resolve) =>
+        setTimeout(() => resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS),
+      )
+      const result = await Promise.race([handshakeOkP, timeoutP, fetchEndedP])
+      if (result !== 'ok') {
+        this.closeStreamRequest()
+        this.streamRequestFailed = true
+      }
     }
+
+    this.connecting = false
+    this.owner._onTransportOpen()
+    if (this.outboxFrames.length > 0) void this.flushOutbox()
   }
 
   private stageInitialBatch(): SseInitialBatchStage {
@@ -1365,6 +1451,9 @@ class SseTransport implements ClientChannelTransport {
 
   private async flushOutbox(): Promise<void> {
     if (!this.hasActiveTransport() || this.flushing || this.outboxFrames.length === 0) return
+    // The `hasActiveTransport()` guard above proves `transportAbort` is non-null and not
+    // closed, and there's no async hop until the fetch fires.
+    assert(this.transportAbort)
     this.flushScheduler.cancel()
     this.flushing = true
     try {
@@ -1387,7 +1476,7 @@ class SseTransport implements ClientChannelTransport {
             channels: this.channels,
             batch: encodeLengthPrefixedFrames(queuedFrames.map((f) => this.aliasPrepend(f))),
           }),
-          signal: this.streamAbort?.signal,
+          signal: this.transportAbort.signal,
         })
         if (!response.ok) throw new Error('POST failed')
       } catch {
@@ -1422,6 +1511,11 @@ class SseTransport implements ClientChannelTransport {
   }
 
   private async sendConcurrentPost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
+    // Called from a deferred `setTimeout` — the transport may have been torn down in the
+    // meantime. Skip silently rather than firing a fetch on a dead wire (it's a heartbeat
+    // ping; the next reconnect will recover).
+    if (!this.hasActiveTransport()) return
+    assert(this.transportAbort)
     try {
       await this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
         method: 'POST',
@@ -1436,7 +1530,7 @@ class SseTransport implements ClientChannelTransport {
           channels: this.channels,
           batch: encodeLengthPrefixedFrames(frames.map((f) => this.aliasPrepend(f))),
         }),
-        signal: this.streamAbort?.signal,
+        signal: this.transportAbort.signal,
       })
     } catch {
       // Best-effort — if this fails the connection will timeout and reconnect.
@@ -1453,7 +1547,6 @@ class SseTransport implements ClientChannelTransport {
   private getFrameDeadline(kind: OutboundFrameKind, now = Date.now()): number {
     switch (kind) {
       case 'reconcile':
-      case 'reconcile-release':
         return now + SSE_RECONCILE_DEADLINE_MS
       case 'control':
         return now
@@ -1469,9 +1562,9 @@ class SseTransport implements ClientChannelTransport {
   }
 
   abandonActiveTransport(): void {
-    const abortController = this.streamAbort
+    const abortController = this.transportAbort
     if (!abortController) return
-    this.streamAbort = null
+    this.transportAbort = null
     this.streamRequest = null
     this.closeAbandonedTransport()
     this.abandonedStream = abortController
@@ -1508,14 +1601,15 @@ class SseTransport implements ClientChannelTransport {
    *  before the SSE reader starts, so by the time this fires `this.streamRequest` is
    *  reliably set (or stays null if the stream-request POST failed). */
   pushReconciledRouting(): void {
-    if (!this.streamRequest) return
-    if (this.streamRequestMetadataPushed) {
+    const sr = this.streamRequest
+    if (!sr) return
+    if (sr.metadataPushed) {
       const refresh = textEncoder.encode(JSON.stringify(this.channels))
       const entry = new Uint8Array(1 + refresh.byteLength)
       entry[0] = METADATA_REFRESH_ALIAS
       entry.set(refresh, 1)
-      this.streamRequest.push(encodeU32(entry.byteLength))
-      this.streamRequest.push(entry)
+      sr.body.push(encodeU32(entry.byteLength))
+      sr.body.push(entry)
       return
     }
     // `streamRequest: true` tells the server this is a long-lived request body —
@@ -1529,9 +1623,9 @@ class SseTransport implements ClientChannelTransport {
         streamRequest: true,
       }),
     )
-    this.streamRequest.push(encodeU32(meta.byteLength))
-    this.streamRequest.push(meta)
-    this.streamRequestMetadataPushed = true
+    sr.body.push(encodeU32(meta.byteLength))
+    sr.body.push(meta)
+    sr.metadataPushed = true
   }
 
   dispose(): void {
@@ -1544,8 +1638,8 @@ class SseTransport implements ClientChannelTransport {
     this.outboxFrames = []
     this.outboxDeadlines = []
     this.closeStreamRequest()
-    this.streamAbort?.abort()
-    this.streamAbort = null
+    this.transportAbort?.abort()
+    this.transportAbort = null
     this.closeAbandonedTransport()
     const cbs = this.drainCallbacks.splice(0)
     for (const cb of cbs) cb()
@@ -1553,39 +1647,29 @@ class SseTransport implements ClientChannelTransport {
 
   // ── Persistent client→server stream-request POST (half-duplex streaming body) ──
 
-  /** Open a persistent half-duplex POST whose request body streams upstream frames over
-   *  the connection's lifetime. Metadata is pushed by `pushReconciledRouting` once the
-   *  routing table is known. If the browser/runtime doesn't support streaming request
-   *  bodies, sets `streamRequestFailed` and all future frames continue through the
-   *  outbox/flush path. */
-  private async openStreamRequest(signal: AbortSignal): Promise<void> {
-    const body = new PushToPullStream<Uint8Array<ArrayBuffer>>()
-    try {
-      const response = await this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
-          ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
-        },
-        body: body.readable,
-        signal,
-        // @ts-ignore duplex is not yet in TypeScript's RequestInit
-        duplex: 'half',
-      })
-      if (!response.ok) throw new Error('Stream-request POST rejected')
-      this.streamRequest = body
-      this.streamRequestMetadataPushed = false
-    } catch {
-      body.close()
-      this.streamRequestFailed = true
-    }
+  /** Fire the half-duplex stream-request POST. Pure: no shared-state mutation, no error
+   *  handling — caller owns the body and decides what to do with the returned promise.
+   *  Resolves on body-end (closed), rejects on fetch error. With browser fetch +
+   *  `duplex:'half'` it never resolves while the body stays open. */
+  private openStreamRequest(body: PushToPullStream<Uint8Array<ArrayBuffer>>, signal: AbortSignal): Promise<unknown> {
+    return this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
+        ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
+      },
+      body: body.readable,
+      signal,
+      // @ts-ignore duplex is not yet in TypeScript's RequestInit
+      duplex: 'half',
+    })
   }
 
   private closeStreamRequest(): void {
-    this.streamRequest?.close()
+    if (!this.streamRequest) return
+    this.streamRequest.body.close()
     this.streamRequest = null
-    this.streamRequestMetadataPushed = false
   }
 }
 
