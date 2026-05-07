@@ -13,6 +13,7 @@ import type {
   BroadcastBinaryListener,
   BroadcastListener,
 } from '../channel.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -38,7 +39,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel
 {
   /** @see ChannelShield in ../channel.ts — `data` validates C2S; `ack` validates ack of own C2S send. */
-  declare readonly __DEFINE_TELEFUNC_SHIELDS: {
+  declare readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<ClientToServer>
     ack: ChannelAck<ServerToClient>
   }

@@ -485,18 +485,26 @@ class ClientConnection implements MuxConnection {
     this.transport.sendFrame({ kind: 'control', frame })
   }
 
+  /** WS sends the reconcile frame here; SSE already baked it into the stream-response POST
+   *  body via `stageInitialBatch`. The `!reconciling` drain handles the SSE Phase-C window:
+   *  RECONCILED can arrive during `openStream`'s awaits (handshake race), and any frames
+   *  user code queued between then and now sit in `sendBuffer` waiting for `connected=true`.
+   *  If RECONCILED hasn't arrived yet, `reconciling` is still true and `applyReconciled`
+   *  will drain — sending data frames pre-RECONCILED has no `ownerInstance` (SSE) or no
+   *  acked-ix routing (WS). */
   _onTransportOpen(): void {
     if (this.closed) return
     this.connected = true
     this.reconnectAttempt = 0
     this.reconnectStart = 0
     if (this.transport.sendReconcileOnOpen) {
-      const reconcileBatch = this.stageReconcileBatch()
-      this.sendReconcileBatch(reconcileBatch)
+      this.sendReconcileBatch(this.stageReconcileBatch())
       return
     }
-    const drained = this.drainBufferedFrames(this.channels, undefined)
-    for (const frame of drained) this.transport.sendFrame(frame)
+    if (!this.reconciling) {
+      const drained = this.drainBufferedFrames(this.channels, undefined)
+      for (const frame of drained) this.transport.sendFrame(frame)
+    }
   }
 
   _onTransportFrame(raw: Uint8Array<ArrayBuffer>): void {

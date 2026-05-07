@@ -9,6 +9,7 @@ import type {
   ChannelCloseOptions,
   ChannelCloseResult,
 } from '../channel.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { makePublishInfo } from '../channel.js'
 import { ServerChannel } from './channel.js'
 import { getBroadcastAdapter } from './broadcast.js'
@@ -28,10 +29,10 @@ const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 
 class ServerBroadcast<T = unknown> extends ServerChannel {
   readonly [SERVER_BROADCAST_BRAND] = true
-  /** @see __DEFINE_TELEFUNC_SHIELDS on ChannelBase — broadcast only validates incoming
+  /** @see ChannelShield in ../channel.ts — broadcast only validates incoming
    *  publishes from clients (the `data` direction). The `ack` slot is unused: publish
    *  receipts are server-generated, not client-supplied. */
-  declare readonly __DEFINE_TELEFUNC_SHIELDS: {
+  declare readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<T>
     ack: unknown
   }
@@ -317,7 +318,7 @@ type Broadcast<T = unknown> = {
   readonly key: string
   readonly id: string
   readonly isClosed: boolean
-  readonly __DEFINE_TELEFUNC_SHIELDS: {
+  readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<T>
     ack: unknown
   }

@@ -15,6 +15,7 @@ import type {
   ChannelListener,
   ChannelBinaryListener,
 } from '../channel.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -65,7 +66,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 {
   readonly [SERVER_CHANNEL_BRAND] = true
   /** @see ChannelShield in ../channel.ts — `data` validates incoming C2S, `ack` validates ack of own S2C sends. */
-  declare readonly __DEFINE_TELEFUNC_SHIELDS: {
+  declare readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<ClientToServer>
     ack: ChannelAck<ServerToClient>
   }
@@ -128,7 +129,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  to the client in `CtrlReconciled.open[].lastSeq`. */
   /** @internal */ _lastClientSeq = 0
 
-  /** Shield validators keyed by name (see __DEFINE_TELEFUNC_SHIELDS on ChannelBase).
+  /** Shield validators keyed by name (see `ChannelShield` in ../channel.ts).
    *  - `data`: validates incoming client data (_onPeerMessage / _dispatchAckReq)
    *  - `ack`: validates client ack responses (_onPeerAckRes)
    *  Each returns `true` on success or an error string — callers decide the action (drop, throw). */

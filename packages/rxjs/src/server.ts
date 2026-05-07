@@ -6,6 +6,7 @@ import type {
   ServerReplacerContext,
   ServerReviverContext,
 } from 'telefunc'
+import type { TELEFUNC_SHIELDS } from 'telefunc/__internal'
 import { Observable, Subject, config as rxjsConfig } from 'rxjs'
 
 import {
@@ -23,16 +24,16 @@ import {
 } from './shared.js'
 
 /** Module augmentation: declares inbound-data shields for rxjs values.
- *  The generateShield walker descends into `__DEFINE_TELEFUNC_SHIELDS` to emit a `next` validator
+ *  The generateShield walker descends into `[TELEFUNC_SHIELDS]` to emit a `next` validator
  *  that fires on the server side where client-sent `msg.v` arrives (wireSubject / wireProxyObservable).
  *  Type-only — the property is never read at runtime — and server-only, because the shield generator
  *  runs server-side and no client code depends on the marker. */
 declare module 'rxjs' {
   interface Subject<T> {
-    readonly __DEFINE_TELEFUNC_SHIELDS: { next: T }
+    readonly [TELEFUNC_SHIELDS]: { next: T }
   }
   interface Observable<T> {
-    readonly __DEFINE_TELEFUNC_SHIELDS: { next: T }
+    readonly [TELEFUNC_SHIELDS]: { next: T }
   }
 }
 

@@ -258,7 +258,7 @@ function testRxjs(inDocker = false) {
 
   // ── Shield data-flow validation ───────────────────────────────────────
   //
-  // Shield generation walks `__DEFINE_TELEFUNC_SHIELDS` on `Subject<T>` / `Observable<T>`,
+  // Shield generation walks `[TELEFUNC_SHIELDS]` on `Subject<T>` / `Observable<T>`,
   // producing a `next` validator that fires on the server side wherever the wire
   // receives `msg.v` from the client. Invalid values are silently dropped — the
   // server's subscription never sees them.

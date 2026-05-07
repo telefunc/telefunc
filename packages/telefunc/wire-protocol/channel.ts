@@ -18,6 +18,8 @@ export type {
   BroadcastBinaryListener,
 }
 
+import type { TELEFUNC_SHIELDS } from '../node/shared/transformer/generateShield/shield-key.js'
+
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
 type ChannelPublishMeta = Record<string, unknown>
@@ -82,7 +84,7 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
  *  handler in response to a server `send`. The same slot is used on both `Channel`
  *  (server-side instance) and `ClientChannel` (returned from a telefunction). */
 type ChannelShield<ClientToServer, ServerToClient> = {
-  readonly __DEFINE_TELEFUNC_SHIELDS: {
+  readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<ClientToServer>
     ack: ChannelAck<ServerToClient>
   }

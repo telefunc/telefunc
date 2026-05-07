@@ -1,6 +1,3 @@
-// Internal API surface — minimal set consumed by substrate-implementor packages
-// (`@telefunc/redis`, `@telefunc/cloudflare`, …). Not for end users.
-
 export {
   decodeProxyEnvelope,
   DETACH_REASON,
@@ -17,3 +14,5 @@ export type {
   DetachReason,
   ProxyEnvelope,
 } from '../../wire-protocol/server/substrate.js'
+
+export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shield-key.js'

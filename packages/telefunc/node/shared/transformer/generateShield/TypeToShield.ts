@@ -238,6 +238,16 @@ export type TypeToShield<T> = T extends (...args: any) => any
   : // export isn't a function => do nothing
     'NON_FUNCTION_EXPORT'
 
+import type { TELEFUNC_SHIELDS } from './shield-key.js'
+
+/** Pull a named field out of a type's `[TELEFUNC_SHIELDS]` slot. Identity-matches on the
+ *  symbol so unrelated symbol-keyed members can't accidentally satisfy the extraction. */
+export type ShieldField<T, K extends string> = T extends { [TELEFUNC_SHIELDS]: { [P in K]: infer V } } ? V : never
+
+/** Single-property type read once at setup to resolve `[TELEFUNC_SHIELDS]`'s exact escaped
+ *  property name (`__@TELEFUNC_SHIELDS@<id>`, where `<id>` is per-project). */
+export type _TelefuncShieldsKeyProbe = { [TELEFUNC_SHIELDS]: never }
+
 type _test = [
   Expect<Equals<ShieldStr<string>, '__telefunc_t.string'>>,
   Expect<Equals<ShieldStr<number>, '__telefunc_t.number'>>,

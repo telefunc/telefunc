@@ -122,7 +122,7 @@ type ServerReviverContext = {
     cancel: () => void
     abort: (abortError: AbortError) => void
   }
-  /** Shield validators for the value being revived, keyed by the name declared in __DEFINE_TELEFUNC_SHIELDS.
+  /** Shield validators for the value being revived, keyed by the name declared in `[TELEFUNC_SHIELDS]`.
    *  Populated per-value based on the telefunction's argument shield metadata. Revivers pick the names
    *  relevant to their data flow and call them inline at the point where client data enters. */
   validators: ShieldValidators
@@ -140,7 +140,7 @@ type ServerReplacerContext = {
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
   }
-  /** Shield validators for the value being serialized, keyed by the name declared in __DEFINE_TELEFUNC_SHIELDS.
+  /** Shield validators for the value being serialized, keyed by the name declared in `[TELEFUNC_SHIELDS]`.
    *  Replacers pick the names relevant to their data flow. Each returns `true` on success or an error
    *  string — call sites decide the action (throw, drop, ...). */
   validators: ShieldValidators

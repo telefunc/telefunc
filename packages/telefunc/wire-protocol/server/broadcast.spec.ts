@@ -267,7 +267,7 @@ describe('Broadcast disallows channel methods', () => {
 
 // ───────────────────────────────────────────────────────────────────────────
 // Shield — the runtime gate that protects the server from untyped client
-// publishes. The shield is wired via __DEFINE_TELEFUNC_SHIELDS on the type;
+// publishes. The shield is wired via `[TELEFUNC_SHIELDS]` on the type;
 // the runtime check lives in _dispatchPublishAckReq.
 // ───────────────────────────────────────────────────────────────────────────
 
