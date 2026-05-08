@@ -169,6 +169,13 @@ function ensureProjectHasFile(
 
 type ShieldFileInput = { filePath: string; code: string; exportList: ExportList }
 
+// Test-only probe: lets `generateShield.spec.ts` assert that the read
+// phase doesn't trigger TypeScript Program rebuilds (the perf claim).
+// `programReadStart` and `programReadEnd` are the underlying ts.Program
+// references right after the mutation phase and right after the last
+// type read; identity equality means no rebuild happened during reads.
+type ShieldsForFilesProbe = (events: { programReadStart: unknown; programReadEnd: unknown }) => void
+
 // Pure-ish primitive: given a project with the listed files already loaded
 // and an explicit (filePath, code, exportList) for each, generate shield
 // code for every file in one pass that shares a single TypeChecker.
@@ -179,6 +186,7 @@ type ShieldFileInput = { filePath: string; code: string; exportList: ExportList 
 function generateShieldsForFiles(
   project: Project & { tsConfigFilePath: null | string },
   files: ShieldFileInput[],
+  _testProbe?: ShieldsForFilesProbe,
 ): Map<string, string> {
   // Use a unique aggregate filename per call so concurrent invocations on
   // the same project (e.g. parallel per-file fallbacks) don't collide.
@@ -226,6 +234,10 @@ function generateShieldsForFiles(
   project.resolveSourceFileDependencies()
   assert(project.compilerOptions.get().strict === true)
 
+  // Snapshot the underlying ts.Program reference. If reads cause no
+  // mutations, the same reference is observed at the end of the loop.
+  const programReadStart = _testProbe ? project.getProgram().compilerObject : undefined
+
   const planByFilePath = new Map(plans.map((p) => [p.filePath, p]))
   const result = new Map<string, string>()
 
@@ -266,6 +278,11 @@ function generateShieldsForFiles(
     }
     shieldCode += '\n'
     result.set(filePath, shieldCode)
+  }
+
+  if (_testProbe) {
+    const programReadEnd = project.getProgram().compilerObject
+    _testProbe({ programReadStart, programReadEnd })
   }
 
   aggSource.delete()
@@ -343,6 +360,7 @@ async function testGenerateShield(telefuncFileCode: string): Promise<string> {
 // repeated calls don't collide.
 async function testGenerateShieldsForFiles(
   files: { fileName: string; code: string }[],
+  testProbe?: ShieldsForFilesProbe,
 ): Promise<Map<string, string>> {
   const dir = `/test-${getRandomId()}`
   let project: Project & { tsConfigFilePath: null | string } | undefined
@@ -353,7 +371,7 @@ async function testGenerateShieldsForFiles(
     inputs.push({ filePath, code, exportList: await getExportList(code) })
   }
   assert(project)
-  const shields = generateShieldsForFiles(project, inputs)
+  const shields = generateShieldsForFiles(project, inputs, testProbe)
   return new Map(inputs.map(({ filePath }, i) => [files[i]!.fileName, shields.get(filePath)!]))
 }
 
