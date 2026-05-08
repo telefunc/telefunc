@@ -3,6 +3,7 @@ export { logResult }
 
 // For ./generateShield.spec.ts
 export { testGenerateShield }
+export { testGenerateShieldsForFiles }
 
 import { Project, SourceFile, getCompilerOptionsFromTsConfig } from 'ts-morph'
 import { assert, assertUsage, assertWarning } from '../../../../utils/assert.js'
@@ -55,6 +56,13 @@ async function generateShield(
     await getOrStartBatch(tsConfigFilePath)
     const fresh = shieldCache.get(telefuncFilePath)
     if (fresh?.code === telefuncFileCode) return fresh.shield
+    if (process.env.TELEFUNC_SHIELD_DEBUG) {
+      // Common cause: an upstream plugin transformed the file before
+      // telefunc, so the batch's on-disk read doesn't match this code.
+      process.stderr.write(
+        `[telefunc] cache miss after batch: file=${telefuncFilePath} — falling back to per-file\n`,
+      )
+    }
   }
 
   // Per-file fallback: no tsconfig, batch skipped this file (parse
@@ -328,6 +336,25 @@ async function testGenerateShield(telefuncFileCode: string): Promise<string> {
   const shield = shields.get(telefuncFilePath)
   assert(shield !== undefined)
   return shield
+}
+
+// Exercises the multi-file primitive directly. Each input is loaded
+// into the (shared) no-tsconfig project under a unique virtual path so
+// repeated calls don't collide.
+async function testGenerateShieldsForFiles(
+  files: { fileName: string; code: string }[],
+): Promise<Map<string, string>> {
+  const dir = `/test-${getRandomId()}`
+  let project: Project & { tsConfigFilePath: null | string } | undefined
+  const inputs: ShieldFileInput[] = []
+  for (const { fileName, code } of files) {
+    const filePath = path.posix.join(dir, fileName)
+    project = ensureProjectHasFile(filePath, code, '/fake-user-root-dir/', true)
+    inputs.push({ filePath, code, exportList: await getExportList(code) })
+  }
+  assert(project)
+  const shields = generateShieldsForFiles(project, inputs)
+  return new Map(inputs.map(({ filePath }, i) => [files[i]!.fileName, shields.get(filePath)!]))
 }
 
 function getImportPath(importer: string, importedFile: string) {
