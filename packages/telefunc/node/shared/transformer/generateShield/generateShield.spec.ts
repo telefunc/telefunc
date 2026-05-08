@@ -1,5 +1,28 @@
 import { testGenerateShield, testGenerateShieldsForFiles } from './generateShield.js'
+import { Project } from 'ts-morph'
 import { expect, describe, it } from 'vitest'
+
+// Hook ts-morph's Program.compilerObject getter once for the whole
+// file. When `seenPrograms` is non-null, every getter access records
+// the underlying ts.Program reference; this lets us count distinct
+// Program rebuilds during a measured operation. When null, the hook
+// is a transparent passthrough so other tests are unaffected.
+let seenPrograms: Set<unknown> | null = null
+{
+  const tmp = new Project({ compilerOptions: { strict: true, skipLibCheck: true } })
+  const proto = Object.getPrototypeOf(tmp.getProgram())
+  const desc = Object.getOwnPropertyDescriptor(proto, 'compilerObject')
+  if (!desc?.get) throw new Error('expected ts-morph Program.compilerObject getter')
+  const origGet = desc.get
+  Object.defineProperty(proto, 'compilerObject', {
+    ...desc,
+    get(this: unknown) {
+      const value = origGet.call(this)
+      seenPrograms?.add(value)
+      return value
+    },
+  })
+}
 
 describe('generateShield', () => {
   it('generateShield, one telefunction', async () => {
@@ -89,25 +112,29 @@ export enum Attending {
     `)
   })
 
-  it('generateShieldsForFiles, read phase reuses one TypeScript Program', async () => {
-    let probed: { programReadStart: unknown; programReadEnd: unknown } | undefined
-    await testGenerateShieldsForFiles(
-      Array.from({ length: 4 }, (_, i) => ({
-        fileName: `program-id-${i}.telefunc.ts`,
-        code: `export function fn${i}(arg: string, opt: { x?: number }) {}`,
-      })),
-      (events) => {
-        probed = events
-      },
-    )
-    expect(probed).toBeDefined()
-    // Identity equality: the underlying ts.Program reference snapshotted
-    // right after the mutation phase is the same one the read loop
-    // finished with — i.e. no AST mutation invalidated the Program
-    // (and therefore no rebuilt TypeChecker) between files. If a future
-    // change introduced a mid-loop mutation, this would fail.
-    expect(probed!.programReadStart).toBe(probed!.programReadEnd)
-    expect(probed!.programReadStart).toBeDefined()
+  it('generateShieldsForFiles, Program rebuilds do not scale with file count', async () => {
+    const measure = async (n: number, prefix: string) => {
+      seenPrograms = new Set()
+      await testGenerateShieldsForFiles(
+        Array.from({ length: n }, (_, i) => ({
+          fileName: `${prefix}-${i}.telefunc.ts`,
+          code: `export function fn${i}(arg: string, opt: { x?: number }) {}`,
+        })),
+      )
+      const count = seenPrograms!.size
+      seenPrograms = null
+      return count
+    }
+    const small = await measure(2, 'small')
+    const large = await measure(8, 'large')
+    // Working impl: one TypeChecker handles every file in the read
+    // loop, so distinct Program count is constant (1) regardless of N.
+    // A regression to per-file generation would mutate the AST during
+    // reads, invalidating the Program once per file — count would
+    // scale with N (verified by injecting an addTypeAlias mid-loop:
+    // small=3, large=9 with N=2 / N=8). `large <= small` cleanly
+    // distinguishes both regimes.
+    expect(large).toBeLessThanOrEqual(small)
   })
 
   it('edge cases', async () => {
