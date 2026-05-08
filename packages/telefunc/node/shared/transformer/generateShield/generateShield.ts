@@ -31,17 +31,14 @@ const generatedShields: GeneratedShield[] = []
 let resultAlreadyLogged = false
 const projects: Record<string, Project> = {}
 
-// Per-file shield code cache populated by `runBatch`. Keyed by absolute
-// telefunc file path. The cached `code` is the source the shield was
-// generated against; we only return the cache hit when the incoming
-// `telefuncFileCode` still matches it (so HMR-style edits in dev fall
-// back to the per-file path automatically).
+// Cache populated by both the batch path and the per-file fallback.
+// Keyed by absolute module id; `code` is the source the cached shield
+// was generated from, gating staleness so two files with identical
+// source but different import neighborhoods stay separate (different
+// id) and HMR edits regenerate (same id, different code).
 const shieldCache: Map<string, { code: string; shield: string }> = new Map()
 
-// Promise-based dedupe so concurrent transform() calls collapse onto
-// one batch per tsconfig. Vite fires transform handlers in parallel; the
-// first telefunc file we see for a given tsconfig kicks off the batch,
-// every subsequent one awaits the same in-flight promise.
+// One in-flight batch per tsconfig. Concurrent transform() calls collapse onto it.
 const batchPromises: Map<string, Promise<void>> = new Map()
 
 async function generateShield(
@@ -50,42 +47,45 @@ async function generateShield(
   appRootDir: string,
   exportList: ExportList,
 ): Promise<string> {
-  // Fast path: this file was processed in a batch and its content
-  // hasn't changed since.
   const cached = shieldCache.get(telefuncFilePath)
-  if (cached && cached.code === telefuncFileCode) return cached.shield
+  if (cached?.code === telefuncFileCode) return cached.shield
 
-  // Discover the tsconfig that owns this file (same logic the per-file
-  // path would use). If we can resolve one, kick off (or await) a batch
-  // for every telefunc file that tsconfig already loaded into the
-  // project — this lets one TypeChecker handle them all instead of
-  // each file paying the rebuild cost separately. Files that aren't
-  // matched by any tsconfig (virtual / outside the project) skip the
-  // batch and go straight to the per-file path.
   const tsConfigFilePath = findTsConfig(telefuncFilePath, appRootDir)
   if (tsConfigFilePath) {
-    let p = batchPromises.get(tsConfigFilePath)
-    if (!p) {
-      p = runBatchForTsConfig(tsConfigFilePath)
-      batchPromises.set(tsConfigFilePath, p)
-    }
-    await p
-    const c2 = shieldCache.get(telefuncFilePath)
-    if (c2 && c2.code === telefuncFileCode) return c2.shield
+    await getOrStartBatch(tsConfigFilePath)
+    const fresh = shieldCache.get(telefuncFilePath)
+    if (fresh?.code === telefuncFileCode) return fresh.shield
   }
 
-  // Fallback: per-file path. Reached when (a) no tsconfig owns the
-  // file, (b) the batch couldn't include the file (e.g. parse error in
-  // its export list), or (c) the file content changed after the batch
-  // ran (HMR / another plugin's transform output).
+  // Per-file fallback: no tsconfig, batch skipped this file (parse
+  // error in its export list), or content changed after the batch ran.
+  const shieldCode = generateShieldPerFile(telefuncFileCode, telefuncFilePath, appRootDir, exportList)
+  shieldCache.set(telefuncFilePath, { code: telefuncFileCode, shield: shieldCode })
+  return shieldCode
+}
+
+function getOrStartBatch(tsConfigFilePath: string): Promise<void> {
+  let p = batchPromises.get(tsConfigFilePath)
+  if (!p) {
+    p = runBatchForTsConfig(tsConfigFilePath)
+    batchPromises.set(tsConfigFilePath, p)
+  }
+  return p
+}
+
+function generateShieldPerFile(
+  telefuncFileCode: string,
+  telefuncFilePath: string,
+  appRootDir: string,
+  exportList: ExportList,
+): string {
   const { project, shieldGenSource } = getProject(telefuncFilePath, telefuncFileCode, appRootDir)
-  const shieldCode = generateShieldCode({
+  return generateShieldCode({
     project,
     shieldGenSource,
     telefuncFilePath,
     exportList,
   })
-  return shieldCode
 }
 
 function ensureProject(tsConfigFilePath: string | null): Project {
@@ -162,12 +162,8 @@ function getProject(telefuncFilePath: string, telefuncFileCode: string, appRootD
 
   const telefuncFileSource = project.getSourceFile(telefuncFilePath)
   assertTelefuncFilesSource(telefuncFileSource, { project, telefuncFilePath, tsConfigFilePath, appRootDir })
-  // The code written in the file at `telefuncFilePath` isn't always equal
-  // to `telefuncFileCode` (e.g. another plugin may have transformed it
-  // before us). Skip the write when it does match — `replaceWithText`
-  // marks the source file dirty in the ts-morph Project, which forces
-  // TypeScript to re-resolve every consumer's imports and rebuild the
-  // TypeChecker on the next type query.
+  // Skip the write when the in-project text already matches:
+  // `replaceWithText` invalidates the Program and forces a fresh TypeChecker.
   if (telefuncFileSource.getFullText() !== telefuncFileCode) {
     telefuncFileSource.replaceWithText(telefuncFileCode)
   }
@@ -250,44 +246,12 @@ function generateShieldCode({
   return shieldCode
 }
 
-/**
- * Generate shield() code for every `*.telefunc.ts` already loaded into
- * the ts-morph Project for `tsConfigFilePath`, in a single pass that
- * reuses one TypeChecker.
- *
- * Why this exists
- * ---------------
- * The per-file path mutates the Project on every shield call (it adds
- * a fresh `__telefunc_shieldGen_<file>.ts` per call). Each Project
- * mutation invalidates the TypeScript Program, and TypeScript builds a
- * brand-new TypeChecker for each new Program — there is no incremental
- * TypeChecker API. Instrumented timings on a 456-telefunc-file app
- * show ~1.3s per file, every file, with the floor never dropping —
- * each fresh checker has to walk the type graph for `typeof <fn>`
- * from scratch. Projected wall time was ~10 minutes.
- *
- * What this does instead
- * ----------------------
- * Build ONE aggregate `__telefunc_shieldGen_BATCH.ts` containing
- * renaming-aliased imports (`import { foo as foo__<tag> } from '…'`)
- * and uniquely-named type aliases for every export of every telefunc
- * file the project already knows about, then call
- * `getType().getLiteralValue()` for every alias. The first call
- * triggers ONE program build + ONE TypeChecker; subsequent reads make
- * no AST mutations, so the same checker is reused and its internal
- * type cache warms up across files instead of being thrown away.
- *
- * Discovery uses `project.getSourceFiles()` — the ts-morph Project is
- * the authority on which files belong to this tsconfig (its `include`
- * already matched them). No filesystem glob, no `appRootDir` heuristic,
- * and naturally supports per-tsconfig batches in repos that route
- * different telefunc files to different tsconfigs via project
- * references.
- *
- * Files we couldn't include here (not in the project, parse error,
- * etc.) get no cache entry and fall back to the per-file path inside
- * `generateShield`.
- */
+// Generate shields for every telefunc file already loaded by this
+// tsconfig's ts-morph Project, in one pass, sharing one TypeChecker.
+// The per-file path mutates the Project per call, which forces TypeScript
+// to rebuild the TypeChecker each time (~1.3s/file on a 456-file app);
+// batching aliased imports + type aliases into one aggregate source means
+// the checker is built once and warms up across files.
 async function runBatchForTsConfig(tsConfigFilePath: string): Promise<void> {
   const debug = process.env.TELEFUNC_SHIELD_DEBUG
   const _t0 = Date.now()
