@@ -37,6 +37,7 @@ services:
       REDIS_URL: redis://redis:6379
       PORT: 3000
       INSTANCE_ID: A
+      NO_HTTPS: '1'
     depends_on:
       redis:
         condition: service_healthy
@@ -52,6 +53,7 @@ services:
       REDIS_URL: redis://redis:6379
       PORT: 3000
       INSTANCE_ID: B
+      NO_HTTPS: '1'
 
   playground-c:
     <<: *playground
@@ -59,6 +61,7 @@ services:
       REDIS_URL: redis://redis:6379
       PORT: 3000
       INSTANCE_ID: C
+      NO_HTTPS: '1'
 
   proxy:
     image: caddy:2-alpine

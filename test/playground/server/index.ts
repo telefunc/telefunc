@@ -1,3 +1,6 @@
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import * as http2 from 'node:http2'
 import { apply, serve } from '@photonjs/hono'
 import { Hono } from 'hono'
 import IORedis from 'ioredis'
@@ -78,8 +81,28 @@ function startServer() {
     return c.text('Not found', 404)
   })
 
+  // HTTP/2 + TLS when `certs/localhost.{pem,-key.pem}` exists next to the playground root
+  // (resolved from `process.cwd()` — start the server from `test/playground/`). Generate:
+  //   mkcert -install && cd test/playground && mkdir -p certs && cd certs && mkcert localhost
+  // Falls back to plain HTTP/1.1 otherwise. Docker compose sets `NO_HTTPS=1` because Caddy
+  // is the TLS terminator there and the certs are visible via the bind mount.
+  const certDir = path.resolve(process.cwd(), 'certs')
+  const certPath = path.join(certDir, 'localhost.pem')
+  const keyPath = path.join(certDir, 'localhost-key.pem')
+  const httpsAvailable = !process.env.NO_HTTPS && fs.existsSync(certPath) && fs.existsSync(keyPath)
+  const httpsOpts = httpsAvailable
+    ? {
+        createServer: http2.createSecureServer,
+        serverOptions: {
+          cert: fs.readFileSync(certPath),
+          key: fs.readFileSync(keyPath),
+          allowHTTP1: true,
+        },
+      }
+    : {}
   return serve(app, {
-    port: Number(process.env.PORT) || 3000,
+    port: Number(process.env.PORT) || (httpsAvailable ? 8443 : 3000),
+    ...httpsOpts,
     onCreate(server) {
       // @ts-expect-error srvx types not exposed
       tf.installWebSocket(server.node.server)

@@ -5,6 +5,8 @@ import { withContext } from 'telefunc/client'
 import {
   onBenchInfo,
   onBenchChannelEcho,
+  onBenchChannelEchoNoAck,
+  onBenchChannelBinaryEchoNoAck,
   onBenchChannelServerPush,
   onBenchChannelBinaryEcho,
   onBenchChannelBinaryServerPush,
@@ -16,24 +18,36 @@ import {
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
-const COUNT = 1000
+const COUNT = 200
 const SIZES = [
   { label: '64B', bytes: 64 },
-  { label: '1KB', bytes: 1024 },
   { label: '4KB', bytes: 4 * 1024 },
   { label: '16KB', bytes: 16 * 1024 },
+  { label: '64KB', bytes: 64 * 1024 },
 ] as const
-const CONCURRENCY_LEVELS = [1] as const
+const CONCURRENCY_LEVELS = [1, 4, 8] as const
 const MAX_CONCURRENCY = Math.max(...CONCURRENCY_LEVELS)
-const CELL_TIMEOUT_MS = 15_000
+const CELL_TIMEOUT_MS = 5_000
+const TRANSPORTS = [['sse'], ['ws']] as const
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-/** Wrap a telefunc so its returned channels/broadcasts use a per-`runId` `ClientConnection`.
- *  Without this, parallel runs all multiplex over the page's single default WS pipe and we
- *  measure client-side wire saturation instead of server throughput. */
+/** Mutable while `runMatrix` iterates `TRANSPORTS`; `isolated()` reads it to scope
+ *  every channel/broadcast opened during a transport pass to that transport only. */
+let currentTransport: (typeof TRANSPORTS)[number] = TRANSPORTS[0]
+
+/** Wrap a telefunc so its returned channels/broadcasts use a per-`runId` `ClientConnection`
+ *  on the current transport. Without this, parallel runs all multiplex over the page's
+ *  single default WS pipe and we measure client-side wire saturation instead of server
+ *  throughput. The `currentTransport` is baked into the connectionKey so a switch from
+ *  SSE→WS forces a fresh connection rather than reusing the previous transport's pipe. */
 const isolated = <F extends (...args: any[]) => any>(fn: F, runId: number): F =>
-  withContext(fn, { channel: { connectionKey: `bench-run-${runId}` } })
+  withContext(fn, {
+    channel: {
+      transports: [...currentTransport],
+      connectionKey: `bench-${currentTransport.join('-')}-run-${runId}`,
+    },
+  })
 
 const percentile = (sorted: number[], p: number): number =>
   sorted.length === 0 ? 0 : sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))]!
@@ -41,6 +55,34 @@ const percentile = (sorted: number[], p: number): number =>
 function summarize(rtts: number[]): { p50: number; p99: number } {
   const sorted = [...rtts].sort((a, b) => a - b)
   return { p50: percentile(sorted, 0.5), p99: percentile(sorted, 0.99) }
+}
+
+/** Render results as a GitHub-flavored markdown table — paste into a PR description
+ *  or issue comment to share a snapshot. The header line includes the run config
+ *  (server instance, substrate, COUNT, sizes, concurrency, transports) so the table
+ *  is interpretable on its own. */
+function toMarkdown(results: Result[], info: { instanceId: string; hasRedis: boolean } | null): string {
+  const cell = (v: string | number | undefined) => (v === undefined ? '—' : String(v))
+  const header =
+    info === null
+      ? ''
+      : `_Server \`INSTANCE_ID=${info.instanceId}\` · ${info.hasRedis ? 'Redis substrate' : 'in-memory substrate'} · ${COUNT} msgs × [${SIZES.map((s) => s.label).join(', ')}] × conc [${CONCURRENCY_LEVELS.join(', ')}] × transports [${TRANSPORTS.map((t) => t.join('+')).join(', ')}]_\n\n`
+  const rows = [
+    ['Transport', 'Scenario', 'Size', 'Conc', 'msg/s', 'MB/s', 'p50 ms', 'p99 ms', 'Notes'],
+    ['---', '---', '---', '---', '---:', '---:', '---:', '---:', '---'],
+    ...results.map((r) => [
+      r.transport,
+      r.scenario,
+      r.size,
+      r.concurrency,
+      r.msgPerSec.toLocaleString(),
+      r.mbPerSec,
+      cell(r.p50),
+      cell(r.p99),
+      r.notes ?? '',
+    ]),
+  ]
+  return header + rows.map((cols) => `| ${cols.join(' | ')} |`).join('\n') + '\n'
 }
 
 /** Race a Promise against a timeout. On timeout, throws an Error with `name = 'TimeoutError'`. */
@@ -62,8 +104,9 @@ async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise
 
 // ── Result row ─────────────────────────────────────────────────────────────
 
-/** One row per (scenario × size × concurrency) cell, aggregated across all parallel runs. */
+/** One row per (transport × scenario × size × concurrency) cell, aggregated across all parallel runs. */
 type Result = {
+  transport: string
   scenario: string
   size: string
   concurrency: number
@@ -129,6 +172,45 @@ function defineChannelEcho<P, C extends { close: () => Promise<unknown> }>(args:
         rtts.push(performance.now() - sentAt)
       }
       return { instance, totalMs: performance.now() - t0, rtts }
+    },
+    async cleanup({ channel }) {
+      await channel.close()
+    },
+  }
+}
+
+// ── Channel-echo-no-ack factory ────────────────────────────────────────────
+//
+// Page fires `count` sends in a tight loop without per-send ack, then awaits all
+// `count` echoes from the server. Isolates client→server upstream throughput from
+// the per-send ack-RTT pessimization.
+
+type EchoNoAckChannel<P, C> = { channel: C; instance: string; payload: P }
+
+function defineChannelEchoNoAck<P, C extends { close: () => Promise<unknown> }>(args: {
+  name: string
+  open: (runId: number) => Promise<{ channel: C; instance: string }>
+  buildPayload: (bytes: number) => P
+  send: (channel: C, payload: P) => void
+  listen: (channel: C, cb: () => void) => void
+}): Scenario<EchoNoAckChannel<P, C>> {
+  return {
+    name: args.name,
+    async setup(bytes, runId) {
+      const { channel, instance } = await args.open(runId)
+      return { channel, instance, payload: args.buildPayload(bytes) }
+    },
+    async measure({ channel, instance, payload }, { count }) {
+      const done = new Promise<void>((resolve) => {
+        let received = 0
+        args.listen(channel, () => {
+          if (++received === count) resolve()
+        })
+      })
+      const t0 = performance.now()
+      for (let i = 0; i < count; i++) args.send(channel, payload)
+      await done
+      return { instance, totalMs: performance.now() - t0 }
     },
     async cleanup({ channel }) {
       await channel.close()
@@ -330,6 +412,40 @@ const broadcastClient: Scenario<BroadcastClientSetup> = {
 
 // ── Concrete scenarios (factory bindings) ──────────────────────────────────
 
+const channelTextEchoNoAck = defineChannelEchoNoAck({
+  name: 'channel echo (text, no-ack)',
+  open: async (runId) => {
+    const { channel, instance } = await isolated(onBenchChannelEchoNoAck, runId)()
+    return { channel, instance }
+  },
+  buildPayload: (bytes) => 'x'.repeat(bytes),
+  send: (channel, payload) => {
+    void channel.send({ seq: 0, payload })
+  },
+  listen: (channel, cb) => {
+    channel.listen(() => cb())
+  },
+})
+
+const channelBinaryEchoNoAck = defineChannelEchoNoAck({
+  name: 'channel echo (binary, no-ack)',
+  open: async (runId) => {
+    const { channel, instance } = await isolated(onBenchChannelBinaryEchoNoAck, runId)()
+    return { channel, instance }
+  },
+  buildPayload: (bytes) => {
+    const buf = new Uint8Array(bytes)
+    for (let i = 0; i < bytes; i++) buf[i] = i & 0xff
+    return buf
+  },
+  send: (channel, payload) => {
+    void channel.sendBinary(payload)
+  },
+  listen: (channel, cb) => {
+    channel.listenBinary(() => cb())
+  },
+})
+
 const channelTextEcho = defineChannelEcho({
   name: 'channel echo (text, ack)',
   open: async (runId) => {
@@ -410,6 +526,8 @@ function broadcastBinaryServerPush(mode: 'sequential' | 'parallel') {
 }
 
 const SCENARIOS: Array<Scenario<any>> = [
+  channelTextEchoNoAck,
+  channelBinaryEchoNoAck,
   channelTextEcho,
   channelBinaryEcho,
   channelTextServerPush,
@@ -579,8 +697,11 @@ function Bench() {
     const instances = [...new Set(outcomes.map((o) => o.instance).filter((x) => x !== '?'))]
     if (instances.length > 1) noteParts.push(`instances: ${instances.join(',')}`)
 
+    const transport = currentTransport.join('+')
+
     if (outcomes.length === 0) {
       resultsRef.current.push({
+        transport,
         scenario,
         size: sizeLabel,
         concurrency: conc,
@@ -596,6 +717,7 @@ function Bench() {
     const pooled = outcomes.flatMap((o) => o.rtts ?? [])
     const seconds = maxTotalMs / 1000
     const r: Result = {
+      transport,
       scenario,
       size: sizeLabel,
       concurrency: conc,
@@ -614,20 +736,27 @@ function Bench() {
   async function runMatrix() {
     reset()
     const stop = startFlusher()
-    let close: (() => Promise<void>) | null = null
     try {
-      setRunning(`warmup (${MAX_CONCURRENCY} connections × all code paths)`)
-      close = await warmupConnections()
-      for (const conc of CONCURRENCY_LEVELS) {
-        for (const scenario of SCENARIOS) {
-          for (const { label, bytes } of SIZES) {
-            setRunning(`conc ${conc}: ${scenario.name} @ ${label}`)
-            await runCell(scenario, conc, bytes, label)
+      for (const transports of TRANSPORTS) {
+        currentTransport = transports
+        const transportLabel = transports.join('+')
+        let close: (() => Promise<void>) | null = null
+        try {
+          setRunning(`[${transportLabel}] warmup (${MAX_CONCURRENCY} connections × all code paths)`)
+          close = await warmupConnections()
+          for (const conc of CONCURRENCY_LEVELS) {
+            for (const scenario of SCENARIOS) {
+              for (const { label, bytes } of SIZES) {
+                setRunning(`[${transportLabel}] conc ${conc}: ${scenario.name} @ ${label}`)
+                await runCell(scenario, conc, bytes, label)
+              }
+            }
           }
+        } finally {
+          if (close) await close()
         }
       }
     } finally {
-      if (close) await close()
       setRunning(null)
       stop()
     }
@@ -646,8 +775,8 @@ function Bench() {
           {info.hasRedis ? 'Redis substrate' : 'in-memory substrate'}
           {' · '}
           {COUNT} messages × sizes [{SIZES.map((s) => s.label).join(', ')}] · concurrency [
-          {CONCURRENCY_LEVELS.join(', ')}] · {MAX_CONCURRENCY} isolated connections · per-cell timeout{' '}
-          {CELL_TIMEOUT_MS / 1000}s
+          {CONCURRENCY_LEVELS.join(', ')}] · transports [{TRANSPORTS.map((t) => t.join('+')).join(', ')}] ·{' '}
+          {MAX_CONCURRENCY} isolated connections · per-cell timeout {CELL_TIMEOUT_MS / 1000}s
         </div>
       )}
 
@@ -659,6 +788,20 @@ function Bench() {
           className="px-4 py-1.5 text-sm font-medium bg-zinc-900 text-white rounded hover:bg-zinc-800 disabled:opacity-50"
         >
           Run benchmark
+        </button>
+        <button
+          onClick={() => navigator.clipboard.writeText(toMarkdown(results, info))}
+          disabled={running !== null || results.length === 0}
+          className="px-3 py-1.5 text-sm text-zinc-500 hover:text-zinc-900 disabled:opacity-50"
+        >
+          Copy as Markdown
+        </button>
+        <button
+          onClick={() => navigator.clipboard.writeText(JSON.stringify({ info, results }, null, 2))}
+          disabled={running !== null || results.length === 0}
+          className="px-3 py-1.5 text-sm text-zinc-500 hover:text-zinc-900 disabled:opacity-50"
+        >
+          Copy as JSON
         </button>
         <button
           onClick={reset}
@@ -674,6 +817,7 @@ function Bench() {
       <table className="w-full text-xs">
         <thead className="text-left text-zinc-500">
           <tr>
+            <th className="py-2 pr-4">Transport</th>
             <th className="py-2 pr-4">Scenario</th>
             <th className="py-2 pr-4">Size</th>
             <th className="py-2 pr-4">Conc</th>
@@ -687,6 +831,7 @@ function Bench() {
         <tbody>
           {results.map((r, i) => (
             <tr key={i} className="border-t border-zinc-100">
+              <td className="py-2 pr-4 font-mono">{r.transport}</td>
               <td className="py-2 pr-4">{r.scenario}</td>
               <td className="py-2 pr-4">{r.size}</td>
               <td className="py-2 pr-4">{r.concurrency}</td>

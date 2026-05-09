@@ -1,6 +1,8 @@
 export {
   onBenchInfo,
   onBenchChannelEcho,
+  onBenchChannelEchoNoAck,
+  onBenchChannelBinaryEchoNoAck,
   onBenchChannelServerPush,
   onBenchChannelBinaryEcho,
   onBenchChannelBinaryServerPush,
@@ -27,6 +29,27 @@ type EchoAck = { seq: number; recvAt: number; instance: string }
 async function onBenchChannelEcho() {
   const ch = new Channel<(msg: EchoMsg) => EchoAck, never>()
   ch.listen((msg) => ({ seq: msg.seq, recvAt: Date.now(), instance: INSTANCE_ID }))
+  return { channel: ch.client, instance: INSTANCE_ID }
+}
+
+/** Fire-and-forget echo: server `send`s each received message back with no per-send ack.
+ *  Client fires N sends in a tight loop, then awaits all N echoes — exposes pure throughput
+ *  on both legs without the serial ack-RTT pessimization. */
+async function onBenchChannelEchoNoAck() {
+  const ch = new Channel<(msg: EchoMsg) => void, (msg: EchoMsg) => void>()
+  ch.listen((msg) => {
+    void ch.send(msg)
+  })
+  return { channel: ch.client, instance: INSTANCE_ID }
+}
+
+/** Binary fire-and-forget echo — same shape as `onBenchChannelEchoNoAck` but on the
+ *  binary path. Server echoes the same `Uint8Array` back. */
+async function onBenchChannelBinaryEchoNoAck() {
+  const ch = new Channel()
+  ch.listenBinary((msg) => {
+    void ch.sendBinary(msg)
+  })
   return { channel: ch.client, instance: INSTANCE_ID }
 }
 
