@@ -47,7 +47,12 @@ type CallContext = {
  *  - `application/octet-stream` → HTTP binary stream
  *  - `text/event-stream`        → SSE stream
  *  - text                       → plain or channel-pump streaming */
-async function parseResponse(response: Response, callContext: CallContext, sessionToken?: string): Promise<unknown> {
+async function parseResponse(
+  response: Response,
+  callContext: CallContext,
+  sessionToken: string | undefined,
+  connectionKey: string | undefined,
+): Promise<unknown> {
   const transports = callContext.channel.transports
   const contentType = response.headers.get('content-type') ?? ''
   const isStreaming = contentType.includes('application/octet-stream') || contentType.includes('text/event-stream')
@@ -64,12 +69,12 @@ async function parseResponse(response: Response, callContext: CallContext, sessi
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
     const metaText = new TextDecoder().decode(metaBytes)
-    return reviveResponse(metaText, callContext, transports, sessionToken, streamReader)
+    return reviveResponse(metaText, callContext, transports, sessionToken, connectionKey, streamReader)
   }
 
   // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
   const body = await response.text()
-  return reviveResponse(body, callContext, transports, sessionToken, null)
+  return reviveResponse(body, callContext, transports, sessionToken, connectionKey, null)
 }
 
 // ===== Response revival =====
@@ -79,6 +84,7 @@ function reviveResponse(
   callContext: CallContext,
   transports: ChannelTransports,
   sessionToken: string | undefined,
+  connectionKey: string | undefined,
   bodyStreamReader: BaseStreamReader | null,
 ): unknown {
   const { extensionResponseTypes } = callContext
@@ -93,14 +99,14 @@ function reviveResponse(
 
   const context: ClientReviverContext = {
     createChannel(opts) {
-      return new ClientChannel({ channelId: opts.channelId, ack: opts.ack, transports, sessionToken })
+      return new ClientChannel({ channelId: opts.channelId, ack: opts.ack, transports, sessionToken, connectionKey })
     },
     createBroadcast(opts) {
-      return new ClientBroadcast({ channelId: opts.channelId, key: opts.key, transports, sessionToken })
+      return new ClientBroadcast({ channelId: opts.channelId, key: opts.key, transports, sessionToken, connectionKey })
     },
     receiveStreamReader(metadata) {
       if ('channelId' in metadata) {
-        const channel = new ClientChannel({ channelId: metadata.channelId, transports, sessionToken })
+        const channel = new ClientChannel({ channelId: metadata.channelId, transports, sessionToken, connectionKey })
         return ChannelChunkReader.create(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStreamReader call in non-streaming response')
@@ -108,7 +114,7 @@ function reviveResponse(
     },
     receiveStream(metadata) {
       if ('channelId' in metadata) {
-        const channel = new ClientChannel({ channelId: metadata.channelId, transports, sessionToken })
+        const channel = new ClientChannel({ channelId: metadata.channelId, transports, sessionToken, connectionKey })
         return ChannelChunkReader.toReadableStream(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')

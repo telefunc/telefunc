@@ -16,6 +16,8 @@ type StreamCallContext = {
 type ChannelCallContext = {
   /** Channel transports — overrides `config.channel.transports` for this call. */
   transports?: ChannelTransports
+  /** Cache key — calls sharing it share a `ClientConnection`; distinct keys are isolated. */
+  connectionKey?: string
 }
 
 /** Per-call context options for the HTTP transport layer. */

@@ -21,10 +21,15 @@ const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
  * On abort: the abort error propagates through the race (reject, not resolve),
  * so the catch block sees it. On clean close: resolves with `{ done: true }`.
  */
-function pumpClientProducerToChannel(createProducer: () => StreamingProducer, channelTransports: ChannelTransports) {
+function pumpClientProducerToChannel(
+  createProducer: () => StreamingProducer,
+  channelTransports: ChannelTransports,
+  connectionKey?: string,
+) {
   const channel = new ClientChannel({
     channelId: crypto.randomUUID(),
     transports: channelTransports,
+    connectionKey,
   })
 
   const producer = createProducer()

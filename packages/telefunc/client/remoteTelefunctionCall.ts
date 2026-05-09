@@ -45,6 +45,11 @@ function remoteTelefunctionCall(
     })
   }
 
+  const connectionKey = callClientContext?.channel?.connectionKey
+  if (connectionKey) {
+    objectAssign(callContext, { connectionKey })
+  }
+
   if (callClientContext?.headers) {
     objectAssign(callContext, {
       headers: { ...callContext.headers, ...callClientContext.headers },

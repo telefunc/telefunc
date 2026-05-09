@@ -9,6 +9,7 @@ config.stream.transport = (import.meta.env.PUBLIC_ENV__STREAM_TRANSPORT || 'chan
   | 'sse-inline'
   | 'channel'
 config.channel.transports = channelTransports
+// config.channel.transports = ['ws']
 // config.channel.transports = ['sse', 'ws']
 
 function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {

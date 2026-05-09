@@ -20,6 +20,7 @@ const nav = [
   { href: '/kitchen-sink', label: 'Kitchen Sink' },
   { href: '/tanstack-ai-chat', label: 'TanStack AI' },
   { href: '/rxjs', label: 'RxJS' },
+  { href: '/benchmark', label: 'Benchmark' },
 ]
 
 function Layout({ children }: { children: React.ReactNode }) {

@@ -1,9 +1,12 @@
 {
   "scripts": {
     "dev": "fuser -k 24679/tcp 2>/dev/null; rm -rf ./node_modules/.vite && vike dev",
+    "dev:prof": "fuser -k 24679/tcp 2>/dev/null; rm -rf ./node_modules/.vite && mkdir -p profiles && NODE_OPTIONS='--cpu-prof --cpu-prof-dir=./profiles' vike dev",
     "build": "vike build",
     "preview": "vike build && node dist/nested/server/index.mjs",
+    "preview:prof": "vike build && mkdir -p profiles && node --cpu-prof --cpu-prof-dir=./profiles dist/nested/server/index.mjs",
     "preview:cluster": "vike build && docker compose up",
+    "preview:cluster:prof": "vike build && docker compose -f compose.yaml -f compose.prof.yaml up",
     "preview:cluster:down": "docker compose down",
     "test:docker": "vike build && docker compose down --remove-orphans && docker compose up --force-recreate 2>&1"
   },

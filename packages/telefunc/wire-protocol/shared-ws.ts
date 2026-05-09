@@ -4,6 +4,7 @@ export {
   encode,
   decode,
   isChannelCtrlTag,
+  isChannelDataFrame,
   isConnCtrlTag,
   encodePublishText,
   decodePublishText,
@@ -18,6 +19,7 @@ export type {
   ChannelDataFrame,
   ReconcilePayload,
   ReconciledPayload,
+  ServerCtrlTag,
   WirePublishInfo,
 }
 
@@ -103,6 +105,10 @@ function isConnCtrlTag(tag: number): boolean {
 
 function isChannelCtrlTag(tag: number): boolean {
   return tag >= CHANNEL_CTRL_TAG_MIN
+}
+
+function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
+  return frame.tag >= DATA_TAG_MIN && frame.tag < CHANNEL_CTRL_TAG_MIN
 }
 
 // ===== Reconcile payloads (JSON-encoded after the header) =====
@@ -196,6 +202,16 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
+
+/** Ctrl frame tags the client receives from the server. */
+type ServerCtrlTag =
+  | typeof TAG.CLOSE
+  | typeof TAG.CLOSE_ACK
+  | typeof TAG.ABORT
+  | typeof TAG.ERROR
+  | typeof TAG.WINDOW
+  | typeof TAG.FIN
+  | typeof TAG.RECONCILED
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 

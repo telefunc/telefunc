@@ -69,6 +69,7 @@ type ConnectionState = {
   terminatePermanently: boolean | null
   reconciling: boolean
   sendChain: Promise<void> | null
+  recvChain: Promise<unknown> | null
 }
 
 /** Per-connection runtime state plus a back-reference to the transport-specific hooks
@@ -425,7 +426,7 @@ class ChannelMux {
    *  reach back through the stored hooks for `sendNow`/`terminateConnection`/etc. */
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
     this.connectionStates.set(connection, {
-      state: { pingTimer: null, terminatePermanently: null, reconciling: false, sendChain: null },
+      state: { pingTimer: null, terminatePermanently: null, reconciling: false, sendChain: null, recvChain: null },
       transport: transport as ServerTransport<unknown>,
     })
     const connId = transport.getConnId(connection)
@@ -434,37 +435,43 @@ class ChannelMux {
   }
 
   async onConnectionRawMessage(connection: unknown, rawFrame: Uint8Array<ArrayBuffer>): Promise<void> {
-    const entry = this.getEntry(connection)
-    if (!entry) return
-    try {
-      const pending = this.handleFrame(entry, connection, rawFrame)
-      if (!pending) return
-      // If the frame was a `reconcile`, `handleFrame` resolves with a `ReconcileOutcome` —
-      // emit `reconciled` immediately. SSE takes the deferred path and emits later (after
-      // draining concurrent data POSTs); see `onConnectionRawMessageDeferredReconciled`.
-      const outcome = await pending
-      if (outcome) this.sendReconciled(connection, outcome)
-    } catch {
-      entry.state.terminatePermanently = true
-      entry.transport.terminateConnection(connection)
-    }
+    const outcome = await this.dispatchInbound(connection, rawFrame)
+    if (outcome) this.sendReconciled(connection, outcome)
   }
 
-  async onConnectionRawMessageDeferredReconciled(
+  onConnectionRawMessageDeferredReconciled(
     connection: unknown,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): Promise<ReconcileOutcome | null> {
+    return this.dispatchInbound(connection, rawFrame)
+  }
+
+  /** PING bypasses the chain — serialising it would tie liveness to the slowest awaitable on the connection. */
+  private dispatchInbound(connection: unknown, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.getEntry(connection)
-    if (!entry) return null
-    try {
-      const pending = this.handleFrame(entry, connection, rawFrame)
-      if (!pending) return null
-      return (await pending) ?? null
-    } catch {
-      entry.state.terminatePermanently = true
-      entry.transport.terminateConnection(connection)
-      return null
+    if (!entry) return Promise.resolve(null)
+    const exec = async (): Promise<ReconcileOutcome | null> => {
+      try {
+        const pending = this.handleFrame(entry, connection, rawFrame)
+        if (!pending) return null
+        return (await pending) ?? null
+      } catch {
+        entry.state.terminatePermanently = true
+        entry.transport.terminateConnection(connection)
+        return null
+      }
     }
+    if (rawFrame[0] === TAG.PING) return exec()
+    return this.chainRecv(entry, exec)
+  }
+
+  private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {
+    const prev = entry.state.recvChain ?? Promise.resolve()
+    const next = prev.then(fn, fn).finally(() => {
+      if (entry.state.recvChain === next) entry.state.recvChain = null
+    })
+    entry.state.recvChain = next
+    return next
   }
 
   onConnectionClosed(connection: unknown, isPermanent: boolean): void {

@@ -79,6 +79,14 @@ export const WS_PROBE_TIMEOUT_MS = 3_000
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
+/** How long phase 1 of the upgrade drain waits for natural SSE outbox drain before
+ *  phase 2 gates the producer and forces the cutover. */
+export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
+
+/** How long the client waits for RECONCILED on the new wire after FIN arrives on the old
+ *  wire (cross-wire reordering can deliver FIN first) before aborting the upgrade. */
+export const UPGRADE_FIN_RECONCILED_TIMEOUT_MS = 2_000
+
 // ===== Multiplexed SSE transport =====
 
 /** Default shorter flush delay for the first SSE batch POST after an idle period. */

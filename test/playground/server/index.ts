@@ -15,6 +15,13 @@ if (process.env.REDIS_URL) {
   console.log(`[INST=${INST}] Redis substrate installed`)
 }
 
+// Translate Ctrl-C / docker-stop into a clean `process.exit(0)`. Without this, Node's
+// default SIGINT/SIGTERM handlers tear the process down without flushing the V8 CPU
+// profile written by `--cpu-prof`, leaving `profiles/` empty.
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => process.exit(0))
+}
+
 const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
 
 const tf = telefunc()

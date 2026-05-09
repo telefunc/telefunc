@@ -6,6 +6,7 @@ import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCal
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { assert } from '../../utils/assert.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
+import { base64urlToUint8Array } from '../base64url.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
@@ -14,41 +15,27 @@ import {
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
+  CHANNEL_TRANSPORT,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   SSE_RECONCILE_DEADLINE_MS,
-  TELEFUNC_SESSION_HEADER,
-  WS_PROBE_TIMEOUT_MS,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
+  TELEFUNC_SESSION_HEADER,
+  UPGRADE_FIN_RECONCILED_TIMEOUT_MS,
+  UPGRADE_DRAIN_TIMEOUT_MS,
+  WS_PROBE_TIMEOUT_MS,
+  type ChannelTransport,
   type ChannelTransports,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames, textEncoder } from '../frame.js'
+import { PushToPullStream } from '../push-to-pull-stream.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
-import { ClientBroadcast } from './channel.js'
+import { ACK_STATUS, TAG, decode, encode, isChannelDataFrame } from '../shared-ws.js'
+import type { AckResultStatus, DecodedFrame, ReconcilePayload, ReconciledPayload, ServerCtrlTag } from '../shared-ws.js'
 import { encodeSseRequest, METADATA_REFRESH_ALIAS, type SseRouteChannel } from '../sse-request.js'
-import { ACK_STATUS, TAG, decode, encode } from '../shared-ws.js'
-import type {
-  AckResultStatus,
-  DecodedFrame,
-  ReconcilePayload,
-  ReconciledPayload,
-  WirePublishInfo,
-} from '../shared-ws.js'
-
-type ServerCtrlTag =
-  | typeof TAG.PONG
-  | typeof TAG.CLOSE
-  | typeof TAG.CLOSE_ACK
-  | typeof TAG.ABORT
-  | typeof TAG.ERROR
-  | typeof TAG.WINDOW
-  | typeof TAG.FIN
-  | typeof TAG.RECONCILED
-import { base64urlToUint8Array } from '../base64url.js'
+import { ClientBroadcast } from './channel.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
-import { CHANNEL_TRANSPORT, type ChannelTransport } from '../constants.js'
-import { PushToPullStream } from '../push-to-pull-stream.js'
 
 type PendingAck = {
   resolve: (result: unknown) => void
@@ -59,6 +46,52 @@ type BufferedFrame = {
   frame: Uint8Array<ArrayBuffer>
   channelIx: number
   seq?: number
+}
+
+/** Probe wire returned by `WsTransport.probe`. Liveness is the consumer's responsibility
+ *  until the swap commits — typically driven via a transient Heartbeat. */
+type ProbeWire = {
+  ping: () => void
+  onPong: (cb: () => void) => void
+  onClose: (cb: () => void) => void
+  close: () => void
+}
+
+/** Ping-then-pong-deadline loop. Each transport owns one for its wire; the upgrade probe
+ *  flow constructs a transient instance for the probed wire until the swap commits. */
+class Heartbeat {
+  private pingTimer: ReturnType<typeof setInterval> | null = null
+  private pongTimer: ReturnType<typeof setTimeout> | null = null
+
+  constructor(
+    private readonly intervalMs: number,
+    private readonly pongTimeoutMs: number,
+    private readonly send: () => void,
+    private readonly onDead: () => void,
+  ) {}
+
+  start(): void {
+    if (this.pingTimer) return
+    this.send()
+    this.resetPong()
+    this.pingTimer = setInterval(this.send, this.intervalMs)
+  }
+
+  resetPong(): void {
+    if (this.pongTimer) clearTimeout(this.pongTimer)
+    this.pongTimer = setTimeout(this.onDead, this.pongTimeoutMs)
+  }
+
+  stop(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer)
+      this.pingTimer = null
+    }
+    if (this.pongTimer) {
+      clearTimeout(this.pongTimer)
+      this.pongTimer = null
+    }
+  }
 }
 
 type OutboundFrameKind = 'reconcile' | 'control' | 'ack' | 'data' | 'heartbeat'
@@ -115,62 +148,94 @@ type ReconcileBufferedFramesMode = 'batch-on-reconcile' | 'release-after-reconci
 type ClientConnectionOptions = {
   transports: ChannelTransports
   fetchImpl: typeof fetch
+  /** Server-issued sticky-routing token (e.g. Cloudflare DO pinning). Sent as URL param + header. */
   sessionToken?: string
+  /** Client-side cache-key extension — distinct values get distinct `ClientConnection` instances. Never sent on the wire. */
+  connectionKey?: string
 }
 
 type ClientChannelTransport = {
   readonly type: ChannelTransport
   readonly reconnectTimeoutMessage: string
   readonly sendReconcileOnOpen: boolean
-  /** Initial reconcile buffered frames mode for this transport. */
   readonly reconcileMode: ReconcileBufferedFramesMode
-  /** Cluster-stable wire identifier the server can resolve via `locateConnection` to find
-   *  the owning instance. Set on transports that multiplex client→server traffic across
-   *  requests (SSE — needed for cross-instance routing); `null` on transports where every
-   *  frame already lands on the owner (WS). */
+  /** Cluster-stable wire id used by the server to route cross-instance — set on SSE, `null` on WS. */
   readonly connId: string | null
-  probe(): Promise<(() => void) | null>
+  probe(): Promise<ProbeWire | null>
   start(): void
-  hasActiveTransport(): boolean
+  hasWire(): boolean
   isConnecting(): boolean
+  /** Send a connection-level ping on this wire. Heartbeat's send callback calls this. */
+  sendPing(): void
   sendFrame(frame: OutboundFrame): void
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
-  /** Push any post-reconcile routing metadata onto the transport's persistent client→server
-   *  stream. Sibling of `applyReconciledSettings`: settings update internal state, this one
-   *  emits the resulting routing table on the wire. No-op for transports that don't carry a
-   *  persistent upstream channel (WS — every frame already lands on the owner). */
+  /** Emit post-reconcile routing on the persistent upstream stream. No-op on WS. */
   pushReconciledRouting(): void
-  /** Drain everything in flight on this transport before the upgrade orchestrator switches
-   *  to the new one: outbox, in-flight batch POSTs, AND any persistent client→server stream
-   *  (closed body → server returns 200). After this resolves the server has finished
-   *  processing every frame the client ever pushed on this transport — symmetric to the
-   *  server's `TAG.FIN` drain on the downstream. */
-  prepareForUpgrade(): Promise<void>
+  /** Phase 1 of upgrade drain — gate still down, user sends keep flowing. Returns when the
+   *  wire is naturally empty or `timeoutMs` elapses, whichever comes first. */
+  gracefulDrain(timeoutMs: number): Promise<void>
+  /** Phase 2 of upgrade drain — caller has gated user sends. After this resolves, every
+   *  frame the client pushed on this transport has been server-acknowledged. */
+  forceDrain(): Promise<void>
+  /** Connection constructs the Heartbeat (with the funnel-bound onDead) and hands it over.
+   *  Transport's frame receive path routes PONG to it directly (`heartbeat?.resetPong()`). */
+  attachHeartbeat(hb: Heartbeat): void
+  detachHeartbeat(): void
+  hasHeartbeat(): boolean
   dispose(): void
 }
 
+type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number }
+
 type SseInitialBatchStage = {
   initialFrames: OutboundFrame[]
-  movedOutboxFrames: Uint8Array<ArrayBuffer>[]
-  movedOutboxDeadlines: number[]
+  movedOutbox: OutboxEntry[]
   movedBufferedFrames: OutboundFrame[]
 }
 
-type UpgradeState = {
-  active: boolean
-  disabled: boolean
-  probeAbort: (() => void) | null
-  handoffTransport: ClientChannelTransport | null
-  handoffBuffer: Uint8Array<ArrayBuffer>[] | null
+type ConnectionState =
+  | { tag: 'fresh' }
+  | { tag: 'open'; upgrade: UpgradeState }
+  | {
+      tag: 'reconnecting'
+      attempt: number
+      startedAt: number
+      timer: ReturnType<typeof setTimeout>
+    }
+  | { tag: 'closed' }
+
+type UpgradeState =
+  | { tag: 'none' }
+  | { tag: 'probing'; attempt: AbortController }
+  | { tag: 'draining'; attempt: AbortController }
+  | {
+      tag: 'handoff'
+      from: ClientChannelTransport
+      buffer: DecodedFrame[]
+      finReceived: boolean
+      finTimer: ReturnType<typeof setTimeout> | null
+    }
+
+/** Per-channel lifecycle. `releasing` = unregistered before the server confirmed —
+ *  entry stays so the upcoming RECONCILE carries the ix and buffered ABORT/CLOSE flow alongside. */
+type ChannelState =
+  | { tag: 'pending'; initial: boolean }
+  | { tag: 'open' }
+  | { tag: 'releasing'; initial: boolean; err: Error }
+
+type ChannelEntry = {
+  channel: MuxChannel
+  state: ChannelState
 }
 
 class ClientConnection implements MuxConnection {
   private static cache = new Map<string, ClientConnection>()
 
   static getOrCreate(telefuncUrl: string, channel: MuxChannel, options: ClientConnectionOptions): ClientConnection {
-    const key = `${options.transports.join(',')}:${telefuncUrl}`
+    // `connectionKey` opts callers out of the shared connection without the server seeing it.
+    const key = `${options.transports.join(',')}:${telefuncUrl}|${options.connectionKey ?? ''}`
     let connection = ClientConnection.cache.get(key)
     if (!connection || connection.closed) {
       connection = new ClientConnection(telefuncUrl, options, key)
@@ -183,126 +248,194 @@ class ClientConnection implements MuxConnection {
   private readonly cacheKey: string
   private readonly telefuncUrl: string
   private readonly connectionOptions: ClientConnectionOptions
-  private reconcileBufferedFramesMode: ReconcileBufferedFramesMode
   private transport: ClientChannelTransport
 
-  private closed = false
-  private connected = false
-  private pingInterval: ReturnType<typeof setInterval> | null = null
-  private pongTimer: ReturnType<typeof setTimeout> | null = null
+  private state: ConnectionState = { tag: 'fresh' }
+  /** Sticky after a permanent upgrade abort — survives every state transition until dispose. */
+  private upgradeDisabled = false
+  /** RECONCILE sent, awaiting RECONCILED. SSE sets it true during connecting since the
+   *  initial reconcile is baked into the openStream POST body. */
+  private reconciling = false
   private ttl: ReturnType<typeof setTimeout> | null = null
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  private reconnectAttempt = 0
-  private reconnectStart = 0
-  private readonly upgrade: UpgradeState = {
-    active: false,
-    disabled: false,
-    probeAbort: null,
-    handoffTransport: null,
-    handoffBuffer: null,
+
+  private get closed(): boolean {
+    return this.state.tag === 'closed'
+  }
+  private get connected(): boolean {
+    return this.state.tag === 'open'
+  }
+  private get inDrain(): boolean {
+    return this.state.tag === 'open' && this.state.upgrade.tag === 'draining'
   }
 
-  // Protocol state
   private sessionId: string | null = null
   private nextIndex = 0
-  private reconciling = false
   private reconcileIxes = new Set<number>()
-  private channels = new Map<number, MuxChannel>()
+  private channels = new Map<number, ChannelEntry>()
   private channelIndex = new Map<MuxChannel, number>()
-  /** Ixs that have not yet been confirmed by a `ReconciledPayload`. They're flagged
-   *  `initial: true` in the next `reconcile` so the server waits up to `connectTtl` for
-   *  late-creation. Cleared once the server confirms the ix in a `reconciled.open`. */
-  private initialPendingIxes = new Set<number>()
   private sendBuffer: BufferedFrame[] = []
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
   private pendingAcks = new Map<string, PendingAck>()
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs = CHANNEL_IDLE_TIMEOUT_MS
+  private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
   private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
-  private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
-  private pongTimeoutMs = CHANNEL_PING_INTERVAL_MS * 2
-  private readonly dispatchFrame = (_raw: Uint8Array<ArrayBuffer>, frame: DecodedFrame): void => {
-    switch (frame.tag) {
-      case TAG.PONG:
-      case TAG.CLOSE:
-      case TAG.CLOSE_ACK:
-      case TAG.ABORT:
-      case TAG.ERROR:
-      case TAG.WINDOW:
-      case TAG.FIN:
-      case TAG.RECONCILED:
-        this.handleCtrl(frame)
-        return
-      case TAG.PING:
-      case TAG.RECONCILE:
-        // Server→client only; client never receives these.
-        return
-      case TAG.TEXT:
-      case TAG.PUBLISH:
-      case TAG.PUBLISH_ACK_REQ:
-      case TAG.TEXT_ACK_REQ:
-      case TAG.BINARY:
-      case TAG.PUBLISH_BINARY:
-      case TAG.PUBLISH_BINARY_ACK_REQ:
-        this.handleDataFrame(frame)
-        return
-      case TAG.ACK_RES:
-        this.handleAckRes(frame.index, frame.ackedSeq, frame.text, frame.status)
-    }
-  }
-  private readonly bufferFrameDuringHandoff = (raw: Uint8Array<ArrayBuffer>, frame: DecodedFrame): void => {
-    if (frame.tag === TAG.FIN) {
-      this.handleHandoffFin()
-      return
-    }
-    if (frame.tag === TAG.RECONCILED) {
-      this.handleReconciled(frame.payload)
-      return
-    }
-    const { handoffBuffer } = this.upgrade
-    assert(handoffBuffer)
-    handoffBuffer.push(raw)
-  }
-  private handleTransportFrame = this.dispatchFrame
-
   private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
     this.cacheKey = cacheKey
     this.telefuncUrl = telefuncUrl
     this.connectionOptions = options
     this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
-    this.reconcileBufferedFramesMode = this.transport.reconcileMode
+  }
+
+  // ── State transitions: every `this.state =` write goes through these. ──
+
+  private enterOpen(): void {
+    if (this.state.tag === 'open') return
+    this.state = { tag: 'open', upgrade: { tag: 'none' } }
+  }
+
+  /** Owns the reconnect timer's lifecycle so callers can't forget to cancel a prior one. */
+  private enterReconnecting(attempt: number, startedAt: number, delay: number): void {
+    if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
+    const timer = setTimeout(() => this.transport.start(), delay)
+    this.state = { tag: 'reconnecting', attempt, startedAt, timer }
+  }
+
+  private enterClosed(): void {
+    this.state = { tag: 'closed' }
+  }
+
+  private enterUpgradeProbing(attempt: AbortController): void {
+    assert(this.state.tag === 'open' && this.state.upgrade.tag === 'none')
+    this.state = { tag: 'open', upgrade: { tag: 'probing', attempt } }
+  }
+
+  private enterUpgradeDraining(attempt: AbortController): void {
+    assert(this.state.tag === 'open' && this.state.upgrade.tag === 'probing' && this.state.upgrade.attempt === attempt)
+    this.state = { tag: 'open', upgrade: { tag: 'draining', attempt } }
+  }
+
+  private enterUpgradeHandoff(from: ClientChannelTransport): void {
+    assert(this.state.tag === 'open' && this.state.upgrade.tag === 'draining')
+    this.state = {
+      tag: 'open',
+      upgrade: { tag: 'handoff', from, buffer: [], finReceived: false, finTimer: null },
+    }
+  }
+
+  /** Idempotent: no-op if `attempt` is already cleared, replaced, or committed to handoff. */
+  private exitUpgradeAttempt(attempt: AbortController): void {
+    if (this.state.tag !== 'open') return
+    const u = this.state.upgrade
+    if (u.tag !== 'probing' && u.tag !== 'draining') return
+    if (u.attempt !== attempt) return
+    this.state = { tag: 'open', upgrade: { tag: 'none' } }
+  }
+
+  private exitUpgradeHandoff(): {
+    from: ClientChannelTransport
+    buffer: DecodedFrame[]
+    finTimer: ReturnType<typeof setTimeout> | null
+  } {
+    assert(this.state.tag === 'open' && this.state.upgrade.tag === 'handoff')
+    const { from, buffer, finTimer } = this.state.upgrade
+    this.state = { tag: 'open', upgrade: { tag: 'none' } }
+    return { from, buffer, finTimer }
   }
 
   private canSendImmediately(): boolean {
-    return this.connected && this.transport.hasActiveTransport() && !this.reconciling
+    return this.connected && !this.reconciling && !this.inDrain && this.registerReconcileTimer === null
+  }
+
+  // ── Per-channel state transitions: every `entry.state =` write goes through these. ──
+
+  private enterChannelPending(ix: number, channel: MuxChannel, initial: boolean): void {
+    this.channels.set(ix, { channel, state: { tag: 'pending', initial } })
+    this.channelIndex.set(channel, ix)
+  }
+
+  private enterChannelOpen(ix: number): void {
+    const entry = this.channels.get(ix)
+    assert(entry && entry.state.tag === 'pending')
+    entry.state = { tag: 'open' }
+  }
+
+  private enterChannelReleasing(ix: number, err: Error): void {
+    const entry = this.channels.get(ix)
+    assert(entry && entry.state.tag === 'pending')
+    entry.state = { tag: 'releasing', initial: entry.state.initial, err }
   }
 
   private register(channel: MuxChannel): void {
-    this.clearTimer('ttl')
+    if (this.ttl) {
+      clearTimeout(this.ttl)
+      this.ttl = null
+    }
     const ix = this.nextIndex++
-    this.channels.set(ix, channel)
-    this.channelIndex.set(channel, ix)
-    this.initialPendingIxes.add(ix)
+    this.enterChannelPending(ix, channel, true)
     this.replayBuffers.set(
       ix,
       new ReplayBuffer(this.clientReplayBufferBytes, this.reconnectTimeoutMs, this.clientReplayBufferBinaryBytes),
     )
 
-    if (!this.transport.hasActiveTransport() && !this.transport.isConnecting()) {
+    if (!this.transport.hasWire() && !this.transport.isConnecting()) {
       this.transport.start()
       return
     }
+    this.scheduleRegisterReconcile()
+  }
+
+  private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
+  /** Coalesces sync-burst registrations into one RECONCILE round-trip. */
+  private scheduleRegisterReconcile(): void {
+    if (this.registerReconcileTimer !== null) return
+    this.registerReconcileTimer = setTimeout(() => this.flushPendingRegisterReconcile(), 0)
+  }
+
+  /** Send the queued RECONCILE on the live wire. No-op when nothing's queued. */
+  private flushPendingRegisterReconcile(): void {
+    if (this.registerReconcileTimer === null) return
+    this.cancelRegisterReconcileTimer()
     if (this.connected && !this.reconciling) {
-      const reconcileBatch = this.stageReconcileBatch()
-      this.sendReconcileBatch(reconcileBatch)
+      this.sendReconcileBatch(this.stageReconcileBatch())
     }
+    this.releaseUnconfirmedReleasing()
+  }
+
+  /** Cancel without sending — wire is dying. Drops releasing entries so they don't
+   *  leak onto the post-reconnect RECONCILE. */
+  private cancelPendingRegisterReconcile(): void {
+    this.cancelRegisterReconcileTimer()
+    this.releaseUnconfirmedReleasing()
+  }
+
+  private cancelRegisterReconcileTimer(): void {
+    if (this.registerReconcileTimer === null) return
+    clearTimeout(this.registerReconcileTimer)
+    this.registerReconcileTimer = null
+  }
+
+  private releaseUnconfirmedReleasing(): void {
+    let droppedAny = false
+    for (const [ix, entry] of this.channels) {
+      if (entry.state.tag === 'releasing' && entry.state.initial) {
+        this.releaseChannel(ix, entry.channel, entry.state.err)
+        droppedAny = true
+      }
+    }
+    if (droppedAny) this.startTtlIfIdle()
   }
 
   unregister(channel: MuxChannel, err = new ChannelClosedError()): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
+    const entry = this.channels.get(ix)!
+    if (entry.state.tag === 'pending') {
+      this.enterChannelReleasing(ix, err)
+      return
+    }
     this.releaseChannel(ix, channel, err)
     this.startTtlIfIdle()
   }
@@ -457,8 +590,7 @@ class ClientConnection implements MuxConnection {
   sendWindowUpdate(channel: MuxChannel, bytes: number): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    // Drop if transport isn't ready — window updates are ephemeral state.
-    // Both sides reset to CREDIT_WINDOW_BYTES on reconnect.
+    // Window updates are ephemeral — both sides reset to CREDIT_WINDOW_BYTES on reconnect.
     if (!this.canSendImmediately()) return
     this.transport.sendFrame({ kind: 'control', frame: encode.window(ix, bytes) })
   }
@@ -485,18 +617,10 @@ class ClientConnection implements MuxConnection {
     this.transport.sendFrame({ kind: 'control', frame })
   }
 
-  /** WS sends the reconcile frame here; SSE already baked it into the stream-response POST
-   *  body via `stageInitialBatch`. The `!reconciling` drain handles the SSE Phase-C window:
-   *  RECONCILED can arrive during `openStream`'s awaits (handshake race), and any frames
-   *  user code queued between then and now sit in `sendBuffer` waiting for `connected=true`.
-   *  If RECONCILED hasn't arrived yet, `reconciling` is still true and `applyReconciled`
-   *  will drain — sending data frames pre-RECONCILED has no `ownerInstance` (SSE) or no
-   *  acked-ix routing (WS). */
-  _onTransportOpen(): void {
+  _onTransportOpen(transport: ClientChannelTransport): void {
     if (this.closed) return
-    this.connected = true
-    this.reconnectAttempt = 0
-    this.reconnectStart = 0
+    if (transport !== this.transport) return
+    this.enterOpen()
     if (this.transport.sendReconcileOnOpen) {
       this.sendReconcileBatch(this.stageReconcileBatch())
       return
@@ -507,51 +631,116 @@ class ClientConnection implements MuxConnection {
     }
   }
 
-  _onTransportFrame(raw: Uint8Array<ArrayBuffer>): void {
-    this.handleTransportFrame(raw, decode(raw))
+  _onTransportFrame(frame: DecodedFrame): void {
+    if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') {
+      this.bufferFrameDuringHandoff(frame)
+    } else {
+      this.dispatchFrame(frame)
+    }
   }
 
-  private flushHandoffBuffer(): void {
-    const buffer = this.upgrade.handoffBuffer
-    this.upgrade.handoffBuffer = null
-    this.handleTransportFrame = this.dispatchFrame
-    if (buffer) for (const raw of buffer) this._onTransportFrame(raw)
+  private dispatchFrame(frame: DecodedFrame): void {
+    // Track seq for ALL data frames including ACK_RES; otherwise reconciles under-report lastSeq.
+    if (isChannelDataFrame(frame) && !this.trackSeq(frame.index, frame.seq)) return
+    switch (frame.tag) {
+      case TAG.CLOSE:
+      case TAG.CLOSE_ACK:
+      case TAG.ABORT:
+      case TAG.ERROR:
+      case TAG.WINDOW:
+      case TAG.FIN:
+      case TAG.RECONCILED:
+        this.handleCtrl(frame)
+        return
+      case TAG.TEXT:
+      case TAG.PUBLISH:
+      case TAG.PUBLISH_ACK_REQ:
+      case TAG.TEXT_ACK_REQ:
+      case TAG.BINARY:
+      case TAG.PUBLISH_BINARY:
+      case TAG.PUBLISH_BINARY_ACK_REQ:
+        this.handleDataFrame(frame)
+        return
+      case TAG.ACK_RES:
+        this.handleAckRes(frame.index, frame.ackedSeq, frame.text, frame.status)
+    }
   }
 
-  private stopUpgradeProbe(): void {
-    this.upgrade.active = false
-    this.upgrade.probeAbort?.()
-    this.upgrade.probeAbort = null
+  private bufferFrameDuringHandoff(frame: DecodedFrame): void {
+    switch (frame.tag) {
+      case TAG.FIN:
+        this.handleHandoffFin()
+        return
+      case TAG.RECONCILED:
+        this.handleReconciled(frame.payload)
+        return
+    }
+    assert(this.state.tag === 'open' && this.state.upgrade.tag === 'handoff')
+    this.state.upgrade.buffer.push(frame)
   }
 
-  private disposeHandoffTransport(): void {
-    const handoffTransport = this.upgrade.handoffTransport
-    if (!handoffTransport) return
-    handoffTransport.abandonActiveTransport()
-    handoffTransport.dispose()
-    this.upgrade.handoffTransport = null
+  /** Idempotent. Detaches first either way so a fresh install can never leak the prior. */
+  private installHeartbeat(transport: ClientChannelTransport, intervalMs: number): void {
+    if (transport.hasHeartbeat() && this.pingIntervalMs === intervalMs) return
+    transport.detachHeartbeat()
+    this.pingIntervalMs = intervalMs
+    const hb = new Heartbeat(
+      intervalMs,
+      intervalMs * 2,
+      () => transport.sendPing(),
+      () => this.handlePongTimeout(transport),
+    )
+    transport.attachHeartbeat(hb)
+    hb.start()
   }
 
-  private completeUpgradeHandoff(): void {
-    this.disposeHandoffTransport()
-    this.flushHandoffBuffer()
+  /** Funnel for pong-timeouts. Suppress while reconciling — pings are delayed by the round-trip. */
+  private handlePongTimeout(transport: ClientChannelTransport): void {
+    if (this.reconciling) return
+    transport.detachHeartbeat()
+    transport.abandonActiveTransport()
+    this._onTransportClosed(transport, false)
   }
 
   private handleHandoffFin(): void {
-    if (!this.upgrade.handoffTransport) return
-    this.completeUpgradeHandoff()
+    if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'handoff') return
+    this.state.upgrade.finReceived = true
+    // Bound the wait for RECONCILED — abort and reconnect if it never shows.
+    if (this.reconciling && !this.state.upgrade.finTimer) {
+      this.state.upgrade.finTimer = setTimeout(() => {
+        if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') {
+          this.state.upgrade.finTimer = null
+        }
+        this.abortUpgradeAndReconnectSse(new ChannelNetworkError('Upgrade FIN without RECONCILED'))
+      }, UPGRADE_FIN_RECONCILED_TIMEOUT_MS)
+    }
+    this.tryCompleteUpgradeHandoff()
+  }
+
+  /** Handoff commits only after BOTH FIN (old wire) and RECONCILED (new wire) — they may reorder. */
+  private tryCompleteUpgradeHandoff(): void {
+    if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'handoff') return
+    if (!this.state.upgrade.finReceived || this.reconciling) return
+    const { from, buffer, finTimer } = this.exitUpgradeHandoff()
+    if (finTimer) clearTimeout(finTimer)
+    from.detachHeartbeat()
+    from.abandonActiveTransport()
+    from.dispose()
+    for (const frame of buffer) this.dispatchFrame(frame)
   }
 
   _onTransportClosed(transport: ClientChannelTransport, rejectedInitial = false): void {
     if (this.closed) return
-    // Ignore close events from non-active transports (e.g. SSE closing while WS upgrade drains it)
+    transport.detachHeartbeat()
     if (transport !== this.transport) {
-      // SSE dropped without fin — clean up the pending reference
-      if (transport === this.upgrade.handoffTransport)
+      if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff' && transport === this.state.upgrade.from) {
         this.abortUpgradeAndReconnectSse(new ChannelNetworkError('Connection dropped'))
+      }
       return
     }
-    if (this.upgrade.active) this.stopUpgradeProbe()
+    if (this.state.tag === 'open' && this.state.upgrade.tag !== 'none' && this.state.upgrade.tag !== 'handoff') {
+      this.state.upgrade.attempt.abort()
+    }
     const err = new ChannelNetworkError(
       rejectedInitial
         ? `Server rejected ${this.transport.type === CHANNEL_TRANSPORT.SSE ? 'SSE' : 'WebSocket'} connection`
@@ -562,14 +751,11 @@ class ClientConnection implements MuxConnection {
 
   private handleCtrl(frame: Extract<DecodedFrame, { tag: ServerCtrlTag }>): void {
     switch (frame.tag) {
-      case TAG.PONG:
-        this.resetPongTimer()
-        return
       case TAG.CLOSE:
-        this.channels.get(frame.index)?._onTransportCloseRequest(frame.timeoutMs)
+        this.channels.get(frame.index)?.channel._onTransportCloseRequest(frame.timeoutMs)
         return
       case TAG.CLOSE_ACK:
-        this.channels.get(frame.index)?._onTransportCloseAck()
+        this.channels.get(frame.index)?.channel._onTransportCloseAck()
         return
       case TAG.ABORT:
         this.closeRemoteChannel(frame.index, makeAbortError(parse(frame.abortValue)))
@@ -580,7 +766,7 @@ class ClientConnection implements MuxConnection {
         this.startTtlIfIdle()
         return
       case TAG.WINDOW:
-        this.channels.get(frame.index)?._onPeerWindowUpdate(frame.bytes)
+        this.channels.get(frame.index)?.channel._onPeerWindowUpdate(frame.bytes)
         return
       case TAG.FIN:
         this.handleHandoffFin()
@@ -595,37 +781,49 @@ class ClientConnection implements MuxConnection {
     this.transport.applyReconciledSettings(ctrl)
     this.transport.pushReconciledRouting()
     const outcome = this.applyReconciled(ctrl)
+    this.installHeartbeat(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
     for (const channel of outcome.channelsToOpen) channel._onTransportOpen()
     if (outcome.reconcileComplete) {
-      this.startPing()
       this.startTtlIfIdle()
     }
+    this.tryCompleteUpgradeHandoff()
     this.maybeStartUpgrade(ctrl)
   }
 
   // ── SSE→WS upgrade ──
 
   private maybeStartUpgrade(ctrl: ReconciledPayload): void {
-    if (this.upgrade.disabled) return
+    if (this.upgradeDisabled) return
+    if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'none') return
     const nextTransport = UPGRADE_PATH[this.transport.type]
-    if (!nextTransport || this.upgrade.active) return
+    if (!nextTransport) return
     if (!this.isTransportUpgradeAllowed(nextTransport)) return
     if (!ctrl.transports.includes(nextTransport)) return
-    this.upgrade.active = true
     void this.probeAndUpgrade(nextTransport)
   }
 
+  /** Tear down upgrade state, fall back to a fresh SSE, and disable upgrades for this connection. */
   private abortUpgradeAndReconnectSse(err: Error): void {
-    this.disposeHandoffTransport()
-    this.upgrade.handoffBuffer = null
-    this.handleTransportFrame = this.dispatchFrame
-    this.upgrade.disabled = true
+    if (this.closed) return
+    if (this.state.tag === 'open') {
+      const u = this.state.upgrade
+      if (u.tag === 'probing' || u.tag === 'draining') {
+        u.attempt.abort()
+        this.exitUpgradeAttempt(u.attempt)
+      } else if (u.tag === 'handoff') {
+        const { from, finTimer } = this.exitUpgradeHandoff()
+        if (finTimer) clearTimeout(finTimer)
+        from.detachHeartbeat()
+        from.abandonActiveTransport()
+        from.dispose()
+      }
+    }
+    this.upgradeDisabled = true
     this.transport.abandonActiveTransport()
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
-    this.reconcileBufferedFramesMode = this.transport.reconcileMode
     this.handleTransportLoss(err)
   }
 
@@ -634,79 +832,85 @@ class ClientConnection implements MuxConnection {
   }
 
   private async probeAndUpgrade(targetTransport: ChannelTransport): Promise<void> {
-    const from = this.transport
-    const to = TRANSPORT_REGISTRY[targetTransport](this.telefuncUrl, this.connectionOptions, this)
-    const closeProbe = await to.probe()
-    if (!closeProbe || !this.upgrade.active) {
-      closeProbe?.()
-      this.upgrade.active = false
-      return
-    }
+    // Flush pending register-reconcile inline before the upgrade so its RECONCILE
+    // doesn't fire mid-drain on the dying old wire. The freshly-registered channels
+    // either go on the old wire now (entering the upgrade drain naturally) or have
+    // their deferred releases settled before the handoff RECONCILE is built.
+    this.flushPendingRegisterReconcile()
+    const attempt = new AbortController()
+    this.enterUpgradeProbing(attempt)
+    try {
+      const from = this.transport
+      const to = TRANSPORT_REGISTRY[targetTransport](this.telefuncUrl, this.connectionOptions, this)
 
-    this.upgrade.probeAbort = closeProbe
-    await from.prepareForUpgrade()
-    if (this.upgrade.probeAbort === closeProbe) this.upgrade.probeAbort = null
-    if (!this.upgrade.active) {
-      closeProbe()
-      return
-    }
+      const probe = await to.probe()
+      if (attempt.signal.aborted || !probe) {
+        probe?.close()
+        return
+      }
+      const probeHeartbeat = new Heartbeat(
+        this.pingIntervalMs,
+        this.pingIntervalMs * 2,
+        () => probe.ping(),
+        () => attempt.abort(),
+      )
+      probe.onPong(() => probeHeartbeat.resetPong())
+      probe.onClose(() => attempt.abort())
+      probeHeartbeat.start()
+      attempt.signal.addEventListener(
+        'abort',
+        () => {
+          probeHeartbeat.stop()
+          probe.close()
+        },
+        { once: true },
+      )
 
-    // Synchronous transport switch.
-    this.upgrade.active = false
-    this.transport = to
-    this.reconcileBufferedFramesMode = to.reconcileMode
-    this.upgrade.handoffTransport = from
-    this.upgrade.handoffBuffer = []
-    this.handleTransportFrame = this.bufferFrameDuringHandoff
-    to.start()
+      if (!(await this.drainOldWire(from, attempt))) {
+        this.exitUpgradeAttempt(attempt)
+        const drained = this.drainBufferedFrames(this.channels, undefined)
+        for (const frame of drained) this.transport.sendFrame(frame)
+        return
+      }
+
+      probeHeartbeat.stop()
+      this.transport = to
+      this.enterUpgradeHandoff(from)
+      to.start()
+    } finally {
+      this.exitUpgradeAttempt(attempt)
+    }
   }
 
-  // ── Ping ──
-
-  private startPing(): void {
-    this.resetPongTimer()
-    if (this.pingInterval) return
-    this.pingInterval = setInterval(() => {
-      if (!this.canSendImmediately()) return
-      this.transport.sendFrame({ kind: 'heartbeat', frame: encode.ping() })
-    }, this.pingIntervalMs)
-  }
-
-  private stopPing(): void {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval)
-      this.pingInterval = null
-    }
-    if (this.pongTimer) {
-      clearTimeout(this.pongTimer)
-      this.pongTimer = null
-    }
-  }
-
-  private resetPongTimer(): void {
-    if (!this.connected) return
-    if (this.pongTimer) clearTimeout(this.pongTimer)
-    this.pongTimer = setTimeout(() => {
-      this.stopPing()
-      this.connected = false
-      this.transport.abandonActiveTransport()
-      this.handleTransportLoss(new ChannelNetworkError(this.transport.reconnectTimeoutMessage))
-    }, this.pongTimeoutMs)
+  /** Two-phase drain. Returns false if the probe aborted; caller rolls back state. */
+  private async drainOldWire(from: ClientChannelTransport, attempt: AbortController): Promise<boolean> {
+    await from.gracefulDrain(UPGRADE_DRAIN_TIMEOUT_MS)
+    if (attempt.signal.aborted) return false
+    this.enterUpgradeDraining(attempt)
+    await from.forceDrain()
+    return !attempt.signal.aborted
   }
 
   private handleTransportLoss(err: Error, rejected = false): void {
     if (this.closed) return
-    this.connected = false
-    this.stopPing()
-    this.reconciling = false
-    this.reconcileIxes.clear()
-    this.clearTimer('ttl')
-    if (this.upgrade.handoffTransport) {
+    if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') {
       this.abortUpgradeAndReconnectSse(err)
       return
     }
+    // The wire is dying — cancel the queued RECONCILE (no point sending) and release
+    // unconfirmed-releasing entries so they don't leak onto the post-reconnect RECONCILE.
+    this.cancelPendingRegisterReconcile()
+    this.reconciling = false
+    this.reconcileIxes.clear()
+    if (this.ttl) {
+      clearTimeout(this.ttl)
+      this.ttl = null
+    }
 
-    if (rejected && this.reconnectAttempt === 0) {
+    const { attempt: prevAttempt, startedAt: prevStartedAt } =
+      this.state.tag === 'reconnecting' ? this.state : { attempt: 0, startedAt: 0 }
+
+    if (rejected && prevAttempt === 0) {
       this.closeAll(err instanceof Error ? err : new ChannelNetworkError('Connection dropped'))
       this.dispose()
       return
@@ -715,22 +919,14 @@ class ClientConnection implements MuxConnection {
       this.dispose()
       return
     }
-    if (!this.reconnectStart) this.reconnectStart = Date.now()
-    if (Date.now() - this.reconnectStart > this.reconnectTimeoutMs) {
+    const startedAt = prevStartedAt || Date.now()
+    if (Date.now() - startedAt > this.reconnectTimeoutMs) {
       this.closeAll(err instanceof Error ? err : new ChannelNetworkError('Connection dropped'))
       this.dispose()
       return
     }
-    if (this.reconnectTimer) return
-    const delay = Math.min(
-      CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** this.reconnectAttempt,
-      CHANNEL_RECONNECT_MAX_DELAY_MS,
-    )
-    this.reconnectAttempt++
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null
-      this.transport.start()
-    }, delay)
+    const delay = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** prevAttempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
+    this.enterReconnecting(prevAttempt + 1, startedAt, delay)
   }
 
   private startTtlIfIdle(): void {
@@ -742,17 +938,28 @@ class ClientConnection implements MuxConnection {
 
   private dispose(): void {
     if (this.closed) return
-    this.closed = true
-    this.connected = false
-    this.clearTimer('ttl')
-    this.clearTimer('reconnectTimer')
-    this.stopPing()
-    this.upgrade.probeAbort?.()
-    this.upgrade.probeAbort = null
-    this.disposeHandoffTransport()
-    this.upgrade.handoffBuffer = null
-    this.handleTransportFrame = this.dispatchFrame
-    this.upgrade.active = false
+    if (this.ttl) {
+      clearTimeout(this.ttl)
+      this.ttl = null
+    }
+    if (this.registerReconcileTimer !== null) {
+      clearTimeout(this.registerReconcileTimer)
+      this.registerReconcileTimer = null
+    }
+    // Tear down any in-flight phase before transitioning to `closed`.
+    if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
+    if (this.state.tag === 'open') {
+      const u = this.state.upgrade
+      if (u.tag === 'probing' || u.tag === 'draining') u.attempt.abort()
+      if (u.tag === 'handoff') {
+        if (u.finTimer) clearTimeout(u.finTimer)
+        u.from.detachHeartbeat()
+        u.from.abandonActiveTransport()
+        u.from.dispose()
+      }
+    }
+    this.enterClosed()
+    this.transport.detachHeartbeat()
     this.transport.dispose()
     for (const replayBuffer of this.replayBuffers.values()) replayBuffer.dispose()
     for (const [, pending] of this.pendingAcks) pending.reject(new ChannelNetworkError('Connection closed'))
@@ -767,44 +974,35 @@ class ClientConnection implements MuxConnection {
     ClientConnection.cache.delete(this.cacheKey)
   }
 
-  private clearTimer(name: 'ttl' | 'reconnectTimer'): void {
-    const timer = this[name]
-    if (!timer) return
-    clearTimeout(timer)
-    this[name] = null
-  }
-
   // ── Protocol internals ──
 
   buildReconcileFrame(): OutboundFrame {
     this.reconciling = true
     this.reconcileIxes = new Set()
     const open: ReconcilePayload['open'] = []
-    for (const [ix, channel] of this.channels) {
+    for (const [ix, entry] of this.channels) {
       this.reconcileIxes.add(ix)
-      const entry: ReconcilePayload['open'][number] = {
-        id: channel.id,
+      const payloadEntry: ReconcilePayload['open'][number] = {
+        id: entry.channel.id,
         ix,
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
-      if (this.initialPendingIxes.has(ix)) entry.initial = true
-      open.push(entry)
+      if (entry.state.tag !== 'open' && entry.state.initial) payloadEntry.initial = true
+      open.push(payloadEntry)
     }
     const reconcile: ReconcilePayload = { open }
     if (this.sessionId) reconcile.sessionId = this.sessionId
-    if (this.upgrade.handoffTransport) {
+    if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') {
       reconcile.upgrade = true
-      // Identify the previous wire so the server can find it even when this reconcile
-      // lands on a different cluster instance than the one holding it. Null when the
-      // previous transport has no cluster-stable id (WS).
-      const handoffConnId = this.upgrade.handoffTransport.connId
+      // Lets a non-owner cluster instance route the reconcile back. Null on WS (no stable id).
+      const handoffConnId = this.state.upgrade.from.connId
       if (handoffConnId !== null) reconcile.prevConnId = handoffConnId
     }
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
   drainBufferedFramesForReconcile(): OutboundFrame[] {
-    if (this.reconcileBufferedFramesMode !== 'batch-on-reconcile') return []
+    if (this.transport.reconcileMode !== 'batch-on-reconcile') return []
     return this.drainBufferedFrames(this.channels, undefined)
   }
 
@@ -830,39 +1028,36 @@ class ClientConnection implements MuxConnection {
     if (ctrl.idleTimeout) this.idleTimeoutMs = ctrl.idleTimeout
     if (ctrl.clientReplayBuffer) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
     if (ctrl.clientReplayBufferBinary) this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
-    if (ctrl.pingInterval) {
-      this.pingIntervalMs = ctrl.pingInterval
-      this.pongTimeoutMs = ctrl.pingInterval * 2
-    }
 
     const serverMap = new Map<number, number>()
-    for (const channel of ctrl.open) {
-      serverMap.set(channel.ix, channel.lastSeq)
-      // Server confirmed this ix — it now exists on the server side, so subsequent reconciles
-      // shouldn't flag it as `initial`.
-      this.initialPendingIxes.delete(channel.ix)
-    }
+    for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
     const reconcileIxes = this.reconcileIxes
     this.reconcileIxes = new Set()
     const releaseFrames: OutboundFrame[] = []
     const channelsToOpen: MuxChannel[] = []
     let hasNewChannels = false
 
-    for (const [ix, channel] of this.channels) {
+    for (const [ix, entry] of this.channels) {
       if (!reconcileIxes.has(ix)) {
+        // Registered after the RECONCILE we just got back was built — wait for next round.
         if (!serverMap.has(ix)) hasNewChannels = true
+        continue
+      }
+      if (entry.state.tag === 'releasing') {
+        this.releaseChannel(ix, entry.channel, entry.state.err)
         continue
       }
       if (!serverMap.has(ix)) {
         const err = new ChannelNetworkError('Channel not acknowledged by server after reconnect')
-        this.releaseChannel(ix, channel, err)
-        channel._onTransportClose(err)
+        this.releaseChannel(ix, entry.channel, err)
+        entry.channel._onTransportClose(err)
         continue
       }
+      if (entry.state.tag === 'pending') this.enterChannelOpen(ix)
       const replay = this.replayBuffers.get(ix)
       if (replay)
         for (const frame of replay.getAfter(serverMap.get(ix)!)) releaseFrames.push({ kind: 'reconcile', frame })
-      if (!channel.isClosed) channelsToOpen.push(channel)
+      if (!entry.channel.isClosed) channelsToOpen.push(entry.channel)
     }
 
     for (const frame of this.drainBufferedFrames(serverMap, this.channels)) releaseFrames.push(frame)
@@ -878,10 +1073,10 @@ class ClientConnection implements MuxConnection {
   }
 
   private closeRemoteChannel(ix: number, err?: Error): void {
-    const channel = this.channels.get(ix)
-    if (!channel) return
-    this.releaseChannel(ix, channel, err ?? new ChannelClosedError())
-    channel._onTransportClose(err)
+    const entry = this.channels.get(ix)
+    if (!entry) return
+    this.releaseChannel(ix, entry.channel, err ?? new ChannelClosedError())
+    entry.channel._onTransportClose(err)
   }
 
   private handleAckRes(index: number, ackedSeq: number, text: string, status: AckResultStatus = ACK_STATUS.OK): void {
@@ -900,44 +1095,41 @@ class ClientConnection implements MuxConnection {
         pending.reject(makeBugError(text || undefined))
         return
       case ACK_STATUS.SHIELD_ERROR:
-        // Server-declared data shield rejected what this channel sent — same branded class as
-        // every other shield-fail surface so user code can catch with `isShieldValidationError`.
         pending.reject(new ShieldValidationError(text))
     }
   }
 
   private handleDataFrame(frame: Extract<DecodedFrame, { index: number; seq: number }>): void {
-    if (frame.seq && !this.trackSeq(frame.index, frame.seq)) return
     if (frame.tag === TAG.TEXT_ACK_REQ) {
-      void this.channels.get(frame.index)?._onTransportAckReqMessage(frame.text!, frame.seq)
+      void this.channels.get(frame.index)?.channel._onTransportAckReqMessage(frame.text!, frame.seq)
       return
     }
     if (frame.tag === TAG.PUBLISH) {
-      const channel = this.channels.get(frame.index)
+      const channel = this.channels.get(frame.index)?.channel
       if (channel && ClientBroadcast.isClientBroadcast(channel)) channel._onTransportPublish(frame.text!, frame.info!)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
-      const channel = this.channels.get(frame.index)
+      const channel = this.channels.get(frame.index)?.channel
       if (channel && ClientBroadcast.isClientBroadcast(channel))
         channel._onTransportPublishBinary(frame.data!, frame.info!)
       return
     }
     if (frame.tag === TAG.TEXT) {
-      this.channels.get(frame.index)?._onTransportMessage(frame.text!)
+      this.channels.get(frame.index)?.channel._onTransportMessage(frame.text!)
       return
     }
     if (frame.tag === TAG.BINARY_ACK_REQ) {
-      this.channels.get(frame.index)?._onTransportBinaryAckReqMessage(frame.data!, frame.seq)
+      this.channels.get(frame.index)?.channel._onTransportBinaryAckReqMessage(frame.data!, frame.seq)
       return
     }
-    if (frame.tag === TAG.BINARY) this.channels.get(frame.index)?._onTransportBinaryMessage(frame.data!)
+    if (frame.tag === TAG.BINARY) this.channels.get(frame.index)?.channel._onTransportBinaryMessage(frame.data!)
   }
 
   private closeAll(err: Error): void {
-    for (const [ix, channel] of this.channels) {
+    for (const [ix, entry] of this.channels) {
       this.clearPendingAcks(ix, err)
-      channel._onTransportClose(err)
+      entry.channel._onTransportClose(err)
     }
     this.dispose()
   }
@@ -989,7 +1181,6 @@ class ClientConnection implements MuxConnection {
     this.channels.delete(ix)
     this.channelIndex.delete(channel)
     this.lastSeqByChannel.delete(ix)
-    this.initialPendingIxes.delete(ix)
     const replayBuffer = this.replayBuffers.get(ix)
     replayBuffer?.dispose()
     this.replayBuffers.delete(ix)
@@ -1003,6 +1194,7 @@ class WsTransport implements ClientChannelTransport {
   readonly sendReconcileOnOpen = true
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly connId = null
+  private heartbeat: Heartbeat | null = null
   private probedWs: WebSocket | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
@@ -1021,52 +1213,79 @@ class WsTransport implements ClientChannelTransport {
     this.wsUrl = url.href
   }
 
-  async probe(): Promise<(() => void) | null> {
-    const ws = await new Promise<WebSocket | null>((resolve) => {
-      let ws: WebSocket
-      try {
-        ws = new WebSocket(this.wsUrl)
-      } catch {
-        resolve(null)
-        return
-      }
-      ws.binaryType = 'arraybuffer'
-      const timer = setTimeout(() => {
-        ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
-        ws.close()
-        resolve(null)
-      }, WS_PROBE_TIMEOUT_MS)
-      ws.onopen = () => ws.send(encode.ping())
-      ws.onmessage = ({ data }: MessageEvent) => {
-        const frame = decode(new Uint8Array(data as ArrayBuffer))
-        if (frame.tag === TAG.PONG) {
-          clearTimeout(timer)
-          ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
-          resolve(ws)
-        }
-      }
-      ws.onclose = () => {
-        clearTimeout(timer)
-        resolve(null)
-      }
-      ws.onerror = () => {}
-    })
-    if (!ws) return null
-    this.probedWs = ws
-    return () => {
+  async probe(): Promise<ProbeWire | null> {
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(this.wsUrl)
+    } catch {
+      return null
+    }
+    ws.binaryType = 'arraybuffer'
+
+    let onPong: (() => void) | null = null
+    let onClose: (() => void) | null = null
+    ws.onmessage = ({ data }: MessageEvent) => {
+      const frame = decode(new Uint8Array(data as ArrayBuffer))
+      if (frame.tag === TAG.PONG) onPong?.()
+    }
+    ws.onclose = () => {
       if (this.probedWs === ws) this.probedWs = null
+      onClose?.()
+    }
+    ws.onerror = () => {}
+    ws.onopen = () => ws.send(encode.ping())
+
+    // First pong proves the wire is alive — consumer reassigns onPong/onClose after the await.
+    const ready = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), WS_PROBE_TIMEOUT_MS)
+      onPong = () => {
+        clearTimeout(timer)
+        resolve(true)
+      }
+      onClose = () => {
+        clearTimeout(timer)
+        resolve(false)
+      }
+    })
+    if (!ready) {
       try {
         ws.close()
       } catch {}
+      return null
+    }
+
+    this.probedWs = ws
+    return {
+      ping: () => {
+        try {
+          ws.send(encode.ping())
+        } catch {}
+      },
+      onPong: (cb) => {
+        onPong = cb
+      },
+      onClose: (cb) => {
+        onClose = cb
+      },
+      close: () => {
+        if (this.probedWs === ws) this.probedWs = null
+        try {
+          ws.close()
+        } catch {}
+      },
     }
   }
 
-  prepareForUpgrade(): Promise<void> {
+  gracefulDrain(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  forceDrain(): Promise<void> {
     return Promise.resolve()
   }
 
   start(): void {
-    if (this.connecting || this.ws) return
+    if (this.connecting || this.hasWire()) return
 
     const wsProbed = this.probedWs
     if (wsProbed) {
@@ -1103,12 +1322,31 @@ class WsTransport implements ClientChannelTransport {
     if (this.ws !== ws) return
     this.everOpened = true
     this.connecting = false
-    this.owner._onTransportOpen()
+    this.owner._onTransportOpen(this)
+  }
+
+  attachHeartbeat(hb: Heartbeat): void {
+    this.heartbeat = hb
+  }
+
+  detachHeartbeat(): void {
+    this.heartbeat?.stop()
+    this.heartbeat = null
+  }
+
+  hasHeartbeat(): boolean {
+    return this.heartbeat !== null
   }
 
   private setupHandlers(ws: WebSocket): void {
     ws.onmessage = ({ data }: MessageEvent) => {
-      this.owner._onTransportFrame(new Uint8Array(data as ArrayBuffer))
+      const raw = new Uint8Array(data as ArrayBuffer)
+      const frame = decode(raw)
+      if (frame.tag === TAG.PONG) {
+        this.heartbeat?.resetPong()
+        return
+      }
+      this.owner._onTransportFrame(frame)
     }
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
@@ -1118,7 +1356,7 @@ class WsTransport implements ClientChannelTransport {
     ws.onerror = () => {}
   }
 
-  hasActiveTransport(): boolean {
+  hasWire(): boolean {
     return this.ws !== null
   }
 
@@ -1154,6 +1392,11 @@ class WsTransport implements ClientChannelTransport {
   applyReconciledSettings(): void {}
   pushReconciledRouting(): void {}
 
+  sendPing(): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return
+    this.ws.send(encode.ping())
+  }
+
   dispose(): void {
     this.connecting = false
     const wsProbed = this.probedWs
@@ -1181,24 +1424,19 @@ class SseTransport implements ClientChannelTransport {
   readonly reconnectTimeoutMessage = 'SSE reconnect timed out'
   readonly sendReconcileOnOpen = false
   readonly reconcileMode = 'batch-on-reconcile' as const
-  async probe(): Promise<(() => void) | null> {
+  async probe(): Promise<ProbeWire | null> {
     throw new Error('SSE transport does not implement probe()')
   }
 
   readonly connId = crypto.randomUUID()
+  private heartbeat: Heartbeat | null = null
   private connecting = false
   private startTimer: ReturnType<typeof setTimeout> | null = null
-  /** Abort handle for the active transport's fetches (SSE downstream, streamRequest, batch
-   *  POSTs, heartbeat pings). `null` means "no active transport" — set on `openStream`,
-   *  cleared on any teardown (failOpen / IIFE end / abandon / dispose). Whether we also
-   *  call `.abort()` depends on the path: failOpen and dispose abort to kill in-flight;
-   *  IIFE end and abandon don't (in-flight batch POSTs are allowed to complete on their
-   *  own; abandon's deferred abort is handled via `abandonedControllers`). */
+  /** Abort handle for the active transport's fetches. `null` means no active transport. */
   private transportAbort: AbortController | null = null
   private abandonedStream: AbortController | null = null
   private readonly abandonedControllers = new WeakSet<AbortController>()
-  private outboxFrames: Uint8Array<ArrayBuffer>[] = []
-  private outboxDeadlines: number[] = []
+  private outbox: OutboxEntry[] = []
   private readonly flushScheduler = new DeadlineScheduler(() => {
     void this.flushOutbox()
   })
@@ -1208,26 +1446,17 @@ class SseTransport implements ClientChannelTransport {
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
   private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
   private drainCallbacks: Array<() => void> = []
-  // Persistent client→server stream-request POST (half-duplex streaming request body).
-  // When available, sendFrame() writes directly here instead of going through the outbox.
-  // Falls back to outbox/flush if the browser/protocol doesn't support streaming request.
-  /** Active client→server stream-request POST. `body` is the upstream wire (frames pushed
-   *  here flow on the persistent half-duplex POST); `fetch` resolves when the body ends
-   *  (server returns 200 after EOF) — `prepareForUpgrade` awaits it as the client→server
-   *  directional fin; `metadataPushed` tracks whether the post-reconcile routing table has
-   *  been emitted on the wire (it's pushed only after `RECONCILED` arrives, since
-   *  `ownerInstance` and per-channel `home` aren't known until then). */
-  private streamRequest: {
-    body: PushToPullStream<Uint8Array<ArrayBuffer>>
-    fetch: Promise<unknown>
-    metadataPushed: boolean
-  } | null = null
-  /** Sticky cross-attempt flag — once a stream-request fetch fails (runtime can't stream,
-   *  network drop, abort), all subsequent transport opens skip the streamRequest path and
-   *  flow upstream frames through outbox+batch POSTs. */
-  private streamRequestFailed = false
-  // Routing table populated by `applyReconciledSettings`. The receiver builds aliases
-  // straight from `channels[]` (alias N = `channels[N − 1]`); alias 0 routes to `ownerInstance`.
+  /** Client→server upstream POST. `failed` is sticky → fall back to outbox+batch POSTs forever. */
+  private streamRequest:
+    | { tag: 'idle' }
+    | {
+        tag: 'active'
+        body: PushToPullStream<Uint8Array<ArrayBuffer>>
+        fetch: Promise<unknown>
+        metadataPushed: boolean
+      }
+    | { tag: 'failed' } = { tag: 'idle' }
+  // Routing table from `applyReconciledSettings`: alias N = `channels[N − 1]`, alias 0 = ownerInstance.
   private ownerInstance = ''
   private channels: SseRouteChannel[] = []
   private ixToAlias = new Map<number, number>()
@@ -1239,36 +1468,41 @@ class SseTransport implements ClientChannelTransport {
     private readonly owner: ClientConnection,
   ) {}
 
-  async prepareForUpgrade(): Promise<void> {
-    // 1. Drain outbox + in-flight batch POST.
-    if (this.flushing || this.outboxFrames.length > 0) {
-      await new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
-    }
-    // 2. Drain the persistent client→server stream-request: close body → server reads EOF
-    //    → returns 200. After this resolves, every frame the client ever pushed has been
-    //    server-acknowledged. Symmetric to the server's `TAG.FIN` drain on the downstream.
-    if (this.streamRequest) {
+  /** Phase 1: gate down. Wait for natural drain or `timeoutMs`, whichever first. */
+  async gracefulDrain(timeoutMs: number): Promise<void> {
+    if (this.streamRequest.tag === 'active') return
+    if (!this.flushing && this.outbox.length === 0) return
+    const drained = new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
+    await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))])
+  }
+
+  /** Phase 2: gate up. Closes streamRequest body or awaits outbox drain. */
+  async forceDrain(): Promise<void> {
+    if (this.streamRequest.tag === 'active') {
+      assert(!this.flushing && this.outbox.length === 0)
       const fetch = this.streamRequest.fetch
       this.closeStreamRequest()
       try {
         await fetch
       } catch {}
+      return
     }
+    if (!this.flushing && this.outbox.length === 0) return
+    await new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
   }
 
   start(): void {
-    if (this.connecting || this.hasActiveTransport()) return
+    if (this.connecting || this.hasWire()) return
     this.connecting = true
-    // Match WS batching behavior: wait one reconcile window so startup code can
-    // register channels and queue payload before we build the initial SSE batch.
+    // Defer one reconcile window so startup code can register channels before the initial batch.
     this.startTimer = setTimeout(() => {
       this.startTimer = null
-      if (!this.connecting || this.hasActiveTransport()) return
+      if (!this.connecting || this.hasWire()) return
       void this.openStream()
     }, SSE_RECONCILE_DEADLINE_MS)
   }
 
-  hasActiveTransport(): boolean {
+  hasWire(): boolean {
     return this.transportAbort !== null
   }
 
@@ -1281,24 +1515,20 @@ class SseTransport implements ClientChannelTransport {
       this.schedulePingDuringFlush(frame)
       return
     }
-    if (this.streamRequest) {
+    if (this.streamRequest.tag === 'active') {
       const aliased = this.aliasPrepend(frame.frame)
       this.streamRequest.body.push(encodeU32(aliased.byteLength))
       this.streamRequest.body.push(aliased)
       return
     }
     const now = Date.now()
-    const deadlineAt = this.getFrameDeadline(frame.kind, now)
-    this.outboxFrames.push(frame.frame)
-    this.outboxDeadlines.push(deadlineAt)
+    const deadline = this.getFrameDeadline(frame.kind, now)
+    this.outbox.push({ frame: frame.frame, deadline })
     this.scheduleFlush()
-    if (deadlineAt <= now) void this.flushOutbox()
+    if (deadline <= now) void this.flushOutbox()
   }
 
-  /** Compute the per-frame routing alias from the frame's tag/ix and the table populated
-   *  by `applyReconciledSettings`. Alias 0 = connection-routed (owner); alias N (≥ 1) =
-   *  `channels[N − 1]`. Unknown ix falls back to alias 0 — the owner re-injects the frame
-   *  and its mux's session registry routes it correctly. */
+  /** Routing alias for a frame: 0 = owner; N ≥ 1 = `channels[N − 1]`. Unknown ix → 0. */
   private aliasFor(frame: Uint8Array): number {
     const decoded = decode(frame)
     return 'index' in decoded ? (this.ixToAlias.get(decoded.index) ?? 0) : 0
@@ -1316,10 +1546,7 @@ class SseTransport implements ClientChannelTransport {
     this.transportAbort = abortController
     const stage = this.stageInitialBatch()
 
-    // Fire stream-response (SSE downstream) + stream-request (client→server upstream)
-    // POSTs in parallel to reduce connection time. Both carry the same connId. The
-    // stream-request may fail (streaming POST not supported, or race with server creating
-    // the connection) — that's fine, outbox/flush handles all upstream sends in that case.
+    // SSE downstream + upstream POST fire in parallel. If upstream fails, we fall back to outbox+batch.
     const ssePromise = this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
       method: 'POST',
       headers: {
@@ -1335,20 +1562,13 @@ class SseTransport implements ClientChannelTransport {
       }),
       signal: abortController.signal,
     })
-    // Fire the stream-request POST. With browser fetch + `duplex:'half'` its response
-    // Promise doesn't resolve until the body ends, and the body never ends — so we don't
-    // await it. The body is wired up to `this.streamRequest` immediately so
-    // `pushReconciledRouting` can write to it as soon as `RECONCILED` arrives via SSE;
-    // that first push is what unblocks the server's `readMetadata()`. The fetch's
-    // rejection (runtime can't stream, network drop, abort) is consumed eagerly by the
-    // `fetchEndedP` IIFE — built up-front so a rejection is always handled even if
-    // `openStream` exits early via the `await ssePromise` catch below. The handshake
-    // race uses `fetchEndedP` to detect a dead wire and fall back to outbox+batch.
+    // The duplex:'half' POST never resolves while the body stays open. `fetchEndedP`
+    // catches its rejection eagerly so it's always handled even if openStream exits early.
     let fetchEndedP: Promise<'fetch-ended'> | undefined
-    if (!this.streamRequestFailed) {
+    if (this.streamRequest.tag !== 'failed') {
       const body = new PushToPullStream<Uint8Array<ArrayBuffer>>()
       const fetch = this.openStreamRequest(body, abortController.signal)
-      this.streamRequest = { body, fetch, metadataPushed: false }
+      this.streamRequest = { tag: 'active', body, fetch, metadataPushed: false }
       fetchEndedP = (async (): Promise<'fetch-ended'> => {
         try {
           await fetch
@@ -1381,11 +1601,8 @@ class SseTransport implements ClientChannelTransport {
 
     const reader = createSseEventStreamReader(response.body.getReader(), abortController)
 
-    // Start the SSE event loop. It dispatches frames AND signals `handshakeOk` on
-    // STREAM_REQUEST_OPEN_ACK. We start it before awaiting the handshake so RECONCILED
-    // frames received during the wait are still dispatched (their `pushReconciledRouting`
-    // writes the metadata into the streamRequest body, which is what unblocks the server's
-    // `readMetadata()` and prompts it to emit the ack back).
+    // Run the SSE loop concurrently with the handshake wait — RECONCILED arriving during
+    // the wait must still be dispatched (its `pushReconciledRouting` is what unblocks the ack).
     let resolveHandshakeOk!: () => void
     const handshakeOkP = new Promise<'ok'>((resolve) => {
       resolveHandshakeOk = () => resolve('ok')
@@ -1396,28 +1613,33 @@ class SseTransport implements ClientChannelTransport {
           const entry = await reader.readNextEntry()
           if (!entry) break
           if (!entry.frame) continue
-          // Peek the tag without full decode — STREAM_REQUEST_OPEN_ACK is a bare ConnCtrl
-          // frame with no payload, so we just read the tag byte and short-circuit.
           if (entry.frame[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
             resolveHandshakeOk()
             continue
           }
-          this.owner._onTransportFrame(entry.frame)
+          const frame = decode(entry.frame)
+          if (frame.tag === TAG.PONG) {
+            this.heartbeat?.resetPong()
+            continue
+          }
+          this.owner._onTransportFrame(frame)
         }
       } catch {
         if (abortController.signal.aborted) return
       } finally {
         reader.cancel()
-        this.closeStreamRequest()
-        this.transportAbort = null
-        // Skip notifying transport-closed if this controller was moved to the abandoned
-        // pool by an SSE→WS upgrade — the new (WS) transport has taken over.
+        // The old SSE reader's death must NOT trample a successor openStream's streamRequest /
+        // transportAbort. Only mutate transport state if this controller is still the active one.
+        if (this.transportAbort === abortController) {
+          this.closeStreamRequest()
+          this.transportAbort = null
+        }
+        // Abandoned controllers are owned by a successor transport — don't notify closed.
         if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this, false)
       }
     })()
 
-    // Three-way race for the upstream wire: handshake ack (ok), fetch ended (rejected =
-    // streamRequest is dead), or timeout. Non-`ok` outcomes flip us to outbox+batch.
+    // Race upstream readiness: ack (ok), fetch ended (dead), or timeout. Non-ok → outbox+batch.
     if (fetchEndedP) {
       const timeoutP = new Promise<'timeout'>((resolve) =>
         setTimeout(() => resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS),
@@ -1425,13 +1647,13 @@ class SseTransport implements ClientChannelTransport {
       const result = await Promise.race([handshakeOkP, timeoutP, fetchEndedP])
       if (result !== 'ok') {
         this.closeStreamRequest()
-        this.streamRequestFailed = true
+        this.streamRequest = { tag: 'failed' }
       }
     }
 
     this.connecting = false
-    this.owner._onTransportOpen()
-    if (this.outboxFrames.length > 0) void this.flushOutbox()
+    this.owner._onTransportOpen(this)
+    if (this.outbox.length > 0) void this.flushOutbox()
   }
 
   private stageInitialBatch(): SseInitialBatchStage {
@@ -1440,34 +1662,30 @@ class SseTransport implements ClientChannelTransport {
     initialFrames.push(reconcileBatch.reconcileFrame)
     for (const frame of reconcileBatch.movedBufferedFrames) initialFrames.push(frame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
-    const movedOutboxFrames = this.outboxFrames
-    const movedOutboxDeadlines = this.outboxDeadlines
-    this.outboxFrames = []
-    this.outboxDeadlines = []
-    for (const frame of movedOutboxFrames) initialFrames.push({ kind: 'data', frame })
-    return { initialFrames, movedOutboxFrames, movedOutboxDeadlines, movedBufferedFrames }
+    const movedOutbox = this.outbox
+    this.outbox = []
+    for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
+    return { initialFrames, movedOutbox, movedBufferedFrames }
   }
 
   private rollbackInitialBatch(stage: SseInitialBatchStage): void {
-    if (stage.movedOutboxFrames.length === 0 && stage.movedBufferedFrames.length === 0) return
+    if (stage.movedOutbox.length === 0 && stage.movedBufferedFrames.length === 0) return
     const now = Date.now()
-    const movedBufferedOutboxFrames = stage.movedBufferedFrames.map((entry) => entry.frame)
-    const movedBufferedDeadlines = stage.movedBufferedFrames.map((entry) => this.getFrameDeadline(entry.kind, now))
-    this.outboxFrames = stage.movedOutboxFrames.concat(movedBufferedOutboxFrames, this.outboxFrames)
-    this.outboxDeadlines = stage.movedOutboxDeadlines.concat(movedBufferedDeadlines, this.outboxDeadlines)
+    const movedBuffered: OutboxEntry[] = stage.movedBufferedFrames.map((entry) => ({
+      frame: entry.frame,
+      deadline: this.getFrameDeadline(entry.kind, now),
+    }))
+    this.outbox = stage.movedOutbox.concat(movedBuffered, this.outbox)
   }
 
   private async flushOutbox(): Promise<void> {
-    if (!this.hasActiveTransport() || this.flushing || this.outboxFrames.length === 0) return
-    // The `hasActiveTransport()` guard above proves `transportAbort` is non-null and not
-    // closed, and there's no async hop until the fetch fires.
+    if (!this.hasWire() || this.flushing || this.outbox.length === 0) return
     assert(this.transportAbort)
     this.flushScheduler.cancel()
     this.flushing = true
     try {
       const now = Date.now()
-      const queuedFrames = this.outboxFrames.splice(0, this.outboxFrames.length)
-      const queuedDeadlines = this.outboxDeadlines.splice(0, this.outboxDeadlines.length)
+      const queued = this.outbox.splice(0, this.outbox.length)
       this.lastPostStartedAt = now
 
       try {
@@ -1482,21 +1700,20 @@ class SseTransport implements ClientChannelTransport {
             connId: this.connId,
             ownerInstance: this.ownerInstance,
             channels: this.channels,
-            batch: encodeLengthPrefixedFrames(queuedFrames.map((f) => this.aliasPrepend(f))),
+            batch: encodeLengthPrefixedFrames(queued.map((entry) => this.aliasPrepend(entry.frame))),
           }),
           signal: this.transportAbort.signal,
         })
         if (!response.ok) throw new Error('POST failed')
       } catch {
-        this.outboxFrames = queuedFrames.concat(this.outboxFrames)
-        this.outboxDeadlines = queuedDeadlines.concat(this.outboxDeadlines)
+        this.outbox = queued.concat(this.outbox)
         this.abandonActiveTransport()
         this.owner._onTransportClosed(this, false)
         return
       }
     } finally {
       this.flushing = false
-      if (this.outboxFrames.length > 0) {
+      if (this.outbox.length > 0) {
         this.scheduleFlush()
       } else {
         const cbs = this.drainCallbacks.splice(0)
@@ -1505,8 +1722,7 @@ class SseTransport implements ClientChannelTransport {
     }
   }
 
-  /** Send a ping in a concurrent POST while a flush POST is in flight.
-   *  Respects the heartbeat deadline before sending. */
+  /** Concurrent ping POST while a flush POST is in flight. */
   private schedulePingDuringFlush(frame: OutboundFrame): void {
     const delay = Math.max(0, this.getFrameDeadline(frame.kind) - Date.now())
     setTimeout(() => {
@@ -1519,10 +1735,7 @@ class SseTransport implements ClientChannelTransport {
   }
 
   private async sendConcurrentPost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
-    // Called from a deferred `setTimeout` — the transport may have been torn down in the
-    // meantime. Skip silently rather than firing a fetch on a dead wire (it's a heartbeat
-    // ping; the next reconnect will recover).
-    if (!this.hasActiveTransport()) return
+    if (!this.hasWire()) return
     assert(this.transportAbort)
     try {
       await this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
@@ -1540,15 +1753,13 @@ class SseTransport implements ClientChannelTransport {
         }),
         signal: this.transportAbort.signal,
       })
-    } catch {
-      // Best-effort — if this fails the connection will timeout and reconnect.
-    }
+    } catch {} // best-effort — connection will timeout and reconnect on real failure
   }
 
   private scheduleFlush(): void {
-    if (this.outboxFrames.length === 0 || !this.hasActiveTransport()) return
+    if (this.outbox.length === 0 || !this.hasWire()) return
     let earliest = Infinity
-    for (const deadlineAt of this.outboxDeadlines) if (deadlineAt < earliest) earliest = deadlineAt
+    for (const entry of this.outbox) if (entry.deadline < earliest) earliest = entry.deadline
     this.flushScheduler.schedule(earliest)
   }
 
@@ -1573,7 +1784,7 @@ class SseTransport implements ClientChannelTransport {
     const abortController = this.transportAbort
     if (!abortController) return
     this.transportAbort = null
-    this.streamRequest = null
+    if (this.streamRequest.tag === 'active') this.streamRequest = { tag: 'idle' }
     this.closeAbandonedTransport()
     this.abandonedStream = abortController
     this.abandonedControllers.add(abortController)
@@ -1592,25 +1803,33 @@ class SseTransport implements ClientChannelTransport {
     if (ctrl.sseFlushThrottle) this.flushThrottleMs = ctrl.sseFlushThrottle
     if (ctrl.ssePostIdleFlushDelay) this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
     this.heartbeatFlushDelayMs = Math.floor(ctrl.pingInterval / 2)
-    // Refresh the routing table tagged onto every subsequent data POST. Every channel
-    // the server attached gets an alias — `alias N` targets `channels[N − 1]`; alias 0
-    // targets the owner. The wire push happens separately in `pushReconciledRouting`.
     this.ownerInstance = ctrl.ownerInstance
     this.channels = ctrl.open.map((entry) => ({ id: entry.id, home: entry.home }))
     this.ixToAlias = new Map(ctrl.open.map((entry, i) => [entry.ix, i + 1]))
   }
 
-  /** Push the post-reconcile routing table onto the live stream-request body so the
-   *  receiver routes subsequent frames against the new aliases. The stream-request POST
-   *  stays open across reconciles: the first call emits metadata-at-start (`{ connId,
-   *  ownerInstance, channels, streamRequest: true }`) consumed by the server's
-   *  `parseSseRequestMetadata`; every later call emits an in-band refresh entry
-   *  (`alias 0xFF` + JSON `channels[]`). `openStream` awaits the stream-request fetch
-   *  before the SSE reader starts, so by the time this fires `this.streamRequest` is
-   *  reliably set (or stays null if the stream-request POST failed). */
+  sendPing(): void {
+    if (!this.hasWire()) return
+    this.sendFrame({ kind: 'heartbeat', frame: encode.ping() })
+  }
+
+  attachHeartbeat(hb: Heartbeat): void {
+    this.heartbeat = hb
+  }
+
+  detachHeartbeat(): void {
+    this.heartbeat?.stop()
+    this.heartbeat = null
+  }
+
+  hasHeartbeat(): boolean {
+    return this.heartbeat !== null
+  }
+
+  /** Push the post-reconcile routing table onto the live stream-request body. */
   pushReconciledRouting(): void {
     const sr = this.streamRequest
-    if (!sr) return
+    if (sr.tag !== 'active') return
     if (sr.metadataPushed) {
       const refresh = textEncoder.encode(JSON.stringify(this.channels))
       const entry = new Uint8Array(1 + refresh.byteLength)
@@ -1620,9 +1839,7 @@ class SseTransport implements ClientChannelTransport {
       sr.body.push(entry)
       return
     }
-    // `streamRequest: true` tells the server this is a long-lived request body —
-    // in-body reconciles get `reconciled` emitted inline (the body never ends, so we
-    // can't defer to body-end like outbox batch POSTs do).
+    // `streamRequest: true` → server emits `reconciled` inline (the body never ends).
     const meta = textEncoder.encode(
       JSON.stringify({
         connId: this.connId,
@@ -1643,8 +1860,7 @@ class SseTransport implements ClientChannelTransport {
       this.startTimer = null
     }
     this.flushScheduler.cancel()
-    this.outboxFrames = []
-    this.outboxDeadlines = []
+    this.outbox = []
     this.closeStreamRequest()
     this.transportAbort?.abort()
     this.transportAbort = null
@@ -1655,10 +1871,7 @@ class SseTransport implements ClientChannelTransport {
 
   // ── Persistent client→server stream-request POST (half-duplex streaming body) ──
 
-  /** Fire the half-duplex stream-request POST. Pure: no shared-state mutation, no error
-   *  handling — caller owns the body and decides what to do with the returned promise.
-   *  Resolves on body-end (closed), rejects on fetch error. With browser fetch +
-   *  `duplex:'half'` it never resolves while the body stays open. */
+  /** Half-duplex POST. Resolves on body-end, rejects on fetch error. */
   private openStreamRequest(body: PushToPullStream<Uint8Array<ArrayBuffer>>, signal: AbortSignal): Promise<unknown> {
     return this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
       method: 'POST',
@@ -1675,9 +1888,10 @@ class SseTransport implements ClientChannelTransport {
   }
 
   private closeStreamRequest(): void {
-    if (!this.streamRequest) return
+    // Only 'active' has a body to close; 'failed' is sticky-terminal so don't regress to 'idle'.
+    if (this.streamRequest.tag !== 'active') return
     this.streamRequest.body.close()
-    this.streamRequest = null
+    this.streamRequest = { tag: 'idle' }
   }
 }
 

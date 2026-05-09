@@ -73,12 +73,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     key,
     transports,
     sessionToken,
+    connectionKey,
   }: {
     channelId: string
     ack?: boolean
     key?: string
     transports: ChannelTransports
     sessionToken?: string
+    connectionKey?: string
   }) {
     this.id = channelId
     this.ack = ack
@@ -89,6 +91,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       transports,
       fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
       sessionToken,
+      connectionKey,
     })
   }
 

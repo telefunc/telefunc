@@ -1,0 +1,14 @@
+# Overlay for compose.yaml that enables V8 CPU profiling on every server instance.
+# Each instance writes its own `CPU.<pid>.<thread>.<seq>.cpuprofile` file into
+# `test/playground/profiles/` on the host (via the existing `../..:/repo` mount).
+#
+# Run:    pnpm preview:cluster:prof
+# Stop:   Ctrl-C (Node flushes the profile on SIGTERM/SIGINT)
+# Open:   load each `.cpuprofile` in Chrome DevTools → Performance → "Load profile…"
+services:
+  playground-a:
+    command: node --cpu-prof --cpu-prof-dir=/repo/test/playground/profiles dist/nested/server/index.mjs
+  playground-b:
+    command: node --cpu-prof --cpu-prof-dir=/repo/test/playground/profiles dist/nested/server/index.mjs
+  playground-c:
+    command: node --cpu-prof --cpu-prof-dir=/repo/test/playground/profiles dist/nested/server/index.mjs
