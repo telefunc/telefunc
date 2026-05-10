@@ -3,6 +3,7 @@ export { testRunDocker }
 import { page, test, expect, expectLog, run, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
+import { testFileDownload } from './pages/file-download/e2e-test'
 import { testStreaming } from './pages/streaming/e2e-test'
 import { testAbort } from './pages/abort/e2e-test'
 import { testClose } from './pages/close/e2e-test'
@@ -75,6 +76,7 @@ function testRunDocker() {
   })
 
   testFileUpload()
+  testFileDownload()
   testStreaming()
   testAbort()
   testClose()

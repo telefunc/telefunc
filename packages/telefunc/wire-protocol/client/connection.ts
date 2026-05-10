@@ -152,6 +152,8 @@ type ClientConnectionOptions = {
   sessionToken?: string
   /** Client-side cache-key extension — distinct values get distinct `ClientConnection` instances. Never sent on the wire. */
   connectionKey?: string
+  /** User headers (config.headers + per-call `withContext({ headers })`) merged into every transport fetch. */
+  headers?: Record<string, string>
 }
 
 type ClientChannelTransport = {
@@ -1465,6 +1467,7 @@ class SseTransport implements ClientChannelTransport {
     private readonly telefuncUrl: string,
     private readonly fetchImpl: typeof fetch,
     private readonly sessionToken: string | undefined,
+    private readonly userHeaders: Record<string, string> | undefined,
     private readonly owner: ClientConnection,
   ) {}
 
@@ -1550,6 +1553,7 @@ class SseTransport implements ClientChannelTransport {
     const ssePromise = this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
       method: 'POST',
       headers: {
+        ...this.userHeaders,
         Accept: 'text/event-stream',
         'Content-Type': 'application/octet-stream',
         [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
@@ -1692,6 +1696,7 @@ class SseTransport implements ClientChannelTransport {
         const response = await this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
           method: 'POST',
           headers: {
+            ...this.userHeaders,
             'Content-Type': 'application/octet-stream',
             [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
             ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
@@ -1741,6 +1746,7 @@ class SseTransport implements ClientChannelTransport {
       await this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
         method: 'POST',
         headers: {
+          ...this.userHeaders,
           'Content-Type': 'application/octet-stream',
           [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
           ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
@@ -1876,6 +1882,7 @@ class SseTransport implements ClientChannelTransport {
     return this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
       method: 'POST',
       headers: {
+        ...this.userHeaders,
         'Content-Type': 'application/octet-stream',
         [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
         ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
@@ -1904,7 +1911,7 @@ const TRANSPORT_REGISTRY: Record<
 > = {
   [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport(telefuncUrl, owner),
   [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>
-    new SseTransport(telefuncUrl, options.fetchImpl, options.sessionToken, owner),
+    new SseTransport(telefuncUrl, options.fetchImpl, options.sessionToken, options.headers, owner),
 }
 
 /** Defines which transport can upgrade to which. */

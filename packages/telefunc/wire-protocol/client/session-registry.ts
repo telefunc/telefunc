@@ -1,4 +1,4 @@
-export { setSessionToken, getSessionToken, getLastSessionToken }
+export { setSessionToken, getSessionToken, getLastSessionToken, appendSessionParam }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 
@@ -27,4 +27,8 @@ function getLastSessionToken(telefuncUrl: string): string | undefined {
 
 function getSessionToken(telefuncUrl: string): string | undefined {
   return globalObject.registry.get(telefuncUrl)
+}
+
+function appendSessionParam(url: string, token: string): string {
+  return url.includes('?') ? `${url}&session=${token}` : `${url}?session=${token}`
 }

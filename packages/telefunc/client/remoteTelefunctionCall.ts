@@ -9,8 +9,6 @@ import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
 import { getPendingContext } from './withContext.js'
 import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/async-generator-interface.js'
-import { getSessionToken } from '../wire-protocol/client/session-registry.js'
-import { TELEFUNC_SESSION_HEADER } from '../wire-protocol/constants.js'
 
 function remoteTelefunctionCall(
   telefuncFilePath: string,
@@ -32,17 +30,8 @@ function remoteTelefunctionCall(
   const clientConfig = resolveClientConfig()
   objectAssign(callContext, clientConfig)
 
-  const telefuncUrlBase = clientConfig.telefuncUrl
-  objectAssign(callContext, { telefuncUrlBase })
-
-  const sessionToken = getSessionToken(telefuncUrlBase)
-  if (sessionToken) {
-    objectAssign(callContext, {
-      telefuncUrl: telefuncUrlBase.includes('?')
-        ? `${telefuncUrlBase}&session=${sessionToken}`
-        : `${telefuncUrlBase}?session=${sessionToken}`,
-      headers: { ...callContext.headers, [TELEFUNC_SESSION_HEADER]: sessionToken },
-    })
+  if (callClientContext?.telefuncUrl) {
+    objectAssign(callContext, { telefuncUrl: callClientContext.telefuncUrl })
   }
 
   const connectionKey = callClientContext?.channel?.connectionKey

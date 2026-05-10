@@ -1,5 +1,7 @@
 export const SERIALIZER_PREFIX_FILE = '!TelefuncFile:'
 export const SERIALIZER_PREFIX_BLOB = '!TelefuncBlob:'
+export const SERIALIZER_PREFIX_FILE_DOWNLOAD = '!TelefuncFileDownload:'
+export const SERIALIZER_PREFIX_BLOB_DOWNLOAD = '!TelefuncBlobDownload:'
 export const SERIALIZER_PREFIX_STREAM = '!TelefuncStream:'
 export const SERIALIZER_PREFIX_GENERATOR = '!TelefuncGenerator:'
 export const SERIALIZER_PREFIX_PROMISE = '!TelefuncPromise:'

@@ -167,6 +167,11 @@ const headings = [
   },
   {
     level: 2,
+    title: 'File download',
+    url: '/file-download',
+  },
+  {
+    level: 2,
     title: 'Stream',
     url: '/stream',
   },

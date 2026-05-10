@@ -20,11 +20,22 @@ export type {
   PromiseContract,
   FileRequestContract,
   BlobRequestContract,
+  FileResponseContract,
+  BlobResponseContract,
+  FileDownloadResponseContract,
+  BlobDownloadResponseContract,
   FileMetadata,
   BlobMetadata,
+  FileResponseMetadata,
+  BlobResponseMetadata,
+  FileDownloadMetadata,
+  BlobDownloadMetadata,
   ChannelContract,
   BroadcastContract,
   FunctionContract,
+  FileDownload,
+  BlobDownload,
+  DownloadProgress,
 }
 
 import type { ServerChannel } from './server/channel.js'
@@ -89,6 +100,8 @@ type StreamingValueServer = {
 
 type ChunkReader = {
   readNextChunk: () => Promise<Uint8Array<ArrayBuffer> | null>
+  /** Throws on cancel mid-stream or on `expectedSize` mismatch. */
+  arrayBuffer: (expectedSize?: number, onChunk?: (chunkSize: number) => void) => Promise<ArrayBuffer>
   cancel: () => void
   abort: (abortError: AbortError) => void
 }
@@ -106,6 +119,8 @@ type ClientReviverContext = {
     cancel: () => void
     abort: (abortError: AbortError) => void
   }
+  /** Awaited before the call settles — for revivers that need to buffer before the user reads. */
+  waitFor(promise: Promise<unknown>): void
 }
 
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
@@ -162,8 +177,25 @@ type ClientReplacerContext = {
 // ===== Metadata =====
 
 type StreamingMetadata = { channelId: string } | { __index: number }
+
+/** Request-direction (client→server): bytes are framed back-to-back in the request body,
+ *  so the reader needs an explicit `index` and `size` to know where this file starts and ends. */
 type FileMetadata = { index: number; name: string; size: number; type: string; lastModified: number }
 type BlobMetadata = { index: number; size: number; type: string }
+
+type FileResponseMetadata = StreamingMetadata & {
+  name: string
+  type: string
+  lastModified: number
+  size?: number
+}
+type BlobResponseMetadata = StreamingMetadata & {
+  type: string
+  size?: number
+}
+
+type FileDownloadMetadata = FileResponseMetadata
+type BlobDownloadMetadata = BlobResponseMetadata
 
 // ===== Concrete contracts =====
 
@@ -181,6 +213,33 @@ type ReadableStreamRequestContract = TypeContract<
 type PromiseContract = TypeContract<Promise<unknown>, Promise<unknown>, StreamingMetadata>
 type FileRequestContract = TypeContract<File, File, FileMetadata>
 type BlobRequestContract = TypeContract<Blob, Blob, BlobMetadata>
+type FileResponseContract = TypeContract<File, Promise<File>, FileResponseMetadata>
+type BlobResponseContract = TypeContract<Blob, Promise<Blob>, BlobResponseMetadata>
+
+type FileDownloadResponseContract = TypeContract<FileDownload, FileDownload, FileDownloadMetadata>
+type BlobDownloadResponseContract = TypeContract<BlobDownload, BlobDownload, BlobDownloadMetadata>
+
+type DownloadProgress = (loaded: number, total: number | undefined) => void
+
+type FileDownload<TSize extends number | undefined = number | undefined> = {
+  readonly name: string
+  readonly type: string
+  readonly size: TSize
+  readonly lastModified: number
+  readonly loaded: number
+  readonly file: Promise<File>
+  readonly onProgress: (cb: DownloadProgress) => void
+  readonly cancel: () => void
+}
+
+type BlobDownload<TSize extends number | undefined = number | undefined> = {
+  readonly type: string
+  readonly size: TSize
+  readonly loaded: number
+  readonly blob: Promise<Blob>
+  readonly onProgress: (cb: DownloadProgress) => void
+  readonly cancel: () => void
+}
 
 type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
 

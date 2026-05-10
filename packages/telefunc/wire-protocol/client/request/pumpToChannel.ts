@@ -24,12 +24,16 @@ const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 function pumpClientProducerToChannel(
   createProducer: () => StreamingProducer,
   channelTransports: ChannelTransports,
+  telefuncUrl: string,
   connectionKey?: string,
+  headers?: Record<string, string>,
 ) {
   const channel = new ClientChannel({
     channelId: crypto.randomUUID(),
     transports: channelTransports,
     connectionKey,
+    headers,
+    telefuncUrl,
   })
 
   const producer = createProducer()

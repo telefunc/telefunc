@@ -30,6 +30,8 @@ type CallContext = {
   extensions?: Record<string, unknown>
   extensionRequestTypes: ReplacerType<TypeContract, ClientReplacerContext>[]
   connectionKey?: string
+  headers?: Record<string, string> | null
+  telefuncUrl: string
 }
 
 type SerializeResult = {
@@ -55,6 +57,8 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
 
   const channelTransports = callContext.channel.transports
   const connectionKey = callContext.connectionKey
+  const headers = callContext.headers ?? undefined
+  const telefuncUrl = callContext.telefuncUrl
   const abortSignal = callContext.abortController.signal
   const files: Blob[] = []
   const requestCloseHandlers: CloseHandler[] = []
@@ -72,10 +76,12 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
           ack: opts?.ack,
           transports: channelTransports,
           connectionKey,
+          headers,
+          telefuncUrl,
         })
       },
       sendStream(createProducer) {
-        return pumpClientProducerToChannel(createProducer, channelTransports, connectionKey)
+        return pumpClientProducerToChannel(createProducer, channelTransports, telefuncUrl, connectionKey, headers)
       },
     },
     function onReplaced(replaced) {

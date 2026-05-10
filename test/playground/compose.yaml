@@ -12,20 +12,58 @@ configs:
       }
       localhost {
           tls internal
-          reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 {
-              lb_policy round_robin
-              flush_interval -1
+
+          # Bench-driven upstream-set selection via `?bench_instances=N` URL query.
+          # Query (not header) so WS upgrades carry it too — the browser strips custom
+          # headers from `new WebSocket(url)` but keeps the URL's query string intact.
+          @inst1 query bench_instances=1
+          handle @inst1 {
+              reverse_proxy playground-a:3000 {
+                  flush_interval -1
+              }
+          }
+
+          @inst3 query bench_instances=3
+          handle @inst3 {
+              reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 {
+                  lb_policy round_robin
+                  flush_interval -1
+              }
+          }
+
+          @inst6 query bench_instances=6
+          handle @inst6 {
+              reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 playground-d:3000 playground-e:3000 playground-f:3000 {
+                  lb_policy round_robin
+                  flush_interval -1
+              }
+          }
+
+          handle {
+              reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 {
+                  lb_policy round_robin
+                  flush_interval -1
+              }
           }
       }
 
 services:
   redis:
-    image: redis:8-alpine
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    ulimits:
+      memlock: -1
+    command:
+      - --logtostdout
+      - --proactor_threads=4
+      - --maxmemory=16gb
+      - --snapshot_cron=
+      - --dbfilename=
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 1s
-      timeout: 1s
+      timeout: 2s
       retries: 30
+      start_period: 5s
 
   playground-a: &playground
     image: node:24-alpine
@@ -63,6 +101,30 @@ services:
       INSTANCE_ID: C
       NO_HTTPS: '1'
 
+  playground-d:
+    <<: *playground
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: D
+      NO_HTTPS: '1'
+
+  playground-e:
+    <<: *playground
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: E
+      NO_HTTPS: '1'
+
+  playground-f:
+    <<: *playground
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: F
+      NO_HTTPS: '1'
+
   proxy:
     image: caddy:2-alpine
     ports:
@@ -78,6 +140,12 @@ services:
       playground-b:
         condition: service_healthy
       playground-c:
+        condition: service_healthy
+      playground-d:
+        condition: service_healthy
+      playground-e:
+        condition: service_healthy
+      playground-f:
         condition: service_healthy
     # Hit Caddy's HTTPS listener through the reverse_proxy block to a playground container —
     # a 200 means the whole data path (TLS handshake → reverse_proxy → upstream) is live.

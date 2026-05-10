@@ -17,6 +17,7 @@ import { ClientChannel, ClientBroadcast } from '../channel.js'
 import { wrapProxy } from '../../wrapProxy.js'
 import { GcRegistry } from '../../gcRegistry.js'
 import { ChannelChunkReader } from '../../ChannelChunkReader.js'
+import { readChunksToArrayBuffer } from '../../readChunksToArrayBuffer.js'
 import { STREAMING_ERROR_TYPE } from '../../constants.js'
 import type { ChannelTransports } from '../../constants.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -34,6 +35,8 @@ type CallContext = {
   channel: { transports: ChannelTransports }
   requestCloseHandlers: CloseHandler[]
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
+  headers?: Record<string, string> | null
+  telefuncUrl: string
 }
 
 // ===== Public entry point =====
@@ -50,7 +53,6 @@ type CallContext = {
 async function parseResponse(
   response: Response,
   callContext: CallContext,
-  sessionToken: string | undefined,
   connectionKey: string | undefined,
 ): Promise<unknown> {
   const transports = callContext.channel.transports
@@ -69,24 +71,23 @@ async function parseResponse(
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
     const metaText = new TextDecoder().decode(metaBytes)
-    return reviveResponse(metaText, callContext, transports, sessionToken, connectionKey, streamReader)
+    return reviveResponse(metaText, callContext, transports, connectionKey, streamReader)
   }
 
   // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
   const body = await response.text()
-  return reviveResponse(body, callContext, transports, sessionToken, connectionKey, null)
+  return reviveResponse(body, callContext, transports, connectionKey, null)
 }
 
 // ===== Response revival =====
 
-function reviveResponse(
+async function reviveResponse(
   body: string,
   callContext: CallContext,
   transports: ChannelTransports,
-  sessionToken: string | undefined,
   connectionKey: string | undefined,
   bodyStreamReader: BaseStreamReader | null,
-): unknown {
+): Promise<unknown> {
   const { extensionResponseTypes } = callContext
   const closeHandlers = new WeakMap<object, () => void>()
 
@@ -97,16 +98,44 @@ function reviveResponse(
     throwBugError()
   }
 
+  const headers = callContext.headers ?? undefined
+  const telefuncUrl = callContext.telefuncUrl
+  const promises: Promise<unknown>[] = []
   const context: ClientReviverContext = {
+    waitFor(promise) {
+      // Suppress unhandled-rejection noise if `parse()` throws before `Promise.all(promises)`.
+      promise.catch(() => {})
+      promises.push(promise)
+    },
     createChannel(opts) {
-      return new ClientChannel({ channelId: opts.channelId, ack: opts.ack, transports, sessionToken, connectionKey })
+      return new ClientChannel({
+        channelId: opts.channelId,
+        ack: opts.ack,
+        transports,
+        connectionKey,
+        headers,
+        telefuncUrl,
+      })
     },
     createBroadcast(opts) {
-      return new ClientBroadcast({ channelId: opts.channelId, key: opts.key, transports, sessionToken, connectionKey })
+      return new ClientBroadcast({
+        channelId: opts.channelId,
+        key: opts.key,
+        transports,
+        connectionKey,
+        headers,
+        telefuncUrl,
+      })
     },
     receiveStreamReader(metadata) {
       if ('channelId' in metadata) {
-        const channel = new ClientChannel({ channelId: metadata.channelId, transports, sessionToken, connectionKey })
+        const channel = new ClientChannel({
+          channelId: metadata.channelId,
+          transports,
+          connectionKey,
+          headers,
+          telefuncUrl,
+        })
         return ChannelChunkReader.create(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStreamReader call in non-streaming response')
@@ -114,7 +143,13 @@ function reviveResponse(
     },
     receiveStream(metadata) {
       if ('channelId' in metadata) {
-        const channel = new ClientChannel({ channelId: metadata.channelId, transports, sessionToken, connectionKey })
+        const channel = new ClientChannel({
+          channelId: metadata.channelId,
+          transports,
+          connectionKey,
+          headers,
+          telefuncUrl,
+        })
         return ChannelChunkReader.toReadableStream(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
@@ -156,6 +191,7 @@ function reviveResponse(
   let parsed: unknown
   try {
     parsed = parse(body, { reviver })
+    if (promises.length > 0) await Promise.all(promises)
   } catch (err) {
     for (const close of allCloseHandlers) close()
     throw err
@@ -274,6 +310,13 @@ class FrameDemuxer {
     const cancel = () => this.cancelIndex(index)
     return {
       readNextChunk: () => this.readNextChunkForIndex(index),
+      arrayBuffer: (expectedSize?: number, onChunk?: (chunkSize: number) => void) =>
+        readChunksToArrayBuffer(
+          () => this.readNextChunkForIndex(index),
+          () => this.cancelledIndices.has(index),
+          expectedSize,
+          onChunk,
+        ),
       cancel,
       // Inline streams abort via HTTP body reader cancellation, not per-index.
       abort() {},

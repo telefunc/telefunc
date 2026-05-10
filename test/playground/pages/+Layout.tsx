@@ -8,6 +8,7 @@ const nav = [
   { href: '/about', label: 'About' },
   { href: '/streaming', label: 'Streaming' },
   { href: '/file-upload', label: 'Upload' },
+  { href: '/file-download', label: 'Download' },
   { href: '/abort', label: 'Abort' },
   { href: '/close', label: 'Close' },
   { href: '/chat', label: 'Chat' },

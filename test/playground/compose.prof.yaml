@@ -2,6 +2,16 @@
 # Each instance writes its own `.cpuprofile` into `test/playground/profiles/` on the host
 # (via the existing `../..:/repo` mount).
 #
+# Filenames are keyed on `INSTANCE_ID` via `--cpu-prof-name=instance-$INSTANCE_ID.cpuprofile`.
+# Without this, V8's default filename pattern `CPU.<date>.<HHMMSS>.<PID>.<thread>.<seq>` would
+# *collide* across containers — every Node process is PID 1 inside its container, the seq is
+# always `001` for a single profile, and Ctrl-C makes them all flush in the same second.
+# All 6 containers would write the same filename to the shared mount and only the last
+# writer's profile would survive.
+#
+# `sh -c 'exec node ...'` rather than direct `node ...` so `$INSTANCE_ID` expands from the env
+# at container start. `exec` keeps Node as PID 1 so signal forwarding (SIGTERM → flush) works.
+#
 # Run:    pnpm preview:cluster:prof
 # Stop:   Ctrl-C (Node flushes the profile on SIGTERM/SIGINT)
 # Open:   load each `.cpuprofile` in Chrome DevTools → Performance → "Load profile…"
@@ -9,9 +19,15 @@
 x-prof-options: &prof-options
   user: ${UID:-1000}:${GID:-1000}
   stop_grace_period: 30s
-  command: node --cpu-prof --cpu-prof-interval=100000 --cpu-prof-dir=/repo/test/playground/profiles dist/nested/server/index.mjs
+  command:
+    - sh
+    - -c
+    - exec node --cpu-prof --cpu-prof-name=instance-$$INSTANCE_ID.cpuprofile --cpu-prof-interval=100000 --cpu-prof-dir=/repo/test/playground/profiles dist/nested/server/index.mjs
 
 services:
   playground-a: *prof-options
   playground-b: *prof-options
   playground-c: *prof-options
+  playground-d: *prof-options
+  playground-e: *prof-options
+  playground-f: *prof-options

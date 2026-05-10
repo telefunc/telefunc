@@ -12,7 +12,9 @@ Telefunc supports streaming in both directions:
 | Type | Best for | Values |
 |---|---|---|
 | [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) | AI tokens, notifications, progress updates | Structured (JSON-serializable) |
-| [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) | File downloads, media, raw bytes | Binary (`Uint8Array`) |
+| [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) | Raw byte streams without file metadata | Binary (`Uint8Array`) |
+| <Link text={<code>File</code>} href="/file-download" /> / <Link text={<code>Blob</code>} href="/file-download" /> | File downloads with `name` / `type` / `size` | Binary (`Uint8Array`) |
+| <Link text={<code>download()</code>} href="/file-download#download" /> | File / Blob downloads with progress + cancel, or upstream-streamed bytes | Binary (`Uint8Array`) |
 | Nested [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise) | Lazy parts of a response that resolve independently | Any serializable value |
 
 
@@ -47,7 +49,7 @@ for await (const token of gen) {
 
 ## `ReadableStream`
 
-Use `ReadableStream` when you need to stream bytes.
+Use `ReadableStream` when you need to stream raw bytes.
 
 ```ts
 // Download.telefunc.ts
@@ -60,6 +62,8 @@ export function onDownload(fileName: string): ReadableStream<Uint8Array> {
   return Readable.toWeb(fs.createReadStream(`./files/${fileName}`)) as ReadableStream<Uint8Array>
 }
 ```
+
+> For named files with `name` / `type` / `size` metadata, return a <Link text={<code>File</code>} href="/file-download" /> or <Link text={<code>Blob</code>} href="/file-download" /> instead.
 
 ```ts
 // Download.tsx
@@ -264,5 +268,6 @@ See <Link href="/error-handling" /> for details.
 
 - <Link href="/real-time" /> — function passing, channels, and upload progress
 - <Link href="/file-upload" /> — streaming file uploads
+- <Link href="/file-download" /> — streaming file downloads
 - <Link href="/channel" /> — bidirectional channels
 - <Link href="/transport" /> — transport comparison and configuration

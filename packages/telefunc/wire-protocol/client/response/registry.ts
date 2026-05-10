@@ -3,6 +3,10 @@ export { createStreamingReviver }
 import type { Reviver } from '@brillout/json-serializer/parse'
 import { asyncGeneratorReviver } from './async-generator.js'
 import { readableStreamReviver } from './readable-stream.js'
+import { fileReviver } from './file.js'
+import { blobReviver } from './blob.js'
+import { fileDownloadReviver } from './fileDownload.js'
+import { blobDownloadReviver } from './blobDownload.js'
 import { promiseReviver } from './promise.js'
 import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
@@ -15,6 +19,10 @@ import { isObject } from '../../../utils/isObject.js'
 const clientTypes = [
   asyncGeneratorReviver,
   readableStreamReviver,
+  fileReviver,
+  blobReviver,
+  fileDownloadReviver,
+  blobDownloadReviver,
   promiseReviver,
   broadcastReviver,
   channelReviver,

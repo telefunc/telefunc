@@ -5,6 +5,7 @@ import { textDecoder } from './frame.js'
 import { CHANNEL_PUMP_TAG_ERROR } from './constants.js'
 import { isObject } from '../utils/isObject.js'
 import { assert } from '../utils/assert.js'
+import { readChunksToArrayBuffer } from './readChunksToArrayBuffer.js'
 import type { Channel } from './server/channel.js'
 import type { AbortError } from '../shared/Abort.js'
 
@@ -35,6 +36,7 @@ class ChannelChunkReader {
   private wake: (() => void) | null = null
   private closed = false
   private closeError: Error | null = null
+  private cancelled = false
   private readonly channel: ChunkReaderChannel
   private readonly throwError?: (errorPayload: Record<string, unknown>) => never
 
@@ -59,7 +61,7 @@ class ChannelChunkReader {
   }
 
   /**
-   * Create a chunk reader returning `{ readNextChunk, cancel }`.
+   * Create a chunk reader returning `{ readNextChunk, arrayBuffer, cancel, abort }`.
    *
    * `throwError` is called when an error frame is dequeued. If omitted,
    * error frames throw a generic Error.
@@ -68,6 +70,13 @@ class ChannelChunkReader {
     const reader = new ChannelChunkReader(channel, throwError)
     return {
       readNextChunk: () => reader.readNextChunk(),
+      arrayBuffer: (expectedSize?: number, onChunk?: (chunkSize: number) => void) =>
+        readChunksToArrayBuffer(
+          () => reader.readNextChunk(),
+          () => reader.cancelled,
+          expectedSize,
+          onChunk,
+        ),
       cancel: () => reader.cancel(),
       abort(abortError: AbortError) {
         channel.abort(abortError.abortValue, abortError.message)
@@ -135,6 +144,7 @@ class ChannelChunkReader {
   }
 
   private cancel(): void {
+    this.cancelled = true
     this.channel.close()
     this.wake?.()
     this.wake = null

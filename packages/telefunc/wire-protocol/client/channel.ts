@@ -21,6 +21,7 @@ import { resolveClientConfig } from '../../client/clientConfig.js'
 import { createAbortError, isAbort } from '../../shared/Abort.js'
 import { ACK_STATUS, type WirePublishInfo } from '../shared-ws.js'
 import { ClientConnection } from './connection.js'
+import { appendSessionParam, getSessionToken } from './session-registry.js'
 import {
   CHANNEL_CLOSE_TIMEOUT_MS,
   CREDIT_WINDOW_BYTES,
@@ -72,26 +73,34 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     ack = false,
     key,
     transports,
-    sessionToken,
     connectionKey,
+    headers,
+    telefuncUrl,
   }: {
     channelId: string
     ack?: boolean
     key?: string
     transports: ChannelTransports
-    sessionToken?: string
     connectionKey?: string
+    headers?: Record<string, string>
+    telefuncUrl: string
   }) {
     this.id = channelId
     this.ack = ack
     this.key = key
     const config = resolveClientConfig()
-    const url = sessionToken ? appendSessionParam(config.telefuncUrl, sessionToken) : config.telefuncUrl
+    // Read the latest stored session token for this URL. `makeHttpRequest` writes the freshest
+    // server-issued token to the registry before this constructor runs (on the response side),
+    // and the request side reads whatever was stored from the prior round-trip. Either way,
+    // querying here keeps the channel's transport in sync with whatever HTTP is using.
+    const sessionToken = getSessionToken(telefuncUrl)
+    const url = sessionToken ? appendSessionParam(telefuncUrl, sessionToken) : telefuncUrl
     this._connection = ClientConnection.getOrCreate(url, this, {
       transports,
       fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
       sessionToken,
       connectionKey,
+      headers,
     })
   }
 
@@ -562,8 +571,4 @@ function normalizeCloseTimeout(timeout: number | undefined): number {
   if (!Number.isFinite(timeout) || timeout < 0)
     throw new Error('Channel close timeout must be a non-negative finite number')
   return timeout
-}
-
-function appendSessionParam(url: string, token: string): string {
-  return url.includes('?') ? `${url}&session=${token}` : `${url}?session=${token}`
 }

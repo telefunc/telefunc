@@ -1,0 +1,95 @@
+import { Link } from '@brillout/docpress'
+
+Return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) from a telefunction. The client receives a standard `File` / `Blob` ready for `URL.createObjectURL`, `<img src>`, `fetch({ body })`, `FormData`, etc.
+
+> For large downloads or bytes streamed through your server from an upstream source, use `download()` to get progress and cancel support without buffering the full payload on the server.
+
+
+## Which one should I use?
+
+| Approach | Server memory | Best for |
+|---|---|---|
+| Native `File` / `Blob` | Full payload | Bytes already in memory |
+| `download(file)` / `download(blob)` | Full payload | Same + progress / cancel |
+| `download(stream, opts)` | One chunk | Bytes streamed from upstream (S3, CDN, …) |
+
+
+## `new File()` / `new Blob()`
+
+Return a native `File` or `Blob` like any other value.
+
+```ts
+// Invoice.telefunc.ts
+// Environment: server
+
+import { renderPdf } from 'some-pdf-lib'
+
+export async function onRenderInvoice(form: InvoiceForm) {
+  const bytes = await renderPdf(form)
+  return new File([bytes], `invoice-${form.id}.pdf`, { type: 'application/pdf' })
+}
+```
+
+```tsx
+// Invoice.tsx
+// Environment: client
+
+import { onRenderInvoice } from './Invoice.telefunc'
+
+const pdf = await onRenderInvoice(form)
+window.open(URL.createObjectURL(pdf))
+```
+
+
+## `download()`
+
+```ts
+// Image.telefunc.ts
+// Environment: server
+
+import { download } from 'telefunc'
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
+
+const s3 = new S3Client({})
+
+export async function onGetImage(key: string) {
+  const res = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: key }))
+  return download(res.Body!.transformToWebStream(), {
+    name: key,
+    size: res.ContentLength,
+    type: res.ContentType,
+  })
+}
+```
+
+```tsx
+// ImageView.tsx
+// Environment: client
+
+import { onGetImage } from './Image.telefunc'
+
+const dl = await onGetImage(s3Key)
+
+dl.onProgress((loaded, total) => {
+  setProgress(total ? loaded / total : null)
+})
+cancelBtn.onclick = () => dl.cancel()
+
+const img = await dl.file
+imgEl.src = URL.createObjectURL(img)
+```
+
+The `await onGetImage(...)` settles once the response metadata arrives — before any bytes flow — so `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are usable while the bytes stream in the background. `await dl.file` (or `dl.blob`) yields the buffered native `File` / `Blob` once complete.
+
+| Overload | Returns |
+|---|---|
+| `download(file)` / `download(blob)` | wraps a native `File` / `Blob` already in memory |
+| `download(stream, { name, size?, type?, lastModified? })` | `FileDownload` |
+| `download(stream, { type?, size? })` (no `name`) | `BlobDownload` (`dl.blob` instead of `dl.file`) |
+
+
+## See also
+
+- <Link href="/file-upload" /> — file uploads (client → server)
+- <Link href="/stream" /> — `ReadableStream` and `AsyncGenerator` returns
+- <Link href="/transport" /> — transport configuration

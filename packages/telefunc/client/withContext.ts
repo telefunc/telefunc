@@ -26,6 +26,8 @@ type ClientCallContext = {
   signal?: AbortSignal
   /** Additional HTTP headers for this call. */
   headers?: Record<string, string>
+  /** Override `config.telefuncUrl` for this call and any of its channels. */
+  telefuncUrl?: string
   /** Streamed-value transport overrides for this call. */
   stream?: StreamCallContext
   /** Channel transport overrides for this call. */

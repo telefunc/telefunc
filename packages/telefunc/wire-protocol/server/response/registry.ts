@@ -2,6 +2,10 @@ export { createStreamingReplacer }
 
 import { asyncGeneratorReplacer } from './async-generator.js'
 import { readableStreamReplacer } from './readable-stream.js'
+import { fileReplacer } from './file.js'
+import { blobReplacer } from './blob.js'
+import { fileDownloadReplacer } from './fileDownload.js'
+import { blobDownloadReplacer } from './blobDownload.js'
 import { promiseReplacer } from './promise.js'
 import { broadcastReplacer } from './broadcast.js'
 import { channelReplacer } from './channel.js'
@@ -11,10 +15,15 @@ import type { AbortError } from '../../../shared/Abort.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
-// broadcastReplacer must come before channelReplacer because ServerBroadcast extends ServerChannel
+// Order: fileDownload/blobDownload before file/blob (brand-checked vs instanceof);
+// file before blob (File extends Blob); broadcast before channel (Broadcast extends Channel).
 const serverTypes = [
   asyncGeneratorReplacer,
   readableStreamReplacer,
+  fileDownloadReplacer,
+  blobDownloadReplacer,
+  fileReplacer,
+  blobReplacer,
   promiseReplacer,
   broadcastReplacer,
   channelReplacer,
