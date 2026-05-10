@@ -6,7 +6,7 @@ import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { createStreamingReviver } from './registry.js'
-import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
+import type { StreamSource, ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { setAbortController } from '../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
@@ -16,8 +16,8 @@ import { SSEStreamReader } from './SSEStreamReader.js'
 import { ClientChannel, ClientBroadcast } from '../channel.js'
 import { wrapProxy } from '../../wrapProxy.js'
 import { GcRegistry } from '../../gcRegistry.js'
-import { ChannelChunkReader } from '../../ChannelChunkReader.js'
-import { readChunksToArrayBuffer } from '../../readChunksToArrayBuffer.js'
+import { ChannelStreamSource } from '../../ChannelStreamSource.js'
+import { readChunksToBytes } from '../../readChunksToBytes.js'
 import { STREAMING_ERROR_TYPE } from '../../constants.js'
 import type { ChannelTransports } from '../../constants.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
@@ -127,20 +127,6 @@ async function reviveResponse(
         telefuncUrl,
       })
     },
-    receiveStreamReader(metadata) {
-      if ('channelId' in metadata) {
-        const channel = new ClientChannel({
-          channelId: metadata.channelId,
-          transports,
-          connectionKey,
-          headers,
-          telefuncUrl,
-        })
-        return ChannelChunkReader.create(channel, throwStreamError)
-      }
-      assert(bodyStreamReader, 'Unexpected receiveStreamReader call in non-streaming response')
-      return FrameDemuxer.getInstance(bodyStreamReader).create(metadata.__index)
-    },
     receiveStream(metadata) {
       if ('channelId' in metadata) {
         const channel = new ClientChannel({
@@ -150,10 +136,10 @@ async function reviveResponse(
           headers,
           telefuncUrl,
         })
-        return ChannelChunkReader.toReadableStream(channel, throwStreamError)
+        return ChannelStreamSource.create(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
-      return FrameDemuxer.getInstance(bodyStreamReader).toReadableStream(metadata.__index)
+      return FrameDemuxer.getInstance(bodyStreamReader).create(metadata.__index)
     },
   }
 
@@ -305,42 +291,43 @@ class FrameDemuxer {
     return promise
   }
 
-  create(index: number) {
+  create(index: number): StreamSource {
     this.registerConsumer()
+    const readNextChunk = () => this.readNextChunkForIndex(index)
     const cancel = () => this.cancelIndex(index)
+    const isCancelled = () => this.cancelledIndices.has(index)
     return {
-      readNextChunk: () => this.readNextChunkForIndex(index),
-      arrayBuffer: (expectedSize?: number, onChunk?: (chunkSize: number) => void) =>
-        readChunksToArrayBuffer(
-          () => this.readNextChunkForIndex(index),
-          () => this.cancelledIndices.has(index),
-          expectedSize,
-          onChunk,
-        ),
+      readNextChunk,
+      bytes: (opts) => readChunksToBytes(readNextChunk, isCancelled, opts?.expectedSize, opts?.onChunk),
+      stream: (opts) => {
+        let received = 0
+        return new ReadableStream<Uint8Array<ArrayBuffer>>({
+          pull: async (controller) => {
+            try {
+              const chunk = await readNextChunk()
+              if (chunk === null) {
+                if (isCancelled()) throw new Error('Stream cancelled before all bytes were received')
+                if (opts?.expectedSize !== undefined && received !== opts.expectedSize) {
+                  throw new Error(`Stream truncated — received ${received} of ${opts.expectedSize} expected bytes`)
+                }
+                controller.close()
+                return
+              }
+              received += chunk.byteLength
+              opts?.onChunk?.(chunk.byteLength)
+              controller.enqueue(chunk)
+            } catch (err) {
+              cancel()
+              controller.error(err)
+            }
+          },
+          cancel,
+        })
+      },
       cancel,
       // Inline streams abort via HTTP body reader cancellation, not per-index.
       abort() {},
     }
-  }
-
-  toReadableStream(index: number) {
-    this.registerConsumer()
-    const cancel = () => this.cancelIndex(index)
-    const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
-      pull: async (controller) => {
-        try {
-          const chunk = await this.readNextChunkForIndex(index)
-          if (chunk === null) controller.close()
-          else controller.enqueue(chunk)
-        } catch (err) {
-          this.cancelIndex(index)
-          controller.error(err)
-        }
-      },
-      cancel,
-    })
-    // Inline streams abort via HTTP body reader cancellation, not per-index.
-    return { stream, cancel, abort() {} }
   }
 
   private async ensureReading() {

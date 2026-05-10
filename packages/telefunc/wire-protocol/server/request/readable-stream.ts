@@ -10,7 +10,7 @@ const readableStreamReviver: ReviverType<ReadableStreamRequestContract, ServerRe
   revive: (metadata, context) => {
     const { stream, cancel, abort } = context.receiveStream(metadata)
     return {
-      value: stream,
+      value: stream(),
       close: cancel,
       abort,
     }

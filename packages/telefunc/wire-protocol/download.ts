@@ -50,18 +50,19 @@ const placeholderError = (): never => {
   throw new Error('`download()` value methods are only valid on the client side.')
 }
 
-/** Return a `File`, `Blob`, or `ReadableStream` from a telefunction with download progress
- *  and cancellation on the client. https://telefunc.com/file-download */
-function download(file: File): FileDownload<number>
-function download(blob: Blob): BlobDownload<number>
-function download<TSize extends number | undefined = undefined>(
+/** Return a `File`, `Blob`, or `ReadableStream` from a telefunction. The client receives a
+ *  `FileDownload`/`BlobDownload` — Blob/File-shaped with `onProgress`, `cancel`,
+ *  `saveToMemory()`, `saveToDisk(path?)`. https://telefunc.com/file-download */
+function download(file: File): FileDownload
+function download(blob: Blob): BlobDownload
+function download(
   stream: ReadableStream<Uint8Array<ArrayBuffer>>,
-  options: { name: string; size?: TSize; type?: string; lastModified?: number },
-): FileDownload<TSize>
-function download<TSize extends number | undefined = undefined>(
+  options: { name: string; size?: number; type?: string; lastModified?: number },
+): FileDownload
+function download(
   stream: ReadableStream<Uint8Array<ArrayBuffer>>,
-  options?: { type?: string; size?: TSize },
-): BlobDownload<TSize>
+  options?: { type?: string; size?: number },
+): BlobDownload
 function download(
   value: File | Blob | ReadableStream<Uint8Array<ArrayBuffer>>,
   options: { name?: string; size?: number; type?: string; lastModified?: number } = {},
@@ -100,27 +101,31 @@ function download(
 }
 
 function makeFileDownload(internal: FileDownloadInternal): FileDownload {
+  // Server-side placeholder. The class instance is only constructed on the client by the
+  // reviver — server-side accessors are decorative; the brand is what the replacer reads.
   return {
     name: internal.name,
     type: internal.type,
-    size: internal.size,
+    size: internal.size ?? 0,
     lastModified: internal.lastModified,
     loaded: 0,
-    file: new Promise<File>(() => {}),
     onProgress: placeholderError,
     cancel: placeholderError,
+    saveToMemory: placeholderError,
+    saveToDisk: placeholderError,
     [FILE_DOWNLOAD_BRAND]: internal,
-  } as FileDownload
+  } as unknown as FileDownload
 }
 
 function makeBlobDownload(internal: BlobDownloadInternal): BlobDownload {
   return {
     type: internal.type,
-    size: internal.size,
+    size: internal.size ?? 0,
     loaded: 0,
-    blob: new Promise<Blob>(() => {}),
     onProgress: placeholderError,
     cancel: placeholderError,
+    saveToMemory: placeholderError,
+    saveToDisk: placeholderError,
     [BLOB_DOWNLOAD_BRAND]: internal,
-  } as BlobDownload
+  } as unknown as BlobDownload
 }

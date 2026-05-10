@@ -30,7 +30,7 @@ type ChannelPumpRunContext = {
  *
  * Each binary send is tagged: `[TAG_DATA][payload]` for data, `[TAG_ERROR][errorPayload]`
  * for errors. Tags are defined in constants.ts and shared with the client's
- * ChannelChunkReader. Errors are encoded with `encodeErrorPayload` — the same
+ * ChannelStreamSource. Errors are encoded with `encodeErrorPayload` — the same
  * payload format as inline streaming.
  *
  * The pump races three promises each iteration:

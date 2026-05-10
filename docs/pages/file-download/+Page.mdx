@@ -1,20 +1,22 @@
 import { Link } from '@brillout/docpress'
 
-Return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) from a telefunction. The client receives a standard `File` / `Blob` ready for `URL.createObjectURL`, `<img src>`, `fetch({ body })`, `FormData`, etc.
+Return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) from a telefunction like any other value. The client receives a standard `File` / `Blob` ready for `URL.createObjectURL`, `<img src>`, `fetch({ body })`, `FormData`, etc.
 
-> For large downloads or bytes streamed through your server from an upstream source, use `download()` to get progress and cancel support without buffering the full payload on the server.
+> For large downloads or bytes streamed through your server from an upstream source, use `download()` to get progress, cancel, and save-to-disk support without buffering the full payload — on the server OR the client.
 
 
 ## Which one should I use?
 
-| Approach | Server memory | Best for |
-|---|---|---|
-| Native `File` / `Blob` | Full payload | Bytes already in memory |
-| `download(file)` / `download(blob)` | Full payload | Same + progress / cancel |
-| `download(stream, opts)` | One chunk | Bytes streamed from upstream (S3, CDN, …) |
+| Approach | Server memory | Client memory | Best for |
+|---|---|---|---|
+| Native `File` / `Blob` | Full payload | Full payload | Bytes already in memory |
+| `download(file)` / `download(blob)` | Full payload | Depends on consumer<sup>†</sup> | Same + progress / cancel / save-to-disk |
+| `download(stream, opts)` | Constant (chunk-sized) | Depends on consumer<sup>†</sup> | Bytes streamed from upstream (S3, CDN, …) |
+
+<sup>†</sup> Constant when consumed via `dl.stream()` / `dl.saveToDisk()` / `dl.saveToOpfs()`; full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
 
 
-## `new File()` / `new Blob()`
+## Example
 
 Return a native `File` or `Blob` like any other value.
 
@@ -41,7 +43,9 @@ window.open(URL.createObjectURL(pdf))
 ```
 
 
-## `download()`
+## Streaming with `download()`
+
+Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
 
 ```ts
 // Image.telefunc.ts
@@ -69,23 +73,137 @@ export async function onGetImage(key: string) {
 import { onGetImage } from './Image.telefunc'
 
 const dl = await onGetImage(s3Key)
-
-dl.onProgress((loaded, total) => {
-  setProgress(total ? loaded / total : null)
-})
-cancelBtn.onclick = () => dl.cancel()
-
-const img = await dl.file
-imgEl.src = URL.createObjectURL(img)
+imgEl.src = URL.createObjectURL(await dl.saveToMemory())
 ```
 
-The `await onGetImage(...)` settles once the response metadata arrives — before any bytes flow — so `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are usable while the bytes stream in the background. `await dl.file` (or `dl.blob`) yields the buffered native `File` / `Blob` once complete.
+> `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are usable as soon as `await onGetImage(...)` settles — bytes stream in the background.
 
-| Overload | Returns |
+
+## Progress + cancel
+
+```tsx
+// Download.tsx
+// Environment: client
+
+import { useState } from 'react'
+import { onGetImage } from './Image.telefunc'
+
+function Download({ s3Key }: { s3Key: string }) {
+  const [progress, setProgress] = useState(0)
+  const [src, setSrc] = useState<string | null>(null)
+  const [cancel, setCancel] = useState<(() => void) | null>(null)
+
+  async function handleDownload() {
+    const dl = await onGetImage(s3Key)
+    setCancel(() => () => dl.cancel())
+
+    dl.onProgress((loaded, total) => {
+      setProgress(total ? Math.round((loaded / total) * 100) : 0)
+    })
+
+    try {
+      const file = await dl.saveToMemory()
+      setSrc(URL.createObjectURL(file))
+    } finally {
+      setCancel(null)
+    }
+  }
+
+  return (
+    <div>
+      <button onClick={handleDownload}>Download</button>
+      {cancel && <button onClick={cancel}>Cancel</button>}
+      <div style={{ width: `${progress}%`, height: 4, background: '#3b82f6' }} />
+      {src && <img src={src} />}
+    </div>
+  )
+}
+```
+
+Calling `dl.cancel()` aborts the stream — the pending `saveToMemory` call rejects with a "Stream cancelled" error.
+
+
+## Reading strategies
+
+The streaming download is a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob)-shaped object — `dl.stream()`, `dl.text()`, `dl.arrayBuffer()`, `dl.bytes()`, `dl.slice()` all work and pull from the streaming source as you read:
+
+| Method | Returns | Memory | Best for |
+|---|---|---|---|
+| `dl.stream()` | `ReadableStream` | Constant (chunk-sized) | Pipe to disk, S3, or any writable stream |
+| `dl.bytes()` | `Uint8Array` | Full file in memory | Process binary bytes |
+| `dl.arrayBuffer()` | `ArrayBuffer` | Full file in memory | Process entire file at once |
+| `dl.text()` | `string` | Full file in memory | Read text content |
+| `dl.saveToMemory()` | `File` / `Blob`<sup>‡</sup> | Full file in memory | Use with Web APIs (`URL.createObjectURL`, `<img src>`, ...) |
+| `dl.saveToDisk(opts?)` | `File` (disk-backed) | Constant (chunk-sized) | Save to user's filesystem (picker or Downloads folder) |
+| `dl.saveToOpfs(path?)` | `File` (disk-backed) | Constant (chunk-sized) | Stash in browser-private storage |
+
+<sup>‡</sup> `File` for `FileDownload`, `Blob` for `BlobDownload`.
+
+> For large files, prefer `dl.stream()` / `dl.saveToDisk()` / `dl.saveToOpfs()` — memory stays constant regardless of file size.
+
+```tsx
+// Pass to a Web API:
+const f = await dl.saveToMemory()
+imgEl.src = URL.createObjectURL(f)
+
+// Save to user's filesystem — picker if available, else Downloads folder:
+await dl.saveToDisk()
+
+// Stash in browser-private storage; URL.createObjectURL on the result has no RAM cost:
+const opfsFile = await dl.saveToOpfs()
+imgEl.src = URL.createObjectURL(opfsFile)
+```
+
+> Web APIs that require a real Blob brand (`URL.createObjectURL`, `<img src>`, `fetch({body})`, `FormData.append`) need `await dl.saveToMemory()` / `saveToDisk()` / `saveToOpfs()` first — those APIs check the internal Blob slot, which only real `File` / `Blob` instances have.
+
+
+### `saveToDisk({ mode })`
+
+| `mode` | Behavior |
 |---|---|
-| `download(file)` / `download(blob)` | wraps a native `File` / `Blob` already in memory |
-| `download(stream, { name, size?, type?, lastModified? })` | `FileDownload` |
-| `download(stream, { type?, size? })` (no `name`) | `BlobDownload` (`dl.blob` instead of `dl.file`) |
+| _(omitted)_ | `'picker'` if [`showSaveFilePicker`](https://developer.mozilla.org/en-US/docs/Web/API/Window/showSaveFilePicker) is available, else `'memory'`. |
+| `'picker'` | Opens the save-file picker so the user chooses the location. Throws if not supported. |
+| `'memory'` | Buffers bytes in RAM, then triggers a native browser download to the Downloads folder. Cross-browser. |
+| `'opfs'` | Streams bytes via browser-private storage, then triggers a native browser download. For large files where in-memory buffering isn't viable. Cross-browser. |
+
+
+## Multiple / nested downloads
+
+Return any number of `File`, `Blob`, or `download()` values, anywhere in the response — arrays, nested objects, mixed with regular data. Each one independently exposes its own `onProgress` / `cancel` / `saveTo*` methods on the client.
+
+```ts
+// Document.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+import { download } from 'telefunc'
+
+export async function onLoadDocument(id: string) {
+  return {
+    title: 'My Document',
+    pdf: download(fs.createReadStream(`./docs/${id}.pdf`), { name: 'doc.pdf', type: 'application/pdf' }),
+    thumbnail: new File([await fs.promises.readFile(`./docs/${id}-thumb.png`)], 'thumb.png', {
+      type: 'image/png',
+    }),
+  }
+}
+```
+
+```tsx
+const { title, pdf, thumbnail } = await onLoadDocument(id)
+
+pdfEl.src = URL.createObjectURL(await pdf.saveToMemory())
+thumbEl.src = URL.createObjectURL(thumbnail)
+```
+
+
+## Limitations
+
+### One-shot reads
+
+The streaming download can only be consumed once — calling `.stream()`, `.bytes()`, `.text()`, `.arrayBuffer()`, `.slice()`, or any `saveTo*` method a second time throws.
+
+> If you need the data more than once, materialize it once via `dl.saveToMemory()` (or `saveToOpfs()` for large files) and reuse the returned `File` / `Blob`.
 
 
 ## See also

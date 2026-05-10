@@ -51,34 +51,32 @@ class StreamReader {
   }
 
   /**
-   * Consume file at given index. Returns a ReadableStream of exactly `size` bytes.
+   * Consume file at given index — returns a `ReadableStream` of exactly `size` bytes.
    *
-   * Queued — concurrent calls are serialized. Out-of-order access skips earlier files.
+   * Queued: concurrent calls are serialized via `start`/`pull` waiting on `#queue`.
+   * Out-of-order access skips earlier files (their bytes are read and discarded).
    */
-  consumeFile(index: number, size: number) {
+  consumeFile(index: number, size: number): ReadableStream<Uint8Array<ArrayBuffer>> {
     const queuePrevious = this.#queue
-
-    let resolveStream!: (s: ReadableStream<Uint8Array<ArrayBuffer>>) => void
-    let rejectStream!: (e: unknown) => void
-    const streamReady = new Promise<ReadableStream<Uint8Array<ArrayBuffer>>>((res, rej) => {
-      resolveStream = res
-      rejectStream = rej
+    let remaining = size
+    let resolveDone!: () => void
+    const done = new Promise<void>((r) => {
+      resolveDone = r
     })
+    this.#queue = done
 
-    this.#queue = (async () => {
-      await queuePrevious
-      try {
+    return new ReadableStream<Uint8Array<ArrayBuffer>>({
+      start: async () => {
+        await queuePrevious
         assertUsage(
           index >= this.#nextFileIndex,
           `File argument ${index} has already been consumed (currently at ${this.#nextFileIndex}). File arguments must be read in order.`,
         )
-
         assertWarning(
           index === this.#nextFileIndex,
           `File arguments are being consumed out of order (reading ${index}, expected ${this.#nextFileIndex}). Skipped files will be unreadable. For correct behavior, consume file arguments in the order they appear.`,
           { onlyOnce: true },
         )
-
         // Skip earlier files by reading and discarding their bytes
         while (this.#nextFileIndex < index) {
           const skipSize = this.#fileSizes.get(this.#nextFileIndex)
@@ -86,17 +84,50 @@ class StreamReader {
           await this.#skipBytes(skipSize)
           this.#nextFileIndex++
         }
-
         this.#nextFileIndex++
-        const { stream, done } = this.#createFileStream(size)
-        resolveStream(stream)
-        await done
-      } catch (err) {
-        rejectStream(err)
-      }
-    })()
-
-    return streamReady
+      },
+      pull: async (controller) => {
+        try {
+          if (remaining <= 0) {
+            controller.close()
+            return
+          }
+          const buffered = this.#takeBuffered(remaining)
+          if (buffered) {
+            controller.enqueue(buffered)
+            remaining -= buffered.length
+            if (remaining <= 0) controller.close()
+            return
+          }
+          const chunk = await this.#pullChunk()
+          if (!chunk) {
+            remaining = 0
+            controller.error(new Error(DISCONNECT_MSG))
+            return
+          }
+          const take = Math.min(chunk.length, remaining)
+          controller.enqueue(chunk.subarray(0, take))
+          if (take < chunk.length) this.#buffer = chunk.subarray(take)
+          remaining -= take
+          if (remaining <= 0) controller.close()
+        } catch (err) {
+          remaining = 0
+          try {
+            controller.error(err)
+          } catch {}
+        } finally {
+          // Single resolveDone call site — unblocks the queue when this file is fully
+          // consumed, errored, or disconnected.
+          if (remaining <= 0) resolveDone()
+        }
+      },
+      cancel: async () => {
+        try {
+          if (remaining > 0) await this.#skipBytes(remaining)
+        } catch {}
+        resolveDone()
+      },
+    })
   }
 
   // ── Primitives ──
@@ -164,65 +195,6 @@ class StreamReader {
       remaining -= chunk.length
       if (remaining < 0) this.#buffer = chunk.subarray(chunk.length + remaining)
     }
-  }
-
-  // ── File stream factory ──
-
-  #createFileStream(size: number) {
-    let remaining = size
-    let resolveDone!: () => void
-    const done = new Promise<void>((r) => {
-      resolveDone = r
-    })
-
-    const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
-      pull: async (controller) => {
-        try {
-          if (remaining <= 0) {
-            controller.close()
-            return
-          }
-
-          const buffered = this.#takeBuffered(remaining)
-          if (buffered) {
-            controller.enqueue(buffered)
-            remaining -= buffered.length
-            if (remaining <= 0) controller.close()
-            return
-          }
-
-          const chunk = await this.#pullChunk()
-          if (!chunk) {
-            remaining = 0
-            controller.error(new Error(DISCONNECT_MSG))
-            return
-          }
-
-          const take = Math.min(chunk.length, remaining)
-          controller.enqueue(chunk.subarray(0, take))
-          if (take < chunk.length) this.#buffer = chunk.subarray(take)
-          remaining -= take
-          if (remaining <= 0) controller.close()
-        } catch (err) {
-          remaining = 0
-          try {
-            controller.error(err)
-          } catch {}
-        } finally {
-          // Single resolveDone call site for pull — unblocks the queue
-          // when the stream is fully consumed, errored, or disconnected.
-          if (remaining <= 0) resolveDone()
-        }
-      },
-      cancel: async () => {
-        try {
-          if (remaining > 0) await this.#skipBytes(remaining)
-        } catch {}
-        resolveDone()
-      },
-    })
-
-    return { stream, done }
   }
 }
 

@@ -18,7 +18,7 @@ import { isProduction } from '../../utils/isProduction.js'
 import { unique } from '../../utils/unique.js'
 import { get } from '../../utils/get.js'
 import { fromPathKey } from '../../utils/pathKey.js'
-import { isLazyFile, isLazyBlob } from '../../wire-protocol/server/request/LazyFile.js'
+import { isLazyFile, isLazyBlob } from '../../wire-protocol/LazyFile.js'
 
 /** The subset of `config.log.shieldErrors` that gates server-side logging of shield failures. */
 type ShieldLogConfig = { dev: boolean; prod: boolean }

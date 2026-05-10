@@ -1,15 +1,16 @@
-export { ChannelChunkReader }
+export { ChannelStreamSource }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { textDecoder } from './frame.js'
 import { CHANNEL_PUMP_TAG_ERROR } from './constants.js'
 import { isObject } from '../utils/isObject.js'
 import { assert } from '../utils/assert.js'
-import { readChunksToArrayBuffer } from './readChunksToArrayBuffer.js'
+import { readChunksToBytes } from './readChunksToBytes.js'
 import type { Channel } from './server/channel.js'
 import type { AbortError } from '../shared/Abort.js'
+import type { StreamSource } from './types.js'
 
-type ChunkReaderChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 'abort'>
+type StreamSourceChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 'abort'>
 
 /**
  * Receives tagged binary frames from a channel with credit-based backpressure.
@@ -30,17 +31,17 @@ type ChunkReaderChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | '
  *
  * Internally uses a read-head index for O(1) dequeues with periodic compaction.
  */
-class ChannelChunkReader {
+class ChannelStreamSource {
   private queue: Array<{ frame: Uint8Array<ArrayBuffer>; onConsumed: () => void }> = []
   private readHead = 0
   private wake: (() => void) | null = null
   private closed = false
   private closeError: Error | null = null
   private cancelled = false
-  private readonly channel: ChunkReaderChannel
+  private readonly channel: StreamSourceChannel
   private readonly throwError?: (errorPayload: Record<string, unknown>) => never
 
-  private constructor(channel: ChunkReaderChannel, throwError?: (errorPayload: Record<string, unknown>) => never) {
+  private constructor(channel: StreamSourceChannel, throwError?: (errorPayload: Record<string, unknown>) => never) {
     this.channel = channel
     this.throwError = throwError
 
@@ -60,55 +61,55 @@ class ChannelChunkReader {
     })
   }
 
-  /**
-   * Create a chunk reader returning `{ readNextChunk, arrayBuffer, cancel, abort }`.
-   *
-   * `throwError` is called when an error frame is dequeued. If omitted,
-   * error frames throw a generic Error.
-   */
-  static create(channel: ChunkReaderChannel, throwError?: (errorPayload: Record<string, unknown>) => never) {
-    const reader = new ChannelChunkReader(channel, throwError)
-    return {
-      readNextChunk: () => reader.readNextChunk(),
-      arrayBuffer: (expectedSize?: number, onChunk?: (chunkSize: number) => void) =>
-        readChunksToArrayBuffer(
-          () => reader.readNextChunk(),
-          () => reader.cancelled,
-          expectedSize,
-          onChunk,
-        ),
-      cancel: () => reader.cancel(),
-      abort(abortError: AbortError) {
-        channel.abort(abortError.abortValue, abortError.message)
-      },
-    }
-  }
-
-  /** Create a pull-based ReadableStream backed by this reader. */
-  static toReadableStream(channel: ChunkReaderChannel, throwError?: (errorPayload: Record<string, unknown>) => never) {
-    const reader = new ChannelChunkReader(channel, throwError)
+  /** Returns a unified `StreamSource` — chunk-pull, byte-buffer, and lazy stream views
+   *  over the same channel. `throwError` is called when an error frame is dequeued;
+   *  if omitted, error frames throw a generic Error. */
+  static create(
+    channel: StreamSourceChannel,
+    throwError?: (errorPayload: Record<string, unknown>) => never,
+  ): StreamSource {
+    const reader = new ChannelStreamSource(channel, throwError)
+    const readNextChunk = () => reader.readNextChunk()
     const cancel = () => reader.cancel()
-    const abort = (abortError: AbortError) => channel.abort(abortError.abortValue, abortError.message)
-    const stream = new ReadableStream<Uint8Array<ArrayBuffer>>(
-      {
-        pull: async (controller) => {
-          try {
-            const chunk = await reader.readNextChunk()
-            if (chunk === null) controller.close()
-            else controller.enqueue(chunk)
-          } catch (err) {
-            reader.cancel()
-            controller.error(err)
-          }
-        },
-        cancel,
-      },
+    const abort = (e: AbortError) => channel.abort(e.abortValue, e.message)
+    const isCancelled = () => reader.cancelled
+    return {
+      readNextChunk,
+      bytes: (opts) => readChunksToBytes(readNextChunk, isCancelled, opts?.expectedSize, opts?.onChunk),
       // No pre-fetching — pull is only called when the consumer actually reads.
       // This ensures window updates reflect true application consumption, not
       // data sitting in the ReadableStream's internal buffer.
-      { highWaterMark: 0 },
-    )
-    return { stream, cancel, abort }
+      stream: (opts) => {
+        let received = 0
+        return new ReadableStream<Uint8Array<ArrayBuffer>>(
+          {
+            pull: async (controller) => {
+              try {
+                const chunk = await readNextChunk()
+                if (chunk === null) {
+                  if (reader.cancelled) throw new Error('Stream cancelled before all bytes were received')
+                  if (opts?.expectedSize !== undefined && received !== opts.expectedSize) {
+                    throw new Error(`Stream truncated — received ${received} of ${opts.expectedSize} expected bytes`)
+                  }
+                  controller.close()
+                  return
+                }
+                received += chunk.byteLength
+                opts?.onChunk?.(chunk.byteLength)
+                controller.enqueue(chunk)
+              } catch (err) {
+                reader.cancel()
+                controller.error(err)
+              }
+            },
+            cancel,
+          },
+          { highWaterMark: 0 },
+        )
+      },
+      cancel,
+      abort,
+    }
   }
 
   private async readNextChunk(): Promise<Uint8Array<ArrayBuffer> | null> {

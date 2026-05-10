@@ -8,7 +8,7 @@ import { SERIALIZER_PREFIX_GENERATOR } from '../../constants.js'
 const asyncGeneratorReviver: ReviverType<AsyncGeneratorContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_GENERATOR,
   revive: (metadata, context) => {
-    const { readNextChunk, cancel, abort } = context.receiveStreamReader(metadata)
+    const { readNextChunk, cancel, abort } = context.receiveStream(metadata)
     const gen = (async function* () {
       try {
         while (true) {

@@ -8,7 +8,7 @@ import { SERIALIZER_PREFIX_PROMISE } from '../../constants.js'
 const promiseReviver: ReviverType<PromiseContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_PROMISE,
   revive: (metadata, context) => {
-    const { readNextChunk, cancel, abort } = context.receiveStreamReader(metadata)
+    const { readNextChunk, cancel, abort } = context.receiveStream(metadata)
     const promise = readNextChunk().then((chunk) => {
       cancel()
       if (!chunk) throw new Error('Stream ended before promise resolved')

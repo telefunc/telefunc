@@ -203,7 +203,7 @@ function testFileDownload() {
     )
   })
 
-  test('file download: download → cancel mid-flight rejects .file', async () => {
+  test('file download: download → cancel mid-flight rejects saveToMemory()', async () => {
     await page.click('#test-progress-cancel')
     await autoRetry(
       async () => {
@@ -266,6 +266,96 @@ function testFileDownload() {
         type: 'text/plain',
         content: '',
       })
+    })
+  })
+
+  test('file download: dl.stream() consumes the source as a ReadableStream', async () => {
+    await page.click('#test-dl-stream')
+    await autoRetry(async () => {
+      const result = await getResult('#download-result')
+      expect(result).deep.equal({
+        isFileLike: true,
+        dlName: 'streamed.txt',
+        dlType: 'text/plain',
+        dlSize: TEXT_BYTES,
+        streamedText: TEXT,
+      })
+    })
+  })
+
+  test('file download: dl.text() inherited from BaseStreamBlob', async () => {
+    await page.click('#test-dl-text')
+    await autoRetry(async () => {
+      const result = await getResult('#download-result')
+      expect(result).deep.equal({
+        name: 'streamed.txt',
+        type: 'text/plain',
+        text: TEXT,
+      })
+    })
+  })
+
+  test('file download: dl.arrayBuffer() inherited from BaseStreamBlob', async () => {
+    await page.click('#test-dl-arraybuffer')
+    await autoRetry(async () => {
+      const result = await getResult('#download-result')
+      expect(result).deep.equal({
+        byteLength: TEXT_BYTES,
+        decoded: TEXT,
+      })
+    })
+  })
+
+  test('file download: dl.slice() returns a Blob view that consumes the parent', async () => {
+    await page.click('#test-dl-slice')
+    await autoRetry(async () => {
+      const result = await getResult('#download-result')
+      // TEXT = 'Hello, file download!' — slice(7, 13) → 'file d'
+      expect(result).deep.equal({
+        isBlob: true,
+        sliceSize: 6,
+        sliceType: 'text/x-slice',
+        sliceText: TEXT.slice(7, 13),
+      })
+    })
+  })
+
+  test('file download: one-shot guard — second consume call throws', async () => {
+    await page.click('#test-dl-one-shot')
+    await autoRetry(async () => {
+      const result = await getResult('#download-result')
+      expect(result.firstCallSucceeded).toBe(true)
+      expect(result.secondCallRejected).toBe(true)
+      expect(result.errorMentionsConsumed).toBe(true)
+      expect(typeof result.secondCallError).toBe('string')
+    })
+  })
+
+  test('file download: saveToMemory() → real File usable with URL.createObjectURL', async () => {
+    await page.click('#test-savetomemory-objecturl')
+    await autoRetry(async () => {
+      const result = await getResult('#download-result')
+      expect(result.isRealFile).toBe(true)
+      expect(result.isRealBlob).toBe(true)
+      expect(result.fName).toBe('streamed.txt')
+      expect(result.fSize).toBe(TEXT_BYTES)
+      expect(result.fType).toBe('text/plain')
+      expect(result.fLastModified).toBe(FIXED_LAST_MODIFIED)
+      expect(result.createObjectURLWorks).toBe(true)
+      expect(result.fetchedText).toBe(TEXT)
+    })
+  })
+
+  test('file download: saveToOpfs(path) → disk-backed File at user path', async () => {
+    await page.click('#test-savetoopfs')
+    await autoRetry(async () => {
+      const result = await getResult('#download-result')
+      expect(result.isRealFile).toBe(true)
+      expect(result.fSize).toBe(TEXT_BYTES)
+      expect(result.fType).toBe('text/plain')
+      expect(result.text).toBe(TEXT)
+      expect(typeof result.path).toBe('string')
+      expect(result.path).contain('telefunc-test/')
     })
   })
 

@@ -3,19 +3,26 @@ export { LazyFile }
 export { isLazyBlob }
 export { isLazyFile }
 
-import type { ServerReviverContext, FileMetadata, BlobMetadata } from '../../types.js'
-import { assertUsage } from '../../../utils/assert.js'
+import { assertUsage } from '../utils/assert.js'
 
 const LAZY_BLOB_BRAND = Symbol.for('telefunc.LazyBlob')
 const LAZY_FILE_BRAND = Symbol.for('telefunc.LazyFile')
 
 function isLazyBlob(value: unknown): value is LazyBlob {
-  return typeof value === 'object' && value !== null && (value as any)[LAZY_BLOB_BRAND] === true
+  return (
+    typeof value === 'object' && value !== null && (value as { [LAZY_BLOB_BRAND]?: true })[LAZY_BLOB_BRAND] === true
+  )
 }
 
 function isLazyFile(value: unknown): value is LazyFile {
-  return typeof value === 'object' && value !== null && (value as any)[LAZY_FILE_BRAND] === true
+  return (
+    typeof value === 'object' && value !== null && (value as { [LAZY_FILE_BRAND]?: true })[LAZY_FILE_BRAND] === true
+  )
 }
+
+// Caller builds the ReadableStream — including its `cancel` hook for upstream
+// cancellation. We return it as-is from `stream()`.
+type GetStream = () => ReadableStream<Uint8Array<ArrayBuffer>>
 
 /** Shared Blob implementation — subclasses only provide `stream()`. */
 abstract class BaseStreamBlob implements Blob {
@@ -65,49 +72,44 @@ abstract class BaseStreamBlob implements Blob {
 }
 
 /**
- * A Blob backed by a pull-based StreamReader.
+ * A Blob backed by a stream callback that resolves a `ReadableStream` on first access.
  *
- * `size` and `type` are available immediately from metadata.
- * Body data is pulled from the stream on demand — no background pump.
- * Each instance is **one-shot**: once consumed, further reads throw.
+ * `size` and `type` are available immediately. Body data is pulled from the stream on
+ * demand — no background pump. Each instance is **one-shot**: once consumed, further
+ * reads throw. Subclasses that consume via a different path (e.g. StreamSource.bytes)
+ * must call `_markConsumed()` to enforce the guard.
  */
 class LazyBlob extends BaseStreamBlob {
   readonly size: number
   readonly type: string
   readonly [LAZY_BLOB_BRAND] = true
 
-  #reader: ServerReviverContext
-  #index: number
-  #consumed = false
+  #getStream: GetStream
+  protected _consumed = false
 
-  constructor(metadata: BlobMetadata, reader: ServerReviverContext) {
+  // Brand-checked `instanceof` (Abort.ts pattern) — accepts any object carrying
+  // the brand symbol, including plain objects across realms / serialization.
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return isLazyBlob(value)
+  }
+
+  constructor(size: number, type: string, getStream: GetStream) {
     super()
-    this.#reader = reader
-    this.#index = metadata.index
-    this.size = metadata.size
-    this.type = metadata.type
-    reader.registerFile(metadata.index, metadata.size)
+    this.size = size
+    this.type = type
+    this.#getStream = getStream
+  }
+
+  /** Subclasses overriding `bytes`/etc. that consume the source via a different path
+   *  must call this to keep the one-shot guard honest. */
+  protected _markConsumed(): void {
+    assertUsage(!this._consumed, 'Stream already consumed — each streaming Blob/File can only be read once.')
+    this._consumed = true
   }
 
   stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
-    assertUsage(!this.#consumed, 'Stream has already been consumed. Each streaming Blob/File can only be read once.')
-    this.#consumed = true
-    let inner: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
-    return new ReadableStream<Uint8Array<ArrayBuffer>>({
-      start: async () => {
-        inner = (await this.#reader.consumeFile(this.#index, this.size)).getReader() as ReadableStreamDefaultReader<
-          Uint8Array<ArrayBuffer>
-        >
-      },
-      pull: async (controller) => {
-        const { done, value } = await inner.read()
-        if (done) controller.close()
-        else controller.enqueue(value)
-      },
-      cancel: async () => {
-        await inner?.cancel()
-      },
-    })
+    this._markConsumed()
+    return this.#getStream()
   }
 }
 
@@ -161,22 +163,26 @@ class SlicedBlob extends BaseStreamBlob {
 }
 
 /**
- * A File implementation backed by a pull-based StreamReader.
- * Extends LazyBlob with `name`, `lastModified`, and `webkitRelativePath`.
+ * A File implementation backed by a stream callback. Extends LazyBlob with `name`,
+ * `lastModified`, and `webkitRelativePath`.
  */
-class LazyFile extends LazyBlob implements File {
+class LazyFile extends LazyBlob {
   readonly name: string
   readonly lastModified: number
   readonly webkitRelativePath: string = ''
   readonly [LAZY_FILE_BRAND] = true
 
-  constructor(metadata: FileMetadata, reader: ServerReviverContext) {
-    super(metadata, reader)
-    this.name = metadata.name
-    this.lastModified = metadata.lastModified
+  static override [Symbol.hasInstance](value: unknown): boolean {
+    return isLazyFile(value)
   }
 
-  get [Symbol.toStringTag](): string {
+  constructor(size: number, type: string, name: string, lastModified: number, getStream: GetStream) {
+    super(size, type, getStream)
+    this.name = name
+    this.lastModified = lastModified
+  }
+
+  override get [Symbol.toStringTag](): string {
     return 'File'
   }
 }

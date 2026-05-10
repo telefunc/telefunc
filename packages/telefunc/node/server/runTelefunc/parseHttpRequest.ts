@@ -12,7 +12,7 @@ import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kin
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { getChannelMux } from '../../../wire-protocol/server/substrate.js'
-import { ChannelChunkReader } from '../../../wire-protocol/ChannelChunkReader.js'
+import { ChannelStreamSource } from '../../../wire-protocol/ChannelStreamSource.js'
 import type { ReviverType, TypeContract, ServerReviverContext } from '../../../wire-protocol/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
@@ -73,8 +73,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     registerFile,
     consumeFile,
     createChannel,
-    receiveStreamReader: ({ channelId }) => ChannelChunkReader.create(createChannel({ id: channelId })),
-    receiveStream: ({ channelId }) => ChannelChunkReader.toReadableStream(createChannel({ id: channelId })),
+    receiveStream: ({ channelId }) => ChannelStreamSource.create(createChannel({ id: channelId })),
   }
 
   // Parse the envelope; each reviver-prefixed string becomes a deferred placeholder that
@@ -135,7 +134,12 @@ async function readBody(
   return {
     text: await request.text(),
     registerFile: () => {},
-    consumeFile: () => Promise.reject(new Error('No binary frame')),
+    consumeFile: () =>
+      new ReadableStream<Uint8Array<ArrayBuffer>>({
+        start(controller) {
+          controller.error(new Error('No binary frame'))
+        },
+      }),
   }
 }
 

@@ -10,6 +10,7 @@ export type {
   ServerReviverContext,
   ClientReplacerContext,
   ServerReplacerContext,
+  StreamSource,
   // ===== Supporting =====
   StreamingMetadata,
   StreamingValueServer,
@@ -43,6 +44,7 @@ import type { ServerBroadcast } from './server/server-broadcast.js'
 import type { ClientChannel, ClientBroadcast } from './client/channel.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
+import type { FileDownload, BlobDownload } from './client/response/DownloadClasses.js'
 
 // ===== Base types =====
 
@@ -98,10 +100,22 @@ type StreamingValueServer = {
 
 // ===== Contexts =====
 
-type ChunkReader = {
+type StreamSource = {
   readNextChunk: () => Promise<Uint8Array<ArrayBuffer> | null>
-  /** Throws on cancel mid-stream or on `expectedSize` mismatch. */
-  arrayBuffer: (expectedSize?: number, onChunk?: (chunkSize: number) => void) => Promise<ArrayBuffer>
+  /** Buffers all chunks into a single Uint8Array. Throws on cancel mid-stream or
+   *  on `expectedSize` mismatch. */
+  bytes: (opts?: {
+    expectedSize?: number
+    onChunk?: (chunkSize: number) => void
+  }) => Promise<Uint8Array<ArrayBuffer>>
+  /** WHATWG `ReadableStream` view over `readNextChunk`. `cancel()` on the stream
+   *  propagates upstream. With `opts.onChunk`, fires per chunk; with `opts.expectedSize`,
+   *  errors the stream on truncation. Errors on consumer-cancel mid-stream too — same
+   *  guarantees as `bytes()`. */
+  stream: (opts?: {
+    expectedSize?: number
+    onChunk?: (chunkSize: number) => void
+  }) => ReadableStream<Uint8Array<ArrayBuffer>>
   cancel: () => void
   abort: (abortError: AbortError) => void
 }
@@ -113,12 +127,7 @@ type ClientReviverContext = {
     ack?: boolean
   }): ClientChannel<ClientToServer, ServerToClient>
   createBroadcast<T = unknown>(opts: { channelId: string; key: string }): ClientBroadcast<T>
-  receiveStreamReader(metadata: StreamingMetadata): ChunkReader
-  receiveStream(metadata: StreamingMetadata): {
-    stream: ReadableStream<Uint8Array<ArrayBuffer>>
-    cancel: () => void
-    abort: (abortError: AbortError) => void
-  }
+  receiveStream(metadata: StreamingMetadata): StreamSource
   /** Awaited before the call settles — for revivers that need to buffer before the user reads. */
   waitFor(promise: Promise<unknown>): void
 }
@@ -126,17 +135,12 @@ type ClientReviverContext = {
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
 type ServerReviverContext = {
   registerFile(index: number, size: number): void
-  consumeFile(index: number, size: number): Promise<ReadableStream<Uint8Array>>
+  consumeFile(index: number, size: number): ReadableStream<Uint8Array<ArrayBuffer>>
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     id: string
     ack?: boolean
   }): ServerChannel<ClientToServer, ServerToClient>
-  receiveStreamReader(metadata: { channelId: string }): ChunkReader
-  receiveStream(metadata: { channelId: string }): {
-    stream: ReadableStream<Uint8Array<ArrayBuffer>>
-    cancel: () => void
-    abort: (abortError: AbortError) => void
-  }
+  receiveStream(metadata: { channelId: string }): StreamSource
   /** Shield validators for the value being revived, keyed by the name declared in `[TELEFUNC_SHIELDS]`.
    *  Populated per-value based on the telefunction's argument shield metadata. Revivers pick the names
    *  relevant to their data flow and call them inline at the point where client data enters. */
@@ -220,26 +224,6 @@ type FileDownloadResponseContract = TypeContract<FileDownload, FileDownload, Fil
 type BlobDownloadResponseContract = TypeContract<BlobDownload, BlobDownload, BlobDownloadMetadata>
 
 type DownloadProgress = (loaded: number, total: number | undefined) => void
-
-type FileDownload<TSize extends number | undefined = number | undefined> = {
-  readonly name: string
-  readonly type: string
-  readonly size: TSize
-  readonly lastModified: number
-  readonly loaded: number
-  readonly file: Promise<File>
-  readonly onProgress: (cb: DownloadProgress) => void
-  readonly cancel: () => void
-}
-
-type BlobDownload<TSize extends number | undefined = number | undefined> = {
-  readonly type: string
-  readonly size: TSize
-  readonly loaded: number
-  readonly blob: Promise<Blob>
-  readonly onProgress: (cb: DownloadProgress) => void
-  readonly cancel: () => void
-}
 
 type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
 
