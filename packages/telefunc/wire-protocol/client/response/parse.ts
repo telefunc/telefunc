@@ -17,6 +17,7 @@ import { ClientChannel, ClientBroadcast } from '../channel.js'
 import { wrapProxy } from '../../wrapProxy.js'
 import { GcRegistry } from '../../gcRegistry.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
+import { createReadableChunkStream } from '../../createReadableChunkStream.js'
 import { readChunksToBytes } from '../../readChunksToBytes.js'
 import { STREAMING_ERROR_TYPE } from '../../constants.js'
 import type { ChannelTransports } from '../../constants.js'
@@ -298,32 +299,8 @@ class FrameDemuxer {
     const isCancelled = () => this.cancelledIndices.has(index)
     return {
       readNextChunk,
-      bytes: (opts) => readChunksToBytes(readNextChunk, isCancelled, opts?.expectedSize, opts?.onChunk),
-      stream: (opts) => {
-        let received = 0
-        return new ReadableStream<Uint8Array<ArrayBuffer>>({
-          pull: async (controller) => {
-            try {
-              const chunk = await readNextChunk()
-              if (chunk === null) {
-                if (isCancelled()) throw new Error('Stream cancelled before all bytes were received')
-                if (opts?.expectedSize !== undefined && received !== opts.expectedSize) {
-                  throw new Error(`Stream truncated — received ${received} of ${opts.expectedSize} expected bytes`)
-                }
-                controller.close()
-                return
-              }
-              received += chunk.byteLength
-              opts?.onChunk?.(chunk.byteLength)
-              controller.enqueue(chunk)
-            } catch (err) {
-              cancel()
-              controller.error(err)
-            }
-          },
-          cancel,
-        })
-      },
+      bytes: (opts) => readChunksToBytes(readNextChunk, isCancelled, opts),
+      stream: (opts) => createReadableChunkStream({ readNextChunk, cancel, isCancelled, readOptions: opts }),
       cancel,
       // Inline streams abort via HTTP body reader cancellation, not per-index.
       abort() {},

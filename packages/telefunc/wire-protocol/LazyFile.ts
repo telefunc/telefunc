@@ -103,7 +103,7 @@ class LazyBlob extends BaseStreamBlob {
   /** Subclasses overriding `bytes`/etc. that consume the source via a different path
    *  must call this to keep the one-shot guard honest. */
   protected _markConsumed(): void {
-    assertUsage(!this._consumed, 'Stream already consumed — each streaming Blob/File can only be read once.')
+    assertUsage(!this._consumed, 'Stream has already been consumed — each streaming Blob/File can only be read once.')
     this._consumed = true
   }
 

@@ -5,6 +5,7 @@ import { textDecoder } from './frame.js'
 import { CHANNEL_PUMP_TAG_ERROR } from './constants.js'
 import { isObject } from '../utils/isObject.js'
 import { assert } from '../utils/assert.js'
+import { createReadableChunkStream } from './createReadableChunkStream.js'
 import { readChunksToBytes } from './readChunksToBytes.js'
 import type { Channel } from './server/channel.js'
 import type { AbortError } from '../shared/Abort.js'
@@ -75,38 +76,18 @@ class ChannelStreamSource {
     const isCancelled = () => reader.cancelled
     return {
       readNextChunk,
-      bytes: (opts) => readChunksToBytes(readNextChunk, isCancelled, opts?.expectedSize, opts?.onChunk),
+      bytes: (opts) => readChunksToBytes(readNextChunk, isCancelled, opts),
       // No pre-fetching — pull is only called when the consumer actually reads.
       // This ensures window updates reflect true application consumption, not
       // data sitting in the ReadableStream's internal buffer.
-      stream: (opts) => {
-        let received = 0
-        return new ReadableStream<Uint8Array<ArrayBuffer>>(
-          {
-            pull: async (controller) => {
-              try {
-                const chunk = await readNextChunk()
-                if (chunk === null) {
-                  if (reader.cancelled) throw new Error('Stream cancelled before all bytes were received')
-                  if (opts?.expectedSize !== undefined && received !== opts.expectedSize) {
-                    throw new Error(`Stream truncated — received ${received} of ${opts.expectedSize} expected bytes`)
-                  }
-                  controller.close()
-                  return
-                }
-                received += chunk.byteLength
-                opts?.onChunk?.(chunk.byteLength)
-                controller.enqueue(chunk)
-              } catch (err) {
-                reader.cancel()
-                controller.error(err)
-              }
-            },
-            cancel,
-          },
-          { highWaterMark: 0 },
-        )
-      },
+      stream: (opts) =>
+        createReadableChunkStream({
+          readNextChunk,
+          cancel,
+          isCancelled,
+          readOptions: opts,
+          highWaterMark: 0,
+        }),
       cancel,
       abort,
     }

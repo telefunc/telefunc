@@ -11,6 +11,7 @@ export type {
   ClientReplacerContext,
   ServerReplacerContext,
   StreamSource,
+  StreamReadOptions,
   // ===== Supporting =====
   StreamingMetadata,
   StreamingValueServer,
@@ -100,22 +101,27 @@ type StreamingValueServer = {
 
 // ===== Contexts =====
 
+type StreamCancelBehavior = 'error' | 'close'
+
+type StreamReadOptions = {
+  expectedSize?: number
+  onChunk?: (chunkSize: number) => void
+  /** How source-side `cancel()` should surface to the current consumer.
+   *  - `'error'` (default): interrupted delivery rejects / errors instead of looking like EOF.
+   *  - `'close'`: treat source cancellation as graceful end-of-stream / partial-buffer completion. */
+  cancelBehavior?: StreamCancelBehavior
+}
+
 type StreamSource = {
   readNextChunk: () => Promise<Uint8Array<ArrayBuffer> | null>
-  /** Buffers all chunks into a single Uint8Array. Throws on cancel mid-stream or
-   *  on `expectedSize` mismatch. */
-  bytes: (opts?: {
-    expectedSize?: number
-    onChunk?: (chunkSize: number) => void
-  }) => Promise<Uint8Array<ArrayBuffer>>
+  /** Buffers all chunks into a single Uint8Array. By default throws on cancel
+   *  mid-stream or on `expectedSize` mismatch. */
+  bytes: (opts?: StreamReadOptions) => Promise<Uint8Array<ArrayBuffer>>
   /** WHATWG `ReadableStream` view over `readNextChunk`. `cancel()` on the stream
    *  propagates upstream. With `opts.onChunk`, fires per chunk; with `opts.expectedSize`,
-   *  errors the stream on truncation. Errors on consumer-cancel mid-stream too — same
-   *  guarantees as `bytes()`. */
-  stream: (opts?: {
-    expectedSize?: number
-    onChunk?: (chunkSize: number) => void
-  }) => ReadableStream<Uint8Array<ArrayBuffer>>
+   *  errors the stream on truncation. Source-side cancellation defaults to an error,
+   *  but callers can opt into graceful close with `cancelBehavior: 'close'`. */
+  stream: (opts?: StreamReadOptions) => ReadableStream<Uint8Array<ArrayBuffer>>
   cancel: () => void
   abort: (abortError: AbortError) => void
 }

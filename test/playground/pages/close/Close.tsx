@@ -64,7 +64,15 @@ function Close() {
           const first = await reader.read()
           if (!first.done) chunks.push(decoder.decode(first.value, { stream: true }))
           close(stream)
-          setResult(JSON.stringify({ method: 'close(stream)', chunks }))
+          let nextDone: boolean | null = null
+          let error: string | null = null
+          try {
+            const r = await reader.read()
+            nextDone = r.done ?? null
+          } catch (e: any) {
+            error = e.message
+          }
+          setResult(JSON.stringify({ method: 'close(stream)', chunks, nextDone, error }))
         }}
       >
         Stream: close(stream)
@@ -252,10 +260,13 @@ function Close() {
           }
 
           let streamReadDone: boolean | null = null
+          let streamReadError: string | null = null
           try {
             const { done } = await reader.read()
             streamReadDone = done ?? null
-          } catch {}
+          } catch (e: any) {
+            streamReadError = e.message
+          }
 
           await channelClosed
 
@@ -276,6 +287,7 @@ function Close() {
               genError,
               chunks,
               streamReadDone,
+              streamReadError,
               channelCloseClean,
               retFnAfterCloseError,
             }),

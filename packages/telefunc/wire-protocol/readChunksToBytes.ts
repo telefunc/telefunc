@@ -1,13 +1,15 @@
 export { readChunksToBytes }
 
+import { getStreamCompletionError } from './getStreamCompletionError.js'
+import type { StreamReadOptions } from './types.js'
+
 // `isCancelled()` distinguishes consumer-cancel from natural EOF — both surface as `null`
 // from `readNextChunk()` per WHATWG Streams. Without this, a cancelled stream silently
 // produces a partial buffer.
 async function readChunksToBytes(
   readNextChunk: () => Promise<Uint8Array<ArrayBuffer> | null>,
   isCancelled: () => boolean,
-  expectedSize: number | undefined,
-  onChunk?: (chunkSize: number) => void,
+  readOptions?: StreamReadOptions,
 ): Promise<Uint8Array<ArrayBuffer>> {
   const chunks: Uint8Array<ArrayBuffer>[] = []
   let total = 0
@@ -16,13 +18,15 @@ async function readChunksToBytes(
     if (chunk === null) break
     chunks.push(chunk)
     total += chunk.byteLength
-    onChunk?.(chunk.byteLength)
+    readOptions?.onChunk?.(chunk.byteLength)
   }
-  if (isCancelled()) {
-    throw new Error('Stream cancelled before all bytes were received')
-  }
-  if (expectedSize !== undefined && expectedSize >= 0 && total !== expectedSize) {
-    throw new Error(`Stream truncated — received ${total} of ${expectedSize} expected bytes`)
+  const completionError = getStreamCompletionError({
+    wasCancelled: isCancelled(),
+    received: total,
+    readOptions,
+  })
+  if (completionError) {
+    throw completionError
   }
   const out = new Uint8Array(total)
   let offset = 0

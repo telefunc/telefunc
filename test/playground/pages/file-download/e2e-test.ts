@@ -73,11 +73,12 @@ function testFileDownload() {
         type: 'text/plain',
         lastModified: FIXED_LAST_MODIFIED,
         content: TEXT,
-        // dl.size is undefined (server declared none) while the materialized File.size is
-        // the buffered length — JSON drops undefined, so size is absent from dl here.
+        // Server didn't declare a size — `dl.size` defaults to `0` (LazyFile spec compliance).
+        // The materialized File.size is the actual buffered length.
         dl: {
           name: 'streamed-nosize.txt',
           type: 'text/plain',
+          size: 0,
           lastModified: FIXED_LAST_MODIFIED,
         },
       })
@@ -108,7 +109,7 @@ function testFileDownload() {
         size: TEXT_BYTES,
         type: 'text/plain',
         content: TEXT,
-        dl: { type: 'text/plain' },
+        dl: { type: 'text/plain', size: 0 },
       })
     })
   })
@@ -306,13 +307,16 @@ function testFileDownload() {
     })
   })
 
-  test('file download: dl.slice() returns a Blob view that consumes the parent', async () => {
+  test('file download: dl.slice() returns a Blob-shaped view that consumes the parent', async () => {
     await page.click('#test-dl-slice')
     await autoRetry(async () => {
       const result = await getResult('#download-result')
-      // TEXT = 'Hello, file download!' — slice(7, 13) → 'file d'
+      // TEXT = 'Hello, file download!' — slice(7, 13) → 'file d'.
+      // `isBlob: false` is expected — SlicedBlob is Blob-shaped (has size/type/text/...) but
+      // doesn't `extends Blob`, same as LazyFile/LazyBlob. Use `saveToMemory()` first if you
+      // need a real Blob brand.
       expect(result).deep.equal({
-        isBlob: true,
+        isBlob: false,
         sliceSize: 6,
         sliceType: 'text/x-slice',
         sliceText: TEXT.slice(7, 13),

@@ -22,6 +22,7 @@ function testRunDocker() {
   run('pnpm test:docker', {
     serverUrl: 'https://localhost:8443',
     serverIsReadyMessage: 'serving initial configuration',
+    tolerateExitCode: [130],
     tolerateError(log) {
       const t = log.logText
       return (

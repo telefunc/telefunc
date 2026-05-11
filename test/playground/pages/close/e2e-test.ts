@@ -39,6 +39,8 @@ function testClose() {
       const result = await getResult('#close-result')
       expect(result.method).toBe('close(stream)')
       expect(result.chunks).deep.equal(['chunk-0'])
+      expect(result.nextDone).toBe(true)
+      expect(result.error).toBe(null)
     })
     await autoRetry(async () => {
       const state = await getCleanupState()
@@ -215,6 +217,7 @@ function testClose() {
       // Stream: first chunk received, then clean termination (done=true)
       expect(result.chunks).deep.equal(['chunk-0'])
       expect(result.streamReadDone).toBe(true)
+      expect(result.streamReadError).toBe(null)
 
       // Channel: closed cleanly with no error
       expect(result.channelCloseClean).toBe(true)
