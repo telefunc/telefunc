@@ -97,6 +97,7 @@ function getServerConfig(): ConfigResolved {
       if (configUser.root) {
         return toPosixPath(configUser.root)
       }
+      // Doesn't work for Cloudflare Workers — but we can make it work if we want to, see reverted commits at https://github.com/telefunc/telefunc/pull/262
       if (rootFromVite) {
         assertPosixPath(rootFromVite)
         return rootFromVite
