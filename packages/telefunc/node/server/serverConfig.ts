@@ -93,6 +93,7 @@ function getServerConfig(): ConfigResolved {
       return null
     })(),
     root: (() => {
+      // TODO/ai: when using Vite, set the `root` to Vite's `root` resolved setting
       if (configUser.root) {
         return toPosixPath(configUser.root)
       }
