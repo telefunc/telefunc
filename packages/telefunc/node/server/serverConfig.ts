@@ -1,5 +1,6 @@
 export { configUser as config }
 export { getServerConfig }
+export { setRootFromVite }
 export type { ConfigUser }
 export type { ConfigResolved }
 
@@ -67,6 +68,11 @@ type ConfigResolved = {
 
 const configUser: ConfigUser = new Proxy({}, { set: validateUserConfig })
 
+let rootFromVite: string | null = null
+function setRootFromVite(root: string) {
+  rootFromVite = root
+}
+
 function getServerConfig(): ConfigResolved {
   return {
     disableEtag: configUser.disableEtag ?? false,
@@ -93,9 +99,11 @@ function getServerConfig(): ConfigResolved {
       return null
     })(),
     root: (() => {
-      // TODO/ai: when using Vite, set the `root` to Vite's `root` resolved setting
       if (configUser.root) {
         return toPosixPath(configUser.root)
+      }
+      if (rootFromVite) {
+        return toPosixPath(rootFromVite)
       }
       if (typeof process == 'undefined' || !hasProp(process, 'cwd')) return null
       return toPosixPath(process.cwd())
