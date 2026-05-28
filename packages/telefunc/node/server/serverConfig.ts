@@ -1,5 +1,6 @@
 export { configUser as config }
 export { getServerConfig }
+export { setRootFromVite }
 export type { ConfigUser }
 export type { ConfigResolved }
 
@@ -7,7 +8,7 @@ import { assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
-import { toPosixPath, pathIsAbsolute } from '../../utils/path.js'
+import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
 
 /** Telefunc Server Configuration */
 type ConfigUser = {
@@ -96,6 +97,10 @@ function getServerConfig(): ConfigResolved {
       if (configUser.root) {
         return toPosixPath(configUser.root)
       }
+      if (rootFromVite) {
+        assertPosixPath(rootFromVite)
+        return rootFromVite
+      }
       if (typeof process == 'undefined' || !hasProp(process, 'cwd')) return null
       return toPosixPath(process.cwd())
     })(),
@@ -167,4 +172,9 @@ function validateUserConfig(configUserUnwrapped: ConfigUser, prop: string, val: 
   }
 
   return true
+}
+
+let rootFromVite: string | null = null
+function setRootFromVite(root: string) {
+  rootFromVite = root
 }
