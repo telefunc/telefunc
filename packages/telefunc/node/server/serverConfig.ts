@@ -1,5 +1,6 @@
 export { configUser as config }
 export { getServerConfig }
+export { setRootFromVite }
 export type { ConfigUser }
 export type { ConfigResolved }
 
@@ -174,7 +175,10 @@ function validateUserConfig(configUserUnwrapped: ConfigUser, prop: string, val: 
 }
 
 let rootFromVite: string | null = null
-if (typeof __TELEFUNC__IS_VITE !== 'undefined') {
+function setRootFromVite(root: string) {
+  rootFromVite = root
+}
+if (globalThis.__TELEFUNC__IS_NON_RUNNABLE_DEV) {
   const mod = await __TELEFUNC__DYNAMIC_IMPORT('virtual:vite:telefunc:vite-root')
   rootFromVite = mod.rootFromVite as string
 }

@@ -5,6 +5,7 @@ import { transformTelefuncFileClientSide } from '../../shared/transformer/transf
 import { transformTelefuncFileServerSide } from '../../shared/transformer/transformTelefuncFileServerSide.js'
 import { assert } from '../../../utils/assert.js'
 import { toPosixPath } from '../../../utils/path.js'
+import { setRootFromVite } from '../../server/serverConfig.js'
 
 function pluginTransformTelefuncFiles(): Plugin[] {
   let root: string
@@ -17,6 +18,7 @@ function pluginTransformTelefuncFiles(): Plugin[] {
         handler(config) {
           root = toPosixPath(config.root)
           assert(root)
+          setRootFromVite(root)
         },
       },
       configureServer: {
