@@ -8,7 +8,7 @@ import { assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
-import { toPosixPath, pathIsAbsolute } from '../../utils/path.js'
+import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
 
 /** Telefunc Server Configuration */
 type ConfigUser = {
@@ -68,11 +68,6 @@ type ConfigResolved = {
 
 const configUser: ConfigUser = new Proxy({}, { set: validateUserConfig })
 
-let rootFromVite: string | null = null
-function setRootFromVite(root: string) {
-  rootFromVite = root
-}
-
 function getServerConfig(): ConfigResolved {
   return {
     disableEtag: configUser.disableEtag ?? false,
@@ -103,7 +98,8 @@ function getServerConfig(): ConfigResolved {
         return toPosixPath(configUser.root)
       }
       if (rootFromVite) {
-        return toPosixPath(rootFromVite)
+        assertPosixPath(rootFromVite)
+        return rootFromVite
       }
       if (typeof process == 'undefined' || !hasProp(process, 'cwd')) return null
       return toPosixPath(process.cwd())
@@ -176,4 +172,9 @@ function validateUserConfig(configUserUnwrapped: ConfigUser, prop: string, val: 
   }
 
   return true
+}
+
+let rootFromVite: string | null = null
+function setRootFromVite(root: string) {
+  rootFromVite = root
 }

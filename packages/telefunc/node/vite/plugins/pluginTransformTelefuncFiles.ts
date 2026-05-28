@@ -18,7 +18,7 @@ function pluginTransformTelefuncFiles(): Plugin[] {
         handler(config) {
           root = toPosixPath(config.root)
           assert(root)
-          setRootFromVite(config.root)
+          setRootFromVite(root)
         },
       },
       configureServer: {
