@@ -9,7 +9,6 @@ import { pluginBuildEntry } from './plugins/pluginBuildEntry.js'
 import { pluginPreview } from './plugins/pluginPreview.js'
 import { pluginPrintShieldResult } from './plugins/pluginPrintShieldResult.js'
 import { pluginVirtualFileEntry } from './plugins/pluginVirtualFileEntry.js'
-import { pluginVirtualFileViteRoot } from './plugins/pluginVirtualFileViteRoot.js'
 import { config } from '../server/serverConfig.js'
 import type { Plugin } from 'vite'
 import type { ConfigUser } from '../server/serverConfig.js'
@@ -28,7 +27,6 @@ function plugin(
 
   const plugins: Plugin[] = [
     ...pluginVirtualFileEntry(),
-    ...pluginVirtualFileViteRoot(),
     ...pluginTransformTelefuncFiles(),
     ...pluginDev(),
     ...pluginRetrieveDevServer(),
