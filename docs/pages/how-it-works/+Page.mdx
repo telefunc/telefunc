@@ -1,0 +1,77 @@
+import { Link } from '@brillout/docpress'
+import { CodeComparison } from '../../components/CodeComparison'
+
+You can think of telefunction calls as a type-safe `fetch` call to a registered server-side function.
+Under the hood, Telefunc converts telefunction calls into an HTTP request to your server.
+
+In this example, the `hello.telefunc.js` file is never actually loaded in the browser:
+
+<CodeComparison>
+  ```html
+  <!-- index.html -->
+  <!-- Environment: client -->
+
+  <script type="module">
+    import { hello } from './hello.telefunc.js';
+
+    const { message } = await hello('Eva');
+    console.log(message) // Prints 'Welcome Eva'
+  </script>
+  ```
+  ```ts ts-only
+  // hello.telefunc.ts
+  // Environment: server
+
+  // shield(hello, [t.string]) <- // Generated // [!code ++]
+  export async function hello(name: string) {
+    const message = 'Welcome ' + name
+
+    return { message }
+  }
+  ```
+</CodeComparison>
+
+1. Telefunc uses build plugins to crawl your app and automatically
+<Link href="/shield#automatic-from-typescript">generate type shields</Link> from your telefunction signature.
+2. It also transforms `hello.telefunc.js` into a slim HTTP call to <Link href="/server-integration">the server</Link>:
+
+```js
+// hello.telefunc.js (after Telefunc transformation)
+// Environment: Browser
+
+import { __internal_makeHttpRequest } from 'telefunc/client'
+export const hello = (...args) => {
+  return __internal_makeHttpRequest('/hello.telefunc.js:hello', args)
+}
+```
+
+> There is work-in-progress to be able to use Telefunc without a transformer, see [#52](https://github.com/telefunc/telefunc/issues/52).
+
+## Telefunction lifecycle
+
+> Telefunc uses a simple JSON protocol to simulate the DX of a local function call.
+
+When `hello('Eva')` is called in the browser,
+
+1. The HTTP client (`__internal_makeHttpRequest`) serializes the call and makes an HTTP request to the `/_telefunc` route on your server.
+
+```sh
+POST /_telefunc HTTP/1.1
+{
+  "path": "/hello.telefunc.js:hello",
+  "args": [{"name": "Eva"}]
+}
+```
+
+2. The <Link href="/telefunc" text={(<code>telefunc</code>)} /> middleware on your server intercepts the request, executes the telefunction call, and returns the (serialized) result.
+
+```sh
+HTTP/1.1 200 OK
+{
+  "return": {
+    "message": "Welcome Eva"
+  }
+}
+```
+
+3. The HTTP client parses the response and type-safely returns the result, as though the control flow never left the browser.

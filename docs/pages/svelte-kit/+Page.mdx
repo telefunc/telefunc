@@ -1,15 +1,14 @@
 import { Link, RepoLink } from '@brillout/docpress'
-import { MostlyMutations } from '../../components'
 
 Using Telefunc with [SvelteKit](https://svelte.dev/docs/kit).
 
-## 1. Install
+## 1. Install Telefunc
 
 ```bash
 npm install telefunc
 ```
 
-## 2. Vite plugin
+## 2. Plugin to Vite
 
 ```ts
 // vite.config.ts
@@ -23,7 +22,9 @@ export default defineConfig({
 })
 ```
 
-## 3. Server integration
+## 3. Add Telefunc middleware
+
+The Telefunc middleware intercepts and executes telefunction calls. This is also your opportunity to set any data you'd like available in the Telefunc request context. For more info, see <Link href="/getContext" />.
 
 ```ts
 // src/routes/_telefunc/+server.ts
@@ -39,59 +40,14 @@ const handler: RequestHandler = async (event) => {
     status: httpResponse.statusCode,
   })
 }
+
 export { handler as GET, handler as POST }
 ```
 
-## 4. Create a telefunction
+### Next
 
-Create your first telefunction, for example:
+<Link href="/start#my-first-telefunction" />
 
-```ts
-// src/routes/Counter.telefunc.ts
-// Environment: server
-
-export async function onIncrement(diff: number) {
-  database.value += diff
-  return database.value
-}
-```
-
-> `.telefunc.ts` files are always server-only, regardless of where they are located. You don't need `$lib/server` or `.server`.
-
-Call it from the client:
-
-```svelte
-<!-- src/routes/Counter.svelte -->
-<!-- Environment: client -->
-
-<script lang="ts">
-import { onIncrement } from './Counter.telefunc'
-
-let count = 0
-</script>
-
-<button on:click={async () => { count = await onIncrement(+1) }}>+1</button>
-<span>{count}</span>
-```
-
-> To pass contextual information (e.g. the logged-in user) to your telefunctions, see <Link href="/getContext" />.
-
-## Example
+## Examples
 
 <RepoLink path="/examples/svelte-kit" />
-
-## Initial Data
-
-<MostlyMutations
-  toolName="SvelteKit"
-  builtInMechanism={
-    <p>
-      For example, you can use SvelteKit's <code>load</code> function in a <code>+page.server.js</code> file to fetch
-      initial data directly from a database, see{' '}
-      <a href="https://svelte.dev/docs/kit/load#Universal-vs-server">
-        SvelteKit Docs &gt; Loading data &gt; Universal vs server
-      </a>
-      {'.'}
-    </p>
-  }
-/>

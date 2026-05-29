@@ -12,7 +12,19 @@ npm install telefunc
 
 The Telefunc middleware intercepts and executes telefunction calls. This is also your opportunity to set any data you'd like available in the Telefunc request context. For more info, see <Link href="/getContext" />.
 
-You can add Telefunc to any server that uses the standard `Request` object (e.g., [Hono](https://hono.dev)), or the Node.js `req` readable stream (e.g., [Express](https://expressjs.com) or [Fastify](https://fastify.dev)).
+You can add Telefunc to any server that uses the standard `Request` object, including [Hono](https://hono.dev), [Next.js](https://nextjs.org), [Nitro](https://nitro.build), [Nuxt](https://nuxt.com), and [SvelteKit](https://svelte.dev/docs/kit).
+See configuration guide for:
+
+- <Link href="/server" text="Hono, Express, Fastify, etc." />
+- <Link href="/next" text="Next.js" />
+- <Link href="/svelte-kit" text="SvelteKit" />
+- <Link href="/vike" text="Vike" />
+- <Link href="/nuxt" text="Nuxt" />
+- <Link href="/react-router" text="React Router" />
+- <Link href="/react-native" text="React Native" />
+- <Link href="/bundler" text="Custom bundler" />
+
+You can also add Telefunc to servers that use the Node.js `req` readable stream, like [Express](https://expressjs.com) or [Fastify](https://fastify.dev).
 
 ```js choice=Hono
 // server.js
@@ -24,6 +36,7 @@ import { telefunc } from 'telefunc'
 const app = new Hono()
 
 app.all('/_telefunc', async (c) => {
+  // make sure to pass raw request
   const httpResponse = await telefunc({ request: c.req.raw })
 
   return new Response(httpResponse.body, {

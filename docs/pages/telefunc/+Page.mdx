@@ -2,11 +2,40 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-The `telefunc()` function enables you to <Link href="/server">install a Telefunc middleware into any server</Link>.
+`telefunc()` acts as an adapter between your server and telefunctions. It intercepts and executes telefunction calls, and returns the result (if any).
 
 > It's a pure function (no side effects).
 
-You can pass the [web standard `Request` object](https://developer.mozilla.org/en-US/docs/Web/API/Request):
+To add Telefunc to your server, <Link href="/server-integration">create middleware</Link> that calls `telefunc(req)`.
+
+By default, `telefunc` accepts the [web standard `Request` object](https://developer.mozilla.org/en-US/docs/Web/API/Request):
+
+```ts
+// server.ts
+
+import { telefunc } from 'telefunc'
+ 
+// Add Telefunc middleware to server (Hono/Fastify/Express.js/...)
+app.use('/_telefunc', async (req: Request, res: Response) => {
+  const httpResponse = await telefunc(req)
+  res.send(httpResponse.body)
+})
+```
+
+## Response 
+
+The return value `httpResponse` is a plain JavaScript object with all the information needed to generate the HTTP response, for exampe using the [web standard `Response` object](https://developer.mozilla.org/en-US/docs/Web/API/Response):
+
+```js
+const response = new Response(httpResponse.body, {
+  status: httpResponse.statusCode,
+  headers: { 'content-type': httpResponse.contentType },
+})
+```
+
+## Populating telefunction Context
+
+You can optionally set values in the telefunction `Context` so that you can later access them from telefunctions with <Link href="/getContext">{<code>getContext()</code>}</Link>.
 
 ```js
 const httpResponse = await telefunc({
@@ -20,9 +49,11 @@ const httpResponse = await telefunc({
 })
 ```
 
-> The `context` parameter is optional and is only needed if you use `getContext()`, see <Link href="/getContext#provide" />.
+This is your opportunity to pass any data from you server `Context`, e.g., session or other auth records.
 
-Or the [Node.js `req` readable stream](https://nodejs.org/api/http.html#http_class_http_incomingmessage):
+## With Node `req`
+
+You can also add Telefunc to servers that use the [Node.js `req` readable stream](https://nodejs.org/api/http.html#http_class_http_incomingmessage):
 
 ```js
 const httpResponse = await telefunc({
@@ -39,16 +70,10 @@ const httpResponse = await telefunc({
 })
 ```
 
-The return value `httpResponse` is a plain JavaScript object with all the information needed to generate the HTTP response, for exampe using the [web standard `Response` object](https://developer.mozilla.org/en-US/docs/Web/API/Response):
+### Next
 
-```js
-const response = new Response(httpResponse.body, {
-  status: httpResponse.statusCode,
-  headers: { 'content-type': httpResponse.contentType },
-})
-```
+<Link href="/Abort" />
 
 ## See also
 
-- <Link href="/server" />
-- <Link href="/getContext" />
+- <Link href="/error-handling" />

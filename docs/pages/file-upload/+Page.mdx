@@ -1,3 +1,5 @@
+import { Link } from '@brillout/docpress'
+
 Telefunc supports [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) and [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) arguments — you can pass them to a telefunction just like any other argument. Any signature works: single file, multiple files, `File[]` arrays, mixed with other arguments — it's completely transparent.
 
 > When a telefunction call contains files, Telefunc automatically switches from JSON to [`multipart/form-data`](https://developer.mozilla.org/en-US/docs/Web/API/FormData).
@@ -168,3 +170,11 @@ Telefunc uses a custom multipart stream parser — files are **not** buffered in
 3. When your telefunction calls `file.stream()`, `file.text()`, or `file.arrayBuffer()`, the bytes are pulled directly from the HTTP stream on demand.
 
 This means **file bytes only flow through memory when you read them** — and if you stream to disk, memory consumption is constant regardless of file size.
+
+### Next
+
+<Link href="/error-handling" />
+
+## See also
+
+- <Link href="/telefunc" />

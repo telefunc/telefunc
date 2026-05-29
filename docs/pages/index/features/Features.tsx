@@ -10,7 +10,7 @@ function Features() {
       id="feature-list"
       style={{
         display: 'grid',
-        gridGap: 30,
+        gridGap: 20,
         paddingLeft: 'var(--main-view-padding)',
         paddingRight: 'var(--main-view-padding)',
         margin: 'auto',
@@ -19,75 +19,95 @@ function Features() {
     >
       <div>
         <h2>
-          <Emoji name="dizzy" /> Simple
+          <Emoji name="typescript" /> Type-Safe by definition
         </h2>
         <>
           <p>
-            With Telefunc, you get a <b>simple frontend-backend relationship</b>: it's just a set of remote functions.
-          </p>
-          <p>
-            Your frontend can <b>directly use any SQL/ORM query</b> to retrieve & mutate data.
+            Telefunc <b>automatically generates runtime shields</b> from argument types. Inference and autocompletion
+            are default.
           </p>
         </>
       </div>
       <div>
         <h2>
-          <Emoji name="shield" /> Permissions
+          <Emoji name="gem-stone" /> Schemaless by design
         </h2>
         <>
           <p>
-            Telefunc enables <b>programmatically defined permissions</b>. It's both <b>simple</b> and <b>flexible</b>.
-          </p>
-          <p>Telefunc introduces new techniques to define advanced permissions and increase safety.</p>
-        </>
-      </div>
-      <div>
-        <h2>
-          <Emoji name="plug" /> Any Stack
-        </h2>
-        <>
-          <p>
-            Telefunc supports <b>Next.js</b>, <b>Nuxt</b>, <b>Vite</b>, <b>Vike</b>, <b>React Native</b>,{' '}
-            <b>SvelteKit</b> and other frameworks based on Webpack, Babel, Parcel or Vite.
+            <b>The types are the contract.</b> Just import and call telefunctions like any other function. Telefunc does
+            the rest.
           </p>
         </>
       </div>
       <div>
         <h2>
-          <Emoji name="high-voltage" /> Performance
+          <SaucerEmoji /> Build without constraints
         </h2>
         <>
           <p>
-            The frontend can directly tap into the <b>full power of the server</b>. Use tailored SQL/ORM queries for
-            highly performant data retrieval and mutations.
+            Iterate flexibly and rapidly. <b>Add telefunctions as you go,</b> instead of getting bogged down with a
+            back-end API schema.
           </p>
         </>
       </div>
       <div>
         <h2>
-          <Emoji name="typescript" /> TypeScript
+          <Emoji name="high-voltage" /> Minimal footprint
         </h2>
         <>
           <p>
-            <b>Seamless TypeScript support</b> out-of-the-box including all your favorite IDE features such as
-            auto-import, replace-all-occurrences, etc.
-          </p>
-          <p>
-            <b>Automatic runtime validation</b> for end-to-end type safety.
+            Telefunc isn't just small, it lets you write small. <b>Send only the data you need</b> for optimal
+            performance and security.
           </p>
         </>
       </div>
       <div>
         <h2>
-          <Emoji name="gem-stone" /> Rock-solid
+          <Emoji name="dizzy" /> Remote made simple
         </h2>
         <>
           <p>
-            The source code of Telefunc has <b>no known bug</b> (bugs are fixed swiftly) and every release is assailed
-            against a heavy suite of <b>automated tests</b>.
+            <b>Couple code, not environments.</b> Telefunctions let you call server-side tools like databases or
+            third-party clients without worrying about the boilerplate.
           </p>
         </>
       </div>
+      <div>
+        <h2>
+          <Emoji name="plug" /> Plug in to any server
+        </h2>
+        <>
+          <p>
+            It works out-of-box with <b>Next.js, Nuxt, SvelteKit, Vike, and React Native</b>, as well as bundlers like
+            Vite, Webpack, Babel, or Parcel.
+          </p>
+        </>
+      </div>
+    </div>
+  )
+}
+
+function SaucerEmoji() {
+  const emoji = () => {
+    try {
+      return String.fromCodePoint(0x1f6f8)
+    } catch {
+      // fall-back to rocket
+      return String.fromCodePoint(0x1f680)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        width: '1.15em',
+        display: 'inline',
+        verticalAlign: 'text-top',
+        fontFamily: 'emoji',
+        fontSize: '1em',
+      }}
+    >
+      {emoji()}
     </div>
   )
 }

@@ -1,0 +1,58 @@
+import { Link } from '@brillout/docpress'
+
+Telefunc guarantees argument types at runtime with a <Link href="/shield" text={(<code>shield()</code>)} />. **This is generated automatically if you're using TypeScript.**
+
+> If you aren't using TypeScript, or want to define the `shield` yourself, you can also <Link href="/shield#manual">define the <code>shield</code> manually</Link>.
+
+The `shield` rejects telefunction calls with invalid argument types using <Link href="/Abort" text={(<code>throw Abort()</code>)} />. 
+
+## Validating non-type rules
+
+Argument rules like email validity or maximum number value must be checked manually in the telefunction body.
+
+Simply return early with an error result, including any message the UI should display to the user.
+
+```ts
+// SignUpForm.telefunc.ts
+// Environment: server
+
+export async function onFormSubmit(email: string, password: string) {
+  // Form validation
+  const inputErrors = {}
+
+  if (!email) {
+    inputErrors.email = 'Please enter your email.'
+  } else if (!email.includes('@')) {
+    inputErrors.email = 'Invalid email; make sure to enter a valid email.'
+  }
+
+  if (!password) {
+    inputErrors.password = 'Please enter a password.'
+  } else if (password.length < 8) {
+    inputErrors.password = 'Password must have at least 8 characters.'
+  }
+
+  if (Object.keys(inputErrors).length > 0) {
+    return { inputErrors }
+  }
+
+  // IRL we'd want to hash the password first
+  const user = await db.execute(
+    'INSERT INTO todos VALUES (:email, :password)',
+    { email, password },
+  )
+
+  return { user }
+}
+```
+
+> You can also exit early and return error data with `throw Abort(errorData)` instead of `return errorData`. This hides the control flow though, and prevents Telefunc from distinguishing between app errors and request errors. See <Link href="/error-handling" />.
+
+### Next
+
+<Link href="/error-handling" />
+
+## See also
+
+- <Link href="/onAbort" />
+- <Link href="/onBug" />

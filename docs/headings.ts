@@ -1,39 +1,22 @@
 export { categories }
 export { headings }
-export { headingsDetached }
 export type { HeadingsURL }
 
-import type {
-  Config,
-  HeadingDefinition,
-  HeadingDetachedDefinition as HeadingDetachedDefinition_,
-} from '@brillout/docpress'
-import { iconScroll, iconEyes, iconGear, iconSeedling } from '@brillout/docpress' with { type: 'vike:pointer' }
-type HeadingDetachedDefinition = Omit<HeadingDetachedDefinition_, 'category'> & {
-  category: CategoryNames | 'Miscellaneous'
-}
+import type { Config, HeadingDefinition } from '@brillout/docpress'
+import { iconGear, iconPlug, iconSeedling } from '@brillout/docpress' with { type: 'vike:pointer' }
 
 type ExtractHeadingUrl<C> = C extends { url: infer N extends string } ? N : C extends string ? C : never
-type HeadingsURL = ExtractHeadingUrl<(typeof headings)[number]> | ExtractHeadingUrl<(typeof headingsDetached)[number]>
-type ExtractCategoryName<C> = C extends { name: infer N extends string } ? N : C extends string ? C : never
-type CategoryNames = ExtractCategoryName<(typeof categories)[number]>
+type HeadingsURL = ExtractHeadingUrl<(typeof headings)[number]>
 
-const categories = ['Guides', 'API', 'Get Started', 'Overview', 'Miscellaneous'] as const satisfies Config['categories']
-
-const headingsDetached = [...misc()] satisfies HeadingDetachedDefinition[]
+const categories = ['Guides', 'Integrations', 'API'] as const satisfies Config['categories']
 
 const headings = [
+  // #region Onboarding
   {
     level: 1,
-    title: 'Learn',
-    titleIcon: iconEyes,
-    color: '#bd55dd',
-    titleIconStyle: {
-      width: 30,
-      height: 30,
-      position: 'relative',
-      top: -2,
-    },
+    title: 'Guides',
+    titleIcon: iconSeedling,
+    color: '#74d717',
   },
   {
     level: 2,
@@ -43,23 +26,96 @@ const headings = [
   },
   {
     level: 2,
-    title: 'RPC',
-    url: '/RPC',
+    title: 'Get Started',
+    url: '/start',
+    sectionTitles: ['My first telefunction'],
   },
   {
     level: 2,
-    title: 'RPC vs GraphQL/REST',
-    url: '/RPC-vs-GraphQL-REST',
+    title: 'Server Integration',
+    url: '/server-integration',
   },
   {
+    level: 2,
+    title: 'Initial Data',
+    url: '/initial-data',
+  },
+  {
+    level: 2,
+    title: 'Why Telefunc?',
+    url: '/why-telefunc',
+  },
+  {
+    level: 2,
+    title: 'Best Practices',
+    url: '/best-practices',
+  },
+
+  // #region Guides
+  {
+    level: 4,
+    title: 'Basics',
+  },
+  {
+    level: 2,
+    title: 'Permissions',
+    url: '/permissions',
+    sectionTitles: ['DRY Permissions'],
+  },
+  {
+    level: 2,
+    title: 'Validation',
+    url: '/validation',
+  },
+  {
+    level: 2,
+    title: 'Error handling',
+    url: '/error-handling',
+  },
+  {
+    level: 2,
+    title: 'File uploads',
+    url: '/file-upload',
+  },
+  // #endregion
+
+  {
+    level: 4,
+    title: 'Learn More',
+  },
+  {
+    level: 2,
+    title: 'Why Schemaless?',
+    url: '/schemaless',
+    sectionTitles: ['Schemaless vs schema-full', 'RPC vs GraphQL/REST'],
+  },
+  {
+    level: 2,
+    title: 'How it works',
+    url: '/how-it-works',
+    sectionTitles: ['Telefunction lifecycle'],
+  },
+  // #endregion
+
+  // #region Integrations
+  {
     level: 1,
-    title: 'Get Started',
-    titleIcon: iconSeedling,
-    color: '#74d717',
+    title: 'Integrations',
+    titleIcon: iconPlug,
+    color: '#ffd511',
   },
   {
     level: 4,
-    title: 'Framework integration',
+    title: 'Server frameworks',
+  },
+  {
+    level: 2,
+    title: 'Hono, Express, etc.',
+    url: '/server',
+  },
+  {
+    level: 4,
+    title: 'Metaframeworks',
   },
   {
     level: 2,
@@ -83,85 +139,59 @@ const headings = [
   },
   {
     level: 2,
-    title: 'React Native',
-    url: '/react-native',
-  },
-  {
-    level: 2,
     title: 'React Router',
     url: '/react-router',
   },
   {
     level: 4,
-    title: 'Server integration',
+    title: 'Native',
   },
   {
     level: 2,
-    title: 'Server (Hono, Express, ...)',
-    url: '/server',
+    title: 'React Native',
+    url: '/react-native',
   },
   {
     level: 4,
-    title: 'Bundler integration',
+    title: 'Bundlers',
   },
   {
     level: 2,
     title: 'Custom bundler',
-    titleInNav: 'Custom bundler',
-    url: '/install',
-  },
-  {
-    level: 1,
-    title: 'Guides',
-    titleIcon: iconScroll,
-    color: '#ffd511',
+    url: '/bundler',
   },
   {
     level: 2,
-    title: 'Permissions',
-    url: '/permissions',
-    sectionTitles: ['`getContext()` wrapping'],
+    title: 'Vite',
+    url: '/vite-plugin',
   },
   {
     level: 2,
-    title: 'Error handling',
-    url: '/error-handling',
+    title: 'Webpack',
+    url: '/webpack-plugin',
   },
   {
     level: 2,
-    title: 'Form validation',
-    url: '/form-validation',
-    sectionTitles: ['`throw Abort(someValue)`'],
+    title: 'Babel',
+    url: '/babel-plugin',
   },
-  {
-    level: 2,
-    title: 'Event-based telefunctions',
-    url: '/event-based',
-  },
-  {
-    level: 2,
-    title: 'File upload',
-    url: '/file-upload',
-  },
+  // #endregion
+
+  // #region API
   {
     level: 1,
     title: 'API',
     titleIcon: iconGear,
     color: '#80c1db',
-    menuModalFullWidth: true,
   },
   {
     level: 4,
-    title: 'Context',
+    title: 'Server',
   },
   {
     level: 2,
-    title: '`getContext()`',
-    url: '/getContext',
-  },
-  {
-    level: 4,
-    title: 'Protection',
+    title: '`telefunc()',
+    url: '/telefunc',
   },
   {
     level: 2,
@@ -170,27 +200,23 @@ const headings = [
   },
   {
     level: 2,
-    title: '`shield()`',
-    url: '/shield',
-    sectionTitles: ['TypeScript - Automatic', 'TypeScript - Manual'],
-  },
-  {
-    level: 4,
-    title: 'Server Middleware',
+    title: '`getContext()`',
+    url: '/getContext',
   },
   {
     level: 2,
-    title: '`telefunc()',
-    url: '/telefunc',
-  },
-  {
-    level: 4,
-    title: 'Error Handling',
+    title: '`shield()`',
+    url: '/shield',
+    sectionTitles: ['Automatic (from TypeScript)', 'Manual'],
   },
   {
     level: 2,
     title: '`onBug()`',
     url: '/onBug',
+  },
+  {
+    level: 4,
+    title: 'Client',
   },
   {
     level: 2,
@@ -241,54 +267,5 @@ const headings = [
     title: '`log`',
     url: '/log',
   },
-  {
-    level: 4,
-    title: 'Plugins',
-  },
-  {
-    level: 2,
-    title: 'Vite Plugin',
-    url: '/vite-plugin',
-  },
-  {
-    level: 2,
-    title: 'Webpack Plugin',
-    url: '/webpack-plugin',
-  },
-  {
-    level: 2,
-    title: 'Babel Plugin',
-    url: '/babel-plugin',
-  },
-] as const satisfies HeadingDefinition[]
-
-function misc() {
-  return (
-    [
-      {
-        title: '`throw Abort()` vs `throw new Error()`',
-        url: '/abort-vs-error',
-      },
-      {
-        title: 'Telefunc Transformer',
-        url: '/transformer',
-      },
-      {
-        title: 'Initial Page Data',
-        url: '/initial-page-data',
-      },
-      {
-        title: 'Initial Data',
-        url: '/initial-data',
-      },
-      {
-        title: 'Multiple Clients',
-        url: '/multiple-clients',
-      },
-      {
-        title: '❌ Non-function exports',
-        url: '/warning/non-function-export',
-      },
-    ] as const
-  ).map((h) => ({ ...h, category: 'Miscellaneous' as const })) satisfies HeadingDetachedDefinition[]
-}
+  // #endregion
+] satisfies HeadingDefinition[]

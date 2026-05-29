@@ -1,0 +1,25 @@
+```tsx
+// Upload.tsx
+// Environment: client
+
+import { onUpload } from './Upload.telefunc.ts'
+
+function Upload() {
+  const [progress, setProgress] = createSignal(0)
+
+  async function onChange(event) {
+    const file = event.target.files[0]
+    await onUpload(file, (percent) => {
+      setProgress(percent)
+    })
+  }
+
+  return (
+    <div>
+      <label>Upload file</label>
+      <input type="file" onChange={onChange} />
+      <div style={{ width: progress }} />
+    </div>
+  )
+}
+```

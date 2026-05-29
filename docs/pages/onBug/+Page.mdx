@@ -1,27 +1,28 @@
-import { Link } from '@brillout/docpress'
+import { Link, Warning } from '@brillout/docpress'
 
 **Environment**: server.
 
-To track bugs, use `onBug()`:
+Unexpected errors trigger the server-side `onBug()` hook. These may be bugs in your telefunction, or in the Telefunc library.
+
+<Warning>
+    The `onBug()` hook is **not** called when <Link href="/Abort" /> is used, and **cannot** be used to implement control flow.
+</Warning>
+
+Use `onBug()` to integrate with logging and monitoring tools like [Sentry](https://sentry.io/), [Bugsnag](https://www.bugsnag.com/), or [Rollbar](https://rollbar.com/).
 
 ```ts
 import { onBug } from 'telefunc'
 
-onBug((err) => {
+onBug((error) => {
+  // type of error is `unknown`
+  console.error(error)
   // ...
 })
 ```
 
-This allows you, for example, to install the tracker code of some tracking service ([Sentry](https://sentry.io/), [Bugsnag](https://www.bugsnag.com/), [Rollbar](https://rollbar.com/), ...).
-
-`onBug()` is called:
- - When a telefunction throws an error **that is not `Abort()`**. (The telefunction has a bug.)
- - When Telefunc throws an error. (Telefunc has a bug.)
-
-> `throw Abort()` does *not* trigger `onBug()`. Telefunc handles `Abort` as an expected error, and returns the error data (if any) as part of a >= `4xx` response, see <Link href="/abort-vs-error" />.
+### Next:
+<Link href="/onAbort" />
 
 ## See also
 
 - <Link href="/error-handling" />
-- <Link href="/error-handling#error-tracking" />
-- <Link href="/abort-vs-error" />

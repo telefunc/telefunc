@@ -1,7 +1,58 @@
+import { Link, RepoLink } from '@brillout/docpress'
 import { Example } from '../../components'
 
-Example of using Telefunc with [React Router](https://reactrouter.com):
- - <Example timestamp="09.2025" repo="arnaudsm/telefunc-react-router-demo" />
+Using Telefunc with [React Router](https://reactrouter.com).
 
-Example with [Remix](https://remix.run) (React Router was [formerly known as Remix](https://remix.run/blog/merging-remix-and-react-router)):
- - <Example timestamp="06.2024" repo="overshom/remix-telefunc-demo" />
+## 1. Install Telefunc
+
+```bash
+npm install telefunc
+```
+
+## 2. Plugin to Vite
+
+```ts
+// vite.config.ts
+
+import { reactRouter } from '@react-router/dev/vite';
+import { telefunc } from 'telefunc/vite'
+import { defineConfig } from 'vite'
+
+export default defineConfig({
+  plugins: [reactRouter(), telefunc()],
+})
+```
+
+## 3. Add Telefunc middleware
+
+The Telefunc middleware intercepts and executes telefunction calls. This is also your opportunity to set any data you'd like available in the Telefunc request context. For more info, see <Link href="/getContext" />.
+
+```ts
+// src/routes/_telefunc.ts
+// Environment: server
+
+import { telefunc } from "telefunc";
+
+export async function action({ request }: ActionFunctionArgs) {
+  const { url, method } = request;
+  const body = await request.json();
+  const httpResponse = await telefunc({
+    url: new URL(url).pathname,
+    method,
+    body: JSON.stringify(body),
+  });
+
+  return JSON.parse(httpResponse.body);
+}
+```
+
+### Next
+
+<Link href="/start#my-first-telefunction" />
+
+## Examples
+
+- <Example timestamp="09.2025" repo="arnaudsm/telefunc-react-router-demo" />
+    - with [React Router](https://reactrouter.com)
+- <Example timestamp="06.2024" repo="overshom/remix-telefunc-demo" />
+    - with [Remix](https://remix.run), ([renamed to React Router](https://remix.run/blog/merging-remix-and-react-router))

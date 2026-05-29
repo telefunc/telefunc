@@ -1,0 +1,28 @@
+```ts ts-only max-width=60
+// Upload.telefunc.ts
+
+import { Abort, getContext } from 'telefunc'
+
+export async function onUpload(
+  file: File,
+  onProgress: (percent: number) => void,
+): void {
+  const { user } = getContext()
+
+  if (!user || !user.permissions.includes('write')) {
+    throw Abort({ /** Shared with client */ })
+  }
+
+  const dest = fs.createWriteStream(/** */)
+  const total = file.size
+  let loaded = 0
+
+  for await (const chunk of file.stream()) {
+    dest.write(chunk)
+    loaded += chunk.byteLength
+    onProgress(Math.round(loaded / total * 100))
+  }
+
+  dest.end()
+}
+```

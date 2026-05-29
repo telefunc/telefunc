@@ -2,10 +2,8 @@ export { config as default }
 
 import type { Config } from '@brillout/docpress'
 import logo from './icons/telefunc.svg'
-import { categories, headings, headingsDetached } from './headings'
+import { categories, headings } from './headings'
 import { PROJECT_VERSION } from './utils/PROJECT_VERSION.js'
-import { TopNavigation } from './TopNavigation'
-import React from 'react'
 
 const config: Config = {
   name: 'Telefunc',
@@ -19,7 +17,7 @@ const config: Config = {
   twitter: '@brillout',
 
   headings,
-  headingsDetached,
+  headingsDetached: [],
   categories,
 
   algolia: {
@@ -30,7 +28,6 @@ const config: Config = {
 
   umamiId: 'd03d0873-19dc-42c4-a250-cf8500171a9e',
 
-  topNavigation: <TopNavigation />,
   navMaxWidth: 950 + 20 * 2,
   navLogoSize: 36,
   navLogoStyle: {

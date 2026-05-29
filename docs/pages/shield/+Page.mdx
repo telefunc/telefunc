@@ -2,85 +2,79 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-You use `shield()` to guarantee the type of telefunction arguments. (As explained in <Link href="/RPC" />,
-telefunctions are public and need protection.)
+Use `shield()` to guarantee the type of telefunction arguments at **compile- and run-time**.
 
-```js
-// CreateTodo.telefunc.js
+```ts ts-only
+// CreateTodo.telefunc.ts
 // Environment: server
-
-export { onNewTodo }
 
 import { shield } from 'telefunc'
 const t = shield.type
 
+// Shield will `throw Abort` if `text` is not type `string`
 shield(onNewTodo, [t.string])
-async function onNewTodo(text) {
-  // `text` is guaranteed to be a `string`: if `onNewTodo(42)` is called then Telefunc
-  // throws an error that `text` should be a `string` (instead of a `number`)
+export async function onNewTodo(text: string) {
+  // ...
 }
 ```
 
-> If you use TypeScript, then Telefunc automatically defines `shield()`, see <Link href="#typescript-automatic" />.
+Under the hood, `shield()` uses <Link href="/Abort" /> to reject invalid telefunction calls, and pass an error message to the client.
 
+```js
+async function onSubmit(text) {
+  try {
+    const todos = await onNewTodo(text)
+    // ...
+  } catch (error) {
+    console.error(error) //
+  }
+}
+````
 
-## TypeScript - Automatic
+## Automatic (from TypeScript)
 
-If you use TypeScript, then Telefunc automatically generates `shield()` for each telefunction.
+If you use TypeScript, Telefunc automatically generates `shield()` for each telefunction.
 
-In other words: telefunction argument types are automatically validated at runtime:
+> Automatic `shield()` generation only works for stacks that transpile server-side code (Next.js, Vite, Vike, SvelteKit, Nuxt, etc.).
 
 ```ts ts-only
-// hello.telefunc.ts
+// CreateTodo.telefunc.ts
+// Environment: server
 
-// No need to define a shield() when using TypeScript: Telefunc automatically generates
-// it. For example here, Telefunc automatically aborts the telefunction call if the
-// argument is `hello({ name: 42 })` and throws an error that `name` should be a `number`.
-export async function hello({ name }: { name: string }) {
-  return `Welcome to Telefunc, ${name}.`
+import { shield } from 'telefunc' // [!code --]
+const t = shield.type // [!code --]
+
+shield(onNewTodo, [t.string]) // [!code --]
+export async function onNewTodo(text) {
+  // `text` is guaranteed to be a `string`
 }
 ```
 
-With Telefunc, not only can you seamlessly re-use types across your frontend and backend code, but you also get automatic type-safety at runtime. If you use a TypeScript ORM (e.g. [Prisma](https://www.prisma.io/)) or SQL builder (e.g. [Kysely](https://github.com/koskimas/kysely) and [others](https://github.com/stars/brillout/lists/sql)), then you get end-to-end type safety all the way from database to frontend.
+By default, Telefunc only generates `shield()` guards when you build for production. This improves local development speed. You can opt-in to `shield()` generation in development, see <Link href="/shield-config" />.
 
-> For a faster development, Telefunc doesn't generate `shield()` and your telefunction arguments aren't validated during development.
-> Telefunc only generates `shield()` upon building your app for production.
-> You can enable the generation of `shield()` for development by setting <Link href="/shield-config">`config.shield.dev`</Link> to `true`.
+## Manual
 
-> Telefunc's automatic `shield()` generation only works for stacks that transpile server-side code (Next.js, Vite, Vike, SvelteKit, Nuxt, etc.).
->
-> For stacks that don't transpile server-side code (e.g. React Native and Parcel), you need to define `shield()` manually: see <Link href="#typescript-manual" />.
+You need to define `shield()` manually when using stacks that don't transpile server-side code (e.g. React Native or Parcel).
 
+In this case, wrap your telefunction to avoid defining type arguments twice:
 
-## TypeScript - Manual
-
-If you define `shield()` manually (instead of using Telefunc's automatic `shield()` generator as described in <Link href="#typescript-automatic" />), then note that you don't need to define the arguments type twice:
-
-```ts ts-only
+```js
+// TodoList.telefunc.js
+// Environment: server
 import { shield } from 'telefunc'
 
 export const onNewTodo = shield(
   [shield.type.string],
   async function (text) {
-    // ✅ TypeScript knows that `text` is of type `string`
+    // ✅ TypeScript knows that `text` is type `string`
   }
 )
 ```
 
-Note that the following doesn't work:
+### Next:
+<Link href="/onBug" />
 
-```ts ts-only
-import { shield } from 'telefunc'
-
-shield(onNewTodo, [shield.type.string])
-// TypeScript cannot infer the type of named functions by design.
-export async function onNewTodo(text) {
-  // ❌ TypeScript doesn't know that `text` is of type `string`
-}
-```
-
-
-## Common types
+## Type examples
 
 Examples showcasing the most common `shield()` types:
 
@@ -149,3 +143,8 @@ List of `shield()` types:
 `t.optional(T)` | <code>T &#x7c; undefined</code> | <code>isT(value) &#x7c;&#x7c; value === undefined</code>
 `t.nullable(T)` | <code>T &#x7c; null</code> | <code>isT(value) &#x7c;&#x7c; value === null</code>
 `t.any` | `any` | `true`
+
+## See also
+
+- <Link href="/Abort" />
+- <Link href="/error-handling" />

@@ -1,0 +1,42 @@
+```jsx
+// /Todos.jsx
+// Environment: client
+
+import {
+  onLoad,
+  onNewTodo,
+  onMarkAllComplete,
+} from './Todos.telefunc.js'
+
+async function TodoList() {
+  // No need for an adapter, or "server only" flag
+  const todoItems = await onLoad()
+
+  async function onClick(form) {
+    const text = form.input.value
+    // Invoke server-side logic like it's local
+    await onNewTodo(text)
+  }
+  
+  return (
+    <main>
+      <div>
+        <form>
+          <input input="text" />
+          <button onClick={onClick}>
+            Add To-Do
+          </button>
+        </form>
+        <button onClick={onMarkAllComplete}>
+          Mark all complete
+        </button>
+      </div>
+      <ul>
+        {todoItems.map((item) => (
+          <li key={item.id}>{item.text}</li>
+        ))}
+      </ul>
+    </main>
+  )
+}
+```

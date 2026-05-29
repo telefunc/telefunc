@@ -1,29 +1,39 @@
 import { Link } from '@brillout/docpress'
 
-> This page is about handling: bugs, expected errors, and network errors.
->
-> - To block unauthorized access, see: <Link href="/permissions" />
-> - To handle invalid `<form>` values, see: <Link href="/form-validation" />
-> - To install error tracking, see: <Link href="/onBug" />
+This page is about handling bugs, expected errors, and network errors.
+ - To block unauthorized access, see: <Link href="/permissions" text="Permissions" />
+ - To handle invalid telefunction arguments, see: <Link href="/validation" text="Validation" />
+ - To install error tracking, see: <Link href="/onBug" text={(<code>onBug()</code>)} />
 
+> To prevent leaking sensitive information, Telefunc never forwards unexpected server errors to the client.
 
-## Bugs
+## Error flows
 
-If a telefunction has a bug:
+|                             | `return someErrorData` | `throw Abort()`  | `throw Error()`           |
+| --------------------------- | ---------------------- | -----------------|-------------------------- |
+| When to use                 | For expected failures  | For control flow | For **bugs**              |
+| triggers `onBug` (server)   | ❌                      | ❌                | ✅                        |
+| `onAbort` (client)          | ❌                      | ✅               | ❌                         |
+| Passes error data to client | ✅                     | ✅               | ❌                         |
+| Logged with `console.error` | ❌                      | ❌                | ✅                        |
 
-```ts
-// hello.telefunc.ts
-// Environment: server
+### Security errors
 
-export { hello }
+<Link href="/Abort" /> is used to reject invalid requests (e.g., an unauthorized user or invalid arguments).
 
-async function hello(name: string) {
-  // Typo => syntax error => it should be `name` instead of `namee`
-  return 'Hello ' + namee
-}
-```
+### App errors
 
-Then a telefunction call throws an error:
+To handle expected errors (e.g., `"Email exists"`) gracefully, just return early with an error message. Add a flag to easily discriminate the return type.
+
+If a telefunction throws an uncaught exception, then <Link href="/onBug" /> is called. Catch the error and return early or `throw Abort(errorData)` to send information back to the client. To avoid leaking sensitive information, Telefunc doesn't send the original `Error` object to the frontend.
+
+### Network errors
+
+If the user's browser can't connect to your server, the error thrown client-side will include a boolean `isConnectionError` property.
+
+## Client side handling
+
+If `throw Abort()` interrupts a telefunction call, the abort data is returned to the client, and thrown as a `new Error(abortData)`. It can be accessed with the <Link href="/onAbort" /> hook, or caught and handled by your frontend:
 
 ```html
 <!-- index.html -->
@@ -47,78 +57,16 @@ Then a telefunction call throws an error:
 </html>
 ```
 
-> To avoid leaking sensitive information, Telefunc doesn't send the original `Error` object to the frontend.
+## Server side handling
 
-
-## Expected Errors
-
-An error thrown by a telefunction doesn't have to be a bug — it can be expected.
-
-For example:
- - An authentication library throwing an error if the user isn't logged in.
- - A validation library throwing an error upon invalid data.
-
-In this situation, you can:
- 1. Propagate the error to the frontend, or
- 2. handle the error on the server-side.
-
-<br/>
-
-**1. Propagate the error to the frontend.**
-
-You can propagate error information to the frontend like this:
-
-```ts
-import { validate } from 'some-library'
-
-function onFormSubmit(data) {
-  try {
-    validate(data)
-  } catch (err) {
-    return {
-      errorMessage: `Data is invalid: ${err.message}. Please enter valid data.`
-    }
-  }
-}
-```
-
-You can also use `throw Abort(someValue)`:
-
-```ts
-import { validate } from 'some-library'
-import { Abort } from 'telefunc'
-
-function onFormSubmit(data) {
-  try {
-    validate(data)
-  } catch (err) {
-    throw Abort({
-      errorMessage: `Data is invalid: ${err.message}. Please enter valid data.`
-    })
-  }
-}
-```
-
-In general, we recommend using `return { someValue }` instead of `throw Abort(someValue)`, see explanation at <Link href="/form-validation#throw-abort-somevalue" doNotInferSectionTitle={true} />.
-
-> You must catch the error and use `throw Abort(someValue)` because Telefunc doesn't send the original `Error` object to the frontend (in order to avoid leaking sensitive information).
-
-See also: <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={true} />.
-
-<br/>
-
-**2. Handle the error on the server-side.**
-
-You can handle the thrown error at your Telefunc server middleware:
+You can also handle the thrown error at your Telefunc server middleware:
 
 ```ts
 // server.ts
 
-// Server (Express.js/Fastify/...)
-
 import { telefunc } from 'telefunc'
 
-// Telefunc middleware
+// Add Telefunc middleware to server (Hono/Express.js/...)
 app.all('/_telefunc', async (req: Request, res: Response) => {
   const httpResponse = await telefunc(/* ... */)
   // Telefunc exposes any error thrown by a telefunction at httpResponse.err
@@ -128,39 +76,12 @@ app.all('/_telefunc', async (req: Request, res: Response) => {
 })
 ```
 
-Also see <Link href="/getContext#provide" />.
+### Next
 
-
-## Network Errors
-
-If the user's browser can't connect to your server:
-
-```html
-<!-- index.html -->
-<!-- Environment: client -->
-
-<html>
-  <body>
-    <script type="module">
-      import { hello } from './hello.telefunc.js'
-
-      try {
-        await hello('Eva')
-      } catch(err) {
-        if (err.isConnectionError) {
-          // There is a network problem:
-          //  - the user isn't connected to the internet, or
-          //  - your server is down.
-          console.log(err.message) // Prints 'No Server Connection'
-        }
-      }
-    </script>
-  </body>
-</html>
-```
-
+<Link href="/schemaless" />
 
 ## See also
 
-- <Link href="/onBug" />
-- <Link href="/abort-vs-error" />
+- <Link href="/Abort" />
+- <Link href="/shield" />
+- <Link href="/telefunc" />

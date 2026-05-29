@@ -1,0 +1,21 @@
+```ts ts-only max-width=60
+// UpdateTodo.telefunc.ts
+
+// `shield` generated automatically from type
+export async function onUpdateTodoText(text: string) {
+  const { user } = getContext()
+  
+  if (!user) {
+    // `throw Abort` to reject requests
+    throw Abort({ code: 'unauthenticated' })
+  }
+
+  // call the database, or do other server-side work
+  await sql(
+    'UPDATE todos SET done = 1 WHERE author_id = :authodId',
+	{ authorId: user.id },
+  )
+	
+  // don't return anything if you don't need to
+}
+```

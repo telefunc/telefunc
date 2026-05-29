@@ -1,28 +1,50 @@
-import { Link } from '@brillout/docpress'
+import { Link, Warning } from '@brillout/docpress'
 
 **Environment**: client.
 
-The `onAbort()` hook is called whenever the browser makes a telefunction call that fails because the telefunction ran <Link text={<code>throw Abort()</code>} href="/Abort" />.
+The client-side `onAbort()` hook is called whenever telefunction calls fail because of <Link text={<code>throw Abort()</code>} href="/Abort" />.
 
-It does **not** run when other errors are thrown, see <Link href="/abort-vs-error" />.
+<Warning>
+    It does **not** run when other errors are thrown, see <Link href="/error-handling" />.
+</Warning>
+
+`onAbort` gives you type-safe access to any data from `throw Abort(errorData)` on the client. It is designed to be used as part of Telefunc's DRY security pattern. For more, see <Link href="/permissions#dry-permissions" doNotInferSectionTitle={true} />.
+
+Use the `abortValue` property to access the error data.
 
 ```ts
+// *.telefunc.ts
+// Environment: server
+import { abort, getContext } from 'telefunc'
+
+export async function someTelefunction() {
+  const { user } = getContext()
+  if (!user) {
+    throw Abort({ code: 'unauthenticated' })
+  }
+}
+````
+
+```ts
+// onAbort.ts
 // Environment: client
 
 import { onAbort } from 'telefunc/client'
 
-onAbort((err) => {
-  if (err.abortValue.notLoggedIn) {
+onAbort((error: TelefunctionCallAbort) => {
+  if (error.isConnectionError) {
+    // ...
+  }
+  
+  if (error.abortValue.code === 'unauthenticated') {
     // Redirect user to login page
     window.location.href = '/login'
   }
+  
+  // ...
 })
 ```
-
-> The `onAbort()` hook is usually used for implementing `getContext()` permission wrappers, see <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={true} />.
-
 
 ## See also
 
  - <Link href="/permissions" />
- - <Link href="/Abort" />

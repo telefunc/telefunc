@@ -1,0 +1,114 @@
+import { Link, Warning } from '@brillout/docpress'
+import { CodeComparison } from '../../components/CodeComparison'
+
+Telefunc is an RPC framework you can attach to your server. It **abstracts away the HTTP protocol**
+so you can **couple code, not environments, and focus on developing.**
+
+With Telefunc, you can type-safely call a named server-side function as if it was client-side.
+For most use-cases it is **simpler, more flexible, and more performant** than REST or GraphQL.
+
+```tsx
+// NewTodo.tsx
+// Environment: client
+
+import { onNewTodo } from './NewTodo.telefunc.ts'
+
+async function onSubmit(event) {
+  // ...
+  const newTodoId = await onNewTodo(title, text)
+}
+```
+
+Type inference and autocompletion are automatic, and Telefunc handles the remote call for you.
+
+## They're (remote) functions
+
+The function you write is the function that gets called (on the server).
+Just import and call telefunctions from your front-end. No need for an adapter, or "server only" flag.
+
+Since telefunctions can be customized to a specific page, display component, or interaction, they:
+- Can perform complex queries with a single round-trip,
+- And only need to return what the calling UI needs.
+
+<CodeComparison>
+  ```ts ts-only
+  // MarkAllDone.telefunc.ts
+  // Environment: server
+
+  import { getContext } from 'telefunc'
+
+  async function onMarkAllDone() {
+    const { user } = getContext()
+    if (!getContext().user) {
+      throw Abort()
+    }
+
+    await db.query(
+      'UPDATE todo_items SET is_completed = TRUE WHERE userId = :userId;',
+      { userId: user.id }
+    )
+  };
+  ```
+  ```tsx ts-only
+  // MarkAllDone.tsx
+  // Environment: client
+
+  import { onMarkAllDone } from './MarkAllDone.telefunc.js'
+
+  function MarkAllDone() {
+    // () => Promise<void>
+    const onClick = onMarkAllDone
+
+    return (
+      <button onClick={onClick}>
+        Complete All
+      </button>
+    )
+  }
+
+  ```
+</CodeComparison>
+
+### Couple code, not environments
+
+Telefunctions always run on the server, so you can safely access environment secrets and use server-side tools (like ORMs or database clients).
+
+> For end-to-end type safety, use a TypeScript ORM or query builder (e.g. [Drizzle](https://orm.drizzle.team), [Kysely](https://github.com/koskimas/kysely), and [others](https://github.com/stars/brillout/lists/sql)).
+
+To the consumer, these are all just functions, that do some async work: RPC abstracts away the request management.
+
+> Operations like these are notoriously problematic with REST (often called the "N+1 problem"). With Telefunc, it's just SQL.
+> Using database-native queries is always more powerful than REST or GraphQL.
+
+## Schemaless architecture
+
+REST and GraphQL establish stable (but rigid) long-term data contracts. This makes it easier for third-parties to predictably consume your API, but gets in the way of prototyping, and forces the server to respond generically to clients:
+
+Telefunc creates unique data contracts between specific pieces of UI and the server-side logic they call. This allows components to invoke server-side logic as if it was local.
+
+## Full-stack design
+
+Telefunc employs a full-stack pattern, and projects that combine front- and back-end in the same project will get the most out of the acceleration it has to offer.
+
+```
+├── src
+    ├── db // ORM, query builder, models, etc.
+    ├── components
+    │  ├── todos
+    │  │  ├── AddTodo.tsx
+    │  │  ├── MarkAllDone.tsx
+    │  │  ├── todos.telefunc.ts
+    │  │  ├── TodoList.tsx
+    │  │  └── Todos.tsx
+    │  ├── ...
+    ├── server
+    │  └── entry.ts // Attach `telefunc` to server
+    ├── ...
+```
+
+It allows you to colocate (and codevelop) highly-tailored server functions with client code.
+You can write a telefunction for each view and interaction, just as if you were mutating data locally in-memory, but with all the power of a remote server.
+
+### Next
+
+<Link href="/best-practices" />

@@ -1,0 +1,21 @@
+```tsx ts-only
+// UpdateTodo.tsx
+
+import { onUpdateTodoText } from './UpdateTodo.telefunc.ts'
+
+export function CreateTodo() {
+  async function onAddTodo(event: SubmitEvent) {
+    const text = new FormData(event).get('text')
+    await onNewTodo(text)
+  }
+  
+  return (
+    <form onSubmit={onAddTodo}>
+      <input input="text" />
+      <button>
+        Add To-do
+      </button>
+    </form>
+  )
+}
+```

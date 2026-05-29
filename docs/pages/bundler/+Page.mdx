@@ -4,7 +4,6 @@ Telefunc can be used in any JavaScript environment without using a transformer b
 
 > Telefunc plugins transform `*.telefunc.js` browser-side imports into a thin HTTP client.
 
-
 ## Without transformer
 
 ```ts
@@ -26,7 +25,16 @@ async function onClick(form) {
 
 ## Vite plugin
 
-If you use Vite, you can transform `*.telefunc.js` files by using the Telefunc's Vite plugin:
+Telefunc's [Vite](https://vitejs.dev) plugin automatically adds Telefunc to Vite apps.
+
+If you use Vite, you can transform `*.telefunc.js` files by using Telefunc's Vite plugin.
+
+The plugin:
+ - Transforms your `.telefunc.js` files, see <Link href="/how-it-works" />.
+ - Automatically adds the <Link text="Telefunc Server Middleware" href="/telefunc" /> to Vite's development server as well as Vite's preview server.
+ - Lazy-loads your `.telefunc.js` files for optimal development speed (aka on-demand compilation).
+
+You can pass Telefunc server configurations to the Vite plugin:
 
 ```ts
 // vite.config.ts
@@ -40,6 +48,10 @@ export default {
 ```
 
 ## Webpack plugin
+
+The [webpack](https://webpack.js.org) plugin adds the <Link text="Telefunc Transformer" href="/how-it-works" /> to webpack apps, such as:
+ - <Link href="/next" />
+ - <Link href="/nuxt" />
 
 If you use webpack, you can transform `*.telefunc.js` files by using the Telefunc's webpack plugin:
 
@@ -57,6 +69,5 @@ module.exports = {
 
 ## Babel plugin
 
-Telefunc's Babel plugin is work-in-progress.
-
-> Reach out on GitHub if you want to use the Babel plugin.
+Telefunc's [Babel](https://babeljs.io) plugin adds the <Link text="Telefunc Transformer" href="/how-it-works#transformer" /> to Babel apps, such as:
+ - <Link href="/react-native" />

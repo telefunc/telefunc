@@ -1,20 +1,19 @@
 import { Link, RepoLink } from '@brillout/docpress'
-import { MostlyMutations } from '../../components'
 
 Using Telefunc with [Vike](https://vike.dev/).
 
-> You can use [vike.dev/new](https://vike.dev/new) to scaffold a new Vike app that uses Telefunc.
+> Use [vike.dev/new](https://vike.dev/new) to scaffold a new Vike app that uses Telefunc.
 
-## 1. Install
+## 1. Install Telefunc
 
 ```bash
 npm install telefunc
 ```
 
-## 2. Vite plugin
+## 2. Plugin to Vite
 
-```js
-// vite.config.js
+```ts
+// vite.config.ts
 
 import react from '@vitejs/plugin-react'
 import vike from 'vike/plugin'
@@ -25,9 +24,9 @@ export default {
 }
 ```
 
-## 3. Server integration
+## 3. Add Telefunc middleware
 
-Install Telefunc's server middleware <Link href="/telefunc">`telefunc()`</Link>, for example if you use Hono:
+The Telefunc middleware intercepts and executes telefunction calls. This is also your opportunity to set any data you'd like available in the Telefunc request context. For more info, see <Link href="/getContext" />.
 
 ```ts
 // server.ts
@@ -47,55 +46,11 @@ app.all('/_telefunc', async (c) => {
 })
 ```
 
-## 4. Create a telefunction
+### Next
 
-Create your first telefunction, for example:
-
-```ts
-// pages/index/TodoList.telefunc.ts
-// Environment: server
-
-export async function onNewTodo({ text }: { text: string }) {
-  todoItems.push({ text })
-  return { todoItems }
-}
-```
-
-Call it from the client:
-
-```tsx
-// pages/index/TodoList.tsx
-// Environment: client
-
-import { onNewTodo } from './TodoList.telefunc'
-
-function TodoList() {
-  const onSubmit = async (text: string) => {
-    const { todoItems } = await onNewTodo({ text })
-    // ...
-  }
-}
-```
-
-> To pass contextual information (e.g. the logged-in user) to your telefunctions, see <Link href="/getContext" />.
+<Link href="/start#my-first-telefunction" />
 
 ## Examples
 
 - <RepoLink path="/examples/vike" />
 - <RepoLink path="/examples/react-streaming" />
-
-## Initial Data
-
-<MostlyMutations
-  toolName="Vike"
-  builtInMechanism={
-    <p>
-      For example, you can use Vike's <code>+data()</code> hook to fetch initial data directly from a database,
-      see{' '}
-      <a href="https://vike.dev/data-fetching">
-        vike.dev &gt; Data Fetching
-      </a>
-      {'.'}
-    </p>
-  }
-/>

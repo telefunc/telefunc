@@ -1,11 +1,10 @@
 import { Link, RepoLink } from '@brillout/docpress'
-import { MostlyMutations } from '../../components'
 
 Using Telefunc with [Next.js](https://nextjs.org).
 
-## 1. Install
+## 1. Install Telefunc
 
-```shell
+```bash
 npm install telefunc
 ```
 
@@ -23,7 +22,9 @@ nextConfig = withTelefunc(nextConfig)
 export default nextConfig
 ```
 
-## 3. Server integration
+## 3. Add Telefunc middleware
+
+The Telefunc middleware intercepts and executes telefunction calls. This is also your opportunity to set any data you'd like available in the Telefunc request context. For more info, see <Link href="/getContext" />.
 
 ```ts
 // app/api/telefunc/route.ts
@@ -34,12 +35,18 @@ import { telefunc, config } from 'telefunc'
 config.telefuncUrl = '/api/telefunc'
 
 async function handler(request: Request) {
-  const httpResponse = await telefunc({ request })
+  const httpResponse = await telefunc({
+    request:{
+      context: { /** */ }
+    }
+  })
+
   return new Response(httpResponse.body, {
     status: httpResponse.statusCode,
     headers: { 'content-type': httpResponse.contentType },
   })
 }
+
 export { handler as GET, handler as POST }
 ```
 
@@ -78,54 +85,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 }
 ```
 
-## 5. Create a telefunction
+### Next
 
-Create your first telefunction, for example:
-
-```ts
-// components/TodoList.telefunc.ts
-// Environment: server
-
-export async function onNewTodo({ text }: { text: string }) {
-  await db.todo.create({ data: { text } })
-  return db.todo.findMany()
-}
-```
-
-Call it from the client:
-
-```tsx
-// components/TodoList.tsx
-// Environment: client & server
-
-import { onNewTodo } from './TodoList.telefunc'
-
-function TodoList() {
-  const onSubmit = async (text: string) => {
-    const todos = await onNewTodo({ text })
-    // ...
-  }
-}
-```
-
-> To pass contextual information (e.g. the logged-in user) to your telefunctions, see <Link href="/getContext" />.
+<Link href="/start#my-first-telefunction" />
 
 ## Example
 
 <RepoLink path="/examples/next" />
-
-## Initial Data
-
-<MostlyMutations
-  toolName="Next.js"
-  builtInMechanism={
-    <p>
-      For example, you can use Next.js Server Components to fetch initial data directly from a database,
-      see{' '}
-      <a href="https://nextjs.org/docs/app/building-your-application/data-fetching">
-        Next.js Docs &gt; Data Fetching
-      </a>
-      {'.'}
-    </p>
-  }
-/>

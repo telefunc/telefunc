@@ -20,7 +20,7 @@ type ConfigUser = {
    * https://telefunc.com/telefuncUrl
    */
   telefuncUrl?: string
-  /** See https://telefunc.com/event-based#naming-convention */
+  /** See https://telefunc.com/best-practices#naming-convention */
   disableNamingConvention?: boolean
   /** Your `.telefunc.js` files */
   telefuncFiles?: string[]

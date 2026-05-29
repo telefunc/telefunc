@@ -1,4 +1,5 @@
 import React from 'react'
+import { CTALink } from '../../components/CTALink'
 import './Header.css'
 
 export { Header }
@@ -18,7 +19,7 @@ function Header() {
               margin: 0,
             }}
           >
-            Remote Functions.
+            Telefunc(tions)
           </div>
           <div
             id="tagline-secondary"
@@ -31,11 +32,22 @@ function Header() {
               maxWidth: 800,
             }}
           >
-            <span style={{ whiteSpace: 'nowrap' }}>Defined on the server,</span>{' '}
-            <span style={{ whiteSpace: 'nowrap' }}>callable in the browser.</span>
+            <span>End-to-end type-safety without the schema.</span>
           </div>
         </CenterHorizontal>
       </h1>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'center',
+          columnGap: 20,
+        }}
+      >
+        <CTALink href="/start">Quick Start</CTALink>
+        <CTALink href="/why-telefunc" variant="secondary">
+          Learn More
+        </CTALink>
+      </div>
     </div>
   )
 }
@@ -105,10 +117,6 @@ function Replaces() {
         tRPC
         <Slash />
         Server Actions
-        {/*
-    <Slash/>
-        <span style={{ opacity: slashOpacity }}>...</span>
-        */}
       </div>
     </div>
   )

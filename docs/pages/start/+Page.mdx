@@ -1,0 +1,241 @@
+import { Link, Warning } from '@brillout/docpress'
+
+## Set up Telefunc
+
+### Install dependencies
+
+```sh
+npm install telefunc
+```
+
+### Add Telefunc to your server
+
+Telefunc is built on [Web Standards](https://www.w3.org/standards/).
+You can add Telefunc to any server that exposes [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) or [Node.js `req`](https://nodejs.org/api/http.html#http_class_http_incomingmessage).
+This includes server frameworks like [Hono](https://hono.dev) or [Express](https://expressjs.com), and metaframeworks like [Next.js](https://nextjs.org) and [SvelteKit](https://svelte.dev/docs/kit).
+
+> Check out the <Link href="/server-integration">setup guide for your framework of choice</Link> for integration and configuration steps.
+
+The <Link href="/telefunc"><code>telefunc()</code></Link> middleware intercepts and executes telefunction calls.
+When calling `telefunc`, you can pass any contextual data from your server to the Telefunc request context.
+You can then type-safely access these values downstream, <Link href="/start#secure-your-telefunction">to check user permissions</Link>, for example.
+
+```js
+// server.js
+// Environment: server
+
+import { Hono } from 'hono'
+import { telefunc } from 'telefunc'
+
+const app = new Hono()
+
+app.all('/_telefunc', async (c) => {
+  const httpResponse = await telefunc({
+    request: c.req.raw,
+    context: {
+      // You can add any arbitrary contextual information here
+    },
+  })
+
+  return new Response(httpResponse.body, {
+    status: httpResponse.statusCode,
+    headers: { 'content-type': httpResponse.contentType },
+  })
+})
+```
+
+> For more info on getting or setting context, see <Link href="/getContext"><code>getContext()</code></Link>.
+
+## My first telefunction
+
+After adding the `telefunc` middleware to your server, create a new file for your telefunction, ideally as close to the component (or page) that will call it.
+
+By convention, telefunctions are named after the events they handle (e.g., `onNewTodo`). This ensures close coupling between telefunctions and the UI that calls them.
+
+```ts
+// components/TodoList.telefunc.ts
+// Environment: server
+
+export async function onNewTodo(title: string, text: string) {
+  await db.execute('INSERT INTO todos VALUES (:title,:text)', { title, text })
+  return await db.execute('SELECT id, title, text FROM todos')
+}
+```
+
+> Coupling telefunctions to specific data views or interactions **keeps arguments and return values minimal**. This is **required** to take advantage of the performance and security benefits Telefunc offers.
+
+### Secure your telefunction
+
+<Warning>
+    Always keep in mind that your **telefuncs are public**. A simple HTTP request could be used to extract, modify, or destroy user secrets or business-critical data from an unprotected function.
+</Warning>
+  
+Add guards to Telefunctions to prevent illegitimate access.
+- Use <b><Link href="/Abort" text={(<code>throw Abort()</code>)} /></b> (or return early) if the client is unauthenticated or doesn't have permission to access the requested resource.
+- Use <b><Link href="/shield" text={(<code>shield()</code>)} /></b> to validate telefunction call arguments.
+  
+```ts
+// Todos.telefunc.ts
+// Environment: server
+
+import { getContext, shield } from 'telefunc'
+// When using TypeScript, Telefunc automatically generates
+// shield for argument type inference and runtime validation
+// shield(onNewTodo, [shield.type.string]) // [!code --]
+
+export async function onNewTodo(title: string, text: string) {
+  const { user } = getContext()
+  if (!user) {
+    throw Abort()
+  }
+
+  // ...
+}
+```
+
+> To learn more about validating business rules (e.g., emails, regex patterns, etc.), see <Link href="/validation" />.
+
+### Call your telefunction
+
+You can use Telefunc with most UI frameworks (e.g., React, Vue, Solid) or plain JavaScript.
+
+```jsx choice=react client
+// components/TodoList.jsx
+// Environment: client
+
+import { onNewTodo } from './TodoList.telefunc'
+
+function TodoList() {
+  /** @param {string} text */
+  const onSubmit = async (text) => {
+    const todos = await onNewTodo(text)
+    // ...
+  }
+}
+```
+
+```html choice=vue client
+<!-- components/TodoList.vue -->
+<!-- Environment: client -->
+
+<!-- ... -->
+
+<script>
+import { onNewTodo } from './TodoList.telefunc.js'
+
+export default {
+    methods: {
+        async onSubmit(_event) {
+            this.todoItems = await onNewTodo(this.text)
+        }
+    }
+}
+</script>
+```
+
+```jsx choice=solid client
+// components/TodoList.jsx
+// Environment: client
+
+import { onNewTodo } from './TodoList.telefunc'
+
+function TodoList() {
+  /** @param {string} text */
+  const onSubmit = async (text) => {
+    const todos = await onNewTodo(text)
+    // ...
+  }
+}
+```
+
+```html choice=svelte client
+<!-- src/routes/TodoList.svelte -->
+<!-- Environment: client -->
+
+<script>
+import { onNewTodo } from './TodoList.telefunc'
+
+/** @param {string} text */
+const onSubmit = async (text) => {
+    const todos = await onNewTodo(text)
+    // ...
+}
+</script>
+```
+
+Telefunc uses a lightweight HTTP client combined with powerful middleware to route telefunction calls and process payloads.
+
+## (Telefunc) Request Context
+
+Telefunc creates a context for each request that you can access from telefunctions with `getContext()`.
+
+_Context is not populated by default._ Add arbitrary values, including from server context, to the `context` object in the `telefunc` middleware call.
+
+> The following example uses Hono, but the same pattern applies for all framework integrations.
+
+```js
+// server.ts
+// Environment: server
+ 
+import { Hono } from 'hono'
+import { telefunc } from 'telefunc'
+
+const app = new Hono()
+app.all('/_telefunc', async (c) => {
+  const httpResponse = await telefunc({
+    // ...
+    // Data added here is available in all telefunctions
+    context: {
+      headers: c.req.raw.headers,
+      user: await getUser(),
+    }
+  })
+})
+```
+
+Properties added to Telefunc context are returned type-safely from `getContext()`.
+
+> Telefunc context is only available server-side.
+
+
+```js
+// TodoList.telefunc.js
+// Environment: server
+ 
+import { getContext } from 'telefunc'
+ 
+export async function onLoad() {
+  const { user } = getContext()
+
+  const todos = await db.execute(
+    'SELECT id, text FROM todos WHERE author_id = ":authorId"',
+    { authorId: user.id }
+  )
+
+  return {
+    todos,
+    userName: user.name
+  }
+}
+```
+
+## SSR
+
+Telefunc is compatible with most SSR solutions, with a few nuances.
+
+### Initial data for SSR
+
+To fetch data for the first (server-side) page render, use your framework's built-in data fetching mechanism instead of Telefunc.
+
+You can still use Telefunc to fetch or mutate data client-side (e.g., for page navigation or infinite scroll).
+
+> All SSR frameworks pass hydration data from server to client. Telefunc shouldn't intercept or modify this data, so it can't be used for initial page hydration.
+
+### Next
+
+<Link href="/why-telefunc" />
+
+## See also
+
+- <Link href="/getContext" />
+- <Link href="/telefunc" />

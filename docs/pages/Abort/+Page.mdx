@@ -1,14 +1,52 @@
-import { Link } from '@brillout/docpress'
+import { Link, Warning } from '@brillout/docpress'
 
 **Environment**: server.
 
-Use `throw Abort()` to implement permissions and other guards, see <Link href="/permissions" />.
+Use `throw Abort()` to implement <Link href="/permissions">permissions and other guards</Link>.
 
-> `Abort` is Telefunc's way of identifying expected errors, and passing error data to the client. Other errors (e.g., `throw new Error()`) are treated as unexpected (bugs), see <Link href="/abort-vs-error" />.
+Telefunc uses `Abort` to distinguish **expected failures** from bugs (errors in code, logic, data, etc.).
 
-You can also call `throw Abort(someValue)` for implementing `getContext()` wrappers, see <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={true} />.
+<Warning>
+Note that using `throw Abort()`:
+- ❌ Does not trigger <Link href="/onBug" />
+- ✅ Triggers <Link href="/onAbort" /> on the client
+- ✅ Error data is passed to client
+- ❌ Is not logged on the server
+</Warning>
+
+## Rejecting bad requests
+
+In other words, use `throw Abort` to implement permissions and other control flows. When returning an error message for the client to display, returning early is recommended instead. For more, see <Link href="/error-handling" />.
+
+In the following example, unauthenticated calls are rejected with `throw Abort()`. The request bypasses `onBug()`, and is returned with a status code `403`.
+
+```js
+// hello.telefunc.js
+// Environment: server
+ 
+export async function hello(name) {
+  const { user } = getContext()
+  if (!user) {
+    // We expect clients will sometimes make unauthed requests
+    throw Abort({ code: 'unauthenticated' })
+  }
+
+  // Typo => syntax error => it should be `name` instead of `namee`
+  return 'Hello ' + namee
+}
+```
+
+## Accessing `abortValue`
+
+The `Abort` error data can be accessed client-side from the <Link href="/onAbort" /> hook.
+
+This pattern is powerful when used in combination with <Link href="/permissions#dry-permissions" doNotInferSectionTitle={true} /> helpers.
+
+### Next:
+
+<Link href="/getContext" />
 
 ## See also
 
- - <Link href="/permissions" />
  - <Link href="/onAbort" />
+ - <Link href="/permissions" />
