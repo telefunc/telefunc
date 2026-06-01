@@ -1,6 +1,7 @@
 export { configUser as config }
 export { getServerConfig }
 export { enableChannelTransports }
+export { setRootFromVite }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -24,7 +25,7 @@ import type {
 } from '../../wire-protocol/types.js'
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
-import { toPosixPath, pathIsAbsolute } from '../../utils/path.js'
+import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
 import {
   installBroadcastAdapter,
   DefaultBroadcastAdapter,
@@ -340,6 +341,11 @@ function getServerConfig(): ConfigResolved {
       if (configState.root) {
         return toPosixPath(configState.root)
       }
+      // Doesn't work for Cloudflare Workers — but we can make it work if we want to, see reverted commits at https://github.com/telefunc/telefunc/pull/262
+      if (rootFromVite) {
+        assertPosixPath(rootFromVite)
+        return rootFromVite
+      }
       if (typeof process == 'undefined' || !hasProp(process, 'cwd')) return null
       return toPosixPath(process.cwd())
     })(),
@@ -551,4 +557,9 @@ function validateChannelTransports(val: unknown, configPath: string): ChannelTra
     `\`${configPath}\` should be an array of transports, e.g. ['sse'] or ['ws']`,
   )
   return val as ChannelTransports
+}
+
+let rootFromVite: string | null = null
+function setRootFromVite(root: string) {
+  rootFromVite = root
 }

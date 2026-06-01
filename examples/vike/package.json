@@ -5,19 +5,21 @@
     "preview": "vike build && node dist/server/index.mjs"
   },
   "dependencies": {
-    "@types/react": "^19.2.2",
+    "@types/react": "^19.2.14",
     "@vikejs/hono": "^0.2.0",
-    "@types/react-dom": "^19.2.2",
+    "@types/react-dom": "^19.2.3",
     "@universal-middleware/core": "^0.4.13",
     "@vitejs/plugin-react": "^5.1.0",
     "hono": "^4.10.4",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "telefunc": "0.2.19",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "telefunc": "0.2.20",
     "typescript": "^5.9.3",
     "vike": "^0.4.259",
     "vike-react": "^0.6.21",
-    "vite": "^7.2.2"
+    "vite": "^7.2.2",
+    "@photonjs/hono": "^0.1.4",
+    "vike-photon": "^0.1.14"
   },
   "type": "module"
 }

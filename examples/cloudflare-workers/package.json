@@ -8,7 +8,7 @@
   "dependencies": {
     "@cloudflare/kv-asset-handler": "^0.4.0",
     "express": "^4.17.2",
-    "telefunc": "0.2.19",
+    "telefunc": "0.2.20",
     "vite": "6.3.0",
     "wrangler": "^4.28.0"
   }

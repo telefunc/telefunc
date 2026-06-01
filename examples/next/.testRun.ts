@@ -2,7 +2,7 @@ import { page, test, expect, run, getServerUrl, autoRetry, fetchHtml } from '@br
 
 export { testRun }
 
-function testRun(cmd: 'npm run dev' | 'npm run prod') {
+function testRun(cmd: 'pnpm run dev' | 'pnpm run prod') {
   run(cmd, {
     serverIsReadyMessage: 'Ready in',
     /* Debug Next.js in GitHub Actions:

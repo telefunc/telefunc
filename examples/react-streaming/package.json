@@ -7,15 +7,15 @@
     "server:prod": "cross-env NODE_ENV=production node ./server"
   },
   "dependencies": {
-    "@types/react": "^19.1.8",
-    "@types/react-dom": "^19.1.6",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.6.0",
     "cross-env": "^7.0.3",
     "express": "^4.17.2",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "react-streaming": "^0.4.15",
-    "telefunc": "0.2.19",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-streaming": "^0.4.17",
+    "telefunc": "0.2.20",
     "typescript": "^5.8.3",
     "vike": "^0.4.259",
     "vite": "^7.0.2"

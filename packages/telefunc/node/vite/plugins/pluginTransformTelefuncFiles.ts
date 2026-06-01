@@ -6,6 +6,7 @@ import { transformTelefuncFileServerSide } from '../../shared/transformer/transf
 import { getExtensionImports } from '../../shared/discoverExtensions.js'
 import { assert } from '../../../utils/assert.js'
 import { toPosixPath } from '../../../utils/path.js'
+import { setRootFromVite } from '../../server/serverConfig.js'
 
 function pluginTransformTelefuncFiles(): Plugin[] {
   let root: string
@@ -15,11 +16,12 @@ function pluginTransformTelefuncFiles(): Plugin[] {
   return [
     {
       name: 'telefunc:pluginTransformTelefuncFiles',
-      enforce: 'pre',
+      enforce: 'pre', // TODO: also use `order: 'pre'`
       configResolved: {
         handler(config) {
           root = toPosixPath(config.root)
           assert(root)
+          setRootFromVite(root)
           serverExtensionImports = getExtensionImports(root, 'server')
           clientExtensionImports = getExtensionImports(root, 'client')
         },

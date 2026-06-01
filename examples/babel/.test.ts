@@ -1,19 +1,19 @@
 import { page, test, expect, run, getServerUrl, autoRetry, fetchHtml, fetch } from '@brillout/test-e2e'
 
-testRun('npm run start', {
+testRun('pnpm run start', {
   skipShieldGenerationTest: true,
   // Babel prints build result `created dist in 693ms` on stderr
   tolerateError: true,
 })
 
 function testRun(
-  cmd: 'npm run dev' | 'npm run preview' | 'npm run start' | 'npm run prod',
+  cmd: 'pnpm run dev' | 'pnpm run preview' | 'pnpm run start' | 'pnpm run prod',
   { skipShieldGenerationTest, tolerateError }: { skipShieldGenerationTest?: true; tolerateError?: true } = {},
 ) {
   run(cmd, { tolerateError })
 
   {
-    const isDev = cmd === 'npm run dev' || cmd === 'npm run start'
+    const isDev = cmd === 'pnpm run dev' || cmd === 'pnpm run start'
     if (isDev) {
       skipShieldGenerationTest = true
     }

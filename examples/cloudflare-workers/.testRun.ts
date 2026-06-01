@@ -2,8 +2,8 @@ export { testRun }
 
 import { page, test, expect, run, skip, fetchHtml, isCI, getServerUrl, autoRetry } from '@brillout/test-e2e'
 
-function testRun(cmd: 'npm run dev' | 'npm run preview') {
-  const isWrangler = cmd === 'npm run preview'
+function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
+  const isWrangler = cmd === 'pnpm run preview'
 
   // - `CLOUDFLARE_ACCOUNT_ID`/`CLOUDFLARE_API_TOKEN` not available for:
   //   - Vite's ecosystem CI

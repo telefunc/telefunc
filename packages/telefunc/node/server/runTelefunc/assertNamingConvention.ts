@@ -2,6 +2,7 @@ export { assertNamingConvention }
 
 import { import_ } from '@brillout/import'
 import { assertWarning } from '../../../utils/assert.js'
+import { isCloudflareWorkers } from '../../../utils/isCloudflareWorkers.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { assertPosixPath } from '../../../utils/path.js'
 import type * as fsType from 'node:fs'
@@ -35,9 +36,11 @@ function assertStartsWithOn(exportName: string, telefuncFilePath: string) {
   }
 }
 
+// TO-DO/eventually: run it at build-time instead of runtime. We didn't do this yet because `config.disableNamingConvention` is a server-side runtime config — it'd need to be defined at build-time instead.
 async function assertCollocation(telefuncFilePath: string, appRootDir: string | null, exportValue: unknown) {
   appRootDir = appRootDir || ((exportValue as any)._appRootDir as undefined | string) || null
   if (!appRootDir) return
+  if (isCloudflareWorkers()) return // Even though the modules 'node:fs' and 'node:path' are available inside Cloudflare Workers with 'nodejs_compat', the filesystem still isn't available and `Error: no such file or directory` is thrown (even if the file/directory does exist)
 
   let fs: typeof fsType
   let path: typeof pathType

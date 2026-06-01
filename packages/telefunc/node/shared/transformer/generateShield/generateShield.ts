@@ -10,9 +10,9 @@ import { assert, assertUsage, assertWarning } from '../../../../utils/assert.js'
 import { assertModuleScope } from '../../../../utils/assertModuleScope.js'
 import { getRandomId } from '../../../../utils/getRandomId.js'
 import { objectAssign } from '../../../../utils/objectAssign.js'
-import { assertPosixPath } from '../../../../utils/path.js'
 import { unique } from '../../../../utils/unique.js'
 import { type ExportList, getExportList } from '../getExportList.js'
+import { findTsConfig } from './findTsConfig.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import pc from '@brillout/picocolors'
@@ -506,28 +506,6 @@ function getTypeToShieldPath() {
   }
   assert(typeToShieldFilePath)
   return typeToShieldFilePath
-}
-
-function findTsConfig(telefuncFilePath: string, appRootDir: string): string | null {
-  assert(fs.existsSync(telefuncFilePath))
-  assertPosixPath(telefuncFilePath)
-  assertPosixPath(appRootDir)
-  assert(telefuncFilePath.startsWith(appRootDir))
-  let curr = telefuncFilePath
-  do {
-    const dir = path.dirname(curr)
-    if (dir === curr) {
-      return null
-    }
-    if (!dir.startsWith(appRootDir)) {
-      return null
-    }
-    const tsConfigFilePath = path.join(dir, 'tsconfig.json')
-    if (fs.existsSync(tsConfigFilePath)) {
-      return tsConfigFilePath
-    }
-    curr = dir
-  } while (true)
 }
 
 function assertTelefuncFilesSource(

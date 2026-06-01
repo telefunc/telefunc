@@ -2,7 +2,7 @@ import { page, test, expect, run, getServerUrl, autoRetry, isLinux, sleep } from
 
 export { testRun }
 
-function testRun(cmd: 'npm run dev' | 'npm run prod') {
+function testRun(cmd: 'pnpm run dev' | 'pnpm run prod') {
   run(cmd, {
     additionalTimeout: 10 * 1000,
   })

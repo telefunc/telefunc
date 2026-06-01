@@ -1,3 +1,13 @@
+## [0.2.20](https://github.com/brillout/telefunc/compare/v0.2.19...v0.2.20) (2026-04-10)
+
+
+### Bug Fixes
+
+* @brillout/vite-plugin-server-entry@^0.7.18 ([#238](https://github.com/brillout/telefunc/issues/238)) ([7610d4c](https://github.com/brillout/telefunc/commit/7610d4cb06575fe78ae1a61e8855ecc08a6829ff))
+* detect referenced tsconfig paths when locating function tsconfig files ([#241](https://github.com/brillout/telefunc/issues/241)) ([bf88d97](https://github.com/brillout/telefunc/commit/bf88d97b189a0c24356ad1712b6fda3a03ba82d1))
+
+
+
 ## [0.2.19](https://github.com/brillout/telefunc/compare/v0.2.18...v0.2.19) (2026-02-22)
 
 

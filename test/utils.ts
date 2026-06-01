@@ -35,7 +35,7 @@ async function testCounter(currentValue = 0) {
 }
 
 function testRunClassic(
-  cmd: 'npm run dev' | 'npm run preview' | 'npm run prod',
+  cmd: 'pnpm run dev' | 'pnpm run preview' | 'pnpm run prod',
   {
     skipAboutPage,
     skipViteEcosystemCi,
@@ -50,7 +50,7 @@ function testRunClassic(
     tolerateError?: NonNullable<Parameters<typeof run>[1]>['tolerateError']
   } = {},
 ) {
-  const isDev = cmd === 'npm run dev'
+  const isDev = cmd === 'pnpm run dev'
 
   if (skipViteEcosystemCi && process.env.VITE_ECOSYSTEM_CI) {
     skip("SKIPPED: skipping this test from Vite's ecosystem CI, see https://github.com/vikejs/vike/pull/2220")

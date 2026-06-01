@@ -1,2 +1,2 @@
 import { testRun } from '../vike/.testRun'
-testRun('npm run dev')
+testRun('pnpm run dev')
