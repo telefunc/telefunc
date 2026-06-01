@@ -1,37 +1,23 @@
-export {
-  installChannelSubstrate,
-  _resetChannelSubstrateForTesting,
-  getChannelMux,
-  InMemoryChannelSubstrate,
-  PROXY_DIRECTION,
-  ENVELOPE_KIND,
-  DETACH_REASON,
-  encodeProxyEnvelope,
-  decodeProxyEnvelope,
-  dispatchEnvelope,
-}
+export { PROXY_DIRECTION, ENVELOPE_KIND, DETACH_REASON, dispatchEnvelope }
+export { encodeProxyEnvelope, decodeProxyEnvelope }
 export type {
-  ChannelSubstrate,
-  ChannelSubstrateHandlers,
-  ConnectionRecord,
   ProxyDirection,
   ProxyEnvelope,
+  ProxyPayload,
+  ProxyFramePayload,
   ProxyAttachPayload,
   ProxyAttachAckPayload,
   ProxyDetachPayload,
-  ProxyFramePayload,
   ProxyConnectionFramePayload,
   ProxyUpgradeFinalizePayload,
-  ProxyPayload,
   DetachReason,
-  SendFn,
+  ConnectionRecord,
+  ChannelSubstrate,
+  ChannelSubstrateHandlers,
 }
 
-import { assert, assertUsage } from '../../utils/assert.js'
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { concat, decodeU32, encodeLengthPrefixedString, encodeU32, readLengthPrefixedString } from '../frame.js'
-import { ChannelMux, type SendFn } from './substrate-runtime.js'
-export type { ChannelMux }
+import { assert } from '../../../utils/assert.js'
+import { concat, decodeU32, encodeLengthPrefixedString, encodeU32, readLengthPrefixedString } from '../../frame.js'
 
 // Cross-instance routing primitive. Channels are single-homed (their runtime state —
 // closures, intervals, listeners — isn't serializable). When a client lands on a
@@ -40,6 +26,8 @@ export type { ChannelMux }
 //
 // The substrate is transport-agnostic: it carries opaque envelopes, knows nothing
 // about wire frames or channel kinds. The local channel registry lives in `ChannelMux`.
+
+// ── Protocol vocabulary ──────────────────────────────────────────────────
 
 const PROXY_DIRECTION = {
   /** Peer→home (client→server frame). */
@@ -97,7 +85,7 @@ type ProxyAttachPayload = {
 
 /** Carries the home's current `lastClientSeq` so the proxy can include it in
  *  `CtrlReconciled.open[]`. Sent after any replay frames (which flow as separate
- *  FRAME envelopes); per-connection sendChain on the proxy preserves wire order. */
+ *  FRAME envelopes); call-order on the proxy preserves wire order (sends are sync). */
 type ProxyAttachAckPayload = { kind: typeof ENVELOPE_KIND.ATTACH_ACK; lastClientSeq: number }
 
 /** `reason` selects the home's lifecycle method:
@@ -133,6 +121,20 @@ type ProxyPayload =
   | ProxyDetachPayload
   | ProxyConnectionFramePayload
   | ProxyUpgradeFinalizePayload
+
+/** The cluster-visible state of a single client connection. Consulted only at reconcile
+ *  (sessionId verification when the client lands on a non-issuing instance). Per-frame
+ *  routing on the data hot path uses metadata supplied by the client in each data POST,
+ *  so this record stays minimal. */
+type ConnectionRecord = {
+  /** The instance holding this connection's SSE response wire. */
+  owner: string
+  /** The currently-rotated session token. Used by reconcile on a non-local instance to
+   *  verify a client's claimed `prevSessionId` against what the cluster believes. */
+  sessionId: string
+}
+
+// ── Handler dispatch ─────────────────────────────────────────────────────
 
 type ChannelSubstrateHandlers = {
   /** TO_HOME `attach` — proxy is announcing itself for this channel. */
@@ -186,112 +188,53 @@ function dispatchEnvelope(handlers: ChannelSubstrateHandlers, env: ProxyEnvelope
   else handlers.onAttachAck?.(env, p)
 }
 
-/** The cluster-visible state of a single client connection. Consulted only at reconcile
- *  (sessionId verification when the client lands on a non-issuing instance). Per-frame
- *  routing on the data hot path uses metadata supplied by the client in each data POST,
- *  so this record stays minimal. */
-type ConnectionRecord = {
-  /** The instance holding this connection's SSE response wire. */
-  owner: string
-  /** The currently-rotated session token. Used by reconcile on a non-local instance to
-   *  verify a client's claimed `prevSessionId` against what the cluster believes. */
-  sessionId: string
-}
+// ── Substrate contract ───────────────────────────────────────────────────
 
 interface ChannelSubstrate {
   readonly selfInstanceId: string
   /** Heartbeat cadence the runtime uses for refreshing every kind of pin (ms). */
   readonly heartbeatIntervalMs: number
 
-  // ── ServerChannel directory ─────────────────────────────────────────────────
-
   /** Announce this instance as home for `channelId` — cluster-wide only. Same-process
    *  waiters are the runtime's job and fire synchronously before this is called. */
   pinChannel(channelId: string): Promise<void>
-
   unpinChannel(channelId: string): Promise<void>
-
   /** Refresh TTL on every supplied channel pin in one batch. Implementations pipeline. */
   refreshChannels(channelIds: readonly string[]): Promise<void>
-
   /** Locate the home for `channelId` *on a different instance*. `timeoutMs` bounds the
    *  total wait (including the lookup itself). Self pins MUST NOT be returned: the
    *  runtime races this against its own local-channel waiter. */
   locateRemoteHome(channelId: string, timeoutMs: number): Promise<string | null>
 
-  // ── Connection directory ──────────────────────────────────────────────
-
   /** Atomically replace the connection record so re-reconciles invalidate the previous
    *  sessionId cluster-wide. */
   pinConnection(connId: string, record: ConnectionRecord): Promise<void>
-
   unpinConnection(connId: string): Promise<void>
-
   /** Refresh TTL on every supplied connection record in one batch. */
   refreshConnections(connIds: readonly string[]): Promise<void>
-
   /** Read the entire connection record in one round trip. Returns null if the record
    *  doesn't exist (connection unpinned, never reconciled, or TTL'd out). */
   locateConnection(connId: string): Promise<ConnectionRecord | null>
-
-  // ── Instance liveness ─────────────────────────────────────────────────
 
   /** Announce this instance is alive cluster-wide and refresh the TTL. Called once at
    *  mux init and again on every heartbeat so peers can detect silent death (instance
    *  crashed, network-partitioned from Redis, etc.) when the pin's TTL elapses. */
   pinInstance(): Promise<void>
-
   unpinInstance(): Promise<void>
-
   /** True iff `instanceId`'s alive-pin is still present. Used by homes to detect dead
    *  owners (clears proxy attachment, fires per-channel `_onPeerDisconnect`) and by
    *  owners to detect dead homes (synthesizes per-channel `abort` to the client). */
   isInstanceAlive(instanceId: string): Promise<boolean>
 
-  // ── Cluster messaging ─────────────────────────────────────────────────
-
   /** Send an opaque envelope to another cluster instance. Envelope kinds and their
    *  semantics live in `ENVELOPE_KIND` + `ChannelSubstrateHandlers`; the substrate
-   *  itself just delivers bytes. The `ChannelMux` constructs envelopes inline at every
-   *  call site — keeping shape inside one module. */
+   *  itself just delivers bytes. */
   forward(targetInstance: string, envelope: ProxyEnvelope): Promise<void>
-
   /** Subscribe to envelopes destined for this instance. Each envelope is dispatched
    *  to whichever entries in `handlers` apply. Returns an unsubscribe callable. */
   listen(handlers: ChannelSubstrateHandlers): () => void
 
   dispose(): Promise<void>
-}
-
-/** Single-process default. Cross-instance ops are no-ops; same-process traffic
- *  bypasses the substrate entirely (handled by the mux's local registry + waiters). */
-class InMemoryChannelSubstrate implements ChannelSubstrate {
-  readonly selfInstanceId: string = 'in-memory'
-  readonly heartbeatIntervalMs = 60_000
-
-  async pinChannel(_channelId: string): Promise<void> {}
-  async unpinChannel(_channelId: string): Promise<void> {}
-  async refreshChannels(_channelIds: readonly string[]): Promise<void> {}
-  async locateRemoteHome(_channelId: string, _timeoutMs: number): Promise<string | null> {
-    return null
-  }
-  async pinConnection(_connId: string, _record: ConnectionRecord): Promise<void> {}
-  async unpinConnection(_connId: string): Promise<void> {}
-  async refreshConnections(_connIds: readonly string[]): Promise<void> {}
-  async locateConnection(_connId: string): Promise<ConnectionRecord | null> {
-    return null
-  }
-  async pinInstance(): Promise<void> {}
-  async unpinInstance(): Promise<void> {}
-  async isInstanceAlive(_instanceId: string): Promise<boolean> {
-    // Single-process — only one instance ever exists; treat any reachable instanceId as alive.
-    return true
-  }
-  async forward(_targetInstance: string, _envelope: ProxyEnvelope): Promise<void> {}
-  listen(_handlers: ChannelSubstrateHandlers): () => void {
-    return () => {}
-  }
-  async dispose(): Promise<void> {}
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -387,38 +330,4 @@ function decodeProxyEnvelope(bytes: Uint8Array): ProxyEnvelope {
     }
   }
   return { channelId: channelIdResult.value, fromInstance: fromInstanceResult.value, direction, payload }
-}
-
-const globalObject = getGlobalObject<{
-  substrate: ChannelSubstrate
-  mux: ChannelMux
-  installed: boolean
-}>('wire-protocol/server/substrate.ts', () => {
-  const substrate = new InMemoryChannelSubstrate()
-  return { substrate, mux: new ChannelMux(substrate), installed: false }
-})
-
-function getChannelMux(): ChannelMux {
-  return globalObject.mux
-}
-
-function installChannelSubstrate(substrate: ChannelSubstrate): void {
-  if (globalObject.installed) return
-  assertUsage(
-    !globalObject.mux.hasChannels(),
-    '`config.channel.substrate` must be set before any channel is registered.',
-  )
-  swapSubstrate(substrate)
-  globalObject.installed = true
-}
-
-function _resetChannelSubstrateForTesting(substrate: ChannelSubstrate): void {
-  swapSubstrate(substrate)
-  globalObject.installed = true
-}
-
-function swapSubstrate(substrate: ChannelSubstrate): void {
-  globalObject.mux.dispose()
-  globalObject.substrate = substrate
-  globalObject.mux = new ChannelMux(substrate)
 }

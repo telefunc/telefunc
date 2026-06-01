@@ -39,6 +39,11 @@ function remoteTelefunctionCall(
     objectAssign(callContext, { connectionKey })
   }
 
+  const channelIdleTimeout = callClientContext?.channel?.idleTimeout
+  if (channelIdleTimeout !== undefined) {
+    objectAssign(callContext, { channelIdleTimeout })
+  }
+
   if (callClientContext?.headers) {
     objectAssign(callContext, {
       headers: { ...callContext.headers, ...callClientContext.headers },

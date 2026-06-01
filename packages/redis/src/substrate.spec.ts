@@ -221,7 +221,6 @@ function createSubstrate(redis: FakeRedis, instanceId: string): RedisChannelSubs
     redis: redis as unknown as import('ioredis').Redis,
     instanceId,
     pinTtlSeconds: 60,
-    inboxMaxLen: 100,
   })
   liveSubstrates.push(substrate)
   return substrate

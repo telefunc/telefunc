@@ -39,6 +39,46 @@ configs:
               }
           }
 
+          # Pinned-instance routing: bench_instance=<letter> always sends to a specific backend.
+          # Used for throughput benchmarks that need all sends to land on the same instance
+          # as the channel (avoids cross-instance Redis proxy overhead for SSE channels).
+          @pin_a query bench_instance=a
+          handle @pin_a {
+              reverse_proxy playground-a:3000 {
+                  flush_interval -1
+              }
+          }
+          @pin_b query bench_instance=b
+          handle @pin_b {
+              reverse_proxy playground-b:3000 {
+                  flush_interval -1
+              }
+          }
+          @pin_c query bench_instance=c
+          handle @pin_c {
+              reverse_proxy playground-c:3000 {
+                  flush_interval -1
+              }
+          }
+          @pin_d query bench_instance=d
+          handle @pin_d {
+              reverse_proxy playground-d:3000 {
+                  flush_interval -1
+              }
+          }
+          @pin_e query bench_instance=e
+          handle @pin_e {
+              reverse_proxy playground-e:3000 {
+                  flush_interval -1
+              }
+          }
+          @pin_f query bench_instance=f
+          handle @pin_f {
+              reverse_proxy playground-f:3000 {
+                  flush_interval -1
+              }
+          }
+
           handle {
               reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 {
                   lb_policy round_robin
@@ -76,6 +116,10 @@ services:
       PORT: 3000
       INSTANCE_ID: A
       NO_HTTPS: '1'
+      # Pass-through from host so `TELEFUNC_NATIVE=1 docker compose up` flips the
+      # `/_telefunc` adapter to the Node `req`/`res` path across all instances.
+      # Unset on the host → adapter falls back to the Web Request path.
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -92,6 +136,7 @@ services:
       PORT: 3000
       INSTANCE_ID: B
       NO_HTTPS: '1'
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
 
   playground-c:
     <<: *playground
@@ -100,6 +145,7 @@ services:
       PORT: 3000
       INSTANCE_ID: C
       NO_HTTPS: '1'
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
 
   playground-d:
     <<: *playground
@@ -108,6 +154,7 @@ services:
       PORT: 3000
       INSTANCE_ID: D
       NO_HTTPS: '1'
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
 
   playground-e:
     <<: *playground
@@ -116,6 +163,7 @@ services:
       PORT: 3000
       INSTANCE_ID: E
       NO_HTTPS: '1'
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
 
   playground-f:
     <<: *playground
@@ -124,6 +172,7 @@ services:
       PORT: 3000
       INSTANCE_ID: F
       NO_HTTPS: '1'
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
 
   proxy:
     image: caddy:2-alpine

@@ -10,6 +10,7 @@ export {
   decodePublishText,
   encodePublishBinary,
   decodePublishBinary,
+  payloadBytes,
 }
 export type {
   AckResultStatus,
@@ -44,8 +45,10 @@ import type { ChannelTransports } from './constants.js'
 // Sequence numbers are sender-assigned for replayable data frames in both directions.
 // Each side tracks the highest seq received and replays after reconnect via reconcile.
 
-const HEADER = 7
+export const HEADER = 7
+const payloadBytes = (frame: Uint8Array): number => frame.byteLength - HEADER
 const DATA_TAG_MIN = 0x10
+
 const CHANNEL_CTRL_TAG_MIN = 0x30
 
 const textEncoder = new TextEncoder()
@@ -93,10 +96,18 @@ const TAG = {
   ABORT: 0x32 as const,
   /** Server → client: channel closed due to an unhandled server error (no payload). */
   ERROR: 0x33 as const,
-  /** Flow-control window update: peer has consumed N bytes, may send N more. */
+  /** Flow-control window update — sets the peer's send credit to the advertised value. */
   WINDOW: 0x34 as const,
   BROADCAST_SUB: 0x35 as const,
   BROADCAST_UNSUB: 0x36 as const,
+  /** BDP probe — receiver→sender. Sender echoes `BDP_PING_ACK` immediately so the
+   *  receiver can measure bytes-in-flight during one RTT and grow `WINDOW` to BDP. */
+  BDP_PING: 0x37 as const,
+  BDP_PING_ACK: 0x38 as const,
+  /** Flow-control message-count update — sets the peer's send msg-credit to the
+   *  advertised value. Parallel to `WINDOW` but counted in messages, not bytes,
+   *  to bound receiver dispatch CPU regardless of message size. */
+  MSG_WINDOW: 0x39 as const,
 }
 
 function isConnCtrlTag(tag: number): boolean {
@@ -173,7 +184,7 @@ type WirePublishInfo = { seq: number; ts: number }
 // ===== Decoded frame =====
 
 type ChannelDataFrame =
-  | { tag: typeof TAG.TEXT; index: number; seq: number; text: string }
+  | { tag: typeof TAG.TEXT; index: number; seq: number; text: string; bytes: number }
   | { tag: typeof TAG.BINARY; index: number; seq: number; data: Uint8Array }
   | { tag: typeof TAG.TEXT_ACK_REQ; index: number; seq: number; text: string }
   | { tag: typeof TAG.BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
@@ -189,8 +200,11 @@ type ChannelCtrlFrame =
   | { tag: typeof TAG.ABORT; index: number; abortValue: string }
   | { tag: typeof TAG.ERROR; index: number }
   | { tag: typeof TAG.WINDOW; index: number; bytes: number }
+  | { tag: typeof TAG.MSG_WINDOW; index: number; count: number }
   | { tag: typeof TAG.BROADCAST_SUB; index: number; binary: boolean }
   | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
+  | { tag: typeof TAG.BDP_PING; index: number }
+  | { tag: typeof TAG.BDP_PING_ACK; index: number }
 
 /** Frames that carry an `index` (channel ix) — both data and per-channel ctrl. */
 type ChannelFrame = ChannelDataFrame | ChannelCtrlFrame
@@ -210,6 +224,9 @@ type ServerCtrlTag =
   | typeof TAG.ABORT
   | typeof TAG.ERROR
   | typeof TAG.WINDOW
+  | typeof TAG.MSG_WINDOW
+  | typeof TAG.BDP_PING
+  | typeof TAG.BDP_PING_ACK
   | typeof TAG.FIN
   | typeof TAG.RECONCILED
 
@@ -333,6 +350,14 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     return frame
   },
+  msgWindow(index: number, count: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 4)
+    writeHeader(frame, TAG.MSG_WINDOW, index, 0)
+    writeU32(frame, HEADER, count)
+    return frame
+  },
+  bdpPing: (index: number) => encodeBareFrame(TAG.BDP_PING, index),
+  bdpPingAck: (index: number) => encodeBareFrame(TAG.BDP_PING_ACK, index),
   broadcastSub(index: number, binary: boolean): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
     writeHeader(frame, TAG.BROADCAST_SUB, index, 0)
@@ -358,7 +383,7 @@ function decode(frame: Uint8Array): DecodedFrame {
 
   switch (tag) {
     case TAG.TEXT:
-      return { tag: TAG.TEXT, index, seq, text: textDecoder.decode(payload) }
+      return { tag: TAG.TEXT, index, seq, text: textDecoder.decode(payload), bytes: payload.byteLength }
     case TAG.BINARY:
       return { tag: TAG.BINARY, index, seq, data: payload }
     case TAG.TEXT_ACK_REQ:
@@ -416,6 +441,13 @@ function decode(frame: Uint8Array): DecodedFrame {
     case TAG.WINDOW:
       assert(payload.length >= 4, 'WINDOW payload too short')
       return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0) }
+    case TAG.MSG_WINDOW:
+      assert(payload.length >= 4, 'MSG_WINDOW payload too short')
+      return { tag: TAG.MSG_WINDOW, index, count: readU32(payload, 0) }
+    case TAG.BDP_PING:
+      return { tag: TAG.BDP_PING, index }
+    case TAG.BDP_PING_ACK:
+      return { tag: TAG.BDP_PING_ACK, index }
     case TAG.BROADCAST_SUB:
       assert(payload.length >= 1, 'BROADCAST_SUB payload too short')
       return { tag: TAG.BROADCAST_SUB, index, binary: payload[0] === 1 }

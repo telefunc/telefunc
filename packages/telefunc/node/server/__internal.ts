@@ -5,7 +5,7 @@ export {
   encodeProxyEnvelope,
   ENVELOPE_KIND,
   PROXY_DIRECTION,
-} from '../../wire-protocol/server/substrate.js'
+} from '../../wire-protocol/server/substrate/protocol.js'
 
 export type {
   ChannelSubstrate,
@@ -13,6 +13,6 @@ export type {
   ConnectionRecord,
   DetachReason,
   ProxyEnvelope,
-} from '../../wire-protocol/server/substrate.js'
+} from '../../wire-protocol/server/substrate/protocol.js'
 
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shield-key.js'

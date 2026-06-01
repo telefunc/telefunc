@@ -70,3 +70,21 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## 6. Writing Prose
+
+Any user-facing prose — docs, comments, JSDoc, commit messages, PR descriptions, error messages — must follow the `no-ai-slop` skill in `.claude/skills/no-ai-slop/`. Source: https://github.com/realrossmanngroup/no_ai_slop_writing_rules
+
+Before returning any prose:
+
+- No em dashes (use a comma, semicolon, period, or restructure).
+- No intensifiers without a number behind them ("significantly", "meaningfully", "drastically", "extremely"). Cut the word or replace with the number it was standing in for.
+- No filler phrases ("In today's world", "It's important to note", "When it comes to"). Open on the fact.
+- No banned verbs (delve, leverage, utilize, foster, bolster, underscore, unveil, streamline). Use plain equivalents.
+- No banned adjectives (robust, comprehensive, pivotal, seamless, holistic, transformative). Cut or replace.
+- No banned transitions opening paragraphs (Furthermore, Moreover, That being said).
+- No dramatic / teasing headings. A heading names what the section contains.
+- Every claim ends on a concrete detail, not on an assertion of importance.
+- Quotes match sources exactly. Never put a position in a named person's mouth from inference.
+
+Full banned-list reference: [.claude/skills/no-ai-slop/references/ai-writing-detection.md](skills/no-ai-slop/references/ai-writing-detection.md).

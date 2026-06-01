@@ -18,6 +18,8 @@ type ChannelCallContext = {
   transports?: ChannelTransports
   /** Cache key — calls sharing it share a `ClientConnection`; distinct keys are isolated. */
   connectionKey?: string
+  /** How long (ms) to keep the underlying transport alive after all channels close. Default: 60 000. Pass 0 to dispose immediately. */
+  idleTimeout?: number
 }
 
 /** Per-call context options for the HTTP transport layer. */

@@ -1,7 +1,7 @@
 export { IndexedPeer }
 export type { PeerSender }
 
-import { ACK_STATUS, encode } from '../shared-ws.js'
+import { ACK_STATUS, encode, payloadBytes } from '../shared-ws.js'
 import type { AckResultStatus } from '../shared-ws.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 
@@ -19,10 +19,10 @@ class IndexedPeer {
     private replay: ReplayBuffer,
   ) {}
 
-  sendText(data: string): void | Promise<void> {
+  sendText(data: string): [void | Promise<void>, number] {
     const seq = this.replay.nextSeq()
     const frame = encode.text(this.index, data, seq)
-    return this.sender.send(frame, () => this.replay.push(seq, frame))
+    return [this.sender.send(frame, () => this.replay.push(seq, frame)), payloadBytes(frame)]
   }
 
   /** Send a text frame that requests an ack response from the receiver. Returns seq. */
@@ -93,9 +93,33 @@ class IndexedPeer {
     }
   }
 
-  sendWindowUpdate(bytes: number): void {
+  sendByteWindowUpdate(bytes: number): void {
     try {
       this.sender.send(encode.window(this.index, bytes))
+    } catch {
+      /* transport may already be closed */
+    }
+  }
+
+  sendMsgWindowUpdate(count: number): void {
+    try {
+      this.sender.send(encode.msgWindow(this.index, count))
+    } catch {
+      /* transport may already be closed */
+    }
+  }
+
+  sendBdpPing(): void {
+    try {
+      this.sender.send(encode.bdpPing(this.index))
+    } catch {
+      /* transport may already be closed */
+    }
+  }
+
+  sendBdpPingAck(): void {
+    try {
+      this.sender.send(encode.bdpPingAck(this.index))
     } catch {
       /* transport may already be closed */
     }

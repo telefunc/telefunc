@@ -1,5 +1,6 @@
 export { parseHttpRequest }
 
+import type { Readable } from 'node:stream'
 import { parse, type Reviver } from '@brillout/json-serializer/parse'
 import { assertUsage, getProjectError, assert } from '../../../utils/assert.js'
 import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
@@ -11,7 +12,7 @@ import { StreamReader } from '../../../wire-protocol/server/request/StreamReader
 import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
-import { getChannelMux } from '../../../wire-protocol/server/substrate.js'
+import { getChannelMux } from '../../../wire-protocol/server/substrate/install.js'
 import { ChannelStreamSource } from '../../../wire-protocol/ChannelStreamSource.js'
 import type { ReviverType, TypeContract, ServerReviverContext } from '../../../wire-protocol/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
@@ -22,6 +23,10 @@ import type { Telefunction } from '../types.js'
 
 type RunContext = {
   request: Request
+  /** Node `IncomingMessage` (or any `Readable`) when the entry adapter has one. Body
+   *  consumers (SSE upstream, binary RPC) prefer it over `request.body` to skip Node's
+   *  webstreams `dequeueValue` overhead. Other runtimes only ever pass `request`. */
+  readable?: Readable
   requestContext: RequestContext
   logMalformedRequests: boolean
   serverConfig: {
@@ -50,12 +55,12 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   assertUrl(runContext)
   if (isWrongMethod(runContext)) return { isMalformedRequest: true }
 
-  const { request, requestContext, serverConfig } = runContext
+  const { request, readable, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
   if (requestKind === REQUEST_KIND.MISMATCH) return { isMalformedRequest: true }
   if (requestKind === REQUEST_KIND.SSE) {
-    const sseResponse = await handleSseChannelRequest(request)
+    const sseResponse = await handleSseChannelRequest(request, readable)
     return sseResponse ? { isMalformedRequest: false, isSseRequest: true, sseResponse } : { isMalformedRequest: true }
   }
 
@@ -68,7 +73,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     channel.onClose(requestContext.trackPending())
     return channel
   }
-  const { text, registerFile, consumeFile } = await readBody(request, requestKind)
+  const { text, registerFile, consumeFile } = await readBody(request, readable, requestKind)
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
     registerFile,
     consumeFile,
@@ -116,6 +121,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
  *  request kind. Binary requests frame files after the JSON envelope; text requests carry no files. */
 async function readBody(
   request: Request,
+  readable: Readable | undefined,
   requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT | null,
 ): Promise<{
   text: string
@@ -123,8 +129,9 @@ async function readBody(
   consumeFile: ServerReviverContext['consumeFile']
 }> {
   if (requestKind === REQUEST_KIND.BINARY) {
-    assert(request.body)
-    const reader = new StreamReader(request.body)
+    const source = readable ?? request.body
+    assert(source)
+    const reader = new StreamReader(source)
     return {
       text: await reader.readMetadata(),
       registerFile: (i, s) => reader.registerFile(i, s),

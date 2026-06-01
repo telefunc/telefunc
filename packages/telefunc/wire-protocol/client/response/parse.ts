@@ -55,6 +55,7 @@ async function parseResponse(
   response: Response,
   callContext: CallContext,
   connectionKey: string | undefined,
+  idleTimeout?: number,
 ): Promise<unknown> {
   const transports = callContext.channel.transports
   const contentType = response.headers.get('content-type') ?? ''
@@ -72,12 +73,12 @@ async function parseResponse(
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
     const metaText = new TextDecoder().decode(metaBytes)
-    return reviveResponse(metaText, callContext, transports, connectionKey, streamReader)
+    return reviveResponse(metaText, callContext, transports, connectionKey, streamReader, idleTimeout)
   }
 
   // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
   const body = await response.text()
-  return reviveResponse(body, callContext, transports, connectionKey, null)
+  return reviveResponse(body, callContext, transports, connectionKey, null, idleTimeout)
 }
 
 // ===== Response revival =====
@@ -88,6 +89,7 @@ async function reviveResponse(
   transports: ChannelTransports,
   connectionKey: string | undefined,
   bodyStreamReader: BaseStreamReader | null,
+  idleTimeout?: number,
 ): Promise<unknown> {
   const { extensionResponseTypes } = callContext
   const closeHandlers = new WeakMap<object, () => void>()
@@ -116,6 +118,7 @@ async function reviveResponse(
         connectionKey,
         headers,
         telefuncUrl,
+        idleTimeout,
       })
     },
     createBroadcast(opts) {
@@ -126,6 +129,7 @@ async function reviveResponse(
         connectionKey,
         headers,
         telefuncUrl,
+        idleTimeout,
       })
     },
     receiveStream(metadata) {
@@ -136,6 +140,7 @@ async function reviveResponse(
           connectionKey,
           headers,
           telefuncUrl,
+          idleTimeout,
         })
         return ChannelStreamSource.create(channel, throwStreamError)
       }

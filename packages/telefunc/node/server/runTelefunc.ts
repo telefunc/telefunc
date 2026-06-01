@@ -20,7 +20,7 @@ import { resolveReturnShields } from './shield.js'
 import { getServerConfig } from './serverConfig.js'
 import { isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { Readable as StreamReadableNode, Writable as StreamWritableNode } from 'node:stream'
-import { loadStreamNodeModule } from '../../utils/loadStreamNodeModule.js'
+import { getStreamNodeModule, loadStreamNodeModuleOnce } from '../../utils/loadStreamNodeModule.js'
 import {
   STATUS_CODE_THROW_ABORT,
   STATUS_CODE_SHIELD_VALIDATION_ERROR,
@@ -45,12 +45,15 @@ type HttpResponse = {
   body: string
   /** HTTP Response Headers */
   headers: [string, string][]
-  /** Pipe the response body to a Node.js or Web writable stream */
-  pipe: (writable: StreamWritableWeb | StreamWritableNode) => void
+  /** Pipe the response body to a Node.js or Web writable stream. The returned
+   *  promise resolves once the body has been fully written (for streaming
+   *  responses, that's when the underlying stream closes), so callers can
+   *  hold their handler open until the response is genuinely finished. */
+  pipe: (writable: StreamWritableWeb | StreamWritableNode) => Promise<void>
   /** Get the response body as a Web ReadableStream */
   getReadableWebStream: () => StreamReadableWeb
   /** Get the response body as a Node.js Readable stream */
-  getReadableNodeStream: () => Promise<StreamReadableNode>
+  getReadableNodeStream: () => StreamReadableNode
   /** Get the full response body as a string (awaits streaming if needed) */
   getBody: () => Promise<string>
   /** @deprecated Use `headers` instead */
@@ -62,7 +65,13 @@ type HttpResponse = {
 }
 
 type ContentType = 'text/plain' | 'application/octet-stream' | 'text/event-stream'
-type ResponseBody = string | ReadableStream<Uint8Array>
+/** A response body is either a literal string or a concrete stream of the
+ *  matching runtime (Node `Readable` when the adapter passed a Node
+ *  `IncomingMessage`, Web `ReadableStream` otherwise). Producers commit to one
+ *  at construction — `useNodeStream` flows down from `runTelefunc_` to both SSE
+ *  and binary-inline — so consumers can pipe natively without a webstreams
+ *  middleman on the hot path. */
+type ResponseBody = string | StreamReadableNode | ReadableStream<Uint8Array<ArrayBuffer>>
 
 function createHttpResponse({
   statusCode,
@@ -99,15 +108,9 @@ function createHttpResponse({
       )
       return responseBody
     },
-    pipe(writable: StreamWritableWeb | StreamWritableNode) {
-      if (isStreamWritableWeb(writable)) {
-        pipeToStreamWritableWeb(responseBody, writable)
-        return
-      }
-      if (isStreamWritableNode(writable)) {
-        pipeToStreamWritableNode(responseBody, writable)
-        return
-      }
+    pipe(writable: StreamWritableWeb | StreamWritableNode): Promise<void> {
+      if (isStreamWritableWeb(writable)) return pipeToStreamWritableWeb(responseBody, writable)
+      if (isStreamWritableNode(writable)) return pipeToStreamWritableNode(responseBody, writable)
       assertUsage(
         false,
         "The argument `writable` passed to `httpResponse.pipe(writable)` doesn't seem to be a Web WritableStream nor a Node.js Writable.",
@@ -116,27 +119,20 @@ function createHttpResponse({
     getReadableWebStream() {
       return getStreamReadableWeb(responseBody)
     },
-    async getReadableNodeStream() {
+    getReadableNodeStream() {
       return getStreamReadableNode(responseBody)
     },
     async getBody() {
-      if (typeof responseBody === 'string') {
-        return responseBody
+      if (typeof responseBody === 'string') return responseBody
+      const decoder = new TextDecoder()
+      let result = ''
+      // A `ReadableStream` is iterable on modern runtimes; the cast is just to
+      // satisfy `lib.dom.d.ts` which doesn't declare `[Symbol.asyncIterator]`.
+      for await (const chunk of responseBody as AsyncIterable<Uint8Array<ArrayBuffer>>) {
+        result += decoder.decode(chunk, { stream: true })
       }
-      const reader = responseBody.getReader()
-      try {
-        const decoder = new TextDecoder()
-        let result = ''
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          result += decoder.decode(value, { stream: true })
-        }
-        result += decoder.decode()
-        return result
-      } finally {
-        await reader.cancel()
-      }
+      result += decoder.decode()
+      return result
     },
     err,
   }
@@ -159,7 +155,12 @@ async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: Str
       writer.close()
       return
     }
-    await responseBody.pipeTo(writable)
+    // Body is typically a Web `ReadableStream` here (Web-adapter producer);
+    // fall back to `Readable.toWeb` for the cross-runtime case where a Node
+    // `Readable` body is piped to a Web `WritableStream`.
+    if (responseBody instanceof ReadableStream) return void (await responseBody.pipeTo(writable))
+    const { Readable } = getStreamNodeModule()
+    await Readable.toWeb(responseBody).pipeTo(writable)
   } catch (err) {
     handleError(err)
   }
@@ -172,9 +173,15 @@ async function pipeToStreamWritableNode(responseBody: ResponseBody, writable: St
       writable.end()
       return
     }
-    // Convert ReadableStream (Web) to Node.js Readable for piping
-    const { Readable, pipeline } = await loadStreamNodeModule()
-    await pipeline(Readable.fromWeb(responseBody as import('stream/web').ReadableStream), writable)
+    const { Readable, pipeline } = getStreamNodeModule()
+    // Body is typically a Node `Readable` here (Node-adapter producer); fall
+    // back to `Readable.fromWeb` for the cross-runtime case where a Web body
+    // is piped to a Node `Writable`.
+    const readable =
+      responseBody instanceof ReadableStream
+        ? Readable.fromWeb(responseBody as import('stream/web').ReadableStream)
+        : responseBody
+    await pipeline(readable, writable)
   } catch (error) {
     handleError(error)
   }
@@ -189,15 +196,18 @@ function getStreamReadableWeb(responseBody: ResponseBody): StreamReadableWeb {
       },
     })
   }
-  return responseBody
+  if (responseBody instanceof ReadableStream) return responseBody
+  const { Readable } = getStreamNodeModule()
+  return Readable.toWeb(responseBody) as ReadableStream<Uint8Array<ArrayBuffer>>
 }
 
-async function getStreamReadableNode(responseBody: ResponseBody): Promise<StreamReadableNode> {
-  const { Readable } = await loadStreamNodeModule()
-  if (typeof responseBody === 'string') {
-    return Readable.from(responseBody)
+function getStreamReadableNode(responseBody: ResponseBody): StreamReadableNode {
+  const { Readable } = getStreamNodeModule()
+  if (typeof responseBody === 'string') return Readable.from(responseBody)
+  if (responseBody instanceof ReadableStream) {
+    return Readable.fromWeb(responseBody as import('stream/web').ReadableStream)
   }
-  return Readable.fromWeb(responseBody as import('stream/web').ReadableStream)
+  return responseBody
 }
 
 let encoder: TextEncoder
@@ -240,6 +250,11 @@ const malformedRequest = {
 } as const
 
 async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[0]): Promise<HttpResponse> {
+  // Eagerly load `node:stream` so all downstream code (`createPushReadable`,
+  // pipe/get helpers, `getStreamReadableNode`) can read it synchronously.
+  // No-op on subsequent calls and a silent no-op on Workers (load fails,
+  // sync access guarded by `useNodeStream`).
+  await loadStreamNodeModuleOnce()
   try {
     return await runTelefunc_(httpRequestResolved)
   } catch (err: unknown) {
@@ -253,9 +268,11 @@ async function runTelefunc(httpRequestResolved: Parameters<typeof runTelefunc_>[
 
 async function runTelefunc_({
   request,
+  readable,
   context,
 }: {
   request: Request
+  readable?: StreamReadableNode
   context?: Telefunc.Context
 }): Promise<HttpResponse> {
   const requestContext = createRequestContext(request)
@@ -266,6 +283,7 @@ async function runTelefunc_({
     const serverConfig = getServerConfig()
     objectAssign(runContext, {
       request,
+      readable,
       serverConfig,
       appRootDir: serverConfig.root,
       telefuncFilesManuallyProvidedByUser: serverConfig.telefuncFiles,
@@ -366,6 +384,7 @@ async function runTelefunc_({
   {
     objectAssign(runContext, {
       abortSignal: runContext.requestContext.abortSignal,
+      useNodeStream: readable !== undefined,
     })
     const result = serializeTelefunctionResult(runContext)
 

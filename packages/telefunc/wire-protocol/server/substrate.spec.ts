@@ -1,30 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { decode, encode, type ChannelFrame } from '../shared-ws.js'
 import { ServerChannel } from './channel.js'
+import { _resetChannelSubstrateForTesting, getChannelMux } from './substrate/install.js'
 import {
   decodeProxyEnvelope,
   DETACH_REASON,
   dispatchEnvelope,
   encodeProxyEnvelope,
   ENVELOPE_KIND,
-  InMemoryChannelSubstrate,
   PROXY_DIRECTION,
-  _resetChannelSubstrateForTesting,
-  getChannelMux,
   type ChannelSubstrate,
   type ChannelSubstrateHandlers,
   type ConnectionRecord,
   type ProxyEnvelope,
-} from './substrate.js'
+} from './substrate/protocol.js'
 
 // ===========================================================================
 // Section 1 — Foundational primitives
 //
-// Below the scenarios live three pure functions: encode/decode envelopes,
-// dispatch routing, and the InMemoryChannelSubstrate stub. These get unit
-// tests because they have no I/O and a bug in any one of them would surface
-// as a confusing failure deep inside a scenario test, not at the layer that
-// caused it. The tests here pin behavior, not byte layout.
+// Below the scenarios live two pure functions: envelope encode/decode and
+// dispatch routing. These get unit tests because they have no I/O and a bug
+// in either would surface as a confusing failure deep inside a scenario test,
+// not at the layer that caused it. The tests here pin behavior, not byte layout.
 // ===========================================================================
 
 const HEADER = { channelId: 'room:abc', fromInstance: 'instance-A' } as const
@@ -156,41 +153,6 @@ describe('dispatchEnvelope — direction-sensitive routing', () => {
   })
 })
 
-describe('InMemoryChannelSubstrate — single-process default', () => {
-  // Three contracts the mux relies on. If any of these flips, the mux's local-waiter
-  // fallback path breaks silently in single-process deployments.
-
-  it('locateRemoteHome resolves null → forces mux to use the local-waiter path', async () => {
-    const substrate = new InMemoryChannelSubstrate()
-    await substrate.pinChannel('room:foo')
-    expect(await substrate.locateRemoteHome('room:foo', 50)).toBe(null)
-  })
-
-  it('listen returns a callable unsubscribe → mux can detach on swap/dispose', () => {
-    const substrate = new InMemoryChannelSubstrate()
-    const unsubscribe = substrate.listen({ onAttach: () => {} })
-    expect(typeof unsubscribe).toBe('function')
-    expect(() => unsubscribe()).not.toThrow()
-  })
-
-  // Critical: forward MUST NOT loopback to the local listener. The mux already serves
-  // local channels from its registry, so loopback would cause double-delivery.
-  it('forward swallows envelopes — no in-process loopback to listeners', async () => {
-    const substrate = new InMemoryChannelSubstrate()
-    const received: ProxyEnvelope[] = []
-    substrate.listen({ onAttach: (env) => received.push(env), onHomeFrame: (env) => received.push(env) })
-
-    await substrate.forward('any-target', {
-      channelId: 'room:foo',
-      fromInstance: substrate.selfInstanceId,
-      direction: PROXY_DIRECTION.TO_HOME,
-      payload: { kind: ENVELOPE_KIND.ATTACH, reconnectTimeout: 1000, ix: 0, lastSeq: 0 },
-    })
-
-    expect(received).toEqual([])
-  })
-})
-
 // ===========================================================================
 // Section 2 — Real scenarios
 //
@@ -287,7 +249,7 @@ class LoopbackSubstrate implements ChannelSubstrate {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-afterEach(() => _resetChannelSubstrateForTesting(new InMemoryChannelSubstrate()))
+afterEach(() => _resetChannelSubstrateForTesting(null))
 
 // ───────────────────────────────────────────────────────────────────────────
 // Scenario A — Cold-start handoff

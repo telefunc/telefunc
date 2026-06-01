@@ -84,7 +84,7 @@ class LazyBlob extends BaseStreamBlob {
   readonly type: string
   readonly [LAZY_BLOB_BRAND] = true
 
-  #getStream: GetStream
+  private getStream: GetStream
   protected _consumed = false
 
   // Brand-checked `instanceof` (Abort.ts pattern) — accepts any object carrying
@@ -97,7 +97,7 @@ class LazyBlob extends BaseStreamBlob {
     super()
     this.size = size
     this.type = type
-    this.#getStream = getStream
+    this.getStream = getStream
   }
 
   /** Subclasses overriding `bytes`/etc. that consume the source via a different path
@@ -109,7 +109,7 @@ class LazyBlob extends BaseStreamBlob {
 
   stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
     this._markConsumed()
-    return this.#getStream()
+    return this.getStream()
   }
 }
 
@@ -118,13 +118,13 @@ class SlicedBlob extends BaseStreamBlob {
   readonly size: number
   readonly type: string
 
-  #parent: BaseStreamBlob
-  #start: number
+  private parent: BaseStreamBlob
+  private start: number
 
   constructor(parent: BaseStreamBlob, start: number, size: number, type: string) {
     super()
-    this.#parent = parent
-    this.#start = start
+    this.parent = parent
+    this.start = start
     this.size = size
     this.type = type
   }
@@ -132,11 +132,11 @@ class SlicedBlob extends BaseStreamBlob {
   stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
     let parentReader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
     let pos = 0
-    const start = this.#start
+    const start = this.start
     const end = start + this.size
     return new ReadableStream<Uint8Array<ArrayBuffer>>({
       start: () => {
-        parentReader = this.#parent.stream().getReader()
+        parentReader = this.parent.stream().getReader()
       },
       pull: async (controller) => {
         const { done, value } = await parentReader.read()

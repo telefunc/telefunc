@@ -2,8 +2,8 @@ export { getTelefuncChannelHooks }
 
 import { defineHooks, type Peer } from 'crossws'
 import { enableChannelTransports } from '../../node/server/serverConfig.js'
-import { getChannelMux } from './substrate.js'
-import type { ServerTransport } from './substrate-runtime.js'
+import { getChannelMux } from './substrate/install.js'
+import type { ServerTransport } from './substrate/mux.js'
 
 declare module 'crossws' {
   interface PeerContext {

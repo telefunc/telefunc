@@ -35,6 +35,8 @@ const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
 installRedis(redis)
 ```
 
+Telefunc `duplicate()`s the client internally for its own connections — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
+
 ### What it configures
 
 `installRedis()` wires two pieces at once:

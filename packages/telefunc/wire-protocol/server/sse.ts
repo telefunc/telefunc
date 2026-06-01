@@ -1,11 +1,13 @@
 export { getTelefuncSseChannelHooks, handleSseChannelRequest }
 export type { SseChannelHttpResponse }
 
+import type { Readable } from 'node:stream'
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
-import { PushToPullStream } from '../push-to-pull-stream.js'
+import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
+import { createPushReadable, type PushReadable } from '../push-readable.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 import {
   METADATA_REFRESH_ALIAS,
@@ -14,20 +16,25 @@ import {
   type SseDataPostMetadata,
 } from '../sse-request.js'
 import { StreamReader } from './request/StreamReader.js'
-import { getChannelMux } from './substrate.js'
-import type { ReconcileOutcome, ServerTransport } from './substrate-runtime.js'
+import { getChannelMux } from './substrate/install.js'
+import type { ReconcileOutcome, ServerTransport } from './substrate/mux.js'
 import { encode } from '../shared-ws.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
   contentType: 'text/plain' | 'text/event-stream'
   headers: [string, string][]
-  body: string | ReadableStream<Uint8Array>
+  body: string | Readable | ReadableStream<Uint8Array<ArrayBuffer>>
 }
 
 type SseConnection = {
   connId: string
-  stream: PushToPullStream<Uint8Array>
+  /** Producer surface: both shapes expose `push`, `close`, and `isClosed`. The
+   *  Node-native `PushReadable` is used when the adapter passes a Node
+   *  `IncomingMessage` (server SSE downstream piped via `pipeline`); the
+   *  `PushReadableStream` (Web `ReadableStream`-backed) is used everywhere
+   *  else, including non-Node runtimes (Bun/Deno/edge). */
+  stream: PushReadable | PushReadableStream<Uint8Array<ArrayBuffer>>
   closed: boolean
   sessionId: string | null
   /** Resolved by `runStreamResponse` once the stream-response POST's body is consumed.
@@ -66,15 +73,19 @@ class SseConnectionTransport {
     terminateConnection: (connection) => this.terminateConnection(connection),
   }
 
-  async handleRequest(request: Request): Promise<SseChannelHttpResponse | null> {
+  async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse | null> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return badRequest()
     if (request.method !== 'POST') return badRequest()
-    const { body } = request
-    assert(body)
+    const source = readable ?? request.body
+    assert(source)
+    // Adapter mode: a Node `IncomingMessage` means we're on the Node-native serve path
+    // and should answer with a Node `Readable` so it pipes straight to the socket. Web
+    // adapters get `request.body` (no `readable`) and want a `ReadableStream` back.
+    const useNodeStream = readable !== undefined
     try {
-      const reader = new StreamReader(body)
+      const reader = new StreamReader(source)
       const metadata = parseSseRequestMetadata(await reader.readMetadata())
-      if ('streamResponse' in metadata) return this.handleStreamResponse(metadata.connId, reader)
+      if ('streamResponse' in metadata) return await this.handleStreamResponse(metadata.connId, reader, useNodeStream)
       return await this.handleDataPost(metadata, reader)
     } catch {
       return badRequest()
@@ -82,16 +93,24 @@ class SseConnectionTransport {
   }
 
   /** Stream-response POST — opens the SSE downstream, registers the connection, and
-   *  asynchronously drives its lifecycle (`runStreamResponse`). Returns immediately so
-   *  the response headers can flush. */
-  private handleStreamResponse(connId: string, reader: StreamReader): SseChannelHttpResponse {
+   *  asynchronously drives its lifecycle (`runStreamResponse`). Returns immediately
+   *  so response headers can flush. */
+  private async handleStreamResponse(
+    connId: string,
+    reader: StreamReader,
+    useNodeStream: boolean,
+  ): Promise<SseChannelHttpResponse> {
     const existing = this.mux.getConnectionByConnId<SseConnection>(connId)
     if (existing) this.closeConnection(existing, false)
 
-    const stream = new PushToPullStream<Uint8Array>(() => {
+    const onCancel = () => {
       const conn = this.mux.getConnectionByConnId<SseConnection>(connId)
       if (conn) this.closeConnection(conn, false)
-    })
+    }
+    const stream = useNodeStream
+      ? createPushReadable(onCancel)
+      : createPushReadableStream<Uint8Array<ArrayBuffer>>(onCancel)
+
     let resolveReady!: () => void
     const ready = new Promise<void>((resolve) => {
       resolveReady = resolve
@@ -117,7 +136,7 @@ class SseConnectionTransport {
         ['Cache-Control', 'no-cache, no-transform'],
         ['X-Accel-Buffering', 'no'],
       ],
-      body: stream.readable,
+      body: stream,
     }
   }
 
@@ -153,8 +172,7 @@ class SseConnectionTransport {
       if (localConnection && !metadata.streamRequest) localConnection.pendingDispatches.delete(dispatch)
     }
     if (deferredReconcile !== null && localConnection && !localConnection.closed) {
-      const pending = this.mux.sendReconciled(localConnection, deferredReconcile)
-      if (pending) await pending
+      this.mux.sendReconciled(localConnection, deferredReconcile)
     }
     return { statusCode: 200, contentType: 'text/plain', headers: [], body: '' }
   }
@@ -257,13 +275,12 @@ class SseConnectionTransport {
     }
     if (reconcileOutcome === null || connection.closed) return
     if (connection.pendingDispatches.size > 0) await Promise.allSettled(connection.pendingDispatches)
-    const pending = this.mux.sendReconciled(connection, reconcileOutcome)
-    if (pending) await pending
+    this.mux.sendReconciled(connection, reconcileOutcome)
   }
 
-  private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void | Promise<void> {
+  private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void {
     if (connection.closed) return
-    return connection.stream.push(textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`))
+    connection.stream.push(textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`))
   }
 
   /** Wait for the stream POST's reconcile to complete on this connection. False on timeout. */
@@ -296,16 +313,16 @@ function badRequest(): SseChannelHttpResponse {
   return { statusCode: 400, contentType: 'text/plain', headers: [], body: '' }
 }
 
-async function handleSseChannelRequest(request: Request): Promise<SseChannelHttpResponse | null> {
+async function handleSseChannelRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse | null> {
   globalObject.defaultHooks ??= getTelefuncSseChannelHooks()
-  return globalObject.defaultHooks.handleRequest(request)
+  return globalObject.defaultHooks.handleRequest(request, readable)
 }
 
 function getTelefuncSseChannelHooks() {
   const server = new SseConnectionTransport()
   return {
-    handleRequest(request: Request) {
-      return server.handleRequest(request)
+    handleRequest(request: Request, readable?: Readable) {
+      return server.handleRequest(request, readable)
     },
   }
 }

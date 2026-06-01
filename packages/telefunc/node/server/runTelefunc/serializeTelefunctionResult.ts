@@ -7,7 +7,7 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
-import { getChannelMux } from '../../../wire-protocol/server/substrate.js'
+import { getChannelMux } from '../../../wire-protocol/server/substrate/install.js'
 import {
   buildShieldValidators,
   type ShieldValidators,
@@ -25,6 +25,7 @@ import type { StreamingProducer, StreamingValueServer } from '../../../wire-prot
 import { type RequestContext } from '../context/requestContext.js'
 import type { Context } from '../context/context.js'
 import type { ReplacerType, TypeContract, ServerReplacerContext } from '../../../wire-protocol/types.js'
+import type { Readable } from 'node:stream'
 
 /** Look up the shields for a revived value and build its auto-logging validator map.
  *  Empty map when the value isn't tracked in `valueShields` or has no registered shields. */
@@ -48,7 +49,7 @@ type SerializeResult =
   | { type: 'text'; body: string }
   | {
       type: 'streaming'
-      body: ReadableStream<Uint8Array>
+      body: Readable | ReadableStream<Uint8Array<ArrayBuffer>>
       streamTransport: StreamTransport
     }
 
@@ -61,6 +62,7 @@ function serializeTelefunctionResult(runContext: {
   requestContext: RequestContext
   abortSignal: AbortSignal
   streamTransport: StreamTransport
+  useNodeStream: boolean
   serverConfig: {
     extensionResponseTypes: ReplacerType<TypeContract, ServerReplacerContext>[]
     log: { shieldErrors: ShieldLogConfig }
@@ -172,6 +174,7 @@ function serializeTelefunctionResult(runContext: {
       responseAbort: requestContext.responseAbort,
       onComplete: onStreamComplete,
       encodeFrame,
+      useNodeStream: runContext.useNodeStream,
     }),
     streamTransport: runContext.streamTransport,
   }

@@ -60,7 +60,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     data: ChannelData<U>,
   ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
     const adapter = getBroadcastAdapter()
-    const serialized = stringify(data, { forbidReactElements: false })
+    const serialized = stringify(data)
     return adapter.publish(key, serialized)
   }
 
@@ -101,7 +101,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
     this._ensureBroadcast()
     if (!this._adapter) throw new ChannelClosedError()
-    const serialized = stringify(data, { forbidReactElements: false })
+    const serialized = stringify(data)
     const ret = this._trackAck(Promise.resolve(this._publishBroadcast(serialized)))
     ret.catch(() => {})
     return ret
@@ -293,7 +293,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
         }
       }
       const result = await this._publishBroadcast(serialized)
-      this._sendAckRes(seq, stringify(result, { forbidReactElements: false }))
+      this._sendAckRes(seq, stringify(result))
     } catch (err) {
       if (this._handleCallbackError(err)) return
       this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
@@ -304,7 +304,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     try {
       this._ensureBroadcast()
       const result = await this._publishBinaryBroadcast(data)
-      this._sendAckRes(seq, stringify(result, { forbidReactElements: false }))
+      this._sendAckRes(seq, stringify(result))
     } catch (err) {
       if (this._handleCallbackError(err)) return
       this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)

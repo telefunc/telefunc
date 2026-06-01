@@ -6,7 +6,6 @@ import type { Telefunc } from '../node/server/context/getContext.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
-import { nodeReadableToWebRequest } from '../utils/nodeReadableToWebRequest.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import type { IncomingMessage, ServerResponse, Server } from 'node:http'
@@ -98,14 +97,19 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
     if (!url) return false
     if (new URL(url, 'http://localhost').pathname !== getServerConfig().telefuncUrl) return false
 
-    const request = await nodeReadableToWebRequest(req, 'http://localhost' + url, req.method || 'GET', req.headers)
-    const httpResponse = await serveTelefunc(context ? { request, context } : { request })
+    const serveInput = {
+      url,
+      method: req.method || 'GET',
+      readable: req,
+      headers: req.headers,
+    }
+    const httpResponse = await serveTelefunc(context ? { ...serveInput, context } : serveInput)
 
     httpResponse.headers.forEach(([name, value]) => res.setHeader(name, value))
     res.statusCode = httpResponse.statusCode
     res.socket?.setNoDelay(true)
     res.flushHeaders()
-    httpResponse.pipe(res)
+    await httpResponse.pipe(res)
     return true
   }
 

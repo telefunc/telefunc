@@ -3,7 +3,6 @@ export type { MuxChannel, MuxConnection }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
-import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { assert } from '../../utils/assert.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import { base64urlToUint8Array } from '../base64url.js'
@@ -28,19 +27,13 @@ import {
   type ChannelTransports,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames, textEncoder } from '../frame.js'
-import { PushToPullStream } from '../push-to-pull-stream.js'
+import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
-import { ACK_STATUS, TAG, decode, encode, isChannelDataFrame } from '../shared-ws.js'
-import type { AckResultStatus, DecodedFrame, ReconcilePayload, ReconciledPayload, ServerCtrlTag } from '../shared-ws.js'
+import { ACK_STATUS, TAG, decode, encode, isChannelDataFrame, payloadBytes } from '../shared-ws.js'
+import type { AckResultStatus, ChannelFrame, DecodedFrame, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
 import { encodeSseRequest, METADATA_REFRESH_ALIAS, type SseRouteChannel } from '../sse-request.js'
-import { ClientBroadcast } from './channel.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
-
-type PendingAck = {
-  resolve: (result: unknown) => void
-  reject: (err: Error) => void
-}
 
 type BufferedFrame = {
   frame: Uint8Array<ArrayBuffer>
@@ -94,7 +87,7 @@ class Heartbeat {
   }
 }
 
-type OutboundFrameKind = 'reconcile' | 'control' | 'ack' | 'data' | 'heartbeat'
+type OutboundFrameKind = 'reconcile' | 'control' | 'flow-control' | 'ack' | 'data' | 'heartbeat'
 
 type OutboundFrame = {
   kind: OutboundFrameKind
@@ -104,29 +97,30 @@ type OutboundFrame = {
 interface MuxChannel {
   readonly id: string
   readonly isClosed: boolean
-  _onTransportOpen(): void
-  _onTransportMessage(data: string): void
-  _onTransportBinaryMessage(data: Uint8Array): void
-  _onTransportAckReqMessage(data: string, seq: number): Promise<void>
-  _onTransportBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void>
-  _onPeerWindowUpdate(bytes: number): void
-  _onTransportCloseRequest(timeoutMs: number): void
-  _onTransportCloseAck(): void
+  _onTransportOpen(batched: boolean): void
+  /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
+   *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/
+   *  FIN/RECONCILED) and channel-termination ctrls (ABORT/ERROR) stay with the
+   *  connection — they involve connection-side cleanup. */
+  _dispatchFrame(frame: ChannelFrame): void
   _onTransportClose(err?: Error): void
 }
 
 interface MuxConnection {
-  send(channel: MuxChannel, data: string): void
-  sendPublishAckReq(channel: MuxChannel, data: string): Promise<unknown>
-  sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array): Promise<unknown>
-  sendTextAckReq(channel: MuxChannel, data: string): Promise<unknown>
-  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array): Promise<unknown>
+  send(channel: MuxChannel, data: string): number
+  sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void
+  sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void
+  sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void
+  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void
   sendBinary(channel: MuxChannel, data: Uint8Array): void
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
   sendAbort(channel: MuxChannel): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
-  sendWindowUpdate(channel: MuxChannel, bytes: number): void
+  sendByteWindowUpdate(channel: MuxChannel, bytes: number): void
+  sendMsgWindowUpdate(channel: MuxChannel, count: number): void
+  sendBdpPing(channel: MuxChannel): void
+  sendBdpPingAck(channel: MuxChannel): void
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel, err?: Error): void
@@ -154,6 +148,8 @@ type ClientConnectionOptions = {
   connectionKey?: string
   /** User headers (config.headers + per-call `withContext({ headers })`) merged into every transport fetch. */
   headers?: Record<string, string>
+  /** Override the idle-close delay after all channels close. Default: 60 000 ms. Pass 0 to dispose immediately. */
+  idleTimeout?: number
 }
 
 type ClientChannelTransport = {
@@ -163,6 +159,9 @@ type ClientChannelTransport = {
   readonly reconcileMode: ReconcileBufferedFramesMode
   /** Cluster-stable wire id used by the server to route cross-instance — set on SSE, `null` on WS. */
   readonly connId: string | null
+  /** True iff client→server frames are per-POST batched instead of pushed onto
+   *  one streaming body — signals the channel to use a larger initial window. */
+  readonly batched: boolean
   probe(): Promise<ProbeWire | null>
   start(): void
   hasWire(): boolean
@@ -278,9 +277,8 @@ class ClientConnection implements MuxConnection {
   private sendBuffer: BufferedFrame[] = []
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
-  private pendingAcks = new Map<string, PendingAck>()
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
-  private idleTimeoutMs = CHANNEL_IDLE_TIMEOUT_MS
+  private idleTimeoutMs: number
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
   private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
@@ -288,6 +286,7 @@ class ClientConnection implements MuxConnection {
     this.cacheKey = cacheKey
     this.telefuncUrl = telefuncUrl
     this.connectionOptions = options
+    this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
     this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
   }
 
@@ -442,90 +441,59 @@ class ClientConnection implements MuxConnection {
     this.startTtlIfIdle()
   }
 
-  send(channel: MuxChannel, data: string): void {
+  send(channel: MuxChannel, data: string): number {
     const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
+    if (ix === undefined) return 0
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.text(ix, data, seq)
     if (!this.canSendImmediately()) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
+    } else {
+      replay.push(seq, frame)
+      this.transport.sendFrame({ kind: 'data', frame })
+    }
+    return payloadBytes(frame)
+  }
+
+  sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
+    this.sendAckReq(channel, (ix, seq) => encode.publishAckReq(ix, data, seq), false, onQueued)
+  }
+
+  sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
+    this.sendAckReq(channel, (ix, seq) => encode.publishBinaryAckReq(ix, data, seq), true, onQueued)
+  }
+
+  sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
+    this.sendAckReq(channel, (ix, seq) => encode.textAckReq(ix, data, seq), false, onQueued)
+  }
+
+  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
+    this.sendAckReq(channel, (ix, seq) => encode.binaryAckReq(ix, data, seq), true, onQueued)
+  }
+
+  /** Shared ack-req issuance — encodes via `buildFrame`, invokes `onQueued(seq)` so the
+   *  channel registers the pending ack *before* the frame hits the wire (so an
+   *  immediate `ACK_RES` can't be lost), then ships or buffers the frame. Mirrors
+   *  `IndexedPeer.sendTextAckReq` on the server side. */
+  private sendAckReq(
+    channel: MuxChannel,
+    buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
+    binary: boolean,
+    onQueued: (seq: number) => void,
+  ): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    const replay = this.replayBuffers.get(ix)!
+    const seq = replay.nextSeq()
+    const frame = buildFrame(ix, seq)
+    onQueued(seq)
+    if (!this.canSendImmediately()) {
+      this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
     }
-    replay.push(seq, frame)
-    this.transport.sendFrame({ kind: 'data', frame })
-  }
-
-  sendPublishAckReq(channel: MuxChannel, data: string): Promise<unknown> {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return Promise.reject(new ChannelClosedError())
-    const replay = this.replayBuffers.get(ix)!
-    const seq = replay.nextSeq()
-    const promise = new Promise<unknown>((resolve, reject) => {
-      this.pendingAcks.set(`${ix}:${seq}`, { resolve, reject })
-    })
-    const frame = encode.publishAckReq(ix, data, seq)
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
-      return promise
-    }
-    replay.push(seq, frame)
+    replay.push(seq, frame, binary)
     this.transport.sendFrame({ kind: 'ack', frame })
-    return promise
-  }
-
-  sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array): Promise<unknown> {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return Promise.reject(new ChannelClosedError())
-    const replay = this.replayBuffers.get(ix)!
-    const seq = replay.nextSeq()
-    const promise = new Promise<unknown>((resolve, reject) => {
-      this.pendingAcks.set(`${ix}:${seq}`, { resolve, reject })
-    })
-    const frame = encode.publishBinaryAckReq(ix, data, seq)
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
-      return promise
-    }
-    replay.push(seq, frame, true)
-    this.transport.sendFrame({ kind: 'ack', frame })
-    return promise
-  }
-
-  sendTextAckReq(channel: MuxChannel, data: string): Promise<unknown> {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return Promise.reject(new ChannelClosedError())
-    const replay = this.replayBuffers.get(ix)!
-    const seq = replay.nextSeq()
-    const promise = new Promise<unknown>((resolve, reject) => {
-      this.pendingAcks.set(`${ix}:${seq}`, { resolve, reject })
-    })
-    const frame = encode.textAckReq(ix, data, seq)
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
-      return promise
-    }
-    replay.push(seq, frame)
-    this.transport.sendFrame({ kind: 'ack', frame })
-    return promise
-  }
-
-  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array): Promise<unknown> {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return Promise.reject(new ChannelClosedError())
-    const replay = this.replayBuffers.get(ix)!
-    const seq = replay.nextSeq()
-    const promise = new Promise<unknown>((resolve, reject) => {
-      this.pendingAcks.set(`${ix}:${seq}`, { resolve, reject })
-    })
-    const frame = encode.binaryAckReq(ix, data, seq)
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
-      return promise
-    }
-    replay.push(seq, frame, true)
-    this.transport.sendFrame({ kind: 'ack', frame })
-    return promise
   }
 
   sendBinary(channel: MuxChannel, data: Uint8Array): void {
@@ -560,11 +528,11 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encode.close(ix, 0)
-    if (this.canSendImmediately()) {
-      this.transport.sendFrame({ kind: 'control', frame })
-    } else {
+    if (!this.canSendImmediately()) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+      return
     }
+    this.transport.sendFrame({ kind: 'control', frame })
   }
 
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void {
@@ -589,12 +557,44 @@ class ClientConnection implements MuxConnection {
     this.transport.sendFrame({ kind: 'control', frame })
   }
 
-  sendWindowUpdate(channel: MuxChannel, bytes: number): void {
+  sendByteWindowUpdate(channel: MuxChannel, bytes: number): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    // Window updates are ephemeral — both sides reset to CREDIT_WINDOW_BYTES on reconnect.
+    // Window updates are ephemeral — the sender resets `_peerWindow` to the initial
+    // value on reconnect and re-adopts the peer's advertised `W` from the next update,
+    // so dropping one mid-disconnect is harmless.
     if (!this.canSendImmediately()) return
-    this.transport.sendFrame({ kind: 'control', frame: encode.window(ix, bytes) })
+    this.transport.sendFrame({ kind: 'flow-control', frame: encode.window(ix, bytes) })
+  }
+
+  sendMsgWindowUpdate(channel: MuxChannel, count: number): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    // Ephemeral — same rationale as `sendByteWindowUpdate`.
+    if (!this.canSendImmediately()) return
+    this.transport.sendFrame({ kind: 'flow-control', frame: encode.msgWindow(ix, count) })
+  }
+
+  sendBdpPing(channel: MuxChannel): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    const frame = encode.bdpPing(ix)
+    if (!this.canSendImmediately()) {
+      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+      return
+    }
+    this.transport.sendFrame({ kind: 'flow-control', frame })
+  }
+
+  sendBdpPingAck(channel: MuxChannel): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    const frame = encode.bdpPingAck(ix)
+    if (!this.canSendImmediately()) {
+      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+      return
+    }
+    this.transport.sendFrame({ kind: 'flow-control', frame })
   }
 
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
@@ -643,29 +643,33 @@ class ClientConnection implements MuxConnection {
 
   private dispatchFrame(frame: DecodedFrame): void {
     // Track seq for ALL data frames including ACK_RES; otherwise reconciles under-report lastSeq.
-    if (isChannelDataFrame(frame) && !this.trackSeq(frame.index, frame.seq)) return
-    switch (frame.tag) {
-      case TAG.CLOSE:
-      case TAG.CLOSE_ACK:
-      case TAG.ABORT:
-      case TAG.ERROR:
-      case TAG.WINDOW:
-      case TAG.FIN:
-      case TAG.RECONCILED:
-        this.handleCtrl(frame)
-        return
-      case TAG.TEXT:
-      case TAG.PUBLISH:
-      case TAG.PUBLISH_ACK_REQ:
-      case TAG.TEXT_ACK_REQ:
-      case TAG.BINARY:
-      case TAG.PUBLISH_BINARY:
-      case TAG.PUBLISH_BINARY_ACK_REQ:
-        this.handleDataFrame(frame)
-        return
-      case TAG.ACK_RES:
-        this.handleAckRes(frame.index, frame.ackedSeq, frame.text, frame.status)
+    if (isChannelDataFrame(frame)) {
+      if (this.trackSeq(frame.index, frame.seq) === 'dup') return
     }
+    // Connection-level + channel-termination ctrls stay here; they involve connection
+    // bookkeeping (handoff state, channel release, TTL). Everything else is per-channel
+    // and goes through `channel._dispatchFrame`.
+    switch (frame.tag) {
+      case TAG.FIN:
+        this.handleHandoffFin()
+        return
+      case TAG.RECONCILED:
+        this.handleReconciled(frame.payload)
+        return
+      case TAG.ABORT:
+        this.closeRemoteChannel(frame.index, makeAbortError(parse(frame.abortValue)))
+        this.startTtlIfIdle()
+        return
+      case TAG.ERROR:
+        this.closeRemoteChannel(frame.index, makeBugError())
+        this.startTtlIfIdle()
+        return
+    }
+    // PING/PONG/RECONCILE/STREAM_REQUEST_OPEN_ACK never reach `dispatchFrame` —
+    // transports peel them off in their own receive paths. Everything that lands
+    // here is per-channel and carries `index`.
+    const channelFrame = frame as ChannelFrame
+    this.channels.get(channelFrame.index)?.channel._dispatchFrame(channelFrame)
   }
 
   private bufferFrameDuringHandoff(frame: DecodedFrame): void {
@@ -751,34 +755,6 @@ class ClientConnection implements MuxConnection {
     this.handleTransportLoss(err, rejectedInitial)
   }
 
-  private handleCtrl(frame: Extract<DecodedFrame, { tag: ServerCtrlTag }>): void {
-    switch (frame.tag) {
-      case TAG.CLOSE:
-        this.channels.get(frame.index)?.channel._onTransportCloseRequest(frame.timeoutMs)
-        return
-      case TAG.CLOSE_ACK:
-        this.channels.get(frame.index)?.channel._onTransportCloseAck()
-        return
-      case TAG.ABORT:
-        this.closeRemoteChannel(frame.index, makeAbortError(parse(frame.abortValue)))
-        this.startTtlIfIdle()
-        return
-      case TAG.ERROR:
-        this.closeRemoteChannel(frame.index, makeBugError())
-        this.startTtlIfIdle()
-        return
-      case TAG.WINDOW:
-        this.channels.get(frame.index)?.channel._onPeerWindowUpdate(frame.bytes)
-        return
-      case TAG.FIN:
-        this.handleHandoffFin()
-        return
-      case TAG.RECONCILED:
-        this.handleReconciled(frame.payload)
-        return
-    }
-  }
-
   private handleReconciled(ctrl: ReconciledPayload): void {
     this.transport.applyReconciledSettings(ctrl)
     this.transport.pushReconciledRouting()
@@ -786,7 +762,7 @@ class ClientConnection implements MuxConnection {
     this.installHeartbeat(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
-    for (const channel of outcome.channelsToOpen) channel._onTransportOpen()
+    for (const channel of outcome.channelsToOpen) channel._onTransportOpen(this.transport.batched)
     if (outcome.reconcileComplete) {
       this.startTtlIfIdle()
     }
@@ -964,13 +940,11 @@ class ClientConnection implements MuxConnection {
     this.transport.detachHeartbeat()
     this.transport.dispose()
     for (const replayBuffer of this.replayBuffers.values()) replayBuffer.dispose()
-    for (const [, pending] of this.pendingAcks) pending.reject(new ChannelNetworkError('Connection closed'))
     this.channels.clear()
     this.channelIndex.clear()
     this.sendBuffer = []
     this.lastSeqByChannel.clear()
     this.replayBuffers.clear()
-    this.pendingAcks.clear()
     this.reconcileIxes.clear()
     this.reconciling = false
     ClientConnection.cache.delete(this.cacheKey)
@@ -1081,66 +1055,21 @@ class ClientConnection implements MuxConnection {
     entry.channel._onTransportClose(err)
   }
 
-  private handleAckRes(index: number, ackedSeq: number, text: string, status: AckResultStatus = ACK_STATUS.OK): void {
-    const key = `${index}:${ackedSeq}`
-    const pending = this.pendingAcks.get(key)
-    if (!pending) return
-    this.pendingAcks.delete(key)
-    switch (status) {
-      case ACK_STATUS.OK:
-        pending.resolve(parse(text))
-        return
-      case ACK_STATUS.ABORT:
-        pending.reject(makeAbortError(parse(text)))
-        return
-      case ACK_STATUS.ERROR:
-        pending.reject(makeBugError(text || undefined))
-        return
-      case ACK_STATUS.SHIELD_ERROR:
-        pending.reject(new ShieldValidationError(text))
-    }
-  }
-
-  private handleDataFrame(frame: Extract<DecodedFrame, { index: number; seq: number }>): void {
-    if (frame.tag === TAG.TEXT_ACK_REQ) {
-      void this.channels.get(frame.index)?.channel._onTransportAckReqMessage(frame.text!, frame.seq)
-      return
-    }
-    if (frame.tag === TAG.PUBLISH) {
-      const channel = this.channels.get(frame.index)?.channel
-      if (channel && ClientBroadcast.isClientBroadcast(channel)) channel._onTransportPublish(frame.text!, frame.info!)
-      return
-    }
-    if (frame.tag === TAG.PUBLISH_BINARY) {
-      const channel = this.channels.get(frame.index)?.channel
-      if (channel && ClientBroadcast.isClientBroadcast(channel))
-        channel._onTransportPublishBinary(frame.data!, frame.info!)
-      return
-    }
-    if (frame.tag === TAG.TEXT) {
-      this.channels.get(frame.index)?.channel._onTransportMessage(frame.text!)
-      return
-    }
-    if (frame.tag === TAG.BINARY_ACK_REQ) {
-      this.channels.get(frame.index)?.channel._onTransportBinaryAckReqMessage(frame.data!, frame.seq)
-      return
-    }
-    if (frame.tag === TAG.BINARY) this.channels.get(frame.index)?.channel._onTransportBinaryMessage(frame.data!)
-  }
-
   private closeAll(err: Error): void {
-    for (const [ix, entry] of this.channels) {
-      this.clearPendingAcks(ix, err)
+    for (const [, entry] of this.channels) {
       entry.channel._onTransportClose(err)
     }
     this.dispose()
   }
 
-  private trackSeq(ix: number, seq: number): boolean {
+  /** Dedup against double-delivery. Transports are TCP-ordered and replay sends a
+   *  contiguous slice starting at our reported `lastSeq + 1`, so duplicates shouldn't
+   *  occur in normal operation — kept as a cheap safety net. */
+  private trackSeq(ix: number, seq: number): 'accept' | 'dup' {
     const prev = this.lastSeqByChannel.get(ix) ?? 0
-    if (seq <= prev) return false
+    if (seq <= prev) return 'dup'
     this.lastSeqByChannel.set(ix, seq)
-    return true
+    return 'accept'
   }
 
   private drainBufferedFrames(
@@ -1170,15 +1099,6 @@ class ClientConnection implements MuxConnection {
     return frames
   }
 
-  private clearPendingAcks(ix: number, err: Error): void {
-    const prefix = `${ix}:`
-    for (const [key, pending] of this.pendingAcks) {
-      if (!key.startsWith(prefix)) continue
-      this.pendingAcks.delete(key)
-      pending.reject(err)
-    }
-  }
-
   private releaseChannel(ix: number, channel: MuxChannel, err: Error): void {
     this.channels.delete(ix)
     this.channelIndex.delete(channel)
@@ -1186,7 +1106,9 @@ class ClientConnection implements MuxConnection {
     const replayBuffer = this.replayBuffers.get(ix)
     replayBuffer?.dispose()
     this.replayBuffers.delete(ix)
-    this.clearPendingAcks(ix, err)
+    // Pending acks on this channel are rejected by the channel itself via
+    // `_onTransportClose(err)` — connection no longer owns them.
+    void err
   }
 }
 
@@ -1196,6 +1118,7 @@ class WsTransport implements ClientChannelTransport {
   readonly sendReconcileOnOpen = true
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly connId = null
+  readonly batched = false
   private heartbeat: Heartbeat | null = null
   private probedWs: WebSocket | null = null
   private ws: WebSocket | null = null
@@ -1431,6 +1354,9 @@ class SseTransport implements ClientChannelTransport {
   }
 
   readonly connId = crypto.randomUUID()
+  get batched(): boolean {
+    return this.streamRequest.tag !== 'active'
+  }
   private heartbeat: Heartbeat | null = null
   private connecting = false
   private startTimer: ReturnType<typeof setTimeout> | null = null
@@ -1453,7 +1379,7 @@ class SseTransport implements ClientChannelTransport {
     | { tag: 'idle' }
     | {
         tag: 'active'
-        body: PushToPullStream<Uint8Array<ArrayBuffer>>
+        body: PushReadableStream<Uint8Array<ArrayBuffer>>
         fetch: Promise<unknown>
         metadataPushed: boolean
       }
@@ -1570,7 +1496,7 @@ class SseTransport implements ClientChannelTransport {
     // catches its rejection eagerly so it's always handled even if openStream exits early.
     let fetchEndedP: Promise<'fetch-ended'> | undefined
     if (this.streamRequest.tag !== 'failed') {
-      const body = new PushToPullStream<Uint8Array<ArrayBuffer>>()
+      const body = createPushReadableStream<Uint8Array<ArrayBuffer>>()
       const fetch = this.openStreamRequest(body, abortController.signal)
       this.streamRequest = { tag: 'active', body, fetch, metadataPushed: false }
       fetchEndedP = (async (): Promise<'fetch-ended'> => {
@@ -1777,6 +1703,7 @@ class SseTransport implements ClientChannelTransport {
         return now
       case 'heartbeat':
         return now + this.heartbeatFlushDelayMs
+      case 'flow-control':
       case 'ack':
       case 'data':
         return (
@@ -1878,7 +1805,7 @@ class SseTransport implements ClientChannelTransport {
   // ── Persistent client→server stream-request POST (half-duplex streaming body) ──
 
   /** Half-duplex POST. Resolves on body-end, rejects on fetch error. */
-  private openStreamRequest(body: PushToPullStream<Uint8Array<ArrayBuffer>>, signal: AbortSignal): Promise<unknown> {
+  private openStreamRequest(body: PushReadableStream<Uint8Array<ArrayBuffer>>, signal: AbortSignal): Promise<unknown> {
     return this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
       method: 'POST',
       headers: {
@@ -1887,7 +1814,10 @@ class SseTransport implements ClientChannelTransport {
         [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
         ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
       },
-      body: body.readable,
+      // `PushReadableStream` IS-A `ReadableStream` — fetch reads it directly,
+      // producer's `push(chunk)` lands in the same stream's internal queue via
+      // `controller.enqueue`, no async-iterator adapter in between.
+      body,
       signal,
       // @ts-ignore duplex is not yet in TypeScript's RequestInit
       duplex: 'half',
@@ -1927,11 +1857,15 @@ function createSseEventStreamReader(
   readNextEntry: () => Promise<{ comment?: string; frame?: Uint8Array<ArrayBuffer> } | null>
 } {
   const decoder = new TextDecoder()
+  // Cursor-based incremental parser. `lineBuf` accumulates decoded text; `cursor` is
+  // the offset of the first unparsed byte. We walk it line-by-line via `indexOf('\n')`
+  // and queue completed events as we go — no full-buffer splits, no re-joins. The
+  // prefix gets trimmed amortised once the consumed region exceeds half the buffer.
   let lineBuf = ''
+  let cursor = 0
   let pendingComment: string | null = null
   let pendingData = ''
-  let readyComment: string | null = null
-  let readyFrame: Uint8Array<ArrayBuffer> | null = null
+  const ready: Array<{ comment?: string; frame?: Uint8Array<ArrayBuffer> }> = []
   let cancelled = false
 
   const cancel = () => {
@@ -1942,56 +1876,45 @@ function createSseEventStreamReader(
 
   abortController.signal.addEventListener('abort', cancel, { once: true })
 
-  const processBufferedLines = () => {
-    const lines = lineBuf.split('\n')
-    if (lines.length === 1) return
-    lineBuf = lines.pop()!
+  const flushEvent = () => {
+    if (pendingComment !== null) {
+      ready.push({ comment: pendingComment })
+      pendingComment = null
+    }
+    if (pendingData !== '') {
+      ready.push({ frame: base64urlToUint8Array(pendingData) })
+      pendingData = ''
+    }
+  }
 
-    for (let index = 0; index < lines.length; index++) {
-      const line = lines[index]!
-      if (line.startsWith(':')) {
+  const processBufferedLines = () => {
+    while (cursor < lineBuf.length) {
+      const nl = lineBuf.indexOf('\n', cursor)
+      if (nl === -1) break // incomplete tail line — wait for more bytes
+      const line = lineBuf.slice(cursor, nl)
+      cursor = nl + 1
+      if (line.length === 0) {
+        flushEvent()
+        continue
+      }
+      if (line.charCodeAt(0) === 58 /* ':' */) {
         pendingComment = line
         continue
       }
       if (line.startsWith('data: ')) {
         pendingData = line.slice(6)
-        continue
       }
-      if (line !== '') continue
-
-      if (pendingComment !== null) {
-        readyComment = pendingComment
-        pendingComment = null
-      }
-      if (pendingData !== '') {
-        readyFrame = base64urlToUint8Array(pendingData)
-        pendingData = ''
-      }
-      if (readyComment === null && readyFrame === null) continue
-
-      const remainingLines = lines.slice(index + 1)
-      if (remainingLines.length > 0) {
-        lineBuf = `${remainingLines.join('\n')}\n${lineBuf}`
-      }
-      return
+    }
+    // Amortised compaction — discard the consumed prefix once it dominates the buffer.
+    if (cursor > 16384 && cursor * 2 >= lineBuf.length) {
+      lineBuf = lineBuf.slice(cursor)
+      cursor = 0
     }
   }
 
   const readNextEntry = async (): Promise<{ comment?: string; frame?: Uint8Array<ArrayBuffer> } | null> => {
     while (true) {
-      if (readyComment !== null) {
-        const comment = readyComment
-        readyComment = null
-        return { comment }
-      }
-      if (readyFrame !== null) {
-        const frame = readyFrame
-        readyFrame = null
-        return { frame }
-      }
-
-      processBufferedLines()
-      if (readyComment !== null || readyFrame !== null) continue
+      if (ready.length > 0) return ready.shift()!
 
       let done: boolean
       let value: Uint8Array<ArrayBuffer> | undefined
@@ -2007,6 +1930,7 @@ function createSseEventStreamReader(
         throw readError ?? new Error('Connection lost before all SSE frames were received.')
       }
       lineBuf += decoder.decode(value!, { stream: true })
+      processBufferedLines()
     }
   }
 

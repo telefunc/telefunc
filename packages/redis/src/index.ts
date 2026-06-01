@@ -21,6 +21,8 @@ function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {})
     instanceId: options.instanceId,
     pinTtlSeconds: options.pinTtlSeconds,
     inboxMaxLen: options.inboxMaxLen,
+    readCount: options.readCount,
+    inboxShardCount: options.inboxShardCount,
   })
 }
 
@@ -33,6 +35,10 @@ type InstallRedisOptions = {
   pinTtlSeconds?: number
   /** `XADD MAXLEN ~ N` bound on the inbox stream. Default: 10_000. */
   inboxMaxLen?: number
+  /** XREAD batch size. Default: 100. */
+  readCount?: number
+  /** Fixed inbox shard count per instance. Default: 2. */
+  inboxShardCount?: number
 }
 
 type RedisBroadcastOptions = {

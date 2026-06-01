@@ -30,7 +30,8 @@ import {
   DefaultBroadcastAdapter,
   type BroadcastTransport,
 } from '../../wire-protocol/server/broadcast.js'
-import { installChannelSubstrate, type ChannelSubstrate } from '../../wire-protocol/server/substrate.js'
+import { installChannelSubstrate } from '../../wire-protocol/server/substrate/install.js'
+import type { ChannelSubstrate } from '../../wire-protocol/server/substrate/protocol.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,

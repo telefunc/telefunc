@@ -11,11 +11,8 @@ export default {
     },
   },
   plugins: [react(), vike(), telefunc(), tailwindcss()],
-  // @ts-expect-error
-  vitePluginServerEntry: {
-    disableAutoImport: true,
-  },
   build: {
     outDir: `${__dirname}/../../test/playground/dist/nested`,
+    minify: false,
   },
 } satisfies UserConfig

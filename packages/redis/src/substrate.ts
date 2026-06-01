@@ -1,7 +1,7 @@
 export { RedisChannelSubstrate }
 export type { RedisChannelSubstrateOptions }
 
-import type { Cluster, Redis } from 'ioredis'
+import { Cluster, Redis } from 'ioredis'
 import {
   decodeProxyEnvelope,
   dispatchEnvelope,
@@ -16,7 +16,7 @@ import { callDefinedCommand } from './callDefinedCommand.js'
 
 // Three Redis primitives:
 //   - Pin (KV)        `tf:home:<channelId>` → `<homeInstanceId>`, TTL'd.
-//   - Inbox (Stream)  `tf:proxy:inbox:<instanceId>` — point-to-point envelope delivery.
+//   - Inbox (Stream)  `tf:proxy:inbox:<instanceId>:<shard>` — point-to-point envelope delivery.
 //   - Fanout (Stream) `tf:reg` — global registration log; entries `{c: channelId, h: home}`.
 //
 // Streams (not Pub/Sub) for envelope routing because Pub/Sub drops messages on subscriber
@@ -24,7 +24,7 @@ import { callDefinedCommand } from './callDefinedCommand.js'
 // `lastId` resume bound the buffer and recover any blip shorter than the window.
 
 type RedisChannelSubstrateOptions = {
-  /** ioredis Redis or Cluster client. `duplicate()`-d twice for blocking consumer loops. */
+  /** ioredis Redis or Cluster client. `duplicate()`-d internally; the passed instance is never mutated or disconnected. */
   redis: Redis | Cluster
   /** Stable per-process id. Default: random UUID. */
   instanceId?: string
@@ -36,12 +36,15 @@ type RedisChannelSubstrateOptions = {
   inboxMaxLen?: number
   /** XREAD batch size. Default: 100. */
   readCount?: number
+  /** Fixed inbox shard count per instance. Default: 2. */
+  inboxShardCount?: number
 }
 
 const DEFAULT_PREFIX = 'tf:'
 const DEFAULT_PIN_TTL_SECONDS = 30
 const DEFAULT_INBOX_MAX_LEN = 10_000
-const DEFAULT_READ_COUNT = 100
+const DEFAULT_READ_COUNT = 200
+const DEFAULT_INBOX_SHARD_COUNT = 2
 /** Heartbeat at one-third of the pin TTL — margin for latency and clock skew. */
 const HEARTBEAT_FRACTION = 3
 
@@ -70,28 +73,31 @@ class RedisChannelSubstrate implements ChannelSubstrate {
   readonly selfInstanceId: string
   readonly heartbeatIntervalMs: number
   private readonly client: Redis | Cluster
-  private readonly inboxBlockingClient: Redis | Cluster
+  private readonly inboxBlockingClients: Array<Redis | Cluster>
   private readonly fanoutBlockingClient: Redis | Cluster
   private readonly prefix: string
   private readonly pinTtlSeconds: number
   private readonly inboxMaxLen: number
   private readonly readCount: number
+  private readonly inboxShardCount: number
   private readonly registrationWaiters = new Map<string, Set<(home: string) => void>>()
   private readonly listeners = new Set<ChannelSubstrateHandlers>()
   private disposed = false
 
   constructor(options: RedisChannelSubstrateOptions) {
-    this.client = options.redis
-    this.inboxBlockingClient = options.redis.duplicate()
+    this.client = duplicateWithAutoPipelining(options.redis)
     this.fanoutBlockingClient = options.redis.duplicate()
     this.selfInstanceId = options.instanceId ?? crypto.randomUUID()
     this.prefix = options.prefix ?? DEFAULT_PREFIX
     this.pinTtlSeconds = options.pinTtlSeconds ?? DEFAULT_PIN_TTL_SECONDS
     this.inboxMaxLen = options.inboxMaxLen ?? DEFAULT_INBOX_MAX_LEN
     this.readCount = options.readCount ?? DEFAULT_READ_COUNT
+    this.inboxShardCount = options.inboxShardCount ?? DEFAULT_INBOX_SHARD_COUNT
+    assert(this.inboxShardCount >= 1, 'inboxShardCount must be >= 1')
+    this.inboxBlockingClients = Array.from({ length: this.inboxShardCount }, () => options.redis.duplicate())
     this.heartbeatIntervalMs = Math.max(1_000, (this.pinTtlSeconds * 1000) / HEARTBEAT_FRACTION)
     this.client.defineCommand(REGISTER_CMD, { numberOfKeys: 2, lua: REGISTER_LUA })
-    void this.runInboxLoop()
+    for (let shard = 0; shard < this.inboxShardCount; shard++) void this.runInboxLoop(shard)
     void this.runFanoutLoop()
   }
 
@@ -208,7 +214,15 @@ class RedisChannelSubstrate implements ChannelSubstrate {
     // zero-copy view over the same ArrayBuffer.
     const encoded = encodeProxyEnvelope(envelope)
     const value = Buffer.from(encoded.buffer, encoded.byteOffset, encoded.byteLength)
-    await this.client.xadd(this.inboxKey(targetInstance), 'MAXLEN', '~', this.inboxMaxLen, '*', FIELD_ENVELOPE, value)
+    await this.client.xadd(
+      this.inboxKey(targetInstance, this.inboxShard(envelope.channelId)),
+      'MAXLEN',
+      '~',
+      this.inboxMaxLen,
+      '*',
+      FIELD_ENVELOPE,
+      value,
+    )
   }
 
   listen(handlers: ChannelSubstrateHandlers): () => void {
@@ -224,7 +238,8 @@ class RedisChannelSubstrate implements ChannelSubstrate {
     this.registrationWaiters.clear()
     // Disconnecting unblocks each parked XREAD with an error; the loops catch it,
     // see `disposed`, and exit cleanly. The user's main client is untouched.
-    this.inboxBlockingClient.disconnect()
+    this.client.disconnect()
+    for (const client of this.inboxBlockingClients) client.disconnect()
     this.fanoutBlockingClient.disconnect()
   }
 
@@ -232,12 +247,13 @@ class RedisChannelSubstrate implements ChannelSubstrate {
   // Each loop holds one duplicated connection on `XREAD BLOCK 0`, resumes from
   // `lastId` across reconnects, and on transient error backs off briefly and retries.
 
-  private async runInboxLoop(): Promise<void> {
-    const inboxKey = this.inboxKey(this.selfInstanceId)
+  private async runInboxLoop(shard: number): Promise<void> {
+    const inboxKey = this.inboxKey(this.selfInstanceId, shard)
+    const blockingClient = this.inboxBlockingClients[shard]!
     let lastId = '$'
     while (!this.disposed) {
       try {
-        const result = await this.inboxBlockingClient.xreadBuffer(
+        const result = await blockingClient.xreadBuffer(
           'COUNT',
           this.readCount,
           'BLOCK',
@@ -317,8 +333,8 @@ class RedisChannelSubstrate implements ChannelSubstrate {
     return `${this.prefix}reg`
   }
 
-  private inboxKey(instanceId: string): string {
-    return `${this.prefix}proxy:inbox:${instanceId}`
+  private inboxKey(instanceId: string, shard: number): string {
+    return `${this.prefix}proxy:inbox:${instanceId}:${shard}`
   }
 
   private connKey(connId: string): string {
@@ -328,6 +344,21 @@ class RedisChannelSubstrate implements ChannelSubstrate {
   private aliveKey(instanceId: string): string {
     return `${this.prefix}alive:${instanceId}`
   }
+
+  private inboxShard(channelId: string): number {
+    let hash = 0x811c9dc5
+    for (let i = 0; i < channelId.length; i++) {
+      hash ^= channelId.charCodeAt(i)
+      hash = Math.imul(hash, 0x01000193)
+    }
+    return (hash >>> 0) % this.inboxShardCount
+  }
+}
+
+function duplicateWithAutoPipelining(client: Redis | Cluster): Redis | Cluster {
+  return client instanceof Cluster
+    ? client.duplicate([], { enableAutoPipelining: true })
+    : client.duplicate({ enableAutoPipelining: true })
 }
 
 const utf8 = new TextDecoder('utf-8')

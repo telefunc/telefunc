@@ -37,6 +37,7 @@ async function makeHttpRequest(callContext: {
   requestCloseHandlers: CloseHandler[]
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
   connectionKey?: string
+  channelIdleTimeout?: number
 }): Promise<unknown> {
   const isBinaryFrame = typeof callContext.httpRequestBody !== 'string'
   const requestKind = isBinaryFrame ? REQUEST_KIND.BINARY : REQUEST_KIND.TEXT
@@ -73,7 +74,7 @@ async function makeHttpRequest(callContext: {
   if (newSessionToken) setSessionToken(callContext.telefuncUrl, newSessionToken)
 
   if (statusCode === STATUS_CODE_SUCCESS) {
-    const parsed = await parseResponse(response, callContext, callContext.connectionKey)
+    const parsed = await parseResponse(response, callContext, callContext.connectionKey, callContext.channelIdleTimeout)
     assertUsage(isObject(parsed) && 'ret' in parsed, wrongInstallation({ method, callContext }))
     return parsed.ret
   } else if (statusCode === STATUS_CODE_THROW_ABORT) {

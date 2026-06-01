@@ -38,10 +38,14 @@ async function nodeReadableToWebRequest(
 }
 
 function normalizeHeaders(headers: HeadersInput): [string, string][] {
-  if (Array.isArray(headers)) return headers
+  // HTTP/2 puts `:method`, `:path`, `:authority`, `:scheme`, `:status` into `req.headers`.
+  // The Web Headers constructor rejects any name starting with `:`, so drop them — the
+  // request's method and URL are passed via separate params already.
+  if (Array.isArray(headers)) return headers.filter(([k]) => k.charCodeAt(0) !== 58 /* ':' */)
   const pairs: [string, string][] = []
   for (const [key, value] of Object.entries(headers)) {
     if (value === undefined) continue
+    if (key.charCodeAt(0) === 58 /* ':' */) continue
     if (Array.isArray(value)) {
       for (const v of value) pairs.push([key, v])
     } else {

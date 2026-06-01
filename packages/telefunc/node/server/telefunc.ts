@@ -10,6 +10,11 @@ import type { Readable } from 'node:stream'
 
 type HttpRequestResolved = {
   request: Request
+  /** Node `Readable` source for the request body, when the entry adapter has one
+   *  (currently: `serve/node.ts` passes its `IncomingMessage`). Downstream body
+   *  consumers prefer this over `request.body` to skip Node's webstreams overhead.
+   *  `undefined` on Web-runtime adapters (`{ request }` input from Bun / Deno / edge). */
+  readable?: Readable
   context?: Telefunc.Context
 }
 
@@ -69,7 +74,7 @@ async function resolveHttpRequest(httpRequest: HttpRequest): Promise<HttpRequest
       httpRequest.method,
       httpRequest.headers,
     )
-    return { request, context: httpRequest.context }
+    return { request, readable: httpRequest.readable, context: httpRequest.context }
   }
   // Backward compat: construct a Request from primitives
   const request = new Request('http://localhost' + httpRequest.url, {
