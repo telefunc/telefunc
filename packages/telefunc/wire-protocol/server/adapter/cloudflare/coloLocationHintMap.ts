@@ -1,3 +1,4 @@
+// spellcheck-ignore:file  IATA airport codes for Cloudflare colos.
 import type { DurableObjectLocationHint } from '@cloudflare/workers-types'
 
 // Generated from Cloudflare status components and collapsed to Telefunc's

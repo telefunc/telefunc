@@ -44,6 +44,12 @@ function getCiJobs() {
       name: 'Vite',
       setups,
     },
+    // Playground dev/preview scripts use bash-only syntax (`fuser`, `rm -rf`, `2>/dev/null`)
+    // and the docker test needs Linux containers. Ubuntu-only.
+    {
+      name: 'Playground',
+      setups: setupModern,
+    },
     {
       name: 'React Native',
       setups,

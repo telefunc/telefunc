@@ -381,7 +381,7 @@ class SubstrateMux extends ChannelMux {
     }
   }
 
-  /** Accept inbound client→server FRAMEs from any cluster instance (data POSTs round-robin
+  /** Accept inbound client→server frames from any cluster instance (data POSTs round-robin
    *  freely). `homeAttached` is only consulted for outbound TO_PEER; channel seq dedups. */
   private dispatchHomeFrame(channelId: string, rawFrame: Uint8Array): void {
     const channel = this.localChannels.get(channelId)
@@ -437,8 +437,8 @@ class SubstrateMux extends ChannelMux {
 
   // ── Heartbeat + peer liveness ───────────────────────────────────────
 
-  /** Refresh own pins (batched per kind) + detect dead peers: dead OWNERs disconnect their
-   *  channels here; dead HOMEs get an `error` ctrl on the local wire so only their channel
+  /** Refresh own pins (batched per kind) + detect dead peers: dead owners disconnect their
+   *  channels here; dead homes get an `error` ctrl on the local wire so only their channel
    *  closes on the client. */
   private async heartbeat(): Promise<void> {
     const channelIds = Array.from(this.localChannels.keys())

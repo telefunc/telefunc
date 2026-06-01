@@ -43,7 +43,7 @@ const mocks = vi.hoisted(() => {
         return new ReadableStream()
       },
     })),
-    installBroadcastAdapter: vi.fn(),
+    installBroadcastAdapter: vi.fn(<T>(factory: () => T): T => factory()),
     transportInstances: [] as MockCloudflareBroadcastTransport[],
     authorityInstances: [] as MockCloudflareBroadcastAuthorityState[],
     MockCloudflareBroadcastAuthorityState,
@@ -181,7 +181,8 @@ describe('cloudflare adapter entrypoint', () => {
     })
 
     expect(mocks.enableChannelTransports).toHaveBeenCalled()
-    expect(mocks.installBroadcastAdapter).toHaveBeenCalledWith(mocks.transportInstances[0])
+    expect(mocks.installBroadcastAdapter).toHaveBeenCalledWith(expect.any(Function))
+    expect(mocks.transportInstances).toHaveLength(1)
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-1' }), {
       locationHint: 'weur',
     })

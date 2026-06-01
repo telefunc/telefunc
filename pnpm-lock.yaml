@@ -483,11 +483,11 @@ importers:
         specifier: ^4.2.1
         version: 4.3.0(vite@8.0.16(@types/node@24.12.4)(esbuild@0.28.0)(jiti@2.7.0))
       '@tanstack/ai':
-        specifier: ^0.9.2
-        version: 0.9.2
+        specifier: ^0.13.0
+        version: 0.13.0
       '@tanstack/ai-react':
         specifier: ^0.7.7
-        version: 0.7.15(@tanstack/ai@0.9.2)(@types/react@19.2.15)(react@19.2.6)
+        version: 0.7.15(@tanstack/ai@0.13.0)(@types/react@19.2.15)(react@19.2.6)
       '@tanstack/react-query':
         specifier: ^5.95.2
         version: 5.100.14(react@19.2.6)
@@ -2996,11 +2996,6 @@ packages:
   '@tanstack/ai-client@0.7.14':
     resolution: {integrity: sha512-/MzRKILuZRK/3LVX6PP1gJcTyEpP0k6+9NdhYSEQk/ReA5Ol4+H3sRHsuTRBbYPFCztEkvVSCIBSLO+xq/0vSA==}
 
-  '@tanstack/ai-event-client@0.1.4':
-    resolution: {integrity: sha512-SDZR7jjC+HNB6WHgfuF++n9WxLV0DiMiHL+77nmGg1A4B7zEQh/Nh/bqBshHcnlBDK+ZuL4QIvw1eCMnbddzww==}
-    peerDependencies:
-      '@tanstack/ai': 0.9.2
-
   '@tanstack/ai-event-client@0.2.7':
     resolution: {integrity: sha512-DcdDNrt1T2ng8CVo0pTx1172CEdGzFg4w/azLFFc/z5WHGAAMkw2ZD/ucSc1VlYlCWCNxwSO6otUqxmJDi9gJQ==}
     peerDependencies:
@@ -3015,10 +3010,6 @@ packages:
 
   '@tanstack/ai@0.13.0':
     resolution: {integrity: sha512-4M0wBvi4Mhc50mpQmmJuT31C5ROGfh8FOQIAzHzc8qQs14ziHDh9Wx1hjDeezGnlqjCTJVGTExFpPGOFOLRz1A==}
-    engines: {node: '>=18'}
-
-  '@tanstack/ai@0.9.2':
-    resolution: {integrity: sha512-4Uz310m7vZPyPzJpxjWZXGo2hCtO1X1WbaexYGrxkRxyj2iXZuVFL02rDE7r5y3/v0NRjM+AimLne4cHTkWDHg==}
     engines: {node: '>=18'}
 
   '@tanstack/devtools-event-client@0.4.3':
@@ -8784,19 +8775,14 @@ snapshots:
       '@tanstack/ai': 0.13.0
       '@tanstack/ai-event-client': 0.2.7(@tanstack/ai@0.13.0)
 
-  '@tanstack/ai-event-client@0.1.4(@tanstack/ai@0.9.2)':
-    dependencies:
-      '@tanstack/ai': 0.9.2
-      '@tanstack/devtools-event-client': 0.4.3
-
   '@tanstack/ai-event-client@0.2.7(@tanstack/ai@0.13.0)':
     dependencies:
       '@tanstack/ai': 0.13.0
       '@tanstack/devtools-event-client': 0.4.3
 
-  '@tanstack/ai-react@0.7.15(@tanstack/ai@0.9.2)(@types/react@19.2.15)(react@19.2.6)':
+  '@tanstack/ai-react@0.7.15(@tanstack/ai@0.13.0)(@types/react@19.2.15)(react@19.2.6)':
     dependencies:
-      '@tanstack/ai': 0.9.2
+      '@tanstack/ai': 0.13.0
       '@tanstack/ai-client': 0.7.14
       '@types/react': 19.2.15
       react: 19.2.6
@@ -8805,11 +8791,6 @@ snapshots:
     dependencies:
       '@ag-ui/core': 0.0.49
       '@tanstack/ai-event-client': 0.2.7(@tanstack/ai@0.13.0)
-      partial-json: 0.1.7
-
-  '@tanstack/ai@0.9.2':
-    dependencies:
-      '@tanstack/ai-event-client': 0.1.4(@tanstack/ai@0.9.2)
       partial-json: 0.1.7
 
   '@tanstack/devtools-event-client@0.4.3': {}

@@ -1,4 +1,5 @@
 {
+  // spellcheck-ignore
   "compatibility_flags": ["nodejs_als"],
   "$schema": "node_modules/wrangler/config-schema.json",
   "compatibility_date": "2025-08-06",
