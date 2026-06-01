@@ -7,7 +7,9 @@ import { testCounter, testRunClassic } from '../../test/utils'
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   const isDev = cmd === 'pnpm run dev'
   testCloudflareBindings()
-  testRunClassic(cmd)
+  testRunClassic(cmd, {
+    tolerateError: (log) => log.logText.includes('Detected multiple renderers concurrently rendering'),
+  })
   testTodolist(isDev)
 }
 

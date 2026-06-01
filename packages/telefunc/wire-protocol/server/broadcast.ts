@@ -196,13 +196,17 @@ function getBroadcastAdapter(): BroadcastAdapter {
   return globalObject.adapter
 }
 
-/** First-time install only. Idempotent: subsequent calls are silent no-ops so a
- *  Vite HMR reload of the user's entry file doesn't leak a fresh transport's
- *  subscriber connection on every cycle. */
-function installBroadcastAdapter(adapter: BroadcastAdapter): void {
-  if (globalObject.installed) return
-  globalObject.adapter = adapter
-  globalObject.installed = true
+/** Per-isolate singleton. The factory runs once: the first caller installs the
+ *  adapter, subsequent callers receive the already-installed one. This handles
+ *  Vite HMR reloads and bundler quirks that evaluate the user's entry
+ *  module more than once in the same isolate. Returns the installed instance so the caller
+ *  can keep using the canonical reference. */
+function installBroadcastAdapter<T extends BroadcastAdapter>(factory: () => T): T {
+  if (!globalObject.installed) {
+    globalObject.adapter = factory()
+    globalObject.installed = true
+  }
+  return globalObject.adapter as T
 }
 
 /** @internal — test-only escape hatch. */

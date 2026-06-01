@@ -70,10 +70,9 @@ function telefunc(options?: CloudflareWebSocketOptions): TelefuncServe {
     instanceName: baseInstanceName,
     hooks: getTelefuncChannelHooks(),
   })
-  const broadcast = new CloudflareBroadcastTransport({
-    baseInstanceName,
-    scale,
-  })
+  // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
+  // we want every evaluation to share one transport instance.
+  const broadcast = installBroadcastAdapter(() => new CloudflareBroadcastTransport({ baseInstanceName, scale }))
 
   function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
     const baseBinding = (env as Record<string, DurableObjectNamespace | undefined>)[bindingName]
@@ -83,8 +82,6 @@ function telefunc(options?: CloudflareWebSocketOptions): TelefuncServe {
   function getKVBinding(env: Cloudflare.Env): KVNamespace | undefined {
     return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
   }
-
-  installBroadcastAdapter(broadcast)
 
   const getContext = options?.context
 

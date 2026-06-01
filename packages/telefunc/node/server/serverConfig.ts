@@ -536,7 +536,7 @@ function applyBroadcastConfig(val: unknown): void {
         'config.broadcast.transport must be a BroadcastTransport with send() and listen() methods',
       )
       configState.broadcast.transport = value as BroadcastTransport
-      installBroadcastAdapter(new DefaultBroadcastAdapter(value as BroadcastTransport))
+      installBroadcastAdapter(() => new DefaultBroadcastAdapter(value as BroadcastTransport))
     } else {
       assertUsage(false, `Unknown config.broadcast.${key}`)
     }

@@ -213,8 +213,11 @@ await events.send({ tick: 1 }, { ack: true })
 [`new Broadcast<T>({ key })`](/channel#new-broadcast) declares the message type `T` flowing through a keyed pub/sub topic. Telefunc generates a `data` sub-shield that fires on the server when a client calls `publish()` on a `Broadcast` returned from a telefunction:
 
 ```ts
-const room = new Broadcast<{ user: string; text: string }>({ key: `chat:${roomId}` })
-return room
+// Chat.telefunc.ts
+export async function onJoinChat(roomId: string) {
+  const room = new Broadcast<{ user: string; text: string }>({ key: `chat:${roomId}` })
+  return room
+}
 ```
 
 ```ts

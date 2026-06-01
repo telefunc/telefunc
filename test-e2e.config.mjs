@@ -85,6 +85,9 @@ function tolerateError({ logSource, logText }) {
 
       // [21:29:57.330][/docs/.test-dev.test.ts][pnpm run dev][stderr] Cannot optimize dependency: @brillout/docpress/Layout, present in 'optimizeDeps.include'
       'Cannot optimize dependency: @brillout/docpress/Layout',
+
+      // Vite 8 + rolldown — perf note from the build, not an error.
+      '[PLUGIN_TIMINGS]',
     ].some((t) => logText.includes(t)) ||
     isRollupEmptyChunkWarning() ||
     isSveltekitTypesGenWarning() ||

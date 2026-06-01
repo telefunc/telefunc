@@ -189,12 +189,18 @@ class ChannelMux {
   private resolvedOptions: MuxServerOptions | null = null
 
   /** This server's cluster-instance identifier. Stamped into every `reconciled`'s
-   *  `ownerInstance` and every channel's `home`. Base picks a per-process UUID;
-   *  `SubstrateMux` overrides via constructor to use the substrate's cluster-wide id. */
-  readonly selfInstanceId: string
+   *  `ownerInstance` and every channel's `home`. Base lazily picks a per-process UUID
+   *  on first read (deferring `crypto.randomUUID()` past module load — Cloudflare
+   *  Workers disallow it in global scope). `SubstrateMux` injects the substrate's
+   *  cluster-wide id via the constructor. */
+  private _selfInstanceId: string | null
+  get selfInstanceId(): string {
+    if (this._selfInstanceId === null) this._selfInstanceId = crypto.randomUUID()
+    return this._selfInstanceId
+  }
 
-  constructor(instanceId: string = crypto.randomUUID()) {
-    this.selfInstanceId = instanceId
+  constructor(instanceId: string | null = null) {
+    this._selfInstanceId = instanceId
   }
 
   protected get options(): MuxServerOptions {
