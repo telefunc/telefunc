@@ -67,14 +67,18 @@ function testRunDocker() {
     }
     {
       // Chromium in Docker fires `net::ERR_NETWORK_CHANGED` when the bridge
-      // interface state shifts, aborting every in-flight asset request on the
-      // first navigation and leaving React unhydrated. Chromium has no flag to
-      // suppress this (no exposed `NetworkChangeNotifier` toggle); the only
-      // recovery is to reload once the network has settled. Cap at one reload —
-      // by then the bridge is stable.
+      // interface state shifts, aborting in-flight asset fetches and leaving
+      // React unhydrated. Chromium exposes no `NetworkChangeNotifier` toggle;
+      // the only recovery is to reload until hydration sticks.
       await page.goto(`${getServerUrl()}/`, { waitUntil: 'load' })
-      if (((await page.textContent('body')) ?? '').includes('Loading...')) {
-        await page.reload({ waitUntil: 'load' })
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          await page.locator('#hydrated').waitFor({ state: 'attached', timeout: 5_000 })
+          break
+        } catch {
+          if (attempt === 3) throw new Error('Page never hydrated after 4 attempts')
+          await page.reload({ waitUntil: 'load' })
+        }
       }
       await autoRetry(
         async () => {
