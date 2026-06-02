@@ -68,10 +68,6 @@ function testRunDocker() {
       page.goto(`${getServerUrl()}/`)
       await autoRetry(
         async () => {
-          const body = await page.textContent('body')
-          if (!body?.includes('Welcome Eva')) {
-            await page.reload({ waitUntil: 'domcontentloaded' })
-          }
           expect(await page.textContent('body')).toContain('Welcome Eva')
         },
         { timeout: 10_000 },
