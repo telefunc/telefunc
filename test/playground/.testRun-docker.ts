@@ -66,7 +66,16 @@ function testRunDocker() {
       expect(html).not.toContain('Eva')
     }
     {
-      await page.goto(`${getServerUrl()}/`)
+      // Chromium in Docker fires `net::ERR_NETWORK_CHANGED` when the bridge
+      // interface state shifts, aborting every in-flight asset request on the
+      // first navigation and leaving React unhydrated. Chromium has no flag to
+      // suppress this (no exposed `NetworkChangeNotifier` toggle); the only
+      // recovery is to reload once the network has settled. Cap at one reload —
+      // by then the bridge is stable.
+      await page.goto(`${getServerUrl()}/`, { waitUntil: 'load' })
+      if (((await page.textContent('body')) ?? '').includes('Loading...')) {
+        await page.reload({ waitUntil: 'load' })
+      }
       await autoRetry(
         async () => {
           expect(await page.textContent('body')).toContain('Welcome Eva')
