@@ -16,6 +16,14 @@ import { testPublish } from './pages/publish/e2e-test'
 
 function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   run(cmd, {
+    // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
+    // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
+    // "Server running at" / "Accepting connections at" matcher, so the framework times
+    // out waiting for ready unless we accept these explicitly.
+    serverIsReadyMessage: (log) =>
+      log.includes('Listening on') ||
+      log.includes('Server running at') ||
+      (log.includes('Local:') && log.includes('http://localhost:3000')),
     tolerateError(log) {
       return (
         log.logText.includes('File arguments are being consumed out of order') ||
