@@ -1,7 +1,7 @@
 export { Channel, setChannelDefaults, ServerChannel, SERVER_CHANNEL_BRAND }
 export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../channel-errors.js'
 
-const SERVER_CHANNEL_BRAND = Symbol.for('ServerChannel')
+const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
 import type {
   ChannelBase,

@@ -205,7 +205,7 @@ class BufferLane {
     return this.#data[i]!
   }
 
-  callbackAt(i: number): EntryCallback | EntryCallback | null {
+  callbackAt(i: number): EntryCallback | null {
     return this.#callbacks[i]!
   }
 

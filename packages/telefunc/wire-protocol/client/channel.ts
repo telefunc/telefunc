@@ -41,7 +41,7 @@ import { ChannelClosedError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
 
-const CLIENT_BROADCAST_BRAND = Symbol.for('ClientBroadcast')
+const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel

@@ -101,7 +101,7 @@ async function makeHttpRequest(callContext: {
     // This should never happen as the Telefunc Client shouldn't make invalid requests
     assert(false)
     */
-    assertUsage(false, 'Try again. You may need to reload the page. (The client and server are/was out-of-sync.)')
+    assertUsage(false, 'Try again. You may need to reload the page. (The client and server are out of sync.)')
   } else {
     assertUsage(
       statusCode !== 404,

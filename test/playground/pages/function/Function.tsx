@@ -128,11 +128,9 @@ function FunctionDemo() {
     const progress: number[] = []
     addLog(`uploading ${file.name} (${file.size} bytes)...`)
     const result = await onUpload(file, async (percent) => {
-      console.log(`upload progress: ${percent}%`)
       progress.push(percent)
       setState((s) => ({ ...s, uploadProgress: [...progress] }))
     })
-    console.log(`upload complete: ${result.name} (${result.size} bytes)`)
     addLog(`upload done: ${result.name} (${result.size} bytes), ${progress.length} progress updates`)
     setState((s) => ({ ...s, uploadResult: result }))
   }

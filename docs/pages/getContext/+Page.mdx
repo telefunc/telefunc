@@ -206,13 +206,23 @@ export async function someTelefunction() {
 
 ## `onClose()`
 
-The context object returned by `getContext()` also includes `onClose()` — a callback that fires when the request lifecycle ends for any reason. Fires exactly once. Use it to release resources.
+The context object returned by `getContext()` also includes `onClose()`, a callback that fires when the request lifecycle ends for any reason. Fires exactly once. Use it to release resources.
 
 ```ts
 const context = getContext()
 context.onClose(() => {
   // Clean up server-side resources
 })
+```
+
+
+## `signal`
+
+The context object also includes an `AbortSignal` that fires when the request ends. Pass it to APIs that accept one (`fetch`, database clients, etc.) so in-flight work cancels when the client disconnects.
+
+```ts
+const context = getContext()
+const response = await fetch(url, { signal: context.signal })
 ```
 
 

@@ -551,7 +551,6 @@ function ChannelDemo() {
   const testServerPendingAckAbort = useCallback(async () => {
     addLog('system', 'Starting server-pending-ack-abort test...')
     const { channel, channelId } = await onChannelServerPendingAckAbort()
-    console.log('server-pending-ack-abort channel opened:', { channelId, channelId2: channel.id })
     serverPendingAckAbortChannelRef.current = channel
     setChannelState((s) => ({ ...s, serverPendingAckAbortChannelId: channelId }))
     channel.listen(() => new Promise(() => {}))

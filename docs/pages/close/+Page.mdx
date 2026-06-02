@@ -67,3 +67,10 @@ export async function* onChat(prompt: string) {
 If the client drops all references to a returned value without explicitly closing it, the underlying resources are cleaned up automatically via garbage collection. There is a short delay (typically a few seconds) between the value becoming unreachable and the cleanup firing.
 
 Explicit `close()` is instant. GC cleanup is the fallback for when user code forgets.
+
+
+## See also
+
+- <Link href="/stream" />
+- <Link href="/channel" />
+- <Link href="/getContext" />

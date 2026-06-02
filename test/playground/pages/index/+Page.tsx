@@ -1,11 +1,13 @@
 export { Page }
 
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Hello } from './Hello'
 
 function Page() {
+  const [hydrated, setHydrated] = useState(false)
+  useEffect(() => setHydrated(true), [])
   return (
-    <div className="max-w-3xl mx-auto px-8 py-10">
+    <div id={hydrated ? 'hydrated' : undefined} className="max-w-3xl mx-auto px-8 py-10">
       <h1>Welcome</h1>
       <Counter />
       <Hello />

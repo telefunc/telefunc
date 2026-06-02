@@ -1,16 +1,15 @@
 export { testRun }
 export { testCloudflareBindings }
 
-import { autoRetry, expect, getServerUrl, page, sleep, test } from '@brillout/test-e2e'
+import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
 import { testCounter, testRunClassic } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
-  const isDev = cmd === 'pnpm run dev'
   testCloudflareBindings()
   testRunClassic(cmd, {
     tolerateError: (log) => log.logText.includes('Detected multiple renderers concurrently rendering'),
   })
-  testTodolist(isDev)
+  testTodolist()
 }
 
 function testCloudflareBindings() {
@@ -24,10 +23,12 @@ function testCloudflareBindings() {
   })
 }
 
-function testTodolist(isDev: boolean) {
+function testTodolist() {
   test('To-Do list', async () => {
     await page.goto(getServerUrl() + '/todo')
-    if (isDev) await sleep(500) // Seems to be required, otherwise the test is flaky. I don't know why.
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
     await page.locator('button', { hasText: 'Reset' }).click()
     await autoRetry(
       async () => {

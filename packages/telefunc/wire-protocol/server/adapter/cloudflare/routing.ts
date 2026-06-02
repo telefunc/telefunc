@@ -45,6 +45,8 @@ type SessionRoutingTarget = {
   shardOrdinal: number
 }
 
+// Fallback regions for continents without a direct DurableObject location hint:
+// AF → weur (lowest-latency for African traffic), SA → enam, AN → oc.
 const CLOUDFLARE_CONTINENT_LOCATION_HINT_MAP = {
   AF: 'weur',
   AS: 'apac',

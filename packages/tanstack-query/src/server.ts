@@ -7,6 +7,7 @@ import {
   __TQ__BROADCAST_KEY_PREFIX,
   __TQ__DATA_KEY,
   __TQ__CHANNEL_KEY,
+  EXTENSION_NAME,
   type TanstackQueryExtensionData,
   type TanstackQueryResult,
 } from './shared.js'
@@ -18,7 +19,7 @@ function topLevelKey(queryKey: readonly unknown[]): string {
 // --- Extension ---
 
 const extension = {
-  name: 'telefunc/tanstack-query',
+  name: EXTENSION_NAME,
   hooks: {
     onTransformResult(ctx) {
       const data = ctx.data as TanstackQueryExtensionData

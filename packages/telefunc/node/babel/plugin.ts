@@ -99,7 +99,6 @@ function isFileAlreadyTransformed(path: NodePath<BabelTypes.Program>, types: typ
 
     const specifier = t.specifiers[0]
     if (!types.isImportSpecifier(specifier)) return false
-    if (!types.isImportSpecifier(specifier)) return false
     if (!types.isIdentifier(specifier.imported)) return false
 
     return specifier.imported.name === '__remoteTelefunctionCall'
