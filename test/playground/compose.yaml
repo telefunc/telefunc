@@ -12,6 +12,10 @@ configs:
       }
       localhost {
           tls internal
+          log {
+              output stdout
+              format console
+          }
 
           # Bench-driven upstream-set selection via `?bench_instances=N` URL query.
           # Query (not header) so WS upgrades carry it too — the browser strips custom
