@@ -765,9 +765,9 @@ class ClientConnection implements MuxConnection {
     for (const channel of outcome.channelsToOpen) channel._onTransportOpen(this.transport.batched)
     if (outcome.reconcileComplete) {
       this.startTtlIfIdle()
+      this.maybeStartUpgrade(ctrl)
     }
     this.tryCompleteUpgradeHandoff()
-    this.maybeStartUpgrade(ctrl)
   }
 
   // ── SSE→WS upgrade ──

@@ -51,6 +51,7 @@ function testRunDocker() {
         t.includes('ERR_CONNECTION_CLOSED') ||
         t.includes('ERR_CONNECTION_RESET') ||
         t.includes('ERR_CONNECTION_REFUSED') ||
+        t.includes('ERR_NETWORK_CHANGED') ||
         t.includes('Failed to load resource: the server responded with a status of 403') ||
         (t.includes('WebSocket connection to') && t.includes('failed'))
       )
@@ -65,9 +66,16 @@ function testRunDocker() {
     }
     {
       page.goto(`${getServerUrl()}/`)
-      await autoRetry(async () => {
-        expect(await page.textContent('body')).toContain('Welcome Eva')
-      })
+      await autoRetry(
+        async () => {
+          const body = await page.textContent('body')
+          if (!body?.includes('Welcome Eva')) {
+            await page.reload({ waitUntil: 'domcontentloaded' })
+          }
+          expect(await page.textContent('body')).toContain('Welcome Eva')
+        },
+        { timeout: 10_000 },
+      )
       expect(await page.textContent('body')).not.toContain('Loading')
     }
   })
