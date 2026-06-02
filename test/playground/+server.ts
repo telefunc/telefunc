@@ -9,7 +9,7 @@ import { config } from 'telefunc'
 import { telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
 
-config.channel.pingInterval = 1000_000
+config.channel.pingInterval = 1000
 config.shield = true
 
 const INST = process.env.INSTANCE_ID ?? '?'

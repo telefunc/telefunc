@@ -1590,11 +1590,16 @@ class SseTransport implements ClientChannelTransport {
     const reconcileBatch = this.owner.stageReconcileBatch()
     const initialFrames: OutboundFrame[] = []
     initialFrames.push(reconcileBatch.reconcileFrame)
-    for (const frame of reconcileBatch.movedBufferedFrames) initialFrames.push(frame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
     const movedOutbox = this.outbox
     this.outbox = []
+    // Outbox contains frames carried over from earlier (failed) connect attempts —
+    // they have OLDER seqs than whatever was just drained from `sendBuffer`. Sending
+    // them first preserves monotonic seq order on the wire; otherwise the server
+    // accepts the newer batch first, advances `lastClientSeq`, then dup-drops the
+    // older batch (losing user messages sent while offline).
     for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
+    for (const frame of movedBufferedFrames) initialFrames.push(frame)
     return { initialFrames, movedOutbox, movedBufferedFrames }
   }
 
