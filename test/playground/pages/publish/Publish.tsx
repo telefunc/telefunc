@@ -84,6 +84,7 @@ function Publish() {
             received.push({ size: data.byteLength, firstByte: data[0]! })
             setResult(JSON.stringify({ received, done: received.length >= 5 }))
           })
+          await room.publish({ start: true })
         }}
       >
         Server broadcasts 5 binary frames

@@ -50,23 +50,15 @@ async function onBroadcastShieldClient() {
   return { room, getReceived: async () => received }
 }
 
-/** Client subscribes to binary broadcast, server publishes frames. Tests client-side subscribeBinary. */
+/** Client subscribes to binary broadcast, server publishes frames. Tests client-side subscribeBinary.
+ *  The client sends a `{ start: true }` text publish on the same wire as its BROADCAST_SUB (binary),
+ *  so by the time this `start` callback runs, the peer is wire-subscribed for binary. */
 async function onBinaryBroadcast() {
-  const room = new Broadcast({ key: 'room:broadcast-test' })
-
-  // Server publishes 5 binary frames after a short delay
-  room.onOpen(() => {
-    let i = 0
-    const interval = setInterval(() => {
-      if (i >= 5) {
-        clearInterval(interval)
-        return
-      }
-      const data = new Uint8Array(64).fill(i + 1)
-      room.publishBinary(data)
-      i++
-    }, 100)
+  const room = new Broadcast<{ start: true }>({ key: `room:broadcast-test:${crypto.randomUUID()}` })
+  room.subscribe(async () => {
+    for (let i = 0; i < 5; i++) {
+      await room.publishBinary(new Uint8Array(64).fill(i + 1))
+    }
   })
-
   return room
 }

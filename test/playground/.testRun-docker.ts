@@ -1,6 +1,7 @@
 export { testRunDocker }
 
 import { page, test, expect, expectLog, run, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
+import { waitForHydration } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
@@ -70,20 +71,8 @@ function testRunDocker() {
       expect(html).not.toContain('Eva')
     }
     {
-      // Chromium in Docker fires `net::ERR_NETWORK_CHANGED` when the bridge
-      // interface state shifts, aborting in-flight asset fetches and leaving
-      // React unhydrated. Chromium exposes no `NetworkChangeNotifier` toggle;
-      // the only recovery is to reload until hydration sticks.
       await page.goto(`${getServerUrl()}/`, { waitUntil: 'load' })
-      for (let attempt = 0; attempt < 4; attempt++) {
-        try {
-          await page.locator('#hydrated').waitFor({ state: 'attached', timeout: 5_000 })
-          break
-        } catch {
-          if (attempt === 3) throw new Error('Page never hydrated after 4 attempts')
-          await page.reload({ waitUntil: 'load' })
-        }
-      }
+      await waitForHydration()
       await autoRetry(
         async () => {
           expect(await page.textContent('body')).toContain('Welcome Eva')

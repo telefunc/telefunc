@@ -40,9 +40,18 @@ async function getCleanupState(): Promise<Record<string, string>> {
 }
 
 async function waitForHydration() {
-  await autoRetry(async () => {
-    expect(await page.locator('#hydrated').count()).toBe(1)
-  })
+  // Chromium-in-Docker can drop in-flight asset fetches with `ERR_NETWORK_CHANGED`
+  // when the bridge interface state shifts, leaving the page un-hydrated. Retry
+  // the navigation a few times before giving up.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      await page.locator('#hydrated').waitFor({ state: 'attached', timeout: 5_000 })
+      return
+    } catch {
+      if (attempt === 3) throw new Error('Page never hydrated after 4 attempts')
+      await page.reload({ waitUntil: 'load' })
+    }
+  }
 }
 
 async function getResult<T = any>(selector: string): Promise<T> {
