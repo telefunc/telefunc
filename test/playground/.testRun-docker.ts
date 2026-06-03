@@ -53,6 +53,10 @@ function testRunDocker() {
         t.includes('ERR_CONNECTION_REFUSED') ||
         t.includes('ERR_NETWORK_CHANGED') ||
         t.includes('ERR_SSL_PROTOCOL_ERROR') ||
+        // Chromium-in-Docker `NetworkChangeNotifier` aborts in-flight asset fetches on the
+        // bridge interface state shift; the dynamic-import wrapper then reports this. The
+        // `hello` test's reload loop recovers from it, so tolerate the noise it leaves behind.
+        t.includes('Failed to fetch dynamically imported module') ||
         t.includes('Failed to load resource: the server responded with a status of 403') ||
         (t.includes('WebSocket connection to') && t.includes('failed'))
       )
