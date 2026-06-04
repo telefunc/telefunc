@@ -346,24 +346,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       c.serverReplayBufferBinary,
     )
     this._clearTimer('_ttlTimer')
-    if (!this._hasServerSideOwnership()) {
-      this._ttlTimer = unrefTimer(
-        setTimeout(() => {
-          this._ttlTimer = null
-          this._shutdown(
-            new ChannelNetworkError('Channel timed out: no client connected within TTL after response was sent'),
-          )
-        }, globalObject.connectTtlMs),
-      )
-    }
-  }
-
-  /** Subclasses override to declare that the server holds an active reference to
-   *  this channel (e.g. a local `Broadcast.subscribe` listener), in which case
-   *  the connect-TTL is skipped — expiring it would tear down live local state
-   *  even though no client peer has attached. */
-  protected _hasServerSideOwnership(): boolean {
-    return false
+    this._ttlTimer = unrefTimer(
+      setTimeout(() => {
+        this._ttlTimer = null
+        this._shutdown(
+          new ChannelNetworkError('Channel timed out: no client connected within TTL after response was sent'),
+        )
+      }, globalObject.connectTtlMs),
+    )
   }
 
   _attachPeer(peer: IndexedPeer): void {

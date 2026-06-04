@@ -135,10 +135,6 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     }
   }
 
-  protected override _hasServerSideOwnership(): boolean {
-    return this._broadcastListeners.length > 0 || this._broadcastBinaryListeners.length > 0
-  }
-
   // --- Transport callbacks ---
 
   protected override _dispatchDataFrame(frame: ChannelDataFrame): void {
