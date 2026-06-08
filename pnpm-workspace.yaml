@@ -5,3 +5,4 @@ packages:
   - 'examples/*'
   - '!examples/react-native/'
   - '.github/workflows/ci'
+minimumReleaseAge: 0
