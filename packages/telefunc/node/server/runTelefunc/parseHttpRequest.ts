@@ -12,7 +12,7 @@ import { StreamReader } from '../../../wire-protocol/server/request/StreamReader
 import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
-import { getChannelMux } from '../../../wire-protocol/server/substrate/install.js'
+import { getChannelMux } from '../../../wire-protocol/server/mux.js'
 import { ChannelStreamSource } from '../../../wire-protocol/ChannelStreamSource.js'
 import type { ReviverType, TypeContract, ServerReviverContext } from '../../../wire-protocol/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'

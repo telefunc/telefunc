@@ -30,7 +30,7 @@ configs:
           @inst3 query bench_instances=3
           handle @inst3 {
               reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 {
-                  lb_policy round_robin
+                  lb_policy cookie
                   flush_interval -1
               }
           }
@@ -38,14 +38,14 @@ configs:
           @inst6 query bench_instances=6
           handle @inst6 {
               reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 playground-d:3000 playground-e:3000 playground-f:3000 {
-                  lb_policy round_robin
+                  lb_policy cookie
                   flush_interval -1
               }
           }
 
           # Pinned-instance routing: bench_instance=<letter> always sends to a specific backend.
-          # Used for throughput benchmarks that need all sends to land on the same instance
-          # as the channel (avoids cross-instance Redis proxy overhead for SSE channels).
+          # Used for benchmarks that span multiple instances — each slot is pinned to its
+          # own instance so the channel's reconnects always land on the same one.
           @pin_a query bench_instance=a
           handle @pin_a {
               reverse_proxy playground-a:3000 {
@@ -85,7 +85,7 @@ configs:
 
           handle {
               reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 {
-                  lb_policy round_robin
+                  lb_policy cookie
                   flush_interval -1
               }
           }
@@ -97,7 +97,7 @@ services:
     ulimits:
       memlock: -1
     command:
-      - --logtostdout
+      - --logtostderr
       - --proactor_threads=4
       - --maxmemory=16gb
       - --snapshot_cron=

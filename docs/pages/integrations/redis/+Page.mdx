@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-Redis-backed scaling for Telefunc — pub/sub fan-out across instances, plus cross-instance routing for channels.
+Redis-backed `Broadcast` fan-out across Telefunc instances — `publish()` on one instance reaches `subscribe()` on every other instance subscribed to the same key.
 
 ## Install
 
@@ -18,10 +18,7 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That configures Redis for Telefunc's cross-instance realtime features:
-
-- publishes from any instance fan out to every subscriber instance
-- channels route correctly when their connection lands on a different instance behind your load balancer
+That swaps the default in-memory broadcast transport for one backed by Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a given key.
 
 ### Sharing an existing client
 
@@ -35,21 +32,14 @@ const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
 installRedis(redis)
 ```
 
-Telefunc `duplicate()`s the client internally for its own connections — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
+Telefunc `duplicate()`s the client internally for its subscriber connection — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
 
-### What it configures
+## Channels
 
-`installRedis()` wires two pieces at once:
-
-- pub/sub fan-out across instances
-- cross-instance channel routing
-
-That means Redis covers both broadcast messaging and channels whose runtime state lives on a different server instance.
-
-All subscribers observe the same publish order for a given key.
+`Channel` is per-instance. Reconnects must land on the instance holding the channel's state, so multi-instance deployments need sticky sessions at the load balancer. See <Link href="/multiple-nodes" />.
 
 ## See also
 
-- <Link href="/channel#multi-server" /> — pub/sub and multi-server behavior
-- <Link href="/real-time" /> — realtime primitives
+- <Link href="/multiple-nodes" /> — running Telefunc across multiple instances
+- <Link href="/channel" /> — `Channel` and `Broadcast` primitives
 - <Link href="/integrations" /> — other Telefunc integrations

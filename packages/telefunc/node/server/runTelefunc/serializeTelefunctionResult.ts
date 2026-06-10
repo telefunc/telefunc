@@ -7,7 +7,7 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
-import { getChannelMux } from '../../../wire-protocol/server/substrate/install.js'
+import { getChannelMux } from '../../../wire-protocol/server/mux.js'
 import {
   buildShieldValidators,
   type ShieldValidators,

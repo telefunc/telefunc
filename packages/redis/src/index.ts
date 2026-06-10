@@ -1,44 +1,21 @@
 export { installRedis, RedisTransport }
 export type { InstallRedisOptions, RedisBroadcastOptions }
-export { RedisChannelSubstrate } from './substrate.js'
-export type { RedisChannelSubstrateOptions } from './substrate.js'
 
 import type { Cluster, Redis } from 'ioredis'
 import { config, type BroadcastTransport } from 'telefunc'
 import { assert } from './assert.js'
 import { callDefinedCommand } from './callDefinedCommand.js'
-import { RedisChannelSubstrate } from './substrate.js'
 
-/** Wires pub/sub fan-out + cross-instance channel routing.
- *
- *  Pass an existing `ioredis` Redis or Cluster client. Both adapter
- *  and substrate `duplicate()` internally for their subscriber/blocking sockets. */
+/** Wires Redis-backed broadcast pub/sub fan-out into the telefunc broadcast adapter so
+ *  `Broadcast.publish()`/`subscribe()` cross instances. Pair with sticky-session routing
+ *  at the load balancer so each client's channel traffic stays on one instance. */
 function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
   config.broadcast.transport = new RedisTransport({ redis, prefix: options.prefix })
-  config.channel.substrate = new RedisChannelSubstrate({
-    redis,
-    prefix: options.prefix,
-    instanceId: options.instanceId,
-    pinTtlSeconds: options.pinTtlSeconds,
-    inboxMaxLen: options.inboxMaxLen,
-    readCount: options.readCount,
-    inboxShardCount: options.inboxShardCount,
-  })
 }
 
 type InstallRedisOptions = {
   /** Default: `tf:`. */
   prefix?: string
-  /** Stable per-process id. Default: random UUID. */
-  instanceId?: string
-  /** Default: 30s. Refreshed by heartbeat. */
-  pinTtlSeconds?: number
-  /** `XADD MAXLEN ~ N` bound on the inbox stream. Default: 10_000. */
-  inboxMaxLen?: number
-  /** XREAD batch size. Default: 100. */
-  readCount?: number
-  /** Fixed inbox shard count per instance. Default: 2. */
-  inboxShardCount?: number
 }
 
 type RedisBroadcastOptions = {

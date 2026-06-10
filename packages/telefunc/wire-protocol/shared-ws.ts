@@ -67,10 +67,9 @@ const TAG = {
   /** Server → client after reconcile. JSON payload (`ReconciledPayload`). */
   RECONCILED: 0x05 as const,
   /** Server → client wire-probe ack. Sent over the SSE downstream after the long-lived
-   *  client→server stream-request POST's metadata has been parsed by the receiving server
-   *  (forwarded via substrate if it lands on a non-owner). The client awaits this within
-   *  `STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS` before declaring the transport open — confirms
-   *  the half-duplex streaming wire round-trips end-to-end. */
+   *  client→server stream-request POST's metadata has been parsed. The client awaits this
+   *  within `STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS` before declaring the transport open —
+   *  confirms the half-duplex streaming wire round-trips end-to-end. */
   STREAM_REQUEST_OPEN_ACK: 0x06 as const,
 
   // ─── Data plane ───
@@ -129,12 +128,6 @@ type ReconcilePayload = {
   /** Set when the client is upgrading from SSE to WS and has kept SSE alive.
    *  Server should drain the SSE send chain before replaying and attaching. */
   upgrade?: true
-  /** Cluster-stable identifier of the previous transport's wire (the SSE owner) when this
-   *  reconcile may land on a different instance than the one currently holding that wire.
-   *  The receiving instance uses it as the cluster directory key (`locateConnection`) to
-   *  verify `sessionId` and to RPC the previous wire's drain+fin to its owner. Always set
-   *  by the client when a previous wire exists — server skips the lookup on local hits. */
-  prevConnId?: string
   /** `initial: true` means this is the first reconcile for that channel — the server may
    *  not have created it yet (late-creation race during request body parse), so the server
    *  should wait up to `connectTtl` for it. Established channels (already reconciled at
@@ -143,16 +136,11 @@ type ReconcilePayload = {
   open: { id: string; ix: number; lastSeq: number; initial?: true }[]
 }
 
-/** All channels the server actually attached, with the cluster instance hosting each
- *  channel's runtime state (`home`) and the instance holding the SSE response wire
- *  (`ownerInstance`). The client mirrors these into every subsequent data-POST metadata
- *  so the receiver can route per-frame from a 1-byte alias alone — no cluster lookup,
- *  no frame decoding. Alias 0 routes to `ownerInstance` (connection-level frames);
- *  alias N (≥ 1) routes to `open[N − 1]` (`home` + `id`). */
+/** Per-channel acknowledgment: the server confirms each `ix` it attached and tells the
+ *  client which `lastSeq` it has on file, so the client can replay frames after that. */
 type ReconciledPayload = {
   sessionId: string
-  open: { id: string; ix: number; lastSeq: number; home: string }[]
-  ownerInstance: string
+  open: { ix: number; lastSeq: number }[]
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number

@@ -114,18 +114,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _pendingCloseAck = false
 
   // ── Wire state — channel-owned, persistent across attach-mode transitions ────
-  //
-  // Lives on the channel itself so the same buffer/seq counter serves a client
-  // whether the wire is local (mux's `IndexedPeer`) or substrate-mediated (the
-  // mux's substrate-backed `IndexedPeer`). Both paths reuse these fields rather
-  // than maintaining parallel external maps.
   /** Buffer of outgoing wire frames, used to replay missed frames on reconnect.
    *  Allocated in `_registerChannel`; disposed in `_shutdown`. Null only between
    *  construction and registration (no peer can attach before registration). */
   /** @internal */ _replayBuffer: ReplayBuffer | null = null
-  /** Highest client→server seq the channel has received and dispatched. Used
-   *  for both local-frame and substrate-frame deduplication, and reported back
-   *  to the client in `CtrlReconciled.open[].lastSeq`. */
+  /** Highest client→server seq the channel has received and dispatched. Used for
+   *  frame deduplication and reported back to the client in `CtrlReconciled.open[].lastSeq`. */
   /** @internal */ _lastClientSeq = 0
 
   /** Shield validators keyed by name (see `ChannelShield` in ../channel.ts).
@@ -389,10 +383,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._fireOpen()
   }
 
-  /** @internal — Entry point for an incoming wire frame. The mux calls this from both
-   *  the local-dispatch path (`handleClientFrame`) and the cross-instance home-side
-   *  path (`dispatchHomeFrame`). Handles ctrl routing, client→server seq dedup, and
-   *  delegation to `_dispatchDataFrame`. */
+  /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
+   *  client→server seq dedup, and delegation to `_dispatchDataFrame`. */
   _dispatchFrame(frame: ChannelFrame): void {
     if (isChannelCtrlTag(frame.tag)) {
       this._dispatchCtrl(frame as ChannelCtrlFrame)

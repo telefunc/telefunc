@@ -1,6 +1,6 @@
 # `@telefunc/redis`
 
-Redis-backed scaling for Telefunc — pub/sub fan-out across instances, plus cross-instance routing for channels.
+Redis-backed `Broadcast` fan-out for Telefunc — publishes on any instance reach subscribers on every other instance.
 
 ## Install
 
@@ -18,10 +18,9 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That's it. Your Telefunc app now scales horizontally:
+That swaps Telefunc's default in-memory broadcast transport for Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a given key.
 
-- Publishes from any instance fan out to every subscriber instance.
-- Channels route correctly when their connection lands on a different instance behind your load balancer.
+`Channel` is per-instance — its reconnects need to land on the instance holding the channel's state. Pair this package with sticky sessions at the load balancer; see [Using multiple nodes](https://telefunc.com/multiple-nodes).
 
 ### Sharing an existing client
 

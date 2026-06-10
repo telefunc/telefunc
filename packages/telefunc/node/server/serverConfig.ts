@@ -31,8 +31,6 @@ import {
   DefaultBroadcastAdapter,
   type BroadcastTransport,
 } from '../../wire-protocol/server/broadcast.js'
-import { installChannelSubstrate } from '../../wire-protocol/server/substrate/install.js'
-import type { ChannelSubstrate } from '../../wire-protocol/server/substrate/protocol.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
@@ -80,13 +78,6 @@ type ChannelConfigUser = {
    * Connections arriving on a transport not listed here are immediately rejected.
    */
   transports?: ChannelTransports
-  /**
-   * Substrate that pins each channel's home instance and routes wire frames
-   * across instances on cross-instance reconnect. Defaults to an in-memory
-   * substrate (single-process). Multi-instance deployments install a Redis,
-   * Cloudflare, or other cross-instance substrate here.
-   */
-  substrate?: ChannelSubstrate
   /**
    * How long, in milliseconds, the server keeps channel state after a client
    * disconnects while waiting for a reconnect.
@@ -491,19 +482,6 @@ function applyChannelConfig(val: unknown): void {
       case 'transports':
         next.transports = validateChannelTransports(value, configPath)
         break
-      case 'substrate': {
-        const candidate = value as unknown as ChannelSubstrate
-        assertUsage(
-          isObject(value) &&
-            typeof candidate.pinChannel === 'function' &&
-            typeof candidate.unpinChannel === 'function' &&
-            typeof candidate.locateRemoteHome === 'function',
-          `\`${configPath}\` must be a ChannelSubstrate`,
-        )
-        next.substrate = candidate
-        installChannelSubstrate(candidate)
-        break
-      }
       case 'reconnectTimeout':
       case 'idleTimeout':
       case 'pingInterval':

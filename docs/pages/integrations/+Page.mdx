@@ -21,7 +21,7 @@ Live queries for [TanStack Query](https://tanstack.com/query) — server-side in
 
 ## `@telefunc/redis`
 
-Redis-backed scaling for Telefunc — pub/sub fan-out across instances, plus cross-instance routing for channels.
+Redis-backed `Broadcast` fan-out across Telefunc instances — `publish()` on one instance reaches `subscribe()` on every other instance subscribed to the same key.
 
 → <Link href="/integrations/redis" text="Full documentation" />
 

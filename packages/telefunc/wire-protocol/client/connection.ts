@@ -32,7 +32,7 @@ import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
 import { ACK_STATUS, TAG, decode, encode, isChannelDataFrame, payloadBytes } from '../shared-ws.js'
 import type { AckResultStatus, ChannelFrame, DecodedFrame, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
-import { encodeSseRequest, METADATA_REFRESH_ALIAS, type SseRouteChannel } from '../sse-request.js'
+import { encodeSseRequest } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
 
 type BufferedFrame = {
@@ -157,7 +157,8 @@ type ClientChannelTransport = {
   readonly reconnectTimeoutMessage: string
   readonly sendReconcileOnOpen: boolean
   readonly reconcileMode: ReconcileBufferedFramesMode
-  /** Cluster-stable wire id used by the server to route cross-instance — set on SSE, `null` on WS. */
+  /** Stable wire id the server uses to look up this connection from out-of-band POSTs.
+   *  Set on SSE (the data POST carries it in metadata); `null` on WS (no out-of-band POSTs). */
   readonly connId: string | null
   /** True iff client→server frames are per-POST batched instead of pushed onto
    *  one streaming body — signals the channel to use a larger initial window. */
@@ -172,8 +173,8 @@ type ClientChannelTransport = {
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
-  /** Emit post-reconcile routing on the persistent upstream stream. No-op on WS. */
-  pushReconciledRouting(): void
+  /** First-call writes the stream-request POST's metadata header. No-op on WS. */
+  pushStreamRequestMetadata(): void
   /** Phase 1 of upgrade drain — gate still down, user sends keep flowing. Returns when the
    *  wire is naturally empty or `timeoutMs` elapses, whichever comes first. */
   gracefulDrain(timeoutMs: number): Promise<void>
@@ -757,7 +758,7 @@ class ClientConnection implements MuxConnection {
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     this.transport.applyReconciledSettings(ctrl)
-    this.transport.pushReconciledRouting()
+    this.transport.pushStreamRequestMetadata()
     const outcome = this.applyReconciled(ctrl)
     this.installHeartbeat(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
@@ -968,12 +969,7 @@ class ClientConnection implements MuxConnection {
     }
     const reconcile: ReconcilePayload = { open }
     if (this.sessionId) reconcile.sessionId = this.sessionId
-    if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') {
-      reconcile.upgrade = true
-      // Lets a non-owner cluster instance route the reconcile back. Null on WS (no stable id).
-      const handoffConnId = this.state.upgrade.from.connId
-      if (handoffConnId !== null) reconcile.prevConnId = handoffConnId
-    }
+    if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') reconcile.upgrade = true
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
@@ -1315,7 +1311,7 @@ class WsTransport implements ClientChannelTransport {
   }
 
   applyReconciledSettings(): void {}
-  pushReconciledRouting(): void {}
+  pushStreamRequestMetadata(): void {}
 
   sendPing(): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
@@ -1384,10 +1380,6 @@ class SseTransport implements ClientChannelTransport {
         metadataPushed: boolean
       }
     | { tag: 'failed' } = { tag: 'idle' }
-  // Routing table from `applyReconciledSettings`: alias N = `channels[N − 1]`, alias 0 = ownerInstance.
-  private ownerInstance = ''
-  private channels: SseRouteChannel[] = []
-  private ixToAlias = new Map<number, number>()
 
   constructor(
     private readonly telefuncUrl: string,
@@ -1445,9 +1437,8 @@ class SseTransport implements ClientChannelTransport {
       return
     }
     if (this.streamRequest.tag === 'active') {
-      const aliased = this.aliasPrepend(frame.frame)
-      this.streamRequest.body.push(encodeU32(aliased.byteLength))
-      this.streamRequest.body.push(aliased)
+      this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
+      this.streamRequest.body.push(frame.frame)
       return
     }
     const now = Date.now()
@@ -1455,19 +1446,6 @@ class SseTransport implements ClientChannelTransport {
     this.outbox.push({ frame: frame.frame, deadline })
     this.scheduleFlush()
     if (deadline <= now) void this.flushOutbox()
-  }
-
-  /** Routing alias for a frame: 0 = owner; N ≥ 1 = `channels[N − 1]`. Unknown ix → 0. */
-  private aliasFor(frame: Uint8Array): number {
-    const decoded = decode(frame)
-    return 'index' in decoded ? (this.ixToAlias.get(decoded.index) ?? 0) : 0
-  }
-
-  private aliasPrepend(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
-    const out = new Uint8Array(1 + frame.byteLength)
-    out[0] = this.aliasFor(frame)
-    out.set(frame, 1)
-    return out
   }
 
   private async openStream(): Promise<void> {
@@ -1532,7 +1510,7 @@ class SseTransport implements ClientChannelTransport {
     const reader = createSseEventStreamReader(response.body.getReader(), abortController)
 
     // Run the SSE loop concurrently with the handshake wait — RECONCILED arriving during
-    // the wait must still be dispatched (its `pushReconciledRouting` is what unblocks the ack).
+    // the wait must still be dispatched (its `pushStreamRequestMetadata` is what unblocks the ack).
     let resolveHandshakeOk!: () => void
     const handshakeOkP = new Promise<'ok'>((resolve) => {
       resolveHandshakeOk = () => resolve('ok')
@@ -1634,9 +1612,7 @@ class SseTransport implements ClientChannelTransport {
           },
           body: encodeSseRequest({
             connId: this.connId,
-            ownerInstance: this.ownerInstance,
-            channels: this.channels,
-            batch: encodeLengthPrefixedFrames(queued.map((entry) => this.aliasPrepend(entry.frame))),
+            batch: encodeLengthPrefixedFrames(queued, (entry) => entry.frame),
           }),
           signal: this.transportAbort.signal,
         })
@@ -1684,9 +1660,7 @@ class SseTransport implements ClientChannelTransport {
         },
         body: encodeSseRequest({
           connId: this.connId,
-          ownerInstance: this.ownerInstance,
-          channels: this.channels,
-          batch: encodeLengthPrefixedFrames(frames.map((f) => this.aliasPrepend(f))),
+          batch: encodeLengthPrefixedFrames(frames),
         }),
         signal: this.transportAbort.signal,
       })
@@ -1741,9 +1715,6 @@ class SseTransport implements ClientChannelTransport {
     if (ctrl.sseFlushThrottle) this.flushThrottleMs = ctrl.sseFlushThrottle
     if (ctrl.ssePostIdleFlushDelay) this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
     this.heartbeatFlushDelayMs = Math.floor(ctrl.pingInterval / 2)
-    this.ownerInstance = ctrl.ownerInstance
-    this.channels = ctrl.open.map((entry) => ({ id: entry.id, home: entry.home }))
-    this.ixToAlias = new Map(ctrl.open.map((entry, i) => [entry.ix, i + 1]))
   }
 
   sendPing(): void {
@@ -1764,28 +1735,12 @@ class SseTransport implements ClientChannelTransport {
     return this.heartbeat !== null
   }
 
-  /** Push the post-reconcile routing table onto the live stream-request body. */
-  pushReconciledRouting(): void {
+  /** Write the stream-request POST's metadata header onto the live body — first call only.
+   *  `streamRequest: true` tells the server to emit `reconciled` inline (the body never ends). */
+  pushStreamRequestMetadata(): void {
     const sr = this.streamRequest
-    if (sr.tag !== 'active') return
-    if (sr.metadataPushed) {
-      const refresh = textEncoder.encode(JSON.stringify(this.channels))
-      const entry = new Uint8Array(1 + refresh.byteLength)
-      entry[0] = METADATA_REFRESH_ALIAS
-      entry.set(refresh, 1)
-      sr.body.push(encodeU32(entry.byteLength))
-      sr.body.push(entry)
-      return
-    }
-    // `streamRequest: true` → server emits `reconciled` inline (the body never ends).
-    const meta = textEncoder.encode(
-      JSON.stringify({
-        connId: this.connId,
-        ownerInstance: this.ownerInstance,
-        channels: this.channels,
-        streamRequest: true,
-      }),
-    )
+    if (sr.tag !== 'active' || sr.metadataPushed) return
+    const meta = textEncoder.encode(JSON.stringify({ connId: this.connId, streamRequest: true }))
     sr.body.push(encodeU32(meta.byteLength))
     sr.body.push(meta)
     sr.metadataPushed = true

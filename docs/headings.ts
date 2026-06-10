@@ -240,6 +240,11 @@ const headings = [
     url: '/close',
   },
   {
+    level: 2,
+    title: 'Using multiple nodes',
+    url: '/multiple-nodes',
+  },
+  {
     level: 4,
     title: 'Error Handling',
   },

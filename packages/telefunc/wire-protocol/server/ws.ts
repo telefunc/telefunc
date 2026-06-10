@@ -2,8 +2,8 @@ export { getTelefuncChannelHooks }
 
 import { defineHooks, type Peer } from 'crossws'
 import { enableChannelTransports } from '../../node/server/serverConfig.js'
-import { getChannelMux } from './substrate/install.js'
-import type { ServerTransport } from './substrate/mux.js'
+import { getChannelMux } from './mux.js'
+import type { ServerTransport } from './mux.js'
 
 declare module 'crossws' {
   interface PeerContext {
@@ -19,9 +19,8 @@ function getTelefuncChannelHooks() {
     setSessionId: (peer, sessionId) => {
       peer.context.telefuncSessionId = sessionId
     },
-    /** WebSocket frames always land on the owner instance (the wire is persistent and
-     *  bidirectional), so there's no cross-instance routing to support. Returning null
-     *  opts the connection out of the substrate's connection-pin machinery. */
+    /** Persistent bidirectional WebSocket: no out-of-band POSTs to route, so no need for a
+     *  connId-based reverse lookup. */
     getConnId: () => null,
     sendNow: (peer, frame) => {
       peer.send(frame)
