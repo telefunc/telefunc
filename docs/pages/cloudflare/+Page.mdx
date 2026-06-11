@@ -44,14 +44,14 @@ export default {
 }
 ```
 
-> Why these bindings:
+> Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else, and Durable Objects and KV are Cloudflare's primitives for exactly that:
 >
-> - **Durable Object**: channels are stateful. Each WebSocket connection and its in-memory channel state live on a Durable Object.
-> - **KV**: stores session tokens (so each browser reaches the same Durable Object across requests) and pub/sub presence (which Durable Objects have active subscribers for a key).
+> - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
+> - **KV** provides shared storage: it's how stateless workers — wherever a request happens to land — find the Durable Object that holds the state.
 >
-> Both bindings are always required: `tf.serve()` routes every Telefunc request through the Durable Object, plain telefunction calls included, and checks the session token in KV on each request. If your app doesn't use `Channel` or `Broadcast`, you can skip both bindings and use `serve()` instead of `telefunc/cloudflare`, see <Link text="Low-level API" href="/server#low-level-api" />.
+> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `Broadcast`, there's no state to keep — skip both bindings and use `serve()` instead, see <Link text="Low-level API" href="/server#low-level-api" />.
 >
-> See <Link href="#architecture" /> for details.
+> See <Link href="#architecture" /> for implementation details.
 
 ## Context
 
