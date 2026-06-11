@@ -20,7 +20,29 @@ type CategoryNames = ExtractCategoryName<(typeof categories)[number]>
 
 const categories = ['Guides', 'API', 'Get Started', 'Overview', 'Miscellaneous'] as const satisfies Config['categories']
 
-const headingsDetached = [...misc()] satisfies HeadingDetachedDefinition[]
+const headingsDetached = [
+  {
+    title: 'Cloudflare Workers',
+    url: '/cloudflare',
+    category: 'API',
+  },
+  {
+    title: '`@telefunc/rxjs`',
+    url: '/integrations/rxjs',
+    category: 'Guides',
+  },
+  {
+    title: '`@telefunc/tanstack-query`',
+    url: '/integrations/tanstack-query',
+    category: 'Guides',
+  },
+  {
+    title: '`@telefunc/redis`',
+    url: '/integrations/redis',
+    category: 'Guides',
+  },
+  ...misc(),
+] satisfies HeadingDetachedDefinition[]
 
 const headings = [
   {
@@ -144,6 +166,26 @@ const headings = [
     url: '/file-upload',
   },
   {
+    level: 2,
+    title: 'File download',
+    url: '/file-download',
+  },
+  {
+    level: 2,
+    title: 'Stream',
+    url: '/stream',
+  },
+  {
+    level: 2,
+    title: 'Real-Time',
+    url: '/real-time',
+  },
+  {
+    level: 2,
+    title: 'Integrations',
+    url: '/integrations',
+  },
+  {
     level: 1,
     title: 'API',
     titleIcon: iconGear,
@@ -180,8 +222,27 @@ const headings = [
   },
   {
     level: 2,
-    title: '`telefunc()',
-    url: '/telefunc',
+    title: '`serve()`',
+    url: '/serve',
+  },
+  {
+    level: 4,
+    title: 'Real-Time',
+  },
+  {
+    level: 2,
+    title: '`Channel` / `Broadcast`',
+    url: '/channel',
+  },
+  {
+    level: 2,
+    title: '`close()` / `onClose()`',
+    url: '/close',
+  },
+  {
+    level: 2,
+    title: 'Using multiple nodes',
+    url: '/multiple-nodes',
   },
   {
     level: 4,
@@ -215,6 +276,11 @@ const headings = [
     level: 2,
     title: '`httpHeaders`',
     url: '/httpHeaders',
+  },
+  {
+    level: 2,
+    title: '`transport`',
+    url: '/transport',
   },
   {
     level: 2,

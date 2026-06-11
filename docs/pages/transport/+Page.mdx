@@ -1,0 +1,109 @@
+import { Link } from '@brillout/docpress'
+import { ConfigWhereClient } from '../../components'
+
+**Environment**: client.
+
+Telefunc has two transport settings:
+
+| Setting | Controls |
+|---|---|
+| `config.stream.transport` | How <Link href="/stream">streamed values</Link> (`AsyncGenerator`, `ReadableStream`, `Promise`) are delivered |
+| `config.channel.transports` | How <Link text={<code>channel()</code>} href="/channel" /> connections work |
+
+Plain telefunction calls are always `text/plain` JSON — these settings only affect streaming and channels.
+
+```ts
+// Environment: client
+
+import { config } from 'telefunc/client'
+
+config.stream.transport = 'binary-inline'   // default
+config.channel.transports = ['sse']            // default
+```
+
+<ConfigWhereClient />
+
+
+## Stream transport
+
+Controls how streamed values are delivered over HTTP.
+
+| Transport | Content-Type | Description |
+|---|---|---|
+| `'binary-inline'` (default) | `application/octet-stream` | Raw binary chunked response. Lowest overhead. |
+| `'sse-inline'` | `text/event-stream` | Base64url-encoded SSE. Works through proxies that buffer binary. |
+| `'channel'` | `text/plain` + channel | Starts in HTTP, continues over the configured channel transport. |
+
+### Comparison
+
+| | Throughput | Proxy/CDN | Recovery | Setup |
+|---|---|---|---|---|
+| `'binary-inline'` | ✅ | 🟡 | ❌ | None |
+| `'sse-inline'` | 🟡 | ✅ | ❌ | None |
+| `'channel'` (SSE) | 🟡 | ✅ | ✅ | None |
+| `'channel'` (WS) | ✅ | 🟡 | ✅ | <Link text="Server setup" href="/server" /> |
+
+### When to use what
+
+- **Start with `'binary-inline'`** — it's the fastest and works in most setups.
+- **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses but passes SSE events through.
+- **Use `'channel'`** when you want streamed values to use the same reconnecting transport as Telefunc channels.
+
+
+## Channel transport
+
+Controls how <Link text={<code>channel()</code>} href="/channel" /> connections work, and which backend `config.stream.transport = 'channel'` uses.
+
+| Transport | Description |
+|---|---|
+| `'sse'` (default) | HTTP requests + SSE stream. Works without extra server setup. |
+| `'ws'` | Multiplexed WebSocket. Requires <Link text="WebSocket server setup" href="/server" />. |
+
+### Comparison
+
+| | Throughput | Recovery | Proxy/CDN | Setup |
+|---|---|---|---|---|
+| `'sse'` | 🟡 | ✅ | ✅ | None |
+| `'ws'` | ✅ | ✅ | 🟡 | <Link text="Server setup" href="/server" /> |
+
+- **Start with `'sse'`** — it works everywhere out of the box.
+- **Use `'ws'`** for chatty real-time traffic where you want full-duplex.
+
+> When WebSocket is enabled (see <Link href="/server" />), the server supports both SSE and WS. The client starts on SSE and seamlessly upgrades to WebSocket in the background — no interruption to your application code.
+
+
+## Recommended setup
+
+| Goal | Config |
+|---|---|
+| Best default | `config.stream.transport = 'binary-inline'` |
+| Proxy buffers binary | `config.stream.transport = 'sse-inline'` |
+| Streams with reconnection | `config.stream.transport = 'channel'` |
+| Channels without WS | `config.channel.transports = ['sse']` |
+| Full-duplex channels | `config.channel.transports = ['sse', 'ws']` + <Link text="Server setup" href="/server" /> |
+
+
+## Per-call override
+
+Override the transport for a single call using `withContext()`:
+
+```ts
+import { onAIChat } from './Chat.telefunc'
+import { withContext } from 'telefunc/client'
+
+const gen = withContext(onAIChat, {
+  stream: { transport: 'channel' },
+  channel: { transports: ['ws'] },
+})('Tell me a joke')
+
+for await (const token of gen) {
+  console.log(token)
+}
+```
+
+
+## See also
+
+- <Link href="/stream" /> — streaming values
+- <Link href="/real-time" /> — real-time patterns
+- <Link href="/channel" /> — channel API

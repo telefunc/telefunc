@@ -12,10 +12,12 @@ Usually used for sending authentication headers.
 
 import { config } from 'telefunc/client'
 
-config.httpHeaders = {
+config.headers = {
   Authorization: `Bearer ${token}`
 }
 ```
+
+> **Note**: `config.httpHeaders` is deprecated — use `config.headers` instead.
 
 <ConfigWhereClient />
 
@@ -24,4 +26,4 @@ config.httpHeaders = {
 
 - <Link href="/fetch" />
 - <Link href="/permissions" />
-- [#167 - Dynamic `httpHeaders`?](https://github.com/telefunc/telefunc/issues/167)
+- [#167 - Dynamic headers?](https://github.com/brillout/telefunc/issues/167)

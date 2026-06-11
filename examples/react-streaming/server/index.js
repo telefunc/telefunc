@@ -23,11 +23,13 @@ async function startServer() {
       url: req.originalUrl,
       method: req.method,
       readable: req,
-      contentType: req.headers['content-type'] || '',
+      headers: req.headers,
       context,
     })
-    const { body, statusCode, contentType: type } = httpResponse
-    res.status(statusCode).type(type).send(body)
+    const { body, statusCode, headers } = httpResponse
+    res.status(statusCode)
+    headers.forEach(([name, value]) => res.setHeader(name, value))
+    res.send(body)
   })
 
   app.get('*', async (req, res, next) => {

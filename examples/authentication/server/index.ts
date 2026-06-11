@@ -17,11 +17,14 @@ async function startServer() {
       url: req.originalUrl,
       method: req.method,
       readable: req,
-      contentType: req.headers['content-type'] || '',
+      headers: req.headers,
       context,
     })
-    const { body, statusCode, contentType: type } = httpResponse
-    res.status(statusCode).type(type).send(body)
+    const { body, statusCode, headers } = httpResponse
+    for (const [key, value] of headers) {
+      res.setHeader(key, value)
+    }
+    res.status(statusCode).send(body)
   })
 
   // Set pageContext.user

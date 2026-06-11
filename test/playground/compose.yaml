@@ -1,0 +1,213 @@
+configs:
+  caddyfile:
+    content: |
+      # HTTPS via Caddy's per-volume internal CA. Browsers/Playwright run with cert
+      # validation disabled, Node fetch via NODE_TLS_REJECT_UNAUTHORIZED=0 — both set in
+      # the test runner. HTTP/2 end-to-end so half-duplex `streamRequest` POSTs work.
+      {
+          # Override Caddy's default "eternal grace period" so long-lived `streamRequest`
+          # bodies don't keep the proxy alive on SIGTERM. Reconnect tests rely on
+          # `docker compose restart proxy` actually severing TCP within ~1s.
+          grace_period 1s
+      }
+      localhost {
+          tls internal
+          log {
+              output stdout
+              format console
+          }
+
+          # Bench-driven upstream-set selection via `?bench_instances=N` URL query.
+          # Query (not header) so WS upgrades carry it too — the browser strips custom
+          # headers from `new WebSocket(url)` but keeps the URL's query string intact.
+          @inst1 query bench_instances=1
+          handle @inst1 {
+              reverse_proxy playground-a:3000 {
+                  flush_interval -1
+              }
+          }
+
+          @inst3 query bench_instances=3
+          handle @inst3 {
+              reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 {
+                  lb_policy cookie
+                  flush_interval -1
+              }
+          }
+
+          @inst6 query bench_instances=6
+          handle @inst6 {
+              reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 playground-d:3000 playground-e:3000 playground-f:3000 {
+                  lb_policy cookie
+                  flush_interval -1
+              }
+          }
+
+          # Pinned-instance routing: bench_instance=<letter> always sends to a specific backend.
+          # Used for benchmarks that span multiple instances — each slot is pinned to its
+          # own instance so the channel's reconnects always land on the same one.
+          @pin_a query bench_instance=a
+          handle @pin_a {
+              reverse_proxy playground-a:3000 {
+                  flush_interval -1
+              }
+          }
+          @pin_b query bench_instance=b
+          handle @pin_b {
+              reverse_proxy playground-b:3000 {
+                  flush_interval -1
+              }
+          }
+          @pin_c query bench_instance=c
+          handle @pin_c {
+              reverse_proxy playground-c:3000 {
+                  flush_interval -1
+              }
+          }
+          @pin_d query bench_instance=d
+          handle @pin_d {
+              reverse_proxy playground-d:3000 {
+                  flush_interval -1
+              }
+          }
+          @pin_e query bench_instance=e
+          handle @pin_e {
+              reverse_proxy playground-e:3000 {
+                  flush_interval -1
+              }
+          }
+          @pin_f query bench_instance=f
+          handle @pin_f {
+              reverse_proxy playground-f:3000 {
+                  flush_interval -1
+              }
+          }
+
+          handle {
+              reverse_proxy playground-a:3000 playground-b:3000 playground-c:3000 {
+                  lb_policy cookie
+                  flush_interval -1
+              }
+          }
+      }
+
+services:
+  redis:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    ulimits:
+      memlock: -1
+    command:
+      - --logtostderr
+      - --proactor_threads=4
+      - --maxmemory=16gb
+      - --snapshot_cron=
+      - --dbfilename=
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
+  playground-a: &playground
+    image: node:24-alpine
+    working_dir: /repo/test/playground
+    command: node dist/nested/server/index.mjs
+    volumes:
+      - ../..:/repo
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: A
+      NO_HTTPS: '1'
+      # Pass-through from host so `TELEFUNC_NATIVE=1 docker compose up` flips the
+      # `/_telefunc` adapter to the Node `req`/`res` path across all instances.
+      # Unset on the host → adapter falls back to the Web Request path.
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/ || exit 1"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+
+  playground-b:
+    <<: *playground
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: B
+      NO_HTTPS: '1'
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
+
+  playground-c:
+    <<: *playground
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: C
+      NO_HTTPS: '1'
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
+
+  playground-d:
+    <<: *playground
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: D
+      NO_HTTPS: '1'
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
+
+  playground-e:
+    <<: *playground
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: E
+      NO_HTTPS: '1'
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
+
+  playground-f:
+    <<: *playground
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      INSTANCE_ID: F
+      NO_HTTPS: '1'
+      TELEFUNC_NATIVE: ${TELEFUNC_NATIVE:-}
+
+  proxy:
+    image: caddy:2-alpine
+    ports:
+      - "8443:443"
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy-data:/data
+    depends_on:
+      playground-a:
+        condition: service_healthy
+      playground-b:
+        condition: service_healthy
+      playground-c:
+        condition: service_healthy
+      playground-d:
+        condition: service_healthy
+      playground-e:
+        condition: service_healthy
+      playground-f:
+        condition: service_healthy
+    # Hit Caddy's HTTPS listener through the reverse_proxy block to a playground container —
+    # a 200 means the whole data path (TLS handshake → reverse_proxy → upstream) is live.
+    # `--no-check-certificate` skips local-CA validation inside the container.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider --no-check-certificate https://localhost/ || exit 1"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  caddy-data:

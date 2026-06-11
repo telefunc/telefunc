@@ -7,3 +7,6 @@ TO-DO/next-major-release:
 - Re-apply global namespace usage commit: https://github.com/brillout/telefunc/commit/7758568044edb4d4008c11be0667c13cedb7a149
   - Revert the revert: https://github.com/brillout/telefunc/commit/616fd0933c3add63b754c1424fd585b0c9c700b2
   - It's a breaking change => release a new major
+
+
+

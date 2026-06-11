@@ -109,18 +109,15 @@ See also: <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={
 
 **2. Handle the error on the server-side.**
 
-You can handle the thrown error at your Telefunc server middleware:
+You can handle the thrown error using the <Link text="low-level API" href="/serve" />:
 
 ```ts
 // server.ts
 
-// Server (Express.js/Fastify/...)
+import { serve } from 'telefunc'
 
-import { telefunc } from 'telefunc'
-
-// Telefunc middleware
-app.all('/_telefunc', async (req: Request, res: Response) => {
-  const httpResponse = await telefunc(/* ... */)
+app.all('/_telefunc', async (c) => {
+  const httpResponse = await serve({ request: c.req.raw })
   // Telefunc exposes any error thrown by a telefunction at httpResponse.err
   if (httpResponse.err) {
     // Error handling
@@ -143,11 +140,12 @@ If the user's browser can't connect to your server:
   <body>
     <script type="module">
       import { hello } from './hello.telefunc.js'
+      import { ConnectionError } from 'telefunc/client'
 
       try {
         await hello('Eva')
       } catch(err) {
-        if (err.isConnectionError) {
+        if (err instanceof ConnectionError) {
           // There is a network problem:
           //  - the user isn't connected to the internet, or
           //  - your server is down.
@@ -164,3 +162,67 @@ If the user's browser can't connect to your server:
 
 - <Link href="/onBug" />
 - <Link href="/abort-vs-error" />
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

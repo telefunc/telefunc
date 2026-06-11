@@ -2,19 +2,11 @@ export { apply }
 
 import type { UserConfig } from 'vite'
 import { assert } from '../../../utils/assert.js'
-import { isViteCliCall } from './isViteCliCall.js'
 
-function apply(
-  when: 'dev' | 'preview',
-  { skipMiddlewareMode, onlyViteCli }: { skipMiddlewareMode?: true; onlyViteCli?: true } = {},
-) {
+function apply(when: 'dev' | 'preview', { skipMiddlewareMode }: { skipMiddlewareMode?: true } = {}) {
   return (config: UserConfig, { command, mode }: { command: string; mode: string }): boolean => {
     assert(command)
     assert(mode)
-
-    if (onlyViteCli && !isViteCliCall({ command: when })) {
-      return false
-    }
 
     if (when === 'dev') {
       if (skipMiddlewareMode === true && config?.server?.middlewareMode) {

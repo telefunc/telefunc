@@ -1,0 +1,273 @@
+import { Link } from '@brillout/docpress'
+
+Telefunc supports streaming in both directions:
+- **Server → client**: Return `AsyncGenerator`, `ReadableStream`, or nested `Promise` from a telefunction.
+- **Client → server**: Pass a `ReadableStream` as a telefunction argument.
+
+> Streaming works out of the box with zero config. Plain telefunction calls are unaffected.
+
+
+## Which one should I use?
+
+| Type | Best for | Values |
+|---|---|---|
+| [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) | AI tokens, notifications, progress updates | Structured (JSON-serializable) |
+| [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) | Raw byte streams without file metadata | Binary (`Uint8Array`) |
+| <Link text={<code>File</code>} href="/file-download" /> / <Link text={<code>Blob</code>} href="/file-download" /> | File downloads with `name` / `type` / `size` | Binary (`Uint8Array`) |
+| <Link text={<code>download()</code>} href="/file-download#download" /> | File / Blob downloads with progress + cancel, or upstream-streamed bytes | Binary (`Uint8Array`) |
+| Nested [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise) | Lazy parts of a response that resolve independently | Any serializable value |
+
+
+## `AsyncGenerator`
+
+The usual choice for incremental structured values.
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+export async function* onChat(prompt: string): AsyncGenerator<string> {
+  const stream = await ai.streamText({ prompt })
+  for await (const token of stream) {
+    yield token
+  }
+}
+```
+
+```tsx
+// Chat.tsx
+// Environment: client
+
+import { onChat } from './Chat.telefunc'
+
+const gen = onChat('Tell me a joke')
+for await (const token of gen) {
+  console.log(token) // Each token arrives as it's yielded
+}
+```
+
+
+## `ReadableStream`
+
+Use `ReadableStream` when you need to stream raw bytes.
+
+```ts
+// Download.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+import { Readable } from 'node:stream'
+
+export function onDownload(fileName: string): ReadableStream<Uint8Array> {
+  return Readable.toWeb(fs.createReadStream(`./files/${fileName}`)) as ReadableStream<Uint8Array>
+}
+```
+
+> For named files with `name` / `type` / `size` metadata, return a <Link text={<code>File</code>} href="/file-download" /> or <Link text={<code>Blob</code>} href="/file-download" /> instead.
+
+```ts
+// Download.tsx
+// Environment: client
+
+import { onDownload } from './Download.telefunc'
+
+const stream = await onDownload('report.pdf')
+const reader = stream.getReader()
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  // Process raw bytes
+}
+```
+
+## Nested `Promise`
+
+Return unawaited promises inside the response object — the client gets the surrounding values immediately while each promise resolves independently.
+
+```ts
+// Dashboard.telefunc.ts
+// Environment: server
+
+export async function onLoadDashboard() {
+  return {
+    title: 'Dashboard',            // Delivered immediately
+    summary: fetchSummary(),        // Resolves independently
+    report: fetchExtensiveReport(), // Resolves independently
+  }
+}
+```
+
+```tsx
+// Dashboard.tsx
+// Environment: client
+
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const res = await onLoadDashboard()
+
+console.log(res.title)             // Available right away
+
+const summary = await res.summary  // Await when needed
+const report = await res.report
+```
+
+> **Don't `await` inside the telefunction** — that blocks the entire response:
+> ```ts
+> // ❌ Blocks everything
+> export async function onLoadDashboard() {
+>   await prepare()
+>   return { title: 'Dashboard' }
+> }
+> ```
+> Return the promise instead:
+> ```ts
+> // ✅ title delivered immediately, promise resolves in the background
+> export async function onLoadDashboard() {
+>   return {
+>     title: 'Dashboard',
+>     data: prepare(),
+>   }
+> }
+> ```
+
+
+## Client → server streaming
+
+Pass a `ReadableStream` as a telefunction argument to stream bytes from the client to the server.
+
+```ts
+// Ingest.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+import { Writable } from 'node:stream'
+
+export async function onIngest(stream: ReadableStream<Uint8Array>, filename: string) {
+  const dest = fs.createWriteStream(`./uploads/${filename}`)
+  await stream.pipeTo(Writable.toWeb(dest))
+}
+```
+
+```ts
+// Ingest.tsx
+// Environment: client
+
+import { onIngest } from './Ingest.telefunc'
+
+const stream = new ReadableStream({
+  start(controller) {
+    controller.enqueue(new TextEncoder().encode('chunk 1'))
+    controller.enqueue(new TextEncoder().encode('chunk 2'))
+    controller.close()
+  },
+})
+
+await onIngest(stream, 'data.txt')
+```
+
+| Method | Backpressure | Best for |
+|---|---|---|
+| <Link text={<code>File</code>} href="/file-upload" /> / <Link text={<code>Blob</code>} href="/file-upload" /> argument | TCP-level | Finite uploads — files, images, CSV imports |
+| `ReadableStream` argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
+| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | No | Fire-and-forget binary — low-latency frames where dropping is acceptable |
+| <Link text={<code>new Broadcast().publishBinary()</code>} href="/channel#new-broadcast" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
+
+
+## Mixed return types
+
+A telefunction can return any combination of generators, streams, and promises.
+
+```ts
+// Dashboard.telefunc.ts
+// Environment: server
+
+export async function onLoadDashboard() {
+  async function* notifications(): AsyncGenerator<string> {
+    for (const n of await fetchNotifications()) {
+      yield n.text
+    }
+  }
+
+  return {
+    title: 'Dashboard',
+    stream: notifications(),
+    fast: Promise.resolve({ count: 42 }),
+    slow: fetchExtensiveReport(),
+  }
+}
+```
+
+```tsx
+// Dashboard.tsx
+// Environment: client
+
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const res = await onLoadDashboard()
+
+// Static values — available immediately
+console.log(res.title)
+
+// Consume generator and promises independently
+for await (const notification of res.stream) {
+  console.log(notification)
+}
+
+const fast = await res.fast
+const slow = await res.slow
+```
+
+> Multiple generators and promises resolve concurrently without blocking each other.
+
+
+## Cancellation & cleanup
+
+See <Link href="/close" /> for all cancellation methods (`close()`, `break`, `gen.return()`, `reader.cancel()`) and server-side cleanup via `onClose()`.
+
+
+## Transport
+
+By default, streamed values are sent as raw binary chunks over HTTP (`application/octet-stream`). You can switch transport globally or per call.
+
+| Transport | Description |
+|---|---|
+| `'binary-inline'` (default) | Raw binary chunked HTTP response. Lowest overhead. |
+| `'sse-inline'` | Base64url-encoded Server-Sent Events — works through proxies that buffer binary |
+| `'channel'` | Delivers over the configured channel transport (`'sse'` or `'ws'`) with reconnection support |
+
+```ts
+// Environment: client
+
+import { config } from 'telefunc/client'
+
+config.stream.transport = 'sse-inline'
+```
+
+Override per call:
+
+```ts
+import { onChat } from './Chat.telefunc'
+import { withContext } from 'telefunc/client'
+
+const gen = withContext(onChat, {
+  stream: { transport: 'channel' },
+})('Tell me a joke')
+```
+
+See <Link href="/transport" /> for a full comparison.
+
+
+## Error handling
+
+Telefunc distinguishes expected failures from bugs — even in streaming responses. If a generator or stream throws, the client receives a typed error while values already delivered remain available.
+
+See <Link href="/error-handling" /> for details.
+
+
+## See also
+
+- <Link href="/real-time" /> — function passing, channels, and upload progress
+- <Link href="/file-upload" /> — streaming file uploads
+- <Link href="/file-download" /> — streaming file downloads
+- <Link href="/channel" /> — bidirectional channels
+- <Link href="/transport" /> — transport comparison and configuration

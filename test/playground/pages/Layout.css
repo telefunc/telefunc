@@ -1,16 +1,16 @@
-/* This CSS is common to all pages */
+@import 'tailwindcss';
 
-body {
-  margin: 0;
-  font-family: sans-serif;
-}
-* {
-  box-sizing: border-box;
-}
-a {
-  text-decoration: none;
-}
-
-.navitem {
-  padding: 3px;
+@layer base {
+  h1 {
+    @apply text-2xl font-bold text-zinc-900 mb-4;
+  }
+  h2 {
+    @apply text-lg font-semibold text-zinc-800 mt-6 mb-3;
+  }
+  button {
+    @apply px-3 py-1.5 text-sm font-medium rounded-md border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 cursor-pointer transition-colors;
+  }
+  pre {
+    @apply bg-zinc-50 border border-zinc-200 rounded-md p-3 text-xs overflow-x-auto;
+  }
 }

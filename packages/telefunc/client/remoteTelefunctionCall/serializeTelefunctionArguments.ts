@@ -4,39 +4,113 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
-import { createMultipartReplacer } from '../../shared/multipart/serializer-client.js'
-import { FORM_DATA_MAIN_FIELD } from '../../shared/multipart/constants.js'
+import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
+import { encodeRequestEnvelope } from '../../wire-protocol/frame.js'
+import { pumpClientProducerToChannel } from '../../wire-protocol/client/request/pumpToChannel.js'
+import { ClientChannel } from '../../wire-protocol/client/channel.js'
+import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
+import { makeAbortError } from './errors.js'
+import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
+import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/types.js'
+import { CloseHandler } from '../close.js'
+import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { GcRegistry } from '../../wire-protocol/gcRegistry.js'
+
+const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {
+  gcRegistry: new GcRegistry(),
+})
 
 type CallContext = {
   telefuncFilePath: string
   telefunctionName: string
   telefunctionArgs: unknown[]
+  stream?: { transport?: StreamTransport }
+  channel: { transports: ChannelTransports }
+  abortController: AbortController
+  extensions?: Record<string, unknown>
+  extensionRequestTypes: ReplacerType<TypeContract, ClientReplacerContext>[]
+  connectionKey?: string
+  headers?: Record<string, string> | null
   telefuncUrl: string
 }
 
-function serializeTelefunctionArguments(callContext: CallContext): string | FormData {
-  const dataMain = {
+type SerializeResult = {
+  httpRequestBody: string | Blob
+  requestCloseHandlers: CloseHandler[]
+}
+
+function serializeTelefunctionArguments(callContext: CallContext): SerializeResult {
+  const dataMain: Record<string, unknown> = {
     file: callContext.telefuncFilePath,
     name: callContext.telefunctionName,
     args: callContext.telefunctionArgs,
   }
 
-  const files: { key: string; value: File | Blob }[] = []
-  const replacer = createMultipartReplacer({
-    onFile: (key, file) => files.push({ key, value: file }),
-    onBlob: (key, blob) => files.push({ key, value: blob }),
-  })
-
-  const dataMainSerialized = serialize(dataMain, callContext, replacer)
-  if (files.length === 0) return dataMainSerialized
-
-  const formData = new FormData()
-  // dataMainSerialized MUST come first — it contains the files metadata, which streaming needs before the files data
-  formData.append(FORM_DATA_MAIN_FIELD, dataMainSerialized)
-  for (const { key, value } of files) {
-    formData.append(key, value)
+  if (callContext.stream?.transport) {
+    const { transport } = callContext.stream
+    dataMain.stream = { transport }
   }
-  return formData
+
+  if (callContext.extensions) {
+    dataMain.extensions = callContext.extensions
+  }
+
+  const channelTransports = callContext.channel.transports
+  const connectionKey = callContext.connectionKey
+  const headers = callContext.headers ?? undefined
+  const telefuncUrl = callContext.telefuncUrl
+  const abortSignal = callContext.abortController.signal
+  const files: Blob[] = []
+  const requestCloseHandlers: CloseHandler[] = []
+
+  const replacer = createRequestReplacer(
+    {
+      registerFile(body) {
+        const index = files.length
+        files.push(body)
+        return index
+      },
+      createChannel(opts) {
+        return new ClientChannel({
+          channelId: crypto.randomUUID(),
+          ack: opts?.ack,
+          transports: channelTransports,
+          connectionKey,
+          headers,
+          telefuncUrl,
+        })
+      },
+      sendStream(createProducer) {
+        return pumpClientProducerToChannel(createProducer, channelTransports, telefuncUrl, connectionKey, headers)
+      },
+    },
+    function onReplaced(replaced) {
+      {
+        // Track the user's actual value — when they drop all references to it, close.
+        // (Unlike the response side, we don't create a value here; the user already
+        //  holds the original, so it serves as its own GC anchor.)
+        const { value, close } = replaced
+        assert(isObjectOrFunction(value))
+        globalObject.gcRegistry.register(value, close)
+      }
+
+      {
+        const { close, abort } = replaced
+        abortSignal.addEventListener(
+          'abort',
+          () => {
+            abort(makeAbortError(undefined, callContext))
+          },
+          { once: true },
+        )
+        requestCloseHandlers.push(close)
+      }
+    },
+    callContext.extensionRequestTypes,
+  )
+  const dataMainSerialized = serialize(dataMain, callContext, replacer)
+  const httpRequestBody = files.length > 0 ? encodeRequestEnvelope(dataMainSerialized, files) : dataMainSerialized
+  return { httpRequestBody, requestCloseHandlers }
 }
 
 type Replacer = Parameters<typeof stringify>[1] extends infer O ? (O extends { replacer?: infer R } ? R : never) : never

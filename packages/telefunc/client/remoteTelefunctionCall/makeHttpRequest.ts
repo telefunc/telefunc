@@ -3,70 +3,89 @@ export { makeHttpRequest }
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
-import { objectAssign } from '../../utils/objectAssign.js'
-import { callOnAbortListeners } from './onAbort.js'
+import { parseResponse } from '../../wire-protocol/client/response/parse.js'
+import type { ReviverType, TypeContract, ClientReviverContext } from '../../wire-protocol/types.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire-protocol/request-kind.js'
+import { throwAbortError, throwBugError } from './errors.js'
+import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
+import type { CloseHandler } from '../close.js'
+import { ConnectionError } from '../ConnectionError.js'
+import { appendSessionParam, getSessionToken, setSessionToken } from '../../wire-protocol/client/session-registry.js'
+import { TELEFUNC_SESSION_HEADER, type ChannelTransports } from '../../wire-protocol/constants.js'
 import {
-  STATUS_CODE_THROW_ABORT,
-  STATUS_CODE_INTERNAL_SERVER_ERROR,
-  STATUS_BODY_INTERNAL_SERVER_ERROR,
-  STATUS_CODE_MALFORMED_REQUEST,
-  STATUS_BODY_MALFORMED_REQUEST,
-  STATUS_CODE_SHIELD_VALIDATION_ERROR,
-  STATUS_BODY_SHIELD_VALIDATION_ERROR,
   STATUS_CODE_SUCCESS,
+  STATUS_CODE_THROW_ABORT,
+  STATUS_CODE_MALFORMED_REQUEST,
+  STATUS_CODE_INTERNAL_SERVER_ERROR,
+  STATUS_CODE_SHIELD_VALIDATION_ERROR,
+  STATUS_BODY_MALFORMED_REQUEST,
+  STATUS_BODY_INTERNAL_SERVER_ERROR,
+  STATUS_BODY_SHIELD_VALIDATION_ERROR,
 } from '../../shared/constants.js'
 
 const method = 'POST'
 
 async function makeHttpRequest(callContext: {
   telefuncUrl: string
-  httpRequestBody: string | FormData
+  httpRequestBody: string | Blob
   telefunctionName: string
   telefuncFilePath: string
-  httpHeaders: Record<string, string> | null
+  headers: Record<string, string> | null
   fetch: typeof globalThis.fetch | null
-}): Promise<{ telefunctionReturn: unknown }> {
-  const isMultipart = typeof callContext.httpRequestBody !== 'string'
-  const contentType = isMultipart
-    ? // Don't set Content-Type for FormData — browser sets multipart/form-data with boundary automatically
-      null
-    : { 'Content-Type': 'text/plain' }
+  abortController: AbortController
+  channel: { transports: ChannelTransports }
+  requestCloseHandlers: CloseHandler[]
+  extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
+  connectionKey?: string
+  channelIdleTimeout?: number
+}): Promise<unknown> {
+  const isBinaryFrame = typeof callContext.httpRequestBody !== 'string'
+  const requestKind = isBinaryFrame ? REQUEST_KIND.BINARY : REQUEST_KIND.TEXT
+  const sessionToken = getSessionToken(callContext.telefuncUrl)
+  const fetchUrl = sessionToken ? appendSessionParam(callContext.telefuncUrl, sessionToken) : callContext.telefuncUrl
+  const requestUrl = getMarkedRequestUrl(fetchUrl, requestKind)
+  const contentType = isBinaryFrame ? { 'Content-Type': 'application/octet-stream' } : { 'Content-Type': 'text/plain' }
+  const requestKindHeader = { [REQUEST_KIND_HEADER]: requestKind }
   let response: Response
   try {
     const fetch = callContext.fetch ?? window.fetch
-    response = await fetch(callContext.telefuncUrl, {
+    response = await fetch(requestUrl, {
       method,
       body: callContext.httpRequestBody,
       credentials: 'same-origin',
       headers: {
         ...contentType,
-        ...callContext.httpHeaders,
+        ...requestKindHeader,
+        ...callContext.headers,
+        ...(sessionToken ? { [TELEFUNC_SESSION_HEADER]: sessionToken } : undefined),
       },
+      signal: callContext.abortController.signal,
     })
-  } catch (_) {
-    const telefunctionCallError = new Error('No Server Connection')
-    objectAssign(telefunctionCallError, { isConnectionError: true as const })
-    throw telefunctionCallError
+  } catch (err) {
+    if (callContext.abortController.signal.aborted) {
+      throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
+    }
+    throw new ConnectionError()
   }
 
   const statusCode = response.status
+  const newSessionToken = response.headers.get(TELEFUNC_SESSION_HEADER) ?? undefined
+
+  if (newSessionToken) setSessionToken(callContext.telefuncUrl, newSessionToken)
 
   if (statusCode === STATUS_CODE_SUCCESS) {
-    const { ret } = await parseResponseBody(response, callContext)
-    const telefunctionReturn = ret
-    return { telefunctionReturn }
+    const parsed = await parseResponse(response, callContext, callContext.connectionKey, callContext.channelIdleTimeout)
+    assertUsage(isObject(parsed) && 'ret' in parsed, wrongInstallation({ method, callContext }))
+    return parsed.ret
   } else if (statusCode === STATUS_CODE_THROW_ABORT) {
-    const { ret } = await parseResponseBody(response, callContext)
-    const abortValue = ret
-    const telefunctionCallError = new Error(
-      `Aborted telefunction call ${callContext.telefunctionName}() (${callContext.telefuncFilePath}).`,
-    )
-    objectAssign(telefunctionCallError, { isAbort: true as const, abortValue })
-    callOnAbortListeners(telefunctionCallError)
-    throw telefunctionCallError
+    const responseBody = await response.text()
+    const parsed: unknown = parse(responseBody)
+    assertUsage(isObject(parsed) && 'ret' in parsed, wrongInstallation({ method, callContext }))
+    assert('abort' in parsed)
+    throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, (parsed as { ret: unknown }).ret)
   } else if (statusCode === STATUS_CODE_INTERNAL_SERVER_ERROR) {
     const errMsg = await getErrMsg(STATUS_BODY_INTERNAL_SERVER_ERROR, response, callContext)
-    throw new Error(errMsg)
+    throwBugError(errMsg)
   } else if (statusCode === STATUS_CODE_SHIELD_VALIDATION_ERROR) {
     const errMsg = await getErrMsg(
       STATUS_BODY_SHIELD_VALIDATION_ERROR,
@@ -74,7 +93,7 @@ async function makeHttpRequest(callContext: {
       callContext,
       ' (if enabled: https://telefunc.com/log)',
     )
-    throw new Error(errMsg)
+    throw new ShieldValidationError(errMsg)
   } else if (statusCode === STATUS_CODE_MALFORMED_REQUEST) {
     const responseBody = await response.text()
     assertUsage(responseBody === STATUS_BODY_MALFORMED_REQUEST, wrongInstallation({ method, callContext }))
@@ -82,7 +101,7 @@ async function makeHttpRequest(callContext: {
     // This should never happen as the Telefunc Client shouldn't make invalid requests
     assert(false)
     */
-    assertUsage(false, 'Try again. You may need to reload the page. (The client and server are/was out-of-sync.)')
+    assertUsage(false, 'Try again. You may need to reload the page. (The client and server are out of sync.)')
   } else {
     assertUsage(
       statusCode !== 404,
@@ -104,14 +123,7 @@ async function makeHttpRequest(callContext: {
   }
 }
 
-async function parseResponseBody(response: Response, callContext: { telefuncUrl: string }): Promise<{ ret: unknown }> {
-  const responseBody = await response.text()
-  const responseBodyParsed = parse(responseBody)
-  assertUsage(isObject(responseBodyParsed) && 'ret' in responseBodyParsed, wrongInstallation({ method, callContext }))
-  assert(response.status !== STATUS_CODE_THROW_ABORT || 'abort' in responseBodyParsed)
-  const { ret } = responseBodyParsed
-  return { ret }
-}
+// ===== Helpers =====
 
 function wrongInstallation({
   reason = 'an HTTP response body that Telefunc never generates',

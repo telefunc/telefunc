@@ -30,9 +30,12 @@ function installTelefunc(app) {
       url: req.originalUrl,
       method: req.method,
       readable: req,
-      contentType: req.headers['content-type'] || '',
+      headers: req.headers,
     })
-    res.status(httpResponse.statusCode).type(httpResponse.contentType).send(httpResponse.body)
+    for (const [key, value] of httpResponse.headers) {
+      res.setHeader(key, value)
+    }
+    res.status(httpResponse.statusCode).send(httpResponse.body)
   })
 }
 

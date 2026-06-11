@@ -2,9 +2,10 @@ export default BabelPluginTelefunc
 
 import { parse } from '@babel/parser'
 import { transformTelefuncFileClientSideSync } from '../shared/transformer/transformTelefuncFileClientSideSync.js'
+import { getExtensionImports } from '../shared/discoverExtensions.js'
 import { toPosixPath } from '../../utils/path.js'
 import type { PluginObj, NodePath } from '@babel/core'
-import type * as BabelTypes from '@babel/types'
+import type { types as BabelTypes } from '@babel/core'
 
 function getExportsFromBabelAST(programNodePath: NodePath<BabelTypes.Program>, types: typeof BabelTypes) {
   const body = programNodePath.node.body
@@ -61,6 +62,8 @@ function getExportsFromBabelAST(programNodePath: NodePath<BabelTypes.Program>, t
   return exported
 }
 
+let clientExtensionImports: string[] | undefined
+
 function BabelPluginTelefunc(babel: { types: typeof BabelTypes }): PluginObj {
   return {
     visitor: {
@@ -73,15 +76,15 @@ function BabelPluginTelefunc(babel: { types: typeof BabelTypes }): PluginObj {
         const exportNames = getExportsFromBabelAST(path, babel.types)
 
         const root: string = context.file.opts.root!
-        const transformed: string = transformTelefuncFileClientSideSync(
+        clientExtensionImports ??= getExtensionImports(toPosixPath(root), 'client')
+        const code: string = transformTelefuncFileClientSideSync(
           toPosixPath(filename),
           toPosixPath(root),
           exportNames,
+          clientExtensionImports,
         ).code
 
-        const parsed = parse(transformed, {
-          sourceType: 'module',
-        })
+        const parsed = parse(code, { sourceType: 'module' })
 
         path.replaceWith(parsed.program)
       },
@@ -95,7 +98,6 @@ function isFileAlreadyTransformed(path: NodePath<BabelTypes.Program>, types: typ
     if (t.specifiers.length === 0) return false
 
     const specifier = t.specifiers[0]
-    if (!types.isImportSpecifier(specifier)) return false
     if (!types.isImportSpecifier(specifier)) return false
     if (!types.isIdentifier(specifier.imported)) return false
 

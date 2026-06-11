@@ -3,7 +3,17 @@ export { testRun }
 import { page, test, expect, run, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
-  run(cmd)
+  // This testRun is shared by `examples/vike` and `examples/react-streaming`, each with
+  // dev and prod variants — four runtimes total:
+  //   - vike dev      → vite              ("Local: http://localhost:3000/")
+  //   - vike preview  → srvx              ("Listening on:")
+  //   - react-streaming dev/prod → express ("Server running at")
+  run(cmd, {
+    serverIsReadyMessage: (log) =>
+      log.includes('Listening on') ||
+      log.includes('Server running at') ||
+      (log.includes('Local:') && log.includes('http://localhost:3000')),
+  })
 
   test('HTML', async () => {
     const html = await fetchHtml('/')

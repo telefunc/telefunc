@@ -1,7 +1,31 @@
 export { configUser as config }
 export { resolveClientConfig }
+export { getStreamTransport }
 
-import { assertUsage } from '../utils/assert.js'
+import { assertUsage, assertWarning } from '../utils/assert.js'
+import { isObject } from '../utils/isObject.js'
+import type { TelefuncClientExtension } from './extensions.js'
+import type {
+  ReplacerType,
+  ReviverType,
+  TypeContract,
+  ClientReplacerContext,
+  ClientReviverContext,
+} from '../wire-protocol/types.js'
+import {
+  DEFAULT_CLIENT_CHANNEL_TRANSPORTS,
+  DEFAULT_STREAM_TRANSPORT,
+  type ChannelTransports,
+  type StreamTransport,
+} from '../wire-protocol/constants.js'
+
+type StreamConfigUser = {
+  transport?: StreamTransport
+}
+
+type ChannelConfigUser = {
+  transports?: ChannelTransports
+}
 
 /** Telefunc Client Configuration */
 type ConfigUser = {
@@ -14,27 +38,107 @@ type ConfigUser = {
    */
   telefuncUrl?: string
   /** Additional headers sent along Telefunc HTTP requests */
+  headers?: Record<string, string>
+  /**
+   * @deprecated Use `headers` instead.
+   * @see headers
+   */
   httpHeaders?: Record<string, string>
   /** Custom fetch implementations */
   fetch?: typeof globalThis.fetch
-}
-type ConfigResolved = {
-  telefuncUrl: string
-  httpHeaders: Record<string, string> | null
-  fetch: typeof globalThis.fetch | null
+  /** Configuration for streamed telefunction results. */
+  stream: StreamConfigUser
+  /** Configuration for Telefunc channels. */
+  channel: ChannelConfigUser
+  /** Registered client extensions. Use `config.extensions.push(ext)` to add. */
+  extensions: TelefuncClientExtension[]
 }
 
-const configUser: ConfigUser = new Proxy({}, { set: validateUserConfig })
+type ConfigResolved = {
+  telefuncUrl: string
+  headers: Record<string, string> | null
+  fetch: typeof globalThis.fetch | null
+  stream?: StreamConfigUser
+  channel: { transports: ChannelTransports }
+  extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
+  extensionRequestTypes: ReplacerType<TypeContract, ClientReplacerContext>[]
+}
+
+const configState: ConfigUser = { stream: {}, channel: {}, extensions: [] }
+
+const configUser: ConfigUser = new Proxy({} as ConfigUser, {
+  get(_target, prop) {
+    if (prop === 'extensions') {
+      return new Proxy(configState.extensions, {
+        get(target, subProp, receiver) {
+          if (subProp === 'push') {
+            return (...exts: TelefuncClientExtension[]) => {
+              for (const ext of exts) {
+                const idx = target.findIndex((e) => e.name === ext.name)
+                if (idx >= 0) {
+                  target[idx] = ext
+                } else {
+                  target.push(ext)
+                }
+              }
+              return target.length
+            }
+          }
+          return Reflect.get(target, subProp, receiver)
+        },
+      })
+    }
+    if (prop === 'stream') {
+      return new Proxy({} as StreamConfigUser, {
+        get(_t, subProp) {
+          return configState.stream[subProp as keyof StreamConfigUser]
+        },
+        set(_t, subProp, val) {
+          if (typeof subProp !== 'string') return true
+          applyStreamConfig({ ...configState.stream, [subProp]: val })
+          return true
+        },
+      })
+    }
+    if (prop === 'channel') {
+      return new Proxy({} as ChannelConfigUser, {
+        get(_t, subProp) {
+          return configState.channel[subProp as keyof ChannelConfigUser]
+        },
+        set(_t, subProp, val) {
+          if (typeof subProp !== 'string') return true
+          applyChannelConfig({ ...configState.channel, [subProp]: val })
+          return true
+        },
+      })
+    }
+    return configState[prop as keyof typeof configState]
+  },
+  set(_target, prop, val) {
+    applyUserConfig(prop, val)
+    return true
+  },
+})
 
 function resolveClientConfig(): ConfigResolved {
   return {
-    httpHeaders: configUser.httpHeaders ?? null,
-    telefuncUrl: configUser.telefuncUrl || '/_telefunc',
-    fetch: configUser.fetch ?? null,
+    headers: configState.headers ?? configState.httpHeaders ?? null,
+    telefuncUrl: configState.telefuncUrl || '/_telefunc',
+    fetch: configState.fetch ?? null,
+    stream: configState.stream.transport ? { ...configState.stream } : undefined,
+    channel: { transports: configState.channel.transports ?? [...DEFAULT_CLIENT_CHANNEL_TRANSPORTS] },
+    extensionResponseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),
+    extensionRequestTypes: configState.extensions.flatMap((ext) => ext.requestTypes ?? []),
   }
 }
 
-function validateUserConfig(configUserUnwrapped: ConfigUser, prop: string, val: unknown) {
+function getStreamTransport(config: { stream?: StreamConfigUser }): StreamTransport {
+  return (config.stream && config.stream.transport) || DEFAULT_STREAM_TRANSPORT
+}
+
+function applyUserConfig(prop: string | symbol, val: unknown) {
+  if (typeof prop !== 'string') return
+
   if (prop === 'telefuncUrl') {
     assertUsage(typeof val === 'string', 'config.telefuncUrl should be a string')
     const isIpAddress = (value: string) => /^\d/.test(value)
@@ -42,19 +146,85 @@ function validateUserConfig(configUserUnwrapped: ConfigUser, prop: string, val: 
       val.startsWith('/') || val.startsWith('http') || isIpAddress(val),
       `config.telefuncUrl (client-side) is '${val}' but it should be one of the following: a URL pathname (such as '/_telefunc'), a URL with origin (such as 'https://example.org/_telefunc'), or an IP address (such as '192.158.1.38') — see https://telefunc.com/telefuncUrl`,
     )
-    configUserUnwrapped[prop] = val
+    configState.telefuncUrl = val
+  } else if (prop === 'headers') {
+    assertUsage(
+      typeof val === 'object' && val !== null && Object.values(val).every((v) => typeof v === 'string'),
+      '`config.headers` should be an object of strings',
+    )
+    configState.headers = val as Record<string, string>
   } else if (prop === 'httpHeaders') {
+    assertWarning(false, '`config.httpHeaders` (client-side) is deprecated, use `config.headers` instead', {
+      onlyOnce: true,
+      showStackTrace: true,
+    })
     assertUsage(
       typeof val === 'object' && val !== null && Object.values(val).every((v) => typeof v === 'string'),
       '`config.httpHeaders` should be an object of strings',
     )
-    configUserUnwrapped[prop] = val as Record<string, string>
+    configState.httpHeaders = val as Record<string, string>
   } else if (prop === 'fetch') {
     assertUsage(typeof val === 'function', '`config.fetch` should be a function')
-    configUserUnwrapped[prop] = val as typeof globalThis.fetch
+    configState.fetch = val as typeof globalThis.fetch
+  } else if (prop === 'stream') {
+    applyStreamConfig(val)
+  } else if (prop === 'channel') {
+    applyChannelConfig(val)
+  } else if (prop === 'extensions') {
+    assertUsage(Array.isArray(val), 'config.extensions should be an array')
+    configState.extensions = val as TelefuncClientExtension[]
   } else {
     assertUsage(false, `Unknown config.${prop}`)
   }
+}
 
-  return true
+function applyStreamConfig(val: unknown): void {
+  assertUsage(isObject(val), 'config.stream should be an object')
+  const next: StreamConfigUser = {}
+  for (const [key, value] of Object.entries(val)) {
+    if (key === 'transport') {
+      next.transport = validateStreamTransport(value, 'config.stream.transport')
+    } else {
+      assertUsage(false, `Unknown config.stream.${key}`)
+    }
+  }
+  configState.stream = next
+}
+
+function applyChannelConfig(val: unknown): void {
+  assertUsage(isObject(val), 'config.channel should be an object')
+  const next: ChannelConfigUser = {}
+  for (const [key, value] of Object.entries(val)) {
+    if (key === 'transports') {
+      next.transports = validateChannelTransports(value, 'config.channel.transports')
+    } else {
+      assertUsage(false, `Unknown config.channel.${key}`)
+    }
+  }
+  configState.channel = next
+}
+
+function validateStreamTransport(val: unknown, configPath: string): StreamTransport {
+  assertUsage(
+    val === 'binary-inline' || val === 'sse-inline' || val === 'channel',
+    `\`${configPath}\` should be 'binary-inline', 'sse-inline', or 'channel'`,
+  )
+  return val
+}
+
+function validateChannelTransports(val: unknown, configPath: string): ChannelTransports {
+  assertUsage(
+    Array.isArray(val) && val.length > 0 && val.every((v) => v === 'sse' || v === 'ws'),
+    `\`${configPath}\` should be an array of transports, e.g. ['sse'] or ['sse', 'ws']`,
+  )
+  return val as ChannelTransports
+}
+
+export type {
+  ConfigUser,
+  ConfigResolved,
+  StreamConfigUser,
+  ChannelConfigUser,
+  ChannelTransports,
+  TelefuncClientExtension,
 }

@@ -1,11 +1,12 @@
 export { pluginDev }
 
 import type { Plugin, ResolvedConfig } from 'vite'
-import { apply } from '../shared/apply.js'
-import { addTelefuncMiddleware } from '../shared/addTelefuncMiddleware.js'
 import { getPackageNodeModulesDirectory } from '../../../utils/requireResolve.js'
+import { addTelefuncMiddleware } from '../shared/addTelefuncMiddleware.js'
+import { apply } from '../shared/apply.js'
 
 function pluginDev(): Plugin[] {
+  let isCloudflarePlugin = false
   return [
     {
       name: 'telefunc:pluginDev',
@@ -24,6 +25,7 @@ function pluginDev(): Plugin[] {
       },
       configResolved: {
         async handler(config) {
+          isCloudflarePlugin = config.plugins.some((p) => p.name === 'vite-plugin-cloudflare')
           fixOptimizeDeps(config.optimizeDeps)
           await determineFsAllowList(config)
         },
@@ -31,13 +33,21 @@ function pluginDev(): Plugin[] {
     },
     {
       name: 'telefunc:pluginDev:serverMiddleware',
-      apply: apply('dev', { skipMiddlewareMode: true, onlyViteCli: true }),
+      apply: apply('dev', { skipMiddlewareMode: true }),
       // Ensure that SvelteKit's configureServer() has precedence, see https://github.com/brillout/telefunc/pull/54
       enforce: 'post',
       configureServer: {
         handler(server) {
-          return () => {
+          return async () => {
             addTelefuncMiddleware(server.middlewares)
+            if (server.httpServer && !isCloudflarePlugin) {
+              // Dynamic import to avoid loading crossws at build time
+              // Skip for @cloudflare/vite-plugin: it runs the worker in its own
+              // environment with a custom WS handler — registering the Node.js
+              // upgrade listener would steal WS upgrades from Cloudflare's handler.
+              const { telefunc } = await import('../../../serve/node.js')
+              telefunc().installWebSocket(server.httpServer)
+            }
           }
         },
       },

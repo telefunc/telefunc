@@ -1,21 +1,34 @@
 {
+  // spellcheck-ignore
+  "compatibility_flags": ["nodejs_als"],
   "$schema": "node_modules/wrangler/config-schema.json",
   "compatibility_date": "2025-08-06",
   "name": "vike_test_cloudflare_vite-plugin",
   "vars": { "SOME_ENV_VAR": "some-value" },
-  "main": "./worker/index.ts",
+  "main": "vike:server-entry",
   "durable_objects": {
     "bindings": [
       {
         "name": "TO_DO_LIST_DURABLE_OBJECTS",
         "class_name": "TodoListDurableObject"
+      },
+      {
+        "name": "TelefuncDurableObject",
+        "class_name": "TelefuncDurableObject"
       }
     ]
   },
+  "kv_namespaces": [
+    {
+      "binding": "TelefuncKV",
+      "id": "telefunc-kv"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TodoListDurableObject"]
+      "new_sqlite_classes": ["TodoListDurableObject"],
+      "new_classes": ["TelefuncDurableObject"]
     }
   ]
 }

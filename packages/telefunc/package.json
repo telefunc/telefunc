@@ -1,6 +1,6 @@
 {
   "name": "telefunc",
-  "version": "0.2.20",
+  "version": "0.2.19",
   "scripts": {
     "build": "rm -rf dist/ && tsc --build",
     "dev": "tsc --watch",
@@ -12,9 +12,10 @@
   },
   "dependencies": {
     "@brillout/import": "^0.2.6",
-    "@brillout/json-serializer": "^0.5.22",
+    "@brillout/json-serializer": "^0.5.23",
     "@brillout/picocolors": "^1.0.28",
-    "@brillout/vite-plugin-server-entry": "^0.7.18",
+    "@brillout/vite-plugin-server-entry": "0.7.18",
+    "crossws": "^0.4.4",
     "es-module-lexer": "^1.7.0",
     "magic-string": "^0.30.17",
     "ts-morph": "^26.0.0"
@@ -40,6 +41,11 @@
       "browser": "./dist/client/index.js",
       "types": "./dist/client/index.d.ts",
       "default": "./dist/node/client.js"
+    },
+    "./react": {
+      "browser": "./dist/client/react/index.js",
+      "types": "./dist/client/react/index.d.ts",
+      "default": "./dist/client/react/index.js"
     },
     "./react-streaming": {
       "worker": "./dist/node/react-streaming/index.js",
@@ -83,15 +89,37 @@
       "browser": "./dist/client/poisen-pills/__internal/loadBuildEntry.js",
       "types": "./dist/node/server/runTelefunc/loadTelefuncFilesUsingVite/loadBuildEntry.d.ts",
       "default": "./dist/node/server/runTelefunc/loadTelefuncFilesUsingVite/loadBuildEntry.js"
+    },
+    "./node": {
+      "types": "./dist/serve/node.d.ts",
+      "default": "./dist/serve/node.js"
+    },
+    "./bun": {
+      "types": "./dist/serve/bun.d.ts",
+      "default": "./dist/serve/bun.js"
+    },
+    "./deno": {
+      "types": "./dist/serve/deno.d.ts",
+      "default": "./dist/serve/deno.js"
+    },
+    "./cloudflare": {
+      "types": "./dist/serve/cloudflare.d.ts",
+      "default": "./dist/serve/cloudflare.js"
+    },
+    "./__internal": {
+      "types": "./dist/node/server/__internal.d.ts",
+      "default": "./dist/node/server/__internal.js"
     }
   },
   "type": "module",
   "devDependencies": {
-    "@babel/core": "7.27.4",
-    "@babel/parser": "7.27.5",
-    "@babel/types": "7.27.6",
+    "@babel/core": "7.29.0",
+    "@babel/parser": "7.29.0",
+    "@babel/types": "7.29.0",
     "@brillout/release-me": "^0.4.5",
+    "@cloudflare/workers-types": "^4.20260305.1",
     "@nuxt/types": "^2.18.1",
+    "@tanstack/query-core": "^5.95.2",
     "@types/express": "^5.0.3",
     "@types/node": "^24.0.4",
     "@types/react": "^19.2.14",
@@ -99,15 +127,16 @@
     "react": "^19.2.4",
     "react-streaming": "^0.4.17",
     "typescript": "^5.8.3",
-    "vite": "^7.0.0"
+    "vite": "^8.0.16"
   },
   "peerDependencies": {
     "@babel/core": ">=7.0.0",
     "@babel/parser": ">=7.0.0",
     "@babel/types": ">=7.0.0",
-    "vite": ">=6.3.0",
     "react": ">=18.0.0",
-    "react-streaming": ">=0.3.3"
+    "react-streaming": ">=0.3.3",
+    "vite": ">=6.3.0",
+    "@tanstack/query-core": ">=5.0.0"
   },
   "peerDependenciesMeta": {
     "@babel/core": {
@@ -127,10 +156,13 @@
     },
     "react": {
       "optional": true
+    },
+    "@tanstack/query-core": {
+      "optional": true
     }
   },
   "engines": {
-    "node": ">=12.19.0"
+    "node": ">=20"
   },
   "files": [
     "dist/",
