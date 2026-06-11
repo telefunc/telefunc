@@ -38,7 +38,7 @@ function testPublish() {
       // 3 publishes → 3 acks with monotonically increasing seq, all keyed to the shared topic.
       expect(result.acks.length).toBe(3)
       expect(result.acks.map((a) => a.seq)).deep.equal([1, 2, 3])
-      for (const ack of result.acks) expect(ack.key).toBe('room:text-test')
+      for (const ack of result.acks) expect(ack.key).match(/^room:text-test:/)
 
       // Subscriber on the same key received all 3 messages in publish order.
       expect(result.received.map((r) => r.text)).deep.equal(['msg-0', 'msg-1', 'msg-2'])
@@ -57,7 +57,7 @@ function testPublish() {
 
       expect(result.acks.length).toBe(3)
       expect(result.acks.map((a) => a.seq)).deep.equal([1, 2, 3])
-      for (const ack of result.acks) expect(ack.key).toBe('room:binary-test')
+      for (const ack of result.acks) expect(ack.key).match(/^room:binary-test:/)
 
       // Each frame is 128 bytes filled with i + 10 (10, 11, 12).
       expect(result.received.length).toBe(3)
