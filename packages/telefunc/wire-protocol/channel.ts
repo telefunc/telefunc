@@ -23,7 +23,7 @@ import type { TELEFUNC_SHIELDS } from '../node/shared/transformer/generateShield
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
 type ChannelPublishMeta = Record<string, unknown>
-/** Metadata delivered to pub/sub subscribers alongside each message. */
+/** Metadata delivered to broadcast subscribers alongside each message. */
 type ChannelPublishInfo = {
   key: string
   /** Strict per-key counter (1, 2, 3…). Resets if the authority restarts. Use for gap detection. */

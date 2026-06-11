@@ -232,9 +232,9 @@ chat.subscribe((msg, info) => {
 chat.publish({ user: 'Alice', text: 'Hello!', })
 ```
 
-### Server-only pub/sub
+### Server-only broadcast
 
-Use the static methods for server-side-only pub/sub — no client, no lifecycle:
+Use the static methods to publish and subscribe purely on the server — no client, no lifecycle:
 
 ```ts
 import { Broadcast } from 'telefunc'
@@ -270,14 +270,14 @@ info.ts   // server timestamp (Unix epoch ms)
 
 `publish()` returns a `Promise` that resolves to `info` once the message is accepted. `subscribe()` receives `info` alongside each message — useful for ordering and gap detection.
 
-> In-memory pub/sub works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
+> In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
 
 
 ## Multi-server
 
-By default, pub/sub is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, configure a transport on `config.broadcast.transport`.
+By default, `Broadcast` is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, configure a transport on `config.broadcast.transport`.
 
-For Redis-backed multi-server routing and pub/sub fan-out, see <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} />.
+For Redis-backed multi-server routing and broadcast fan-out, see <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} />.
 
 ### Custom transport
 
@@ -294,7 +294,7 @@ type BroadcastTransport = {
 
 `send` / `sendBinary` must return the assigned `{ seq, ts }` so subscribers across nodes see a single global order per key. `listen` / `listenBinary` return an unsubscribe function and are called at most once per key.
 
-> On Cloudflare Workers, Telefunc handles distributed pub/sub automatically via Durable Objects — no transport needed. See <Link href="/cloudflare" />.
+> On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/cloudflare" />.
 
 
 ## Lifecycle
@@ -374,4 +374,4 @@ config.channel = {
 - <Link href="/file-upload" /> — file uploads with progress
 - <Link href="/file-download" /> — streaming file downloads
 - <Link href="/transport" /> — transport configuration
-- <Link href="/cloudflare" /> — Cloudflare Workers with distributed pub/sub
+- <Link href="/cloudflare" /> — Cloudflare Workers with distributed broadcast

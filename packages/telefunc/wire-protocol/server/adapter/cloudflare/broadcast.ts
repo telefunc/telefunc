@@ -240,7 +240,7 @@ class CloudflareBroadcastAuthorityState {
 }
 
 // ---------------------------------------------------------------------------
-// CloudflareBroadcastTransport — per-isolate pub/sub transport.
+// CloudflareBroadcastTransport — per-isolate broadcast transport.
 //
 // A single CloudflareBroadcastTransport instance exists per worker isolate.
 // Multiple Durable Object instances in the same isolate share this transport.
@@ -291,7 +291,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   // --- KV presence ---
 
   private requireKV(): KVNamespace {
-    assert(this.kv, 'Cloudflare KV binding is not attached. Keyed pub/sub requires a KV namespace.')
+    assert(this.kv, 'Cloudflare KV binding is not attached. Broadcast requires a KV namespace.')
     return this.kv
   }
 
