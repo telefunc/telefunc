@@ -2,7 +2,7 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Cloudflare-specific setup and architecture for Telefunc channels and pub/sub.
+Cloudflare-specific setup for <Link href="/channel">`Channel` and `Broadcast`</Link>.
 
 
 ## Setup
@@ -43,6 +43,15 @@ export default {
   ]
 }
 ```
+
+> Why these bindings:
+>
+> - **Durable Object**: channels are stateful. Each WebSocket connection and its in-memory channel state live on a Durable Object.
+> - **KV**: stores session tokens (so each browser reaches the same Durable Object across requests) and pub/sub presence (which Durable Objects have active subscribers for a key).
+>
+> Both bindings are always required: `tf.serve()` routes every Telefunc request through the Durable Object, plain telefunction calls included, and checks the session token in KV on each request. If your app doesn't use `Channel` or `Broadcast`, you can skip both bindings and use `serve()` instead of `telefunc/cloudflare`, see <Link text="Low-level API" href="/server#low-level-api" />.
+>
+> See <Link href="#architecture" /> for details.
 
 ## Context
 
