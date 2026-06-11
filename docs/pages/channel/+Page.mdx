@@ -7,7 +7,7 @@ Telefunc provides two primitives for real-time communication:
 | | `new Channel()` | `new Broadcast()` |
 |---|---|---|
 | What is it | Direct messages between one server and one client | Broadcast to many subscribers |
-| Use cases | Commands, request-response, per-client pushes | Chat rooms, live feeds, notifications |
+| Use cases | AI chat, live dashboards, order tracking | Chat rooms, live scores, notifications |
 
 Both are returned from a telefunction — they serialize into client-side objects automatically.
 
@@ -297,27 +297,27 @@ You can think of `new Broadcast()` as `new Channel()` plus the static `Broadcast
 
 Use `Channel` when the server talks with one client:
 
-- Commands and acknowledgements
-- Request-response beyond a single telefunction call
-- Per-client pushes, like a live dashboard
+- An AI chat: the response streams in, the user can interrupt or send a follow-up
+- A live dashboard: the server pushes fresh metrics to the user viewing it
+- Order tracking: "preparing", "out for delivery", pushed to the customer who ordered
 
-Use `Broadcast` when a message concerns everyone interested in a topic:
+Use `Broadcast` when a message concerns everyone following a topic:
 
-- Chat rooms
-- Live feeds and notifications
-- Collaborative editing and multiplayer state
+- A chat room: every member sees every message
+- A live auction or sports score: every viewer sees each bid or goal
+- Notifications: publish once to `notifications:${userId}`, and every open tab of that user receives it
 
-The two compose: a chat app can use a `Broadcast` for the room and a `Channel` per user for direct messages and delivery receipts.
+The two compose: a card game can use a `Broadcast` for the table that everyone sees, and a `Channel` for each player's hand.
 
 ### Comparison
 
 | | `new Channel()` | `new Broadcast()` |
 |---|---|---|
-| Topology | One server ↔ one client | All instances sharing a string `key`, server or client |
+| Topology | One server ↔ one client | All members sharing a `key` (server or client) |
 | Methods | `send()` / `listen()` | `publish()` / `subscribe()`, also as statics for [server-only use](#server-only-broadcast) |
 | Delivery | The other end | Every subscriber of the key, including the publisher |
-| TypeScript & replies | Two function signatures, `Channel<ClientToServer, ServerToClient>`; their return types declare the acks | Single message type, `Broadcast<T>`; `publish()` resolves to a receipt (`key`, `seq`, `timestamp`) |
-| Return from telefunction | `chat.client` (message directions flip) | The instance itself (no flip) |
+| Message type | Asymmetric:<ul><li>Two directions: `Channel<ClientToServer, ServerToClient>`</li><li>The server keeps the channel and returns `chat.client`, the same API with directions flipped</li></ul> | Symmetric:<ul><li>One type for every member: `Broadcast<T>`</li><li>The telefunction returns the instance itself</li></ul> |
+| Message return | The other end's reply (with `{ ack: true }`) | A receipt: `key`, `seq`, `timestamp` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
 | Multi-server | [Sticky sessions](/multiple-nodes) | [Broadcast transport](#multi-server) |
 
