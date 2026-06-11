@@ -4,13 +4,13 @@ Invalidate [TanStack Query](https://tanstack.com/query) queries after mutations 
 
 ## Setup
 
-Use `QueryClient` from `@telefunc/tanstack-query` instead of `@tanstack/react-query`:
+Wrap your `QueryClient` with `withTelefunc()`:
 
 ```tsx
-import { QueryClient } from '@telefunc/tanstack-query'
-import { QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { withTelefunc } from '@telefunc/tanstack-query'
 
-const queryClient = new QueryClient()
+const queryClient = withTelefunc(new QueryClient())
 
 function App() {
   return (
@@ -21,7 +21,7 @@ function App() {
 }
 ```
 
-It's a drop-in replacement — same options, same API.
+`withTelefunc()` returns the same `QueryClient` instance. All options and APIs keep working as-is.
 
 
 
@@ -99,10 +99,10 @@ Prefix matching — invalidating `['global:documents']` hits `['global:documents
 
 **Local keys:**
 1. Mutation succeeds.
-2. `QueryClient` calls `invalidateQueries()` on the current client for matching local keys.
+2. `withTelefunc()` calls `invalidateQueries()` on the current client for matching local keys.
 
 **Global keys:**
-1. `QueryClient` sends each global query's `queryKey` alongside the telefunc call.
+1. `withTelefunc()` sends each global query's `queryKey` alongside the telefunc call.
 2. The telefunction executes (including auth). Only after it succeeds, the server subscribes to invalidation events for that key.
 3. Mutations work the same way — the telefunction runs first, then global keys from `meta.invalidates` are published through <Link text={<code>Broadcast</code>} href="/channel#new-broadcast" />.
 4. Every connected client with a matching subscription calls `invalidateQueries()`.
