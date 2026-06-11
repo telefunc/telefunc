@@ -122,9 +122,9 @@ Deno.serve({ port: 3000 }, async (request, info) => {
 // worker.ts
 // Environment: server
 
-import { telefunc } from 'telefunc/cloudflare'
+import { Telefunc } from 'telefunc/cloudflare'
 
-const tf = telefunc()
+const tf = new Telefunc()
 
 export const TelefuncDurableObject = tf.TelefuncDurableObject
 

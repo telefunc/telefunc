@@ -11,9 +11,9 @@ Cloudflare-specific setup for <Link href="/channel">`Channel` and `Broadcast`</L
 // worker.ts
 // Environment: server
 
-import { telefunc } from 'telefunc/cloudflare'
+import { Telefunc } from 'telefunc/cloudflare'
 
-const tf = telefunc()
+const tf = new Telefunc()
 
 export const TelefuncDurableObject = tf.TelefuncDurableObject
 
@@ -58,7 +58,7 @@ export default {
 Pass per-request data to telefunctions via <Link text={<code>getContext()</code>} href="/getContext" />:
 
 ```ts
-const tf = telefunc({
+const tf = new Telefunc({
   context: async (request, env: Env) => ({
     user: await getUserFromCookie(request, env),
   }),
@@ -103,7 +103,7 @@ On the first request, Telefunc picks a Durable Object in the nearest region, sto
 By default, Telefunc creates one Durable Object per region. Increase capacity with `scale`:
 
 ```ts
-const tf = telefunc({ scale: 4 })
+const tf = new Telefunc({ scale: 4 })
 ```
 
 This creates 4 Durable Objects per region. Sessions are distributed across them.
@@ -111,7 +111,7 @@ This creates 4 Durable Objects per region. Sessions are distributed across them.
 ### Per-region scale
 
 ```ts
-const tf = telefunc({
+const tf = new Telefunc({
   scale: { weur: 5, enam: 3, apac: 2 },
 })
 ```
@@ -179,7 +179,7 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 ## Configuration
 
 ```ts
-const tf = telefunc({
+const tf = new Telefunc({
   bindingName: 'TelefuncDurableObject',  // DO binding name (default)
   kvBindingName: 'TelefuncKV',           // KV binding name (default)
   instanceName: 'telefunc',              // Base name for DO instances (default)
