@@ -28,6 +28,7 @@ type ChannelPublishInfo = {
   key: string
   /** Strict per-key counter (1, 2, 3…). Resets if the authority restarts. Use for gap detection. */
   seq: number
+  /** Server timestamp, Unix epoch milliseconds. */
   ts: number
 }
 type ChannelPublishAck = ChannelPublishInfo & { meta?: ChannelPublishMeta }

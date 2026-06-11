@@ -265,7 +265,7 @@ Both `publish` and `subscribe` share the same `info` object:
 ```ts
 info.key  // 'chat:lobby' — the broadcast key
 info.seq  // monotonic sequence number for this key
-info.ts   // server timestamp
+info.ts   // server timestamp (Unix epoch ms)
 ```
 
 `publish()` returns a `Promise` that resolves to `info` once the message is accepted. `subscribe()` receives `info` alongside each message — useful for ordering and gap detection.
