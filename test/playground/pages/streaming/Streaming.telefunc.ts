@@ -23,7 +23,7 @@ export {
 
 import { Abort, Channel, getContext } from 'telefunc'
 import { Subject, interval } from 'rxjs'
-import { map, take } from 'rxjs/operators'
+import { map, take, tap } from 'rxjs/operators'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -228,9 +228,24 @@ async function* onGeneratorBugMidStream(): AsyncGenerator<string> {
 }
 
 const onAbortOneOfManyStreamingValues = async () => {
+  // The observable and subject only start emitting after the client's SUBSCRIBE
+  // message arrives over the channel transport (SSE/WS), which connects
+  // asynchronously and may retry. A fixed sleep before the Abort races against
+  // that: if the transport is slow, the server aborts before any obs/subj value
+  // exists, and the test asserts both values and the abort error. Gate the
+  // Abort on the first emission of each instead.
+  let markObsEmitted!: () => void
+  let markSubjEmitted!: () => void
+  const obsEmitted = new Promise<void>((resolve) => {
+    markObsEmitted = resolve
+  })
+  const subjEmitted = new Promise<void>((resolve) => {
+    markSubjEmitted = resolve
+  })
+
   async function* aborting(): AsyncGenerator<string> {
     yield 'abort-0'
-    await sleep(80)
+    await Promise.all([obsEmitted, subjEmitted])
     throw Abort({ reason: 'stream-abort', code: 101 })
   }
 
@@ -251,19 +266,25 @@ const onAbortOneOfManyStreamingValues = async () => {
     },
   })
 
-  const promise = new Promise<string>((resolve) => setTimeout(() => resolve('promise-done'), 200))
+  // Never settles on its own; only the sibling Abort settles it. A timer-based
+  // resolve would race the gated Abort above and null out promiseErr.
+  const promise = new Promise<string>(() => {})
 
   // rxjs Observable that keeps emitting
   const observable = interval(20).pipe(
     map((i) => `obs-${i}`),
     take(1000),
+    tap(() => markObsEmitted()),
   )
 
   // rxjs Subject that the server pushes to
   const subject = new Subject<string>()
   let subjectCount = 0
   const subjectInterval = setInterval(() => {
-    if (subject.observed) subject.next(`subj-${subjectCount++}`)
+    if (subject.observed) {
+      subject.next(`subj-${subjectCount++}`)
+      markSubjEmitted()
+    }
   }, 25)
   const { onClose } = getContext()
   onClose(() => clearInterval(subjectInterval))
