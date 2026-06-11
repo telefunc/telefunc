@@ -21,7 +21,7 @@ function topLevelKey(queryKey: readonly unknown[]): string {
 const extension = {
   name: EXTENSION_NAME,
   hooks: {
-    onTransformResult(ctx) {
+    onTelefunctionResult(ctx) {
       const data = ctx.data as TanstackQueryExtensionData
 
       if ('invalidates' in data) {

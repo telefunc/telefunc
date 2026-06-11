@@ -69,10 +69,10 @@ async function executeTelefunction(runContext: {
 
   if (!telefunctionHasErrored && !telefunctionAborted) {
     for (const ext of extensions) {
-      if (ext.hooks?.onTransformResult && requestExtensions[ext.name]) {
+      if (ext.hooks?.onTelefunctionResult && requestExtensions[ext.name]) {
         const data = requestExtensions[ext.name]!
         telefunctionReturn = await withContext(() =>
-          ext.hooks!.onTransformResult!({ result: telefunctionReturn, data }),
+          ext.hooks!.onTelefunctionResult!({ result: telefunctionReturn, data }),
         )
       }
     }
