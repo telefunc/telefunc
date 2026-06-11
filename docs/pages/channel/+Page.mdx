@@ -265,9 +265,9 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 Both `publish` and `subscribe` share the same `info` object:
 
 ```ts
-info.key  // 'chat:lobby' — the broadcast key
-info.seq  // monotonic sequence number for this key
-info.ts   // server timestamp (Unix epoch ms)
+info.key        // 'chat:lobby' — the broadcast key
+info.seq        // monotonic sequence number for this key
+info.timestamp  // server timestamp (Unix epoch ms)
 ```
 
 `publish()` returns a `Promise` that resolves to `info` once the message is accepted. `subscribe()` receives `info` alongside each message — useful for ordering and gap detection.
@@ -287,14 +287,14 @@ For other backends (NATS, Kafka, …), implement `BroadcastTransport` and assign
 
 ```ts
 type BroadcastTransport = {
-  send(key: string, payload: string): { seq: number; ts: number } | Promise<{ seq: number; ts: number }>
-  listen(key: string, onMessage: (payload: string, info: { seq: number; ts: number }) => void): () => void
-  sendBinary(key: string, payload: Uint8Array): { seq: number; ts: number } | Promise<{ seq: number; ts: number }>
-  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; ts: number }) => void): () => void
+  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
 }
 ```
 
-`send` / `sendBinary` must return the assigned `{ seq, ts }` so subscribers across nodes see a single global order per key. `listen` / `listenBinary` return an unsubscribe function and are called at most once per key.
+`send` / `sendBinary` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen` / `listenBinary` return an unsubscribe function and are called at most once per key.
 
 > On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/cloudflare" />.
 

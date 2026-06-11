@@ -682,7 +682,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   _onTransportPublish(data: string, wireInfo: WirePublishInfo): void {
     const parsed = parse(data) as ChannelData<T>
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.ts)
+    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastListeners) {
       try {
         cb(parsed, info)
@@ -693,7 +693,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo): void {
-    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.ts)
+    const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners) {
       try {
         cb(data, info)

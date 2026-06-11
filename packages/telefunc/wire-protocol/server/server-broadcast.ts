@@ -68,7 +68,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     const adapter = getBroadcastAdapter()
     return adapter.subscribe(key, (serialized, info) => {
       const data = parse(serialized) as ChannelData<U>
-      callback(data, { key, seq: info.seq, ts: info.ts })
+      callback(data, { key, seq: info.seq, timestamp: info.timestamp })
     })
   }
 
@@ -80,7 +80,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   static subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     const adapter = getBroadcastAdapter()
     return adapter.subscribeBinary(key, (data, info) => {
-      callback(data, { key, seq: info.seq, ts: info.ts })
+      callback(data, { key, seq: info.seq, timestamp: info.timestamp })
     })
   }
 
@@ -170,7 +170,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   _deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
-    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.ts)
+    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
     for (const cb of this._broadcastListeners) {
       try {
@@ -189,7 +189,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
-    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.ts)
+    const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners) {
       try {
         cb(data, info)
@@ -263,7 +263,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private _publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
     assert(this._adapter)
     const toAck = (r: BroadcastPublishResult): ChannelPublishAck =>
-      Object.assign(makePublishInfo(this.key, r.seq, r.ts), { meta: r.meta })
+      Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), { meta: r.meta })
     const result = this._adapter.publish(this.key, serialized)
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)
@@ -272,7 +272,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private _publishBinaryBroadcast(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assert(this._adapter)
     const toAck = (r: BroadcastPublishResult): ChannelPublishAck =>
-      Object.assign(makePublishInfo(this.key, r.seq, r.ts), { meta: r.meta })
+      Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), { meta: r.meta })
     const result = this._adapter.publishBinary(this.key, data)
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)

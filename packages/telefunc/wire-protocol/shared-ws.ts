@@ -167,7 +167,7 @@ const ACK_STATUS = {
 type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 
 /** Ordering metadata embedded in PUBLISH frames on the wire. */
-type WirePublishInfo = { seq: number; ts: number }
+type WirePublishInfo = { seq: number; timestamp: number }
 
 // ===== Decoded frame =====
 
@@ -449,11 +449,11 @@ function decode(frame: Uint8Array): DecodedFrame {
 }
 
 // ===== Publish info helpers =====
-// Format: seq,ts\n{serialized text}
+// Format: seq,timestamp\n{serialized text}
 // JSON.stringify never produces bare \n, so the first \n reliably splits info from payload.
 
 function encodePublishText(text: string, info: WirePublishInfo): string {
-  return info.seq + ',' + info.ts + '\n' + text
+  return info.seq + ',' + info.timestamp + '\n' + text
 }
 
 function decodePublishText(wire: string): { text: string; info: WirePublishInfo } {
@@ -462,13 +462,13 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
   const comma = wire.indexOf(',')
   assert(comma !== -1 && comma < nl, 'PUBLISH frame malformed info prefix')
   const seq = Number(wire.slice(0, comma))
-  const ts = Number(wire.slice(comma + 1, nl))
-  assert(Number.isFinite(seq) && Number.isFinite(ts), 'PUBLISH frame info must be finite numbers')
-  return { text: wire.slice(nl + 1), info: { seq, ts } }
+  const timestamp = Number(wire.slice(comma + 1, nl))
+  assert(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH frame info must be finite numbers')
+  return { text: wire.slice(nl + 1), info: { seq, timestamp } }
 }
 
 // ===== Binary publish info helpers =====
-// Format: [4 bytes: seq as u32 LE][8 bytes: ts as f64 LE][binary data]
+// Format: [4 bytes: seq as u32 LE][8 bytes: timestamp as f64 LE][binary data]
 
 const PUBLISH_BINARY_HEADER = 12
 
@@ -476,7 +476,7 @@ function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Arra
   const result = new Uint8Array(PUBLISH_BINARY_HEADER + data.byteLength)
   const view = new DataView(result.buffer)
   view.setUint32(0, info.seq, true)
-  view.setFloat64(4, info.ts, true)
+  view.setFloat64(4, info.timestamp, true)
   result.set(data, PUBLISH_BINARY_HEADER)
   return result
 }
@@ -485,7 +485,7 @@ function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePu
   assert(wire.byteLength >= PUBLISH_BINARY_HEADER, 'PUBLISH_BINARY frame too short for info header')
   const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
   const seq = view.getUint32(0, true)
-  const ts = view.getFloat64(4, true)
-  assert(Number.isFinite(seq) && Number.isFinite(ts), 'PUBLISH_BINARY frame info must be finite numbers')
-  return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, ts } }
+  const timestamp = view.getFloat64(4, true)
+  assert(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH_BINARY frame info must be finite numbers')
+  return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, timestamp } }
 }

@@ -62,11 +62,11 @@ class RedisTransport implements BroadcastTransport {
     this.subscriber.on('messageBuffer', this._onMessage)
   }
 
-  async send(key: string, payload: string): Promise<{ seq: number; ts: number }> {
+  async send(key: string, payload: string): Promise<{ seq: number; timestamp: number }> {
     return this._publish(this.channelKey(key, 't'), this.seqKey(key), textEncoder.encode(payload))
   }
 
-  async sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; ts: number }> {
+  async sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; timestamp: number }> {
     return this._publish(this.channelKey(key, 'b'), this.seqKey(key), payload)
   }
 
@@ -96,16 +96,16 @@ class RedisTransport implements BroadcastTransport {
     assert(frame.byteLength >= HEADER_BYTES, 'Malformed publish frame: header too short')
     const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
     const seq = view.getUint32(0, false)
-    const ts = view.getUint32(4, false) * U32_RANGE + view.getUint32(8, false)
+    const timestamp = view.getUint32(4, false) * U32_RANGE + view.getUint32(8, false)
     const payload = frame.subarray(HEADER_BYTES)
     const channel = utf8.decode(channelBytes)
     const text = this.textCallbacks.get(channel)
     if (text) {
-      text(utf8.decode(payload), { seq, ts })
+      text(utf8.decode(payload), { seq, timestamp })
       return
     }
     const binary = this.binaryCallbacks.get(channel)
-    if (binary) binary(payload, { seq, ts })
+    if (binary) binary(payload, { seq, timestamp })
   }
 
   // ── Publish (private) ─────────────────────────────────────────────────
@@ -114,7 +114,7 @@ class RedisTransport implements BroadcastTransport {
     channelKey: string,
     seqKey: string,
     payload: Uint8Array,
-  ): Promise<{ seq: number; ts: number }> {
+  ): Promise<{ seq: number; timestamp: number }> {
     // ioredis 5.x checks `arg instanceof Buffer` to pick its binary path; a raw
     // `Uint8Array` falls into `String(arg)` and gets serialised as a comma-joined
     // string of byte values, corrupting the bytes. `Buffer.from(buf, off, len)`
@@ -122,9 +122,9 @@ class RedisTransport implements BroadcastTransport {
     const buf = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength)
     const reply = await callDefinedCommand(this.publisher, PUBLISH_CMD, [seqKey, channelKey, buf])
     assert(Array.isArray(reply) && reply.length === 2, 'Publish script returned an unexpected shape')
-    const [seq, ts] = reply
-    assert(typeof seq === 'number' && typeof ts === 'number', 'Publish script returned non-numeric seq/ts')
-    return { seq, ts }
+    const [seq, timestamp] = reply
+    assert(typeof seq === 'number' && typeof timestamp === 'number', 'Publish script returned non-numeric seq/ts')
+    return { seq, timestamp }
   }
 
   // ── Key naming (private) ──────────────────────────────────────────────
@@ -141,8 +141,8 @@ class RedisTransport implements BroadcastTransport {
   }
 }
 
-type TextOnMessage = (payload: string, info: { seq: number; ts: number }) => void
-type BinaryOnMessage = (payload: Uint8Array, info: { seq: number; ts: number }) => void
+type TextOnMessage = (payload: string, info: { seq: number; timestamp: number }) => void
+type BinaryOnMessage = (payload: Uint8Array, info: { seq: number; timestamp: number }) => void
 
 /** Module-level codec — allocating one per call would burn measurable CPU on hot paths. */
 const utf8 = new TextDecoder('utf-8')

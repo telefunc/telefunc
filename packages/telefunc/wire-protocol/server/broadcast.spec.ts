@@ -203,7 +203,7 @@ describe('keyed in-process broadcast', () => {
     expect(b1.key).toBe(k2)
     expect(a2.seq).toBe(a1.seq + 1)
     expect(b1.seq).toBe(a1.seq) // separate key → seq counter is independent
-    expect(typeof a1.ts).toBe('number')
+    expect(typeof a1.timestamp).toBe('number')
   })
 })
 
@@ -330,7 +330,7 @@ describe('Broadcast shield validation', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('DefaultBroadcastAdapter — multi-node transport', () => {
-  type TextListener = (payload: string, info: { seq: number; ts: number }) => void
+  type TextListener = (payload: string, info: { seq: number; timestamp: number }) => void
 
   /** Synchronous-delivery bus for fast, deterministic tests. */
   function createMockTransport(): BroadcastTransport & { _listeners: Map<string, Set<TextListener>> } {
@@ -341,10 +341,10 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
       send(key, payload) {
         const seq = (seqs.get(key) ?? 0) + 1
         seqs.set(key, seq)
-        const ts = Date.now()
+        const timestamp = Date.now()
         const set = listeners.get(key)
-        if (set) for (const cb of set) cb(payload, { seq, ts })
-        return { seq, ts }
+        if (set) for (const cb of set) cb(payload, { seq, timestamp })
+        return { seq, timestamp }
       },
       listen(key, onMessage) {
         let set = listeners.get(key)
@@ -356,7 +356,7 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
         return () => listeners.delete(key)
       },
       sendBinary(_key, _payload) {
-        return { seq: 0, ts: Date.now() }
+        return { seq: 0, timestamp: Date.now() }
       },
       listenBinary() {
         return () => {}
@@ -379,7 +379,7 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
 
     expect(received).toEqual([{ text: 'hello' }])
     expect(receipt.seq).toBe(1)
-    expect(typeof receipt.ts).toBe('number')
+    expect(typeof receipt.timestamp).toBe('number')
   })
 
   // The classic distributed-bus footgun: the transport delivers to all subscribers
