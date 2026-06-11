@@ -107,7 +107,7 @@ vi.mock('./routing.js', () => ({
   ),
 }))
 
-import { telefunc } from '../../../../serve/cloudflare.js'
+import { Telefunc } from '../../../../serve/cloudflare.js'
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -169,7 +169,7 @@ beforeEach(() => {
 describe('cloudflare adapter entrypoint', () => {
   it('resolves shard from KV token and forwards routing headers', async () => {
     const { binding, get, fetch } = createBinding()
-    const tf = telefunc()
+    const tf = new Telefunc()
     const kv = createMockKV()
     await kv.put('session:my-token', JSON.stringify({ s: 'telefunc-shard-weur-1', b: 'weur' }))
     const request = new Request('https://telefunc.test/_telefunc?session=my-token')
@@ -197,7 +197,7 @@ describe('cloudflare adapter entrypoint', () => {
 
   it('derives a new shard and stores a KV token when no token is provided', async () => {
     const { binding, get, fetch } = createBinding()
-    const tf = telefunc()
+    const tf = new Telefunc()
     const kv = createMockKV()
     const waitUntilFns: Array<Promise<unknown>> = []
     const request = new Request('https://telefunc.test/_telefunc')
@@ -223,7 +223,7 @@ describe('cloudflare adapter entrypoint', () => {
   })
 
   it('returns undefined for non-telefunc traffic', async () => {
-    const tf = telefunc()
+    const tf = new Telefunc()
 
     await expect(
       tf.serve({
@@ -235,7 +235,7 @@ describe('cloudflare adapter entrypoint', () => {
   })
 
   it('asserts when binding is missing for telefunc traffic', async () => {
-    const tf = telefunc()
+    const tf = new Telefunc()
 
     await expect(
       tf.serve({
@@ -249,7 +249,7 @@ describe('cloudflare adapter entrypoint', () => {
   it('returns 400 for websocket upgrades when websocket transport is disabled', async () => {
     const { binding } = createBinding()
     mocks.getServerConfig.mockReturnValue({ telefuncUrl: '/_telefunc', channel: { transports: [] } })
-    const tf = telefunc()
+    const tf = new Telefunc()
     const request = new Request('https://telefunc.test/_telefunc', { headers: { upgrade: 'websocket' } })
 
     const response = await tf.serve({
@@ -264,7 +264,7 @@ describe('cloudflare adapter entrypoint', () => {
   it('applies jurisdiction wrapping before binding lookups', async () => {
     const { binding, jurisdiction } = createBinding()
     const kv = createMockKV()
-    const tf = telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
+    const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
 
     await tf.serve({
       request: new Request('https://telefunc.test/_telefunc'),
@@ -276,7 +276,7 @@ describe('cloudflare adapter entrypoint', () => {
   })
 
   it('passes base transport options to the broadcast transport', () => {
-    telefunc()
+    new Telefunc()
 
     expect(mocks.transportInstances[0]?.options).toEqual(
       expect.objectContaining({ baseInstanceName: 'telefunc', scale: undefined }),
@@ -285,7 +285,7 @@ describe('cloudflare adapter entrypoint', () => {
 
   it('wires the durable object runtime and delegates fetch, websocket, and broadcast methods', async () => {
     const { binding } = createBinding()
-    const tf = telefunc({ context: vi.fn(async () => ({ userId: 'user-1' })) })
+    const tf = new Telefunc({ context: vi.fn(async () => ({ userId: 'user-1' })) })
     const DurableClass = tf.TelefuncDurableObject
     const ctx = { id: { name: 'telefunc-shard-weur-1' } } as DurableObjectState
     const instance = new DurableClass(ctx, {

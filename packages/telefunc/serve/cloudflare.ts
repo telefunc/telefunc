@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-export { telefunc }
+export { Telefunc }
 export type { CloudflareWebSocketOptions }
 
 import { DurableObject } from 'cloudflare:workers'
@@ -24,7 +24,7 @@ import {
   resolveSessionRoutingTarget,
 } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { assertUsage } from '../utils/assert.js'
-import type { Telefunc } from '../node/server/context/getContext.js'
+import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 
@@ -34,7 +34,7 @@ type CloudflareWebSocketOptions = {
   bindingName?: string
   kvBindingName?: string
   instanceName?: string
-  context?: (request: Request, env: Cloudflare.Env) => Telefunc.Context | Promise<Telefunc.Context>
+  context?: (request: Request, env: Cloudflare.Env) => TelefuncNamespace.Context | Promise<TelefuncNamespace.Context>
   scale?: CloudflareScale
   locationFallback?: DurableObjectLocationHint
   jurisdiction?: DurableObjectJurisdiction
@@ -51,90 +51,95 @@ type ServeInput = {
   ctx: ExecutionContext
 }
 
-interface TelefuncServe {
-  serve(input: ServeInput): Promise<Response | undefined>
-  TelefuncDurableObject: new (ctx: DurableObjectState, env: Cloudflare.Env) => DurableObject
-}
+class Telefunc {
+  readonly serve: (input: ServeInput) => Promise<Response | undefined>
+  readonly TelefuncDurableObject: new (
+    ctx: DurableObjectState,
+    env: Cloudflare.Env,
+  ) => DurableObject
 
-function telefunc(options?: CloudflareWebSocketOptions): TelefuncServe {
-  enableChannelTransports([CHANNEL_TRANSPORT.WS])
-  const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
-  const kvBindingName = options?.kvBindingName ?? 'TelefuncKV'
-  const baseInstanceName = options?.instanceName ?? 'telefunc'
-  const scale = options?.scale
-  const locationFallback = options?.locationFallback ?? 'weur'
-  const jurisdiction = options?.jurisdiction
+  constructor(options?: CloudflareWebSocketOptions) {
+    enableChannelTransports([CHANNEL_TRANSPORT.WS])
+    const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
+    const kvBindingName = options?.kvBindingName ?? 'TelefuncKV'
+    const baseInstanceName = options?.instanceName ?? 'telefunc'
+    const scale = options?.scale
+    const locationFallback = options?.locationFallback ?? 'weur'
+    const jurisdiction = options?.jurisdiction
 
-  const crosswsAdapter = crossws({
-    bindingName,
-    instanceName: baseInstanceName,
-    hooks: getTelefuncChannelHooks(),
-  })
-  // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
-  // we want every evaluation to share one transport instance.
-  const broadcast = installBroadcastAdapter(() => new CloudflareBroadcastTransport({ baseInstanceName, scale }))
+    const crosswsAdapter = crossws({
+      bindingName,
+      instanceName: baseInstanceName,
+      hooks: getTelefuncChannelHooks(),
+    })
+    // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
+    // we want every evaluation to share one transport instance.
+    const broadcast = installBroadcastAdapter(() => new CloudflareBroadcastTransport({ baseInstanceName, scale }))
 
-  function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
-    const baseBinding = (env as Record<string, DurableObjectNamespace | undefined>)[bindingName]
-    return baseBinding && jurisdiction ? baseBinding.jurisdiction(jurisdiction) : baseBinding
-  }
-
-  function getKVBinding(env: Cloudflare.Env): KVNamespace | undefined {
-    return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
-  }
-
-  const getContext = options?.context
-
-  const TelefuncDurableObject = class extends DurableObject {
-    private readonly authorityState: CloudflareBroadcastAuthorityState
-
-    constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
-      super(ctx, env)
-      const binding = getBinding(env)
-      assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}" in Durable Object constructor.`)
-      broadcast.attachBinding(binding, bindingName)
-      const kv = getKVBinding(env)
-      if (kv) broadcast.attachKV(kv)
-      this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
-      crosswsAdapter.handleDurableInit(this, ctx, env)
+    function getBinding(env: Cloudflare.Env): DurableObjectNamespace | undefined {
+      const baseBinding = (env as Record<string, DurableObjectNamespace | undefined>)[bindingName]
+      return baseBinding && jurisdiction ? baseBinding.jurisdiction(jurisdiction) : baseBinding
     }
 
-    async fetch(request: Request) {
-      const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
-      const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-      if (shard && bucket) {
-        broadcast.attachIsolateInfo(shard, bucket)
+    function getKVBinding(env: Cloudflare.Env): KVNamespace | undefined {
+      return (env as Record<string, KVNamespace | undefined>)[kvBindingName]
+    }
+
+    const getContext = options?.context
+
+    const TelefuncDurableObject = class extends DurableObject {
+      private readonly authorityState: CloudflareBroadcastAuthorityState
+
+      constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+        super(ctx, env)
+        const binding = getBinding(env)
+        assertUsage(
+          binding,
+          `Missing Cloudflare Durable Object binding "${bindingName}" in Durable Object constructor.`,
+        )
+        broadcast.attachBinding(binding, bindingName)
+        const kv = getKVBinding(env)
+        if (kv) broadcast.attachKV(kv)
+        this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
+        crosswsAdapter.handleDurableInit(this, ctx, env)
       }
-      if (request.headers.get('upgrade') === 'websocket') {
-        return crosswsAdapter.handleDurableUpgrade(this, request)
+
+      async fetch(request: Request) {
+        const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
+        const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
+        if (shard && bucket) {
+          broadcast.attachIsolateInfo(shard, bucket)
+        }
+        if (request.headers.get('upgrade') === 'websocket') {
+          return crosswsAdapter.handleDurableUpgrade(this, request)
+        }
+        const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
+        const httpResponse = await serveTelefunc(context ? { request, context } : { request })
+        return new Response(httpResponse.getReadableWebStream(), {
+          status: httpResponse.statusCode,
+          headers: httpResponse.headers,
+        })
       }
-      const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
-      const httpResponse = await serveTelefunc(context ? { request, context } : { request })
-      return new Response(httpResponse.getReadableWebStream(), {
-        status: httpResponse.statusCode,
-        headers: httpResponse.headers,
-      })
-    }
 
-    webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-      return crosswsAdapter.handleDurableMessage(this, ws, message)
-    }
+      webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+        return crosswsAdapter.handleDurableMessage(this, ws, message)
+      }
 
-    webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
-      return crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean)
-    }
+      webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
+        return crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean)
+      }
 
-    telefuncBroadcastPublish(request: BroadcastPublishRequest) {
-      return broadcast.publishToSubscribers(this.authorityState, request)
-    }
+      telefuncBroadcastPublish(request: BroadcastPublishRequest) {
+        return broadcast.publishToSubscribers(this.authorityState, request)
+      }
 
-    telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-      broadcast.deliverToLocal(request)
+      telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
+        broadcast.deliverToLocal(request)
+      }
     }
-  }
+    this.TelefuncDurableObject = TelefuncDurableObject
 
-  return {
-    async serve({ request, env, ctx }: ServeInput): Promise<Response | undefined> {
+    this.serve = async ({ request, env, ctx }: ServeInput): Promise<Response | undefined> => {
       const config = getServerConfig()
       if (!new URL(request.url).pathname.startsWith(config.telefuncUrl)) return undefined
 
@@ -188,7 +193,6 @@ function telefunc(options?: CloudflareWebSocketOptions): TelefuncServe {
       }
 
       return doResponse
-    },
-    TelefuncDurableObject,
+    }
   }
 }
