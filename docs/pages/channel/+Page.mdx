@@ -2,32 +2,18 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Telefunc provides two primitives for real-time communication: `Channel` and `Broadcast`.
+Telefunc provides two primitives for real-time communication:
+
+| | `new Channel()` | `new Broadcast()` |
+|---|---|---|
+| What is it | A private line between one server and one client | A message group: everyone with the same `key` receives every publish |
+| Use cases | Commands, request-response, per-client pushes | Chat rooms, live feeds, notifications |
 
 Return either from a telefunction — they serialize into client-side objects automatically.
 
 By default, channels and broadcast use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background. See <Link href="/transport" />.
 
 > For short-lived callbacks (e.g. progress updates), <Link href="/real-time">function passing</Link> is usually simpler.
-
-
-## `Channel` vs `Broadcast`
-
-Both share the same transport, reconnection, lifecycle, binary support, and shield validation. The difference is topology: a `Channel` connects two fixed ends, a `Broadcast` connects everyone sharing a key.
-
-| | `new Channel()` | `new Broadcast()` |
-|---|---|---|
-| Topology | One server ↔ one client | All instances sharing a string `key`, server or client |
-| Methods | `send()` / `listen()` | `publish()` / `subscribe()`, also as statics for [server-only use](#server-only-broadcast) |
-| Delivery | The other end | Every subscriber of the key, including the publisher |
-| TypeScript & replies | Two function signatures, `Channel<ClientToServer, ServerToClient>`; their return types declare the acks | Single message type, `Broadcast<T>`; `publish()` resolves to a receipt (`key`, `seq`, `timestamp`) |
-| Return from telefunction | `chat.client` (message directions flip) | The instance itself (no flip) |
-| `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
-| Multi-server | [Sticky sessions](/multiple-nodes) | [Broadcast transport](#multi-server) |
-
-`new Broadcast()` is essentially `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the instance holds a private channel to the one client that received it, and bridges that client into the keyed publish/subscribe group that the static methods tap directly.
-
-Use `Channel` for request-response and per-client pushes: commands, acks, live dashboards. Use `Broadcast` for fan-out to a group: chat rooms, live feeds, notifications.
 
 
 ## new Channel()
@@ -287,6 +273,49 @@ info.timestamp  // server timestamp (Unix epoch ms)
 `publish()` returns a `Promise` that resolves to `info` once the message is accepted. `subscribe()` receives `info` alongside each message — useful for ordering and gap detection.
 
 > In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
+
+
+## `Channel` vs `Broadcast`
+
+### Fundamentally
+
+Fundamentally, the difference is what a message is addressed to: a `Channel` message is addressed to *someone*, a `Broadcast` message is addressed to *something*.
+
+A `Channel` is a conversation, like a phone call: two fixed ends (the server and the one client that received it), private to them, over when either side hangs up.
+
+A `Broadcast` is an announcement, like a radio frequency: whoever tunes in to the `key` receives everything published to it (the publisher included), members come and go, and the key belongs to no one.
+
+These are the two natural shapes of communication, and the rest follows from the addressing: only the two ends of a channel can use it, while anything that knows a key can join its group; a channel ends when either side closes it, while a group outlives any single member.
+
+You can think of `new Broadcast()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the instance holds a private channel to the one client that received it, and bridges that client into the keyed publish/subscribe group that the static methods tap directly.
+
+### Use cases
+
+Use `Channel` when the server talks with one client:
+
+- Commands and acknowledgements
+- Request-response beyond a single telefunction call
+- Per-client pushes, like a live dashboard
+
+Use `Broadcast` when a message concerns everyone interested in a topic:
+
+- Chat rooms
+- Live feeds and notifications
+- Collaborative editing and multiplayer state
+
+The two compose: a chat app can use a `Broadcast` for the room and a `Channel` per user for direct messages and delivery receipts.
+
+### Comparison
+
+| | `new Channel()` | `new Broadcast()` |
+|---|---|---|
+| Topology | One server ↔ one client | All instances sharing a string `key`, server or client |
+| Methods | `send()` / `listen()` | `publish()` / `subscribe()`, also as statics for [server-only use](#server-only-broadcast) |
+| Delivery | The other end | Every subscriber of the key, including the publisher |
+| TypeScript & replies | Two function signatures, `Channel<ClientToServer, ServerToClient>`; their return types declare the acks | Single message type, `Broadcast<T>`; `publish()` resolves to a receipt (`key`, `seq`, `timestamp`) |
+| Return from telefunction | `chat.client` (message directions flip) | The instance itself (no flip) |
+| `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
+| Multi-server | [Sticky sessions](/multiple-nodes) | [Broadcast transport](#multi-server) |
 
 
 ## Multi-server
