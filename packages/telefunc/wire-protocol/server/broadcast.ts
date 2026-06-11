@@ -36,14 +36,20 @@ type BroadcastAdapter = {
  * Subscriber multiplexing and lifecycle are handled for you.
  */
 type BroadcastTransport = {
-  /** Send a text message. Must return the assigned seq and ts. */
-  send(key: string, payload: string): { seq: number; ts: number } | Promise<{ seq: number; ts: number }>
+  /** Send a text message. Must return the assigned seq and timestamp. */
+  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
   /** Listen for text messages on a key. Called at most once per key. Return an unsubscribe function. */
-  listen(key: string, onMessage: (payload: string, info: { seq: number; ts: number }) => void): () => void
-  /** Send a binary message. Must return the assigned seq and ts. */
-  sendBinary(key: string, payload: Uint8Array): { seq: number; ts: number } | Promise<{ seq: number; ts: number }>
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  /** Send a binary message. Must return the assigned seq and timestamp. */
+  sendBinary(
+    key: string,
+    payload: Uint8Array,
+  ): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
   /** Listen for binary messages on a key. Called at most once per key. Return an unsubscribe function. */
-  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; ts: number }) => void): () => void
+  listenBinary(
+    key: string,
+    onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
+  ): () => void
 }
 
 // ---------------------------------------------------------------------------
@@ -146,8 +152,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   ): BroadcastPublishResult {
     const seq = (this.keySeqs.get(key) ?? 0) + 1
     this.keySeqs.set(key, seq)
-    const ts = Date.now()
-    const info = { seq, ts }
+    const timestamp = Date.now()
+    const info = { seq, timestamp }
     let delivered = 0
     const set = subs.get(key)
     if (set) {
@@ -156,7 +162,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
         onMessage(data, info)
       }
     }
-    return { seq, ts, meta: { delivered, transport: 'in-memory' } }
+    return { seq, timestamp, meta: { delivered, transport: 'in-memory' } }
   }
 
   // ── Shared ──
