@@ -2,7 +2,12 @@ import { Link } from '@brillout/docpress'
 
 Invalidate [TanStack Query](https://tanstack.com/query) queries after mutations — locally or across all connected clients.
 
-## Setup
+
+## Install
+
+```shell
+npm install @telefunc/tanstack-query
+```
 
 Wrap your `QueryClient` with `withTelefunc()`:
 
@@ -23,6 +28,9 @@ function App() {
 
 `withTelefunc()` returns the same `QueryClient` instance. All options and APIs keep working as-is.
 
+> The integration lives in `QueryClient` (the peer dependency is `@tanstack/query-core` v5+), so any TanStack Query adapter works: React, Vue, Svelte, Solid. The examples above use React.
+
+> There's no server-side setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads their server extension.
 
 
 ## Local vs global keys
@@ -35,10 +43,27 @@ queryKey: ['global:todos', `user:${userId}`]     // global — all clients with 
 queryKey: ['global:documents', docId]            // global
 ```
 
+> A key is global when its *first* element is a string starting with `global:`, e.g. `['todos', 'global:x']` is a local key.
+
+> Global keys ride on Telefunc calls, so two rules apply:
+>
+> - **`queryFn` must call a telefunction.** The invalidation subscription piggybacks on that call. With a non-telefunc `queryFn` (e.g. plain `fetch()`), a global key silently behaves like a local one. The same goes for mutations: global keys in `meta.invalidates` are published server-side after the telefunction succeeds, so `mutationFn` must be a telefunction call too.
+> - **Return the telefunction call directly.** The integration unwraps the subscription from whatever `queryFn` returns, so transform with `select` instead:
+>   ```tsx
+>   // ✗ Broken: inside queryFn, getTodos() resolves to an internal wrapper
+>   queryFn: async () => (await getTodos()).items
+>
+>   // ✓ Return the call directly, transform with select
+>   queryFn: () => getTodos(),
+>   select: (todos) => todos.items,
+>   ```
+
 
 ## Mutations
 
-Use `meta.invalidates` on mutations to automatically invalidate matching queries:
+Use `meta.invalidates` on mutations to invalidate matching queries after the mutation succeeds.
+
+> The `invalidates` field is a `@telefunc/tanstack-query` convention: TanStack Query itself attaches no behavior to `meta`.
 
 ```tsx
 const { data: todos } = useQuery({
@@ -107,11 +132,12 @@ Prefix matching — invalidating `['global:documents']` hits `['global:documents
 3. Mutations work the same way — the telefunction runs first, then global keys from `meta.invalidates` are published through <Link text={<code>Broadcast</code>} href="/channel#new-broadcast" />.
 4. Every connected client with a matching subscription calls `invalidateQueries()`.
 
-Works across multiple servers via a <Link text="broadcast transport" href="/channel#multi-server" />.
+> Works across multiple servers via a <Link text="broadcast transport" href="/channel#multi-server" /> such as <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} />.
 
 
 ## See also
 
 - <Link href="/channel" /> — `Channel` and `Broadcast`
+- <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} /> — multi-server pub/sub
 - <Link href="/real-time" /> — real-time patterns
 - <Link href="/cloudflare" /> — Cloudflare Workers
