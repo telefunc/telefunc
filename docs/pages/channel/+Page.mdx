@@ -256,6 +256,9 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 | `subscribe(cb)` | Receive `(data, info)`. Returns an unsubscribe function. |
 | `publishBinary(data)` | Send raw binary to all subscribers. Returns a receipt. |
 | `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
+| `onOpen(cb)` / `onClose(cb)` | Lifecycle callbacks. |
+| `close()` | Close gracefully. |
+| `abort(value?)` | Terminate immediately. |
 
 Both `publish` and `subscribe` share the same `info` object:
 
