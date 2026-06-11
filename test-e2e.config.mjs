@@ -80,6 +80,13 @@ function tolerateError({ logSource, logText }) {
   return (
     // TO-DO/eventually: move everything to this array
     [
+      // [18:13:12.528][/.test-docker.binary-inline.sse.test.ts][pnpm test:docker][stderr] [PLUGIN_TIMINGS] Your build spent significant time in plugins. Here is a breakdown:
+      //   - telefunc:pluginTransformTelefuncFiles (77%)
+      //   - vike:pluginVirtualFiles (8%)
+      //   - vite:css (7%)
+      //   - ud:catch-all (7%)
+      // See https://rolldown.rs/options/checks#plugintimings for more details.
+      '[PLUGIN_TIMINGS] Your build spent significant time in plugins.',
       // [22:41:29.864][\examples\next][npm run dev][stderr] Watchpack Error (initial scan): Error: EINVAL: invalid argument, lstat 'D:\DumpStack.log.tmp'
       'Watchpack Error (initial scan)',
       // Error: [DocPress][Warning] prop `text` is deprecated
