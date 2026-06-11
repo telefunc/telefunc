@@ -1,11 +1,11 @@
 export { Page }
 
 import React from 'react'
-import { QueryClientProvider } from '@tanstack/react-query'
-import { QueryClient } from '@telefunc/tanstack-query'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { withTelefunc } from '@telefunc/tanstack-query'
 import { TodoList } from './TodoList'
 
-const queryClient = new QueryClient()
+const queryClient = withTelefunc(new QueryClient())
 
 function Page() {
   return (
