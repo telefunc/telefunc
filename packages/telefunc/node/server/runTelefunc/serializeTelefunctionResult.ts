@@ -170,6 +170,7 @@ function serializeTelefunctionResult(runContext: {
       metadataSerialized: httpResponseBody,
       streamingValues,
       telefuncId,
+      context: runContext.context,
       abortSignal: requestContext.abortSignal,
       responseAbort: requestContext.responseAbort,
       onComplete: onStreamComplete,

@@ -14,6 +14,8 @@ import {
 } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import type { ResponseAbortSource } from '../../../node/server/context/requestContext.js'
 import type { TelefuncId } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
+import { restoreContext } from '../../../node/server/context/context.js'
+import type { Context } from '../../../node/server/context/context.js'
 import { createPushReadable } from '../../push-readable.js'
 import { createPushReadableStream } from '../../push-readable-stream.js'
 
@@ -48,6 +50,7 @@ function buildInlineResponseBody(runContext: {
   metadataSerialized: string
   streamingValues: StreamingValueServer[]
   telefuncId: TelefuncId
+  context: Context
   abortSignal: AbortSignal
   responseAbort: Pick<ResponseAbortSource, 'errorPromise' | 'abort'>
   onComplete: () => void
@@ -58,6 +61,7 @@ function buildInlineResponseBody(runContext: {
     metadataSerialized,
     streamingValues,
     telefuncId,
+    context,
     abortSignal,
     responseAbort,
     onComplete,
@@ -115,47 +119,58 @@ function buildInlineResponseBody(runContext: {
   void (async () => {
     abortSignal.addEventListener('abort', onConsumerGone, { once: true })
     try {
-      // ── Header: [u32 metadata_len][metadata_bytes] — atomic on the wire,
-      // so don't break between the length and its payload.
-      const metadataBytes = textEncoder.encode(metadataSerialized)
-      await emit(encodeFrame(encodeU32(metadataBytes.length)))
-      await emit(encodeFrame(metadataBytes))
-
-      // ── Multiplexed merge loop ──
-      // Each producer keeps one in-flight `.next()`; `Promise.race` picks
-      // whichever resolves first. Winner is rotated to the end of `active` so
-      // a fast producer at index 0 doesn't starve others (race resolves in
-      // array order on ties).
-      const active: RaceEntry[] = []
-      for (const { producer, index } of producers) {
-        const entry: RaceEntry = { index, iter: producer.chunks, pending: null! }
-        advance(entry)
-        active.push(entry)
-      }
-
-      while (active.length > 0) {
-        // `responseAbort.errorPromise` rejects on a response-wide abort; it
-        // wins the race and routes us into the catch below.
-        const { entry, result } = await Promise.race([responseAbort.errorPromise, ...active.map((e) => e.pending)])
-        // Consumer is gone: bail before emitting a "this producer is done" frame
-        // — would also be misleading for cancelled producers returning done.
-        if (cancelled) return
-        if (result.done) {
-          // Empty-payload frame so the client knows this index is done
-          // without waiting for the global terminator.
-          await emit(encodeFrame(encodeIndexedFrame(entry.index, EMPTY)))
-          active.splice(active.indexOf(entry), 1)
-        } else {
-          await emit(encodeFrame(encodeIndexedFrame(entry.index, result.value as Uint8Array<ArrayBuffer>)))
+      // The telefunc context is restored around the whole merge loop, like the
+      // channel pump (ChannelResponseBody.ts) does, so `getContext()` works
+      // inside producer bodies (generator code runs lazily, on `.next()`).
+      await restoreContext(context, async () => {
+        // The producers' first `.next()` must run inside the synchronous
+        // stretch of the restored context: in sync mode the context global is
+        // cleared on the next macrotask, and the header `emit` below can
+        // suspend until the consumer's first read (the Web sink applies
+        // backpressure from the first push). So start the pulls before
+        // emitting the header.
+        const active: RaceEntry[] = []
+        for (const { producer, index } of producers) {
+          const entry: RaceEntry = { index, iter: producer.chunks, pending: null! }
           advance(entry)
-          active.splice(active.indexOf(entry), 1)
           active.push(entry)
         }
-      }
-      // `emit` is already a no-op if `cancelled` — but we'd rather not allocate
-      // the terminator frame at all when there's no one to receive it.
-      if (cancelled) return
-      await emit(encodeFrame(encodeU32(0)))
+
+        // ── Header: [u32 metadata_len][metadata_bytes] — atomic on the wire,
+        // so don't break between the length and its payload.
+        const metadataBytes = textEncoder.encode(metadataSerialized)
+        await emit(encodeFrame(encodeU32(metadataBytes.length)))
+        await emit(encodeFrame(metadataBytes))
+
+        // ── Multiplexed merge loop ──
+        // Each producer keeps one in-flight `.next()`; `Promise.race` picks
+        // whichever resolves first. Winner is rotated to the end of `active` so
+        // a fast producer at index 0 doesn't starve others (race resolves in
+        // array order on ties).
+        while (active.length > 0) {
+          // `responseAbort.errorPromise` rejects on a response-wide abort; it
+          // wins the race and routes us into the catch below.
+          const { entry, result } = await Promise.race([responseAbort.errorPromise, ...active.map((e) => e.pending)])
+          // Consumer is gone: bail before emitting a "this producer is done" frame
+          // — would also be misleading for cancelled producers returning done.
+          if (cancelled) return
+          if (result.done) {
+            // Empty-payload frame so the client knows this index is done
+            // without waiting for the global terminator.
+            await emit(encodeFrame(encodeIndexedFrame(entry.index, EMPTY)))
+            active.splice(active.indexOf(entry), 1)
+          } else {
+            await emit(encodeFrame(encodeIndexedFrame(entry.index, result.value as Uint8Array<ArrayBuffer>)))
+            advance(entry)
+            active.splice(active.indexOf(entry), 1)
+            active.push(entry)
+          }
+        }
+        // `emit` is already a no-op if `cancelled` — but we'd rather not allocate
+        // the terminator frame at all when there's no one to receive it.
+        if (cancelled) return
+        await emit(encodeFrame(encodeU32(0)))
+      })
     } catch (err) {
       // Cancel producers immediately so peer producers stop emitting work
       // that would never reach the consumer while we emit the error frames.
