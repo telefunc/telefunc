@@ -1,6 +1,7 @@
 export { testRunDocker }
 
-import { page, test, expect, expectLog, run, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, run, skip, isCI, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
+import { execSync } from 'node:child_process'
 import { waitForHydration } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
@@ -20,6 +21,13 @@ import { testPublish } from './pages/publish/e2e-test'
   '0'
 
 function testRunDocker() {
+  // Skip locally when Docker is unavailable. On CI a missing Docker should fail loudly,
+  // not silently shrink coverage.
+  if (!isCI() && !isDockerAvailable()) {
+    skip('SKIPPED: Docker is not available (`docker info` failed).')
+    return
+  }
+
   run('pnpm test:docker', {
     serverUrl: 'https://localhost:8443',
     serverIsReadyMessage: 'serving initial configuration',
@@ -116,6 +124,17 @@ function testRunDocker() {
       })
     }
   })
+}
+
+// `docker info` fails both when the CLI is missing and when the daemon is not running;
+// checking the binary alone would miss the stopped-daemon case.
+function isDockerAvailable(): boolean {
+  try {
+    execSync('docker info', { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function makeTelefuncHttpRequest(name: string | number) {
