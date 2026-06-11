@@ -11,7 +11,8 @@ import type {
 type TelefuncServerExtension = {
   name: string
   hooks?: {
-    onTransformResult?: (ctx: { result: unknown; data: Record<string, unknown> }) => unknown | Promise<unknown>
+    /** Called after the telefunction returns (before serialization), only when the request carries this extension's data. The return value replaces the result. */
+    onTelefunctionResult?: (ctx: { result: unknown; data: Record<string, unknown> }) => unknown | Promise<unknown>
   }
   /** Custom replacer types for server→client serialization (appended after built-in types). */
   responseTypes?: ReplacerType<TypeContract, ServerReplacerContext>[]
