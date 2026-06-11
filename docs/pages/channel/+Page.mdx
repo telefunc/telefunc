@@ -178,7 +178,7 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ## new Broadcast()
 
-`new Broadcast({ key })` creates one member of a pub/sub group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to it.
+`new Broadcast({ key })` creates one member of a broadcast group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to it.
 
 ```ts
 // Chat.telefunc.ts
