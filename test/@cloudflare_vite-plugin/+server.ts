@@ -1,7 +1,7 @@
 import vike from 'vike/fetch'
-import { telefunc } from 'telefunc/cloudflare'
+import { Telefunc } from 'telefunc/cloudflare'
 
-const tf = telefunc({ scale: 5 })
+const tf = new Telefunc({ scale: 5 })
 
 // Cloudflare requires Durable Object classes to be named exports of the worker entry.
 // `wrangler.jsonc`'s `main: "vike:server-entry"` re-exports everything from this file,
