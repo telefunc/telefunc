@@ -62,7 +62,7 @@ type StreamConfigUser = {
 }
 
 type BroadcastConfigUser = {
-  /** Transport for cross-node pub/sub delivery. */
+  /** Transport for cross-node `Broadcast` delivery. */
   transport?: BroadcastTransport
 }
 
@@ -200,7 +200,7 @@ type ConfigUser = {
   stream: StreamConfigUser
   /** Enabled transports and runtime settings for Telefunc channels. */
   channel: ChannelConfigUser
-  /** Pub/sub configuration. */
+  /** `Broadcast` configuration. */
   broadcast: BroadcastConfigUser
   /** Registered server extensions. Use `config.extensions.push(ext)` to add. */
   extensions: TelefuncServerExtension[]

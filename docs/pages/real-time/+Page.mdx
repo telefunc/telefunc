@@ -80,7 +80,7 @@ See <Link href="/channel" /> for the full API.
 > Channel messages are **shield-validated at runtime** from your TypeScript types — every client→server message passed to `listen()` is checked against the declared client-to-server type before reaching server code, and every ack response from the client is checked against the declared server-to-client type. See <Link href="/shield#channels" text="Shield — Channels" />.
 
 
-## Pub/sub
+## Broadcast
 
 Use <Link text={<code>new Broadcast()</code>} href="/channel#new-broadcast" /> for broadcast messaging — all instances sharing a key form a broadcast group.
 
@@ -119,7 +119,7 @@ chat.subscribe((msg) => console.log(msg))
 chat.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
-See <Link href="/channel#new-broadcast" /> for the full pub/sub API.
+See <Link href="/channel#new-broadcast" /> for the full `Broadcast` API.
 
 > Client-published messages are **shield-validated at runtime** from your TypeScript types — when the client calls `publish()` on a `Broadcast<T>` returned from a telefunction, the value is checked against `T` on the server before fanning out to subscribers. A failing shield rejects the client's `publish()` promise with `ShieldValidationError`. See <Link href="/shield" />.
 

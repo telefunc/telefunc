@@ -15,7 +15,7 @@ import type { WirePublishInfo } from '../shared-ws.js'
 /** Transport-level publish result. */
 type BroadcastPublishResult = WirePublishInfo & { meta?: Record<string, unknown> }
 
-/** Callback for delivering a pub/sub message to a subscriber. */
+/** Callback for delivering a broadcast message to a subscriber. */
 type BroadcastOnMessage = (serialized: string, info: WirePublishInfo) => void
 
 type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => void
@@ -30,7 +30,7 @@ type BroadcastAdapter = {
 }
 
 /**
- * Minimal interface for a pub/sub transport backend.
+ * Minimal interface for a broadcast transport backend.
  *
  * Implement these 4 methods to get a full BroadcastAdapter via `new DefaultBroadcastAdapter(transport)`.
  * Subscriber multiplexing and lifecycle are handled for you.
