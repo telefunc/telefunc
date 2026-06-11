@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-`@telefunc/rxjs` lets you pass [RxJS](https://rxjs.dev/) `Observable` and `Subject` transparently between client and server — both directions. All rxjs operators work out of the box.
+`@telefunc/rxjs` lets you pass [RxJS](https://rxjs.dev/) `Observable` and `Subject` transparently between client and server, both directions. All rxjs operators work out of the box.
 
 ## Install
 
@@ -8,10 +8,12 @@ import { Link } from '@brillout/docpress'
 npm install @telefunc/rxjs rxjs
 ```
 
+> The Telefunc bundler plugin (Vite, webpack, Next.js, Babel) detects `@telefunc/rxjs` in your dependencies and registers it automatically. Without a Telefunc bundler plugin, register it manually: `import '@telefunc/rxjs/server'` in your server entry and `import '@telefunc/rxjs/client'` in your client entry.
+
 
 ## Live stock ticker
 
-Server pushes prices every second. Client applies operators locally — filtering and limiting happen on the client with standard rxjs.
+Server pushes prices every second. Client applies operators locally: filtering and limiting happen on the client with standard rxjs.
 
 ```ts
 // StockPrice.telefunc.ts
@@ -63,7 +65,7 @@ edits.next({ userId: 'alice', text: 'Hello' })
 
 ## Click heatmap (client to server)
 
-Pass an Observable as a telefunction argument. The server subscribes and processes the stream — useful for telemetry, analytics, or any client-driven event stream.
+Pass an Observable as a telefunction argument. The server subscribes and processes the stream (useful for telemetry, analytics, or any client-driven event stream).
 
 ```ts
 // Heatmap.telefunc.ts
@@ -121,7 +123,7 @@ document.addEventListener('mousemove', e => {
 
 ## Angular
 
-Angular uses rxjs extensively. With `@telefunc/rxjs`, telefunctions return Observables directly — pipe them into templates with `| async`, use them in services, or compose them with the rest of your rxjs code.
+Angular uses rxjs extensively. With `@telefunc/rxjs`, telefunctions return Observables directly: pipe them into templates with `| async`, use them in services, or compose them with the rest of your rxjs code.
 
 ```ts
 // Dashboard.telefunc.ts
@@ -150,7 +152,7 @@ export class DashboardComponent {
 ```html
 <!-- dashboard.component.html -->
 @if (metrics$ | async; as m) {
-  CPU: {{ m.cpu }}% — Memory: {{ m.memory }}MB
+  CPU: {{ m.cpu }}%; Memory: {{ m.memory }}MB
 }
 ```
 
@@ -169,5 +171,5 @@ Unsubscribing stops data flow immediately. The underlying <Link href="/channel" 
 
 ## See also
 
-- <Link href="/real-time" /> — overview of Telefunc's real-time primitives
-- <Link href="/integrations" /> — other Telefunc integrations
+- <Link href="/real-time" />: overview of Telefunc's real-time primitives
+- <Link href="/integrations" />: other Telefunc integrations

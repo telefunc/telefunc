@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-`close()` and `onClose()` manage the lifecycle of telefunction values — anything returned from or passed to a telefunction that holds an open connection.
+`close()` and `onClose()` manage the lifecycle of telefunction values: anything returned from or passed to a telefunction that holds an open connection.
 
 ## `close()` (client)
 
@@ -24,7 +24,7 @@ close(result)
 For specific value types, you can also use the standard JS APIs directly:
 
 ```ts
-// AsyncGenerator — break out of the loop
+// AsyncGenerator: break out of the loop
 for await (const token of gen) {
   if (shouldStop) break
 }
@@ -32,10 +32,10 @@ for await (const token of gen) {
 // Or call return() directly
 gen.return()
 
-// ReadableStream — cancel the reader
+// ReadableStream: cancel the reader
 reader.cancel()
 
-// Channel — close explicitly
+// Channel: close explicitly
 await channel.close()
 ```
 
@@ -44,7 +44,7 @@ All of these signal the server to stop producing and release resources.
 
 ## `onClose()` (server)
 
-Use `onClose()` from <Link href="/getContext" text="getContext()" /> on the server to detect when the response ends — whether the value was consumed, the client disconnected, or an error occurred:
+Use `onClose()` from <Link href="/getContext" text="getContext()" /> on the server to detect when the response ends, whether the value was consumed, the client disconnected, or an error occurred:
 
 ```ts
 import { getContext } from 'telefunc'

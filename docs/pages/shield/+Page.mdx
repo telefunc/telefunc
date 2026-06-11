@@ -153,7 +153,7 @@ List of `shield()` types:
 
 ## Beyond top-level arguments
 
-Telefunc's automatic `shield()` generation isn't limited to a telefunction's direct arguments. It also emits **sub-shields** for values nested inside your types wherever the RPC boundary extends — callbacks and channels below, and <Link href="/integrations/rxjs#shields" text="RxJS streams" /> via `@telefunc/rxjs`. Sub-shields come from the same TypeScript types, so the runtime check always matches the declared type.
+Telefunc's automatic `shield()` generation isn't limited to a telefunction's direct arguments. It also emits **sub-shields** for values nested inside your types wherever the RPC boundary extends: callbacks and channels below, and <Link href="/integrations/rxjs#shields" text="RxJS streams" /> via `@telefunc/rxjs`. Sub-shields come from the same TypeScript types, so the runtime check always matches the declared type.
 
 The invariant: **only values arriving at the server are validated.** Values flowing the other way are trusted (the server is the trust boundary).
 
@@ -161,8 +161,8 @@ The invariant: **only values arriving at the server are validated.** Values flow
 
 A callback passed as an argument, or a function returned to the client, extends the RPC boundary to a second call site:
 
-- **Client-passed callback** — its **return value** is validated when the server invokes it.
-- **Server-returned function** — its **arguments** are validated when the client invokes it.
+- **Client-passed callback**: its **return value** is validated when the server invokes it.
+- **Server-returned function**: its **arguments** are validated when the client invokes it.
 
 ```ts
 // Upload.telefunc.ts
@@ -180,15 +180,15 @@ export async function getUser(id: string) {
 }
 ```
 
-> `void` return types compile to a shield that accepts only `undefined`. A callback typed `() => Promise<void>` that returns a truthy value is rejected — otherwise `if (await cb()) …` would branch on client-returned garbage.
+> `void` return types compile to a shield that accepts only `undefined`. A callback typed `() => Promise<void>` that returns a truthy value is rejected; otherwise `if (await cb()) …` would branch on client-returned garbage.
 
 
 ### Channels
 
 [`new Channel<ClientToServer, ServerToClient>()`](/channel) declares two typed directions, each a function signature `(msg) => ack`. Telefunc generates two sub-shields that fire on the server:
 
-- **`data`** — validates messages arriving from the client (input to `listen()`).
-- **`ack`** — validates the ack returned by the client's `listen()` to a server-initiated `send(..., { ack: true })`.
+- **`data`**: validates messages arriving from the client (input to `listen()`).
+- **`ack`**: validates the ack returned by the client's `listen()` to a server-initiated `send(..., { ack: true })`.
 
 ```ts
 const events = new Channel<
@@ -205,7 +205,7 @@ events.listen((msg) => {
 await events.send({ tick: 1 }, { ack: true })
 ```
 
-> A direction typed `never` rejects any value at runtime — it means "no traffic expected on this direction." If you send traffic on a `never` direction anyway, the corresponding `data` or `ack` shield will fail. Make sure the direction you actually use at runtime isn't `never`.
+> A direction typed `never` rejects any value at runtime: it means "no traffic expected on this direction." If you send traffic on a `never` direction anyway, the corresponding `data` or `ack` shield will fail. Make sure the direction you actually use at runtime isn't `never`.
 
 
 ### Broadcast
@@ -229,4 +229,4 @@ await chat.publish({ user: 'Alice', text: 'Hello!' })
 // `ShieldValidationError` and the message is not delivered.
 ```
 
-Server-side `publish()` calls (from inside a telefunction or via the static `Broadcast.publish(key, data)`) are not shield-validated — the server is the trust boundary, so values originating there flow through as-is.
+Server-side `publish()` calls (from inside a telefunction or via the static `Broadcast.publish(key, data)`) are not shield-validated: the server is the trust boundary, so values originating there flow through as-is.

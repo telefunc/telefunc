@@ -44,12 +44,12 @@ export default {
 }
 ```
 
-> Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else, and Durable Objects and KV are Cloudflare's primitives for exactly that:
+> Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral: any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else, and Durable Objects and KV are Cloudflare's primitives for exactly that:
 >
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
-> - **KV** provides shared storage: it's how stateless workers — wherever a request happens to land — find the Durable Object that holds the state.
+> - **KV** provides shared storage: it's how stateless workers (wherever a request happens to land) find the Durable Object that holds the state.
 >
-> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `Broadcast`, there's no state to keep — skip both bindings and use `serve()` instead, see <Link text="Low-level API" href="/server#low-level-api" />.
+> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `Broadcast`, there's no state to keep: skip both bindings and use `serve()` instead, see <Link text="Low-level API" href="/server#low-level-api" />.
 >
 > See <Link href="#architecture" /> for implementation details.
 
@@ -71,8 +71,8 @@ const tf = new Telefunc({
 Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for channel state and broadcast fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object as the WebSocket connection.
 
 [KV](https://developers.cloudflare.com/kv/) stores two things:
-- **Session tokens** — pins a browser to the same Durable Object across requests.
-- **Broadcast presence** — tracks which Durable Objects have active subscribers for each key.
+- **Session tokens**: pins a browser to the same Durable Object across requests.
+- **Broadcast presence**: tracks which Durable Objects have active subscribers for each key.
 
 ### Regions
 
@@ -91,7 +91,7 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 ### Session affinity
 
-Every telefunction call and channel message from a browser must reach the **same Durable Object** — otherwise the channel state wouldn't be there.
+Every telefunction call and channel message from a browser must reach the **same Durable Object**; otherwise the channel state wouldn't be there.
 
 On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns it to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
 
@@ -127,7 +127,7 @@ Only specified regions get Durable Objects. Requests from unspecified regions fa
 
 ```
 Publisher (Durable Object)
-  → Authority DO (one per key — assigns sequence numbers)
+  → Authority DO (one per key; assigns sequence numbers)
     → Coordinators (one per active region)
       → Durable Objects (deliver to local subscribers)
 ```
@@ -196,7 +196,7 @@ const tf = new Telefunc({
 >
 > Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
 
-Once all channels close and no clients are connected, the Durable Object can hibernate — after the reconnect and idle windows expire.
+Once all channels close and no clients are connected, the Durable Object can hibernate (after the reconnect and idle windows expire).
 
 ```ts
 import { config } from 'telefunc'
@@ -212,6 +212,6 @@ config.channel = {
 
 ## See also
 
-- <Link href="/server" /> — serve API for all runtimes
-- <Link href="/channel" /> — `Channel` and `Broadcast` API
-- <Link href="/real-time" /> — real-time patterns
+- <Link href="/server" />: serve API for all runtimes
+- <Link href="/channel" />: `Channel` and `Broadcast` API
+- <Link href="/real-time" />: real-time patterns

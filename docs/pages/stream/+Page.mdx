@@ -14,7 +14,7 @@ Telefunc supports streaming in both directions:
 | [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) | AI tokens, notifications, progress updates | Structured (JSON-serializable) |
 | [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) | Raw byte streams without file metadata | Binary (`Uint8Array`) |
 | <Link text={<code>File</code>} href="/file-download" /> / <Link text={<code>Blob</code>} href="/file-download" /> | File downloads with `name` / `type` / `size` | Binary (`Uint8Array`) |
-| <Link text={<code>download()</code>} href="/file-download#download" /> | File / Blob downloads with progress + cancel, or upstream-streamed bytes | Binary (`Uint8Array`) |
+| <Link text={<code>download()</code>} href="/file-download#streaming-with-download" /> | File / Blob downloads with progress + cancel, or upstream-streamed bytes | Binary (`Uint8Array`) |
 | Nested [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise) | Lazy parts of a response that resolve independently | Any serializable value |
 
 
@@ -82,7 +82,7 @@ while (true) {
 
 ## Nested `Promise`
 
-Return unawaited promises inside the response object — the client gets the surrounding values immediately while each promise resolves independently.
+Return unawaited promises inside the response object: the client gets the surrounding values immediately while each promise resolves independently.
 
 ```ts
 // Dashboard.telefunc.ts
@@ -111,7 +111,7 @@ const summary = await res.summary  // Await when needed
 const report = await res.report
 ```
 
-> **Don't `await` inside the telefunction** — that blocks the entire response:
+> **Don't `await` inside the telefunction**; that blocks the entire response:
 > ```ts
 > // ❌ Blocks everything
 > export async function onLoadDashboard() {
@@ -167,10 +167,10 @@ await onIngest(stream, 'data.txt')
 
 | Method | Backpressure | Best for |
 |---|---|---|
-| <Link text={<code>File</code>} href="/file-upload" /> / <Link text={<code>Blob</code>} href="/file-upload" /> argument | TCP-level | Finite uploads — files, images, CSV imports |
-| `ReadableStream` argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
-| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | No | Fire-and-forget binary — low-latency frames where dropping is acceptable |
-| <Link text={<code>new Broadcast().publishBinary()</code>} href="/channel#new-broadcast" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
+| <Link text={<code>File</code>} href="/file-upload" /> / <Link text={<code>Blob</code>} href="/file-upload" /> argument | TCP-level | Finite uploads: files, images, CSV imports |
+| `ReadableStream` argument | Yes | Long-lived streams: video feed, sensor data, continuous audio |
+| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | <Link text="Opt-in" href="/channel#backpressure" /> (`await` each send) | Low-latency frames; skip the `await` for fire-and-forget |
+| <Link text={<code>new Broadcast().publishBinary()</code>} href="/channel#new-broadcast" /> | Publish-side only | Broadcast binary: video to multiple subscribers |
 
 
 ## Mixed return types
@@ -205,7 +205,7 @@ import { onLoadDashboard } from './Dashboard.telefunc'
 
 const res = await onLoadDashboard()
 
-// Static values — available immediately
+// Static values: available immediately
 console.log(res.title)
 
 // Consume generator and promises independently
@@ -232,7 +232,7 @@ By default, streamed values are sent as raw binary chunks over HTTP (`applicatio
 | Transport | Description |
 |---|---|
 | `'binary-inline'` (default) | Raw binary chunked HTTP response. Lowest overhead. |
-| `'sse-inline'` | Base64url-encoded Server-Sent Events — works through proxies that buffer binary |
+| `'sse-inline'` | Base64url-encoded Server-Sent Events; works through proxies that buffer binary |
 | `'channel'` | Delivers over the configured channel transport (`'sse'` or `'ws'`) with reconnection support |
 
 ```ts
@@ -259,15 +259,15 @@ See <Link href="/transport" /> for a full comparison.
 
 ## Error handling
 
-Telefunc distinguishes expected failures from bugs — even in streaming responses. If a generator or stream throws, the client receives a typed error while values already delivered remain available.
+Telefunc distinguishes expected failures from bugs, even in streaming responses. If a generator or stream throws, the client receives a typed error while values already delivered remain available.
 
 See <Link href="/error-handling" /> for details.
 
 
 ## See also
 
-- <Link href="/real-time" /> — function passing, channels, and upload progress
-- <Link href="/file-upload" /> — streaming file uploads
-- <Link href="/file-download" /> — streaming file downloads
-- <Link href="/channel" /> — bidirectional channels
-- <Link href="/transport" /> — transport comparison and configuration
+- <Link href="/real-time" />: function passing, channels, and upload progress
+- <Link href="/file-upload" />: streaming file uploads
+- <Link href="/file-download" />: streaming file downloads
+- <Link href="/channel" />: bidirectional channels
+- <Link href="/transport" />: transport comparison and configuration
