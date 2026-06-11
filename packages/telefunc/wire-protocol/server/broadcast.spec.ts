@@ -449,7 +449,7 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
-// Static methods — server-only fire-and-forget pub/sub. Bypasses the
+// Static methods — server-only fire-and-forget broadcast. Bypasses the
 // instance-lifecycle (no register, no peer) and goes straight to the adapter.
 // Bug class: regression where statics start touching instance state.
 // ───────────────────────────────────────────────────────────────────────────

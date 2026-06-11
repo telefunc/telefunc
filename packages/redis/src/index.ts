@@ -6,7 +6,7 @@ import { config, type BroadcastTransport } from 'telefunc'
 import { assert } from './assert.js'
 import { callDefinedCommand } from './callDefinedCommand.js'
 
-/** Wires Redis-backed broadcast pub/sub fan-out into the telefunc broadcast adapter so
+/** Wires Redis-backed fan-out into the telefunc broadcast transport so
  *  `Broadcast.publish()`/`subscribe()` cross instances. Pair with sticky-session routing
  *  at the load balancer so each client's channel traffic stays on one instance. */
 function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {

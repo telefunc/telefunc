@@ -18,7 +18,7 @@ import { TELEFUNC_SESSION_HEADER } from '../../../constants.js'
 import { assert } from '../../../../utils/assert.js'
 
 /**
- * Cloudflare routing primitives for Telefunc's session and pub/sub Durable Objects.
+ * Cloudflare routing primitives for Telefunc's session and broadcast Durable Objects.
  *
  * Routing now always resolves to one of Telefunc's canonical Cloudflare location hints.
  * If Cloudflare doesn't provide a precise mapping, Telefunc uses `locationFallback`.

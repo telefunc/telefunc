@@ -1,7 +1,7 @@
 {
   "name": "@telefunc/redis",
   "version": "0.1.0",
-  "description": "Redis pub/sub adapter for Telefunc — scale channels and pub/sub across multiple server instances.",
+  "description": "Redis broadcast transport for Telefunc — fan out Broadcast messages across multiple server instances.",
   "homepage": "https://github.com/brillout/telefunc/tree/main/packages/redis#readme",
   "repository": {
     "type": "git",
