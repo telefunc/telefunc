@@ -29,12 +29,12 @@ type ChannelPublishInfo = {
   /** Strict per-key counter (1, 2, 3…). Resets if the authority restarts. Use for gap detection. */
   seq: number
   /** Server timestamp, Unix epoch milliseconds. */
-  ts: number
+  timestamp: number
 }
 type ChannelPublishAck = ChannelPublishInfo & { meta?: ChannelPublishMeta }
 
-function makePublishInfo(key: string, seq: number, ts: number): ChannelPublishInfo {
-  return { key, seq, ts }
+function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPublishInfo {
+  return { key, seq, timestamp }
 }
 type ChannelListenReturn<T> = [T] extends [never]
   ? void

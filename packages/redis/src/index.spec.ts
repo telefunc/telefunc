@@ -83,15 +83,15 @@ function newAdapter() {
 }
 
 describe('Redis adapter — atomic publish via Lua', () => {
-  it('returns the monotonic per-key seq and Redis-clock ts assigned by the script', async () => {
+  it('returns the monotonic per-key seq and Redis-clock timestamp assigned by the script', async () => {
     const { fake, adapter } = newAdapter()
     fake.setClock(1_700_000_001_000)
 
     const first = await adapter.publish('room:a', 'hello')
     const second = await adapter.publish('room:a', 'world')
 
-    expect(first).toMatchObject({ seq: 1, ts: 1_700_000_001_000 })
-    expect(second).toMatchObject({ seq: 2, ts: 1_700_000_001_000 })
+    expect(first).toMatchObject({ seq: 1, timestamp: 1_700_000_001_000 })
+    expect(second).toMatchObject({ seq: 2, timestamp: 1_700_000_001_000 })
   })
 
   it('keeps separate seq counters per key', async () => {
@@ -108,19 +108,19 @@ describe('Redis adapter — atomic publish via Lua', () => {
 })
 
 describe('Redis adapter — live delivery', () => {
-  it('decodes the binary header and UTF-8 payload for text subscribers with the same seq/ts the publisher saw', async () => {
+  it('decodes the binary header and UTF-8 payload for text subscribers with the same seq/timestamp the publisher saw', async () => {
     const { fake, adapter } = newAdapter()
     fake.setClock(1_700_000_002_000)
 
-    const received: Array<{ payload: string; seq: number; ts: number }> = []
+    const received: Array<{ payload: string; seq: number; timestamp: number }> = []
     adapter.subscribe('room:live', (payload, info) => received.push({ payload, ...info }))
 
     await adapter.publish('room:live', 'msg-1')
     await adapter.publish('room:live', 'msg-2')
 
     expect(received).toEqual([
-      { payload: 'msg-1', seq: 1, ts: 1_700_000_002_000 },
-      { payload: 'msg-2', seq: 2, ts: 1_700_000_002_000 },
+      { payload: 'msg-1', seq: 1, timestamp: 1_700_000_002_000 },
+      { payload: 'msg-2', seq: 2, timestamp: 1_700_000_002_000 },
     ])
   })
 
@@ -128,7 +128,7 @@ describe('Redis adapter — live delivery', () => {
     const { fake, adapter } = newAdapter()
     fake.setClock(1_700_000_003_000)
 
-    const received: Array<{ payload: Uint8Array; seq: number; ts: number }> = []
+    const received: Array<{ payload: Uint8Array; seq: number; timestamp: number }> = []
     adapter.subscribeBinary('room:bin', (payload, info) => received.push({ payload, ...info }))
 
     await adapter.publishBinary('room:bin', new Uint8Array([0xde, 0xad, 0xbe, 0xef]))
@@ -136,6 +136,6 @@ describe('Redis adapter — live delivery', () => {
     expect(received).toHaveLength(1)
     expect(Array.from(received[0]!.payload)).toEqual([0xde, 0xad, 0xbe, 0xef])
     expect(received[0]!.seq).toBe(1)
-    expect(received[0]!.ts).toBe(1_700_000_003_000)
+    expect(received[0]!.timestamp).toBe(1_700_000_003_000)
   })
 })

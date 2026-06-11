@@ -23,8 +23,8 @@ const PRESENCE_REFRESH_INTERVAL_MS = 30_000
  *  RPC properties are lazy stubs that must be awaited to resolve their values. */
 async function unwrapRpcResult(rpc: Promise<BroadcastPublishResult>): Promise<BroadcastPublishResult> {
   const r = await rpc
-  const [seq, ts, meta] = await Promise.all([r.seq, r.ts, r.meta])
-  return { seq, ts, ...(meta ? { meta } : undefined) }
+  const [seq, timestamp, meta] = await Promise.all([r.seq, r.timestamp, r.meta])
+  return { seq, timestamp, ...(meta ? { meta } : undefined) }
 }
 
 type BroadcastPublishRequest = {
@@ -474,7 +474,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
           this.getBoundStub(doName).telefuncBroadcastDeliver({ key, serialized, binaryData, info }),
         ),
       )
-      return { seq: info.seq, ts: info.ts }
+      return { seq: info.seq, timestamp: info.timestamp }
     }
 
     const { authorityBucket, seq, presenceByBucket } = await authorityState.runInAuthorityChain(async () => ({
@@ -483,8 +483,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       presenceByBucket: await this.listPresenceByBucket(key),
     }))
 
-    const ts = Date.now()
-    const info = { seq, ts }
+    const timestamp = Date.now()
+    const info = { seq, timestamp }
     const activeBuckets = Array.from(presenceByBucket.keys())
     await Promise.all(
       activeBuckets.map((activeBucket) =>
@@ -499,7 +499,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
         }),
       ),
     )
-    return { seq, ts, meta: { authorityBucket, fanoutBuckets: activeBuckets } }
+    return { seq, timestamp, meta: { authorityBucket, fanoutBuckets: activeBuckets } }
   }
 
   /**

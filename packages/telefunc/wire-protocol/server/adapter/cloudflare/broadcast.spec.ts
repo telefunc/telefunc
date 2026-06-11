@@ -100,7 +100,7 @@ function createBasicBinding(
     get(id: { name: string }) {
       return {
         telefuncBroadcastPublish(request: any) {
-          return overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, ts: Date.now() })
+          return overrides?.onPublish?.(id, request) ?? Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
         telefuncBroadcastDeliver(request: any) {
           return overrides?.onDeliver?.(id, request) ?? Promise.resolve()
@@ -288,7 +288,7 @@ describe('cloudflare broadcast routing', () => {
         fanoutBuckets: ['weur', 'apac'],
       },
     })
-    expect(receipt.ts).toEqual(expect.any(Number))
+    expect(receipt.timestamp).toEqual(expect.any(Number))
   })
 
   it('waits for KV presence setup before authority publish fanout', async () => {
@@ -312,7 +312,7 @@ describe('cloudflare broadcast routing', () => {
       createBasicBinding({
         onPublish(id, request) {
           publishTargets.push(id.name)
-          return Promise.resolve({ seq: 1, ts: Date.now() })
+          return Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
       }),
       'TelefuncDurableObject',
@@ -450,7 +450,7 @@ describe('cloudflare broadcast routing', () => {
         fanoutBuckets: ['weur'],
       },
     })
-    expect(receipt.ts).toEqual(expect.any(Number))
+    expect(receipt.timestamp).toEqual(expect.any(Number))
 
     _resetBroadcastAdapterForTesting(previousTransport)
   })
@@ -514,7 +514,7 @@ describe('cloudflare broadcast routing', () => {
       serialized: '{"text":"hello"}',
       forwarded: true,
       doNames: ['telefunc-shard-weur-0', 'telefunc-shard-weur-1'],
-      info: { seq: 1, ts: Date.now() },
+      info: { seq: 1, timestamp: Date.now() },
     })
 
     expect(deliveredTo.sort()).toEqual(['telefunc-shard-weur-0', 'telefunc-shard-weur-1'])
@@ -530,7 +530,7 @@ describe('cloudflare broadcast routing', () => {
       createBasicBinding({
         onPublish(id, { key, locationBucket, serialized }) {
           coordinatorPublishes.push({ name: id.name, key, locationBucket, serialized })
-          return Promise.resolve({ seq: 1, ts: Date.now() })
+          return Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
       }),
       'TelefuncDurableObject',
