@@ -346,7 +346,7 @@ describe('cloudflare adapter entrypoint', () => {
     instance.telefuncBroadcastDeliver({
       key: 'room:test',
       serialized: '{"text":"hello"}',
-      info: { seq: 1, ts: Date.now() },
+      info: { seq: 1, timestamp: Date.now() },
     })
     expect(mocks.transportInstances[0]?.deliverToLocal).toHaveBeenCalledWith({
       key: 'room:test',
