@@ -15,8 +15,8 @@ config.shield = true
 const INST = process.env.INSTANCE_ID ?? '?'
 
 if (process.env.REDIS_URL) {
-  installRedis(new IORedis(process.env.REDIS_URL), { instanceId: INST })
-  console.log(`[INST=${INST}] Redis substrate installed`)
+  installRedis(new IORedis(process.env.REDIS_URL))
+  console.log(`[INST=${INST}] Redis broadcast transport installed`)
 }
 
 // Translate Ctrl-C / docker-stop into a clean `process.exit(0)`. Without this, Node's
