@@ -18,6 +18,8 @@ By default, channels and broadcast use **SSE** and work without extra server set
 
 ## new Channel()
 
+`new Channel()` creates a private, two-way message pipe between the server and the one client that called the telefunction. The server keeps the `Channel` object and hands the client its end by returning `chat.client`. The channel outlives the telefunction call: both ends can `send()` and `listen()` until one side closes it.
+
 ```ts
 // Chat.telefunc.ts
 import { Channel } from 'telefunc'
@@ -176,7 +178,7 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ## new Broadcast()
 
-Use `new Broadcast()` for broadcast messaging. All broadcast instances sharing a key form a broadcast group.
+`new Broadcast({ key })` creates one member of a pub/sub group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to it.
 
 ```ts
 // Chat.telefunc.ts
