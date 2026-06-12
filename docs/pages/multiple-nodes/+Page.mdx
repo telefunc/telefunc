@@ -26,7 +26,7 @@ A `Broadcast` is different: publishers and subscribers are intentionally decoupl
 In a single-instance setup the default in-memory transport is enough. In a multi-instance setup, configure a transport that fans out across the cluster:
 
 ```ts
-// telefunc.config.ts
+// server.ts
 // Environment: server
 
 import IORedis from 'ioredis'
