@@ -4,14 +4,13 @@ import { Link } from '@brillout/docpress'
 
 Telefunc provides two primitives for real-time communication:
 
-| Primitive | Methods | Use case |
+| | `new Channel()` | `new Broadcast()` |
 |---|---|---|
-| **`new Channel()`** | `send()` / `listen()` | Direct messages between one server and one client — commands, acks, request-response over a persistent connection. |
-| **`new Broadcast()`** | `publish()` / `subscribe()` | Broadcast to all subscribers sharing a key — chat rooms, live feeds, collaborative editing. |
+| Purpose | Direct messages between *one* server and *one* client | Broadcast to *all* subscribers |
 
-Return either from a telefunction — they serialize into client-side objects automatically.
+Both are returned from a telefunction — they serialize into client-side objects automatically.
 
-By default, channels and broadcast use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background. See <Link href="/transport" />.
+> By default, channels and broadcasts use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background, see <Link href="/transport" />.
 
 > For short-lived callbacks (e.g. progress updates), <Link href="/real-time">function passing</Link> is usually simpler.
 
@@ -229,7 +228,7 @@ import { onJoinChat } from './Chat.telefunc'
 
 const chat = await onJoinChat('Alice')
 
-// Receive every message published to the key, including this instance's own publishes
+// Receive messages published to the key, including this instance's own publishes
 chat.subscribe((msg, info) => {
   console.log(`#${info.seq} ${msg.user}: ${msg.text}`)
 })
@@ -277,6 +276,37 @@ info.timestamp  // server timestamp (Unix epoch ms)
 `publish()` returns a `Promise` that resolves to `info` once the message is accepted. `subscribe()` receives `info` alongside each message — useful for ordering and gap detection.
 
 > In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
+
+
+## `Channel` vs `Broadcast`
+
+### Fundamentally
+
+Fundamentally, the difference is what a message is addressed to: a `Channel` message is addressed to *someone*, a `Broadcast` message is addressed to *a topic* (the `key`).
+
+A `Channel` is a conversation, like a phone call: two fixed ends (the server and the one client that received the channel), private to them, finishes when either side hangs up.
+
+A `Broadcast` is an announcement, like a radio frequency: whoever tunes in to the `key` receives everything published to it (the publisher included), members come and go, and the `key` belongs to no one.
+
+Only the two ends of a channel can use it, while anything that knows a `key` can join its broadcast. A channel ends when either side closes it, while a broadcast outlives any single member.
+
+These are the two natural shapes of communication.
+
+### Technically
+
+You can think of `new Broadcast()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received the broadcast object, and bridges that client into the keyed broadcast group that the static methods tap directly.
+
+### Comparison
+
+| | `new Channel()` | `new Broadcast()` |
+|---|---|---|
+| Topology | One server ↔ one client | All members sharing a `key` (server and client) |
+| Methods | `send()` / `listen()` | `publish()` / `subscribe()` |
+| Delivery | The other end | Every subscriber of the `key`, including the publisher |
+| Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `channel = new Channel()` instance and returns `channel.client` for the client (asymmetric)</li></ul> | Symmetric:<ul><li>Same type for every member: `Broadcast<MessageType>`</li><li>The server uses and returns the same instance `Broadcast` (symmetric)</li></ul> |
+| Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
+| `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
+| Multi-server | [Sticky sessions](/multiple-nodes) | [Broadcast transport](#multi-server) |
 
 
 ## Multi-server

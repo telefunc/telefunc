@@ -231,7 +231,7 @@ const headings = [
   },
   {
     level: 2,
-    title: '`Channel` / `Broadcast`',
+    title: '`Channel`',
     url: '/channel',
   },
   {
