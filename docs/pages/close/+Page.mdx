@@ -7,6 +7,8 @@ import { Link } from '@brillout/docpress'
 `close()` from `telefunc/client` gracefully closes any value returned by a telefunction. It walks the return value recursively and closes everything in one call.
 
 ```ts
+// Environment: client
+
 import { close } from 'telefunc/client'
 import { onLoadDashboard } from './Dashboard.telefunc'
 
@@ -47,6 +49,8 @@ All of these signal the server to stop producing and release resources.
 Use `onClose()` from <Link href="/getContext" text="getContext()" /> on the server to detect when the response ends — whether the value was consumed, the client disconnected, or an error occurred:
 
 ```ts
+// Environment: server
+
 import { getContext } from 'telefunc'
 
 export async function* onChat(prompt: string) {

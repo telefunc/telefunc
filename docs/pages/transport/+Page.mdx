@@ -8,7 +8,7 @@ Telefunc has two transport settings:
 | Setting | Controls |
 |---|---|
 | `config.stream.transport` | How <Link href="/stream">streamed values</Link> (`AsyncGenerator`, `ReadableStream`, `Promise`) are delivered |
-| `config.channel.transports` | How <Link text={<code>channel()</code>} href="/channel" /> connections work |
+| `config.channel.transports` | How <Link text={<code>new Channel()</code>} href="/channel" /> connections work |
 
 Plain telefunction calls are always `text/plain` JSON — these settings only affect streaming and channels.
 
@@ -18,7 +18,7 @@ Plain telefunction calls are always `text/plain` JSON — these settings only af
 import { config } from 'telefunc/client'
 
 config.stream.transport = 'binary-inline'   // default
-config.channel.transports = ['sse']            // default
+config.channel.transports = ['sse', 'ws']   // default
 ```
 
 <ConfigWhereClient />
@@ -52,12 +52,14 @@ Controls how streamed values are delivered over HTTP.
 
 ## Channel transport
 
-Controls how <Link text={<code>channel()</code>} href="/channel" /> connections work, and which backend `config.stream.transport = 'channel'` uses.
+Controls how <Link text={<code>new Channel()</code>} href="/channel" /> connections work, and which backend `config.stream.transport = 'channel'` uses.
 
 | Transport | Description |
 |---|---|
-| `'sse'` (default) | HTTP requests + SSE stream. Works without extra server setup. |
+| `'sse'` | HTTP requests + SSE stream. Works without extra server setup. |
 | `'ws'` | Multiplexed WebSocket. Requires <Link text="WebSocket server setup" href="/server" />. |
+
+The client default is `['sse', 'ws']` — start on SSE, upgrade to WebSocket when the server supports it. The server enables SSE only until a WebSocket adapter is installed (see <Link href="/server" />).
 
 ### Comparison
 
@@ -88,6 +90,8 @@ Controls how <Link text={<code>channel()</code>} href="/channel" /> connections 
 Override the transport for a single call using `withContext()`:
 
 ```ts
+// Environment: client
+
 import { onAIChat } from './Chat.telefunc'
 import { withContext } from 'telefunc/client'
 

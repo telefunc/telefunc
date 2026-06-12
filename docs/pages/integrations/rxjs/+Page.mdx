@@ -8,6 +8,8 @@ import { Link } from '@brillout/docpress'
 npm install @telefunc/rxjs rxjs
 ```
 
+> The Telefunc bundler plugin (Vite, webpack, Next.js, Babel) detects `@telefunc/rxjs` in your dependencies and registers it automatically. Without a Telefunc bundler plugin, register it manually — `import '@telefunc/rxjs/server'` in your server entry and `import '@telefunc/rxjs/client'` in your client entry.
+
 
 ## Live stock ticker
 
@@ -15,6 +17,8 @@ Server pushes prices every second. Client applies operators locally — filterin
 
 ```ts
 // StockPrice.telefunc.ts
+// Environment: server
+
 import { interval, map } from 'rxjs'
 
 export async function onStockPrice(symbol: string) {
@@ -26,6 +30,8 @@ export async function onStockPrice(symbol: string) {
 
 ```tsx
 // StockPrice.tsx
+// Environment: client
+
 import { filter, take } from 'rxjs'
 
 const price$ = await onStockPrice('AAPL')
@@ -42,6 +48,8 @@ A shared `Subject` returned to multiple clients multicasts: when any client call
 
 ```ts
 // Editor.telefunc.ts
+// Environment: server
+
 import { Subject } from 'rxjs'
 
 const edits = new Subject<{ userId: string; text: string }>()
@@ -53,6 +61,8 @@ export async function onJoinEditor() {
 
 ```tsx
 // Editor.tsx
+// Environment: client
+
 const edits = await onJoinEditor()
 
 edits.subscribe(edit => applyEdit(edit))
@@ -67,6 +77,8 @@ Pass an Observable as a telefunction argument. The server subscribes and process
 
 ```ts
 // Heatmap.telefunc.ts
+// Environment: server
+
 import { Observable, bufferTime, filter } from 'rxjs'
 
 export async function onTrackClicks(clicks$: Observable<{ x: number; y: number }>) {
@@ -79,6 +91,8 @@ export async function onTrackClicks(clicks$: Observable<{ x: number; y: number }
 
 ```tsx
 // Heatmap.tsx
+// Environment: client
+
 import { fromEvent, map } from 'rxjs'
 
 const clicks$ = fromEvent<MouseEvent>(document, 'click').pipe(
@@ -94,6 +108,8 @@ A shared Subject multicasts cursor positions between all connected users. The se
 
 ```ts
 // Whiteboard.telefunc.ts
+// Environment: server
+
 import { Subject } from 'rxjs'
 import { getContext } from 'telefunc'
 
@@ -109,6 +125,8 @@ export async function onCursors() {
 
 ```tsx
 // Whiteboard.tsx
+// Environment: client
+
 const { cursors, input } = await onCursors()
 
 cursors.subscribe(pos => drawCursor(pos.userId, pos.x, pos.y))
@@ -125,6 +143,8 @@ Angular uses rxjs extensively. With `@telefunc/rxjs`, telefunctions return Obser
 
 ```ts
 // Dashboard.telefunc.ts
+// Environment: server
+
 import { interval, map } from 'rxjs'
 
 export async function onMetrics() {
@@ -138,6 +158,8 @@ The `| async` pipe subscribes and auto-unsubscribes on component destroy:
 
 ```ts
 // dashboard.component.ts
+// Environment: client
+
 export class DashboardComponent {
   metrics$!: Observable<{ cpu: number; memory: number }>
 
@@ -149,6 +171,8 @@ export class DashboardComponent {
 
 ```html
 <!-- dashboard.component.html -->
+<!-- Environment: client -->
+
 @if (metrics$ | async; as m) {
   CPU: {{ m.cpu }}% — Memory: {{ m.memory }}MB
 }

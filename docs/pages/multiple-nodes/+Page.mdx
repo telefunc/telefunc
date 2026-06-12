@@ -26,7 +26,9 @@ A `Broadcast` is different: publishers and subscribers are intentionally decoupl
 In a single-instance setup the default in-memory transport is enough. In a multi-instance setup, configure a transport that fans out across the cluster:
 
 ```ts
-// telefunc.config.ts
+// server.ts
+// Environment: server
+
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
@@ -70,9 +72,11 @@ reverse_proxy app1:3000 app2:3000 {
 
 In the target group's attributes, enable **Stickiness** with type **Load balancer generated cookie**.
 
-### Cloud Run / Cloudflare Workers / serverless
+### Cloud Run / serverless
 
 Serverless platforms that don't expose sticky-session routing aren't a good fit for `Channel`. `Broadcast` still works (publishes round-trip through Redis), but channel reconnects can fail unpredictably. Most teams pair Telefunc with a regular long-running server tier when they need channels at scale.
+
+> Cloudflare Workers is the exception — `telefunc/cloudflare` routes channels through Durable Objects instead of sticky sessions, so channels are fully supported. See <Link href="/cloudflare" />.
 
 
 ## Sanity check

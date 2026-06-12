@@ -34,17 +34,26 @@ function Publish() {
         id="test-text-broadcast"
         onClick={async () => {
           setResult('')
-          const { publisher, getReceived } = await onTextBroadcast()
+          const { publisher, subscriber, getReceived } = await onTextBroadcast()
           // Publish 3 messages from the publisher
           const acks = []
           for (let i = 0; i < 3; i++) {
             const ack = await publisher.publish({ text: `msg-${i}`, from: 'client' })
             acks.push({ seq: ack.seq, key: ack.key })
           }
-          // Small delay for delivery
-          await new Promise((r) => setTimeout(r, 200))
-          const received = await getReceived()
-          setResult(JSON.stringify({ acks, received }))
+          // Render every poll so the e2e autoRetry sees fresh data on each iteration.
+          // A one-shot snapshot freezes the DOM and turns slow delivery into a
+          // guaranteed test failure.
+          for (let poll = 0; poll < 50; poll++) {
+            const received = await getReceived()
+            setResult(JSON.stringify({ acks, received }))
+            if (received.length >= 3) break
+            await new Promise((r) => setTimeout(r, 200))
+          }
+          // `subscriber` is unused but must stay reachable until the scenario is over:
+          // it crosses the wire as a remote handle, and a GC pass would close it,
+          // tearing down the server-side subscription mid-test.
+          void subscriber
         }}
       >
         Text publish (3 messages)
@@ -56,7 +65,7 @@ function Publish() {
         id="test-binary-broadcast-pair"
         onClick={async () => {
           setResult('')
-          const { publisher, getReceived } = await onBinaryBroadcastPair()
+          const { publisher, subscriber, getReceived } = await onBinaryBroadcastPair()
           // Publish 3 binary frames
           const acks = []
           for (let i = 0; i < 3; i++) {
@@ -64,9 +73,15 @@ function Publish() {
             const ack = await publisher.publishBinary(data)
             acks.push({ seq: ack.seq, key: ack.key })
           }
-          await new Promise((r) => setTimeout(r, 200))
-          const received = await getReceived()
-          setResult(JSON.stringify({ acks, received }))
+          // Same poll-and-render pattern as the text broadcast above.
+          for (let poll = 0; poll < 50; poll++) {
+            const received = await getReceived()
+            setResult(JSON.stringify({ acks, received }))
+            if (received.length >= 3) break
+            await new Promise((r) => setTimeout(r, 200))
+          }
+          // Keep the unused remote handle reachable, see the text broadcast above.
+          void subscriber
         }}
       >
         Binary publish (3 frames)

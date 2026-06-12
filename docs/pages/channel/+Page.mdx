@@ -22,6 +22,8 @@ Both are returned from a telefunction — they serialize into client-side object
 
 ```ts
 // Chat.telefunc.ts
+// Environment: server
+
 import { Channel } from 'telefunc'
 
 export async function onChat() {
@@ -182,6 +184,8 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ```ts
 // Chat.telefunc.ts
+// Environment: server
+
 import { Broadcast } from 'telefunc'
 
 export async function onJoinChat() {
@@ -392,11 +396,14 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 | `Abort` | Server called `abort()` | Terminal — inspect `err.abortValue` |
 | `ChannelClosedError` | `send()` after close/abort | Terminal — recreate channel if needed |
 | `ChannelNetworkError` | Connection lost beyond timeout | Terminal — channel auto-closed |
+| `ChannelOverflowError` | Buffered sends exceeded `config.channel.bufferLimit` while the peer was disconnected | Pending `send()` promises reject — apply backpressure by awaiting sends |
 
 
 ## Config
 
 ```ts
+// Environment: server
+
 import { config } from 'telefunc'
 
 config.channel = {
