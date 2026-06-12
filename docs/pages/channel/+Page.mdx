@@ -6,8 +6,7 @@ Telefunc provides two primitives for real-time communication:
 
 | | `new Channel()` | `new Broadcast()` |
 |---|---|---|
-| What is it | Direct messages between one server and one client | Broadcast to many subscribers |
-| Use cases | AI chat, live dashboards, order tracking | Chat rooms, live scores, notifications |
+| Purpose | Direct messages between *one* server and *one* client | Broadcast to *all* subscribers |
 
 Both are returned from a telefunction — they serialize into client-side objects automatically.
 
@@ -297,31 +296,15 @@ These are the two natural shapes of communication.
 
 You can think of `new Broadcast()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received the broadcast object, and bridges that client into the keyed broadcast group that the static methods tap directly.
 
-### Use cases
-
-Use `Channel` when the server talks with one client:
-
-- An AI chat: the response streams in, the user can interrupt or send a follow-up
-- A live dashboard: the server pushes fresh metrics to the user viewing it
-- Order tracking: "preparing", "out for delivery", pushed to the customer who ordered
-
-Use `Broadcast` when a message concerns everyone following a topic:
-
-- A chat room: every member sees every message
-- A live auction or sports score: every viewer sees each bid or goal
-- Notifications: publish once to `notifications:${userId}`, and every open tab of that user receives it
-
-The two compose: a card game can use a `Broadcast` for the table that everyone sees, and a `Channel` for each player's hand.
-
 ### Comparison
 
 | | `new Channel()` | `new Broadcast()` |
 |---|---|---|
-| Topology | One server ↔ one client | All members sharing a `key` (server or client) |
-| Methods | `send()` / `listen()` | `publish()` / `subscribe()`, also as statics for [server-only use](#server-only-broadcast) |
-| Delivery | The other end | Every subscriber of the key, including the publisher |
-| Message type | Asymmetric:<ul><li>Two directions: `Channel<ClientToServer, ServerToClient>`</li><li>The server keeps the channel and returns `chat.client`, the same API with directions flipped</li></ul> | Symmetric:<ul><li>One type for every member: `Broadcast<T>`</li><li>The telefunction returns the instance itself</li></ul> |
-| Message return | The other end's reply (with `{ ack: true }`) | A receipt: `key`, `seq`, `timestamp` |
+| Topology | One server ↔ one client | All members sharing a `key` (server and client) |
+| Methods | `send()` / `listen()` | `publish()` / `subscribe()` |
+| Delivery | The other end | Every subscriber of the `key`, including the publisher |
+| Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `channel = new Channel()` instance and returns `channel.client` for the client (asymmetric)</li></ul> | Symmetric:<ul><li>Same type for every member: `Broadcast<MessageType>`</li><li>The server uses and returns the same instance `Broadcast` (symmetric)</li></ul> |
+| Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
 | Multi-server | [Sticky sessions](/multiple-nodes) | [Broadcast transport](#multi-server) |
 
