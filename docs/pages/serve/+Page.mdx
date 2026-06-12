@@ -4,7 +4,7 @@ import { Link } from '@brillout/docpress'
 
 Low-level function that processes telefunction requests and returns an HTTP response. It's a pure function with no side effects.
 
-> For most setups, use the runtime-specific `telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare` instead. See <Link href="/server" />.
+> For most setups, use the runtime-specific `new Telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare` instead. See <Link href="/server" />.
 
 ## Basic usage
 
@@ -72,7 +72,7 @@ const httpResponse = await serve({
 
 ## Runtime adapters
 
-For production deployments with channels and WebSocket support, use the runtime-specific `telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare`. See <Link href="/server" /> for examples.
+For production deployments with channels and WebSocket support, use the runtime-specific `new Telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare`. See <Link href="/server" /> for examples.
 
 
 ## See also
