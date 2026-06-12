@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-Redis-backed `Broadcast` fan-out across Telefunc instances: `publish()` on one instance reaches `subscribe()` on every other instance subscribed to the same key.
+Redis-backed `Broadcast` fan-out across Telefunc instances — `publish()` on one instance reaches `subscribe()` on every other instance subscribed to the same key.
 
 ## Install
 
@@ -32,7 +32,7 @@ const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
 installRedis(redis)
 ```
 
-Telefunc `duplicate()`s the client internally for its subscriber connection; your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
+Telefunc `duplicate()`s the client internally for its subscriber connection — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
 
 ## Channels
 
@@ -40,6 +40,6 @@ Telefunc `duplicate()`s the client internally for its subscriber connection; you
 
 ## See also
 
-- <Link href="/multiple-nodes" />: running Telefunc across multiple instances
-- <Link href="/channel" />: `Channel` and `Broadcast` primitives
-- <Link href="/integrations" />: other Telefunc integrations
+- <Link href="/multiple-nodes" /> — running Telefunc across multiple instances
+- <Link href="/channel" /> — `Channel` and `Broadcast` primitives
+- <Link href="/integrations" /> — other Telefunc integrations

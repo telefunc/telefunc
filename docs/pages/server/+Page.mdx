@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-Telefunc integrates with any server. For production deployments with streaming, channels, and WebSocket support, use the runtime-specific server entry: the `telefunc()` factory on Node.js, Bun, and Deno, or `new Telefunc()` on Cloudflare Workers.
+Telefunc integrates with any server. For production deployments with streaming, channels, and WebSocket support, use the runtime-specific server entry — the `telefunc()` factory on Node.js, Bun, and Deno, or `new Telefunc()` on Cloudflare Workers.
 
 
 ## Node.js
@@ -52,7 +52,7 @@ const server = app.listen(3000)
 tf.installWebSocket(server)
 ```
 
-> The Node.js adapter auto-detects your HTTP server from the request socket. `installWebSocket()` is idempotent: calling it multiple times is safe.
+> The Node.js adapter auto-detects your HTTP server from the request socket. `installWebSocket()` is idempotent — calling it multiple times is safe.
 
 > **Performance tip:** prefer `{ req, res }` over `{ request }` when you have access to the raw Node.js objects (Express, raw `http`, Connect-style middleware). The `req`/`res` path reads the request body directly from the Node `Readable` and writes the response straight to the Node `Writable`, skipping the Web Streams conversion layer. Node's Web Streams implementation is slower than its internal streams; see [nodejs/performance#134](https://github.com/nodejs/performance/issues/134).
 
@@ -195,5 +195,5 @@ See <Link href="/serve" /> for details.
 
 ## See also
 
-- <Link href="/serve" />: core `serve()` function reference
-- <Link href="/getContext" />: request context
+- <Link href="/serve" /> — core `serve()` function reference
+- <Link href="/getContext" /> — request context

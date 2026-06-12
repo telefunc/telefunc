@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-Invalidate [TanStack Query](https://tanstack.com/query) queries after mutations, locally or across all connected clients.
+Invalidate [TanStack Query](https://tanstack.com/query) queries after mutations — locally or across all connected clients.
 
 
 ## Install
@@ -35,11 +35,11 @@ function App() {
 
 ## Local vs global keys
 
-Keys prefixed with `global:` invalidate through the server: every connected client with a matching query refetches. All other keys invalidate locally (current tab only).
+Keys prefixed with `global:` invalidate through the server — every connected client with a matching query refetches. All other keys invalidate locally (current tab only).
 
 ```tsx
-queryKey: ['todos']                              // local: current tab only
-queryKey: ['global:todos', `user:${userId}`]     // global: all clients with a matching query refetch
+queryKey: ['todos']                              // local — current tab only
+queryKey: ['global:todos', `user:${userId}`]     // global — all clients with a matching query refetch
 queryKey: ['global:documents', docId]            // global
 ```
 
@@ -77,7 +77,7 @@ const add = useMutation({
 })
 ```
 
-Global keys work the same way. When a collaborator edits a document, every client viewing it refetches:
+Global keys work the same way — when a collaborator edits a document, every client viewing it refetches:
 
 ```tsx
 const { data: doc } = useQuery({
@@ -96,8 +96,8 @@ Local and global keys can be mixed in a single mutation:
 ```js
 meta: {
   invalidates: [
-    ['my-drafts'],            // local: this client only
-    ['global:documents'],     // global: every connected client
+    ['my-drafts'],            // local — this client only
+    ['global:documents'],     // global — every connected client
   ],
 }
 ```
@@ -117,7 +117,7 @@ invalidate(['global:articles'])
 invalidate(['global:documents', docId])
 ```
 
-Prefix matching: invalidating `['global:documents']` hits `['global:documents', docId]` too. Same behavior as TanStack Query's [`invalidateQueries`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
+Prefix matching — invalidating `['global:documents']` hits `['global:documents', docId]` too. Same behavior as TanStack Query's [`invalidateQueries`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
 
 
 ## How it works
@@ -129,7 +129,7 @@ Prefix matching: invalidating `['global:documents']` hits `['global:documents', 
 **Global keys:**
 1. `withTelefunc()` sends each global query's `queryKey` alongside the telefunc call.
 2. The telefunction executes (including auth). Only after it succeeds, the server subscribes to invalidation events for that key.
-3. Mutations work the same way: the telefunction runs first, then global keys from `meta.invalidates` are published through <Link text={<code>Broadcast</code>} href="/channel#new-broadcast" />.
+3. Mutations work the same way — the telefunction runs first, then global keys from `meta.invalidates` are published through <Link text={<code>Broadcast</code>} href="/channel#new-broadcast" />.
 4. Every connected client with a matching subscription calls `invalidateQueries()`.
 
 > Works across multiple servers via a <Link text="broadcast transport" href="/channel#multi-server" /> such as <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} />.
@@ -137,7 +137,7 @@ Prefix matching: invalidating `['global:documents']` hits `['global:documents', 
 
 ## See also
 
-- <Link href="/channel" />: `Channel` and `Broadcast`
-- <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} />: multi-server broadcast
-- <Link href="/real-time" />: real-time patterns
-- <Link href="/cloudflare" />: Cloudflare Workers
+- <Link href="/channel" /> — `Channel` and `Broadcast`
+- <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} /> — multi-server pub/sub
+- <Link href="/real-time" /> — real-time patterns
+- <Link href="/cloudflare" /> — Cloudflare Workers

@@ -6,12 +6,12 @@ Telefunc provides two primitives for real-time communication:
 
 | Primitive | Methods | Use case |
 |---|---|---|
-| **`new Channel()`** | `send()` / `listen()` | Direct messages between one server and one client: commands, acks, request-response over a persistent connection. |
-| **`new Broadcast()`** | `publish()` / `subscribe()` | Broadcast to all subscribers sharing a key: chat rooms, live feeds, collaborative editing. |
+| **`new Channel()`** | `send()` / `listen()` | Direct messages between one server and one client — commands, acks, request-response over a persistent connection. |
+| **`new Broadcast()`** | `publish()` / `subscribe()` | Broadcast to all subscribers sharing a key — chat rooms, live feeds, collaborative editing. |
 
-Return either from a telefunction; they serialize into client-side objects automatically.
+Return either from a telefunction — they serialize into client-side objects automatically.
 
-By default, channels and broadcast use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and upgrades to WebSocket in the background. See <Link href="/transport" />.
+By default, channels and broadcast use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background. See <Link href="/transport" />.
 
 > For short-lived callbacks (e.g. progress updates), <Link href="/real-time">function passing</Link> is usually simpler.
 
@@ -106,7 +106,7 @@ ack.accepted // true
 
 On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `chat.client` type swaps the directions.
 
-Both generic parameters also drive runtime validation: Telefunc auto-generates shields that check every message and ack arriving at the server against its declared type. See <Link href="/shield#channels">Shields: Channels</Link>.
+Both generic parameters also drive runtime validation: Telefunc auto-generates shields that check every message and ack arriving at the server against its declared type. See <Link href="/shield#channels">Shields — Channels</Link>.
 
 
 ### Acknowledgements
@@ -149,7 +149,7 @@ const unlisten = chat.listenBinary((data) => {
 })
 unlisten() // stop listening
 
-// Client: same API
+// Client — same API
 await channel.sendBinary(new Uint8Array(buffer))
 channel.listenBinary((data) => {
   console.log(data.byteLength)
@@ -169,7 +169,7 @@ for (const frame of frames) {
 }
 ```
 
-Fire-and-forget is also fine; data is always sent immediately regardless of whether you await:
+Fire-and-forget is also fine — data is always sent immediately regardless of whether you await:
 
 ```ts
 chat.send({ type: 'ping' }) // sent immediately, no await needed
@@ -190,7 +190,7 @@ export async function onJoinChat() {
 }
 ```
 
-Return the broadcast instance directly from a telefunction; no `.client` needed (unlike channels, broadcast has no directional type flip).
+Return the broadcast instance directly from a telefunction — no `.client` needed (unlike channels, broadcast has no directional type flip).
 
 ### Chat example
 
@@ -236,7 +236,7 @@ chat.publish({ user: 'Alice', text: 'Hello!', })
 
 ### Server-only broadcast
 
-Use the static methods to publish and subscribe purely on the server (no client, no lifecycle):
+Use the static methods to publish and subscribe purely on the server — no client, no lifecycle:
 
 ```ts
 import { Broadcast } from 'telefunc'
@@ -265,19 +265,19 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 Both `publish` and `subscribe` share the same `info` object:
 
 ```ts
-info.key        // 'chat:lobby' (the broadcast key)
+info.key        // 'chat:lobby' — the broadcast key
 info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
 ```
 
-`publish()` returns a `Promise` that resolves to `info` once the message is accepted. `subscribe()` receives `info` alongside each message, useful for ordering and gap detection.
+`publish()` returns a `Promise` that resolves to `info` once the message is accepted. `subscribe()` receives `info` alongside each message — useful for ordering and gap detection.
 
-> In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport`; see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically; see <Link href="/cloudflare" />.
+> In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
 
 
 ## Multi-server
 
-By default, `Broadcast` is in-memory: messages only reach subscribers on the same server. To broadcast across multiple servers, configure a transport on `config.broadcast.transport`.
+By default, `Broadcast` is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, configure a transport on `config.broadcast.transport`.
 
 For Redis-backed multi-server routing and broadcast fan-out, see <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} />.
 
@@ -296,14 +296,14 @@ type BroadcastTransport = {
 
 `send` / `sendBinary` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen` / `listenBinary` return an unsubscribe function and are called at most once per key.
 
-> On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects; no transport needed. See <Link href="/cloudflare" />.
+> On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/cloudflare" />.
 
 
 ## Lifecycle
 
 ```ts
 chat.onOpen(() => {
-  // Connection established, safe to send
+  // Connection established — safe to send
 })
 
 chat.onClose((err) => {
@@ -335,17 +335,17 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 - Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
-> Reconnection is transparent: you don't need to handle it in your application code.
+> Reconnection is transparent — you don't need to handle it in your application code.
 
 
 ## Error handling
 
 | Error | When | Recovery |
 |---|---|---|
-| `Abort` | Server called `abort()` | Terminal; inspect `err.abortValue` |
-| `ChannelClosedError` | `send()` after close/abort | Terminal; recreate channel if needed |
-| `ChannelNetworkError` | Connection lost beyond timeout | Terminal; channel auto-closed |
-| `ChannelOverflowError` | Buffered sends exceeded `config.channel.bufferLimit` while the peer was disconnected | Pending `send()` promises reject; apply backpressure by awaiting sends |
+| `Abort` | Server called `abort()` | Terminal — inspect `err.abortValue` |
+| `ChannelClosedError` | `send()` after close/abort | Terminal — recreate channel if needed |
+| `ChannelNetworkError` | Connection lost beyond timeout | Terminal — channel auto-closed |
+| `ChannelOverflowError` | Buffered sends exceeded `config.channel.bufferLimit` while the peer was disconnected | Pending `send()` promises reject — apply backpressure by awaiting sends |
 
 
 ## Config
@@ -362,7 +362,7 @@ config.channel = {
   serverReplayBuffer: 262_144,     // Server replay buffer for text frames (bytes)
   clientReplayBuffer: 1_048_576,   // Client replay buffer for text frames (bytes)
   bufferLimit: 524_288,            // Pre-peer buffer for text messages (bytes)
-  // Binary buffers: separate budget so binary can never evict text
+  // Binary buffers — separate budget so binary can never evict text
   serverReplayBufferBinary: 2_097_152,  // Server replay buffer for binary frames (bytes)
   clientReplayBufferBinary: 2_097_152,  // Client replay buffer for binary frames (bytes)
   bufferLimitBinary: 2_097_152,         // Pre-peer buffer for binary messages (bytes)
@@ -372,9 +372,9 @@ config.channel = {
 
 ## See also
 
-- <Link href="/real-time" />: choosing between function passing and channels
-- <Link href="/stream" />: streaming server values
-- <Link href="/file-upload" />: file uploads with progress
-- <Link href="/file-download" />: streaming file downloads
-- <Link href="/transport" />: transport configuration
-- <Link href="/cloudflare" />: Cloudflare Workers with distributed broadcast
+- <Link href="/real-time" /> — choosing between function passing and channels
+- <Link href="/stream" /> — streaming server values
+- <Link href="/file-upload" /> — file uploads with progress
+- <Link href="/file-download" /> — streaming file downloads
+- <Link href="/transport" /> — transport configuration
+- <Link href="/cloudflare" /> — Cloudflare Workers with distributed broadcast

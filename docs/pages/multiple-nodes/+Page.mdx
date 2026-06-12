@@ -4,15 +4,15 @@ import { Link } from '@brillout/docpress'
 
 To scale Telefunc horizontally across several server processes (multiple Node instances, multiple containers, multiple machines), two pieces have to be set up.
 
-1. The load balancer in front of your instances must route every request from the same client to the same instance: **sticky sessions**.
-2. `Broadcast` publishes must fan out across instances: install a **broadcast transport** like <Link href="/integrations/redis">`@telefunc/redis`</Link>.
+1. The load balancer in front of your instances must route every request from the same client to the same instance — **sticky sessions**.
+2. `Broadcast` publishes must fan out across instances — install a **broadcast transport** like <Link href="/integrations/redis">`@telefunc/redis`</Link>.
 
 That's the whole picture. The rest of this page explains why and shows the common configurations.
 
 
 ## Sticky sessions
 
-A Telefunc `Channel` is a stateful connection. Its server-side state (the `Channel` instance, its `send()`/`listen()` closures, any interval the telefunction set up) lives in one Node process. When the client reconnects (network blip, page reload, SSE→WS upgrade), the next request has to land on the same process or the channel can't recover.
+A Telefunc `Channel` is a stateful connection. Its server-side state — the `Channel` instance, its `send()`/`listen()` closures, any interval the telefunction set up — lives in one Node process. When the client reconnects (network blip, page reload, SSE→WS upgrade), the next request has to land on the same process or the channel can't recover.
 
 This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves it for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
 
@@ -21,7 +21,7 @@ Without sticky sessions a reconnect that lands on a different instance sees no m
 
 ## Broadcast across instances
 
-A `Broadcast` is different: publishers and subscribers are intentionally decoupled: they only share a string key. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publish on instance A reach a subscriber on instance B.
+A `Broadcast` is different: publishers and subscribers are intentionally decoupled — they only share a string key. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publish on instance A reach a subscriber on instance B.
 
 In a single-instance setup the default in-memory transport is enough. In a multi-instance setup, configure a transport that fans out across the cluster:
 
@@ -34,12 +34,12 @@ const redis = new IORedis(process.env.REDIS_URL)
 installRedis(redis)
 ```
 
-See <Link href="/integrations/redis" /> for details. Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small (about four methods), so a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker is straightforward.
+See <Link href="/integrations/redis" /> for details. Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small — about four methods — so a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker is straightforward.
 
 
 ## Load balancer setup
 
-### Nginx: `ip_hash`
+### Nginx — `ip_hash`
 
 ```nginx
 upstream telefunc {
@@ -49,7 +49,7 @@ upstream telefunc {
 }
 ```
 
-### HAProxy: cookie
+### HAProxy — cookie
 
 ```
 backend telefunc
@@ -58,7 +58,7 @@ backend telefunc
   server app2 app2:3000 check cookie app2
 ```
 
-### Caddy: `lb_policy cookie`
+### Caddy — `lb_policy cookie`
 
 ```
 reverse_proxy app1:3000 app2:3000 {
@@ -66,7 +66,7 @@ reverse_proxy app1:3000 app2:3000 {
 }
 ```
 
-### AWS ALB: target-group stickiness
+### AWS ALB — target-group stickiness
 
 In the target group's attributes, enable **Stickiness** with type **Load balancer generated cookie**.
 
@@ -74,7 +74,7 @@ In the target group's attributes, enable **Stickiness** with type **Load balance
 
 Serverless platforms that don't expose sticky-session routing aren't a good fit for `Channel`. `Broadcast` still works (publishes round-trip through Redis), but channel reconnects can fail unpredictably. Most teams pair Telefunc with a regular long-running server tier when they need channels at scale.
 
-> Cloudflare Workers is the exception: `telefunc/cloudflare` routes channels through Durable Objects instead of sticky sessions, so channels are fully supported. See <Link href="/cloudflare" />.
+> Cloudflare Workers is the exception — `telefunc/cloudflare` routes channels through Durable Objects instead of sticky sessions, so channels are fully supported. See <Link href="/cloudflare" />.
 
 
 ## Sanity check
@@ -84,5 +84,5 @@ After deploying behind a sticky load balancer, open the browser network tab, ref
 
 ## See also
 
-- <Link href="/integrations/redis" />: Redis broadcast transport
-- <Link href="/channel" />: `Channel` and `Broadcast` primitives
+- <Link href="/integrations/redis" /> — Redis broadcast transport
+- <Link href="/channel" /> — `Channel` and `Broadcast` primitives
