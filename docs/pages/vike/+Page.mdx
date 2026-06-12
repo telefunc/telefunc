@@ -35,10 +35,10 @@ Install the Telefunc server middleware. For example with Hono:
 
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
-import { telefunc } from 'telefunc/node'
+import { Telefunc } from 'telefunc/node'
 
 const app = new Hono()
-const tf = telefunc()
+const tf = new Telefunc()
 
 app.all('/_telefunc', async (c) => {
   const response = await tf.serve({ request: c.req.raw })

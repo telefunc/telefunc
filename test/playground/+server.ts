@@ -6,7 +6,7 @@ import vike from '@vikejs/hono'
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 import { config } from 'telefunc'
-import { telefunc } from 'telefunc/node'
+import { Telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
 
 config.channel.pingInterval = 1000
@@ -28,7 +28,7 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
 
 const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
 
-const tf = telefunc()
+const tf = new Telefunc()
 const app = new Hono()
 
 // Bench toggle: when `TELEFUNC_NATIVE=1` the `/_telefunc` route feeds the raw

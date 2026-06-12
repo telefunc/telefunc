@@ -1,6 +1,6 @@
 import { Link } from '@brillout/docpress'
 
-Telefunc integrates with any server. For production deployments with streaming, channels, and WebSocket support, use the runtime-specific `telefunc()` factory.
+Telefunc integrates with any server. For production deployments with streaming, channels, and WebSocket support, use `new Telefunc()`.
 
 
 ## Node.js
@@ -13,10 +13,10 @@ Telefunc integrates with any server. For production deployments with streaming, 
 
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
-import { telefunc } from 'telefunc/node'
+import { Telefunc } from 'telefunc/node'
 
 const app = new Hono()
-const tf = telefunc()
+const tf = new Telefunc()
 
 app.all('/_telefunc', async (c) => {
   const response = await tf.serve({ request: c.req.raw })
@@ -36,10 +36,10 @@ tf.installWebSocket(server)
 // Environment: server
 
 import express from 'express'
-import { telefunc } from 'telefunc/node'
+import { Telefunc } from 'telefunc/node'
 
 const app = express()
-const tf = telefunc()
+const tf = new Telefunc()
 
 app.all('/_telefunc', async (req, res, next) => {
   const handled = await tf.serve({ req, res })
@@ -79,9 +79,9 @@ app.all('/_telefunc', async (c) => {
 // server.ts
 // Environment: server
 
-import { telefunc } from 'telefunc/bun'
+import { Telefunc } from 'telefunc/bun'
 
-const tf = telefunc()
+const tf = new Telefunc()
 
 Bun.serve({
   port: 3000,
@@ -103,9 +103,9 @@ Bun.serve({
 // server.ts
 // Environment: server
 
-import { telefunc } from 'telefunc/deno'
+import { Telefunc } from 'telefunc/deno'
 
-const tf = telefunc()
+const tf = new Telefunc()
 
 Deno.serve({ port: 3000 }, async (request, info) => {
   const response = await tf.serve({ request, info })

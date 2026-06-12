@@ -1,8 +1,8 @@
-export { telefunc }
+export { Telefunc }
 
 import crossws from 'crossws/adapters/deno'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import type { Telefunc } from '../node/server/context/getContext.js'
+import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
@@ -14,11 +14,18 @@ type DenoInfo = Parameters<DenoWs['handleUpgrade']>[1]
 type ServeInput = {
   request: Request
   info: DenoInfo
-  context?: Telefunc.Context
+  context?: TelefuncNamespace.Context
 }
 
 interface TelefuncServe {
   serve(input: ServeInput): Promise<Response | undefined>
+}
+
+interface Telefunc extends TelefuncServe {}
+class Telefunc {
+  constructor() {
+    return telefunc()
+  }
 }
 
 function telefunc(): TelefuncServe {
