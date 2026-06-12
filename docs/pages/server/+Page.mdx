@@ -130,7 +130,7 @@ export const TelefuncDurableObject = tf.TelefuncDurableObject
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const response = tf.serve({ request, env, ctx })
+    const response = await tf.serve({ request, env, ctx })
     if (response) return response
 
     return new Response('Not found', { status: 404 })
@@ -169,7 +169,7 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 | Node.js (`{ req, res }`) | `boolean` | `true` if handled, `false` if not a Telefunc request |
 | Bun | `Response \| undefined` | `undefined` if not a Telefunc request |
 | Deno | `Response \| undefined` | `undefined` if not a Telefunc request |
-| Cloudflare | `Promise<Response> \| undefined` | `undefined` if not a Telefunc request |
+| Cloudflare | `Response \| undefined` | `undefined` if not a Telefunc request |
 
 > `tf.serve()` returns `undefined` (or `false`) for non-Telefunc requests, allowing you to chain it with other handlers.
 
@@ -195,5 +195,5 @@ See <Link href="/serve" /> for details.
 
 ## See also
 
-- <Link href="/serve" /> — core `telefunc()` function reference
+- <Link href="/serve" /> — core `serve()` function reference
 - <Link href="/getContext" /> — request context

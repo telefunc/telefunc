@@ -14,7 +14,7 @@ Telefunc supports streaming in both directions:
 | [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) | AI tokens, notifications, progress updates | Structured (JSON-serializable) |
 | [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) | Raw byte streams without file metadata | Binary (`Uint8Array`) |
 | <Link text={<code>File</code>} href="/file-download" /> / <Link text={<code>Blob</code>} href="/file-download" /> | File downloads with `name` / `type` / `size` | Binary (`Uint8Array`) |
-| <Link text={<code>download()</code>} href="/file-download#download" /> | File / Blob downloads with progress + cancel, or upstream-streamed bytes | Binary (`Uint8Array`) |
+| <Link text={<code>download()</code>} href="/file-download#streaming-with-download" /> | File / Blob downloads with progress + cancel, or upstream-streamed bytes | Binary (`Uint8Array`) |
 | Nested [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise) | Lazy parts of a response that resolve independently | Any serializable value |
 
 
@@ -169,7 +169,7 @@ await onIngest(stream, 'data.txt')
 |---|---|---|
 | <Link text={<code>File</code>} href="/file-upload" /> / <Link text={<code>Blob</code>} href="/file-upload" /> argument | TCP-level | Finite uploads — files, images, CSV imports |
 | `ReadableStream` argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
-| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | No | Fire-and-forget binary — low-latency frames where dropping is acceptable |
+| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | <Link text="Opt-in" href="/channel#backpressure" /> — `await` each send | Low-latency frames — skip the `await` for fire-and-forget |
 | <Link text={<code>new Broadcast().publishBinary()</code>} href="/channel#new-broadcast" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
 
 
