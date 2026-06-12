@@ -38,10 +38,8 @@ const { registeredServers } = getGlobalObject('serve/node.ts', {
   registeredServers: new WeakSet<HttpServer>(),
 })
 
-interface Telefunc<
-  Req extends NodeRequest = NodeRequest,
-  Res extends ServerResponse = ServerResponse,
-> extends TelefuncServe<Req, Res> {}
+interface Telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse>
+  extends TelefuncServe<Req, Res> {}
 class Telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse> {
   constructor() {
     return telefunc<Req, Res>()
