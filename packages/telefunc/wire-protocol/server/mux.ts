@@ -1,5 +1,5 @@
-export { ChannelMux, getChannelMux, DETACH_REASON }
-export type { ReconcileOutcome, SendFn, ServerTransport, MuxServerOptions, DetachReason }
+export { ChannelMux, getChannelMux }
+export type { ReconcileOutcome, ServerTransport }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -9,13 +9,13 @@ import { CHANNEL_PING_INTERVAL_MIN_MS, type ChannelTransports } from '../constan
 import { TAG, decode, encode, isConnCtrlTag } from '../shared-ws.js'
 import type { ChannelFrame, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { setChannelDefaults, type ServerChannel } from './channel.js'
+import type { ServerChannel } from './channel.js'
 
 // Single-instance kernel: owns channels, sessions, per-connection runtime. Transports talk
 // to this class via `onConnectionOpen` and from then on identify connections by object
 // identity. Multi-instance deployments rely on sticky sessions at the load balancer.
 
-type SendFn = (frame: Uint8Array<ArrayBuffer>, onCommit?: () => void) => void | Promise<void>
+type SendFn = (frame: Uint8Array<ArrayBuffer>, onCommit?: () => void) => void
 
 type ServerTransport<TConnection> = {
   getSessionId(connection: TConnection): string | undefined
@@ -66,6 +66,8 @@ type ConnectionState = {
   terminatePermanently: boolean | null
   reconciling: boolean
   recvChain: Promise<unknown> | null
+  /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
+  closed: { isPermanent: boolean } | null
 }
 
 type ConnectionEntry = {
@@ -96,14 +98,7 @@ class ChannelMux {
   private resolvedOptions: MuxServerOptions | null = null
 
   private get options(): MuxServerOptions {
-    if (this.resolvedOptions) return this.resolvedOptions
-    this.resolvedOptions = resolveMuxServerOptions()
-    setChannelDefaults({
-      connectTtl: this.resolvedOptions.connectTtl,
-      bufferLimit: this.resolvedOptions.bufferLimit,
-      bufferLimitBinary: this.resolvedOptions.bufferLimitBinary,
-    })
-    return this.resolvedOptions
+    return (this.resolvedOptions ??= resolveMuxServerOptions())
   }
 
   /** Exposed for transport-level race timers (SSE's `waitForConnection`). */
@@ -115,6 +110,9 @@ class ChannelMux {
 
   /** Callers must not invoke `channel._registerChannel()` directly. */
   registerChannel(channel: ServerChannel<any, any>): void {
+    // A shutdown channel's `_onShutdown` callback never fires, so inserting it would leave a
+    // permanent zombie entry whose later attach trips `attachChannel`'s replay-buffer assert.
+    if (channel._didShutdown) return
     channel._registerChannel()
     this.channels.set(channel.id, channel)
     const waiters = this.pendingRegisterWaiters.get(channel.id)
@@ -138,7 +136,7 @@ class ChannelMux {
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
     this.connectionEntries.set(connection, {
-      state: { pingTimer: null, terminatePermanently: null, reconciling: false, recvChain: null },
+      state: { pingTimer: null, terminatePermanently: null, reconciling: false, recvChain: null, closed: null },
       transport: transport as ServerTransport<unknown>,
     })
     const connId = transport.getConnId(connection)
@@ -181,6 +179,7 @@ class ChannelMux {
   onConnectionClosed(connection: unknown, isPermanent: boolean): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
+    entry.state.closed = { isPermanent }
     this.clearPingTimer(entry.state)
     this.connectionEntries.delete(connection)
     const connId = entry.transport.getConnId(connection)
@@ -268,9 +267,14 @@ class ChannelMux {
     const newSessionId = crypto.randomUUID()
     const openList = await this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, send)
 
-    // The connection may have closed during the await
-    if (!this.connectionEntries.has(connection)) {
-      this.detachSession(newSessionId, DETACH_REASON.PERMANENT)
+    // The connection may have closed during the await. The client never received this
+    // session's id (`reconciled` was never sent), so no future reconcile can reference it —
+    // remove the session outright, but preserve the close kind: a transient close leaves the
+    // channels their `_onPeerDisconnect` grace so the client's retry can re-attach them.
+    if (state.closed) {
+      const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT
+      const session = this.sessions.removeSession(newSessionId)
+      if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
       throw new ProtocolViolationError()
     }
 
@@ -317,27 +321,18 @@ class ChannelMux {
     if (!entry.initial) return null
     return new Promise<ChannelHandle | null>((resolve) => {
       this.waitForChannelRegistration(entry.id, this.options.connectTtl, (channel) => {
-        if (!channel) return resolve(null)
-        this.attachChannel(channel, entry.ix, entry.lastSeq, send).then(resolve, () => resolve(null))
+        resolve(channel ? this.attachChannel(channel, entry.ix, entry.lastSeq, send) : null)
       })
     })
   }
 
-  /** Drains replay frames missed since `lastSeq`, then attaches an `IndexedPeer`. Returns
-   *  null if the channel shut down during the drain. */
-  private async attachChannel(
-    channel: ServerChannel,
-    ix: number,
-    lastSeq: number,
-    send: SendFn,
-  ): Promise<ChannelHandle | null> {
+  /** Drains replay frames missed since `lastSeq` (sends are sync — see `send`), then
+   *  attaches an `IndexedPeer`. Returns null if the channel already shut down. */
+  private attachChannel(channel: ServerChannel, ix: number, lastSeq: number, send: SendFn): ChannelHandle | null {
+    if (channel._didShutdown) return null
     const replay = channel._replayBuffer
     assert(replay !== null, `ServerChannel "${channel.id}" attached without a replay buffer`)
-    for (const frame of replay.getAfter(lastSeq)) {
-      const pending = send(frame as Uint8Array<ArrayBuffer>)
-      if (pending) await pending
-    }
-    if (channel._didShutdown) return null
+    for (const frame of replay.getAfter(lastSeq)) send(frame as Uint8Array<ArrayBuffer>)
     const sender: PeerSender = { send }
     channel._attachPeer(new IndexedPeer(sender, ix, replay))
     return { channel, ix }
@@ -438,6 +433,7 @@ class ChannelMux {
     this.channels.clear()
     this.pendingRegisterWaiters.clear()
     this.sessions.clear()
+    this.sessionFinalizers.clear()
     this.connectionEntries.clear()
     this.connectionsByConnId.clear()
   }
@@ -472,6 +468,10 @@ class SessionRegistry {
       }
       bindings.set(sessionId, h.ix)
     }
+    // An empty session has nothing to route, detach, or recovery-fail — storing it would
+    // leak: only `removeSession` (a future reconcile naming this id, or a permanent close)
+    // ever deletes entries, and a session abandoned by a transient close sees neither.
+    if (session.size === 0) return
     this.bySession.set(sessionId, session)
   }
 
@@ -493,7 +493,14 @@ class SessionRegistry {
     const bindings = this.byChannel.get(channelId)
     if (!bindings) return
     this.byChannel.delete(channelId)
-    for (const [sessionId, ix] of bindings) this.bySession.get(sessionId)?.delete(ix)
+    for (const [sessionId, ix] of bindings) {
+      const session = this.bySession.get(sessionId)
+      if (!session) continue
+      session.delete(ix)
+      // Last channel gone: drop the session, or it outlives every reconcile that could
+      // ever name it (transient-closed sessions are otherwise only removed by reconcile).
+      if (session.size === 0) this.bySession.delete(sessionId)
+    }
   }
 
   clear(): void {

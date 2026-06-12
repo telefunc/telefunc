@@ -6,7 +6,7 @@ import type { AckResultStatus } from '../shared-ws.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 
 interface PeerSender {
-  send(frame: Uint8Array, onCommit?: () => void): void | Promise<void>
+  send(frame: Uint8Array, onCommit?: () => void): void
 }
 
 /** Wraps a crossws peer, encodes frames with a fixed channel index.
@@ -19,10 +19,12 @@ class IndexedPeer {
     private replay: ReplayBuffer,
   ) {}
 
-  sendText(data: string): [void | Promise<void>, number] {
+  /** Returns the frame's payload byte count (the caller's flow-control unit). */
+  sendText(data: string): number {
     const seq = this.replay.nextSeq()
     const frame = encode.text(this.index, data, seq)
-    return [this.sender.send(frame, () => this.replay.push(seq, frame)), payloadBytes(frame)]
+    this.sender.send(frame, () => this.replay.push(seq, frame))
+    return payloadBytes(frame)
   }
 
   /** Send a text frame that requests an ack response from the receiver. Returns seq. */
@@ -34,10 +36,10 @@ class IndexedPeer {
     return seq
   }
 
-  sendBinary(data: Uint8Array): void | Promise<void> {
+  sendBinary(data: Uint8Array): void {
     const seq = this.replay.nextSeq()
     const frame = encode.binary(this.index, data, seq)
-    return this.sender.send(frame, () => this.replay.push(seq, frame, true))
+    this.sender.send(frame, () => this.replay.push(seq, frame, true))
   }
 
   /** Send a binary frame that requests an ack response from the receiver. Returns seq. */
