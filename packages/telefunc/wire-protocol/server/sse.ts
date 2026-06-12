@@ -50,7 +50,7 @@ class SseConnectionTransport {
   /** Resolvers for data POSTs that arrived before the stream-response POST registered the
    *  connection — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
-  private readonly pendingConnections = new Map<string, Array<(connection: SseConnection | null) => void>>()
+  private readonly pendingConnections = new Map<string, Set<(connection: SseConnection | null) => void>>()
   private readonly mux = getChannelMux()
   private readonly transport: ServerTransport<SseConnection> = {
     getSessionId: (connection) => connection.sessionId ?? undefined,
@@ -74,8 +74,7 @@ class SseConnectionTransport {
     try {
       const reader = new StreamReader(source)
       const metadata = parseSseRequestMetadata(await reader.readMetadata())
-      if ('streamResponse' in metadata)
-        return await this.handleStreamResponsePost(metadata.connId, reader, useNodeStream)
+      if (metadata.streamResponse) return await this.handleStreamResponsePost(metadata.connId, reader, useNodeStream)
       if (metadata.streamRequest) return await this.handleStreamRequestPost(metadata.connId, reader)
       return await this.handleBatchPost(metadata.connId, reader)
     } catch {
@@ -174,6 +173,12 @@ class SseConnectionTransport {
     let outcome: ReconcileOutcome | null = null
     try {
       outcome = await this.drainDeferred(connection, reader)
+    } catch {
+      // Body truncated mid-frame (`StreamReader` throws). The caller fire-and-forgets this
+      // promise, so a rethrow would be an unhandled rejection. Transient close: the channels
+      // keep their reconnect grace and the client's retry can re-attach them.
+      this.closeConnection(connection, false)
+      return
     } finally {
       connection.resolveReady()
     }
@@ -199,12 +204,30 @@ class SseConnectionTransport {
     return this.mux.getConnectionByConnId<SseConnection>(connId) ?? (await this.waitForConnection(connId))
   }
 
+  /** Mirrors `ChannelMux.waitForChannelRegistration`: the timeout path must remove the
+   *  waiter and (when last) the map entry, or abandoned data POSTs leak an entry forever. */
   private waitForConnection(connId: string): Promise<SseConnection | null> {
     return new Promise<SseConnection | null>((resolve) => {
-      let pending = this.pendingConnections.get(connId)
-      if (!pending) this.pendingConnections.set(connId, (pending = []))
-      pending.push(resolve)
-      setTimeout(() => resolve(null), this.mux.connectTtl)
+      let settled = false
+      let timer: ReturnType<typeof setTimeout>
+      const pending = this.pendingConnections.get(connId) ?? new Set()
+      this.pendingConnections.set(connId, pending)
+
+      const settle = (connection: SseConnection | null): void => {
+        if (settled) return
+        settled = true
+        pending.delete(waiter)
+        // Identity-equality guards against deleting a replacement set registered after
+        // `resolvePendingConnections` already consumed ours.
+        if (pending.size === 0 && this.pendingConnections.get(connId) === pending) {
+          this.pendingConnections.delete(connId)
+        }
+        clearTimeout(timer)
+        resolve(connection)
+      }
+      const waiter = (connection: SseConnection | null): void => settle(connection)
+      pending.add(waiter)
+      timer = setTimeout(() => settle(null), this.mux.connectTtl)
     })
   }
 

@@ -26,13 +26,13 @@ import {
   type ChannelTransport,
   type ChannelTransports,
 } from '../constants.js'
-import { encodeU32, encodeLengthPrefixedFrames, textEncoder } from '../frame.js'
+import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
 import { ACK_STATUS, TAG, decode, encode, isChannelDataFrame, payloadBytes } from '../shared-ws.js'
 import type { AckResultStatus, ChannelFrame, DecodedFrame, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
-import { encodeSseRequest } from '../sse-request.js'
+import { encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
 
 type BufferedFrame = {
@@ -173,8 +173,6 @@ type ClientChannelTransport = {
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
-  /** First-call writes the stream-request POST's metadata header. No-op on WS. */
-  pushStreamRequestMetadata(): void
   /** Phase 1 of upgrade drain — gate still down, user sends keep flowing. Returns when the
    *  wire is naturally empty or `timeoutMs` elapses, whichever comes first. */
   gracefulDrain(timeoutMs: number): Promise<void>
@@ -255,6 +253,10 @@ class ClientConnection implements MuxConnection {
   private state: ConnectionState = { tag: 'fresh' }
   /** Sticky after a permanent upgrade abort — survives every state transition until dispose. */
   private upgradeDisabled = false
+  /** Server-allowed transports from the last settled RECONCILED. Kept so `maybeStartUpgrade`
+   *  can run from both `handleReconciled` and `_onTransportOpen` — transport-open and the
+   *  first RECONCILED can arrive in either order on the SSE path. */
+  private serverTransports: ReconciledPayload['transports'] | null = null
   /** RECONCILE sent, awaiting RECONCILED. SSE sets it true during connecting since the
    *  initial reconcile is baked into the openStream POST body. */
   private reconciling = false
@@ -396,13 +398,16 @@ class ClientConnection implements MuxConnection {
     this.registerReconcileTimer = setTimeout(() => this.flushPendingRegisterReconcile(), 0)
   }
 
-  /** Send the queued RECONCILE on the live wire. No-op when nothing's queued. */
+  /** Send the queued RECONCILE on the live wire. No-op when nothing's queued. While the wire
+   *  can't take it (connecting, awaiting RECONCILED, mid-upgrade) the obligation is KEPT, not
+   *  consumed — `registerReconcileTimer` stays non-null as the marker (which also keeps
+   *  `canSendImmediately` false so data frames buffer behind the RECONCILE), and the
+   *  transitions that make the wire sendable re-invoke this: `_onTransportOpen`, a settled
+   *  RECONCILED, upgrade-attempt exit, and handoff completion. */
   private flushPendingRegisterReconcile(): void {
     if (this.registerReconcileTimer === null) return
-    this.cancelRegisterReconcileTimer()
-    if (this.connected && !this.reconciling) {
-      this.sendReconcileBatch(this.stageReconcileBatch())
-    }
+    if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'none' || this.reconciling) return
+    this.sendReconcileBatch(this.stageReconcileBatch())
     this.releaseUnconfirmedReleasing()
   }
 
@@ -629,9 +634,14 @@ class ClientConnection implements MuxConnection {
       return
     }
     if (!this.reconciling) {
-      const drained = this.drainBufferedFrames(this.channels, undefined)
-      for (const frame of drained) this.transport.sendFrame(frame)
+      // A register-reconcile queued during the connecting window sends its RECONCILE here and
+      // carries the buffered frames after it, emptying the buffer; with none queued, flush
+      // no-ops and the drain sends them directly. Buffered frames must land after any RECONCILE
+      // or the server drops them as unknown-ix — flush-then-drain preserves that order.
+      this.flushPendingRegisterReconcile()
+      for (const frame of this.drainBufferedFrames(this.channels, undefined)) this.transport.sendFrame(frame)
     }
+    this.maybeStartUpgrade()
   }
 
   _onTransportFrame(frame: DecodedFrame): void {
@@ -734,6 +744,8 @@ class ClientConnection implements MuxConnection {
     from.abandonActiveTransport()
     from.dispose()
     for (const frame of buffer) this.dispatchFrame(frame)
+    // Registrations deferred while the upgrade was in flight can go out now.
+    this.flushPendingRegisterReconcile()
   }
 
   _onTransportClosed(transport: ClientChannelTransport, rejectedInitial = false): void {
@@ -758,7 +770,6 @@ class ClientConnection implements MuxConnection {
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     this.transport.applyReconciledSettings(ctrl)
-    this.transport.pushStreamRequestMetadata()
     const outcome = this.applyReconciled(ctrl)
     this.installHeartbeat(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
@@ -766,20 +777,25 @@ class ClientConnection implements MuxConnection {
     for (const channel of outcome.channelsToOpen) channel._onTransportOpen(this.transport.batched)
     this.tryCompleteUpgradeHandoff()
     if (outcome.reconcileComplete) {
+      this.serverTransports = ctrl.transports
       this.startTtlIfIdle()
-      this.maybeStartUpgrade(ctrl)
+      this.flushPendingRegisterReconcile()
+      this.maybeStartUpgrade()
     }
   }
 
   // ── SSE→WS upgrade ──
 
-  private maybeStartUpgrade(ctrl: ReconciledPayload): void {
+  private maybeStartUpgrade(): void {
     if (this.upgradeDisabled) return
     if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'none') return
+    // Settled-reconcile gate; a flush above may have just re-armed `reconciling` — the next
+    // RECONCILED retries via `handleReconciled`.
+    if (this.reconciling) return
     const nextTransport = UPGRADE_PATH[this.transport.type]
     if (!nextTransport) return
     if (!this.isTransportUpgradeAllowed(nextTransport)) return
-    if (!ctrl.transports.includes(nextTransport)) return
+    if (!this.serverTransports?.includes(nextTransport)) return
     void this.probeAndUpgrade(nextTransport)
   }
 
@@ -846,9 +862,12 @@ class ClientConnection implements MuxConnection {
       )
 
       if (!(await this.drainOldWire(from, attempt))) {
-        this.exitUpgradeAttempt(attempt)
-        const drained = this.drainBufferedFrames(this.channels, undefined)
-        for (const frame of drained) this.transport.sendFrame(frame)
+        // Aborted: stay on the old wire. The `finally` exits the attempt and flushes any queued
+        // register-reconcile, whose batch carries the frames buffered during the drain. With none
+        // queued that flush no-ops, so drain those buffered frames onto the old wire here instead.
+        if (this.registerReconcileTimer === null) {
+          for (const frame of this.drainBufferedFrames(this.channels, undefined)) this.transport.sendFrame(frame)
+        }
         return
       }
 
@@ -858,6 +877,9 @@ class ClientConnection implements MuxConnection {
       to.start()
     } finally {
       this.exitUpgradeAttempt(attempt)
+      // No-op unless the attempt aborted with a registration deferred behind it (the gate
+      // blocks while a handoff is still in flight).
+      this.flushPendingRegisterReconcile()
     }
   }
 
@@ -979,6 +1001,8 @@ class ClientConnection implements MuxConnection {
   }
 
   stageReconcileBatch(): ReconcileBatch {
+    // This batch includes every channel, so it already covers any pending registration.
+    this.cancelRegisterReconcileTimer()
     const reconcileFrame = this.buildReconcileFrame()
     const movedBufferedFrames = this.drainBufferedFramesForReconcile()
     return { reconcileFrame, movedBufferedFrames }
@@ -1311,7 +1335,6 @@ class WsTransport implements ClientChannelTransport {
   }
 
   applyReconciledSettings(): void {}
-  pushStreamRequestMetadata(): void {}
 
   sendPing(): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
@@ -1377,7 +1400,6 @@ class SseTransport implements ClientChannelTransport {
         tag: 'active'
         body: PushReadableStream<Uint8Array<ArrayBuffer>>
         fetch: Promise<unknown>
-        metadataPushed: boolean
       }
     | { tag: 'failed' } = { tag: 'idle' }
 
@@ -1463,11 +1485,10 @@ class SseTransport implements ClientChannelTransport {
         [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
         ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
       },
-      body: encodeSseRequest({
-        connId: this.connId,
-        streamResponse: true,
-        batch: encodeLengthPrefixedFrames(stage.initialFrames, (entry) => entry.frame),
-      }),
+      body: encodeSseRequest(
+        { connId: this.connId, streamResponse: true },
+        encodeLengthPrefixedFrames(stage.initialFrames, (entry) => entry.frame),
+      ),
       signal: abortController.signal,
     })
     // The duplex:'half' POST never resolves while the body stays open. `fetchEndedP`
@@ -1475,8 +1496,11 @@ class SseTransport implements ClientChannelTransport {
     let fetchEndedP: Promise<'fetch-ended'> | undefined
     if (this.streamRequest.tag !== 'failed') {
       const body = createPushReadableStream<Uint8Array<ArrayBuffer>>()
+      // Metadata header first — the server classifies the POST by it; `streamRequest: true`
+      // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
+      body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
       const fetch = this.openStreamRequest(body, abortController.signal)
-      this.streamRequest = { tag: 'active', body, fetch, metadataPushed: false }
+      this.streamRequest = { tag: 'active', body, fetch }
       fetchEndedP = (async (): Promise<'fetch-ended'> => {
         try {
           await fetch
@@ -1509,8 +1533,8 @@ class SseTransport implements ClientChannelTransport {
 
     const reader = createSseEventStreamReader(response.body.getReader(), abortController)
 
-    // Run the SSE loop concurrently with the handshake wait — RECONCILED arriving during
-    // the wait must still be dispatched (its `pushStreamRequestMetadata` is what unblocks the ack).
+    // Run the SSE loop concurrently with the handshake wait — frames (including the first
+    // RECONCILED) can arrive while the open-ack is still in flight and must be dispatched.
     let resolveHandshakeOk!: () => void
     const handshakeOkP = new Promise<'ok'>((resolve) => {
       resolveHandshakeOk = () => resolve('ok')
@@ -1610,10 +1634,10 @@ class SseTransport implements ClientChannelTransport {
             [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
             ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
           },
-          body: encodeSseRequest({
-            connId: this.connId,
-            batch: encodeLengthPrefixedFrames(queued, (entry) => entry.frame),
-          }),
+          body: encodeSseRequest(
+            { connId: this.connId },
+            encodeLengthPrefixedFrames(queued, (entry) => entry.frame),
+          ),
           signal: this.transportAbort.signal,
         })
         if (!response.ok) throw new Error('POST failed')
@@ -1658,10 +1682,7 @@ class SseTransport implements ClientChannelTransport {
           [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
           ...(this.sessionToken ? { [TELEFUNC_SESSION_HEADER]: this.sessionToken } : undefined),
         },
-        body: encodeSseRequest({
-          connId: this.connId,
-          batch: encodeLengthPrefixedFrames(frames),
-        }),
+        body: encodeSseRequest({ connId: this.connId }, encodeLengthPrefixedFrames(frames)),
         signal: this.transportAbort.signal,
       })
     } catch {} // best-effort — connection will timeout and reconnect on real failure
@@ -1733,17 +1754,6 @@ class SseTransport implements ClientChannelTransport {
 
   hasHeartbeat(): boolean {
     return this.heartbeat !== null
-  }
-
-  /** Write the stream-request POST's metadata header onto the live body — first call only.
-   *  `streamRequest: true` tells the server to emit `reconciled` inline (the body never ends). */
-  pushStreamRequestMetadata(): void {
-    const sr = this.streamRequest
-    if (sr.tag !== 'active' || sr.metadataPushed) return
-    const meta = textEncoder.encode(JSON.stringify({ connId: this.connId, streamRequest: true }))
-    sr.body.push(encodeU32(meta.byteLength))
-    sr.body.push(meta)
-    sr.metadataPushed = true
   }
 
   dispose(): void {

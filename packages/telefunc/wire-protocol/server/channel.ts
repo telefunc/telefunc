@@ -1,4 +1,4 @@
-export { Channel, setChannelDefaults, ServerChannel, SERVER_CHANNEL_BRAND }
+export { Channel, ServerChannel, SERVER_CHANNEL_BRAND }
 export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../channel-errors.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
@@ -20,7 +20,6 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { assertUsage } from '../../utils/assert.js'
@@ -31,13 +30,7 @@ import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
-import {
-  CHANNEL_BUFFER_LIMIT_BYTES,
-  CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-  CHANNEL_CLOSE_TIMEOUT_MS,
-  CHANNEL_CONNECT_TTL_MS,
-  CHANNEL_PING_INTERVAL_MIN_MS,
-} from '../constants.js'
+import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_PING_INTERVAL_MIN_MS } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
@@ -46,18 +39,6 @@ import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import { ACK_STATUS, TAG, isChannelCtrlTag } from '../shared-ws.js'
 import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
-
-const globalObject = getGlobalObject('channel.ts', {
-  connectTtlMs: CHANNEL_CONNECT_TTL_MS,
-  bufferLimit: CHANNEL_BUFFER_LIMIT_BYTES,
-  bufferLimitBinary: CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-})
-
-function setChannelDefaults(opts: { connectTtl: number; bufferLimit: number; bufferLimitBinary: number }): void {
-  globalObject.connectTtlMs = opts.connectTtl
-  globalObject.bufferLimit = opts.bufferLimit
-  globalObject.bufferLimitBinary = opts.bufferLimitBinary
-}
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>
@@ -144,9 +125,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       msgWindowUpdate: (count) => this._peer?.sendMsgWindowUpdate(count),
       bdpPing: () => this._peer?.sendBdpPing(),
     })
+    const c = getServerConfig().channel
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
-      bufferLimit ?? globalObject.bufferLimit,
-      globalObject.bufferLimitBinary,
+      bufferLimit ?? c.bufferLimit,
+      c.bufferLimitBinary,
     )
   }
 
@@ -207,20 +189,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         }),
       )
     }
-    const [transport, bytes] = this._peer.sendText(serialized)
-    return this._sendToPeerWithWindow(transport, bytes)
-  }
-
-  /** Decrement credit by `bytes`; return `transport` if credit remains, otherwise a
-   *  Promise that resolves when credit refreshes (so the caller's next `await` blocks).
-   *
-   *  Cooperative model: the send already fired in `peer.sendText(...)`; this only
-   *  gates the return value. Awaiting throttles the caller's next send; not awaiting
-   *  bypasses. */
-  private _sendToPeerWithWindow(transport: void | Promise<void>, bytes: number): void | Promise<void> {
-    const gate = this._flow.decrement(bytes)
-    if (!gate) return transport ?? undefined
-    return transport ? transport.then(() => gate) : gate
+    // Cooperative credit model: the send already fired; `decrement` only gates the return
+    // value. Awaiting throttles the caller's next send; not awaiting bypasses.
+    return this._flow.decrement(this._peer.sendText(serialized))
   }
 
   sendBinary(data: Uint8Array): Promise<void>
@@ -260,7 +231,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         }),
       )
     }
-    return this._sendToPeerWithWindow(this._peer.sendBinary(data), data.byteLength)
+    this._peer.sendBinary(data)
+    // Cooperative credit model; see `_send`.
+    return this._flow.decrement(data.byteLength)
   }
 
   listen(callback: ChannelListener<ClientToServer>): () => void {
@@ -346,7 +319,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._shutdown(
           new ChannelNetworkError('Channel timed out: no client connected within TTL after response was sent'),
         )
-      }, globalObject.connectTtlMs),
+      }, c.connectTtl),
     )
   }
 
@@ -459,7 +432,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       // await a response, so there's no `ShieldValidationError` to surface — listeners simply
       // never see the bad value. Ack-bearing sends go through `_dispatchAckReq` and *do*
       // reject the sender's promise via the `shield-error` wire status.
-      if (validateData && validateData(data) !== true) return
+      // Dropping still consumes: window refreshes are consumption-driven, so skipping
+      // `onConsumed` would leak receive credit and eventually stall the client's sends.
+      if (validateData && validateData(data) !== true) {
+        this._flow.onConsumed(bytes)
+        return
+      }
       const pending: Promise<unknown>[] = []
       for (const cb of this._listeners) {
         try {
