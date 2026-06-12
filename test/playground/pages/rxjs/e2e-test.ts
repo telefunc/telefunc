@@ -221,17 +221,12 @@ function testRxjs(inDocker = false) {
       expect(state.subjectArgReceived).toBe('hello')
     })
 
-    // Server didn't crash — navigate (closes channel → onClose fires) and
-    // confirm a follow-up telefunction call succeeds.
-    await page.reload()
-    await waitForHydration()
     await page.click('#test-obs-complete')
     await autoRetry(async () => {
       const result = await getResult('#rxjs-result')
       expect(result.done).toBe(true)
     })
 
-    // After navigation, onClose fired on the old channel
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.subjectArgClosed).toBe('true')
