@@ -49,7 +49,7 @@ queryKey: ['global:documents', docId]            // global
 >
 > - **`queryFn` must call a telefunction.** The invalidation subscription piggybacks on that call. With a non-telefunc `queryFn` (e.g. plain `fetch()`), a global key silently behaves like a local one. The same goes for mutations: global keys in `meta.invalidates` are published server-side after the telefunction succeeds, so `mutationFn` must be a telefunction call too.
 > - **Return the telefunction call directly.** The integration unwraps the subscription from whatever `queryFn` returns, so transform with `select` instead:
->   ```tsx
+>   ```js
 >   // ✗ Broken: inside queryFn, getTodos() resolves to an internal wrapper
 >   queryFn: async () => (await getTodos()).items
 >
