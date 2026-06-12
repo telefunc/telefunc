@@ -22,6 +22,8 @@ By default, channels and broadcast use **SSE** and work without extra server set
 
 ```ts
 // Chat.telefunc.ts
+// Environment: server
+
 import { Channel } from 'telefunc'
 
 export async function onChat() {
@@ -182,6 +184,8 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ```ts
 // Chat.telefunc.ts
+// Environment: server
+
 import { Broadcast } from 'telefunc'
 
 export async function onJoinChat() {
@@ -351,6 +355,8 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 ## Config
 
 ```ts
+// Environment: server
+
 import { config } from 'telefunc'
 
 config.channel = {

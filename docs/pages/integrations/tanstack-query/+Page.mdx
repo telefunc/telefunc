@@ -49,7 +49,7 @@ queryKey: ['global:documents', docId]            // global
 >
 > - **`queryFn` must call a telefunction.** The invalidation subscription piggybacks on that call. With a non-telefunc `queryFn` (e.g. plain `fetch()`), a global key silently behaves like a local one. The same goes for mutations: global keys in `meta.invalidates` are published server-side after the telefunction succeeds, so `mutationFn` must be a telefunction call too.
 > - **Return the telefunction call directly.** The integration unwraps the subscription from whatever `queryFn` returns, so transform with `select` instead:
->   ```tsx
+>   ```js
 >   // ✗ Broken: inside queryFn, getTodos() resolves to an internal wrapper
 >   queryFn: async () => (await getTodos()).items
 >
@@ -108,6 +108,8 @@ meta: {
 For changes not triggered by a client mutation (background jobs, webhooks, other services), use `invalidate()` directly. This only works with global keys since it broadcasts to all clients:
 
 ```ts
+// Environment: server
+
 import { invalidate } from '@telefunc/tanstack-query/server'
 
 // e.g. a CMS publishes new content

@@ -24,6 +24,8 @@ Telefunc can pass functions between client and server:
 
 ```ts
 // Upload.telefunc.ts
+// Environment: server
+
 export async function onUpload(file: File, onProgress: (percent: number) => void) {
   let loaded = 0
   for await (const chunk of file.stream()) {
@@ -36,6 +38,8 @@ export async function onUpload(file: File, onProgress: (percent: number) => void
 
 ```tsx
 // Upload.tsx
+// Environment: client
+
 await onUpload(file, (percent) => setProgress(percent))
 ```
 
@@ -54,6 +58,8 @@ A channel that stays open for the lifetime of a page, pushing live metrics from 
 
 ```ts
 // Dashboard.telefunc.ts
+// Environment: server
+
 import { Channel } from 'telefunc'
 
 export async function onDashboard() {
@@ -71,6 +77,8 @@ export async function onDashboard() {
 
 ```ts
 // Dashboard.tsx
+// Environment: client
+
 const { channel } = await onDashboard()
 channel.listen((metrics) => updateCharts(metrics))
 ```
@@ -88,6 +96,8 @@ Use <Link text={<code>new Broadcast()</code>} href="/channel#new-broadcast" /> f
 
 ```ts
 // Notifications.telefunc.ts
+// Environment: server
+
 import { Broadcast } from 'telefunc'
 
 export async function onListenNotifications(userId: string) {
@@ -97,6 +107,8 @@ export async function onListenNotifications(userId: string) {
 
 ```ts
 // Notifications.tsx
+// Environment: client
+
 const notifications = await onListenNotifications(userId)
 notifications.subscribe((n) => showToast(n))
 ```
@@ -105,6 +117,8 @@ notifications.subscribe((n) => showToast(n))
 
 ```ts
 // Chat.telefunc.ts
+// Environment: server
+
 import { Broadcast } from 'telefunc'
 
 export async function onJoinChat(room: string) {
@@ -114,6 +128,8 @@ export async function onJoinChat(room: string) {
 
 ```ts
 // Chat.tsx
+// Environment: client
+
 const chat = await onJoinChat('lobby')
 chat.subscribe((msg) => console.log(msg))
 chat.publish({ user: 'Alice', text: 'Hello!' })

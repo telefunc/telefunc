@@ -135,7 +135,7 @@ The streaming download is a standard [`File`](https://developer.mozilla.org/en-U
 | `dl.text()` | `string` | Full file in memory | Read text content |
 | `dl.saveToMemory()` | `File` / `Blob`<sup>‡</sup> | Full file in memory | Use with Web APIs (`URL.createObjectURL`, `<img src>`, ...) |
 | `dl.saveToDisk(opts?)` | `File` (disk-backed) | Constant (chunk-sized) | Save to user's filesystem (picker or Downloads folder) |
-| `dl.saveToOpfs(path?)` | `File` (disk-backed) | Constant (chunk-sized) | Stash in browser-private storage |
+| `dl.saveToOpfs(path?)` | `File` (disk-backed) | Constant (chunk-sized) | Stash in browser-private storage [(OPFS)](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system) |
 
 <sup>‡</sup> `File` for `FileDownload`, `Blob` for `BlobDownload`.
 
@@ -191,6 +191,9 @@ export async function onLoadDocument(id: string) {
 ```
 
 ```tsx
+// Document.tsx
+// Environment: client
+
 const { title, pdf, thumbnail } = await onLoadDocument(id)
 
 pdfEl.src = URL.createObjectURL(await pdf.saveToMemory())

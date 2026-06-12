@@ -32,6 +32,7 @@ In other words: telefunction argument types are automatically validated at runti
 
 ```ts ts-only
 // hello.telefunc.ts
+// Environment: server
 
 // No need to define a shield() when using TypeScript: Telefunc automatically generates
 // it. For example here, Telefunc automatically aborts the telefunction call if the
@@ -166,6 +167,8 @@ A callback passed as an argument, or a function returned to the client, extends 
 
 ```ts
 // Upload.telefunc.ts
+// Environment: server
+
 export async function onUpload(
   file: File,
   onProgress: (percent: number) => void,  // void → client must resolve with `undefined`
@@ -214,6 +217,8 @@ await events.send({ tick: 1 }, { ack: true })
 
 ```ts
 // Chat.telefunc.ts
+// Environment: server
+
 export async function onJoinChat(roomId: string) {
   const room = new Broadcast<{ user: string; text: string }>({ key: `chat:${roomId}` })
   return room
@@ -221,7 +226,8 @@ export async function onJoinChat(roomId: string) {
 ```
 
 ```ts
-// Client side
+// Environment: client
+
 const chat = await onJoinChat(roomId)
 await chat.publish({ user: 'Alice', text: 'Hello!' })
 // Server validates `{ user: string; text: string }` against the declared `T` before
