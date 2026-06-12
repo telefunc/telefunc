@@ -31,7 +31,7 @@ export type {
 } from '../../wire-protocol/types.js'
 
 // In order to allow users to override `Telefunc.Context`, we need to export `Telefunc` (even if the user never imports `Telefunc`)
-export type { Telefunc as TelefuncNamespace } from './context/TelefuncNamespace.js'
+export type { Telefunc } from './context/TelefuncNamespace.js'
 
 export { decorateTelefunction as __decorateTelefunction } from './runTelefunc/decorateTelefunction.js'
 export { __applyReturnShields, __applyArgumentShields } from './shield.js'
