@@ -12,6 +12,8 @@ npm install @telefunc/tanstack-query
 Wrap your `QueryClient` with `withTelefunc()`:
 
 ```tsx
+// Environment: client
+
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { withTelefunc } from '@telefunc/tanstack-query'
 
@@ -108,6 +110,8 @@ meta: {
 For changes not triggered by a client mutation (background jobs, webhooks, other services), use `invalidate()` directly. This only works with global keys since it broadcasts to all clients:
 
 ```ts
+// Environment: server
+
 import { invalidate } from '@telefunc/tanstack-query/server'
 
 // e.g. a CMS publishes new content

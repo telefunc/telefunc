@@ -11,6 +11,8 @@ npm install @telefunc/redis ioredis
 ## Setup
 
 ```ts
+// Environment: server
+
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
@@ -25,6 +27,8 @@ That swaps the default in-memory broadcast transport for one backed by Redis Pub
 Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options such as TLS or retry strategy.
 
 ```ts
+// Environment: server
+
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 

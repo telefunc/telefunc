@@ -27,6 +27,8 @@ In a single-instance setup the default in-memory transport is enough. In a multi
 
 ```ts
 // telefunc.config.ts
+// Environment: server
+
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
