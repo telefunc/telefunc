@@ -229,12 +229,12 @@ import { onJoinChat } from './Chat.telefunc'
 
 const chat = await onJoinChat('Alice')
 
-// Receive messages published by other instances with the same key
+// Receive every message published to the key, including this instance's own publishes
 chat.subscribe((msg, info) => {
   console.log(`#${info.seq} ${msg.user}: ${msg.text}`)
 })
 
-// Publish to all other instances with the same key
+// Publish to every subscriber of the key
 chat.publish({ user: 'Alice', text: 'Hello!', })
 ```
 
@@ -349,6 +349,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 | `Abort` | Server called `abort()` | Terminal — inspect `err.abortValue` |
 | `ChannelClosedError` | `send()` after close/abort | Terminal — recreate channel if needed |
 | `ChannelNetworkError` | Connection lost beyond timeout | Terminal — channel auto-closed |
+| `ChannelOverflowError` | Buffered sends exceeded `config.channel.bufferLimit` while the peer was disconnected | Pending `send()` promises reject — apply backpressure by awaiting sends |
 
 
 ## Config

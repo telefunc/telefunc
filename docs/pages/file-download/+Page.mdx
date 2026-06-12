@@ -176,12 +176,13 @@ Return any number of `File`, `Blob`, or `download()` values, anywhere in the res
 // Environment: server
 
 import fs from 'node:fs'
+import { Readable } from 'node:stream'
 import { download } from 'telefunc'
 
 export async function onLoadDocument(id: string) {
   return {
     title: 'My Document',
-    pdf: download(fs.createReadStream(`./docs/${id}.pdf`), { name: 'doc.pdf', type: 'application/pdf' }),
+    pdf: download(Readable.toWeb(fs.createReadStream(`./docs/${id}.pdf`)), { name: 'doc.pdf', type: 'application/pdf' }),
     thumbnail: new File([await fs.promises.readFile(`./docs/${id}-thumb.png`)], 'thumb.png', {
       type: 'image/png',
     }),
