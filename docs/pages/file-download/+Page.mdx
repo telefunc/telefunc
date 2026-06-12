@@ -190,6 +190,9 @@ export async function onLoadDocument(id: string) {
 ```
 
 ```tsx
+// Document.tsx
+// Environment: client
+
 const { title, pdf, thumbnail } = await onLoadDocument(id)
 
 pdfEl.src = URL.createObjectURL(await pdf.saveToMemory())
