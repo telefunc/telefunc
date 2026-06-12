@@ -105,9 +105,16 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
         const resp = await makeTelefuncHttpRequest(1337)
         expect(resp.status).toBe(422)
         expect(await resp.text()).toBe('Shield Validation Error')
-        expectLog('Shield Validation Error', {
-          filter: (log) =>
-            log.logSource === 'stderr' && log.logText.includes('onLoad()') && log.logText.includes('Hello.telefunc.ts'),
+        // The server's stderr line can reach the harness's log capture a few
+        // milliseconds after the HTTP response resolves, and expectLog() only
+        // checks logs captured so far. Poll instead of asserting once.
+        await autoRetry(async () => {
+          expectLog('Shield Validation Error', {
+            filter: (log) =>
+              log.logSource === 'stderr' &&
+              log.logText.includes('onLoad()') &&
+              log.logText.includes('Hello.telefunc.ts'),
+          })
         })
       }
     })

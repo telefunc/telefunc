@@ -480,11 +480,29 @@ function Streaming() {
           let obsErr: { isAbort: boolean; abortValue: unknown } | null = null
           let subjectErr: { isAbort: boolean; abortValue: unknown } | null = null
 
+          // The telefunction gates its Abort on this confirmation, so the e2e
+          // assertions can rely on every source having delivered a value.
+          let confirmed = false
+          const maybeConfirmAllReceived = () => {
+            if (confirmed) return
+            if (
+              abortingValues.length > 0 &&
+              otherValues.length > 0 &&
+              streamChunks.length > 0 &&
+              obsValues.length > 0 &&
+              subjectValues.length > 0
+            ) {
+              confirmed = true
+              void res.confirmAllReceived()
+            }
+          }
+
           await Promise.all([
             (async () => {
               try {
                 for await (const v of res.aborting) {
                   abortingValues.push(v)
+                  maybeConfirmAllReceived()
                 }
               } catch (e: any) {
                 abortingErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
@@ -494,6 +512,7 @@ function Streaming() {
               try {
                 for await (const v of res.other) {
                   otherValues.push(v)
+                  maybeConfirmAllReceived()
                 }
               } catch (e: any) {
                 otherErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
@@ -506,6 +525,7 @@ function Streaming() {
                   const { done, value } = await reader.read()
                   if (done) break
                   streamChunks.push(decoder.decode(value, { stream: true }))
+                  maybeConfirmAllReceived()
                 }
               } catch (e: any) {
                 streamErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
@@ -522,6 +542,7 @@ function Streaming() {
               res.observable.subscribe({
                 next(v) {
                   obsValues.push(v as string)
+                  maybeConfirmAllReceived()
                 },
                 error(e: any) {
                   obsErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
@@ -534,6 +555,7 @@ function Streaming() {
               res.subject.subscribe({
                 next(v) {
                   subjectValues.push(v as string)
+                  maybeConfirmAllReceived()
                 },
                 error(e: any) {
                   subjectErr = { isAbort: e instanceof TelefuncAbort, abortValue: e?.abortValue ?? null }
