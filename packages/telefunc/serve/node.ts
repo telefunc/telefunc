@@ -1,8 +1,8 @@
-export { telefunc }
+export { Telefunc }
 
 import crossws from 'crossws/adapters/node'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
-import type { Telefunc } from '../node/server/context/getContext.js'
+import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
@@ -18,12 +18,12 @@ type NodeRequest = IncomingMessage & { originalUrl?: string }
 type ServeInputNode<Req extends NodeRequest, Res extends ServerResponse> = {
   req: Req
   res: Res
-  context?: Telefunc.Context
+  context?: TelefuncNamespace.Context
 }
 
 type ServeInputRequest = {
   request: Request
-  context?: Telefunc.Context
+  context?: TelefuncNamespace.Context
 }
 
 type ServeInput<Req extends NodeRequest, Res extends ServerResponse> = ServeInputNode<Req, Res> | ServeInputRequest
@@ -37,6 +37,18 @@ interface TelefuncServe<Req extends NodeRequest, Res extends ServerResponse> {
 const { registeredServers } = getGlobalObject('serve/node.ts', {
   registeredServers: new WeakSet<HttpServer>(),
 })
+
+// `new Telefunc()` is a thin wrapper: a constructor that returns an object yields that object,
+// so `new Telefunc()` is exactly `telefunc()`. The merged interface gives instances the factory's type.
+interface Telefunc<
+  Req extends NodeRequest = NodeRequest,
+  Res extends ServerResponse = ServerResponse,
+> extends TelefuncServe<Req, Res> {}
+class Telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse> {
+  constructor() {
+    return telefunc<Req, Res>()
+  }
+}
 
 function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerResponse = ServerResponse>(): TelefuncServe<
   Req,

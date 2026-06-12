@@ -46,10 +46,10 @@ For example:
 // Server entry (Hono)
 
 import { Hono } from 'hono'
-import { telefunc } from 'telefunc/node'
+import { Telefunc } from 'telefunc/node'
 
 const app = new Hono()
-const tf = telefunc()
+const tf = new Telefunc()
 
 app.all('/_telefunc', async (c) => {
   const response = await tf.serve({
@@ -90,10 +90,10 @@ app.use(async (c, next) => {
 // Server entry (Express.js)
 
 import express from 'express'
-import { telefunc } from 'telefunc/node'
+import { Telefunc } from 'telefunc/node'
 
 const app = express()
-const tf = telefunc()
+const tf = new Telefunc()
 
 // Telefunc middleware
 app.all('/_telefunc', async (req, res, next) => {

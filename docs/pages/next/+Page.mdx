@@ -29,12 +29,12 @@ export default nextConfig
 // app/api/telefunc/route.ts
 // Environment: server
 
-import { telefunc } from 'telefunc/node'
+import { Telefunc } from 'telefunc/node'
 import { config } from 'telefunc'
 
 config.telefuncUrl = '/api/telefunc'
 
-const tf = telefunc()
+const tf = new Telefunc()
 
 async function handler(request: Request) {
   const response = await tf.serve({ request })
