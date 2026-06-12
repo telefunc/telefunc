@@ -21,8 +21,6 @@ interface TelefuncServe {
   serve(input: ServeInput): Promise<Response | undefined>
 }
 
-// `new Telefunc()` is a thin wrapper: a constructor that returns an object yields that object,
-// so `new Telefunc()` is exactly `telefunc()`. The merged interface gives instances the factory's type.
 interface Telefunc extends TelefuncServe {}
 class Telefunc {
   constructor() {

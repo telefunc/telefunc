@@ -38,8 +38,6 @@ const { registeredServers } = getGlobalObject('serve/node.ts', {
   registeredServers: new WeakSet<HttpServer>(),
 })
 
-// `new Telefunc()` is a thin wrapper: a constructor that returns an object yields that object,
-// so `new Telefunc()` is exactly `telefunc()`. The merged interface gives instances the factory's type.
 interface Telefunc<
   Req extends NodeRequest = NodeRequest,
   Res extends ServerResponse = ServerResponse,
