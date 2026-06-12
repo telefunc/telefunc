@@ -4,10 +4,13 @@ import { Broadcast } from 'telefunc'
 
 type TextMsg = { text: string; from: string }
 
-/** Two broadcast instances sharing a key — publish from one, subscribe on the other. */
+/** Two broadcast instances sharing a key — publish from one, subscribe on the other.
+ *  The key is unique per call: the in-memory adapter's seq counter is per-key, so a
+ *  fixed key would leak seq state across page loads and break the [1,2,3] assertion. */
 async function onTextBroadcast() {
-  const publisher = new Broadcast<TextMsg>({ key: 'room:text-test' })
-  const subscriber = new Broadcast<TextMsg>({ key: 'room:text-test' })
+  const key = `room:text-test:${crypto.randomUUID()}`
+  const publisher = new Broadcast<TextMsg>({ key })
+  const subscriber = new Broadcast<TextMsg>({ key })
 
   const received: Array<{ text: string; from: string; seq: number }> = []
   subscriber.subscribe((msg, info) => {
@@ -21,10 +24,12 @@ async function onTextBroadcast() {
   }
 }
 
-/** Two broadcast instances sharing a key — publishBinary from one, subscribeBinary on the other. */
+/** Two broadcast instances sharing a key — publishBinary from one, subscribeBinary on the other.
+ *  Unique key per call, same reason as onTextBroadcast(). */
 async function onBinaryBroadcastPair() {
-  const publisher = new Broadcast({ key: 'room:binary-test' })
-  const subscriber = new Broadcast({ key: 'room:binary-test' })
+  const key = `room:binary-test:${crypto.randomUUID()}`
+  const publisher = new Broadcast({ key })
+  const subscriber = new Broadcast({ key })
 
   const received: Array<{ size: number; firstByte: number; seq: number }> = []
   subscriber.subscribeBinary((data, info) => {

@@ -23,7 +23,7 @@ export {
 
 import { Abort, Channel, getContext } from 'telefunc'
 import { Subject, interval } from 'rxjs'
-import { map, take, tap } from 'rxjs/operators'
+import { map, take } from 'rxjs/operators'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -228,24 +228,21 @@ async function* onGeneratorBugMidStream(): AsyncGenerator<string> {
 }
 
 const onAbortOneOfManyStreamingValues = async () => {
-  // The observable and subject only start emitting after the client's SUBSCRIBE
-  // message arrives over the channel transport (SSE/WS), which connects
-  // asynchronously and may retry. A fixed sleep before the Abort races against
-  // that: if the transport is slow, the server aborts before any obs/subj value
-  // exists, and the test asserts both values and the abort error. Gate the
-  // Abort on the first emission of each instead.
-  let markObsEmitted!: () => void
-  let markSubjEmitted!: () => void
-  const obsEmitted = new Promise<void>((resolve) => {
-    markObsEmitted = resolve
-  })
-  const subjEmitted = new Promise<void>((resolve) => {
-    markSubjEmitted = resolve
+  // The test asserts that every sibling delivered at least one value to the
+  // client before the abort error. Gating the Abort on server-side emission is
+  // not enough: the abort and the inline stream chunks travel on different
+  // wires, so an abort fired on first server emission can still overtake the
+  // first other/stream chunk on the client. Gate on the client's confirmation
+  // instead: the page calls confirmAllReceived() once it holds one value from
+  // every source.
+  let markAllReceived!: () => void
+  const allReceived = new Promise<void>((resolve) => {
+    markAllReceived = resolve
   })
 
   async function* aborting(): AsyncGenerator<string> {
     yield 'abort-0'
-    await Promise.all([obsEmitted, subjEmitted])
+    await allReceived
     throw Abort({ reason: 'stream-abort', code: 101 })
   }
 
@@ -274,7 +271,6 @@ const onAbortOneOfManyStreamingValues = async () => {
   const observable = interval(20).pipe(
     map((i) => `obs-${i}`),
     take(1000),
-    tap(() => markObsEmitted()),
   )
 
   // rxjs Subject that the server pushes to
@@ -283,13 +279,20 @@ const onAbortOneOfManyStreamingValues = async () => {
   const subjectInterval = setInterval(() => {
     if (subject.observed) {
       subject.next(`subj-${subjectCount++}`)
-      markSubjEmitted()
     }
   }, 25)
   const { onClose } = getContext()
   onClose(() => clearInterval(subjectInterval))
 
-  return { aborting: aborting(), other: other(), stream, promise, observable, subject }
+  return {
+    aborting: aborting(),
+    other: other(),
+    stream,
+    promise,
+    observable,
+    subject,
+    confirmAllReceived: () => markAllReceived(),
+  }
 }
 
 const onChannelAbortAbortsSiblingStreamingValues = async () => {
