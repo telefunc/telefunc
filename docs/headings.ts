@@ -182,11 +182,6 @@ const headings = [
   },
   {
     level: 2,
-    title: 'Integrations',
-    url: '/integrations',
-  },
-  {
-    level: 2,
     title: '`@telefunc/rxjs`',
     url: '/rxjs',
   },
