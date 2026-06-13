@@ -182,11 +182,6 @@ const headings = [
   },
   {
     level: 2,
-    title: '`@telefunc/rxjs`',
-    url: '/rxjs',
-  },
-  {
-    level: 2,
     title: '`@telefunc/tanstack-query`',
     url: '/tanstack-query',
   },
@@ -194,6 +189,11 @@ const headings = [
     level: 2,
     title: '`@telefunc/redis`',
     url: '/redis',
+  },
+  {
+    level: 2,
+    title: '`@telefunc/rxjs`',
+    url: '/rxjs',
   },
   {
     level: 1,
