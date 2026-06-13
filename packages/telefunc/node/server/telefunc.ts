@@ -2,7 +2,7 @@ export { serve, telefunc }
 
 import { runTelefunc, HttpResponse } from './runTelefunc.js'
 import { Telefunc } from './context/getContext.js'
-import { assertUsage } from '../../utils/assert.js'
+import { assertUsage, assertWarning } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import { nodeReadableToWebRequest } from '../../utils/nodeReadableToWebRequest.js'
@@ -58,8 +58,11 @@ async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   return httpResponse
 }
 
-/** @deprecated Use serve() instead. */
+/** @deprecated `telefunc()` has been renamed to `serve()`. */
 async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
+  assertWarning(false, '`telefunc()` has been renamed to `serve()` — https://telefunc.com/serve', {
+    onlyOnce: true,
+  })
   return serve(httpRequest)
 }
 
