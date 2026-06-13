@@ -1,6 +1,11 @@
 import { Link } from '@brillout/docpress'
 
-`@telefunc/rxjs` lets you pass [RxJS](https://rxjs.dev/) `Observable` and `Subject` transparently between client and server — both directions. All rxjs operators work out of the box.
+For reactive streams with full operator support, you can use [RxJS](https://rxjs.dev).
+
+The `@telefunc/rxjs` integration lets you pass the RxJS's `Observable` and `Subject` transparently between client and server — both directions. All RxJS operators work out of the box.
+
+> Each value emitted into a client-side `Subject<T>` is **shield-validated at runtime** when it arrives at the server, against the `T` from your TypeScript types. Terminal signals (`error`, `complete`) are untyped and pass through unshielded — see <Link href="#shields" />.
+
 
 ## Install
 
@@ -13,7 +18,7 @@ npm install @telefunc/rxjs rxjs
 
 ## Live stock ticker
 
-Server pushes prices every second. Client applies operators locally — filtering and limiting happen on the client with standard rxjs.
+Server pushes prices every second. Client applies operators locally — filtering and limiting happen on the client with standard RxJS.
 
 ```ts
 // StockPrice.telefunc.ts
@@ -139,7 +144,7 @@ document.addEventListener('mousemove', e => {
 
 ## Angular
 
-Angular uses rxjs extensively. With `@telefunc/rxjs`, telefunctions return Observables directly — pipe them into templates with `| async`, use them in services, or compose them with the rest of your rxjs code.
+Angular uses RxJS extensively. With `@telefunc/rxjs`, telefunctions return Observables directly — pipe them into templates with `| async`, use them in services, or compose them with the rest of your RxJS code.
 
 ```ts
 // Dashboard.telefunc.ts

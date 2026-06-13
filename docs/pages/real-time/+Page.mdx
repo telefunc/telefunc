@@ -143,13 +143,6 @@ See <Link href="/channel#new-broadcast" /> for the full `Broadcast` API.
 > Client-published messages are **shield-validated at runtime** from your TypeScript types — when the client calls `publish()` on a `Broadcast<T>` returned from a telefunction, the value is checked against `T` on the server before fanning out to subscribers. A failing shield rejects the client's `publish()` promise with `ShieldValidationError`. See <Link href="/shield" />.
 
 
-## RxJS
-
-For reactive streams with full operator support, see <Link href="/integrations/rxjs" text={<code>@telefunc/rxjs</code>} /> — pass `Observable` and `Subject` transparently in both directions.
-
-> Each value emitted into a client-side `Subject<T>` is **shield-validated at runtime** when it arrives at the server, against the `T` from your TypeScript types. Terminal signals (`error`, `complete`) are untyped and pass through unshielded. See <Link href="/integrations/rxjs#shields" text="RxJS — Shields" />.
-
-
 ## Reconnection
 
 If the connection drops, Telefunc reconnects automatically, resumes existing channels, and replays buffered messages in order. It's transparent to your application code.
@@ -166,8 +159,11 @@ See <Link href="/transport" /> for the full comparison.
 
 ## See also
 
-- <Link href="/stream" /> — streaming server values
-- <Link href="/file-upload" /> — file uploads
-- <Link href="/file-download" /> — file downloads
-- <Link href="/channel" /> — full channel API reference
-- <Link href="/transport" /> — transport configuration
+- <Link href="/integrations/tanstack-query" />
+- <Link href="/integrations/rxjs" />
+- <Link href="/integrations/redis" />
+- <Link href="/stream" />
+- <Link href="/file-upload" />
+- <Link href="/file-download" />
+- <Link href="/channel" />
+- <Link href="/transport" />
