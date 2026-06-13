@@ -6,9 +6,6 @@ import { testFileUpload } from './pages/file-upload/e2e-test'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   run(cmd, {
-    // `pnpm run preview` runs srvx (prints `Listening on:`); `pnpm run dev` is `vike dev` on
-    // vite (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
-    // "Server running at" matcher, so accept these explicitly to avoid a readiness timeout.
     serverIsReadyMessage: (log) =>
       log.includes('Listening on') ||
       log.includes('Server running at') ||
