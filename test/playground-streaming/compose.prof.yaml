@@ -1,5 +1,5 @@
 # Overlay for compose.yaml that enables V8 CPU profiling on every server instance.
-# Each instance writes its own `.cpuprofile` into `test/playground/profiles/` on the host
+# Each instance writes its own `.cpuprofile` into `test/playground-streaming/profiles/` on the host
 # (via the existing `../..:/repo` mount).
 #
 # Filenames are keyed on `INSTANCE_ID` via `--cpu-prof-name=instance-$INSTANCE_ID.cpuprofile`.
@@ -22,7 +22,7 @@ x-prof-options: &prof-options
   command:
     - sh
     - -c
-    - exec node --cpu-prof --cpu-prof-name=instance-$$INSTANCE_ID.cpuprofile --cpu-prof-interval=100000 --cpu-prof-dir=/repo/test/playground/profiles dist/nested/server/index.mjs
+    - exec node --cpu-prof --cpu-prof-name=instance-$$INSTANCE_ID.cpuprofile --cpu-prof-interval=100000 --cpu-prof-dir=/repo/test/playground-streaming/profiles dist/nested/server/index.mjs
 
 services:
   playground-a: *prof-options

@@ -477,7 +477,7 @@ importers:
         specifier: ^4.79.0
         version: 4.95.0(@cloudflare/workers-types@4.20260601.1)
 
-  test/playground:
+  test/playground-streaming:
     dependencies:
       '@tailwindcss/vite':
         specifier: ^4.2.1
