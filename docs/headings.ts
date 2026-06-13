@@ -173,7 +173,7 @@ const headings = [
   },
   {
     level: 2,
-    title: 'Cloudflare Workers',
+    title: 'Cloudflare',
     url: '/cloudflare',
   },
   {
