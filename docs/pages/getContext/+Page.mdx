@@ -163,15 +163,14 @@ export async function myTelefunction() {
 
 ## TypeScript
 
-You can use `Telefunc.Context` to globally set the type of `const context = getContext()`:
+You can use the global `Telefunc.Context` interface to globally set the type of `const context = getContext()`:
 
 ```ts ts-only
 // TelefuncContext.d.ts
 
-import 'telefunc'
 import type { User } from './User.ts'
 
-declare module 'telefunc' {
+declare global {
   namespace Telefunc {
     interface Context {
       user: null | User
@@ -194,6 +193,20 @@ export async function someTelefunction() {
   const { user } = getContext()
 }
 ```
+
+> [!NOTE]
+> Augmenting the `'telefunc'` module is deprecated, use the global `Telefunc` namespace shown above instead.
+> ```ts
+> // ❌ Deprecated
+> import 'telefunc'
+> declare module 'telefunc' {
+>   namespace Telefunc {
+>     interface Context {
+>       user: null | User
+>     }
+>   }
+> }
+> ```
 
 You can also directly set `const context = getContext<MyContext>()`:
 
