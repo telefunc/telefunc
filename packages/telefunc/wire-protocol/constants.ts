@@ -87,6 +87,13 @@ export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
  *  wire (cross-wire reordering can deliver FIN first) before aborting the upgrade. */
 export const UPGRADE_FIN_RECONCILED_TIMEOUT_MS = 2_000
 
+/** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
+ *  wire dead and reconnecting. A downstream that stalls without erroring (bytes stop, no FIN)
+ *  otherwise wedges the connection: the upstream keeps sending pings but `handlePongTimeout`
+ *  is suppressed while reconciling, so nothing notices the dead wire and every call buffered
+ *  behind the un-acked RECONCILE hangs. */
+export const RECONCILE_TIMEOUT_MS = 10_000
+
 // ===== Multiplexed SSE transport =====
 
 /** Shorter flush delay for the first SSE batch POST after an idle period. */
