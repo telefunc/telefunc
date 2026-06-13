@@ -208,6 +208,7 @@ export async function someTelefunction() {
 }
 ```
 
+
 ## `onClose()`
 
 The context object returned by `getContext()` also includes `onClose()`, a callback that fires when the request lifecycle ends for any reason. Fires exactly once. Use it to release resources.
@@ -218,6 +219,9 @@ context.onClose(() => {
   // Clean up server-side resources
 })
 ```
+
+> See also:
+> - <Link href="/close" />
 
 
 ## `signal`
@@ -234,4 +238,3 @@ const response = await fetch(url, { signal: context.signal })
 
 - <Link href="/permissions" />
 - <Link href="/server" />
-- <Link href="/close" />
