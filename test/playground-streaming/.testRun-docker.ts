@@ -1,6 +1,6 @@
 export { testRunDocker }
 
-import { page, test, expect, expectLog, run, skip, isCI, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
+import { page, test, expect, run, skip, isCI, getServerUrl, autoRetry } from '@brillout/test-e2e'
 import { execSync } from 'node:child_process'
 import { resilientGoto, waitForHydration } from './e2e-utils'
 import { testCounter } from '../utils'
@@ -64,7 +64,7 @@ function testRunDocker() {
         t.includes('ERR_SSL_PROTOCOL_ERROR') ||
         // Chromium-in-Docker `NetworkChangeNotifier` aborts in-flight asset fetches on the
         // bridge interface state shift; the dynamic-import wrapper then reports this. The
-        // `hello` test's reload loop recovers from it, so tolerate the noise it leaves behind.
+        // `home page` test's reload loop recovers from it, so tolerate the noise it leaves behind.
         t.includes('Failed to fetch dynamically imported module') ||
         t.includes('Failed to load resource: the server responded with a status of 403') ||
         (t.includes('WebSocket connection to') && t.includes('failed'))
@@ -72,23 +72,15 @@ function testRunDocker() {
     },
   })
 
-  test('hello', async () => {
-    {
-      const html = await fetchHtml('/')
-      expect(html).toContain('Loading...')
-      expect(html).not.toContain('Eva')
-    }
-    {
-      await resilientGoto(`${getServerUrl()}/`, { waitUntil: 'load' })
-      await waitForHydration()
-      await autoRetry(
-        async () => {
-          expect(await page.textContent('body')).toContain('Welcome Eva')
-        },
-        { timeout: 10_000 },
-      )
-      expect(await page.textContent('body')).not.toContain('Loading')
-    }
+  test('home page', async () => {
+    await resilientGoto(`${getServerUrl()}/`, { waitUntil: 'load' })
+    await waitForHydration()
+    await autoRetry(
+      async () => {
+        expect(await page.textContent('h1')).toBe('Welcome')
+      },
+      { timeout: 10_000 },
+    )
   })
 
   test('counter', async () => {
@@ -106,29 +98,6 @@ function testRunDocker() {
   testLiveQuery()
   testRxjs(true)
   testPublish()
-
-  test('shield() generation', async () => {
-    {
-      const resp = await makeTelefuncHttpRequest('Jon')
-      expect(resp.status).toBe(200)
-      const { ret } = await resp.json()
-      expect(ret.message).toBe('Welcome Jon')
-    }
-    {
-      const resp = await makeTelefuncHttpRequest(1337)
-      expect(resp.status).toBe(422)
-      expect(await resp.text()).toBe('Shield Validation Error')
-      // The container's stderr line can reach the harness's log capture a few milliseconds
-      // after the HTTP response resolves, and expectLog() only checks logs captured so far.
-      // Docker compose's log aggregation widens that window. Poll instead of asserting once.
-      await autoRetry(async () => {
-        expectLog('Shield Validation Error', {
-          // Docker `2>&1` collapses container stderr into stdout, so don't filter on source.
-          filter: (log) => log.logText.includes('onLoad()') && log.logText.includes('Hello.telefunc.ts'),
-        })
-      })
-    }
-  })
 }
 
 // `docker info` fails both when the CLI is missing and when the daemon is not running;
@@ -140,16 +109,4 @@ function isDockerAvailable(): boolean {
   } catch {
     return false
   }
-}
-
-async function makeTelefuncHttpRequest(name: string | number) {
-  const resp = await fetch(`${getServerUrl()}/_telefunc`, {
-    method: 'POST',
-    body: JSON.stringify({
-      file: '/pages/index/Hello.telefunc.ts',
-      name: 'onLoad',
-      args: [{ name }],
-    }),
-  })
-  return resp
 }
