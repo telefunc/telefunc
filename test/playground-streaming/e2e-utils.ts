@@ -53,7 +53,8 @@ async function getCleanupState(): Promise<Record<string, string>> {
  * `page.goto()` that retries the navigation on transient Chromium-in-Docker network errors.
  * Right after the containers come up, Chromium's `NetworkChangeNotifier` can abort the in-flight
  * navigation with `ERR_NETWORK_CHANGED` (and connection-family friends) when the Docker bridge
- * interface state shifts. Re-navigating recovers, so retry a few times before giving up.
+ * interface state shifts — sometimes surfacing as a bounce to `chrome-error://chromewebdata/`
+ * (see `isTransientNetworkError`). Re-navigating recovers, so retry a few times before giving up.
  */
 async function resilientGoto(url: string, options?: Parameters<typeof page.goto>[1]) {
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -62,6 +63,9 @@ async function resilientGoto(url: string, options?: Parameters<typeof page.goto>
       return
     } catch (err) {
       if (attempt === 3 || !isTransientNetworkError(err)) throw err
+      // Pause before retrying so the next navigation lands after the bridge interface shift has
+      // settled, instead of hammering the same broken window with back-to-back attempts.
+      await sleep(500)
     }
   }
 }
@@ -100,6 +104,11 @@ const transientNetworkErrors = [
 ]
 function isTransientNetworkError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
+  // When a transient network error aborts an in-flight navigation, Chromium bounces to its internal
+  // error page and Playwright reports the original navigation as "interrupted by another navigation
+  // to chrome-error://chromewebdata/" — without surfacing the underlying ERR_* code. Treat that
+  // bounce as transient too, so the navigation still gets retried.
+  if (message.includes('chrome-error://chromewebdata')) return true
   return transientNetworkErrors.some((code) => message.includes(code))
 }
 
