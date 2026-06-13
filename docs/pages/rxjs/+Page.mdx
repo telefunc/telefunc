@@ -2,7 +2,7 @@ import { Link } from '@brillout/docpress'
 
 For reactive streams with full operator support, you can use [RxJS](https://rxjs.dev).
 
-The `@telefunc/rxjs` integration lets you pass RxJS `Observable`s and `Subject`s transparently between client and server, in both directions.
+The `@telefunc/rxjs` integration lets you pass RxJS `Observable` and `Subject` transparently between client and server — both directions, all operators.
 
 > Each value emitted into a client-side `Subject<T>` is **shield-validated at runtime** when it arrives at the server, against the `T` from your TypeScript types. Terminal signals (`error`, `complete`) are untyped and pass through unshielded — see <Link href="#shields" />.
 
