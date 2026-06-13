@@ -15,6 +15,7 @@ import {
   CHANNEL_RECONNECT_MAX_DELAY_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_TRANSPORT,
+  RECONCILE_TIMEOUT_MS,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   SSE_RECONCILE_DEADLINE_MS,
@@ -258,8 +259,11 @@ class ClientConnection implements MuxConnection {
    *  first RECONCILED can arrive in either order on the SSE path. */
   private serverTransports: ReconciledPayload['transports'] | null = null
   /** RECONCILE sent, awaiting RECONCILED. SSE sets it true during connecting since the
-   *  initial reconcile is baked into the openStream POST body. */
+   *  initial reconcile is baked into the openStream POST body. Bounded by `reconcileTimer`:
+   *  written only via `enterReconciling`/`exitReconciling` so the deadline can never outlive
+   *  the state it guards. */
   private reconciling = false
+  private reconcileTimer: ReturnType<typeof setTimeout> | null = null
   private ttl: ReturnType<typeof setTimeout> | null = null
 
   private get closed(): boolean {
@@ -711,9 +715,37 @@ class ClientConnection implements MuxConnection {
     hb.start()
   }
 
-  /** Funnel for pong-timeouts. Suppress while reconciling — pings are delayed by the round-trip. */
+  /** Funnel for pong-timeouts. Suppress while reconciling — pings are delayed by the round-trip;
+   *  `reconcileTimer` (armed by `enterReconciling`) is the liveness bound for that window. */
   private handlePongTimeout(transport: ClientChannelTransport): void {
     if (this.reconciling) return
+    transport.detachHeartbeat()
+    transport.abandonActiveTransport()
+    this._onTransportClosed(transport, false)
+  }
+
+  /** Enter the await-RECONCILED window and arm its liveness bound. A follow-up RECONCILE for
+   *  late registrations re-enters and restarts the deadline from scratch. */
+  private enterReconciling(): void {
+    this.reconciling = true
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer)
+    this.reconcileTimer = setTimeout(() => this.onReconcileTimeout(), RECONCILE_TIMEOUT_MS)
+  }
+
+  /** Leave the await-RECONCILED window: RECONCILED settled, the wire was lost, or disposed. */
+  private exitReconciling(): void {
+    this.reconciling = false
+    if (this.reconcileTimer) {
+      clearTimeout(this.reconcileTimer)
+      this.reconcileTimer = null
+    }
+  }
+
+  /** RECONCILED never arrived on a silently-stalled wire — same outcome as a missed pong:
+   *  drop the wire and let `handleTransportLoss` reconnect. */
+  private onReconcileTimeout(): void {
+    if (this.closed || !this.reconciling) return
+    const transport = this.transport
     transport.detachHeartbeat()
     transport.abandonActiveTransport()
     this._onTransportClosed(transport, false)
@@ -901,7 +933,7 @@ class ClientConnection implements MuxConnection {
     // The wire is dying — cancel the queued RECONCILE (no point sending) and release
     // unconfirmed-releasing entries so they don't leak onto the post-reconnect RECONCILE.
     this.cancelPendingRegisterReconcile()
-    this.reconciling = false
+    this.exitReconciling()
     this.reconcileIxes.clear()
     if (this.ttl) {
       clearTimeout(this.ttl)
@@ -969,14 +1001,14 @@ class ClientConnection implements MuxConnection {
     this.lastSeqByChannel.clear()
     this.replayBuffers.clear()
     this.reconcileIxes.clear()
-    this.reconciling = false
+    this.exitReconciling()
     ClientConnection.cache.delete(this.cacheKey)
   }
 
   // ── Protocol internals ──
 
   buildReconcileFrame(): OutboundFrame {
-    this.reconciling = true
+    this.enterReconciling()
     this.reconcileIxes = new Set()
     const open: ReconcilePayload['open'] = []
     for (const [ix, entry] of this.channels) {
@@ -1062,7 +1094,7 @@ class ClientConnection implements MuxConnection {
       const reconcileBatch = this.stageReconcileBatch()
       this.appendReconcileBatch(releaseFrames, reconcileBatch)
     } else {
-      this.reconciling = false
+      this.exitReconciling()
     }
 
     return { frames: releaseFrames, channelsToOpen, reconcileComplete: !hasNewChannels }
