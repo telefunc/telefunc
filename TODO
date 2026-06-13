@@ -1,9 +1,7 @@
 TO-DO/before-merge:
 - Use <Link> instead of []()
-- Does telefunc() log "deprecated in favor of serve()"?
 
 TO-DO/soon:
-- Soft-deprecate `telefunc()` in favor of `serve()` ?
 - Use `createDebug()` instead of `TELEFUNC_SHIELD_DEBUG` (let's do it after no potential conflicts with pending PRs)
 
 TO-DO/next-major-release:

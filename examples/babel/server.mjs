@@ -1,5 +1,5 @@
 import express from 'express'
-import { telefunc, config } from 'telefunc'
+import { serve, config } from 'telefunc'
 import { createRequire } from 'node:module'
 
 startServer()
@@ -19,7 +19,7 @@ async function startServer() {
 
 function installTelefunc(app) {
   app.all('/_telefunc', async (req, res) => {
-    const httpResponse = await telefunc({
+    const httpResponse = await serve({
       url: req.originalUrl,
       method: req.method,
       readable: req,

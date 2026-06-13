@@ -1,5 +1,5 @@
 import express from 'express'
-import { telefunc } from 'telefunc'
+import { serve } from 'telefunc'
 import cookieParser from 'cookie-parser'
 import { retrieveUser } from '#app/auth'
 import vike from 'vike-node/express'
@@ -13,7 +13,7 @@ async function startServer() {
   app.use(cookieParser())
   app.all('/_telefunc', async (req, res) => {
     const context = { user: retrieveUser(req) }
-    const httpResponse = await telefunc({
+    const httpResponse = await serve({
       url: req.originalUrl,
       method: req.method,
       readable: req,

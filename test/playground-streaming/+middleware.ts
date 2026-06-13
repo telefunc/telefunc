@@ -1,10 +1,10 @@
 export { middlewareTelefunc as default }
 
 import { enhance, type UniversalMiddleware } from '@universal-middleware/core'
-import { telefunc } from 'telefunc'
+import { serve } from 'telefunc'
 
 const telefuncUniversalMiddleware: UniversalMiddleware = async (request, context, runtime) => {
-  const httpResponse = await telefunc({
+  const httpResponse = await serve({
     request,
     context: {
       ...context,
