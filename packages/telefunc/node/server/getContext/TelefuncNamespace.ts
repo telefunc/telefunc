@@ -1,4 +1,4 @@
-// TO-DO/next-major-release: remove
+// TO-DO/next-major-release: remove, see https://github.com/telefunc/telefunc/commit/7758568044edb4d4008c11be0667c13cedb7a149
 export declare namespace Telefunc {
   /**
    * @deprecated Replace `declare module 'telefunc'` with `declare global`
