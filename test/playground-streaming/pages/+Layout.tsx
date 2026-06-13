@@ -5,7 +5,6 @@ import './Layout.css'
 
 const nav = [
   { href: '/', label: 'Home' },
-  { href: '/about', label: 'About' },
   { href: '/streaming', label: 'Streaming' },
   { href: '/file-upload', label: 'Upload' },
   { href: '/file-download', label: 'Download' },
