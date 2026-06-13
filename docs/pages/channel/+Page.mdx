@@ -306,7 +306,7 @@ You can think of `new Broadcast()` as `new Channel()` plus the static `Broadcast
 | Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `channel = new Channel()` instance and returns `channel.client` for the client (asymmetric)</li></ul> | Symmetric:<ul><li>Same type for every member: `Broadcast<MessageType>`</li><li>The server uses and returns the same instance `Broadcast` (symmetric)</li></ul> |
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
-| Multi-server | [Sticky sessions](/multiple-nodes) | [Broadcast transport](#multi-server) |
+| Multi-server | [Sticky sessions](/scaling) | [Broadcast transport](#multi-server) |
 
 
 ## Multi-server

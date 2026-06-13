@@ -168,6 +168,16 @@ const headings = [
   },
   {
     level: 2,
+    title: 'Scaling',
+    url: '/scaling',
+  },
+  {
+    level: 2,
+    title: 'Cloudflare Workers',
+    url: '/cloudflare',
+  },
+  {
+    level: 2,
     title: 'Integrations',
     url: '/integrations',
   },
@@ -240,20 +250,6 @@ const headings = [
     level: 2,
     title: '`close()` / `onClose()`',
     url: '/close',
-  },
-  {
-    level: 4,
-    title: 'Scaling',
-  },
-  {
-    level: 2,
-    title: 'Using multiple nodes',
-    url: '/multiple-nodes',
-  },
-  {
-    level: 2,
-    title: 'Cloudflare Workers',
-    url: '/cloudflare',
   },
   {
     level: 4,

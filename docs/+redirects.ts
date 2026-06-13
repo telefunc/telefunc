@@ -11,4 +11,5 @@ checkType<HeadingsURL>(0 as any as RedirectsURL)
 
 const redirects = {
   '/remix': '/react-router',
+  '/multiple-nodes': '/scaling',
 } as const satisfies Config['redirects']
