@@ -1,10 +1,8 @@
+// TO-DO/next-major-release: remove
 export declare namespace Telefunc {
   /**
-   * Globally set the type of the `context` object (`const context = getContext()`).
+   * @deprecated Replace `declare module 'telefunc'` with `declare global`:
    *
-   * https://telefunc.com/getContext#typescript
-   *
-   * @deprecated Augment the global `Telefunc` namespace instead of the `'telefunc'` module:
    * ```ts
    * // TelefuncContext.d.ts
    *
@@ -25,11 +23,10 @@ export declare namespace Telefunc {
 declare global {
   namespace Telefunc {
     /**
-     * Globally set the type of the `context` object (`const context = getContext()`).
+     * Set the type of the `context` object (`const context = getContext()`).
      *
      * https://telefunc.com/getContext#typescript
      */
-    // Can be overridden by the user
     interface Context {}
   }
 }
