@@ -15,7 +15,7 @@ import { onLoadDashboard } from './Dashboard.telefunc'
 const result = await onLoadDashboard()
 
 // Read what you need...
-const first = await result.stream.next()
+const { value } = await result.stream.next()
 
 // Then close everything at once
 close(result)
