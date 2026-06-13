@@ -1,6 +1,6 @@
 const express = require('express')
 const { renderPage, createDevMiddleware } = require('vike/server')
-const { telefunc } = require('telefunc')
+const { serve } = require('telefunc')
 
 const isProduction = process.env.NODE_ENV === 'production'
 const root = `${__dirname}/..`
@@ -19,7 +19,7 @@ async function startServer() {
 
   app.all('/_telefunc', async (req, res) => {
     const context = {}
-    const httpResponse = await telefunc({
+    const httpResponse = await serve({
       url: req.originalUrl,
       method: req.method,
       readable: req,
