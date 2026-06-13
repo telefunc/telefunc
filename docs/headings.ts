@@ -140,7 +140,7 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Streaming',
+    title: 'Files',
   },
   {
     level: 2,
@@ -153,13 +153,13 @@ const headings = [
     url: '/file-download',
   },
   {
+    level: 4,
+    title: 'Streaming & Real-Time',
+  },
+  {
     level: 2,
     title: 'Stream',
     url: '/stream',
-  },
-  {
-    level: 4,
-    title: 'Real-Time',
   },
   {
     level: 2,
@@ -175,6 +175,10 @@ const headings = [
     level: 2,
     title: 'Cloudflare',
     url: '/cloudflare',
+  },
+  {
+    level: 4,
+    title: 'Integrations',
   },
   {
     level: 2,
