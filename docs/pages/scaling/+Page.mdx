@@ -3,7 +3,7 @@ import { Link } from '@brillout/docpress'
 To scale Telefunc horizontally across several server processes (multiple Node instances, multiple containers, multiple machines), two pieces have to be set up.
 
 1. The load balancer in front of your instances must route every request from the same client to the same instance — **sticky sessions**.
-2. `Broadcast` publishes must fan out across instances — install a **broadcast transport** like <Link href="/integrations/redis">`@telefunc/redis`</Link>.
+2. `Broadcast` publishes must fan out across instances — install a **broadcast transport** like <Link href="/redis">`@telefunc/redis`</Link>.
 
 That's the whole picture. The rest of this page explains why and shows the common configurations.
 
@@ -34,7 +34,7 @@ const redis = new IORedis(process.env.REDIS_URL)
 installRedis(redis)
 ```
 
-See <Link href="/integrations/redis" /> for details. Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small — about four methods — so a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker is straightforward.
+See <Link href="/redis" /> for details. Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small — about four methods — so a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker is straightforward.
 
 
 ## Load balancer setup
@@ -89,5 +89,5 @@ After deploying behind a sticky load balancer, open the browser network tab, ref
 
 ## See also
 
-- <Link href="/integrations/redis" />
+- <Link href="/redis" />
 - <Link href="/channel" />

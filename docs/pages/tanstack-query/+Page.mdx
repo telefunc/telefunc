@@ -134,12 +134,12 @@ Prefix matching — invalidating `['global:documents']` hits `['global:documents
 3. Mutations work the same way — the telefunction runs first, then global keys from `meta.invalidates` are published through <Link text={<code>Broadcast</code>} href="/channel#new-broadcast" />.
 4. Every connected client with a matching subscription calls `invalidateQueries()`.
 
-> Works across multiple servers via a <Link text="broadcast transport" href="/channel#multi-server" /> such as <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} />.
+> Works across multiple servers via a <Link text="broadcast transport" href="/channel#multi-server" /> such as <Link href="/redis" text={<code>@telefunc/redis</code>} />.
 
 
 ## See also
 
 - <Link href="/channel" />
-- <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} />
+- <Link href="/redis" text={<code>@telefunc/redis</code>} />
 - <Link href="/real-time" />
 - <Link href="/cloudflare" />
