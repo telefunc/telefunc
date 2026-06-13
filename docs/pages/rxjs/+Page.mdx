@@ -4,6 +4,8 @@ For reactive streams with full operator support, you can use [RxJS](https://rxjs
 
 The `@telefunc/rxjs` integration lets you pass the RxJS's `Observable` and `Subject` transparently between client and server — both directions. All RxJS operators work out of the box.
 
+> **First-party integration.** Telefunc's extension API is currently unstable and intended for first-party integrations only. It will be opened up and documented for third-party integrations once it stabilizes.
+
 > Each value emitted into a client-side `Subject<T>` is **shield-validated at runtime** when it arrives at the server, against the `T` from your TypeScript types. Terminal signals (`error`, `complete`) are untyped and pass through unshielded — see <Link href="#shields" />.
 
 
@@ -199,4 +201,5 @@ Unsubscribing stops data flow immediately. The underlying <Link href="/channel" 
 ## See also
 
 - <Link href="/real-time" />
-- <Link href="/integrations" />
+- <Link href="/tanstack-query" />
+- <Link href="/redis" />

@@ -2,6 +2,8 @@ import { Link } from '@brillout/docpress'
 
 Redis-backed `Broadcast` fan-out across Telefunc instances — `publish()` on one instance reaches `subscribe()` on every other instance subscribed to the same key.
 
+> **First-party integration.** Telefunc's extension API is currently unstable and intended for first-party integrations only. It will be opened up and documented for third-party integrations once it stabilizes.
+
 ## Install
 
 ```bash
@@ -46,4 +48,5 @@ Telefunc `duplicate()`s the client internally for its subscriber connection — 
 
 - <Link href="/scaling" />
 - <Link href="/channel" />
-- <Link href="/integrations" />
+- <Link href="/tanstack-query" />
+- <Link href="/rxjs" />
