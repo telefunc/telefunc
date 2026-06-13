@@ -93,8 +93,8 @@ app.all('/_telefunc', async (c) => {
 vike(app)
 
 // HTTPS via `certs/localhost.{pem,-key.pem}` next to the playground root (resolved
-// from `process.cwd()` — start the server from `test/playground/`). Generate:
-//   mkcert -install && cd test/playground && mkdir -p certs && cd certs && mkcert localhost
+// from `process.cwd()` — start the server from `test/playground-streaming/`). Generate:
+//   mkcert -install && cd test/playground-streaming && mkdir -p certs && cd certs && mkcert localhost
 // Falls back to plain HTTP/1.1 otherwise. Docker compose sets `NO_HTTPS=1` because
 // Caddy is the TLS terminator there and the certs are visible via the bind mount.
 // srvx negotiates HTTP/2 vs HTTP/1.1 automatically via ALPN when `tls` is set.

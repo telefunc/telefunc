@@ -1,6 +1,5 @@
 TO-DO/before-merge:
 - Use <Link> instead of []()
-- mv test/playground/ test/streaming/
 - Does telefunc() log "deprecated in favor of serve()"?
 
 TO-DO/soon:
