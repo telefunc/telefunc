@@ -21,26 +21,6 @@ type CategoryNames = ExtractCategoryName<(typeof categories)[number]>
 const categories = ['Guides', 'API', 'Get Started', 'Overview', 'Miscellaneous'] as const satisfies Config['categories']
 
 const headingsDetached = [
-  {
-    title: 'Cloudflare Workers',
-    url: '/cloudflare',
-    category: 'API',
-  },
-  {
-    title: '`@telefunc/rxjs`',
-    url: '/integrations/rxjs',
-    category: 'Guides',
-  },
-  {
-    title: '`@telefunc/tanstack-query`',
-    url: '/integrations/tanstack-query',
-    category: 'Guides',
-  },
-  {
-    title: '`@telefunc/redis`',
-    url: '/integrations/redis',
-    category: 'Guides',
-  },
   ...misc(),
 ] satisfies HeadingDetachedDefinition[]
 
@@ -161,6 +141,10 @@ const headings = [
     url: '/event-based',
   },
   {
+    level: 4,
+    title: 'Streaming',
+  },
+  {
     level: 2,
     title: 'File upload',
     url: '/file-upload',
@@ -176,6 +160,10 @@ const headings = [
     url: '/stream',
   },
   {
+    level: 4,
+    title: 'Real-Time',
+  },
+  {
     level: 2,
     title: 'Real-Time',
     url: '/real-time',
@@ -184,6 +172,21 @@ const headings = [
     level: 2,
     title: 'Integrations',
     url: '/integrations',
+  },
+  {
+    level: 2,
+    title: '`@telefunc/rxjs`',
+    url: '/integrations/rxjs',
+  },
+  {
+    level: 2,
+    title: '`@telefunc/tanstack-query`',
+    url: '/integrations/tanstack-query',
+  },
+  {
+    level: 2,
+    title: '`@telefunc/redis`',
+    url: '/integrations/redis',
   },
   {
     level: 1,
@@ -231,8 +234,9 @@ const headings = [
   },
   {
     level: 2,
-    title: '`Channel`',
+    title: '`Channel` & `Broadcast`',
     url: '/channel',
+    sectionTitles: ['new Broadcast()'],
   },
   {
     level: 2,
@@ -240,9 +244,18 @@ const headings = [
     url: '/close',
   },
   {
+    level: 4,
+    title: 'Scaling',
+  },
+  {
     level: 2,
     title: 'Using multiple nodes',
     url: '/multiple-nodes',
+  },
+  {
+    level: 2,
+    title: 'Cloudflare Workers',
+    url: '/cloudflare',
   },
   {
     level: 4,
