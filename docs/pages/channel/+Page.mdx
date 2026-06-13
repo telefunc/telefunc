@@ -397,11 +397,11 @@ config.channel = {
   // Text buffers
   serverReplayBuffer: 262_144,     // Server replay buffer for text frames (bytes)
   clientReplayBuffer: 1_048_576,   // Client replay buffer for text frames (bytes)
-  bufferLimit: 524_288,            // Pre-peer buffer for text messages (bytes)
+  bufferLimit: 524_288,            // Per-peer buffer for text messages (bytes)
   // Binary buffers — separate budget so binary can never evict text
   serverReplayBufferBinary: 2_097_152,  // Server replay buffer for binary frames (bytes)
   clientReplayBufferBinary: 2_097_152,  // Client replay buffer for binary frames (bytes)
-  bufferLimitBinary: 2_097_152,         // Pre-peer buffer for binary messages (bytes)
+  bufferLimitBinary: 2_097_152,         // Per-peer buffer for binary messages (bytes)
 }
 ```
 
