@@ -22,7 +22,6 @@ Reach for a **high-level integration** when one fits your use case — they wrap
 | **Function passing** | Short-lived callbacks — progress updates, one-off server-to-client pushes | None |
 | **`new Channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE) or <Link text="WebSocket server setup" href="/server" /> (WS) |
 | **`new Broadcast()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
-| **`config.stream.transport = 'channel'`** | <Link href="/stream">Streamed values</Link> over the same reconnecting transport as channels | Same as channels |
 
 > See also: [`Channel` vs `Broadcast`](/channel#channel-vs-broadcast)
 
