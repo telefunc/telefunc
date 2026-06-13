@@ -477,6 +477,45 @@ importers:
         specifier: ^4.79.0
         version: 4.95.0(@cloudflare/workers-types@4.20260601.1)
 
+  test/playground:
+    dependencies:
+      '@types/react':
+        specifier: ^19.2.14
+        version: 19.2.15
+      '@types/react-dom':
+        specifier: ^19.2.3
+        version: 19.2.3(@types/react@19.2.15)
+      '@vikejs/hono':
+        specifier: ^0.2.0
+        version: 0.2.0(@cloudflare/workers-types@4.20260601.1)(@types/express@5.0.6)(hono@4.12.23)(srvx@0.11.16)(vike@0.4.259(@cloudflare/workers-types@4.20260601.1)(@types/express@5.0.6)(hono@4.12.23)(react-streaming@0.4.17(react-dom@19.2.6(react@19.2.6))(react@19.2.6))(srvx@0.11.16)(vite@8.0.16(@types/node@24.12.4)(esbuild@0.28.0)(jiti@2.7.0)))
+      '@vitejs/plugin-react':
+        specifier: ^6.0.2
+        version: 6.0.2(vite@8.0.16(@types/node@24.12.4)(esbuild@0.28.0)(jiti@2.7.0))
+      hono:
+        specifier: ^4.10.4
+        version: 4.12.23
+      react:
+        specifier: ^19.2.4
+        version: 19.2.6
+      react-dom:
+        specifier: ^19.2.4
+        version: 19.2.6(react@19.2.6)
+      telefunc:
+        specifier: link:../../packages/telefunc
+        version: link:../../packages/telefunc
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vike:
+        specifier: ^0.4.259
+        version: 0.4.259(@cloudflare/workers-types@4.20260601.1)(@types/express@5.0.6)(hono@4.12.23)(react-streaming@0.4.17(react-dom@19.2.6(react@19.2.6))(react@19.2.6))(srvx@0.11.16)(vite@8.0.16(@types/node@24.12.4)(esbuild@0.28.0)(jiti@2.7.0))
+      vike-react:
+        specifier: ^0.6.21
+        version: 0.6.23(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(vike@0.4.259(@cloudflare/workers-types@4.20260601.1)(@types/express@5.0.6)(hono@4.12.23)(react-streaming@0.4.17(react-dom@19.2.6(react@19.2.6))(react@19.2.6))(srvx@0.11.16)(vite@8.0.16(@types/node@24.12.4)(esbuild@0.28.0)(jiti@2.7.0)))
+      vite:
+        specifier: ^8.0.16
+        version: 8.0.16(@types/node@24.12.4)(esbuild@0.28.0)(jiti@2.7.0)
+
   test/playground-streaming:
     dependencies:
       '@tailwindcss/vite':
