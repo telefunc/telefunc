@@ -4,12 +4,24 @@ Telefunc handles real-time flows — chat, upload progress, live updates — usi
 
 ## Which primitive should I use?
 
+Reach for a **high-level integration** when one fits your use case — they wrap the primitives below with an ergonomic API. Drop down to a **low-level primitive** when you need full control.
+
+### High-level usage
+
+| Integration | Best for | Setup |
+|---|---|---|
+| <Link text={<code>@telefunc/tanstack-query</code>} href="/integrations/tanstack-query" /> | Data fetching with caching that stays fresh — server-side invalidation refetches every connected client with a matching query key | <Link text={<code>withTelefunc()</code>} href="/integrations/tanstack-query#install" /> |
+| <Link text={<code>@telefunc/rxjs</code>} href="/integrations/rxjs" /> | Reactive [RxJS](https://rxjs.dev/) streams with full operator support — pass `Observable` / `Subject` transparently in both directions | <Link text="install" href="/integrations/rxjs#install" /> |
+
+> Scaling across multiple servers? <Link text={<code>@telefunc/redis</code>} href="/integrations/redis" /> backs `Broadcast` fan-out with Redis Pub/Sub. See <Link href="/multiple-nodes" />.
+
+### Low-level primitives
+
 | Primitive | Best for | Setup |
 |---|---|---|
 | **Function passing** | Short-lived callbacks — progress updates, one-off server-to-client pushes | None |
 | **`new Channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE) or <Link text="WebSocket server setup" href="/server" /> (WS) |
 | **`new Broadcast()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
-| **[RxJS](https://rxjs.dev/) `Observable` / `Subject`** | Reactive streams with full operator support — pass rxjs primitives transparently | <Link href="/integrations/rxjs" text={<code>@telefunc/rxjs</code>} /> |
 | **`config.stream.transport = 'channel'`** | <Link href="/stream">Streamed values</Link> over the same reconnecting transport as channels | Same as channels |
 
 > See also: [`Channel` vs `Broadcast`](/channel#channel-vs-broadcast)
