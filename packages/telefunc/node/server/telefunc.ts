@@ -60,7 +60,7 @@ async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
 
 /** @deprecated `telefunc()` has been renamed to `serve()`. */
 async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
-  assertWarning(false, '`telefunc()` has been renamed to `serve()`, see https://telefunc.com/server', {
+  assertWarning(false, '`telefunc()` has been renamed to `serve()` — https://telefunc.com/serve', {
     onlyOnce: true,
   })
   return serve(httpRequest)
