@@ -92,9 +92,13 @@ function createHttpResponse({
     statusCode,
     headers,
     get contentType() {
-      assertWarning(false, 'httpResponse.contentType is deprecated, use httpResponse.headers instead.', {
-        onlyOnce: true,
-      })
+      assertWarning(
+        false,
+        'httpResponse.contentType is deprecated, use httpResponse.headers instead — https://telefunc.com/serve',
+        {
+          onlyOnce: true,
+        },
+      )
       return contentType
     },
     get etag() {
