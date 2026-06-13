@@ -1,7 +1,6 @@
 TO-DO/before-merge:
 - Use <Link> instead of []()
 - mv test/playground/ test/streaming/
-- /integrations/rxjs => /rxjs (same for other integrations)
 - Does telefunc() log "deprecated in favor of serve()"?
 
 TO-DO/soon:
