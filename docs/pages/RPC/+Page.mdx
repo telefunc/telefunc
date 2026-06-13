@@ -197,9 +197,12 @@ When `hello('Eva')` is called in the browser-side, the following happens:
     import { serve } from 'telefunc'
 
     // Telefunc middleware
-    app.use('/_telefunc', async (req: Request, res: Response) => {
-      const httpResponse = await serve(req)
-      res.send(httpResponse.body)
+    app.all('/_telefunc', async (request) => {
+      const httpResponse = await serve({ request })
+      return new Response(httpResponse.getReadableWebStream(), {
+        status: httpResponse.statusCode,
+        headers: httpResponse.headers,
+      })
     })
     ```
     Replies following HTTP response:
