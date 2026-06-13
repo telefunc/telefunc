@@ -30,7 +30,7 @@ export type {
   ServerReviverContext,
 } from '../../wire-protocol/types.js'
 
-// In order to allow users to override `Telefunc.Context`, we need to export `Telefunc` (even if the user never imports `Telefunc`)
+// TO-DO/next-major-release: remove
 export type { Telefunc } from './context/TelefuncNamespace.js'
 
 export { decorateTelefunction as __decorateTelefunction } from './runTelefunc/decorateTelefunction.js'
