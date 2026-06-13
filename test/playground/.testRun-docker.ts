@@ -118,9 +118,14 @@ function testRunDocker() {
       const resp = await makeTelefuncHttpRequest(1337)
       expect(resp.status).toBe(422)
       expect(await resp.text()).toBe('Shield Validation Error')
-      expectLog('Shield Validation Error', {
-        // Docker `2>&1` collapses container stderr into stdout, so don't filter on source.
-        filter: (log) => log.logText.includes('onLoad()') && log.logText.includes('Hello.telefunc.ts'),
+      // The container's stderr line can reach the harness's log capture a few milliseconds
+      // after the HTTP response resolves, and expectLog() only checks logs captured so far.
+      // Docker compose's log aggregation widens that window. Poll instead of asserting once.
+      await autoRetry(async () => {
+        expectLog('Shield Validation Error', {
+          // Docker `2>&1` collapses container stderr into stdout, so don't filter on source.
+          filter: (log) => log.logText.includes('onLoad()') && log.logText.includes('Hello.telefunc.ts'),
+        })
       })
     }
   })
