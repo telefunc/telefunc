@@ -1,4 +1,20 @@
+// TO-DO/next-major-release: remove
 export declare namespace Telefunc {
-  // Can be overridden by the user
-  export interface Context {}
+  /**
+   * @deprecated Replace `declare module 'telefunc'` with `declare global`
+   *
+   * https://telefunc.com/getContext#typescript
+   */
+  export interface Context extends globalThis.Telefunc.Context {}
+}
+
+declare global {
+  namespace Telefunc {
+    /**
+     * Set the type of the `context` object (`const context = getContext()`).
+     *
+     * https://telefunc.com/getContext#typescript
+     */
+    interface Context {}
+  }
 }
