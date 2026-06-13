@@ -1,16 +1,17 @@
 import { Link } from '@brillout/docpress'
 
-Telefunc handles real-time flows — chat, upload progress, live updates — using the same function model as ordinary calls.
+Telefunc supports real-time use cases — chat, file upload progress, live updates, ...
+
+> Instead of using Telefunc's real-time primitives yourself, consider using high-level integrations such as <Link text={<code>@telefunc/tanstack-query</code>} href="/integrations/tanstack-query" /> — they wrap the primitives below with an ergonomic API.
+
 
 ## Which primitive should I use?
 
 | Primitive | Best for | Setup |
 |---|---|---|
 | **Function passing** | Short-lived callbacks — progress updates, one-off server-to-client pushes | None |
-| **`new Channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE) or <Link text="WebSocket server setup" href="/server" /> (WS) |
+| **`new Channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE), or <Link text="WebSocket server setup" href="/server" /> (WS) |
 | **`new Broadcast()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
-| **[RxJS](https://rxjs.dev/) `Observable` / `Subject`** | Reactive streams with full operator support — pass rxjs primitives transparently | <Link href="/integrations/rxjs" text={<code>@telefunc/rxjs</code>} /> |
-| **`config.stream.transport = 'channel'`** | <Link href="/stream">Streamed values</Link> over the same reconnecting transport as channels | Same as channels |
 
 > See also: [`Channel` vs `Broadcast`](/channel#channel-vs-broadcast)
 
