@@ -13,7 +13,7 @@ Return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Bl
 | `download(file)` / `download(blob)` | Full payload | Depends on consumer<sup>†</sup> | Same + progress / cancel / save-to-disk |
 | `download(stream, opts)` | Constant (chunk-sized) | Depends on consumer<sup>†</sup> | Bytes streamed from upstream (S3, CDN, …) |
 
-<sup>†</sup> Constant when consumed via `dl.stream()` / `dl.saveToDisk()` / `dl.saveToOpfs()`; full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
+<sup>†</sup> Constant when consumed via `dl.stream()`, `dl.saveToOpfs()`, or `dl.saveToDisk()` (except its `'memory'` fallback); full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
 
 
 ## Example
@@ -134,10 +134,12 @@ The streaming download is a standard [`File`](https://developer.mozilla.org/en-U
 | `dl.arrayBuffer()` | `ArrayBuffer` | Full file in memory | Process entire file at once |
 | `dl.text()` | `string` | Full file in memory | Read text content |
 | `dl.saveToMemory()` | `File` / `Blob`<sup>‡</sup> | Full file in memory | Use with Web APIs (`URL.createObjectURL`, `<img src>`, ...) |
-| `dl.saveToDisk(opts?)` | `File` (disk-backed) | Constant (chunk-sized) | Save to user's filesystem (picker or Downloads folder) |
+| `dl.saveToDisk(opts?)` | `File` (disk-backed) | Constant<sup>§</sup> | Save to user's filesystem (picker or Downloads folder) |
 | `dl.saveToOpfs(path?)` | `File` (disk-backed) | Constant (chunk-sized) | Stash in browser-private storage [(OPFS)](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system) |
 
 <sup>‡</sup> `File` for `FileDownload`, `Blob` for `BlobDownload`.
+
+<sup>§</sup> Constant in `'picker'` / `'opfs'` mode; the `'memory'` fallback (default when `showSaveFilePicker` is unavailable) buffers the full file in RAM.
 
 > For large files, prefer `dl.stream()` / `dl.saveToDisk()` / `dl.saveToOpfs()` — memory stays constant regardless of file size.
 
