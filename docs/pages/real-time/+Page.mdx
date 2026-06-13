@@ -151,24 +151,14 @@ For reactive streams with full operator support, see <Link href="/integrations/r
 
 ## Reconnection
 
-If the connection drops, Telefunc reconnects automatically and resumes existing channels. Messages sent while offline are buffered and delivered in order on reconnect.
+If the connection drops, Telefunc reconnects automatically, resumes existing channels, and replays buffered messages in order. It's transparent to your application code.
 
-- `onOpen()` fires only for the initial open.
-- `onClose()` fires only when the channel is permanently closed.
-
-> Both sides keep a bounded replay buffer. After reconnect, missing frames are replayed and duplicates are ignored.
+See <Link href="/channel#reconnection" text="Channel reconnection" /> for details.
 
 
 ## Transport
 
-Channels start on **SSE** and automatically upgrade to **WebSocket** when WebSocket is enabled in your <Link text="server setup" href="/server" />. No client-side configuration needed.
-
-| Transport | Throughput | Recovery | CDN-friendly |
-|---|---|---|---|
-| SSE (initial) | 🟡 | ✅ | ✅ |
-| WebSocket (upgraded) | ✅ | ✅ | 🟡 |
-
-All channels share a single multiplexed connection per server URL. The upgrade happens transparently in the background — no interruption to active channels.
+Channels start on **SSE** and automatically upgrade to **WebSocket** when it's enabled in your <Link text="server setup" href="/server" />, with no client-side configuration. All channels share a single multiplexed connection per server URL, and the upgrade is transparent to active channels.
 
 See <Link href="/transport" /> for the full comparison.
 

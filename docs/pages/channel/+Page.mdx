@@ -366,7 +366,7 @@ chat.abort({ reason: 'session-expired' })
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcast instances:
 
 - Messages sent while offline are buffered and delivered in order on reconnect.
-- Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed.
+- Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed and duplicates are ignored.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is transparent — you don't need to handle it in your application code.

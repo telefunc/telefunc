@@ -61,6 +61,8 @@ Controls how <Link text={<code>new Channel()</code>} href="/channel" /> connecti
 
 The client default is `['sse', 'ws']` — start on SSE, upgrade to WebSocket when the server supports it. The server enables SSE only until a WebSocket adapter is installed (see <Link href="/server" />).
 
+All channels share a single multiplexed connection per server URL, so opening many channels doesn't open many connections.
+
 ### Comparison
 
 | | Throughput | Recovery | Proxy/CDN | Setup |
