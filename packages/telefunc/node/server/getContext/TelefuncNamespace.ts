@@ -1,21 +1,9 @@
 // TO-DO/next-major-release: remove
 export declare namespace Telefunc {
   /**
-   * @deprecated Replace `declare module 'telefunc'` with `declare global`:
+   * @deprecated Replace `declare module 'telefunc'` with `declare global`
    *
-   * ```ts
-   * // TelefuncContext.d.ts
-   *
-   * import type { User } from './User.js'
-   *
-   * declare global {
-   *   namespace Telefunc {
-   *     interface Context {
-   *       user: null | User
-   *     }
-   *   }
-   * }
-   * ```
+   * https://telefunc.com/getContext#typescript
    */
   export interface Context extends globalThis.Telefunc.Context {}
 }
