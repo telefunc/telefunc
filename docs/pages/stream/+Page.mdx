@@ -1,7 +1,7 @@
 import { Link } from '@brillout/docpress'
 
 Telefunc supports streaming in both directions:
-- **Server → client**: Return `AsyncGenerator`, `ReadableStream`, or nested `Promise` from a telefunction.
+- **Server → client**: Return `AsyncGenerator`, `ReadableStream`, `File` / `Blob` / `download()`, or nested `Promise` from a telefunction.
 - **Client → server**: Pass a `ReadableStream` as a telefunction argument.
 
 > Streaming works out of the box with zero config. Plain telefunction calls are unaffected.
