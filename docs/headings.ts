@@ -20,9 +20,7 @@ type CategoryNames = ExtractCategoryName<(typeof categories)[number]>
 
 const categories = ['Guides', 'API', 'Get Started', 'Overview', 'Miscellaneous'] as const satisfies Config['categories']
 
-const headingsDetached = [
-  ...misc(),
-] satisfies HeadingDetachedDefinition[]
+const headingsDetached = [...misc()] satisfies HeadingDetachedDefinition[]
 
 const headings = [
   {
