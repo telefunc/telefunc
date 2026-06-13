@@ -9,6 +9,7 @@ export { onBug } from './runTelefunc/onBug.js'
 
 // TO-DO/eventually: remove this export after we remove `declare module 'telefunc'`, see https://github.com/telefunc/telefunc/pull/279
 // In order to allow users to override `Telefunc.Context`, we need to export `Telefunc` (even if the user never imports `Telefunc`)
+export type { Telefunc } from './getContext/TelefuncNamespace.js'
 
 export { decorateTelefunction as __decorateTelefunction } from './runTelefunc/decorateTelefunction.js'
 
