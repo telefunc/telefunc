@@ -145,12 +145,7 @@ If the connection drops, Telefunc reconnects automatically, resumes existing cha
 
 See <Link href="/channel#reconnection" text="Channel reconnection" /> for details.
 
-
-## Transport
-
-Channels start on **SSE** and automatically upgrade to **WebSocket** when it's enabled in your <Link text="server setup" href="/server" />, with no client-side configuration. All channels share a single multiplexed connection per server URL, and the upgrade is transparent to active channels.
-
-See <Link href="/transport" /> for the full comparison.
+> Channels run over **SSE** and upgrade to **WebSocket** automatically when your <Link text="server" href="/server" /> enables it — no client config. See <Link href="/transport" /> for the comparison.
 
 
 ## See also
