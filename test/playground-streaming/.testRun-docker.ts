@@ -2,7 +2,7 @@ export { testRunDocker }
 
 import { page, test, expect, run, skip, isCI, getServerUrl, autoRetry } from '@brillout/test-e2e'
 import { execSync } from 'node:child_process'
-import { resilientGoto, waitForHydration } from './e2e-utils'
+import { navigate } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
@@ -73,8 +73,7 @@ function testRunDocker() {
   })
 
   test('home page', async () => {
-    await resilientGoto(`${getServerUrl()}/`, { waitUntil: 'load' })
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/`, { waitUntil: 'load' })
     await autoRetry(
       async () => {
         expect(await page.textContent('h1')).toBe('Welcome')

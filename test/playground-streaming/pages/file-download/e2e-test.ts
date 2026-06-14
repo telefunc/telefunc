@@ -1,7 +1,7 @@
 export { testFileDownload }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { waitForHydration, getResult } from '../../e2e-utils'
+import { navigate, getResult } from '../../e2e-utils'
 
 const TEXT = 'Hello, file download!'
 const TEXT_BYTES = TEXT.length // ASCII — 1 byte per char
@@ -9,8 +9,7 @@ const FIXED_LAST_MODIFIED = 1700000000000
 
 function testFileDownload() {
   test('file download: native File auto-materializes on client', async () => {
-    await page.goto(`${getServerUrl()}/file-download`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/file-download`)
 
     await page.click('#test-file-eager')
     await autoRetry(async () => {

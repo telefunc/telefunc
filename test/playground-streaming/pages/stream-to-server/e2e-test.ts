@@ -1,12 +1,11 @@
 export { testStreamToServer }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { waitForHydration, getResult } from '../../e2e-utils'
+import { navigate, getResult } from '../../e2e-utils'
 
 function testStreamToServer() {
   test('stream-to-server: echo', async () => {
-    await page.goto(`${getServerUrl()}/stream-to-server`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/stream-to-server`)
     await page.click('#test-echo')
     await autoRetry(async () => {
       const result = await getResult('#stream-result')

@@ -1,6 +1,7 @@
 export { testRun }
 
 import { page, test, expect, run, getServerUrl, autoRetry } from '@brillout/test-e2e'
+import { navigate } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
@@ -53,7 +54,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   const isDev = cmd === 'pnpm dev'
 
   test('home page', async () => {
-    await page.goto(`${getServerUrl()}/`)
+    await navigate(`${getServerUrl()}/`)
     await autoRetry(async () => {
       expect(await page.textContent('h1')).toBe('Welcome')
     })

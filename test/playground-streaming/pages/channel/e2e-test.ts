@@ -1,7 +1,7 @@
 export { testChannel }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { waitForHydration, getResult, getCleanupState, restartProxy, stopProxy, startProxy } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, restartProxy, stopProxy, startProxy } from '../../e2e-utils'
 
 type ChannelState = {
   connected: boolean
@@ -90,8 +90,7 @@ function testChannel(isDev: boolean, inDocker = false) {
   // ── Basic connection ─────────────────────────────────────────────────
 
   test('channel: connect — client onOpen fires, server responds with welcome via ping', async () => {
-    await page.goto(`${getServerUrl()}/channel`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/channel`)
 
     await page.click('#channel-connect')
 
@@ -287,8 +286,7 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   if (!isDev) {
     test('channel: reconnect — ticks resume after network goes offline then online', async () => {
-      await page.goto(`${getServerUrl()}/channel`)
-      await waitForHydration()
+      await navigate(`${getServerUrl()}/channel`)
       await page.click('#channel-connect')
       await autoRetry(async () => {
         const state = await getResult<ChannelState>('#channel-state')
@@ -340,8 +338,7 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   if (!isDev) {
     test('channel: reconnect — client messages sent while offline are delivered exactly once after reconnect', async () => {
-      await page.goto(`${getServerUrl()}/channel`)
-      await waitForHydration()
+      await navigate(`${getServerUrl()}/channel`)
 
       // Open the upstream channel (client→server only, no server ticks)
       await page.click('#channel-test-upstream-open')
@@ -410,8 +407,7 @@ function testChannel(isDev: boolean, inDocker = false) {
   // owning playground container in a cluster regardless. Leave for the single-instance paths.
   if (!isDev && !inDocker) {
     test('channel: reconnect + close — client onClose stays clean when server closes with pending ack while client is offline', async () => {
-      await page.goto(`${getServerUrl()}/channel`)
-      await waitForHydration()
+      await navigate(`${getServerUrl()}/channel`)
       await page.click('#channel-connect')
       await autoRetry(async () => {
         const state = await getResult<ChannelState>('#channel-state')
@@ -454,8 +450,7 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   if (!isDev) {
     test('channel: reconnect + close — server onClose stays clean when client closes with pending ack while offline', async () => {
-      await page.goto(`${getServerUrl()}/channel`)
-      await waitForHydration()
+      await navigate(`${getServerUrl()}/channel`)
       await page.click('#channel-connect')
       await autoRetry(async () => {
         const state = await getResult<ChannelState>('#channel-state')
