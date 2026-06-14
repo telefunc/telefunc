@@ -1,14 +1,13 @@
 export { testLiveQuery }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { waitForHydration } from '../../e2e-utils'
+import { navigate } from '../../e2e-utils'
 
 function testLiveQuery() {
   // ── Local key: invalidation stays on the current client ──────────────
 
   test('live-query: local key — mutation invalidates only the current client', async () => {
-    await page.goto(`${getServerUrl()}/live-query`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/live-query`)
 
     // Wait for initial load
     await autoRetry(async () => {
@@ -30,8 +29,7 @@ function testLiveQuery() {
   // ── Global key: invalidation reaches all connected clients ──────────
 
   test('live-query: global key — mutation invalidates across clients', async () => {
-    await page.goto(`${getServerUrl()}/live-query`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/live-query`)
 
     // Wait for global todos to load on tab 1
     await autoRetry(async () => {
@@ -43,10 +41,7 @@ function testLiveQuery() {
     const browser = page.context().browser()!
     const context2 = await browser.newContext()
     const page2 = await context2.newPage()
-    await page2.goto(`${getServerUrl()}/live-query`)
-    await autoRetry(async () => {
-      expect(await page2.locator('#hydrated').count()).toBe(1)
-    })
+    await navigate(`${getServerUrl()}/live-query`, undefined, page2)
 
     // Tab 2 should also see existing global todos
     await autoRetry(async () => {

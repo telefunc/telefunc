@@ -1,7 +1,7 @@
 export { testPublish }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { waitForHydration, getResult } from '../../e2e-utils'
+import { navigate, getResult } from '../../e2e-utils'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -28,8 +28,7 @@ type ServerBroadcastResult = {
 
 function testPublish() {
   test('broadcast: paired text publish/subscribe roundtrip', async () => {
-    await page.goto(`${getServerUrl()}/publish`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-text-broadcast')
 
     await autoRetry(async () => {
@@ -48,8 +47,7 @@ function testPublish() {
   })
 
   test('broadcast: paired binary publish/subscribe roundtrip', async () => {
-    await page.goto(`${getServerUrl()}/publish`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-binary-broadcast-pair')
 
     await autoRetry(async () => {
@@ -68,8 +66,7 @@ function testPublish() {
   })
 
   test('broadcast: server publishes binary frames, client subscribes', async () => {
-    await page.goto(`${getServerUrl()}/publish`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-binary-broadcast')
 
     await autoRetry(async () => {
@@ -84,8 +81,7 @@ function testPublish() {
   })
 
   test('broadcast: shield validates client→server publishes', async () => {
-    await page.goto(`${getServerUrl()}/publish`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-shield')
 
     await autoRetry(async () => {

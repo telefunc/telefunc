@@ -1,16 +1,6 @@
-export {
-  resetCleanupState,
-  getCleanupState,
-  resilientGoto,
-  waitForHydration,
-  getResult,
-  sleep,
-  restartProxy,
-  stopProxy,
-  startProxy,
-}
+export { resetCleanupState, getCleanupState, navigate, getResult, sleep, restartProxy, stopProxy, startProxy }
 
-import { page, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, getServerUrl } from '@brillout/test-e2e'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -50,46 +40,46 @@ async function getCleanupState(): Promise<Record<string, string>> {
 }
 
 /**
- * `page.goto()` that retries the navigation on transient Chromium-in-Docker network errors.
- * Right after the containers come up, Chromium's `NetworkChangeNotifier` can abort the in-flight
- * navigation with `ERR_NETWORK_CHANGED` (and connection-family friends) when the Docker bridge
- * interface state shifts — sometimes surfacing as a bounce to `chrome-error://chromewebdata/`
- * (see `isTransientNetworkError`). Re-navigating recovers, so retry a few times before giving up.
+ * Loads a page and waits for it to hydrate — resiliently, because the Docker suite runs the browser
+ * against a Caddy container over the Docker bridge.
+ *
+ * When the bridge interface state shifts — right after the containers come up, and right after a
+ * reconnect test restarts the proxy (`restartProxy`/`startProxy`) — Chromium's `NetworkChangeNotifier`
+ * aborts whatever request is in flight with a transient `ERR_*` (see `isTransientNetworkError`). That
+ * can kill the navigation outright, or drop an asset fetch so the page never hydrates. Re-navigating
+ * recovers from both, so retry the navigate-and-hydrate as a unit before giving up.
+ *
+ * This is the navigation half of the suite's Docker-resilience story; the channel handshake half lives
+ * in `openChannel()` (pages/channel/Channel.tsx), which retries the telefunc call the same aborts can
+ * kill. Steady-state message delivery needs no such retry — telefunc's own reconnect/replay covers it.
+ *
+ * `target` defaults to the shared `page`; pass another page to load a second tab/context resiliently.
  */
-async function resilientGoto(url: string, options?: Parameters<typeof page.goto>[1]) {
-  for (let attempt = 0; attempt < 4; attempt++) {
+async function navigate(url: string, options?: Parameters<typeof page.goto>[1], target: typeof page = page) {
+  for (let attempt = 1; attempt <= NAVIGATE_ATTEMPTS; attempt++) {
+    const lastAttempt = attempt === NAVIGATE_ATTEMPTS
     try {
-      await page.goto(url, options)
+      await target.goto(url, options)
+    } catch (err) {
+      // A transient bridge error aborted the navigation itself; re-navigate. Surface anything else.
+      if (lastAttempt || !isTransientNetworkError(err)) throw err
+      await sleep(NAVIGATE_RETRY_DELAY)
+      continue
+    }
+    try {
+      await target.locator('#hydrated').waitFor({ state: 'attached', timeout: HYDRATION_TIMEOUT })
       return
     } catch (err) {
-      if (attempt === 3 || !isTransientNetworkError(err)) throw err
-      // Pause before retrying so the next navigation lands after the bridge interface shift has
-      // settled, instead of hammering the same broken window with back-to-back attempts.
-      await sleep(500)
+      // Navigated, but an asset fetch was dropped on the bridge shift so the page never hydrated.
+      // Re-navigate to refetch the missing chunks; the pause lets the interface shift settle first.
+      if (lastAttempt) throw err
+      await sleep(NAVIGATE_RETRY_DELAY)
     }
   }
 }
-
-async function waitForHydration() {
-  // Chromium-in-Docker can drop in-flight asset fetches with `ERR_NETWORK_CHANGED`
-  // when the bridge interface state shifts, leaving the page un-hydrated. Retry
-  // the navigation a few times before giving up.
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      await page.locator('#hydrated').waitFor({ state: 'attached', timeout: 5_000 })
-      return
-    } catch {
-      if (attempt === 3) throw new Error('Page never hydrated after 4 attempts')
-      // The reload can itself hit a transient `ERR_NETWORK_CHANGED`; swallow it and let the
-      // next attempt retry, instead of failing the whole test on the recovery step.
-      try {
-        await page.reload({ waitUntil: 'load' })
-      } catch (err) {
-        if (!isTransientNetworkError(err)) throw err
-      }
-    }
-  }
-}
+const NAVIGATE_ATTEMPTS = 4
+const HYDRATION_TIMEOUT = 5_000
+const NAVIGATE_RETRY_DELAY = 500
 
 // Transient errors Chromium-in-Docker surfaces when the bridge interface state shifts. Mirrors
 // the connection-family errors `.testRun-docker.ts`'s `tolerateError()` already allows in logs.

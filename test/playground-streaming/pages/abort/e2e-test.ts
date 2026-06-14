@@ -1,7 +1,7 @@
 export { testAbort }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, waitForHydration, getResult } from '../../e2e-utils'
+import { resetCleanupState, getCleanupState, navigate, getResult } from '../../e2e-utils'
 
 /** Max elapsed time (ms) from t0 to server-side cleanup completion. */
 const ABORT_DEADLINE_MS = 2000
@@ -10,8 +10,7 @@ function testAbort() {
   // ── Generator abort mechanisms ──────────────────────────────────────
 
   test('abort: generator via abort(gen)', async () => {
-    await page.goto(`${getServerUrl()}/abort`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     const t0 = Date.now()
@@ -32,8 +31,7 @@ function testAbort() {
   })
 
   test('abort: generator via gen.return()', async () => {
-    await page.goto(`${getServerUrl()}/abort`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     const t0 = Date.now()
@@ -54,8 +52,7 @@ function testAbort() {
   })
 
   test('abort: generator via withContext(gen, signal)', async () => {
-    await page.goto(`${getServerUrl()}/abort`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     const t0 = Date.now()
@@ -78,8 +75,7 @@ function testAbort() {
   // ── Stream abort mechanisms ─────────────────────────────────────────
 
   test('abort: stream via reader.cancel()', async () => {
-    await page.goto(`${getServerUrl()}/abort`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     const t0 = Date.now()
@@ -100,8 +96,7 @@ function testAbort() {
   })
 
   test('abort: stream via withContext(stream, signal)', async () => {
-    await page.goto(`${getServerUrl()}/abort`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     const t0 = Date.now()
@@ -124,8 +119,7 @@ function testAbort() {
   // ── Non-streaming abort ─────────────────────────────────────────────
 
   test('abort: non-streaming telefunc — client call throws Abort', async () => {
-    await page.goto(`${getServerUrl()}/abort`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     await page.click('#test-slow-normal-telefunc')
@@ -147,8 +141,7 @@ function testAbort() {
 
   // 1MB file with sleep(100) between reads — client aborts at 300ms
   test('abort: single file upload — client cancel, server disconnect error', async () => {
-    await page.goto(`${getServerUrl()}/abort`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     await page.click('#test-upload-abort-single')
@@ -170,8 +163,7 @@ function testAbort() {
   // Three 50MB files — file1 consumed fully, client aborts at 3s during
   // post-file1 sleep, file2+file3 error on disconnect
   test('abort: multiple file upload — file1 received, file2+file3 error on disconnect', async () => {
-    await page.goto(`${getServerUrl()}/abort`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     await page.click('#test-upload-abort-multiple')

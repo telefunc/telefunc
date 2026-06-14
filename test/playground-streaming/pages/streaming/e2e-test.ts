@@ -1,15 +1,14 @@
 export { testStreaming }
 
 import { page, test, expect, autoRetry, getServerUrl, skip } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, waitForHydration, getResult } from '../../e2e-utils'
+import { resetCleanupState, getCleanupState, navigate, getResult } from '../../e2e-utils'
 
 const channelTransports = parseChannelTransports(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS)
 const channelTransport = channelTransports[channelTransports.length - 1]!
 
 function testStreaming() {
   test('streaming: ReadableStream return', async () => {
-    await page.goto(`${getServerUrl()}/streaming`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/streaming`)
 
     await page.click('#test-readable-stream')
     await autoRetry(async () => {

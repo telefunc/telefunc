@@ -1,12 +1,11 @@
 export { testFunction }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { waitForHydration, getResult } from '../../e2e-utils'
+import { navigate, getResult } from '../../e2e-utils'
 
 function testFunction() {
   test('function: simple greeter returns correct string', async () => {
-    await page.goto(`${getServerUrl()}/function`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/function`)
 
     await page.click('#greeter-run')
 
