@@ -139,6 +139,47 @@ chat.publish({ user: 'Alice', text: 'Hello!' })
 See <Link href="/channel#new-broadcast" /> for the full `Broadcast` API.
 
 
+## Authorization
+
+A channel or broadcast is opened by a telefunction, so you protect it like any other telefunction (see <Link href="/permissions" />): authorize **at open time** with <Link text="getContext()" href="/getContext" /> and `throw Abort()`.
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+import { Broadcast, getContext, Abort } from 'telefunc'
+
+export async function onJoinChat(roomId: string) {
+  const { user } = getContext()
+  if (!user || !user.rooms.includes(roomId)) throw Abort()
+  return new Broadcast({ key: `chat:${roomId}` })
+}
+```
+
+`getContext()` and `throw Abort()` only work **synchronously, before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that — its `listen()` runs later — so **capture what you need in a closure** and check it per message:
+
+```ts
+// Room.telefunc.ts
+// Environment: server
+
+import { Channel, getContext, Abort } from 'telefunc'
+
+export async function onJoinRoom(roomId: string) {
+  const { user } = getContext() // captured once, at open time
+  if (!user) throw Abort()
+
+  const room = new Channel<RoomMessage, RoomMessage>()
+  room.listen((msg) => {
+    if (!canPost(user, msg)) return // per-message check uses the captured user
+    saveMessage(roomId, user.id, msg)
+  })
+  return { channel: room.client }
+}
+```
+
+> <Link href="/shield" /> validates the **type** of every client→server message; authorization — **who** may open a channel or send a message — is yours, via `getContext()` + `Abort()`.
+
+
 ## Reconnection
 
 If the connection drops, Telefunc reconnects automatically, resumes existing channels, and replays buffered messages in order. It's transparent to your application code.
