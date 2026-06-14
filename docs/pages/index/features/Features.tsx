@@ -65,6 +65,17 @@ function Features() {
       </div>
       <div>
         <h2>
+          <Emoji name="red-circle" /> Real-time &amp; streaming
+        </h2>
+        <>
+          <p>
+            Telefunctions can <b>stream live values</b> — AI tokens, progress, file up/downloads — and power{' '}
+            <b>real-time</b> features with channels &amp; broadcasts, by returning or passing them like any other value.
+          </p>
+        </>
+      </div>
+      <div>
+        <h2>
           <Emoji name="typescript" /> TypeScript
         </h2>
         <>
