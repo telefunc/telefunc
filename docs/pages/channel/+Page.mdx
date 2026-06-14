@@ -19,17 +19,33 @@ Both are returned from a telefunction — they serialize into client-side object
 
 `new Channel()` creates a private, two-way message pipe between the server and the one client that called the telefunction. The server keeps the `Channel` object and hands the client its end by returning `chat.client`. The channel outlives the telefunction call: both ends can `send()` and `listen()` until one side closes it.
 
+The simplest case — the server pushes live updates to the one client that opened the channel:
+
 ```ts
-// Chat.telefunc.ts
+// Clock.telefunc.ts
 // Environment: server
 
 import { Channel } from 'telefunc'
 
-export async function onChat() {
-  const chat = new Channel<ClientToServer, ServerToClient>()
-  return { channel: chat.client }
+export async function onClock() {
+  const clock = new Channel()
+  const timer = setInterval(() => clock.send(Date.now()), 1000)
+  clock.onClose(() => clearInterval(timer))
+  return { channel: clock.client }
 }
 ```
+
+```ts
+// Clock.tsx
+// Environment: client
+
+import { onClock } from './Clock.telefunc'
+
+const { channel } = await onClock()
+channel.listen((time) => console.log(time)) // 1700000000000, 1700000001000, ...
+```
+
+The rest of this section adds types, two-way messaging, acks, and binary; see <Link href="#methods" /> for the full API.
 
 ### Methods
 

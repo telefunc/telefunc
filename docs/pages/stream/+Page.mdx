@@ -4,7 +4,7 @@ Telefunc supports streaming in both directions:
 - **Server → client**: Return `AsyncGenerator`, `ReadableStream`, `File` / `Blob` / `download()`, or nested `Promise` from a telefunction.
 - **Client → server**: Pass a `ReadableStream` as a telefunction argument.
 
-> Streaming works out of the box with zero config. Plain telefunction calls are unaffected.
+> Streaming works out of the box with zero config — including <Link text="transport" href="/transport" /> (binary HTTP by default; switch to SSE or a reconnecting channel only if you need to). Plain telefunction calls are unaffected.
 
 
 ## Which one should I use?
@@ -225,13 +225,6 @@ const slow = await res.slow
 ## Cancellation & cleanup
 
 See <Link href="/close" /> for all cancellation methods (`close()`, `break`, `gen.return()`, `reader.cancel()`) and server-side cleanup via `onClose()`.
-
-
-## Transport
-
-By default, streamed values are sent as raw binary chunks over HTTP. Switch to `'sse-inline'` (for proxies that buffer binary responses) or `'channel'` (to stream over a reconnecting channel), globally or per call.
-
-See <Link href="/transport" /> for the options, trade-offs, and how to configure them.
 
 
 ## Error handling
