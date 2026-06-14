@@ -154,7 +154,13 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Streaming & Real-Time',
+    title: 'Live telefunctions',
+  },
+  {
+    level: 2,
+    title: 'Overview',
+    titleDocument: 'Live telefunctions',
+    url: '/live',
   },
   {
     level: 2,
