@@ -1,14 +1,13 @@
 export { testRxjs }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { waitForHydration, getResult, resetCleanupState, getCleanupState } from '../../e2e-utils'
+import { navigate, getResult, resetCleanupState, getCleanupState } from '../../e2e-utils'
 
 function testRxjs(inDocker = false) {
   // ── Observable: server → client ──────────────────────────────────────
 
   test('rxjs: observable — server emits 5 ticks then completes', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-obs-ticks')
 
@@ -20,8 +19,7 @@ function testRxjs(inDocker = false) {
   })
 
   test('rxjs: observable — synchronous emit + complete', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-obs-complete')
 
@@ -33,8 +31,7 @@ function testRxjs(inDocker = false) {
   })
 
   test('rxjs: observable — error propagates to client subscriber', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-obs-error')
 
@@ -47,8 +44,7 @@ function testRxjs(inDocker = false) {
   })
 
   test('rxjs: observable — close() stops after 2 values', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-obs-close')
 
@@ -62,8 +58,7 @@ function testRxjs(inDocker = false) {
   // ── Subject: bidirectional ───────────────────────────────────────────
 
   test('rxjs: subject — receives server pushes and client can send', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-subject-bidir')
 
@@ -76,8 +71,7 @@ function testRxjs(inDocker = false) {
   })
 
   test('rxjs: subject — close() from client triggers server cleanup', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
     await resetCleanupState()
 
     await page.click('#test-subject-close')
@@ -95,8 +89,7 @@ function testRxjs(inDocker = false) {
   })
 
   test('rxjs: subject echo — server subscribes and echoes back', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-subject-echo')
 
@@ -108,8 +101,7 @@ function testRxjs(inDocker = false) {
   })
 
   test('rxjs: subject — server-initiated complete propagates to client', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-subject-server-complete')
 
@@ -127,8 +119,7 @@ function testRxjs(inDocker = false) {
   // instance multicast would require Redis pub/sub bridging the Subject — out of scope.
   if (!inDocker) {
     test('rxjs: shared subject — client A sends, client B receives', async () => {
-      await page.goto(`${getServerUrl()}/rxjs`)
-      await waitForHydration()
+      await navigate(`${getServerUrl()}/rxjs`)
 
       await page.click('#test-shared-subject')
 
@@ -145,8 +136,7 @@ function testRxjs(inDocker = false) {
   // ── Observable: client → server ──────────────────────────────────────
 
   test('rxjs: observable client→server — server receives all values', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
     await resetCleanupState()
 
     await page.click('#test-obs-from-client')
@@ -165,8 +155,7 @@ function testRxjs(inDocker = false) {
   // ── Subject: multiple local subscriptions ────────────────────────────
 
   test('rxjs: subject — multiple local subscribers both receive all values', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-subject-multi-sub')
 
@@ -181,8 +170,7 @@ function testRxjs(inDocker = false) {
 
   // ── Server-initiated error propagation ─────────────────────────────
   test('rxjs: observable — server calls subscriber.error(), client subscription errors', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-obs-server-error')
 
@@ -196,8 +184,7 @@ function testRxjs(inDocker = false) {
   })
 
   test('rxjs: subject — server calls subject.error(), client subscription errors', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-subject-server-error')
 
@@ -209,8 +196,7 @@ function testRxjs(inDocker = false) {
   })
 
   test('rxjs: subject arg — server without error handler survives client-errored Subject', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
     await resetCleanupState()
 
     await page.click('#test-subject-arg-no-handler')
@@ -236,8 +222,7 @@ function testRxjs(inDocker = false) {
   // Skipped in docker — same shared-Subject cross-instance limitation.
   if (!inDocker) {
     test('rxjs: shared subject — one client errors, shared Subject dies for all', async () => {
-      await page.goto(`${getServerUrl()}/rxjs`)
-      await waitForHydration()
+      await navigate(`${getServerUrl()}/rxjs`)
 
       await page.click('#test-shared-error-one')
 
@@ -258,8 +243,7 @@ function testRxjs(inDocker = false) {
   // receives `msg.v` from the client. Invalid values are silently dropped — the
   // server's subscription never sees them.
   test('rxjs: shield — Subject arg / Subject return / Observable arg reject invalid next values', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
 
     await page.click('#test-shield-all')
 
@@ -275,8 +259,7 @@ function testRxjs(inDocker = false) {
   })
 
   test('rxjs: subject — server subscribes without error handler, no crash on error', async () => {
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
     await resetCleanupState()
 
     await page.click('#test-subject-no-handler')
@@ -296,8 +279,7 @@ function testRxjs(inDocker = false) {
     // Confirm server is still alive — navigation closes the channel (triggering
     // onClose cleanup) and a follow-up telefunction call confirms the process
     // didn't crash.
-    await page.goto(`${getServerUrl()}/rxjs`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/rxjs`)
     await page.click('#test-obs-complete')
     await autoRetry(async () => {
       const result = await getResult('#rxjs-result')

@@ -1,12 +1,11 @@
 export { testFileUpload }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { waitForHydration, getResult } from '../../e2e-utils'
+import { navigate, getResult } from '../../e2e-utils'
 
 function testFileUpload() {
   test('file upload: single file + text arg', async () => {
-    await page.goto(`${getServerUrl()}/file-upload`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/file-upload`)
 
     await page.click('#test-single')
     await autoRetry(async () => {

@@ -1,7 +1,7 @@
 export { ChannelDemo }
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Abort as TelefuncAbort, abort } from 'telefunc/client'
+import { Abort as TelefuncAbort, abort, ConnectionError } from 'telefunc/client'
 import {
   onChannelInit,
   onChannelAbortTest,
@@ -26,6 +26,36 @@ import {
   onChannelShieldClient,
   onChannelShieldServerAck,
 } from './Channel.telefunc'
+
+/**
+ * Establishes a channel, retrying if the handshake's HTTP round-trip is dropped.
+ *
+ * Opening a channel is a one-shot telefunc call. In the Docker e2e environment, Chromium's
+ * NetworkChangeNotifier aborts in-flight requests with a transient `ConnectionError` when the Docker
+ * bridge interface shifts — most notably right after a reconnect test restarts the proxy container.
+ * If that abort lands on a channel handshake the channel never comes back, so retry until it does.
+ *
+ * This is the channel-handshake half of the suite's Docker-resilience story; the navigation half
+ * lives in `navigate()` (../../e2e-utils.ts). Steady-state message delivery needs no such retry —
+ * telefunc's own reconnect/replay covers it. Retrying the handshake is safe: each attempt opens an
+ * independent channel, so a superseded half-open one merely gets reaped server-side after its grace
+ * period.
+ */
+async function openChannel<T>(open: () => Promise<T>): Promise<T> {
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= OPEN_CHANNEL_ATTEMPTS; attempt++) {
+    try {
+      return await open()
+    } catch (err) {
+      if (!(err instanceof ConnectionError)) throw err
+      lastErr = err
+      await new Promise((resolve) => setTimeout(resolve, OPEN_CHANNEL_RETRY_DELAY_MS))
+    }
+  }
+  throw lastErr
+}
+const OPEN_CHANNEL_ATTEMPTS = 4
+const OPEN_CHANNEL_RETRY_DELAY_MS = 500
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -256,7 +286,7 @@ function ChannelDemo() {
   const connect = useCallback(async () => {
     if (channelRef.current && !channelRef.current.isClosed) return
     addLog('system', 'Calling onChannelInit()...')
-    const result = await onChannelInit()
+    const result = await openChannel(onChannelInit)
     initResultRef.current = result
     const { channel, serverTime } = result
     channelRef.current = channel
@@ -349,7 +379,7 @@ function ChannelDemo() {
 
   const testServerAbort = useCallback(async () => {
     addLog('system', 'Starting server-abort test...')
-    const { channel } = await onChannelAbortTest()
+    const { channel } = await openChannel(onChannelAbortTest)
     abortChannelRef.current = channel
     channel.onClose((err) => {
       const e = err as any
@@ -366,7 +396,7 @@ function ChannelDemo() {
 
   const testPerSendAck = useCallback(async () => {
     addLog('system', 'Starting per-send ack test...')
-    const { channel } = await onChannelPerSendAck()
+    const { channel } = await openChannel(onChannelPerSendAck)
     perSendChannelRef.current = channel
     const ack = await channel.send('per-send-test', { ack: true })
     addLog('system', `per-send ack: ${JSON.stringify(ack)}`)
@@ -376,7 +406,7 @@ function ChannelDemo() {
 
   const testHookInstrument = useCallback(async () => {
     addLog('system', 'Starting hook instrumentation test...')
-    const { channel, channelId } = await onChannelHookInstrument()
+    const { channel, channelId } = await openChannel(onChannelHookInstrument)
     hookChannelRef.current = channel
     setChannelState((s) => ({ ...s, hookChannelId: channelId }))
     channel.onClose((err) => {
@@ -394,7 +424,7 @@ function ChannelDemo() {
 
   const testMultiChannel = useCallback(async () => {
     addLog('system', 'Starting multi-channel test...')
-    const { channel1, channel2 } = await onChannelMulti()
+    const { channel1, channel2 } = await openChannel(onChannelMulti)
     multiCh1Ref.current = channel1
     multiCh2Ref.current = channel2
     let ch1Prev = 0
@@ -438,7 +468,7 @@ function ChannelDemo() {
     }
 
     addLog('system', 'Starting client-abort-server test...')
-    const { channel, channelId } = await onChannelClientAbortInstrument()
+    const { channel, channelId } = await openChannel(onChannelClientAbortInstrument)
     clientAbortServerChannelRef.current = channel
     setChannelState((s) => ({ ...s, clientAbortServerChannelId: channelId }))
     channel.abort()
@@ -448,7 +478,7 @@ function ChannelDemo() {
 
   const openClientAbortServerChannel = useCallback(async () => {
     addLog('system', 'Starting client-abort-server test...')
-    const { channel, channelId } = await onChannelClientAbortInstrument()
+    const { channel, channelId } = await openChannel(onChannelClientAbortInstrument)
     channel.onOpen(() => {
       addLog('system', `client-abort-server channel acknowledged: ${channelId}`)
       setChannelState((s) => ({ ...s, clientAbortServerOnOpenFired: true }))
@@ -460,7 +490,7 @@ function ChannelDemo() {
 
   const testEarlyClose = useCallback(async () => {
     addLog('system', 'Starting early-close test...')
-    const { channel, channelId } = await onChannelHookInstrument()
+    const { channel, channelId } = await openChannel(onChannelHookInstrument)
     setChannelState((s) => ({ ...s, earlyCloseChannelId: channelId }))
     channel.close()
     addLog('system', `early close() sent for channel ${channelId}`)
@@ -468,7 +498,7 @@ function ChannelDemo() {
 
   const testBinary = useCallback(async () => {
     addLog('system', 'Starting binary round-trip test...')
-    const { channel } = await onChannelBinary()
+    const { channel } = await openChannel(onChannelBinary)
     binaryChannelRef.current = channel
     const PATTERN_SIZE = 256
     const REPEAT = 4096 // 1 MB
@@ -497,7 +527,7 @@ function ChannelDemo() {
 
   const testAckListenerAbort = useCallback(async () => {
     addLog('system', 'Starting ack-listener-abort test...')
-    const { channel } = await onChannelAckListenerAbort()
+    const { channel } = await openChannel(onChannelAckListenerAbort)
     ackListenerAbortChannelRef.current = channel
     try {
       await channel.send('trigger', { ack: true })
@@ -518,7 +548,7 @@ function ChannelDemo() {
 
   const testAckListenerBug = useCallback(async () => {
     addLog('system', 'Starting ack-listener-bug test...')
-    const { channel } = await onChannelAckListenerBug()
+    const { channel } = await openChannel(onChannelAckListenerBug)
     ackListenerBugChannelRef.current = channel
     try {
       await channel.send('bug', { ack: true })
@@ -536,7 +566,7 @@ function ChannelDemo() {
 
   const testClientAckListenerBug = useCallback(async () => {
     addLog('system', 'Starting client-ack-listener-bug test...')
-    const { channel, channelId } = await onChannelClientAckListenerBug()
+    const { channel, channelId } = await openChannel(onChannelClientAckListenerBug)
     clientAckListenerBugChannelRef.current = channel
     setChannelState((s) => ({ ...s, clientAckListenerBugChannelId: channelId }))
     channel.listen((msg) => {
@@ -550,7 +580,7 @@ function ChannelDemo() {
 
   const testServerPendingAckAbort = useCallback(async () => {
     addLog('system', 'Starting server-pending-ack-abort test...')
-    const { channel, channelId } = await onChannelServerPendingAckAbort()
+    const { channel, channelId } = await openChannel(onChannelServerPendingAckAbort)
     serverPendingAckAbortChannelRef.current = channel
     setChannelState((s) => ({ ...s, serverPendingAckAbortChannelId: channelId }))
     channel.listen(() => new Promise(() => {}))
@@ -563,7 +593,7 @@ function ChannelDemo() {
 
   const testAbortThenSend = useCallback(async () => {
     addLog('system', 'Starting server abort-then-send test...')
-    const { channel, channelId } = await onChannelAbortThenSend()
+    const { channel, channelId } = await openChannel(onChannelAbortThenSend)
     abortThenSendChannelRef.current = channel
     setChannelState((s) => ({ ...s, abortThenSendChannelId: channelId }))
     channel.onClose(() => {
@@ -573,7 +603,7 @@ function ChannelDemo() {
 
   const testPendingAckAbort = useCallback(async () => {
     addLog('system', 'Starting server pending-ack-abort test...')
-    const { channel, channelId } = await onChannelPendingAckAbort()
+    const { channel, channelId } = await openChannel(onChannelPendingAckAbort)
     pendingAckAbortChannelRef.current = channel
     setChannelState((s) => ({ ...s, pendingAckAbortChannelId: channelId }))
     channel.onClose(() => {
@@ -583,7 +613,7 @@ function ChannelDemo() {
 
   const testClientAbortThenSend = useCallback(async () => {
     addLog('system', 'Starting client abort-then-send test...')
-    const { channel } = await onChannelClientAbortThenSend()
+    const { channel } = await openChannel(onChannelClientAbortThenSend)
     clientAbortThenSendChannelRef.current = channel
     channel.onOpen(() => {
       channel.abort()
@@ -599,7 +629,7 @@ function ChannelDemo() {
 
   const testClientPendingAckClose = useCallback(async () => {
     addLog('system', 'Starting client pending-ack-close test...')
-    const { channel } = await onChannelClientPendingAckClose()
+    const { channel } = await openChannel(onChannelClientPendingAckClose)
     clientPendingAckCloseChannelRef.current = channel
     channel.onOpen(async () => {
       const p = channel.send('test', { ack: true })
@@ -616,7 +646,7 @@ function ChannelDemo() {
 
   const openClientPendingAckCloseReconnectChannel = useCallback(async () => {
     addLog('system', 'Starting client pending-ack-close reconnect test...')
-    const { channel, channelId } = await onChannelClientPendingAckCloseReconnect()
+    const { channel, channelId } = await openChannel(onChannelClientPendingAckCloseReconnect)
     channel.onOpen(() => {
       addLog('system', `client-pending-ack-close reconnect channel acknowledged: ${channelId}`)
       setChannelState((s) => ({ ...s, clientPendingAckCloseReconnectOnOpenFired: true }))
@@ -652,7 +682,7 @@ function ChannelDemo() {
 
   const openServerPendingAckCloseReconnectChannel = useCallback(async () => {
     addLog('system', 'Starting server pending-ack-close reconnect test...')
-    const { channel, channelId } = await onChannelServerPendingAckCloseReconnectOpen()
+    const { channel, channelId } = await openChannel(onChannelServerPendingAckCloseReconnectOpen)
     channel.onOpen(() => {
       addLog('system', `server-pending-ack-close reconnect channel acknowledged: ${channelId}`)
       setChannelState((s) => ({ ...s, serverPendingAckCloseReconnectOnOpenFired: true }))
@@ -675,7 +705,7 @@ function ChannelDemo() {
 
   const testUpstreamReconnectOpen = useCallback(async () => {
     addLog('system', 'Opening upstream-reconnect channel...')
-    const { channel, channelId } = await onChannelUpstreamReconnect()
+    const { channel, channelId } = await openChannel(onChannelUpstreamReconnect)
     upstreamReconnectChannelRef.current = channel
     upstreamReconnectSeqRef.current = 0
     setChannelState((s) => ({ ...s, upstreamReconnectChannelId: channelId }))
@@ -692,7 +722,7 @@ function ChannelDemo() {
 
   const testNoListenerAckServer = useCallback(async () => {
     addLog('system', 'Starting no-listener-ack-server test...')
-    const { channel, channelId } = await onChannelNoListenerAckServer()
+    const { channel, channelId } = await openChannel(onChannelNoListenerAckServer)
     setChannelState((s) => ({ ...s, noListenerAckServerChannelId: channelId }))
     // No listener — server's send({ ack: true }) should reject
     channel.onClose(() => {
@@ -702,7 +732,7 @@ function ChannelDemo() {
 
   const testNoListenerAckClient = useCallback(async () => {
     addLog('system', 'Starting no-listener-ack-client test...')
-    const { channel } = await onChannelNoListenerAckClient()
+    const { channel } = await openChannel(onChannelNoListenerAckClient)
     channel.onOpen(async () => {
       try {
         await channel.send('hello', { ack: true })
@@ -717,7 +747,7 @@ function ChannelDemo() {
 
     // ── A1/A2/B1/B2 — client sends, server validates incoming data ────────────
     {
-      const { channel, getReceived } = await onChannelShieldClient()
+      const { channel, getReceived } = await openChannel(onChannelShieldClient)
       await new Promise<void>((resolve) => channel.onOpen(resolve))
 
       // A1: valid no-ack — server listener should receive.
@@ -755,7 +785,7 @@ function ChannelDemo() {
 
     // ── C1 — server sends, client listener returns valid ──────────────────────
     {
-      const { channel, trigger, getOutcome } = await onChannelShieldServerAck()
+      const { channel, trigger, getOutcome } = await openChannel(onChannelShieldServerAck)
       channel.listen((msg: number) => `got-${msg}`)
       await trigger()
       const outcome = await getOutcome()
@@ -764,7 +794,7 @@ function ChannelDemo() {
 
     // ── C2 — server sends, client listener returns invalid (wrong type) ───────
     {
-      const { channel, trigger, getOutcome } = await onChannelShieldServerAck()
+      const { channel, trigger, getOutcome } = await openChannel(onChannelShieldServerAck)
       ;(channel.listen as any)((msg: number) => msg * 9) // returns number, expected string
       await trigger()
       const outcome = await getOutcome()

@@ -1,14 +1,13 @@
 export { testClose }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, waitForHydration, getResult, sleep } from '../../e2e-utils'
+import { resetCleanupState, getCleanupState, navigate, getResult, sleep } from '../../e2e-utils'
 
 function testClose() {
   // ── Targeted: generator ──────────────────────────────────────────────
 
   test('close: generator — close(gen) terminates cleanly; done=true, no error, finally block runs', async () => {
-    await page.goto(`${getServerUrl()}/close`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/close`)
     await resetCleanupState()
 
     await page.click('#test-close-gen')
@@ -29,8 +28,7 @@ function testClose() {
   // ── Targeted: stream ─────────────────────────────────────────────────
 
   test('close: stream — close(stream) terminates cleanly; cancel callback fires on server', async () => {
-    await page.goto(`${getServerUrl()}/close`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/close`)
     await resetCleanupState()
 
     await page.click('#test-close-stream')
@@ -51,8 +49,7 @@ function testClose() {
   // ── Targeted: channel ────────────────────────────────────────────────
 
   test('close: channel — close(channel) fires clean onClose on client and server, even before channel acknowledgement', async () => {
-    await page.goto(`${getServerUrl()}/close`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/close`)
     await resetCleanupState()
 
     await page.click('#test-close-channel')
@@ -71,8 +68,7 @@ function testClose() {
   // ── Targeted: fn ─────────────────────────────────────────────────────
 
   test('close: fn — close(fn) closes backing channel; call after close throws ChannelClosedError', async () => {
-    await page.goto(`${getServerUrl()}/close`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/close`)
     await resetCleanupState()
 
     await page.click('#test-close-fn')
@@ -92,8 +88,7 @@ function testClose() {
   // ── context.onClose waits for channel to close ───────────────────────
 
   test('close: channel onClose ordering — context.onClose fires only after channel closes', async () => {
-    await page.goto(`${getServerUrl()}/close`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/close`)
     await resetCleanupState()
 
     await page.click('#test-close-channel-onclose')
@@ -113,8 +108,7 @@ function testClose() {
   // ── context.onClose waits for both stream and channel ────────────────
 
   test('close: stream + channel onClose ordering — context.onClose fires only after channel closes, not after stream ends', async () => {
-    await page.goto(`${getServerUrl()}/close`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/close`)
     await resetCleanupState()
 
     await page.click('#test-close-stream-channel-onclose')
@@ -153,8 +147,7 @@ function testClose() {
   // ── Passed function: context.onClose waits for request-side channel ──
 
   test('close: passed function onClose ordering — context.onClose does not fire while request-side channel is open', async () => {
-    await page.goto(`${getServerUrl()}/close`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/close`)
     await resetCleanupState()
 
     await page.click('#test-close-passed-fn-onclose')
@@ -195,8 +188,7 @@ function testClose() {
   // ── Mixed close: { generator, stream, channel, fn } ──────────────────
 
   test('close: mixed { generator, stream, channel, fn } — close(result) terminates all value types cleanly; passed and returned functions work', async () => {
-    await page.goto(`${getServerUrl()}/close`)
-    await waitForHydration()
+    await navigate(`${getServerUrl()}/close`)
     await resetCleanupState()
 
     await page.click('#test-close-mixed')
