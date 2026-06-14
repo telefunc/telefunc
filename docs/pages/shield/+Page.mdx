@@ -236,3 +236,8 @@ await chat.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
 Server-side `publish()` calls (from inside a telefunction or via the static `Broadcast.publish(key, data)`) are not shield-validated — the server is the trust boundary, so values originating there flow through as-is.
+
+
+## See also
+
+- <Link href="/permissions" />
