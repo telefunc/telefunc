@@ -158,8 +158,8 @@ const headings = [
   },
   {
     level: 2,
-    title: 'Overview',
-    titleDocument: 'Live telefunctions',
+    titleInNav: 'Overview',
+    title: 'Overview: Live telefunctions',
     url: '/live',
   },
   {
