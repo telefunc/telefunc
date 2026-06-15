@@ -42,8 +42,8 @@ importers:
   docs:
     dependencies:
       '@brillout/docpress':
-        specifier: ^0.16.25
-        version: 0.16.25(@algolia/client-search@5.31.0)(@types/react@19.2.14)(@vitejs/plugin-react-swc@4.2.1(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0)))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(rollup@4.44.0)(search-insights@2.17.3)(typescript@5.9.3)(vike@0.4.256(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0)))(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0))
+        specifier: ^0.16.39
+        version: 0.16.39(@algolia/client-search@5.31.0)(@types/react@19.2.14)(@vitejs/plugin-react@6.0.1(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0)))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(rollup@4.44.0)(search-insights@2.17.3)(typescript@5.9.3)(vike@0.4.256(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0)))(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0))
       '@types/react':
         specifier: ^19.2.14
         version: 19.2.14
@@ -1309,20 +1309,15 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@brillout/docpress@0.16.25':
-    resolution: {integrity: sha512-3K90xH2tcuSqPtIwjX0p1oy9N8XloWUKgyLNy6W4jA/OYnas5tGd1wSN1V/0dl65cw5Dqjc/feDVOE8MY6YYvA==}
+  '@brillout/docpress@0.16.39':
+    resolution: {integrity: sha512-yeF85gJz0jhky1DzupbHTtt6k/i2s/Hzo9liX7Wh0zrUL6iHR7gu5UzWO/LWFKL9LhNCG4WGRmQZWSHSnhe6ow==}
     peerDependencies:
-      '@vitejs/plugin-react-swc': '>=3.0.0'
+      '@vitejs/plugin-react': '>=4.0.0'
       react: '>=18.0.0'
       react-dom: '>=18.0.0'
       typescript: '>=5.0.0'
       vike: '>=0.4.234'
       vite: '>=5.2.0'
-    peerDependenciesMeta:
-      '@vitejs/plugin-react-swc':
-        optional: true
-      vite:
-        optional: true
 
   '@brillout/import@0.2.6':
     resolution: {integrity: sha512-1GUTmADc8trUC1YSW2lp9r6PmwluMoEyHajnE1kxVdbKGD0wJOlq/DvTWMUqLtBDCnQR+n//qgMtz6HwA/lotA==}
@@ -1352,6 +1347,10 @@ packages:
 
   '@brillout/shell@0.2.1':
     resolution: {integrity: sha512-l5PTMWw6rndD7vZcMvw1bv31sTzpz0qP3q409PD50ATsfxhvbMvDVySnV73Okoskfd673oClIlt6OnupbQJqHA==}
+
+  '@brillout/shiki-transformers@4.0.2':
+    resolution: {integrity: sha512-LELxHWwiIcYoUc/V0KWgfQMWOjRXNebJt9Z1NM9InjPUQ8fsL0ZxttD7qoBzFvaFIbEUJre3N5jc9FmM5b5MBQ==}
+    engines: {node: '>=20'}
 
   '@brillout/spellcheck@0.1.2':
     resolution: {integrity: sha512-DNJKsGPRps/3rwezmtMMoNwrcIpqnDPkqArEK5eS3vpkRJGzVaSH8suGf1+TmgUIsHn2Y1bgLIz9jh7w0EqwHw==}
@@ -3433,8 +3432,36 @@ packages:
   '@shikijs/core@1.2.0':
     resolution: {integrity: sha512-OlFvx+nyr5C8zpcMBnSGir0YPD6K11uYhouqhNmm1qLiis4GA7SsGtu07r9gKS9omks8RtQqHrJL4S+lqWK01A==}
 
-  '@shikijs/transformers@1.2.0':
-    resolution: {integrity: sha512-xKn7DtA65DQV4FOfYsrvqM80xOy2xuXnxWWKsZmHv1VII/IOuDUDsWDu3KnpeLH6wqNJWp1GRoNUsHR1aw/VhQ==}
+  '@shikijs/core@4.0.2':
+    resolution: {integrity: sha512-hxT0YF4ExEqB8G/qFdtJvpmHXBYJ2lWW7qTHDarVkIudPFE6iCIrqdgWxGn5s+ppkGXI0aEGlibI0PAyzP3zlw==}
+    engines: {node: '>=20'}
+
+  '@shikijs/core@4.2.0':
+    resolution: {integrity: sha512-Hc87Ab1Ld/vEbZRCbwx344I5v+4RU8CVToUTRkqXL1+TjbuOp9U5Xa0M23V4GEWHxVn+yO5otb+HkQVm3ptWQQ==}
+    engines: {node: '>=20'}
+
+  '@shikijs/primitive@4.0.2':
+    resolution: {integrity: sha512-M6UMPrSa3fN5ayeJwFVl9qWofl273wtK1VG8ySDZ1mQBfhCpdd8nEx7nPZ/tk7k+TYcpqBZzj/AnwxT9lO+HJw==}
+    engines: {node: '>=20'}
+
+  '@shikijs/primitive@4.2.0':
+    resolution: {integrity: sha512-NOq+DtUkVBJtZMVXL5A0vI0Xk8nvDYaXetFHSJFlOqjDZIVhIPRYFdGkSoElDqNuegikcc3A76SNUa8dTqtAYA==}
+    engines: {node: '>=20'}
+
+  '@shikijs/transformers@4.2.0':
+    resolution: {integrity: sha512-pKrYVNUr1oPjJvs76gkPPirDySx3GKG9O88P2Y3AQ+7AjSFws9Y+Ry/Q/6Yg6QpyigzjdQ6H5JAMNAvLXZ63dw==}
+    engines: {node: '>=20'}
+
+  '@shikijs/types@4.0.2':
+    resolution: {integrity: sha512-qzbeRooUTPnLE+sHD/Z8DStmaDgnbbc/pMrU203950aRqjX/6AFHeDYT+j00y2lPdz0ywJKx7o/7qnqTivtlXg==}
+    engines: {node: '>=20'}
+
+  '@shikijs/types@4.2.0':
+    resolution: {integrity: sha512-VT/MKtlpOhEPZloSH3Pb9WCZEBDoQVMa9jedp5UAwmJOar1DVc9DRODAxmYPW9M93IK4ryuqRejFfmlvlVDemw==}
+    engines: {node: '>=20'}
+
+  '@shikijs/vscode-textmate@10.0.2':
+    resolution: {integrity: sha512-83yeghZ2xxin3Nj8z1NMd/NCuca+gsYXswywDy5bHvwlWL8tpTQmzGeUuHd9FC3E/SBEMvzJRwWEOz5gGes9Qg==}
 
   '@simple-libs/child-process-utils@1.0.1':
     resolution: {integrity: sha512-3nWd8irxvDI6v856wpPCHZ+08iQR0oHTZfzAZmnbsLzf+Sf1odraP6uKOHDZToXq3RPRV/LbqGVlSCogm9cJjg==}
@@ -3790,6 +3817,7 @@ packages:
 
   '@ungap/structured-clone@1.3.0':
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
+    deprecated: Potential CWE-502 - Update to 1.3.1 or higher
 
   '@universal-middleware/cloudflare@0.4.10':
     resolution: {integrity: sha512-ZY+N0KKoH+H+BB3wsaD5yqTiiFtX7uklPyCBqGLqEijOtZA5ZgFIExfWDjiIUjezUBAbRB8kUZ/WlPITY+hyTg==}
@@ -5084,6 +5112,9 @@ packages:
   hast-util-to-estree@3.1.3:
     resolution: {integrity: sha512-48+B/rJWAp0jamNbAAf9M7Uf//UVqAoMmgXhBdxTDJLGKY+LRnZ99qcG+Qjl5HfMpYNzS5v4EAwVEF34LeAj7w==}
 
+  hast-util-to-html@9.0.5:
+    resolution: {integrity: sha512-OguPdidb+fbHQSU4Q4ZiLKnzWo8Wwsf5bZfbvu7//a9oTYoqD/fWpe96NuHkoS9h0ccGOTe0C4NGXdtS0iObOw==}
+
   hast-util-to-jsx-runtime@2.3.6:
     resolution: {integrity: sha512-zl6s8LwNyo1P9uw+XJGvZtdFF1GdAkOg8ujOw+4Pyb76874fLps4ueHXDhXWdk6YHQ6OgUtinliG7RsYvCbbBg==}
 
@@ -5103,6 +5134,9 @@ packages:
   hosted-git-info@8.1.0:
     resolution: {integrity: sha512-Rw/B2DNQaPBICNXEm8balFz9a6WpZrkCGpcWFpy7nCj+NyhSdqXipmfvtmWt9xGfp0wZnBxB+iVpLmQMYt47Tw==}
     engines: {node: ^18.17.0 || >=20.5.0}
+
+  html-void-elements@3.0.0:
+    resolution: {integrity: sha512-bEqo66MRXsUGxWHV5IP0PUiAWwoEjba4VCzg0LjFJBpchPaTfyfCKTG6bc5F8ucKec3q5y6qOdGyYTSBEvhCrg==}
 
   http-errors@1.8.1:
     resolution: {integrity: sha512-Kpk9Sm7NmI+RHhnj6OIWDI1d6fIoFAtFt9RLaTMRlg/8w49juAStsrBgp0Dp4OdxdVbRIeKhtCUvoi/RuAhO4g==}
@@ -8389,15 +8423,17 @@ snapshots:
   '@biomejs/cli-win32-x64@1.9.4':
     optional: true
 
-  '@brillout/docpress@0.16.25(@algolia/client-search@5.31.0)(@types/react@19.2.14)(@vitejs/plugin-react-swc@4.2.1(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0)))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(rollup@4.44.0)(search-insights@2.17.3)(typescript@5.9.3)(vike@0.4.256(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0)))(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0))':
+  '@brillout/docpress@0.16.39(@algolia/client-search@5.31.0)(@types/react@19.2.14)(@vitejs/plugin-react@6.0.1(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0)))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(rollup@4.44.0)(search-insights@2.17.3)(typescript@5.9.3)(vike@0.4.256(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0)))(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0))':
     dependencies:
       '@brillout/picocolors': 1.0.30
+      '@brillout/shiki-transformers': 4.0.2
       '@docsearch/css': 3.9.0
       '@docsearch/react': 3.9.0(@algolia/client-search@5.31.0)(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(search-insights@2.17.3)
       '@mdx-js/mdx': 3.0.1
       '@mdx-js/react': 3.0.1(@types/react@19.2.14)(react@19.2.4)
       '@mdx-js/rollup': 3.0.1(rollup@4.44.0)
-      '@shikijs/transformers': 1.2.0
+      '@shikijs/transformers': 4.2.0
+      '@vitejs/plugin-react': 6.0.1(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0))
       detype: 2.0.3
       estree-util-value-to-estree: 3.5.0
       npm-to-yarn: 3.0.1
@@ -8410,8 +8446,6 @@ snapshots:
       typescript: 5.9.3
       unist-util-visit: 5.0.0
       vike: 0.4.256(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0))
-    optionalDependencies:
-      '@vitejs/plugin-react-swc': 4.2.1(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0))
       vite: 7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0)
     transitivePeerDependencies:
       - '@algolia/client-search'
@@ -8451,6 +8485,11 @@ snapshots:
   '@brillout/shell@0.2.1':
     dependencies:
       '@brillout/picocolors': 1.0.30
+
+  '@brillout/shiki-transformers@4.0.2':
+    dependencies:
+      '@shikijs/core': 4.0.2
+      '@shikijs/types': 4.0.2
 
   '@brillout/spellcheck@0.1.2':
     dependencies:
@@ -9820,7 +9859,7 @@ snapshots:
     dependencies:
       '@types/estree': 1.0.8
       estree-walker: 2.0.2
-      picomatch: 4.0.3
+      picomatch: 4.0.4
     optionalDependencies:
       rollup: 4.44.0
 
@@ -9890,9 +9929,50 @@ snapshots:
 
   '@shikijs/core@1.2.0': {}
 
-  '@shikijs/transformers@1.2.0':
+  '@shikijs/core@4.0.2':
     dependencies:
-      shiki: 1.2.0
+      '@shikijs/primitive': 4.0.2
+      '@shikijs/types': 4.0.2
+      '@shikijs/vscode-textmate': 10.0.2
+      '@types/hast': 3.0.4
+      hast-util-to-html: 9.0.5
+
+  '@shikijs/core@4.2.0':
+    dependencies:
+      '@shikijs/primitive': 4.2.0
+      '@shikijs/types': 4.2.0
+      '@shikijs/vscode-textmate': 10.0.2
+      '@types/hast': 3.0.4
+      hast-util-to-html: 9.0.5
+
+  '@shikijs/primitive@4.0.2':
+    dependencies:
+      '@shikijs/types': 4.0.2
+      '@shikijs/vscode-textmate': 10.0.2
+      '@types/hast': 3.0.4
+
+  '@shikijs/primitive@4.2.0':
+    dependencies:
+      '@shikijs/types': 4.2.0
+      '@shikijs/vscode-textmate': 10.0.2
+      '@types/hast': 3.0.4
+
+  '@shikijs/transformers@4.2.0':
+    dependencies:
+      '@shikijs/core': 4.2.0
+      '@shikijs/types': 4.2.0
+
+  '@shikijs/types@4.0.2':
+    dependencies:
+      '@shikijs/vscode-textmate': 10.0.2
+      '@types/hast': 3.0.4
+
+  '@shikijs/types@4.2.0':
+    dependencies:
+      '@shikijs/vscode-textmate': 10.0.2
+      '@types/hast': 3.0.4
+
+  '@shikijs/vscode-textmate@10.0.2': {}
 
   '@simple-libs/child-process-utils@1.0.1':
     dependencies:
@@ -10447,6 +10527,11 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@vitejs/plugin-react@6.0.1(vite@7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0))':
+    dependencies:
+      '@rolldown/pluginutils': 1.0.0-rc.7
+      vite: 7.2.2(@types/node@24.0.10)(jiti@1.21.0)(lightningcss@1.32.0)
+
   '@vitejs/plugin-react@6.0.1(vite@8.0.3(@emnapi/core@1.9.1)(@emnapi/runtime@1.9.1)(@types/node@24.0.10)(esbuild@0.25.9)(jiti@1.21.0))':
     dependencies:
       '@rolldown/pluginutils': 1.0.0-rc.7
@@ -10516,7 +10601,7 @@ snapshots:
       '@vue/shared': 3.5.29
       estree-walker: 2.0.2
       magic-string: 0.30.21
-      postcss: 8.5.6
+      postcss: 8.5.8
       source-map-js: 1.2.1
 
   '@vue/compiler-ssr@3.5.29':
@@ -12058,6 +12143,20 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  hast-util-to-html@9.0.5:
+    dependencies:
+      '@types/hast': 3.0.4
+      '@types/unist': 3.0.3
+      ccount: 2.0.1
+      comma-separated-tokens: 2.0.3
+      hast-util-whitespace: 3.0.0
+      html-void-elements: 3.0.0
+      mdast-util-to-hast: 13.2.0
+      property-information: 7.1.0
+      space-separated-tokens: 2.0.2
+      stringify-entities: 4.0.4
+      zwitch: 2.0.4
+
   hast-util-to-jsx-runtime@2.3.6:
     dependencies:
       '@types/estree': 1.0.8
@@ -12099,6 +12198,8 @@ snapshots:
   hosted-git-info@8.1.0:
     dependencies:
       lru-cache: 10.2.0
+
+  html-void-elements@3.0.0: {}
 
   http-errors@1.8.1:
     dependencies:
