@@ -7,7 +7,7 @@ Telefunc supports streaming in both directions:
 - **Server → client**: Return `AsyncGenerator`, `ReadableStream`, `File` / `Blob` / `download()`, or nested `Promise` from a telefunction.
 - **Client → server**: Pass a `ReadableStream` as a telefunction argument.
 
-> Streaming works out of the box with zero config — including <Link text="transport" href="/transport" /> (binary HTTP by default; switch to SSE or a reconnecting channel only if you need to). Plain telefunction calls are unaffected.
+> Streaming works out of the box with zero config — including <Link text="transport" href="/transport" /> (binary HTTP by default; switch to SSE or a reconnecting channel only if you need to).
 
 
 ## Which one should I use?
@@ -238,7 +238,7 @@ See <Link href="/close" /> for all cancellation methods (`close()`, `break`, `ge
 
 Telefunc distinguishes expected failures from bugs — even in streaming responses. If a generator or stream throws, the client receives a typed error while values already delivered remain available.
 
-See <Link href="/error-handling#streaming-and-channel-errors" text="Error handling — streaming & channels" /> for details.
+See <Link href="/error-handling#streaming" text="Error handling — streaming" /> for details.
 
 
 ## See also
