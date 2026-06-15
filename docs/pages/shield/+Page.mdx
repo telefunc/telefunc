@@ -188,7 +188,7 @@ export async function getUser(id: string) {
 
 ### Channels
 
-[`new Channel<ClientToServer, ServerToClient>()`](/channel) declares two typed directions, each a function signature `(msg) => ack`. Telefunc generates two sub-shields that fire on the server:
+<Link href="/channel" text={<code>{'new Channel<ClientToServer, ServerToClient>()'}</code>} /> declares two typed directions, each a function signature `(msg) => ack`. Telefunc generates two sub-shields that fire on the server:
 
 - **`data`** — validates messages arriving from the client (input to `listen()`).
 - **`ack`** — validates the ack returned by the client's `listen()` to a server-initiated `send(..., { ack: true })`.
@@ -213,7 +213,7 @@ await events.send({ tick: 1 }, { ack: true })
 
 ### Broadcast
 
-[`new Broadcast<T>({ key })`](/channel#new-broadcast) declares the message type `T` flowing through a keyed broadcast topic. Telefunc generates a `data` sub-shield that fires on the server when a client calls `publish()` on a `Broadcast` returned from a telefunction:
+<Link href="/channel#new-broadcast" text={<code>{'new Broadcast<T>({ key })'}</code>} /> declares the message type `T` flowing through a keyed broadcast topic. Telefunc generates a `data` sub-shield that fires on the server when a client calls `publish()` on a `Broadcast` returned from a telefunction:
 
 ```ts
 // Chat.telefunc.ts

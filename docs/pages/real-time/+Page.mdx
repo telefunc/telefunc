@@ -16,7 +16,7 @@ Telefunc supports real-time use cases — chat, file upload progress, live updat
 | **`new Channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE), or <Link text="WebSocket server setup" href="/server" /> (WS) |
 | **`new Broadcast()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
 
-> See also: [`Channel` vs `Broadcast`](/channel#channel-vs-broadcast)
+> See also: <Link text={<><code>Channel</code> vs <code>Broadcast</code></>} href="/channel#channel-vs-broadcast" />
 
 > **Runtime safety**: whichever primitive you use, every value the client sends to the server is shield-validated against your TypeScript types before it reaches your code — function-call <Link href="/shield#function-arguments" text="arguments" />, <Link href="/shield#channels" text="channel messages" />, and broadcast <Link href="/shield#broadcast" text="publishes" />. A failing check is rejected with `ShieldValidationError`.
 
