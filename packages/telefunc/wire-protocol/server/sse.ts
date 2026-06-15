@@ -9,6 +9,7 @@ import { CHANNEL_TRANSPORT } from '../constants.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { createPushReadable, type PushReadable } from '../push-readable.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
+import { textEncoder } from '../frame.js'
 import { parseSseRequestMetadata } from '../sse-request.js'
 import { StreamReader } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
@@ -39,7 +40,6 @@ type SseConnection = {
   pendingDispatches: Set<Promise<unknown>>
 }
 
-const textEncoder = new TextEncoder()
 const sseOpenComment = textEncoder.encode(': open\n\n')
 
 const globalObject = getGlobalObject('wire-protocol/server/sse.ts', {
