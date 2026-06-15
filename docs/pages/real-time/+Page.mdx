@@ -149,15 +149,15 @@ See <Link href="/channel#new-broadcast" /> for the full `Broadcast` API.
 A channel or broadcast is opened by a telefunction, so you protect it like any other telefunction (see <Link href="/permissions" />): authorize **at open time** with <Link text="getContext()" href="/getContext" /> and `throw Abort()`.
 
 ```ts
-// Chat.telefunc.ts
+// Team.telefunc.ts
 // Environment: server
 
 import { Broadcast, getContext, Abort } from 'telefunc'
 
-export async function onJoinChat(roomId: string) {
+export async function onJoinTeam(teamId: string) {
   const { user } = getContext()
-  if (!user || !user.rooms.includes(roomId)) throw Abort()
-  return new Broadcast({ key: `chat:${roomId}` })
+  if (!user || !user.teams.includes(teamId)) throw Abort()
+  return new Broadcast({ key: `team:${teamId}` })
 }
 ```
 
@@ -199,15 +199,15 @@ See <Link href="/channel#reconnection" text="Channel reconnection" /> for detail
 Telefunctions are plain functions — unit-test them by importing and calling them directly. Supply the <Link text="context" href="/getContext" /> with `provideTelefuncContext()`:
 
 ```ts
-// Chat.telefunc.test.ts
+// Team.telefunc.test.ts
 // Environment: server
 
 import { provideTelefuncContext } from 'telefunc'
-import { onJoinChat } from './Chat.telefunc'
+import { onJoinTeam } from './Team.telefunc'
 
-test('rejects a non-member of the room', async () => {
-  provideTelefuncContext({ user: { id: 1, rooms: [] } })
-  await expect(onJoinChat('general')).rejects.toThrow() // throws Abort()
+test('rejects a non-member of the team', async () => {
+  provideTelefuncContext({ user: { id: 1, teams: [] } })
+  await expect(onJoinTeam('acme')).rejects.toThrow() // throws Abort()
 })
 ```
 
