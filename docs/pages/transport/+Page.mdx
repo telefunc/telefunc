@@ -89,9 +89,9 @@ All channels share a single multiplexed connection per server URL, so opening ma
 | Full-duplex channels | `config.channel.transports = ['sse', 'ws']` + <Link text="Server setup" href="/server" /> |
 
 
-## Per-call override
+## Per-call overrides
 
-Override the transport for a single call using `withContext()`:
+`withContext(fn, context)` from `telefunc/client` wraps a telefunction with per-call client context — not only transport, but also an `AbortSignal`, extra headers, and a URL override:
 
 ```ts
 // Environment: client
@@ -99,11 +99,15 @@ Override the transport for a single call using `withContext()`:
 import { onAIChat } from './Chat.telefunc'
 import { withContext } from 'telefunc/client'
 
-const gen = withContext(onAIChat, {
-  stream: { transport: 'channel' },
-  channel: { transports: ['ws'] },
-})('Tell me a joke')
+const call = withContext(onAIChat, {
+  signal,                            // abort this call (and any channels it opens)
+  headers: { 'x-trace': traceId },   // extra HTTP headers, just for this call
+  telefuncUrl: '/api/_telefunc',     // override config.telefuncUrl for this call
+  stream: { transport: 'channel' },  // override config.stream.transport
+  channel: { transports: ['ws'] },   // override config.channel.transports
+})
 
+const gen = call('Tell me a joke')
 for await (const token of gen) {
   console.log(token)
 }
