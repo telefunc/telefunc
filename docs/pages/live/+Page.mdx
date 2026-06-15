@@ -37,6 +37,7 @@ Whatever you return or pass:
 - **Validation** — values arriving at the server are runtime-checked against your TypeScript types. See <Link href="/shield" />.
 - **Cleanup** — when the client stops reading or disconnects, your telefunction is notified so it can release resources. See <Link href="/close" />.
 - **Transport & reconnection** — streams and channels negotiate a working transport (HTTP, SSE, WebSocket) and recover from dropped connections automatically. Tune it only if you need to — see <Link href="/transport" />.
+- **Serialization** — structured values use Telefunc's serializer, so `Date`, `Map`, `Set`, `BigInt`, etc. survive the trip (not just JSON); raw bytes travel as `Uint8Array` / `File` / `Blob`.
 
 
 ## Shipping to production
