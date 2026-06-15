@@ -1,0 +1,50 @@
+import { Link } from '@brillout/docpress'
+
+**Environment**: server.
+
+`new Telefunc()` is the runtime adapter that processes telefunction requests — including <Link href="/stream">streaming</Link> and <Link href="/real-time">real-time</Link> (channels, WebSocket). Import it from the entry point for your runtime:
+
+```ts
+import { Telefunc } from 'telefunc/node' // or telefunc/bun, telefunc/deno, telefunc/cloudflare
+
+const tf = new Telefunc()
+```
+
+> For per-runtime setup see <Link href="/server" />, and <Link href="/cloudflare" /> for Cloudflare specifics. For a low-level request handler without channels, use <Link href="/serve" />.
+
+
+## Methods
+
+| Method | Runtime | Description |
+|---|---|---|
+| `serve(input)` | all | Process a request and return the response. The input shape (`{ request }`, `{ req, res }`, `{ request, env, ctx }`, …) and return type vary by runtime — see <Link href="/server#return-value" />. |
+| `installWebSocket(server)` | Node | Enable WebSocket channels on your HTTP server. Idempotent. |
+| `websocket` | Bun | The WebSocket handler — pass it to `Bun.serve({ websocket })`. |
+| `TelefuncDurableObject` | Cloudflare | The Durable Object class to export — see <Link href="/cloudflare" />. |
+
+
+## Context
+
+Provide the <Link text="getContext()" href="/getContext" /> data per request — on Node/Bun/Deno via `serve({ context })`, on Cloudflare via the `context` constructor option:
+
+```ts
+// Node / Bun / Deno
+await tf.serve({ request, context: { user } })
+
+// Cloudflare
+const tf = new Telefunc({ context: (request, env) => ({ user }) })
+```
+
+See <Link href="/getContext#provide" />.
+
+
+## Configuration (Cloudflare)
+
+On Cloudflare the constructor also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, … — see <Link href="/cloudflare#configuration" />.
+
+
+## See also
+
+- <Link href="/server" />
+- <Link href="/serve" />
+- <Link href="/cloudflare" />
