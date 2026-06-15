@@ -116,6 +116,14 @@ for await (const token of gen) {
 ```
 
 
+## Channel & broadcast config
+
+Beyond transport, channels and broadcasts expose more `config` (server-side):
+
+- **`config.channel`** — reconnect/idle timeouts and per-peer buffer limits. See <Link href="/channel#configuration" />.
+- **`config.broadcast.transport`** — cross-instance broadcast for multi-server deployments. See <Link href="/channel#multi-server" />, or <Link href="/redis" /> for the Redis adapter.
+
+
 ## See also
 
 - <Link href="/stream" />
