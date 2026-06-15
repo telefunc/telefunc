@@ -218,6 +218,11 @@ const headings = [
     url: '/getContext',
   },
   {
+    level: 2,
+    title: '`provideTelefuncContext()`',
+    url: '/provideTelefuncContext',
+  },
+  {
     level: 4,
     title: 'Protection',
   },
