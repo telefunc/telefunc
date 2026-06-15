@@ -200,21 +200,7 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ## new Broadcast()
 
-`new Broadcast({ key })` creates one member of a broadcast group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to it.
-
-```ts
-// Chat.telefunc.ts
-// Environment: server
-
-import { Broadcast } from 'telefunc'
-
-export async function onJoinChat() {
-  const chat = new Broadcast<ChatMessage>({ key: 'chat:lobby' })
-  return chat
-}
-```
-
-Return the broadcast instance directly from a telefunction — no `.client` needed (unlike channels, broadcast has no directional type flip).
+`new Broadcast({ key })` creates one member of a broadcast group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to it. Return the broadcast instance directly from a telefunction — no `.client` needed (unlike channels, broadcast has no directional type flip).
 
 > **Keys are capabilities** — anyone who forms the same `key` joins the group. Secure a broadcast one of two ways:
 > - **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
