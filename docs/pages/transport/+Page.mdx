@@ -61,7 +61,7 @@ Controls how <Link text={<code>new Channel()</code>} href="/channel" /> connecti
 | `'sse'` | HTTP requests + SSE stream. Works without extra server setup. |
 | `'ws'` | Multiplexed WebSocket. Requires <Link text="WebSocket server setup" href="/server" />. |
 
-The client default is `['sse', 'ws']` — start on SSE, upgrade to WebSocket when the server supports it. The server enables SSE only until a WebSocket adapter is installed (see <Link href="/server" />).
+The client default is `['sse', 'ws']` — start on SSE, then upgrade to WebSocket once the server offers it. The server offers SSE out of the box and adds WebSocket when you install an adapter (see <Link href="/server" />).
 
 All channels share a single multiplexed connection per server URL, so opening many channels doesn't open many connections.
 

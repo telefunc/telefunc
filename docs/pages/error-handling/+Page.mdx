@@ -165,7 +165,7 @@ If the user's browser can't connect to your server:
 > `NetworkError` covers both regular telefunction calls and channels — read `err.isChannel` to tell them apart (`false` for regular calls, `true` for channels). Regular calls still throw `ConnectionError` (now a `NetworkError` subclass), so existing `instanceof ConnectionError` checks keep working.
 
 
-## Streaming and channel errors
+## Streaming
 
 The expected-vs-bug distinction above applies to <Link href="/stream">streamed</Link> and <Link href="/real-time">real-time</Link> values too.
 
