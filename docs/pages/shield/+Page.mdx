@@ -213,14 +213,14 @@ await events.send({ tick: 1 }, { ack: true })
 
 ### Broadcast
 
-<Link href="/channel#new-broadcast" text={<code>{'new Broadcast<T>({ key })'}</code>} /> declares the message type `T` flowing through a keyed broadcast topic. Telefunc generates a `data` sub-shield that fires on the server when a client calls `publish()` on a `Broadcast` returned from a telefunction:
+<Link href="/channel#new-broadcastchannel" text={<code>{'new BroadcastChannel<T>({ key })'}</code>} /> declares the message type `T` flowing through a keyed broadcast topic. Telefunc generates a `data` sub-shield that fires on the server when a client calls `publish()` on a `BroadcastChannel` returned from a telefunction:
 
 ```ts
 // Chat.telefunc.ts
 // Environment: server
 
 export async function onJoinChat(roomId: string) {
-  const room = new Broadcast<{ user: string; text: string }>({ key: `chat:${roomId}` })
+  const room = new BroadcastChannel<{ user: string; text: string }>({ key: `chat:${roomId}` })
   return room
 }
 ```
