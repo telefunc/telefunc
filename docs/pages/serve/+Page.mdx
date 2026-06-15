@@ -14,6 +14,8 @@ Low-level function that processes telefunction requests and returns an HTTP resp
 Pass the web standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
 
 ```ts
+// Environment: server
+
 import { serve } from 'telefunc'
 
 const httpResponse = await serve({ request })
