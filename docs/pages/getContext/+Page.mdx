@@ -118,6 +118,15 @@ app.all('/_telefunc', async (req, res, next) => {
   </TabPanel>
 </Tabs>
 
+> **Outside `serve()`** (server-side rendering, unit tests) — when a telefunction isn't reached through `tf.serve()`, provide the context with `provideTelefuncContext()` before it runs:
+> ```ts
+> // Environment: server
+>
+> import { provideTelefuncContext } from 'telefunc'
+>
+> provideTelefuncContext({ user })
+> ```
+
 ## Access
 
 If you get this error:
