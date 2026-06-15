@@ -1,12 +1,15 @@
-import { Link } from '@brillout/docpress'
+import { Link, Tabs } from '@brillout/docpress'
 
 Telefunc integrates with any server. For production deployments with streaming, channels, and WebSocket support, use `new Telefunc()`.
 
 > **Upgrading from `telefunc()`?** `telefunc()` was renamed to <Link text="serve()" href="/serve" /> — it still works but is deprecated. Use `serve()` for a low-level request handler, or `new Telefunc()` (below) for the full runtime: streaming, channels, WebSocket.
 
 
-## Node.js
+## Setup
 
+<Tabs choice={'runtime'} />
+
+:::Choice{#Node}
 ### With Hono, Fastify, or any `Request`-based server
 
 ```ts
@@ -73,10 +76,9 @@ app.all('/_telefunc', async (c) => {
 ```
 
 > Access `context` inside telefunctions via <Link href="/getContext">`getContext()`</Link>.
+:::
 
-
-## Bun
-
+:::Choice{#Bun}
 ```ts
 // server.ts
 // Environment: server
@@ -97,10 +99,9 @@ Bun.serve({
   },
 })
 ```
+:::
 
-
-## Deno
-
+:::Choice{#Deno}
 ```ts
 // server.ts
 // Environment: server
@@ -116,10 +117,9 @@ Deno.serve({ port: 3000 }, async (request, info) => {
   return new Response('Not found', { status: 404 })
 })
 ```
+:::
 
-
-## Cloudflare Workers
-
+:::Choice{#Cloudflare}
 ```ts
 // worker.ts
 // Environment: server
@@ -159,6 +159,7 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 ```
 
 > See <Link text="Cloudflare Workers" href="/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
+:::
 
 
 ## Return value
