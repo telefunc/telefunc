@@ -16,7 +16,7 @@ Telefunc supports real-time use cases — chat, file upload progress, live updat
 | **`new Channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE), or <Link text="WebSocket server setup" href="/server" /> (WS) |
 | **`new Broadcast()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
 
-> See also: [`Channel` vs `Broadcast`](/channel#channel-vs-broadcast)
+> See also: <Link text={<><code>Channel</code> vs <code>Broadcast</code></>} href="/channel#channel-vs-broadcast" />
 
 > **Runtime safety**: whichever primitive you use, every value the client sends to the server is shield-validated against your TypeScript types before it reaches your code — function-call <Link href="/shield#function-arguments" text="arguments" />, <Link href="/shield#channels" text="channel messages" />, and broadcast <Link href="/shield#broadcast" text="publishes" />. A failing check is rejected with `ShieldValidationError`.
 
@@ -149,15 +149,15 @@ See <Link href="/channel#new-broadcast" /> for the full `Broadcast` API.
 A channel or broadcast is opened by a telefunction, so you protect it like any other telefunction (see <Link href="/permissions" />): authorize **at open time** with <Link text="getContext()" href="/getContext" /> and `throw Abort()`.
 
 ```ts
-// Chat.telefunc.ts
+// Team.telefunc.ts
 // Environment: server
 
 import { Broadcast, getContext, Abort } from 'telefunc'
 
-export async function onJoinChat(roomId: string) {
+export async function onJoinTeam(teamId: string) {
   const { user } = getContext()
-  if (!user || !user.rooms.includes(roomId)) throw Abort()
-  return new Broadcast({ key: `chat:${roomId}` })
+  if (!user || !user.teams.includes(teamId)) throw Abort()
+  return new Broadcast({ key: `team:${teamId}` })
 }
 ```
 
@@ -194,53 +194,20 @@ See <Link href="/channel#reconnection" text="Channel reconnection" /> for detail
 > Channels run over **SSE** and upgrade to **WebSocket** automatically when your <Link text="server" href="/server" /> enables it — no client config. See <Link href="/transport" /> for the comparison.
 
 
-## End-to-end example
-
-A complete chat room with the pieces assembled — authorize at open, broadcast a typed message (the type doubles as the runtime <Link href="/shield" text="shield" />), then deploy.
-
-```ts
-// ChatRoom.telefunc.ts
-// Environment: server
-
-import { Broadcast, getContext, Abort } from 'telefunc'
-
-type ChatMessage = { user: string; text: string }
-
-export async function onJoinRoom(roomId: string) {
-  const { user } = getContext()
-  if (!user || !user.rooms.includes(roomId)) throw Abort() // authorize at open
-  return new Broadcast<ChatMessage>({ key: `room:${roomId}` })
-}
-```
-
-```tsx
-// ChatRoom.tsx
-// Environment: client
-
-import { onJoinRoom } from './ChatRoom.telefunc'
-
-const room = await onJoinRoom('general')
-room.subscribe((msg) => appendMessage(msg))
-room.publish({ user: 'Alice', text: 'Hello!' }) // checked against ChatMessage on the server
-```
-
-Deploy it on a long-running server or Cloudflare Workers — not typical serverless. See <Link href="/scaling" /> and <Link href="/cloudflare" />.
-
-
 ## Testing
 
 Telefunctions are plain functions — unit-test them by importing and calling them directly. Supply the <Link text="context" href="/getContext" /> with `provideTelefuncContext()`:
 
 ```ts
-// ChatRoom.telefunc.test.ts
+// Team.telefunc.test.ts
 // Environment: server
 
 import { provideTelefuncContext } from 'telefunc'
-import { onJoinRoom } from './ChatRoom.telefunc'
+import { onJoinTeam } from './Team.telefunc'
 
-test('rejects a non-member of the room', async () => {
-  provideTelefuncContext({ user: { id: 1, rooms: [] } })
-  await expect(onJoinRoom('general')).rejects.toThrow() // throws Abort()
+test('rejects a non-member of the team', async () => {
+  provideTelefuncContext({ user: { id: 1, teams: [] } })
+  await expect(onJoinTeam('acme')).rejects.toThrow() // throws Abort()
 })
 ```
 

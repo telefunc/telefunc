@@ -72,6 +72,8 @@ All channels share a single multiplexed connection per server URL, so opening ma
 | `'sse'` | 🟡 | ✅ | ✅ | None |
 | `'ws'` | ✅ | ✅ | 🟡 | <Link text="Server setup" href="/server" /> |
 
+### When to use what
+
 - **Start with `'sse'`** — it works everywhere out of the box.
 - **Use `'ws'`** for chatty real-time traffic where you want full-duplex.
 
