@@ -200,21 +200,7 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ## new Broadcast()
 
-`new Broadcast({ key })` creates one member of a broadcast group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to it.
-
-```ts
-// Chat.telefunc.ts
-// Environment: server
-
-import { Broadcast } from 'telefunc'
-
-export async function onJoinChat() {
-  const chat = new Broadcast<ChatMessage>({ key: 'chat:lobby' })
-  return chat
-}
-```
-
-Return the broadcast instance directly from a telefunction — no `.client` needed (unlike channels, broadcast has no directional type flip).
+`new Broadcast({ key })` creates one member of a broadcast group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to it. Return the broadcast instance directly from a telefunction — no `.client` needed (unlike channels, broadcast has no directional type flip).
 
 > **Keys are capabilities** — anyone who forms the same `key` joins the group. Secure a broadcast one of two ways:
 > - **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
@@ -430,9 +416,15 @@ config.channel = {
 }
 ```
 
+> **What to tune** — defaults suit typical chat/dashboard traffic; reach for these only if you hit one:
+> - Slow/flaky clients dropping with `ChannelNetworkError` → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
+> - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit` / `bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
+> - Reconnects should replay more history → raise the replay buffers; lower them to cap memory.
+
 
 ## See also
 
+- <Link href="/live" />
 - <Link href="/real-time" />
 - <Link href="/stream" />
 - <Link href="/file-upload" />
