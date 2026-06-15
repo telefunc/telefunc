@@ -118,14 +118,7 @@ app.all('/_telefunc', async (req, res, next) => {
   </TabPanel>
 </Tabs>
 
-> **Outside `serve()`** (server-side rendering, unit tests) — when a telefunction isn't reached through `tf.serve()`, provide the context with `provideTelefuncContext()` before it runs:
-> ```ts
-> // Environment: server
->
-> import { provideTelefuncContext } from 'telefunc'
->
-> provideTelefuncContext({ user })
-> ```
+> **Outside `serve()`** (server-side rendering, unit tests): provide the context with <Link text={<code>provideTelefuncContext()</code>} href="/provideTelefuncContext" />.
 
 ## Access
 
