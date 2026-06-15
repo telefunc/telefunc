@@ -365,12 +365,12 @@ chat.onOpen(() => {
 
 chat.onClose((err) => {
   if (!err) {
-    // Clean close
+    // Graceful close — `close()` completed, channel done
   } else if (err instanceof Abort) {
-    // Server called channel.abort(value)
+    // Either side called abort(value)
     console.log(err.abortValue)
-  } else {
-    // Network error or timeout
+  } else if (err instanceof NetworkError) {
+    // Connection lost beyond reconnectTimeout
   }
 })
 
@@ -397,12 +397,14 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 
 ## Error handling
 
-| Error | When | Recovery |
-|---|---|---|
-| `Abort` | Server called `abort()` | Terminal — inspect `err.abortValue` |
-| `ChannelClosedError` | `send()` after close/abort | Terminal — recreate channel if needed |
-| `NetworkError` (`isChannel: true`) | Connection lost beyond timeout | Terminal — channel auto-closed |
-| `ChannelOverflowError` | Buffered sends exceeded `config.channel.bufferLimit` while the peer was disconnected | Pending `send()` promises reject — apply backpressure by awaiting sends |
+> A graceful `close()` is not an error — `onClose(err)` receives `undefined`.
+
+| Error | When | Channel after | Recovery |
+|---|---|---|---|
+| `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
+| `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
+| `ChannelClosedError` | `send()` on a closed channel (thrown synchronously); also rejects pending `ack` sends orphaned by close or close timeout | Closed | Recreate the channel |
+| `ChannelOverflowError` | A buffered send was dropped — backlog exceeded `config.channel.bufferLimit` while the peer was disconnected | **Open** | Only the dropped `send()` rejects; `await` sends to apply backpressure |
 
 
 ## Config
