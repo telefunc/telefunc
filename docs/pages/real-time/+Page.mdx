@@ -161,7 +161,7 @@ export async function onJoinTeam(teamId: string) {
 }
 ```
 
-`getContext()` and `throw Abort()` only work **synchronously, before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that — its `listen()` runs later — so **capture what you need in a closure** and check it per message:
+`getContext()` and `throw Abort()` only work **synchronously, before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that window — its `listen()` callback runs later, after the telefunction has returned — so **capture what you need in a closure** and check it on each message:
 
 ```ts
 // Room.telefunc.ts
