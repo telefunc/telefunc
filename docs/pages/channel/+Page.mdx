@@ -50,9 +50,9 @@ const { channel } = await onClock()
 channel.listen((time) => console.log(time)) // 1700000000000, 1700000001000, ...
 ```
 
-The rest of this section adds types, two-way messaging, acks, and binary; see <Link href="#methods" /> for the full API.
+The rest of this section adds types, two-way messaging, acks, and binary; see <Link href="#channel-methods" /> for the full API.
 
-### Methods
+### Channel methods
 
 | Method | Description |
 |---|---|
@@ -264,7 +264,7 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 })
 ```
 
-### Methods
+### Broadcast methods
 
 | Method | Description |
 |---|---|

@@ -5,6 +5,8 @@ import { StreamingBeta } from '../../components'
 
 `close()` and `onClose()` manage the lifecycle of telefunction values — anything returned from or passed to a telefunction that holds an open connection.
 
+> Applies to both <Link href="/stream">streaming</Link> (`AsyncGenerator`, `ReadableStream`, files) and <Link href="/real-time">real-time</Link> (`Channel`, `Broadcast`) values — they all close the same way.
+
 ## `close()` (client)
 
 `close()` from `telefunc/client` gracefully closes any value returned by a telefunction. It walks the return value recursively and closes everything in one call.
