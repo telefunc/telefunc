@@ -218,6 +218,11 @@ const headings = [
     url: '/getContext',
   },
   {
+    level: 2,
+    title: '`provideTelefuncContext()`',
+    url: '/provideTelefuncContext',
+  },
+  {
     level: 4,
     title: 'Protection',
   },
@@ -235,6 +240,11 @@ const headings = [
   {
     level: 4,
     title: 'Server Middleware',
+  },
+  {
+    level: 2,
+    title: '`new Telefunc()`',
+    url: '/Telefunc',
   },
   {
     level: 2,
