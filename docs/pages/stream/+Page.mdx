@@ -29,7 +29,7 @@ For values **passed** to a telefunction (client → server), pass a `ReadableStr
 
 ## `AsyncGenerator`
 
-The usual choice for incremental structured values.
+The usual choice for structured values that arrive one piece at a time.
 
 ```ts
 // Chat.telefunc.ts
@@ -91,7 +91,7 @@ while (true) {
 
 ## Nested `Promise`
 
-Return unawaited promises inside the response object — the client gets the surrounding values immediately while each promise resolves independently.
+Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
 
 ```ts
 // Dashboard.telefunc.ts

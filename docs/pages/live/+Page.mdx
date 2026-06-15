@@ -42,4 +42,4 @@ Whatever you return or pass:
 
 ## Shipping to production
 
-Channels are stateful — a `Channel` lives in one server process and holds a connection open — so real-time needs a **long-running server**, not typical serverless (Vercel, Lambda), where function timeouts cut SSE connections short and there's no sticky routing for reconnects. Across multiple instances you also need sticky sessions and a cross-instance broadcast transport — see <Link href="/scaling" />. On Cloudflare Workers it's handled via Durable Objects — see <Link href="/cloudflare" />.
+Channels are **stateful** — a `Channel` lives in one server process and holds a connection open — so real-time needs a **long-running server**. Typical serverless (Vercel, Lambda) doesn't fit: function timeouts cut the connection short, and a reconnect isn't routed back to the process that holds the channel. Running several servers also needs sticky sessions and a cross-instance broadcast transport — see <Link href="/scaling" />. On Cloudflare Workers, Durable Objects handle all of this — see <Link href="/cloudflare" />.
