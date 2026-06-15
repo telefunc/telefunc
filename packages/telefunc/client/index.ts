@@ -9,7 +9,8 @@ export { Abort } from '../shared/Abort.js'
 export { ShieldValidationError, isShieldValidationError } from '../shared/ShieldValidationError.js'
 export { withContext } from './withContext.js'
 export { ConnectionError } from './ConnectionError.js'
-export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../wire-protocol/channel-errors.js'
+export { NetworkError } from '../shared/NetworkError.js'
+export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/channel-errors.js'
 
 export type { TelefuncClientExtension } from './extensions.js'
 export type {

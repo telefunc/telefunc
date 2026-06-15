@@ -395,7 +395,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 |---|---|---|
 | `Abort` | Server called `abort()` | Terminal — inspect `err.abortValue` |
 | `ChannelClosedError` | `send()` after close/abort | Terminal — recreate channel if needed |
-| `ChannelNetworkError` | Connection lost beyond timeout | Terminal — channel auto-closed |
+| `NetworkError` (`isChannel: true`) | Connection lost beyond timeout | Terminal — channel auto-closed |
 | `ChannelOverflowError` | Buffered sends exceeded `config.channel.bufferLimit` while the peer was disconnected | Pending `send()` promises reject — apply backpressure by awaiting sends |
 
 
