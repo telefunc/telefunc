@@ -4,7 +4,8 @@ export type { MuxChannel, MuxConnection }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { assert } from '../../utils/assert.js'
-import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
+import { ChannelClosedError } from '../channel-errors.js'
+import { NetworkError } from '../../shared/NetworkError.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
@@ -760,7 +761,7 @@ class ClientConnection implements MuxConnection {
         if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') {
           this.state.upgrade.finTimer = null
         }
-        this.abortUpgradeAndReconnectSse(new ChannelNetworkError('Upgrade FIN without RECONCILED'))
+        this.abortUpgradeAndReconnectSse(new NetworkError('Upgrade FIN without RECONCILED', true))
       }, UPGRADE_FIN_RECONCILED_TIMEOUT_MS)
     }
     this.tryCompleteUpgradeHandoff()
@@ -785,17 +786,18 @@ class ClientConnection implements MuxConnection {
     transport.detachHeartbeat()
     if (transport !== this.transport) {
       if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff' && transport === this.state.upgrade.from) {
-        this.abortUpgradeAndReconnectSse(new ChannelNetworkError('Connection dropped'))
+        this.abortUpgradeAndReconnectSse(new NetworkError('Connection dropped', true))
       }
       return
     }
     if (this.state.tag === 'open' && this.state.upgrade.tag !== 'none' && this.state.upgrade.tag !== 'handoff') {
       this.state.upgrade.attempt.abort()
     }
-    const err = new ChannelNetworkError(
+    const err = new NetworkError(
       rejectedInitial
         ? `Server rejected ${this.transport.type === CHANNEL_TRANSPORT.SSE ? 'SSE' : 'WebSocket'} connection`
         : 'Connection dropped',
+      true,
     )
     this.handleTransportLoss(err, rejectedInitial)
   }
@@ -944,7 +946,7 @@ class ClientConnection implements MuxConnection {
       this.state.tag === 'reconnecting' ? this.state : { attempt: 0, startedAt: 0 }
 
     if (rejected && prevAttempt === 0) {
-      this.closeAll(err instanceof Error ? err : new ChannelNetworkError('Connection dropped'))
+      this.closeAll(err instanceof Error ? err : new NetworkError('Connection dropped', true))
       this.dispose()
       return
     }
@@ -954,7 +956,7 @@ class ClientConnection implements MuxConnection {
     }
     const startedAt = prevStartedAt || Date.now()
     if (Date.now() - startedAt > this.reconnectTimeoutMs) {
-      this.closeAll(err instanceof Error ? err : new ChannelNetworkError('Connection dropped'))
+      this.closeAll(err instanceof Error ? err : new NetworkError('Connection dropped', true))
       this.dispose()
       return
     }
@@ -1076,7 +1078,7 @@ class ClientConnection implements MuxConnection {
         continue
       }
       if (!serverMap.has(ix)) {
-        const err = new ChannelNetworkError('Channel not acknowledged by server after reconnect')
+        const err = new NetworkError('Channel not acknowledged by server after reconnect', true)
         this.releaseChannel(ix, entry.channel, err)
         entry.channel._onTransportClose(err)
         continue

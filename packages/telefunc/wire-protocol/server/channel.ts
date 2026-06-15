@@ -1,5 +1,6 @@
 export { Channel, ServerChannel, SERVER_CHANNEL_BRAND }
-export { ChannelClosedError, ChannelNetworkError, ChannelOverflowError } from '../channel-errors.js'
+export { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
+export { NetworkError } from '../../shared/NetworkError.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
@@ -28,7 +29,8 @@ import type { ShieldValidators } from '../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../shared/Abort.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
+import { ChannelClosedError } from '../channel-errors.js'
+import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_PING_INTERVAL_MIN_MS } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
@@ -317,7 +319,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       setTimeout(() => {
         this._ttlTimer = null
         this._shutdown(
-          new ChannelNetworkError('Channel timed out: no client connected within TTL after response was sent'),
+          new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
         )
       }, c.connectTtl),
     )
@@ -551,7 +553,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._reconnectTimer = unrefTimer(
       setTimeout(() => {
         this._reconnectTimer = null
-        this._shutdown(new ChannelNetworkError('Channel timed out: client did not reconnect within grace period'))
+        this._shutdown(new NetworkError('Channel timed out: client did not reconnect within grace period', true))
       }, reconnectTimeout),
     )
   }
@@ -559,7 +561,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerRecoveryFailure(): void {
     if (this._didShutdown) return
     this._peer = null
-    this._shutdown(new ChannelNetworkError('Channel not acknowledged by client after reconnect'))
+    this._shutdown(new NetworkError('Channel not acknowledged by client after reconnect', true))
   }
 
   _onPeerClose(): void {

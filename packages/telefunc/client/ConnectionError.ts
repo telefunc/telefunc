@@ -1,15 +1,19 @@
 export { ConnectionError }
 
-class ConnectionError extends Error {
+import { NetworkError } from '../shared/NetworkError.js'
+
+/**
+ * Thrown when a regular telefunction call can't reach the server.
+ * @deprecated Catch `NetworkError` instead — `ConnectionError` is a `NetworkError` with `isChannel: false`.
+ */
+class ConnectionError extends NetworkError {
   /**
-   * @deprecated Use `instanceof ConnectionError` instead.
+   * @deprecated Use `instanceof NetworkError` (or `instanceof ConnectionError`) instead.
    */
   readonly isConnectionError = true as const
 
   constructor(message = 'No Server Connection') {
-    super(message)
-    Object.setPrototypeOf(this, new.target.prototype)
+    super(message, false)
     this.name = 'ConnectionError'
-    Error.captureStackTrace?.(this, ConnectionError)
   }
 }
