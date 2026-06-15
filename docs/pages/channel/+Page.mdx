@@ -303,7 +303,7 @@ Only the two ends of a channel can use it, while anything that knows a `key` can
 
 ### Technically
 
-You can think of `new Broadcast()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received the broadcast object, and bridges that client into the keyed broadcast group that the static methods tap directly.
+You can think of `new Broadcast()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received the broadcast object, and bridges that client into the keyed broadcast group that the static methods publish to and subscribe from directly.
 
 ### Comparison
 
