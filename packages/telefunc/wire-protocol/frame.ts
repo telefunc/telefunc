@@ -12,7 +12,10 @@ export {
   textDecoder,
 }
 
-const textEncoder = new TextEncoder()
+const textEncoderInstance = new TextEncoder()
+const textEncoder = {
+  encode: (input?: string): Uint8Array<ArrayBuffer> => textEncoderInstance.encode(input) as Uint8Array<ArrayBuffer>,
+}
 const textDecoder = new TextDecoder()
 
 const U32_SIZE = 4 // byte size of a uint32
