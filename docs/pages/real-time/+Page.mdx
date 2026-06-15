@@ -227,6 +227,26 @@ room.publish({ user: 'Alice', text: 'Hello!' }) // checked against ChatMessage o
 Deploy it on a long-running server or Cloudflare Workers — not typical serverless. See <Link href="/scaling" /> and <Link href="/cloudflare" />.
 
 
+## Testing
+
+Telefunctions are plain functions — unit-test them by importing and calling them directly. Supply the <Link text="context" href="/getContext" /> with `provideTelefuncContext()`:
+
+```ts
+// ChatRoom.telefunc.test.ts
+// Environment: server
+
+import { provideTelefuncContext } from 'telefunc'
+import { onJoinRoom } from './ChatRoom.telefunc'
+
+test('rejects a non-member of the room', async () => {
+  provideTelefuncContext({ user: { id: 1, rooms: [] } })
+  await expect(onJoinRoom('general')).rejects.toThrow() // throws Abort()
+})
+```
+
+For the wire protocol itself — reconnection, multi-client broadcast, transport upgrades — use an end-to-end test against a running server.
+
+
 ## See also
 
 - <Link href="/live" />
