@@ -14,7 +14,7 @@ Telefunc supports real-time use cases — chat, file upload progress, live updat
 |---|---|---|
 | **Function passing** | Short-lived callbacks — progress updates, one-off server-to-client pushes | None |
 | **`new Channel()`** | Ongoing point-to-point messaging — commands, acks, request-response | None (SSE), or <Link text="WebSocket server setup" href="/server" /> (WS) |
-| **`new Broadcast()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
+| **`new BroadcastChannel()`** | Broadcast messaging — chat rooms, live feeds, notifications | Same as channels |
 
 > See also: <Link text={<><code>Channel</code> vs <code>Broadcast</code></>} href="/channel#channel-vs-broadcast" />
 
@@ -96,7 +96,7 @@ See <Link href="/channel" /> for the full API.
 
 ## Broadcast
 
-Use <Link text={<code>new Broadcast()</code>} href="/channel#new-broadcast" /> for broadcast messaging — all instances sharing a key form a broadcast group.
+Use <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" /> for broadcast messaging — all instances sharing a key form a broadcast group.
 
 ### Notifications
 
@@ -104,10 +104,10 @@ Use <Link text={<code>new Broadcast()</code>} href="/channel#new-broadcast" /> f
 // Notifications.telefunc.ts
 // Environment: server
 
-import { Broadcast } from 'telefunc'
+import { BroadcastChannel } from 'telefunc'
 
 export async function onListenNotifications(userId: string) {
-  return new Broadcast({ key: `notifications:${userId}` })
+  return new BroadcastChannel({ key: `notifications:${userId}` })
 }
 ```
 
@@ -125,10 +125,10 @@ notifications.subscribe((n) => showToast(n))
 // Chat.telefunc.ts
 // Environment: server
 
-import { Broadcast } from 'telefunc'
+import { BroadcastChannel } from 'telefunc'
 
 export async function onJoinChat(room: string) {
-  return new Broadcast({ key: `chat:${room}` })
+  return new BroadcastChannel({ key: `chat:${room}` })
 }
 ```
 
@@ -141,7 +141,7 @@ chat.subscribe((msg) => console.log(msg))
 chat.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
-See <Link href="/channel#new-broadcast" /> for the full `Broadcast` API.
+See <Link href="/channel#new-broadcastchannel" /> for the full `Broadcast` API.
 
 
 ## Authorization
@@ -152,12 +152,12 @@ A channel or broadcast is opened by a telefunction, so you protect it like any o
 // Team.telefunc.ts
 // Environment: server
 
-import { Broadcast, getContext, Abort } from 'telefunc'
+import { BroadcastChannel, getContext, Abort } from 'telefunc'
 
 export async function onJoinTeam(teamId: string) {
   const { user } = getContext()
   if (!user || !user.teams.includes(teamId)) throw Abort()
-  return new Broadcast({ key: `team:${teamId}` })
+  return new BroadcastChannel({ key: `team:${teamId}` })
 }
 ```
 

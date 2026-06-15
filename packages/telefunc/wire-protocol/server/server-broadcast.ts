@@ -1,4 +1,4 @@
-export { Broadcast, ServerBroadcast }
+export { Broadcast, BroadcastChannel, ServerBroadcast }
 
 import type {
   ChannelData,
@@ -86,16 +86,16 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   // Channel methods that don't apply to broadcast: throw at runtime.
   override send(): never {
-    assertUsage(false, '`send()` is not available on a `Broadcast` — use `publish()`.')
+    assertUsage(false, '`send()` is not available on a `BroadcastChannel` — use `publish()`.')
   }
   override sendBinary(): never {
-    assertUsage(false, '`sendBinary()` is not available on a `Broadcast` — use `publishBinary()`.')
+    assertUsage(false, '`sendBinary()` is not available on a `BroadcastChannel` — use `publishBinary()`.')
   }
   override listen(): never {
-    assertUsage(false, '`listen()` is not available on a `Broadcast` — use `subscribe()`.')
+    assertUsage(false, '`listen()` is not available on a `BroadcastChannel` — use `subscribe()`.')
   }
   override listenBinary(): never {
-    assertUsage(false, '`listenBinary()` is not available on a `Broadcast` — use `subscribeBinary()`.')
+    assertUsage(false, '`listenBinary()` is not available on a `BroadcastChannel` — use `subscribeBinary()`.')
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -312,9 +312,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 }
 
-/** Public surface of `Broadcast` — same shape `Channel` uses to hide internal `_methods`
- *  from autocomplete on user-facing `chat.` etc. The underlying class is `ServerBroadcast`. */
-type Broadcast<T = unknown> = {
+/** Public surface of a `BroadcastChannel` instance — same shape `Channel` uses to hide internal
+ *  `_methods` from autocomplete on user-facing `chat.` etc. The underlying class is `ServerBroadcast`. */
+type BroadcastChannel<T = unknown> = {
   readonly key: string
   readonly id: string
   readonly isClosed: boolean
@@ -333,8 +333,16 @@ type Broadcast<T = unknown> = {
   abort(abortValue: unknown, message?: string): void
 }
 
+/** `new BroadcastChannel({ key })` — one member of a keyed broadcast group: `publish()` fans out to
+ *  every subscriber of the key and `subscribe()` receives them. Returned from a telefunction, it's
+ *  the handle the client subscribes through. The underlying class is `ServerBroadcast`. */
+const BroadcastChannel = ServerBroadcast as {
+  new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
+}
+
+/** `Broadcast.*` — the static broadcast bus: server-side fan-out by key, with no client-facing
+ *  handle. Use `new BroadcastChannel()` when a key should be exposed to a client. */
 const Broadcast = ServerBroadcast as {
-  new <T = unknown>(opts: { key: string }): Broadcast<T>
   publish<U = unknown>(key: string, data: ChannelData<U>): BroadcastPublishResult | Promise<BroadcastPublishResult>
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
