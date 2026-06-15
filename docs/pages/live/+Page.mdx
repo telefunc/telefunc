@@ -42,4 +42,4 @@ Whatever you return or pass:
 
 ## Shipping to production
 
-Channels are stateful, so a multi-instance deployment needs sticky sessions and a cross-instance broadcast transport — see <Link href="/scaling" />. On Cloudflare Workers it's handled via Durable Objects — see <Link href="/cloudflare" />.
+Channels are stateful — a `Channel` lives in one server process and holds a connection open — so real-time needs a **long-running server**, not typical serverless (Vercel, Lambda), where function timeouts cut SSE connections short and there's no sticky routing for reconnects. Across multiple instances you also need sticky sessions and a cross-instance broadcast transport — see <Link href="/scaling" />. On Cloudflare Workers it's handled via Durable Objects — see <Link href="/cloudflare" />.
