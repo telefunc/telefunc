@@ -1,4 +1,7 @@
 import { Link } from '@brillout/docpress'
+import { StreamingBeta } from '../../components'
+
+<StreamingBeta />
 
 Telefunc supports streaming in both directions:
 - **Server → client**: Return `AsyncGenerator`, `ReadableStream`, `File` / `Blob` / `download()`, or nested `Promise` from a telefunction.
@@ -18,6 +21,8 @@ For values **returned** from a telefunction (server → client):
 | <Link text={<code>File</code>} href="/file-download" /> / <Link text={<code>Blob</code>} href="/file-download" /> | File downloads with `name` / `type` / `size` | Binary (`Uint8Array`) |
 | <Link text={<code>download()</code>} href="/file-download#streaming-with-download" /> | File / Blob downloads with progress + cancel, or upstream-streamed bytes | Binary (`Uint8Array`) |
 | Nested [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise) | Lazy parts of a response that resolve independently | Any serializable value |
+
+For values **passed** to a telefunction (client → server), pass a `ReadableStream` argument — covered in the *Client → server streaming* section below.
 
 
 ## `AsyncGenerator`
@@ -231,7 +236,7 @@ See <Link href="/close" /> for all cancellation methods (`close()`, `break`, `ge
 
 Telefunc distinguishes expected failures from bugs — even in streaming responses. If a generator or stream throws, the client receives a typed error while values already delivered remain available.
 
-See <Link href="/error-handling" /> for details.
+See <Link href="/error-handling#streaming-and-channel-errors" text="Error handling — streaming & channels" /> for details.
 
 
 ## See also
