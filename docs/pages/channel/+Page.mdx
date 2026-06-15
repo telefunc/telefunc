@@ -414,6 +414,11 @@ config.channel = {
 }
 ```
 
+> **What to tune** — defaults suit typical chat/dashboard traffic; reach for these only if you hit one:
+> - Slow/flaky clients dropping with `ChannelNetworkError` → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
+> - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit` / `bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
+> - Reconnects should replay more history → raise the replay buffers; lower them to cap memory.
+
 
 ## See also
 
