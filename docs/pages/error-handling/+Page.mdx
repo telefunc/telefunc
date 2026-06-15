@@ -145,12 +145,12 @@ If the user's browser can't connect to your server:
   <body>
     <script type="module">
       import { hello } from './hello.telefunc.js'
-      import { ConnectionError } from 'telefunc/client'
+      import { NetworkError } from 'telefunc/client'
 
       try {
         await hello('Eva')
       } catch(err) {
-        if (err instanceof ConnectionError) {
+        if (err instanceof NetworkError) {
           // There is a network problem:
           //  - the user isn't connected to the internet, or
           //  - your server is down.
@@ -161,6 +161,8 @@ If the user's browser can't connect to your server:
   </body>
 </html>
 ```
+
+> `NetworkError` covers both regular telefunction calls and channels — read `err.isChannel` to tell them apart (`false` for regular calls, `true` for channels). Regular calls still throw `ConnectionError` (now a `NetworkError` subclass), so existing `instanceof ConnectionError` checks keep working.
 
 
 ## Streaming and channel errors
