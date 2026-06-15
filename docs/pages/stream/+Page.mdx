@@ -24,6 +24,8 @@ For values **returned** from a telefunction (server → client):
 
 For values **passed** to a telefunction (client → server), pass a `ReadableStream` argument — covered in the *Client → server streaming* section below.
 
+> Structured values cross the wire via Telefunc's serializer — `Date`, `Map`, `Set`, `BigInt`, etc., not just JSON. Binary travels as `Uint8Array` (or `File` / `Blob`).
+
 
 ## `AsyncGenerator`
 
