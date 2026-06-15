@@ -2,6 +2,8 @@ import { Link } from '@brillout/docpress'
 
 Telefunc integrates with any server. For production deployments with streaming, channels, and WebSocket support, use `new Telefunc()`.
 
+> **Upgrading from `telefunc()`?** The old `telefunc(req)` middleware has been replaced — use `new Telefunc()` (full runtime: streaming, channels, WebSocket) as shown below, or the low-level <Link text="serve()" href="/serve" /> if you just need a request handler.
+
 
 ## Node.js
 
