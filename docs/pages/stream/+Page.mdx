@@ -187,10 +187,10 @@ await onIngest(stream, 'data.txt')
 A telefunction can return any combination of generators, streams, and promises.
 
 ```ts
-// Dashboard.telefunc.ts
+// Feed.telefunc.ts
 // Environment: server
 
-export async function onLoadDashboard() {
+export async function onLoadFeed() {
   async function* notifications(): AsyncGenerator<string> {
     for (const n of await fetchNotifications()) {
       yield n.text
@@ -198,7 +198,7 @@ export async function onLoadDashboard() {
   }
 
   return {
-    title: 'Dashboard',
+    title: 'Feed',
     stream: notifications(),
     fast: Promise.resolve({ count: 42 }),
     slow: fetchExtensiveReport(),
@@ -207,12 +207,12 @@ export async function onLoadDashboard() {
 ```
 
 ```tsx
-// Dashboard.tsx
+// Feed.tsx
 // Environment: client
 
-import { onLoadDashboard } from './Dashboard.telefunc'
+import { onLoadFeed } from './Feed.telefunc'
 
-const res = await onLoadDashboard()
+const res = await onLoadFeed()
 
 // Static values — available immediately
 console.log(res.title)
