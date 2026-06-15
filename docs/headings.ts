@@ -238,6 +238,11 @@ const headings = [
   },
   {
     level: 2,
+    title: '`new Telefunc()`',
+    url: '/Telefunc',
+  },
+  {
+    level: 2,
     title: '`serve()`',
     url: '/serve',
   },
