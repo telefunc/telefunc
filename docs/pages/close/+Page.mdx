@@ -46,6 +46,16 @@ await channel.close()
 
 All of these signal the server to stop producing and release resources.
 
+> `close()` ends a value **gracefully** (buffered data is flushed). To stop a call **immediately** instead, pass the pending call to `abort()` — the underlying request is cancelled and the result rejects with an `Abort` error (mid-stream, the next read rejects):
+> ```ts
+> // Environment: client
+>
+> import { abort } from 'telefunc/client'
+>
+> const call = onLoadDashboard()
+> abort(call) // cancels the in-flight call
+> ```
+
 
 ## `onClose()` (server)
 
