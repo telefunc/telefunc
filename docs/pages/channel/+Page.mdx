@@ -315,7 +315,7 @@ You can think of `new Broadcast()` as `new Channel()` plus the static `Broadcast
 | Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `channel = new Channel()` instance and returns `channel.client` for the client (asymmetric)</li></ul> | Symmetric:<ul><li>Same type for every member: `Broadcast<MessageType>`</li><li>The server uses and returns the same instance `Broadcast` (symmetric)</li></ul> |
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
-| Multi-server | [Sticky sessions](/scaling) | [Broadcast transport](#multi-server) |
+| Multi-server | <Link text="Sticky sessions" href="/scaling" /> | <Link text="Broadcast transport" href="#multi-server" /> |
 
 
 ## Multi-server
@@ -393,7 +393,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 | `ChannelOverflowError` | A buffered send was dropped — backlog exceeded `config.channel.bufferLimit` while the peer was disconnected | **Open** | Only the dropped `send()` rejects; `await` sends to apply backpressure |
 
 
-## Config
+## Configuration
 
 ```ts
 // Environment: server
@@ -416,7 +416,7 @@ config.channel = {
 }
 ```
 
-> **What to tune** — defaults suit typical chat/dashboard traffic; reach for these only if you hit one:
+> **What to tune**: defaults suit typical chat/dashboard traffic; reach for these only if you hit one:
 > - Slow/flaky clients dropping with `ChannelNetworkError` → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
 > - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit` / `bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
 > - Reconnects should replay more history → raise the replay buffers; lower them to cap memory.
