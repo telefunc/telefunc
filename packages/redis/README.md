@@ -5,7 +5,7 @@ Redis-backed `Broadcast` fan-out for Telefunc — publishes on any instance reac
 ## Install
 
 ```sh
-pnpm add @telefunc/redis ioredis
+npm install @telefunc/redis ioredis
 ```
 
 ## Setup
