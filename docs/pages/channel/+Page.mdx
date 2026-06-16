@@ -200,7 +200,9 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ## new BroadcastChannel()
 
-`new BroadcastChannel({ key })` creates one member of a broadcast group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to the key. Return the broadcast instance directly from a telefunction — no `.client` needed (unlike channels, broadcast has no directional type flip).
+`new BroadcastChannel({ key })` creates one member of a broadcast group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to the key. Return the `BroadcastChannel` instance directly from a telefunction — no `.client` needed (unlike channels, broadcast has no directional type flip).
+
+The name reflects the shape: a `Channel` to the one client that received it, bridged onto a keyed broadcast group. That same group is reachable on the server without an instance, through the static `Broadcast.*` bus — see <Link text="Server-side Broadcast" href="#server-side-broadcast" />.
 
 > **Keys are capabilities** — anyone who forms the same `key` joins the group. Secure a broadcast one of two ways:
 > - **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
@@ -248,14 +250,14 @@ chat.subscribe((msg, info) => {
 chat.publish({ user: 'Alice', text: 'Hello!', })
 ```
 
-### Server-only broadcast
+### Server-side Broadcast
 
-Use the static methods to publish and subscribe purely on the server — no client, no lifecycle:
+A `BroadcastChannel` bridges a *client* into a key's group. To publish or subscribe purely on the **server** — no client, no handle, no lifecycle — use the static `Broadcast.*` methods instead. They take the `key` as their first argument and reach the same group: `Broadcast.publish(key, …)` is delivered to every member of the key, including any client holding a `BroadcastChannel` for it.
 
 ```ts
 import { Broadcast } from 'telefunc'
 
-// Fire-and-forget publish
+// Fire-and-forget publish to every subscriber of the key
 Broadcast.publish('room:lobby', { text: 'Hello!' })
 
 // Server-only subscription
@@ -264,17 +266,19 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 })
 ```
 
-### Broadcast methods
+### BroadcastChannel methods
 
 | Method | Description |
 |---|---|
-| `publish(data)` | Send to all subscribers with the same key. Returns a receipt. |
+| `publish(data)` | Publish to every subscriber of the key. Returns a receipt. |
 | `subscribe(cb)` | Receive `(data, info)`. Returns an unsubscribe function. |
-| `publishBinary(data)` | Send raw binary to all subscribers. Returns a receipt. |
+| `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
 | `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
 | `onOpen(cb)` / `onClose(cb)` | Lifecycle callbacks. |
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
+
+> The instance has its `key` baked in, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#server-side-broadcast" /> / `Broadcast.subscribe(key, cb)` take it first — and have no `onOpen` / `onClose` / `close` / `abort`, since there's no instance to manage.
 
 Both `publish` and `subscribe` share the same `info` object:
 
@@ -289,15 +293,15 @@ info.timestamp  // server timestamp (Unix epoch ms)
 > In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
 
 
-## `Channel` vs `Broadcast`
+## `Channel` vs `BroadcastChannel`
 
 ### Fundamentally
 
-Fundamentally, the difference is what a message is addressed to: a `Channel` message is addressed to *someone*, a `Broadcast` message is addressed to *a topic* (the `key`).
+Fundamentally, the difference is what a message is addressed to: a channel message is addressed to *someone*, a broadcast message is addressed to *a topic* (the `key`).
 
-A `Channel` is a conversation, like a phone call: two fixed ends (the server and the one client that received the channel), private to them, finishes when either side hangs up.
+A channel is a conversation, like a phone call: two fixed ends (the server and the one client that received the channel), private to them, finishes when either side hangs up.
 
-A `Broadcast` is an announcement, like a radio frequency: whoever tunes in to the `key` receives everything published to it (the publisher included), members come and go, and the `key` belongs to no one.
+A broadcast is an announcement, like a radio frequency: whoever tunes in to the `key` receives everything published to it (the publisher included), members come and go, and the `key` belongs to no one.
 
 Only the two ends of a channel can use it, while anything that knows a `key` can join its broadcast. A channel ends when either side closes it, while a broadcast outlives any single member.
 
@@ -320,7 +324,7 @@ You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Br
 
 ## Multi-server
 
-By default, `Broadcast` is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, configure a transport on `config.broadcast.transport`.
+By default, broadcast is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, configure a transport on `config.broadcast.transport`.
 
 For Redis-backed multi-server routing and broadcast fan-out, see <Link href="/redis" text={<code>@telefunc/redis</code>} />.
 
@@ -372,7 +376,7 @@ chat.abort({ reason: 'session-expired' })
 
 ## Reconnection
 
-If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcast instances:
+If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
 - Messages sent while offline are buffered and delivered in order on reconnect.
 - Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed and duplicates are ignored.

@@ -6,7 +6,7 @@ import { StreamingBeta } from '../../components'
 Telefunc lets you move **live values** across the client/server boundary — async sequences, byte streams, files, and persistent connections — by returning them from, or passing them to, a telefunction like any other value.
 
 It works in **both directions**:
-- **Server → client** — return an `AsyncGenerator`, `ReadableStream`, `File`, nested `Promise`, `Channel`, or `Broadcast`.
+- **Server → client** — return an `AsyncGenerator`, `ReadableStream`, `File`, nested `Promise`, `Channel`, or `BroadcastChannel`.
 - **Client → server** — pass a `ReadableStream`, `File`, or callback as an argument.
 
 > Plain telefunction calls are unaffected — these capabilities kick in only when a live value is involved, with zero config.
