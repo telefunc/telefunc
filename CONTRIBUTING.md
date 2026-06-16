@@ -119,6 +119,20 @@ cd docs/ # From the monorepo root
 pnpm run dev
 ```
 
+**3. Conventions** (streaming & real-time pages)
+
+A few conventions, enforced by `pnpm run docs:lint`:
+
+- Internal links use `<Link href="/foo" />`, never markdown `[…](/foo)`.
+- Every page ends with a `## See also` section.
+- One term per concept: `real-time` (hyphenated), `WebSocket`.
+- Every `#anchor` link resolves to a real heading.
+
+Two conventions the linter doesn't enforce:
+
+- Annotate code with `// Environment: server` / `// Environment: client`; single-environment pages also carry a page-level `**Environment**: server|client`.
+- Reach for a typed callout when something is load-bearing — `<Warning>` (must-heed / security), `<Danger>` (data loss), `<Advanced>` (skippable deep-dive) — and a plain `>` blockquote for ordinary notes.
+
 <br/>
 
 
