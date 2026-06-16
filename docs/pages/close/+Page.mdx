@@ -5,7 +5,7 @@ import { StreamingBeta } from '../../components'
 
 `close()` and `onClose()` manage the lifecycle of telefunction values — anything returned from or passed to a telefunction that holds an open connection.
 
-> Applies to both <Link href="/stream">streaming</Link> (`AsyncGenerator`, `ReadableStream`, files) and <Link href="/real-time">real-time</Link> (`Channel`, `Broadcast`) values — they all close the same way.
+> Applies to both <Link href="/stream">streaming</Link> (`AsyncGenerator`, `ReadableStream`, files) and <Link href="/real-time">real-time</Link> (`Channel`, `BroadcastChannel`) values — they all close the same way.
 
 
 ## At a glance
@@ -17,10 +17,10 @@ There's one umbrella API, `close()`, plus the per-type APIs. They all signal the
 | `close(value)` | client | Graceful | Everything in the returned value (walked recursively) |
 | `gen.return()` / `break` | client | Graceful | One `AsyncGenerator` |
 | `reader.cancel()` | client | Graceful | One `ReadableStream` |
-| <Link text={<code>channel.close()</code>} href="/channel#lifecycle" /> | either side | Graceful | One `Channel` / `Broadcast` (both ends) |
+| <Link text={<code>channel.close()</code>} href="/channel#lifecycle" /> | either side | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
 | `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
 | <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
-| <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | either side | Immediate | One `Channel` / `Broadcast`, with an abort value |
+| <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | either side | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
 | `onClose(cb)` | server | — (cleanup hook) | Fires when the value ends, however it ended |
 
 The rest of this page covers `close()`, `abort()`, and `onClose()` in detail; channel-specific closing is on <Link href="/channel#lifecycle" />.

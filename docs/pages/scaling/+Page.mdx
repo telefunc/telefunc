@@ -6,7 +6,7 @@ import { StreamingBeta } from '../../components'
 To scale Telefunc horizontally across several server processes (multiple Node instances, multiple containers, multiple machines), two pieces have to be set up.
 
 1. The load balancer in front of your instances must route every request from the same client to the same instance — **sticky sessions**.
-2. `Broadcast` publishes must fan out across instances — install a **broadcast transport** like <Link href="/redis">`@telefunc/redis`</Link>.
+2. Broadcast publishes must fan out across instances — install a **broadcast transport** like <Link href="/redis">`@telefunc/redis`</Link>.
 
 That's the whole picture. The rest of this page explains why and shows the common configurations.
 
@@ -22,7 +22,7 @@ Without sticky sessions a reconnect that lands on a different instance sees no m
 
 ## Broadcast across instances
 
-A `Broadcast` is different: publishers and subscribers are intentionally decoupled — they only share a string key. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publish on instance A reach a subscriber on instance B.
+A broadcast is different: publishers and subscribers are intentionally decoupled — they only share a string key. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publish on instance A reach a subscriber on instance B.
 
 In a single-instance setup the default in-memory transport is enough. In a multi-instance setup, configure a transport that fans out across the cluster:
 
@@ -75,7 +75,7 @@ In the target group's attributes, enable **Stickiness** with type **Load balance
 
 ### Cloud Run / serverless
 
-Serverless platforms that don't expose sticky-session routing aren't a good fit for `Channel`. `Broadcast` still works (publishes round-trip through Redis), but channel reconnects can fail unpredictably. Most teams pair Telefunc with a regular long-running server tier when they need channels at scale.
+Serverless platforms that don't expose sticky-session routing aren't a good fit for `Channel`. Broadcasts still work (publishes round-trip through Redis), but channel reconnects can fail unpredictably. Most teams pair Telefunc with a regular long-running server tier when they need channels at scale.
 
 
 ## Cloudflare
