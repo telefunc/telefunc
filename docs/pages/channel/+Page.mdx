@@ -1,5 +1,5 @@
 import { Link } from '@brillout/docpress'
-import { StreamingBeta } from '../../components'
+import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
@@ -15,7 +15,7 @@ Telefunc has two real-time **primitives** — and one **composition** of them:
 
 > By default, channels and broadcasts use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background, see <Link href="/transport" />.
 
-> **Not for serverless**: "no extra setup" still means a **long-running server** — a channel holds a connection open, which serverless functions (Vercel, Lambda) cut short. See <Link href="/scaling" />, or <Link href="/cloudflare" /> for Cloudflare Workers.
+<NeedsLongRunningServer />
 
 > For short-lived callbacks (e.g. progress updates), <Link href="/real-time">function passing</Link> is usually simpler.
 

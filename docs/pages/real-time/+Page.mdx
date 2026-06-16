@@ -1,5 +1,5 @@
 import { Link } from '@brillout/docpress'
-import { StreamingBeta } from '../../components'
+import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
@@ -21,7 +21,7 @@ Telefunc supports real-time use cases — chat, file upload progress, live updat
 
 > **Runtime safety**: whichever primitive you use, every value the client sends to the server is shield-validated against your TypeScript types before it reaches your code — function-call <Link href="/shield#function-arguments" text="arguments" />, <Link href="/shield#channels" text="channel messages" />, and broadcast <Link href="/shield#broadcast" text="publishes" />. A failing check is rejected with `ShieldValidationError`.
 
-> **Deployment**: channels and broadcasts hold a connection open, so they need a long-running server — typical serverless (Vercel, Lambda) cuts them off. See <Link href="/scaling" />, or <Link href="/cloudflare" /> for Cloudflare's Durable Objects.
+<NeedsLongRunningServer />
 
 
 ## Function passing
