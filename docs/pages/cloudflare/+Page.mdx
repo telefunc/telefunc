@@ -1,4 +1,4 @@
-import { Link } from '@brillout/docpress'
+import { Link, Warning, Advanced } from '@brillout/docpress'
 import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
@@ -98,7 +98,11 @@ Every telefunction call and channel message from a browser must reach the **same
 
 On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns it to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
 
-> **CDN / reverse proxy note**: Make sure `x-telefunc-session` is not stripped from responses or requests. Without it, each request would be routed to a random Durable Object and channel state would be lost.
+<Warning>
+
+**CDN / reverse proxy** — make sure `x-telefunc-session` is not stripped from responses or requests. Without it, each request would be routed to a random Durable Object and channel state would be lost.
+
+</Warning>
 
 
 ## Scaling
@@ -128,7 +132,11 @@ Broadcasts (<Link href="/channel#new-broadcastchannel" />) fan out across all re
 
 ### How it works
 
-> You can skip this section — it's Telefunc's internal fan-out, not anything you configure.
+<Advanced>
+
+You can skip this section — it's Telefunc's internal fan-out, not anything you configure.
+
+</Advanced>
 
 ```
 Publisher (Durable Object)
@@ -197,9 +205,13 @@ const tf = new Telefunc({
 
 ## Hibernation
 
-> **[Hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#why-use-hibernation) while channels are open is not supported.**
->
-> Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
+<Warning>
+
+**[Hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#why-use-hibernation) while channels are open is not supported.**
+
+Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
+
+</Warning>
 
 Once all channels close and no clients are connected, the Durable Object can hibernate — after the reconnect and idle windows expire.
 

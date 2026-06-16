@@ -1,4 +1,4 @@
-import { Link } from '@brillout/docpress'
+import { Link, Warning } from '@brillout/docpress'
 import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
@@ -99,7 +99,11 @@ export async function* onChat(prompt: string) {
 }
 ```
 
-> **Pitfall**: anything a long-lived telefunction opens — `setInterval`, an event subscription, a DB cursor, an upstream stream — outlives the call and **leaks** unless you release it in `onClose()`. If you set it up, tear it down here.
+<Warning>
+
+**Pitfall** — anything a long-lived telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the call and **leaks** unless you release it in `onClose()`. If you set it up, tear it down here.
+
+</Warning>
 
 
 ## Automatic cleanup (GC)
