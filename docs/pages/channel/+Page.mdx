@@ -395,6 +395,8 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 
 ## Configuration
 
+> This is the **server-side** `config.channel` — reconnect/idle timeouts and buffer limits. It's a separate object from the **client-side** <Link text={<code>config.channel.transports</code>} href="/transport#channel-transport" /> (`telefunc/client`); the assignment below sets every server-side field at once and doesn't touch the client transports.
+
 ```ts
 // Environment: server
 
