@@ -258,7 +258,7 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Real-Time',
+    title: 'Channels & Broadcast',
   },
   {
     level: 2,
