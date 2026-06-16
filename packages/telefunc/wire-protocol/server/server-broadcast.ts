@@ -304,15 +304,10 @@ type BroadcastChannel<T = unknown> = {
   abort(abortValue: unknown, message?: string): void
 }
 
-/** `new BroadcastChannel({ key })` — one member of a keyed broadcast group: `publish()` fans out to
- *  every subscriber of the key and `subscribe()` receives them. Returned from a telefunction, it's
- *  the handle the client subscribes through. The underlying class is `ServerBroadcast`. */
 const BroadcastChannel = ServerBroadcast as {
   new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
 }
 
-/** `Broadcast.*` — the static broadcast bus: server-side fan-out by key, with no client-facing
- *  handle. Use `new BroadcastChannel()` when a key should be exposed to a client. */
 const Broadcast = {
   publish<U = unknown>(key: string, data: ChannelData<U>): BroadcastPublishResult | Promise<BroadcastPublishResult> {
     const adapter = getBroadcastAdapter()
