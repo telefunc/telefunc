@@ -3,14 +3,14 @@ import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
 
-`close()` and `onClose()` manage the lifecycle of telefunction values — anything returned from or passed to a telefunction that holds an open connection.
+`close()` and `onClose()` manage the lifecycle of live values — anything returned from or passed to a telefunction that holds an open connection.
 
 > Applies to both <Link href="/stream">streaming</Link> (`AsyncGenerator`, `ReadableStream`, files) and <Link href="/real-time">real-time</Link> (`Channel`, `BroadcastChannel`) values — they all close the same way.
 
 
 ## At a glance
 
-There's one umbrella API, `close()`, plus the per-type APIs. They all signal the server to stop producing and release resources — the difference is **graceful** (flush buffered data, then close) vs **immediate** (cancel in flight):
+There's one umbrella API, `close()`, plus the per-type APIs. They all signal the server to stop producing and release resources — the difference is **graceful** (flush buffered data, then close) vs **immediate** (cancel in-flight work):
 
 | API | Side | Graceful / immediate | Closes |
 |---|---|---|---|
@@ -28,7 +28,7 @@ The rest of this page covers `close()`, `abort()`, and `onClose()` in detail; ch
 
 ## `close()` (client)
 
-`close()` from `telefunc/client` gracefully closes any value returned by a telefunction. It walks the return value recursively and closes everything in one call.
+`close()` from `telefunc/client` gracefully closes any value returned by a telefunction. In one call, it closes every live value nested anywhere in the return value.
 
 ```ts
 // Environment: client
@@ -67,7 +67,7 @@ await channel.close()
 
 All of these signal the server to stop producing and release resources.
 
-> `close()` ends a value **gracefully** (buffered data is flushed). To stop a call **immediately** instead, pass the pending call to `abort()` — the underlying request is cancelled and the result rejects with an `Abort` error (mid-stream, the next read rejects):
+> `close()` ends a value **gracefully** (buffered data is flushed). To stop a call **immediately** instead, pass the pending call to `abort()` — the request is cancelled, and the pending call (or the next read, if you're mid-stream) rejects with an `Abort` error:
 > ```ts
 > // Environment: client
 >

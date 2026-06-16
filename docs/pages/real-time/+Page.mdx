@@ -97,7 +97,7 @@ See <Link href="/channel" /> for the full API.
 
 ## Broadcast
 
-Broadcasting is keyed pub/sub — everything sharing a `key` forms a group. There are two faces: the server-side <Link text={<code>Broadcast</code>} href="/channel#broadcast" /> bus (`publish` / `subscribe` by key), and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, which bridges a client into a key's group. Return a `BroadcastChannel` to broadcast to clients:
+Broadcasting is keyed pub/sub — everything sharing a `key` forms a group. There are two pieces: the server-side <Link text={<code>Broadcast</code>} href="/channel#broadcast" /> bus (`publish` / `subscribe` by key), and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, which bridges a client into a key's group. Return a `BroadcastChannel` to broadcast to clients:
 
 ### Notifications
 

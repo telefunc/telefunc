@@ -23,7 +23,7 @@ The Telefunc bundler plugin (Vite, webpack, Next.js, Babel) detects `@telefunc/r
 
 ## Live stock ticker
 
-Server pushes prices every second. Client applies operators locally — filtering and limiting happen on the client with standard RxJS.
+Server pushes prices every second. The client filters and limits them locally, with standard RxJS operators.
 
 ```ts
 // StockPrice.telefunc.ts
@@ -79,7 +79,7 @@ edits.subscribe(edit => applyEdit(edit))
 edits.next({ userId: 'alice', text: 'Hello' })
 ```
 
-> **Single server.** A module-level `Subject` lives in one server process. These multicast examples (the editor above, and *Live cursors* below) work as-is on a single instance; across multiple instances each process has its own `Subject`, so route shared state through a broadcast transport instead — see <Link href="/scaling" />.
+> **Single server.** A module-level `Subject` lives in one server process. These multicast examples (the editor above, and *Live cursors* below) work as-is on a single instance. Across multiple instances, each process has its own `Subject` — so route shared state through a broadcast transport instead, see <Link href="/scaling" />.
 
 
 
@@ -194,7 +194,7 @@ export class DashboardComponent {
 
 ## Shields
 
-A `Subject<T>` or `Observable<T>` passed as a telefunction argument gets a shield on each `next(v)` value arriving at the server. Terminal signals (`error`, `complete`) are untyped and pass through unshielded.
+When you pass a `Subject<T>` or `Observable<T>` as a telefunction argument, each `next(v)` value is shield-validated against `T` as it arrives at the server. Terminal signals (`error`, `complete`) are untyped and pass through unshielded.
 
 See <Link href="/shield" /> for how telefunction arguments are validated in general.
 
