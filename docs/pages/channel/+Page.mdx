@@ -5,13 +5,13 @@ import { StreamingBeta } from '../../components'
 
 **Environment**: server.
 
-Telefunc provides two primitives for real-time communication:
+Telefunc has two real-time **primitives** — and one **composition** of them:
 
-| | `new Channel()` | `new BroadcastChannel()` |
-|---|---|---|
-| Purpose | Direct messages between *one* server and *one* client | Broadcast to *all* subscribers |
+- **`new Channel()`** — a private two-way pipe between the server and *one* client.
+- **`Broadcast`** — a keyed pub/sub **bus**: `publish()` / `subscribe()` by string `key`, server-side.
+- **`new BroadcastChannel()`** — a `Channel` bridged onto a `Broadcast` key. The two combined.
 
-Both are returned from a telefunction — they serialize into client-side objects automatically.
+`new Channel()` and `new BroadcastChannel()` are returned from a telefunction — they serialize into client-side objects automatically. `Broadcast` is a server-side API, so there's nothing to return.
 
 > By default, channels and broadcasts use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background, see <Link href="/transport" />.
 
@@ -198,11 +198,40 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 ```
 
 
+## Broadcast
+
+`Broadcast` is a keyed pub/sub **bus**: `publish()` to a `key` reaches every `subscribe()` on that same `key`, anywhere — on the server, or on any client. Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
+
+The static methods run purely on the server — no client, no handle, no lifecycle — and take the `key` as their first argument:
+
+```ts
+import { Broadcast } from 'telefunc'
+
+// Publish to every subscriber of the key
+Broadcast.publish('room:lobby', { text: 'Hello!' })
+
+// Subscribe on the server
+const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
+  console.log(msg, info.seq)
+})
+```
+
+`publish()` returns a receipt and `subscribe()` receives the same `info`:
+
+```ts
+info.key        // 'room:lobby' — the broadcast key
+info.seq        // monotonic sequence number for this key
+info.timestamp  // server timestamp (Unix epoch ms)
+```
+
+`seq` is monotonic per `key`, useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
+
+> In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
+
+
 ## new BroadcastChannel()
 
-`new BroadcastChannel({ key })` creates one member of a broadcast group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to the key. Return the `BroadcastChannel` instance directly from a telefunction — no `.client` needed (unlike channels, broadcast has no directional type flip).
-
-The name reflects the shape: a `Channel` to the one client that received it, bridged onto a keyed broadcast group. That same group is reachable on the server without an instance, through the static `Broadcast.*` bus — see <Link text="Server-side Broadcast" href="#server-side-broadcast" />.
+`new BroadcastChannel({ key })` is the composition: a `Channel` to the one client that received it, bridged onto a `Broadcast` key. Return it from a telefunction and that client can `publish()` / `subscribe()` on the key — every message reaches every member of the group: the other subscribers, the server, and the publishing instance itself. No `.client` needed: broadcast is symmetric (one message type, no directional flip), so the same instance works on both ends — unlike channels.
 
 > **Keys are capabilities** — anyone who forms the same `key` joins the group. Secure a broadcast one of two ways:
 > - **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
@@ -250,22 +279,6 @@ chat.subscribe((msg, info) => {
 chat.publish({ user: 'Alice', text: 'Hello!', })
 ```
 
-### Server-side Broadcast
-
-A `BroadcastChannel` bridges a *client* into a key's group. To publish or subscribe purely on the **server** — no client, no handle, no lifecycle — use the static `Broadcast.*` methods instead. They take the `key` as their first argument and reach the same group: `Broadcast.publish(key, …)` is delivered to every member of the key, including any client holding a `BroadcastChannel` for it.
-
-```ts
-import { Broadcast } from 'telefunc'
-
-// Fire-and-forget publish to every subscriber of the key
-Broadcast.publish('room:lobby', { text: 'Hello!' })
-
-// Server-only subscription
-const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
-  console.log(msg, info.seq)
-})
-```
-
 ### BroadcastChannel methods
 
 | Method | Description |
@@ -278,19 +291,7 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
 
-> The instance has its `key` baked in, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#server-side-broadcast" /> / `Broadcast.subscribe(key, cb)` take it first — and have no `onOpen` / `onClose` / `close` / `abort`, since there's no instance to manage.
-
-Both `publish` and `subscribe` share the same `info` object:
-
-```ts
-info.key        // 'chat:lobby' — the broadcast key
-info.seq        // monotonic sequence number for this key
-info.timestamp  // server timestamp (Unix epoch ms)
-```
-
-`publish()` returns a `Promise` that resolves to `info` once the message is accepted. `subscribe()` receives `info` alongside each message — useful for ordering and gap detection.
-
-> In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
+> The instance has its `key` baked in, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#broadcast" /> / `Broadcast.subscribe(key, cb)` take it first — and have no `onOpen` / `onClose` / `close` / `abort`, since there's no instance to manage.
 
 
 ## `Channel` vs `BroadcastChannel`
