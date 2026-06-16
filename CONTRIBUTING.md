@@ -129,7 +129,7 @@ Enforced by `pnpm run docs:lint`:
 Also:
 
 - Annotate code with `// Environment: server` / `// Environment: client`; single-environment pages also carry a page-level `**Environment**: server|client`.
-- Reach for a typed callout when something is load-bearing — `<Warning>` (must-heed / security), `<Danger>` (data loss), `<Advanced>` (skippable deep-dive) — and a plain `>` blockquote for ordinary notes.
+- Reach for a typed callout when something is load-bearing — `<Warning>` (must-heed / security), `<Advanced>` (skippable deep-dive) — and a plain `>` blockquote for ordinary notes.
 
 <br/>
 
