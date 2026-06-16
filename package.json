@@ -16,7 +16,7 @@
     "docs": "cd docs/ && pnpm run dev",
     "// Build website for production": "",
     "docs:build": "cd docs/ && pnpm run build",
-    "// Lint the docs (static checks: anchor integrity, conventions)": "",
+    "// Lint the docs (static checks)": "",
     "docs:lint": "node docs/check-docs.mjs",
     "// Test website (CI)": "",
     "docs:test": "pnpm run docs:lint && cd docs/ && test-e2e",
