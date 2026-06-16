@@ -5,7 +5,11 @@ import { StreamingBeta } from '../../components'
 
 Return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) from a telefunction like any other value. The client receives a standard `File` / `Blob` ready for `URL.createObjectURL`, `<img src>`, `fetch({ body })`, `FormData`, etc.
 
-> For large downloads, or bytes streamed through your server from an upstream source, use `download()` — it adds progress, cancel, and save-to-disk, without ever buffering the full payload (on either the server or the client).
+> **Which API?**
+> - **Bytes already in memory** → return a native `File` / `Blob` (as above).
+> - **Large files, bytes streamed from an upstream source, or you need progress / cancel / save-to-disk** → wrap them with <Link text={<code>download()</code>} href="#streaming-with-download" />, which never buffers the full payload (on either the server or the client).
+>
+> The tables below break down the memory trade-offs.
 
 
 ## Which one should I use?
