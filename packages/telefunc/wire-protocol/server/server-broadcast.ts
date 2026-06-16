@@ -1,4 +1,4 @@
-export { Broadcast, ServerBroadcast }
+export { Broadcast, BroadcastChannel, ServerBroadcast }
 
 import type {
   ChannelData,
@@ -55,47 +55,18 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     return value !== null && typeof value === 'object' && SERVER_BROADCAST_BRAND in value
   }
 
-  static publish<U = unknown>(
-    key: string,
-    data: ChannelData<U>,
-  ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
-    const adapter = getBroadcastAdapter()
-    const serialized = stringify(data)
-    return adapter.publish(key, serialized)
-  }
-
-  static subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
-    const adapter = getBroadcastAdapter()
-    return adapter.subscribe(key, (serialized, info) => {
-      const data = parse(serialized) as ChannelData<U>
-      callback(data, { key, seq: info.seq, timestamp: info.timestamp })
-    })
-  }
-
-  static publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
-    const adapter = getBroadcastAdapter()
-    return adapter.publishBinary(key, data)
-  }
-
-  static subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
-    const adapter = getBroadcastAdapter()
-    return adapter.subscribeBinary(key, (data, info) => {
-      callback(data, { key, seq: info.seq, timestamp: info.timestamp })
-    })
-  }
-
   // Channel methods that don't apply to broadcast: throw at runtime.
   override send(): never {
-    assertUsage(false, '`send()` is not available on a `Broadcast` — use `publish()`.')
+    assertUsage(false, '`send()` is not available on a `BroadcastChannel` — use `publish()`.')
   }
   override sendBinary(): never {
-    assertUsage(false, '`sendBinary()` is not available on a `Broadcast` — use `publishBinary()`.')
+    assertUsage(false, '`sendBinary()` is not available on a `BroadcastChannel` — use `publishBinary()`.')
   }
   override listen(): never {
-    assertUsage(false, '`listen()` is not available on a `Broadcast` — use `subscribe()`.')
+    assertUsage(false, '`listen()` is not available on a `BroadcastChannel` — use `subscribe()`.')
   }
   override listenBinary(): never {
-    assertUsage(false, '`listenBinary()` is not available on a `Broadcast` — use `subscribeBinary()`.')
+    assertUsage(false, '`listenBinary()` is not available on a `BroadcastChannel` — use `subscribeBinary()`.')
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -312,9 +283,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 }
 
-/** Public surface of `Broadcast` — same shape `Channel` uses to hide internal `_methods`
- *  from autocomplete on user-facing `chat.` etc. The underlying class is `ServerBroadcast`. */
-type Broadcast<T = unknown> = {
+/** Public surface of a `BroadcastChannel` instance — same shape `Channel` uses to hide internal
+ *  `_methods` from autocomplete on user-facing `chat.` etc. The underlying class is `ServerBroadcast`. */
+type BroadcastChannel<T = unknown> = {
   readonly key: string
   readonly id: string
   readonly isClosed: boolean
@@ -333,10 +304,31 @@ type Broadcast<T = unknown> = {
   abort(abortValue: unknown, message?: string): void
 }
 
-const Broadcast = ServerBroadcast as {
-  new <T = unknown>(opts: { key: string }): Broadcast<T>
-  publish<U = unknown>(key: string, data: ChannelData<U>): BroadcastPublishResult | Promise<BroadcastPublishResult>
-  subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe
-  publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
-  subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe
+const BroadcastChannel = ServerBroadcast as {
+  new <T = unknown>(opts: { key: string }): BroadcastChannel<T>
+}
+
+const Broadcast = {
+  publish<U = unknown>(key: string, data: ChannelData<U>): BroadcastPublishResult | Promise<BroadcastPublishResult> {
+    const adapter = getBroadcastAdapter()
+    const serialized = stringify(data)
+    return adapter.publish(key, serialized)
+  },
+  subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
+    const adapter = getBroadcastAdapter()
+    return adapter.subscribe(key, (serialized, info) => {
+      const data = parse(serialized) as ChannelData<U>
+      callback(data, { key, seq: info.seq, timestamp: info.timestamp })
+    })
+  },
+  publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
+    const adapter = getBroadcastAdapter()
+    return adapter.publishBinary(key, data)
+  },
+  subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
+    const adapter = getBroadcastAdapter()
+    return adapter.subscribeBinary(key, (data, info) => {
+      callback(data, { key, seq: info.seq, timestamp: info.timestamp })
+    })
+  },
 }

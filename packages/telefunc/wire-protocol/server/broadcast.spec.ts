@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { ServerBroadcast } from './server-broadcast.js'
+import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
@@ -449,17 +449,17 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
-// Static methods — server-only fire-and-forget broadcast. Bypasses the
-// instance-lifecycle (no register, no peer) and goes straight to the adapter.
-// Bug class: regression where statics start touching instance state.
+// Static bus (`Broadcast.*`) — server-only fire-and-forget broadcast. Bypasses
+// the instance-lifecycle (no register, no peer) and goes straight to the adapter.
+// Bug class: regression where the static bus starts touching instance state.
 // ───────────────────────────────────────────────────────────────────────────
 
-describe('ServerBroadcast static publish/subscribe', () => {
+describe('Broadcast static bus (publish/subscribe)', () => {
   it('static publish + static subscribe deliver without any instance', async () => {
     const received: Array<{ text: string }> = []
-    const unsubscribe = ServerBroadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))
+    const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))
 
-    await ServerBroadcast.publish('room:static', { text: 'fire-and-forget' })
+    await Broadcast.publish('room:static', { text: 'fire-and-forget' })
 
     expect(received).toEqual([{ text: 'fire-and-forget' }])
     unsubscribe()
@@ -467,11 +467,11 @@ describe('ServerBroadcast static publish/subscribe', () => {
 
   it('static unsubscribe stops further deliveries', async () => {
     const received: Array<{ text: string }> = []
-    const unsubscribe = ServerBroadcast.subscribe<{ text: string }>('room:static-unsub', (m) => received.push(m))
+    const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static-unsub', (m) => received.push(m))
 
-    await ServerBroadcast.publish('room:static-unsub', { text: 'first' })
+    await Broadcast.publish('room:static-unsub', { text: 'first' })
     unsubscribe()
-    await ServerBroadcast.publish('room:static-unsub', { text: 'second' })
+    await Broadcast.publish('room:static-unsub', { text: 'second' })
 
     expect(received).toEqual([{ text: 'first' }])
   })

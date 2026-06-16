@@ -264,7 +264,7 @@ const headings = [
     level: 2,
     title: '`Channel` & `Broadcast`',
     url: '/channel',
-    sectionTitles: ['new Broadcast()'],
+    sectionTitles: ['new BroadcastChannel()'],
   },
   {
     level: 2,

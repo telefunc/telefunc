@@ -1,8 +1,8 @@
 export { onJoinRoom }
 
-import { Broadcast } from 'telefunc'
+import { BroadcastChannel } from 'telefunc'
 
 async function onJoinRoom(roomId: string) {
-  const room = new Broadcast({ key: `video:${roomId}` })
+  const room = new BroadcastChannel({ key: `video:${roomId}` })
   return room
 }

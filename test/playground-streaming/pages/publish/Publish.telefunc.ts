@@ -1,6 +1,6 @@
 export { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient }
 
-import { Broadcast } from 'telefunc'
+import { BroadcastChannel } from 'telefunc'
 
 type TextMsg = { text: string; from: string }
 
@@ -9,8 +9,8 @@ type TextMsg = { text: string; from: string }
  *  fixed key would leak seq state across page loads and break the [1,2,3] assertion. */
 async function onTextBroadcast() {
   const key = `room:text-test:${crypto.randomUUID()}`
-  const publisher = new Broadcast<TextMsg>({ key })
-  const subscriber = new Broadcast<TextMsg>({ key })
+  const publisher = new BroadcastChannel<TextMsg>({ key })
+  const subscriber = new BroadcastChannel<TextMsg>({ key })
 
   const received: Array<{ text: string; from: string; seq: number }> = []
   subscriber.subscribe((msg, info) => {
@@ -28,8 +28,8 @@ async function onTextBroadcast() {
  *  Unique key per call, same reason as onTextBroadcast(). */
 async function onBinaryBroadcastPair() {
   const key = `room:binary-test:${crypto.randomUUID()}`
-  const publisher = new Broadcast({ key })
-  const subscriber = new Broadcast({ key })
+  const publisher = new BroadcastChannel({ key })
+  const subscriber = new BroadcastChannel({ key })
 
   const received: Array<{ size: number; firstByte: number; seq: number }> = []
   subscriber.subscribeBinary((data, info) => {
@@ -43,11 +43,11 @@ async function onBinaryBroadcastPair() {
   }
 }
 
-/** Shield validates client-published data on a `Broadcast<{ text: string }>`:
+/** Shield validates client-published data on a `BroadcastChannel<{ text: string }>`:
  *  - valid `{ text: string }` reaches subscribers and resolves with a publish receipt.
  *  - invalid payload rejects the client's `publish()` with a shield error and is not delivered. */
 async function onBroadcastShieldClient() {
-  const room = new Broadcast<{ text: string }>({ key: `shield-test:${crypto.randomUUID()}` })
+  const room = new BroadcastChannel<{ text: string }>({ key: `shield-test:${crypto.randomUUID()}` })
   const received: Array<{ text: string }> = []
   room.subscribe((msg) => {
     received.push(msg)
@@ -59,7 +59,7 @@ async function onBroadcastShieldClient() {
  *  The client sends a `{ start: true }` text publish on the same wire as its BROADCAST_SUB (binary),
  *  so by the time this `start` callback runs, the peer is wire-subscribed for binary. */
 async function onBinaryBroadcast() {
-  const room = new Broadcast<{ start: true }>({ key: `room:broadcast-test:${crypto.randomUUID()}` })
+  const room = new BroadcastChannel<{ start: true }>({ key: `room:broadcast-test:${crypto.randomUUID()}` })
   room.subscribe(async () => {
     for (let i = 0; i < 5; i++) {
       await room.publishBinary(new Uint8Array(64).fill(i + 1))
