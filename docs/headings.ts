@@ -140,20 +140,6 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Files',
-  },
-  {
-    level: 2,
-    title: 'File upload',
-    url: '/file-upload',
-  },
-  {
-    level: 2,
-    title: 'File download',
-    url: '/file-download',
-  },
-  {
-    level: 4,
     title: 'Live',
   },
   {
@@ -169,18 +155,22 @@ const headings = [
   },
   {
     level: 2,
-    title: 'Real-Time',
+    title: 'Real-time',
     url: '/real-time',
   },
   {
-    level: 2,
-    title: 'Scaling',
-    url: '/scaling',
+    level: 4,
+    title: 'Files',
   },
   {
     level: 2,
-    title: 'Cloudflare',
-    url: '/cloudflare',
+    title: 'File upload',
+    url: '/file-upload',
+  },
+  {
+    level: 2,
+    title: 'File download',
+    url: '/file-download',
   },
   {
     level: 4,
@@ -200,6 +190,20 @@ const headings = [
     level: 2,
     title: '`@telefunc/rxjs`',
     url: '/rxjs',
+  },
+  {
+    level: 4,
+    title: 'Deploying',
+  },
+  {
+    level: 2,
+    title: 'Scaling',
+    url: '/scaling',
+  },
+  {
+    level: 2,
+    title: 'Cloudflare',
+    url: '/cloudflare',
   },
   {
     level: 1,
