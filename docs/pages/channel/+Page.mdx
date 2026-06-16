@@ -22,7 +22,7 @@ Telefunc has two real-time **primitives** — and one **composition** of them:
 
 ## new Channel()
 
-`new Channel()` creates a private, two-way message pipe between the server and the one client that called the telefunction. The server keeps the `Channel` object and hands the client its end by returning `chat.client`. The channel outlives the telefunction call: both ends can `send()` and `listen()` until one side closes it.
+`new Channel()` creates a private, two-way message pipe between the server and the one client that called the telefunction. The server keeps the `Channel` object and hands the client its end by returning its `.client`. The channel outlives the telefunction call: both ends can `send()` and `listen()` until one side closes it.
 
 The simplest case — the server pushes live updates to the one client that opened the channel:
 
@@ -66,7 +66,7 @@ The rest of this section adds types, two-way messaging, acks, and binary; see <L
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
 
-Server: return `chat.client` from the telefunction. The client gets the same API with message directions flipped.
+Server: return the channel's `.client` from the telefunction. The client gets the same API with message directions flipped.
 
 
 ### TypeScript
@@ -200,7 +200,7 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ## Broadcast
 
-`Broadcast` is a keyed pub/sub **bus**: `publish()` to a `key` reaches every `subscribe()` on that same `key`, anywhere — on the server, or on any client. Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
+`Broadcast` is a keyed pub/sub **bus**: a `publish()` to a `key` reaches every subscriber of that `key` — on the server (via `Broadcast.subscribe()`) or on a client (via a `BroadcastChannel`). Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
 
 The static methods run purely on the server — no client, no handle, no lifecycle — and take the `key` as their first argument:
 

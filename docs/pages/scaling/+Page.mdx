@@ -22,7 +22,7 @@ Without sticky sessions a reconnect that lands on a different instance sees no m
 
 ## Broadcast across instances
 
-A broadcast is different: publishers and subscribers are intentionally decoupled — they only share a string key. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publish on instance A reach a subscriber on instance B.
+A <Link text="broadcast" href="/channel#broadcast" /> is different: publishers and subscribers are intentionally decoupled — they only share a string key. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publish on instance A reach a subscriber on instance B.
 
 In a single-instance setup the default in-memory transport is enough. In a multi-instance setup, configure a transport that fans out across the cluster:
 
