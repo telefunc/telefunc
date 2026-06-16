@@ -5,7 +5,7 @@ import { StreamingBeta } from '../../components'
 
 **Environment**: server.
 
-Cloudflare-specific setup for <Link href="/real-time">real-time</Link> (i.e. <Link href="/channel">`Channel` and `Broadcast`</Link>).
+Cloudflare-specific setup for <Link href="/real-time">real-time</Link> (i.e. <Link href="/channel">`Channel` and `BroadcastChannel`</Link>).
 
 
 ## Setup
@@ -52,7 +52,7 @@ export default {
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
 > - **KV** provides shared storage: it's how stateless workers — wherever a request happens to land — find the Durable Object that holds the state.
 >
-> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `Broadcast`, there's no state to keep — skip both bindings and use `serve()` instead, see <Link text="Low-level API" href="/server#low-level-api" />.
+> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `BroadcastChannel`, there's no state to keep — skip both bindings and use `serve()` instead, see <Link text="Low-level API" href="/server#low-level-api" />.
 >
 > See <Link href="#architecture" /> for implementation details.
 
@@ -124,7 +124,7 @@ Only specified regions get Durable Objects. Requests from unspecified regions fa
 
 ## Distributed broadcast
 
-`Broadcast` (<Link href="/channel#new-broadcastchannel" />) fans out across all regions automatically.
+Broadcasts (<Link href="/channel#new-broadcastchannel" />) fan out across all regions automatically.
 
 ### How it works
 
