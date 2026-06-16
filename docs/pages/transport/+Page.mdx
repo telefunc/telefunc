@@ -93,7 +93,7 @@ All channels share a single multiplexed connection per server URL, so opening ma
 
 ## Per-call overrides
 
-`withContext(fn, context)` from `telefunc/client` wraps a telefunction with per-call client context — not only transport, but also an `AbortSignal`, extra headers, and a URL override:
+Override transport for a single call (instead of globally) with <Link text={<code>withContext()</code>} href="/withContext" /> from `telefunc/client`:
 
 ```ts
 // Environment: client
@@ -102,9 +102,6 @@ import { onAIChat } from './Chat.telefunc'
 import { withContext } from 'telefunc/client'
 
 const call = withContext(onAIChat, {
-  signal,                            // abort this call (and any channels it opens)
-  headers: { 'x-trace': traceId },   // extra HTTP headers, just for this call
-  telefuncUrl: '/api/_telefunc',     // override config.telefuncUrl for this call
   stream: { transport: 'channel' },  // override config.stream.transport
   channel: { transports: ['ws'] },   // override config.channel.transports
 })
@@ -114,6 +111,8 @@ for await (const token of gen) {
   console.log(token)
 }
 ```
+
+> `withContext()` also takes a per-call `signal`, `headers`, and `telefuncUrl` — see <Link href="/withContext" /> for the full list.
 
 
 ## Channel & broadcast config
