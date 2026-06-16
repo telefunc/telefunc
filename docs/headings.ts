@@ -276,8 +276,13 @@ const headings = [
     url: '/close',
   },
   {
+    level: 2,
+    title: '`transport`',
+    url: '/transport',
+  },
+  {
     level: 4,
-    title: 'Error Handling',
+    title: 'Hooks',
   },
   {
     level: 2,
@@ -310,11 +315,6 @@ const headings = [
   },
   {
     level: 2,
-    title: '`transport`',
-    url: '/transport',
-  },
-  {
-    level: 2,
     title: '`fetch`',
     url: '/fetch',
   },
@@ -330,7 +330,7 @@ const headings = [
   },
   {
     level: 2,
-    title: '`shield`',
+    title: '`config.shield`',
     url: '/shield-config',
   },
   {
