@@ -10,7 +10,7 @@ export {
   onBenchBroadcastPublish,
 }
 
-import { Broadcast, Channel } from 'telefunc'
+import { BroadcastChannel, Channel } from 'telefunc'
 
 const INSTANCE_ID = process.env.INSTANCE_ID ?? 'local'
 
@@ -140,7 +140,7 @@ async function onBenchBinaryServerPush(count: number, payloadSize: number) {
 
 /** Open a broadcast room and subscribe. Returns room + server-side stats closure. */
 async function onBenchBroadcastRoom(key: string) {
-  const room = new Broadcast<PushMsg>({ key })
+  const room = new BroadcastChannel<PushMsg>({ key })
   let serverReceived = 0
   room.subscribe(() => {
     serverReceived++
@@ -154,7 +154,7 @@ async function onBenchBroadcastRoom(key: string) {
 
 /** Publish `count` messages to a broadcast key; returns elapsed time. */
 async function onBenchBroadcastPublish(key: string, count: number, payloadSize: number) {
-  const room = new Broadcast<PushMsg>({ key })
+  const room = new BroadcastChannel<PushMsg>({ key })
   const payload = 'x'.repeat(payloadSize)
   const t0 = Date.now()
   const promises: Promise<unknown>[] = []

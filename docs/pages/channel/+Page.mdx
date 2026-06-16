@@ -7,7 +7,7 @@ import { StreamingBeta } from '../../components'
 
 Telefunc provides two primitives for real-time communication:
 
-| | `new Channel()` | `new Broadcast()` |
+| | `new Channel()` | `new BroadcastChannel()` |
 |---|---|---|
 | Purpose | Direct messages between *one* server and *one* client | Broadcast to *all* subscribers |
 
@@ -198,9 +198,9 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 ```
 
 
-## new Broadcast()
+## new BroadcastChannel()
 
-`new Broadcast({ key })` creates one member of a broadcast group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to the key. Return the broadcast instance directly from a telefunction — no `.client` needed (unlike channels, broadcast has no directional type flip).
+`new BroadcastChannel({ key })` creates one member of a broadcast group. All instances created with the same `key`, on the server or on clients, form the group: `publish()` delivers a message to every subscriber of the key, including the publishing instance itself, and `subscribe()` receives every message published to the key. Return the broadcast instance directly from a telefunction — no `.client` needed (unlike channels, broadcast has no directional type flip).
 
 > **Keys are capabilities** — anyone who forms the same `key` joins the group. Secure a broadcast one of two ways:
 > - **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
@@ -212,12 +212,12 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 // Chat.telefunc.ts
 // Environment: server
 
-import { Broadcast } from 'telefunc'
+import { BroadcastChannel } from 'telefunc'
 
 type ChatMessage = { user: string; text: string }
 
 export async function onJoinChat(username: string) {
-  const chat = new Broadcast<ChatMessage>({ key: 'chat:lobby' })
+  const chat = new BroadcastChannel<ChatMessage>({ key: 'chat:lobby' })
 
   chat.onOpen(() => {
     chat.publish({ user: 'system', text: `${username} joined`, })
@@ -303,16 +303,16 @@ Only the two ends of a channel can use it, while anything that knows a `key` can
 
 ### Technically
 
-You can think of `new Broadcast()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received the broadcast object, and bridges that client into the keyed broadcast group that the static methods publish to and subscribe from directly.
+You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received the broadcast object, and bridges that client into the keyed broadcast group that the static methods publish to and subscribe from directly.
 
 ### Comparison
 
-| | `new Channel()` | `new Broadcast()` |
+| | `new Channel()` | `new BroadcastChannel()` |
 |---|---|---|
 | Topology | One server ↔ one client | All members sharing a `key` (server and client) |
 | Methods | `send()` / `listen()` | `publish()` / `subscribe()` |
 | Delivery | The other end | Every subscriber of the `key`, including the publisher |
-| Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `Broadcast<MessageType>`</li><li>The server uses and returns the same `Broadcast` instance</li></ul> |
+| Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
 | Multi-server | <Link text="Sticky sessions" href="/scaling" /> | <Link text="Broadcast transport" href="#multi-server" /> |
