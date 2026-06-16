@@ -64,7 +64,7 @@ async function parseResponse(
   // HTTP streaming (binary / SSE)
   if (isStreaming) {
     assert(response.body)
-    const reader = response.body.getReader()
+    const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
     const isSSE = contentType.includes('text/event-stream')
     const streamReader = isSSE
       ? //

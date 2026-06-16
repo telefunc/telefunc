@@ -176,7 +176,7 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 |---|---|
 | Ordering | Publishes for a given key are serialized and delivered in order. |
 | Delivery | `publish()` resolves after all Durable Objects with subscribers have received the message. Client delivery happens over the channel wire. |
-| Presence lag | Up to 90 seconds. A new subscriber may miss a publish until its KV record is written (typically a few milliseconds). |
+| Presence lag | A new subscriber may miss publishes until its KV presence record is written — typically a few milliseconds. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
 

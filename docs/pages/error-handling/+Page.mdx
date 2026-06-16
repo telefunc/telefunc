@@ -165,13 +165,13 @@ If the user's browser can't connect to your server:
 > `NetworkError` covers both regular telefunction calls and channels — read `err.isChannel` to tell them apart (`false` for regular calls, `true` for channels). Regular calls still throw `ConnectionError` (now a `NetworkError` subclass), so existing `instanceof ConnectionError` checks keep working.
 
 
-## Streaming and channel errors
+## Streaming
 
 The expected-vs-bug distinction above applies to <Link href="/stream">streamed</Link> and <Link href="/real-time">real-time</Link> values too.
 
 A generator or stream that **throws mid-response** surfaces a typed error on the client for that value, while values already delivered stay usable. `throw Abort()` is relayed as an expected error; any other throw is treated as a bug (hidden in production, like a normal telefunction).
 
-**Channels and broadcasts** signal failure through dedicated errors — `ChannelNetworkError` (connection lost beyond the reconnect window), `ChannelClosedError` (`send()` after `close()` / `abort()`), `ChannelOverflowError` (buffered sends exceeded the limit), and `Abort` (the server called `abort(value)`). See <Link href="/channel#error-handling" /> for the table and recovery.
+**Channels and broadcasts** signal failure through a small set of errors — `NetworkError` (`isChannel: true`, connection lost beyond the reconnect window), `ChannelClosedError` (`send()` after `close()` / `abort()`), `ChannelOverflowError` (buffered sends exceeded the limit), and `Abort` (the server called `abort(value)`). See <Link href="/channel#error-handling" /> for the table and recovery.
 
 
 ## See also

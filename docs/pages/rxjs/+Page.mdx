@@ -79,9 +79,11 @@ edits.subscribe(edit => applyEdit(edit))
 edits.next({ userId: 'alice', text: 'Hello' })
 ```
 
+> **Single server.** A module-level `Subject` lives in one server process. These multicast examples (the editor above, and *Live cursors* below) work as-is on a single instance; across multiple instances each process has its own `Subject`, so route shared state through a broadcast transport instead — see <Link href="/scaling" />.
 
 
-## Click heatmap (client to server)
+
+## Click heatmap (client → server)
 
 Pass an Observable as a telefunction argument. The server subscribes and processes the stream — useful for telemetry, analytics, or any client-driven event stream.
 
@@ -126,9 +128,10 @@ import { getContext } from 'telefunc'
 const cursors = new Subject<{ userId: string; x: number; y: number }>()
 
 export async function onCursors() {
-  const { user } = getContext()
+  const { user, onClose } = getContext()
   const input = new Subject<{ x: number; y: number }>()
-  input.subscribe(pos => cursors.next({ ...pos, userId: user.id }))
+  const sub = input.subscribe(pos => cursors.next({ ...pos, userId: user.id }))
+  onClose(() => sub.unsubscribe()) // release the per-client subscription on disconnect
   return { cursors, input }
 }
 ```
@@ -206,3 +209,4 @@ Unsubscribing stops data flow immediately. The underlying <Link href="/channel" 
 - <Link href="/real-time" />
 - <Link href="/channel" />
 - <Link href="/stream" />
+- <Link href="/scaling" />

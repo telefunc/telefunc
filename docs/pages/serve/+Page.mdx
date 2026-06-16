@@ -1,7 +1,4 @@
 import { Link } from '@brillout/docpress'
-import { StreamingBeta } from '../../components'
-
-<StreamingBeta />
 
 **Environment**: server.
 
@@ -14,6 +11,8 @@ Low-level function that processes telefunction requests and returns an HTTP resp
 Pass the web standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
 
 ```ts
+// Environment: server
+
 import { serve } from 'telefunc'
 
 const httpResponse = await serve({ request })
@@ -71,6 +70,7 @@ const httpResponse = await serve({
 | `getReadableWebStream()` | `ReadableStream` | Web standard stream (Hono, Cloudflare, Deno, etc.) |
 | `pipe(writable)` | `void` | Pipe to Node.js writable (Express, Fastify) |
 | `getBody()` | `Promise<string>` | Full body as string (non-streaming only) |
+| `err` | `unknown` | The error thrown by your telefunction, if any (otherwise `undefined`) — see <Link href="/error-handling" /> |
 
 
 ## See also

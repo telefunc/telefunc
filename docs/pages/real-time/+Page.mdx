@@ -3,9 +3,9 @@ import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
 
-Telefunc supports real-time use cases — chat, file upload progress, live updates, ...
+Telefunc supports real-time use cases — chat, file upload progress, live updates, and more. They're powered by <Link href="/live">live values</Link> that flow across the client/server boundary.
 
-> Instead of using Telefunc's real-time primitives yourself, consider using high-level integrations such as <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> — they wrap the primitives below with an ergonomic API.
+> Before reaching for Telefunc's real-time primitives directly, consider a high-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> — it wraps the primitives below in an ergonomic API.
 
 
 ## Which primitive should I use?
@@ -161,7 +161,7 @@ export async function onJoinTeam(teamId: string) {
 }
 ```
 
-`getContext()` and `throw Abort()` only work **synchronously, before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that — its `listen()` runs later — so **capture what you need in a closure** and check it per message:
+`getContext()` and `throw Abort()` only work **synchronously, before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that window — its `listen()` callback runs later, after the telefunction has returned — so **capture what you need in a closure** and check it on each message:
 
 ```ts
 // Room.telefunc.ts

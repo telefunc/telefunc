@@ -1565,7 +1565,10 @@ class SseTransport implements ClientChannelTransport {
       return
     }
 
-    const reader = createSseEventStreamReader(response.body.getReader(), abortController)
+    const reader = createSseEventStreamReader(
+      response.body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
+      abortController,
+    )
 
     // Run the SSE loop concurrently with the handshake wait — frames (including the first
     // RECONCILED) can arrive while the open-ack is still in flight and must be dispatched.

@@ -3,11 +3,11 @@ import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
 
-Telefunc supports streaming in both directions:
+Streaming is one kind of <Link href="/live">live value</Link>. Telefunc streams in both directions:
 - **Server → client**: Return `AsyncGenerator`, `ReadableStream`, `File` / `Blob` / `download()`, or nested `Promise` from a telefunction.
 - **Client → server**: Pass a `ReadableStream` as a telefunction argument.
 
-> Streaming works out of the box with zero config — including <Link text="transport" href="/transport" /> (binary HTTP by default; switch to SSE or a reconnecting channel only if you need to). Plain telefunction calls are unaffected.
+> Streaming works out of the box with zero config — including <Link text="transport" href="/transport" /> (binary HTTP by default; switch to SSE or a reconnecting channel only if you need to).
 
 
 ## Which one should I use?
@@ -29,7 +29,7 @@ For values **passed** to a telefunction (client → server), pass a `ReadableStr
 
 ## `AsyncGenerator`
 
-The usual choice for incremental structured values.
+The usual choice for structured values that arrive one piece at a time.
 
 ```ts
 // Chat.telefunc.ts
@@ -91,7 +91,7 @@ while (true) {
 
 ## Nested `Promise`
 
-Return unawaited promises inside the response object — the client gets the surrounding values immediately while each promise resolves independently.
+Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
 
 ```ts
 // Dashboard.telefunc.ts
@@ -238,7 +238,7 @@ See <Link href="/close" /> for all cancellation methods (`close()`, `break`, `ge
 
 Telefunc distinguishes expected failures from bugs — even in streaming responses. If a generator or stream throws, the client receives a typed error while values already delivered remain available.
 
-See <Link href="/error-handling#streaming-and-channel-errors" text="Error handling — streaming & channels" /> for details.
+See <Link href="/error-handling#streaming" text="Error handling — streaming" /> for details.
 
 
 ## See also

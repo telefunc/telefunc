@@ -223,6 +223,11 @@ const headings = [
     url: '/provideTelefuncContext',
   },
   {
+    level: 2,
+    title: '`withContext()`',
+    url: '/withContext',
+  },
+  {
     level: 4,
     title: 'Protection',
   },
@@ -253,7 +258,7 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Real-Time',
+    title: 'Channels & Broadcast',
   },
   {
     level: 2,
