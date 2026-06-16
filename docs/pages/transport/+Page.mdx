@@ -25,6 +25,8 @@ config.channel.transports = ['sse', 'ws']   // default
 
 <ConfigWhereClient />
 
+> **Client vs server `config.channel`.** The settings on this page are **client-side** (`telefunc/client`). The server-side `config.channel` is a *different* object — reconnect/idle timeouts and buffer limits, imported from `telefunc` — see <Link href="/channel#configuration" />. They share a name but live on separate imports and don't overlap, so setting one never clears the other.
+
 
 ## Stream transport
 
