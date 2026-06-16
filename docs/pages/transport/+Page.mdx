@@ -47,6 +47,8 @@ Controls how streamed values are delivered over HTTP.
 | `'channel'` (SSE) | 🟡 | ✅ | ✅ | None |
 | `'channel'` (WS) | ✅ | 🟡 | ✅ | <Link text="Server setup" href="/server" /> |
 
+*Key: ✅ good · 🟡 partial / caveats · ❌ none*
+
 ### When to use what
 
 - **Start with `'binary-inline'`** — it's the fastest and works in most setups.
@@ -73,6 +75,8 @@ All channels share a single multiplexed connection per server URL, so opening ma
 |---|---|---|---|---|
 | `'sse'` | 🟡 | ✅ | ✅ | None |
 | `'ws'` | ✅ | ✅ | 🟡 | <Link text="Server setup" href="/server" /> |
+
+*Key: ✅ good · 🟡 partial / caveats · ❌ none*
 
 ### When to use what
 

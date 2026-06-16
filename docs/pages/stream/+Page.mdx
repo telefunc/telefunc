@@ -3,7 +3,7 @@ import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
 
-Streaming is one kind of <Link href="/live">live value</Link>. Telefunc streams in both directions:
+Stream values that arrive over time — AI tokens, progress, raw bytes, or lazily-resolved parts of a response — by returning or accepting them like any other value. It works in both directions:
 - **Server → client**: Return `AsyncGenerator`, `ReadableStream`, `File` / `Blob` / `download()`, or nested `Promise` from a telefunction.
 - **Client → server**: Pass a `ReadableStream` as a telefunction argument.
 
