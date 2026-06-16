@@ -154,12 +154,12 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Live telefunctions',
+    title: 'Live',
   },
   {
     level: 2,
     titleInNav: 'Overview',
-    title: 'Overview: Live telefunctions',
+    title: 'Overview: Live',
     url: '/live',
   },
   {
