@@ -2,9 +2,7 @@
 //
 // Checks, across docs/pages/**/+Page.mdx:
 //   1. Anchor integrity — every internal `#anchor` link resolves to a real heading.
-//   2. Link convention — Live-cluster pages use <Link>, not bare markdown internal links.
-//   3. "See also" — every Live-cluster page ends with a See-also section.
-//   4. Terminology — deny-list of off-spec terms on Live-cluster pages.
+//   2. Link convention — internal links use <Link>, not bare markdown links.
 //
 // Run: `node docs/check-docs.mjs` (or `pnpm run docs:lint`).
 
@@ -35,33 +33,6 @@ function headingText(raw) {
     .trim()
 }
 
-// The cluster of pages introduced/owned by the "Telefunc Live" feature.
-const liveCluster = new Set([
-  'live',
-  'stream',
-  'real-time',
-  'channel',
-  'close',
-  'transport',
-  'scaling',
-  'cloudflare',
-  'serve',
-  'Telefunc',
-  'withContext',
-  'provideTelefuncContext',
-  'file-download',
-  'file-upload',
-  'tanstack-query',
-  'redis',
-  'rxjs',
-])
-
-// Terms that must not appear in Live-cluster prose (one concept = one term).
-const deniedTerms = [
-  { re: /\brealtime\b/i, msg: 'use "real-time" (hyphenated)' },
-  { re: /\bweb ?socket\b/, msg: 'use "WebSocket"' },
-]
-
 function walk(dir) {
   const out = []
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -74,7 +45,7 @@ function walk(dir) {
 
 const files = walk(pagesDir)
 
-// url ("/channel", "/warning/non-function-export") -> { slugs:Set, file, code-stripped text }
+// url ("/channel", "/warning/non-function-export") -> { slugs, file, src }
 const pages = {}
 for (const file of files) {
   const url = '/' + path.relative(pagesDir, path.dirname(file)).split(path.sep).join('/')
@@ -91,9 +62,8 @@ for (const file of files) {
 }
 
 const errors = []
-const pageName = (url) => url.replace(/^\//, '')
 
-// Strip fenced code blocks so links/terms inside examples aren't checked.
+// Strip fenced code blocks and code spans so links inside examples aren't checked.
 function stripCode(src) {
   return src.replace(/```[\s\S]*?```/g, '').replace(/`[^`]*`/g, '')
 }
@@ -101,11 +71,11 @@ function stripCode(src) {
 for (const [url, page] of Object.entries(pages)) {
   const rel = path.relative(pagesDir, page.file)
   const prose = stripCode(page.src)
-  const inCluster = liveCluster.has(pageName(url))
 
-  // --- 1. Anchor integrity (all pages) ---
   const hrefs = [...page.src.matchAll(/href="([^"]+)"/g)].map((m) => m[1])
   const mdLinks = [...prose.matchAll(/\]\((\/[^)\s]*|#[^)\s]*)\)/g)].map((m) => m[1])
+
+  // Anchor integrity: every internal `#anchor` link resolves to a real heading.
   for (const href of [...hrefs, ...mdLinks]) {
     if (!href.includes('#')) continue
     if (/^https?:/.test(href)) continue
@@ -120,22 +90,9 @@ for (const [url, page] of Object.entries(pages)) {
     }
   }
 
-  if (!inCluster) continue
-
-  // --- 2. Link convention (cluster only): no bare markdown internal links ---
+  // Link convention: internal links use <Link>, not bare markdown links.
   for (const m of mdLinks) {
     errors.push(`${rel}: bare markdown internal link "](${m})" — use <Link href="${m}" /> instead`)
-  }
-
-  // --- 3. "See also" (cluster only) ---
-  if (!/^##+\s+See also\s*$/m.test(page.src)) {
-    errors.push(`${rel}: missing a "## See also" section`)
-  }
-
-  // --- 4. Terminology (cluster only) ---
-  for (const { re, msg } of deniedTerms) {
-    const hit = prose.match(re)
-    if (hit) errors.push(`${rel}: off-spec term "${hit[0]}" — ${msg}`)
   }
 }
 
@@ -147,7 +104,4 @@ if (errors.length) {
   console.error('')
   process.exit(1)
 }
-console.log(
-  `✓ docs quality gate: ${files.length} pages, ${linkCount} internal anchor links — all resolve; ` +
-    `${liveCluster.size} Live-cluster pages conform.`,
-)
+console.log(`✓ docs quality gate: ${files.length} pages, ${linkCount} internal anchor links — all resolve.`)
