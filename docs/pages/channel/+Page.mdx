@@ -1,5 +1,5 @@
-import { Link } from '@brillout/docpress'
-import { StreamingBeta } from '../../components'
+import { Link, Warning } from '@brillout/docpress'
+import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
@@ -15,7 +15,7 @@ Telefunc has two real-time **primitives** — and one **composition** of them:
 
 > By default, channels and broadcasts use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background, see <Link href="/transport" />.
 
-> **Not for serverless**: "no extra setup" still means a **long-running server** — a channel holds a connection open, which serverless functions (Vercel, Lambda) cut short. See <Link href="/scaling" />, or <Link href="/cloudflare" /> for Cloudflare Workers.
+<NeedsLongRunningServer />
 
 > For short-lived callbacks (e.g. progress updates), <Link href="/real-time">function passing</Link> is usually simpler.
 
@@ -226,16 +226,20 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
-> In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see [Multi-server](#multi-server). On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
+> In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see <Link text="Multi-server" href="#multi-server" />. On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
 
 
 ## new BroadcastChannel()
 
 `new BroadcastChannel({ key })` is the composition: a `Channel` to the one client that received it, bridged onto a `Broadcast` key. Return it from a telefunction and that client can `publish()` / `subscribe()` on the key — every message reaches every member of the group: the other subscribers, the server, and the publishing instance itself. No `.client` needed: broadcast is symmetric (one message type, no directional flip), so the same instance works on both ends — unlike channels.
 
-> **Keys are capabilities** — anyone who forms the same `key` joins the group. Secure a broadcast one of two ways:
-> - **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
-> - **Guard the payload**: whatever you `publish()` reaches every subscriber, so broadcast only non-sensitive data. That's how <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> stays safe — it broadcasts only a *"refetch"* signal (the query key), and each client loads the actual data through its own authorized telefunction.
+<Warning>
+
+**Keys are capabilities** — anyone who forms the same `key` joins the group. Secure a broadcast one of two ways:
+- **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
+- **Guard the payload**: whatever you `publish()` reaches every subscriber, so broadcast only non-sensitive data. That's how <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> stays safe — it broadcasts only a *"refetch"* signal (the query key), and each client loads the actual data through its own authorized telefunction.
+
+</Warning>
 
 ### Chat example
 
