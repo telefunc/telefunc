@@ -235,7 +235,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 <Warning>
 
-**Keys are capabilities** — anyone who forms the same `key` joins the group. Secure a broadcast one of two ways:
+**Keys are capabilities** — anyone who knows the `key` joins the group. Secure a broadcast one of two ways:
 - **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
 - **Guard the payload**: whatever you `publish()` reaches every subscriber, so broadcast only non-sensitive data. That's how <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> stays safe — it broadcasts only a *"refetch"* signal (the query key), and each client loads the actual data through its own authorized telefunction.
 
@@ -304,7 +304,7 @@ chat.publish({ user: 'Alice', text: 'Hello!', })
 
 Fundamentally, the difference is what a message is addressed to: a channel message is addressed to *someone*, a broadcast message is addressed to *a topic* (the `key`).
 
-A channel is a conversation, like a phone call: two fixed ends (the server and the one client that received the channel), private to them, finishes when either side hangs up.
+A channel is a conversation, like a phone call: two fixed ends (the server and the one client that received the channel), private to them, ending when either side hangs up.
 
 A broadcast is an announcement, like a radio frequency: whoever tunes in to the `key` receives everything published to it, members come and go, and the `key` belongs to no one.
 
@@ -427,7 +427,7 @@ config.channel = {
 }
 ```
 
-> **What to tune**: defaults suit typical chat/dashboard traffic; reach for these only if you hit one:
+> **What to tune**: the defaults suit typical chat/dashboard traffic; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
 > - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit` / `bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
 > - Reconnects should replay more history → raise the replay buffers; lower them to cap memory.
