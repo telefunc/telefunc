@@ -22,7 +22,7 @@ Telefunc has two real-time **primitives** — and one **composition** of them:
 
 ## new Channel()
 
-`new Channel()` creates a private, two-way message pipe between the server and the one client that called the telefunction. The server keeps the `Channel` object and hands the client its end by returning its `.client`. The channel outlives the telefunction call: both ends can `send()` and `listen()` until one side closes it.
+`new Channel()` creates a private, two-way message pipe between the server and the one client that called the telefunction. The server keeps the `Channel` object and hands the client its end by returning the channel's `.client`. The channel outlives the telefunction call: both ends can `send()` and `listen()` until one side closes it.
 
 The simplest case — the server pushes live updates to the one client that opened the channel:
 
@@ -56,9 +56,9 @@ The rest of this section adds types, two-way messaging, acks, and binary; see <L
 
 | Method | Description |
 |---|---|
-| `send(data)` | Send a message. Await for backpressure. |
+| `send(data)` | Send a message. Await to apply backpressure. |
 | `send(data, { ack: true })` | Send and await acknowledgement. |
-| `sendBinary(data)` | Send binary data. Await for backpressure. |
+| `sendBinary(data)` | Send binary data. Await to apply backpressure. |
 | `sendBinary(data, { ack: true })` | Send binary and await acknowledgement. |
 | `listen(cb)` | Receive messages. Return a value to ack. Returns an unlisten function. |
 | `listenBinary(cb)` | Receive binary. Return a value to ack. Returns an unlisten function. |
