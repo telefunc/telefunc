@@ -2,7 +2,7 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Low-level function that processes telefunction requests and returns an HTTP response. It's stateless: a request goes in, an HTTP response comes out — no connection state to manage.
+Low-level function that processes telefunction requests and returns an HTTP response. It's stateless (a pure function with no side effects).
 
 > For <Link href="/stream">streaming</Link> and <Link href="/real-time">real-time</Link> setups, use the runtime-specific `new Telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare` instead. See <Link href="/server" />.
 
