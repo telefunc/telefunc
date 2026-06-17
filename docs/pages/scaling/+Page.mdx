@@ -17,7 +17,7 @@ A Telefunc `Channel` is a stateful connection. Its server-side state — the `Ch
 
 This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves it for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
 
-Without sticky sessions a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and your client's `Channel` ends.
+Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and your client's `Channel` ends.
 
 
 ## Broadcast across instances

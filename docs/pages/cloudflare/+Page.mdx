@@ -163,7 +163,7 @@ Telefunc uses KV to track which Durable Objects have active subscribers:
 | TTL | 90 seconds |
 | Refresh | every 30 seconds |
 
-A KV record is created on subscribe and deleted on unsubscribe. If a Durable Object is evicted (e.g. during a deployment), the record expires after 90 seconds and the region is excluded from fanout.
+A KV record is created on subscribe and deleted on unsubscribe. If a Durable Object is evicted (e.g. during a deployment), the record expires after 90 seconds and the region is excluded from fan-out.
 
 
 ## Delivery guarantees
