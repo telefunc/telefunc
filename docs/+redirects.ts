@@ -11,7 +11,4 @@ checkType<HeadingsURL>(0 as any as RedirectsURL)
 
 const redirects = {
   '/remix': '/react-router',
-  '/live': '/streaming',
-  '/stream': '/streaming',
-  '/real-time': '/streaming',
 } as const satisfies Config['redirects']
