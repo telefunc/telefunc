@@ -3,7 +3,7 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
-Telefunc supports real-time use cases — chat, file upload progress, live updates, and more. They're powered by <Link href="/live">live values</Link> that flow across the client/server boundary.
+Telefunc supports real-time use cases — chat, file upload progress, live updates, and more. They build on values that stream or stay connected across the client/server boundary — see the <Link text="Live overview" href="/live" />.
 
 > Before reaching for Telefunc's real-time primitives directly, consider a high-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> — it wraps the primitives below in an ergonomic API.
 
@@ -97,7 +97,7 @@ See <Link href="/channel" /> for the full API.
 
 ## Broadcast
 
-Broadcasting is keyed pub/sub — everything sharing a `key` forms a group. There are two faces: the server-side <Link text={<code>Broadcast</code>} href="/channel#broadcast" /> bus (`publish` / `subscribe` by key), and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, which bridges a client into a key's group. Return a `BroadcastChannel` to broadcast to clients:
+Broadcasting is keyed pub/sub — everything sharing a `key` forms a group. There are two pieces: the server-side <Link text={<code>Broadcast</code>} href="/channel#broadcast" /> bus (`publish` / `subscribe` by key), and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, which bridges a client into a key's group. Return a `BroadcastChannel` to broadcast to clients:
 
 ### Notifications
 
