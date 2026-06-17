@@ -53,7 +53,7 @@ Controls how streamed values are delivered over HTTP.
 
 - **Start with `'binary-inline'`** — it's the fastest and works in most setups.
 - **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses but passes SSE events through.
-- **Use `'channel'`** when you want streamed values to use the same reconnecting transport as Telefunc channels.
+- **Use `'channel'`** when you want streamed values to reconnect automatically after a dropped connection, like Telefunc channels do.
 
 
 ## Channel transport

@@ -200,7 +200,7 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ## Broadcast
 
-`Broadcast` is a keyed pub/sub **bus**: a `publish()` to a `key` reaches every subscriber of that `key` — on the server (via `Broadcast.subscribe()`) or on a client (via a `BroadcastChannel`). Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
+`Broadcast` is a keyed pub/sub **bus**: a `publish()` to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the key (via a `BroadcastChannel`). Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
 
 The static methods run purely on the server — no client, no handle, no lifecycle — and take the `key` as their first argument:
 
@@ -231,7 +231,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 ## new BroadcastChannel()
 
-`new BroadcastChannel({ key })` is the composition: a `Channel` to the one client that received it, bridged onto a `Broadcast` key. Return it from a telefunction and that client can `publish()` / `subscribe()` on the key — every message reaches every member of the group: the other subscribers, the server, and the publishing instance itself. No `.client` needed: broadcast is symmetric (one message type, no directional flip), so the same instance works on both ends — unlike channels.
+`new BroadcastChannel({ key })` is the composition: a `Channel` to the one client that received it, bridged onto a `Broadcast` key. Return it from a telefunction and that client can `publish()` / `subscribe()` on the key — every message reaches every member of the group, including the publisher itself. No `.client` needed: broadcast is symmetric (one message type, no directional flip), so the same instance works on both ends — unlike channels.
 
 <Warning>
 
@@ -312,7 +312,7 @@ Only the two ends of a channel can use it, while anything that knows a `key` can
 
 ### Technically
 
-You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received the broadcast object, and bridges that client into the keyed broadcast group that the static methods publish to and subscribe from directly.
+You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received it, and bridges that client into the keyed broadcast group — the same group those static methods publish to and subscribe from.
 
 ### Comparison
 

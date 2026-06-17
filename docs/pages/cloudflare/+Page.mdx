@@ -113,7 +113,7 @@ By default, Telefunc creates one Durable Object per region. Increase capacity wi
 const tf = new Telefunc({ scale: 4 })
 ```
 
-This creates 4 Durable Objects per region. Sessions are distributed across them.
+This creates 4 Durable Objects per region, and Telefunc distributes sessions across them.
 
 ### Per-region scale
 
