@@ -3,7 +3,7 @@ import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
 
-`close()` and `onClose()` manage the lifecycle of live values — anything returned from or passed to a telefunction that holds an open connection.
+`close()` and `onClose()` manage the lifecycle of the streams and connections a telefunction returns or accepts — so the server can stop producing and release resources.
 
 > Applies to both <Link href="/stream">streaming</Link> (`AsyncGenerator`, `ReadableStream`, files) and <Link href="/real-time">real-time</Link> (`Channel`, `BroadcastChannel`) values — they all close the same way.
 
@@ -28,7 +28,7 @@ The rest of this page covers `close()`, `abort()`, and `onClose()` in detail; ch
 
 ## `close()` (client)
 
-`close()` from `telefunc/client` gracefully closes any value returned by a telefunction. In one call, it closes every live value nested anywhere in the return value.
+`close()` from `telefunc/client` gracefully closes any value returned by a telefunction. In one call, it closes every stream, channel, and file nested anywhere in the return value.
 
 ```ts
 // Environment: client

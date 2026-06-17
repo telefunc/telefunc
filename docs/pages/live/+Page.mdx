@@ -3,16 +3,16 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
-Telefunc lets you move **live values** across the client/server boundary — async sequences, byte streams, files, and persistent connections — by returning them from, or passing them to, a telefunction like any other value.
+Telefunc moves values that **stream or stay connected** across the client/server boundary — async sequences, byte streams, files, and persistent connections — by returning them from, or passing them to, a telefunction like any other value.
 
 It works in **both directions**:
 - **Server → client** — return an `AsyncGenerator`, `ReadableStream`, `File`, nested `Promise`, `Channel`, or `BroadcastChannel`.
 - **Client → server** — pass a `ReadableStream`, `File`, or callback as an argument.
 
-> Plain telefunction calls are unaffected — these capabilities kick in only when a live value is involved, with zero config.
+> Plain telefunction calls are unaffected — this kicks in only when you return or pass one of these, with zero config.
 
 
-## A first live value
+## A first example
 
 Return an `AsyncGenerator` and read it as it arrives — no setup, no config:
 
@@ -39,7 +39,7 @@ for await (const n of onCountdown(3)) {
 }
 ```
 
-That's a live value: it crosses the network like any return value, but arrives over time. The rest of this page points you to the right one for each job.
+That's the whole idea: the value crosses the network like any return value, but arrives over time. The rest of this page helps you pick the right type for each job.
 
 
 ## What are you moving?
