@@ -251,8 +251,8 @@ import { BroadcastChannel } from 'telefunc'
 
 type ChatMessage = { user: string; text: string }
 
-export async function onJoinChat(username: string) {
-  const chat = new BroadcastChannel<ChatMessage>({ key: 'chat:lobby' })
+export async function onJoinChat(room: string, username: string) {
+  const chat = new BroadcastChannel<ChatMessage>({ key: `chat:${room}` })
 
   chat.onOpen(() => {
     chat.publish({ user: 'system', text: `${username} joined`, })
@@ -272,7 +272,7 @@ export async function onJoinChat(username: string) {
 
 import { onJoinChat } from './Chat.telefunc'
 
-const chat = await onJoinChat('Alice')
+const chat = await onJoinChat('lobby', 'Alice')
 
 // Receive messages published to the key, including this instance's own publishes
 chat.subscribe((msg, info) => {
@@ -281,6 +281,29 @@ chat.subscribe((msg, info) => {
 
 // Publish to every subscriber of the key
 chat.publish({ user: 'Alice', text: 'Hello!', })
+```
+
+### Notifications
+
+A per-user key with a subscribe-only client — the server returns a `BroadcastChannel` keyed to the user, and the client only listens:
+
+```ts
+// Notifications.telefunc.ts
+// Environment: server
+
+import { BroadcastChannel } from 'telefunc'
+
+export async function onListenNotifications(userId: string) {
+  return new BroadcastChannel({ key: `notifications:${userId}` })
+}
+```
+
+```ts
+// Notifications.tsx
+// Environment: client
+
+const notifications = await onListenNotifications(userId)
+notifications.subscribe((n) => showToast(n))
 ```
 
 ### BroadcastChannel methods
