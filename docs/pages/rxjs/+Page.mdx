@@ -5,7 +5,7 @@ import { StreamingBeta } from '../../components'
 
 For reactive streams with full operator support, you can use [RxJS](https://rxjs.dev).
 
-The `@telefunc/rxjs` integration lets you pass RxJS `Observable` and `Subject` transparently between client and server — both directions, all operators.
+The `@telefunc/rxjs` integration lets you pass RxJS `Observable` and `Subject` directly between client and server — both directions, all operators.
 
 > Values you stream to the server are **shield-validated at runtime** against your TypeScript types — see <Link href="#shields" />.
 
@@ -79,7 +79,7 @@ edits.subscribe(edit => applyEdit(edit))
 edits.next({ userId: 'alice', text: 'Hello' })
 ```
 
-> **Single server.** A module-level `Subject` lives in one server process. These multicast examples (the editor above, and *Live cursors* below) work as-is on a single instance. Across multiple instances, each process has its own `Subject` — so route shared state through a broadcast transport instead, see <Link href="/scaling" />.
+> **Single server.** A module-level `Subject` lives in one server process. These multicast examples (the editor above, and *Live cursors* below) work as-is on a single instance. Across multiple instances, each server process has its own `Subject` — so route shared state through a broadcast transport instead, see <Link href="/scaling" />.
 
 
 

@@ -52,7 +52,7 @@ Controls how streamed values are delivered over HTTP.
 ### When to use what
 
 - **Start with `'binary-inline'`** — it's the fastest and works in most setups.
-- **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses but passes SSE events through.
+- **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses, but passes SSE events through without buffering.
 - **Use `'channel'`** when you want streamed values to reconnect automatically after a dropped connection, like Telefunc channels do.
 
 
@@ -65,7 +65,7 @@ Controls how <Link text={<code>new Channel()</code>} href="/channel" /> and <Lin
 | `'sse'` | HTTP requests + SSE stream. Works without extra server setup. |
 | `'ws'` | Multiplexed WebSocket. Requires <Link text="WebSocket server setup" href="/server" />. |
 
-The client default is `['sse', 'ws']` — start on SSE, then upgrade to WebSocket once the server offers it. The server offers SSE out of the box and adds WebSocket when you install an adapter (see <Link href="/server" />).
+The client default is `['sse', 'ws']` — start on SSE, then upgrade to WebSocket once the server offers it. The server offers SSE out-of-the-box and adds WebSocket when you install an adapter (see <Link href="/server" />).
 
 All channels share a single multiplexed connection per server URL, so opening many channels doesn't open many connections.
 
@@ -80,10 +80,10 @@ All channels share a single multiplexed connection per server URL, so opening ma
 
 ### When to use what
 
-- **Start with `'sse'`** — it works everywhere out of the box.
+- **Start with `'sse'`** — it works everywhere out-of-the-box.
 - **Use `'ws'`** for chatty real-time traffic where you want full-duplex.
 
-> When WebSocket is enabled (see <Link href="/server" />), the server supports both SSE and WS. The client starts on SSE and seamlessly upgrades to WebSocket in the background — no interruption to your application code.
+> When WebSocket is enabled (see <Link href="/server" />), the server supports both SSE and WS. The client starts on SSE and seamlessly upgrades to WebSocket in the background (open channels keep working without interruption).
 
 
 ## Recommended setup

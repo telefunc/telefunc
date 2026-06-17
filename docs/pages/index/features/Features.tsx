@@ -69,7 +69,7 @@ function Features() {
         </h2>
         <>
           <p>
-            Telefunctions can <b>stream values</b> — AI tokens, progress, file up/downloads — and power <b>real-time</b>{' '}
+            Telefunctions can <b>stream values</b> — AI tokens, progress, file uploads &amp; downloads — and power <b>real-time</b>{' '}
             features with channels &amp; broadcasts, by returning or passing them like any other value.
           </p>
         </>

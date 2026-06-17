@@ -9,7 +9,7 @@ It works in **both directions**:
 - **Server → client** — return an `AsyncGenerator`, `ReadableStream`, `File`, nested `Promise`, `Channel`, or `BroadcastChannel`.
 - **Client → server** — pass a `ReadableStream`, `File`, or callback as an argument.
 
-> Plain telefunction calls are unaffected — this kicks in only when you return or pass one of these, with zero config.
+> Plain telefunction calls are unaffected. The special handling described here applies only when you return or pass one of the types listed above, and it requires no configuration.
 
 
 ## A first example
@@ -60,12 +60,12 @@ That's the whole idea: the value crosses the network like any return value, but 
 > One-way or two-way? Reach for an `AsyncGenerator` or `ReadableStream` when data flows one way; use a <Link text="channel" href="/channel" /> only when the client also needs to send.
 
 
-## Handled for you
+## Handled automatically
 
 Whatever you return or pass:
 
 - **Validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
-- **Cleanup** — when the client stops reading or disconnects, your telefunction is notified so it can release resources. See <Link href="/close" />.
+- **Cleanup** — when the client stops reading or disconnects, `onClose()` fires so your telefunction can release resources. See <Link href="/close" />.
 - **Transport & reconnection** — streams and channels negotiate a working transport (HTTP, SSE, WebSocket) and recover from dropped connections automatically. Tune it only if you need to — see <Link href="/transport" />.
 - **Serialization** — structured values use Telefunc's serializer, so `Date`, `Map`, `Set`, `BigInt`, etc. survive the trip (not just JSON); raw bytes travel as `Uint8Array` / `File` / `Blob`.
 

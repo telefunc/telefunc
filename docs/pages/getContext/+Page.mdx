@@ -213,7 +213,7 @@ export async function someTelefunction() {
 
 ## `onClose()`
 
-The context object returned by `getContext()` also includes `onClose()`, a callback that fires exactly once when the call ends — whether the client received everything, disconnected, or hit an error. Use it to release resources.
+The context object returned by `getContext()` also includes `onClose()`, a callback that fires exactly once when the call ends — whether the client received everything, the client disconnected, or an error occurred. Use it to release resources.
 
 ```ts
 const context = getContext()
