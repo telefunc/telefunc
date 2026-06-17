@@ -10,7 +10,7 @@ import { StreamingBeta } from '../../components'
 
 ## At a glance
 
-There's one catch-all API, `close()`, plus the per-type APIs. They all signal the server to stop producing and release resources — the difference is **graceful** (flush buffered data, then close) vs **immediate** (cancel in-flight work):
+There's one catch-all API, `close()`, plus per-type APIs. They all signal the server to stop producing and release resources — the difference is **graceful** (flush buffered data, then close) vs **immediate** (cancel in-flight work):
 
 | API | Side | Graceful / immediate | Closes |
 |---|---|---|---|
@@ -23,7 +23,7 @@ There's one catch-all API, `close()`, plus the per-type APIs. They all signal th
 | <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | either side | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
 | `onClose(cb)` | server | — (cleanup hook) | Fires when the value ends, however it ends |
 
-The rest of this page covers `close()`, `abort()`, and `onClose()` in detail; channel-specific closing is on <Link href="/channel#lifecycle" />.
+The rest of this page covers `close()`, `abort()`, and `onClose()` in detail; channel-specific closing is covered on <Link href="/channel#lifecycle" />.
 
 
 ## `close()` (client)
@@ -67,7 +67,7 @@ await channel.close()
 
 All of these signal the server to stop producing and release resources.
 
-> `close()` ends a value **gracefully** (buffered data is flushed). To stop a call **immediately** instead, pass the pending call to `abort()` — the request is cancelled, and the pending call (or the next read, if you're mid-stream) rejects with an `Abort` error:
+> `close()` ends a value **gracefully** (buffered data is flushed). To stop a call **immediately** instead, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, the next read does):
 > ```ts
 > // Environment: client
 >
@@ -110,7 +110,7 @@ export async function* onChat(prompt: string) {
 
 If the client drops all references to a returned value without explicitly closing it, the underlying resources are cleaned up automatically via garbage collection. There is a short delay (typically a few seconds) between the value becoming unreachable and the cleanup firing.
 
-Explicit `close()` triggers cleanup immediately. GC cleanup is the fallback for when you forget to do so.
+Explicit `close()` triggers cleanup immediately. GC cleanup is the fallback for when you forget to close explicitly.
 
 
 ## See also

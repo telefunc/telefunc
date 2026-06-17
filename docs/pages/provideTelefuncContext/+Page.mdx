@@ -2,7 +2,7 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-`provideTelefuncContext()` makes the `context` object available to telefunctions via <Link href="/getContext" text="getContext()" /> — for when a telefunction runs **outside `tf.serve()`**, such as server-side rendering or unit tests.
+`provideTelefuncContext()` makes the `context` object available to telefunctions via <Link href="/getContext" text="getContext()" /> — useful when a telefunction runs **outside `tf.serve()`**, such as server-side rendering or unit tests.
 
 ```ts
 // Environment: server
@@ -15,7 +15,7 @@ provideTelefuncContext({ user })
 
 Call it before the telefunction runs (e.g. in a test's setup, or your SSR request handler).
 
-> Through <Link text="serve()" href="/serve" /> / <Link text="new Telefunc()" href="/Telefunc" />, the context is provided for you — see <Link href="/getContext#provide" />. Reach for `provideTelefuncContext()` only when a telefunction runs without going through them.
+> Through <Link text="serve()" href="/serve" /> / <Link text="new Telefunc()" href="/Telefunc" />, the context is provided for you — see <Link href="/getContext#provide" />. Reach for `provideTelefuncContext()` only when a telefunction runs outside both.
 
 
 ## See also
