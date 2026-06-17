@@ -188,7 +188,7 @@ app.all('/_telefunc', async (c) => {
   const httpResponse = await serve({ request: c.req.raw })
   return new Response(httpResponse.getReadableWebStream(), {
     status: httpResponse.statusCode,
-    headers: httpResponse.headers,
+    headers: httpResponse.headers
   })
 })
 ```
