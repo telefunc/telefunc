@@ -126,7 +126,7 @@ const ack = await channel.send({ type: 'join', roomId: 'general' })
 ack.accepted // true
 ```
 
-On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `chat.client` type flips the message directions.
+On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `chat.client` type flips the message types.
 
 Both generic parameters also drive runtime validation: Telefunc auto-generates shields that check every message and ack arriving at the server against its declared type. See <Link href="/shield#channels">Shields — Channels</Link>.
 

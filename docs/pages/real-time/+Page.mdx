@@ -97,7 +97,7 @@ See <Link href="/channel" /> for the full API.
 
 ## Broadcast
 
-Broadcasting is keyed pub/sub — everyone sharing a `key` is in the same group. There are two pieces: the server-side <Link text={<code>Broadcast</code>} href="/channel#broadcast" /> bus (`publish` / `subscribe` by key), and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, which bridges a client into the group for a given `key`. Return a `BroadcastChannel` to broadcast to clients:
+Broadcasting is keyed pub/sub — everyone sharing a `key` is in the same group. There are two pieces: the server-side <Link text={<code>Broadcast</code>} href="/channel#broadcast" /> bus (`publish` / `subscribe` by key), and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, which bridges a client into the group for the given `key`. Return a `BroadcastChannel` to broadcast to clients:
 
 ### Notifications
 
@@ -162,7 +162,7 @@ export async function onJoinTeam(teamId: string) {
 }
 ```
 
-`getContext()` and `throw Abort()` only work **synchronously, before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that synchronous window — its `listen()` callback runs later, after the telefunction has returned — so **capture what you need in a closure** and re-check authorization on each message:
+`getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that window — its `listen()` callback runs later, after the telefunction has returned — so **capture what you need in a closure** and re-check authorization on each message:
 
 ```ts
 // Room.telefunc.ts

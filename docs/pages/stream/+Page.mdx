@@ -7,8 +7,6 @@ Stream values that arrive over time — AI tokens, progress, raw bytes, or lazil
 - **Server → client**: Return `AsyncGenerator`, `ReadableStream`, `File` / `Blob` / `download()`, or nested `Promise` from a telefunction.
 - **Client → server**: Pass a `ReadableStream` as a telefunction argument.
 
-> Streaming works out-of-the-box, <Link text="transport" href="/transport" /> included — binary HTTP by default; switch to SSE or a reconnecting transport only if you need to.
-
 
 ## Which one should I use?
 
