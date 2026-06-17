@@ -169,9 +169,9 @@ If the user's browser can't connect to your server:
 
 The expected-vs-bug distinction above applies to <Link href="/stream">streamed</Link> and <Link href="/real-time">real-time</Link> values too.
 
-A generator or stream that **throws partway through** sends the client a typed error for that value, while values already delivered stay usable. `throw Abort()` is relayed as an expected error; any other throw is treated as a bug (hidden in production, like a normal telefunction).
+A generator or stream that **throws mid-response** surfaces a typed error on the client for that value, while values already delivered stay usable. `throw Abort()` is relayed as an expected error; any other throw is treated as a bug (hidden in production, like a normal telefunction).
 
-**Channels and broadcasts** signal failure through four error types — `NetworkError` (`isChannel: true`, connection lost beyond the reconnect window), `ChannelClosedError` (`send()` after `close()` / `abort()`), `ChannelOverflowError` (buffered sends exceeded the limit), and `Abort` (the server called `abort(value)`). See <Link href="/channel#error-handling" /> for the table and recovery.
+**Channels and broadcasts** signal failure through four types of errors — `NetworkError` (`isChannel: true`, connection lost beyond the reconnect window), `ChannelClosedError` (`send()` after `close()` / `abort()`), `ChannelOverflowError` (buffered sends exceeded the limit), and `Abort` (the server called `abort(value)`). See <Link href="/channel#error-handling" /> for the table and recovery.
 
 
 ## See also

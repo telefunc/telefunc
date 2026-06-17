@@ -13,7 +13,7 @@ That's the whole picture. The rest of this page explains why and shows the commo
 
 ## Sticky sessions
 
-A Telefunc `Channel` is a stateful connection. Its server-side state — the `Channel` instance, its `send()`/`listen()` closures, any interval the telefunction set up — lives in one Node process. When the client reconnects (a brief network drop, a page reload, an SSE→WS upgrade), the next request has to land on the same process or the channel can't recover.
+A Telefunc `Channel` is a stateful connection. Its server-side state — the `Channel` instance, its `send()`/`listen()` closures, any interval the telefunction set up — lives in one Node process. When the client reconnects (network issues, a page reload, an SSE→WS upgrade), the next request has to land on the same process or the channel can't recover.
 
 This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves it for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
 
