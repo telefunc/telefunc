@@ -163,7 +163,7 @@ const opfsFile = await dl.saveToOpfs()
 imgEl.src = URL.createObjectURL(opfsFile)
 ```
 
-> Web APIs that require a real `File` / `Blob` (`URL.createObjectURL`, `<img src>`, `fetch({body})`, `FormData.append`) need `await dl.saveToMemory()` / `saveToDisk()` / `saveToOpfs()` first — they check for an internal marker that only real `File` / `Blob` instances have.
+> Web APIs that require a real `File` / `Blob` (`URL.createObjectURL`, `<img src>`, `fetch({body})`, `FormData.append`) need `await dl.saveToMemory()` / `saveToDisk()` / `saveToOpfs()` first. These APIs check for an internal marker that only real `File` / `Blob` instances have.
 
 
 ### `saveToDisk({ mode })`
