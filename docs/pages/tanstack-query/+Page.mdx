@@ -31,7 +31,7 @@ function App() {
 }
 ```
 
-`withTelefunc()` returns the same `QueryClient` instance. All options and APIs keep working as-is.
+`withTelefunc()` returns the same `QueryClient` instance. All options and APIs keep working unchanged.
 
 > The integration lives in `QueryClient` (the peer dependency is `@tanstack/query-core` v5+), so any TanStack Query adapter works: React, Vue, Svelte, Solid. The examples above use React.
 
@@ -48,9 +48,9 @@ queryKey: ['global:todos', `user:${userId}`]     // global — all clients with 
 queryKey: ['global:documents', docId]            // global
 ```
 
-> A key is global when its *first* element is a string starting with `global:`, e.g. `['todos', 'global:x']` is a local key.
+> A key is global when its *first* element is a string starting with `global:` — e.g. `['global:todos']` is global, while `['todos', 'global:x']` is local (its first element isn't).
 
-> Global keys ride on Telefunc calls, so two rules apply:
+> Global keys are carried by Telefunc calls, so two rules apply:
 >
 > - **`queryFn` must call a telefunction.** The invalidation subscription piggybacks on that call. With a non-telefunc `queryFn` (e.g. plain `fetch()`), a global key silently behaves like a local one. The same goes for mutations: global keys in `meta.invalidates` are published server-side after the telefunction succeeds, so `mutationFn` must be a telefunction call too.
 > - **Return the telefunction call directly.** The integration reads the invalidation subscription from whatever `queryFn` returns, so transform with `select` instead:
@@ -124,7 +124,7 @@ invalidate(['global:articles'])
 invalidate(['global:documents', docId])
 ```
 
-Prefix matching — invalidating `['global:documents']` hits `['global:documents', docId]` too. Same behavior as TanStack Query's [`invalidateQueries`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
+Prefix matching — invalidating `['global:documents']` matches `['global:documents', docId]` too. Same behavior as TanStack Query's [`invalidateQueries`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
 
 
 ## How it works

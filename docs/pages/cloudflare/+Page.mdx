@@ -74,7 +74,7 @@ const tf = new Telefunc({
 Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for channel state and broadcast fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object as the WebSocket connection.
 
 [KV](https://developers.cloudflare.com/kv/) stores two things:
-- **Session tokens** — pins a browser to the same Durable Object across requests.
+- **Session tokens** — pin a browser to the same Durable Object across requests.
 - **Broadcast presence** — tracks which Durable Objects have active subscribers for each key.
 
 ### Regions
@@ -94,7 +94,7 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 ### Session affinity
 
-Every telefunction call and channel message from a browser must reach the **same Durable Object** — otherwise the channel state wouldn't be there.
+Every telefunction call and channel message from a browser must reach the **same Durable Object** — otherwise its channel state would not be available.
 
 On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns it to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
 

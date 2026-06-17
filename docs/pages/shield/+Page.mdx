@@ -154,7 +154,7 @@ List of `shield()` types:
 
 ## Beyond top-level arguments
 
-Telefunc's automatic `shield()` generation isn't limited to a telefunction's direct arguments. It also emits **sub-shields** for values nested inside your types wherever the RPC boundary extends — callbacks and channels below, and <Link href="/rxjs#shields" text="RxJS streams" /> via `@telefunc/rxjs`. Sub-shields come from the same TypeScript types, so the runtime check always matches the declared type.
+Telefunc's automatic `shield()` generation isn't limited to a telefunction's direct arguments. It also emits **sub-shields** for values nested inside your types wherever the RPC boundary extends — callbacks and channels below, and <Link href="/rxjs#shields" text="RxJS streams" /> via `@telefunc/rxjs`. Sub-shields are generated from your TypeScript types, so the runtime check always matches the declared type.
 
 The invariant: **only values arriving at the server are validated.** Values flowing the other way are trusted (the server is the trust boundary).
 
@@ -183,7 +183,7 @@ export async function getUser(id: string) {
 }
 ```
 
-> `void` return types compile to a shield that accepts only `undefined`. A callback typed `() => Promise<void>` that returns a truthy value is rejected — otherwise `if (await cb()) …` would branch on client-returned garbage.
+> `void` return types compile to a shield that accepts only `undefined`. A callback typed `() => Promise<void>` that returns a truthy value is rejected — otherwise `if (await cb()) …` would branch on an arbitrary value supplied by the client.
 
 
 ### Channels
