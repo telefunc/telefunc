@@ -3,7 +3,7 @@ import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
 
-To scale Telefunc horizontally across several server processes (multiple Node instances, multiple containers, multiple machines), two pieces have to be set up.
+To scale Telefunc horizontally across several server processes (multiple Node instances, multiple containers, multiple machines), you need to set up two things.
 
 1. The load balancer in front of your instances must route every request from the same client to the same instance — **sticky sessions**.
 2. Broadcast publishes must fan out across instances — install a **broadcast transport** like <Link href="/redis">`@telefunc/redis`</Link>.
