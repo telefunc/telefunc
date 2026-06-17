@@ -7,7 +7,7 @@ Return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Bl
 
 > **Which API?**
 > - **Bytes already in memory** → return a native `File` / `Blob` (as above).
-> - **Large files, bytes streamed from an upstream source, or you need progress / cancel / save-to-disk** → wrap them with <Link text={<code>download()</code>} href="#streaming-with-download" />, which adds progress, cancel, and save-to-disk — and, when the source is a stream, never buffers the full payload on the server.
+> - **Large files, bytes streamed from an upstream source, or you need progress / cancel / save-to-disk** → wrap them with <Link text={<code>download()</code>} href="#streaming-with-download" /> — when the source is a stream, it never buffers the full payload on the server.
 >
 > The tables below break down the memory trade-offs.
 
