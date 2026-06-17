@@ -17,7 +17,7 @@ Telefunc has two real-time **primitives** — and one **composition** of them:
 
 <NeedsLongRunningServer />
 
-> For short-lived callbacks (e.g. progress updates), <Link href="/real-time">function passing</Link> is usually simpler.
+> For short-lived callbacks (e.g. progress updates), <Link href="/streaming#function-passing">function passing</Link> is usually simpler.
 
 
 ## new Channel()
@@ -236,7 +236,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 <Warning>
 
 **Keys are capabilities** — anyone who knows the `key` joins the group. Secure a broadcast in one of two ways:
-- **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
+- **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="#authorization" />.
 - **Guard the payload**: whatever you `publish()` reaches every subscriber, so broadcast only non-sensitive data. That's how <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> stays safe — it broadcasts only a *"refetch"* signal (the query key), and each client loads the actual data through its own authorized telefunction.
 
 </Warning>
@@ -296,6 +296,47 @@ chat.publish({ user: 'Alice', text: 'Hello!', })
 | `abort(value?)` | Terminate immediately. |
 
 > The instance is bound to its `key`, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#broadcast" /> / `Broadcast.subscribe(key, cb)` take it first — and have no `onOpen` / `onClose` / `close` / `abort`, since there's no instance to manage.
+
+
+## Authorization
+
+A channel or broadcast is opened by a telefunction, so you protect it just as you would any telefunction (see <Link href="/permissions" />): authorize **at open time** with <Link text="getContext()" href="/getContext" /> and `throw Abort()`.
+
+```ts
+// Team.telefunc.ts
+// Environment: server
+
+import { BroadcastChannel, getContext, Abort } from 'telefunc'
+
+export async function onJoinTeam(teamId: string) {
+  const { user } = getContext()
+  if (!user || !user.teams.includes(teamId)) throw Abort()
+  return new BroadcastChannel({ key: `team:${teamId}` })
+}
+```
+
+`getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that window — its `listen()` callback runs later, after the telefunction has returned — so **capture what you need in a closure** and re-check authorization on each message:
+
+```ts
+// Room.telefunc.ts
+// Environment: server
+
+import { Channel, getContext, Abort } from 'telefunc'
+
+export async function onJoinRoom(roomId: string) {
+  const { user } = getContext() // captured once, at open time
+  if (!user) throw Abort()
+
+  const room = new Channel<RoomMessage, RoomMessage>()
+  room.listen((msg) => {
+    if (!canPost(user, msg)) return // per-message check uses the captured user
+    saveMessage(roomId, user.id, msg)
+  })
+  return { channel: room.client }
+}
+```
+
+> <Link href="/shield" /> validates the **type** of every client→server message; authorization — **who** may open a channel or send a message — is up to you, via `getContext()` + `Abort()`.
 
 
 ## `Channel` vs `BroadcastChannel`
@@ -435,9 +476,7 @@ config.channel = {
 
 ## See also
 
-- <Link href="/live" />
-- <Link href="/real-time" />
-- <Link href="/stream" />
+- <Link href="/streaming" />
 - <Link href="/file-upload" />
 - <Link href="/file-download" />
 - <Link href="/transport" />
