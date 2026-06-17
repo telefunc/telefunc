@@ -116,7 +116,7 @@ await onTrackClicks(clicks$)
 
 ## Live cursors
 
-A shared Subject multicasts cursor positions between all connected users. The server attaches the user identity from context.
+A shared Subject multicasts cursor positions among all connected users. The server attaches the user identity from context.
 
 ```ts
 // Whiteboard.telefunc.ts
@@ -167,7 +167,7 @@ export async function onMetrics() {
 }
 ```
 
-The `| async` pipe subscribes and auto-unsubscribes on component destroy:
+The `| async` pipe subscribes and auto-unsubscribes when the component is destroyed:
 
 ```ts
 // dashboard.component.ts

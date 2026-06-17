@@ -50,7 +50,7 @@ const { channel } = await onClock()
 channel.listen((time) => console.log(time)) // 1700000000000, 1700000001000, ...
 ```
 
-The rest of this section adds types, two-way messaging, acks, and binary; see <Link href="#channel-methods" /> for the full API.
+The rest of this section adds types, two-way messaging, acks, and binary data; see <Link href="#channel-methods" /> for the full API.
 
 ### Channel methods
 
@@ -126,7 +126,7 @@ const ack = await channel.send({ type: 'join', roomId: 'general' })
 ack.accepted // true
 ```
 
-On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `chat.client` type swaps the directions.
+On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `chat.client` type flips the message directions.
 
 Both generic parameters also drive runtime validation: Telefunc auto-generates shields that check every message and ack arriving at the server against its declared type. See <Link href="/shield#channels">Shields — Channels</Link>.
 
@@ -200,7 +200,7 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ## Broadcast
 
-`Broadcast` is a keyed pub/sub **bus**: a `publish()` to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the key (via a `BroadcastChannel`). Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
+`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the key (via a `BroadcastChannel`). Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
 
 The static methods run purely on the server — no client, no handle, no lifecycle — and take the `key` as their first argument:
 
@@ -308,11 +308,11 @@ A channel is a conversation, like a phone call: two fixed ends (the server and t
 
 A broadcast is an announcement, like a radio frequency: whoever tunes in to the `key` receives everything published to it, members come and go, and the `key` belongs to no one.
 
-Only the two ends of a channel can use it, while anything that knows a `key` can join its broadcast. A channel ends when either side closes it, while a broadcast outlives any single member.
+Only the two ends of a channel can use it, while anything that knows a broadcast's `key` can join it. A channel ends when either side closes it, while a broadcast outlives any single member.
 
 ### Technically
 
-You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received it, and bridges that client into the keyed broadcast group — the same group those static methods publish to and subscribe from.
+You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`. The server holds a private channel to the one client that received it, then bridges that client into the keyed broadcast group — the same group those static methods publish to and subscribe from.
 
 ### Comparison
 
@@ -404,7 +404,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 
 ## Configuration
 
-> This is the **server-side** `config.channel` — reconnect/idle timeouts and buffer limits. It's a separate object from the **client-side** <Link text={<code>config.channel.transports</code>} href="/transport#channel-transport" /> (`telefunc/client`); the assignment below sets every server-side field at once and doesn't touch the client transports.
+> This is the **server-side** `config.channel` — reconnect/idle timeouts and buffer limits. It's a separate object from the **client-side** <Link text={<code>config.channel.transports</code>} href="/transport#channel-transport" /> (`telefunc/client`). The assignment below sets every server-side field at once and doesn't touch the client transports.
 
 ```ts
 // Environment: server
@@ -430,7 +430,7 @@ config.channel = {
 > **What to tune**: the defaults suit typical chat/dashboard traffic; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
 > - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit` / `bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
-> - Reconnects should replay more history → raise the replay buffers; lower them to cap memory.
+> - Want reconnects to replay more history → raise the replay buffers; lower them to cap memory.
 
 
 ## See also

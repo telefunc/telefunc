@@ -173,7 +173,7 @@ imgEl.src = URL.createObjectURL(opfsFile)
 | _(omitted)_ | `'picker'` if [`showSaveFilePicker`](https://developer.mozilla.org/en-US/docs/Web/API/Window/showSaveFilePicker) is available, else `'memory'`. |
 | `'picker'` | Opens the save-file picker so the user chooses the location. Throws if not supported. |
 | `'memory'` | Buffers bytes in RAM, then triggers a native browser download to the Downloads folder. Cross-browser. |
-| `'opfs'` | Streams bytes via browser-private storage, then triggers a native browser download. For large files where in-memory buffering isn't viable. Cross-browser. |
+| `'opfs'` | Streams bytes through browser-private storage (OPFS), then triggers a native browser download. For large files where in-memory buffering isn't viable. Cross-browser. |
 
 
 ## Multiple / nested downloads
