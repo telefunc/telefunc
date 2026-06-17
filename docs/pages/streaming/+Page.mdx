@@ -57,7 +57,7 @@ Direction: **→** server → client · **←** client → server · **↔** two
 > **Most apps don't use these primitives directly.** Reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> (auto-refetching queries) or <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" /> (reactive operators) — they're built on the primitives below.
 
 > **Handled for you, across all of the above:**
-> - **Validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
+> - **Validation** — whichever type you use, every value the client sends to the server is shield-validated against your TypeScript types: function-call <Link href="/shield#function-arguments" text="arguments" />, <Link href="/shield#channels" text="channel messages" />, and broadcast <Link href="/shield#broadcast" text="publishes" />. A value that fails validation never reaches your code — it surfaces as `ShieldValidationError` where you await a result, or is silently dropped for fire-and-forget sends.
 > - **Cleanup** — when the client disconnects or stops reading, `onClose()` fires so your telefunction can release resources. See <Link href="/close" />.
 > - **Transport & reconnection** — streams and channels negotiate a working transport (HTTP, SSE, WebSocket) and recover from dropped connections automatically. Tune it only if you need to — see <Link href="/transport" />.
 > - **Serialization** — structured values use Telefunc's serializer, not just JSON, so `Date`, `Map`, `Set`, `BigInt`, etc. survive the trip; raw bytes travel as `Uint8Array` / `File` / `Blob`.
