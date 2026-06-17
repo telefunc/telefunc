@@ -19,7 +19,7 @@ Telefunc supports real-time use cases — chat, file upload progress, live updat
 
 > See also: <Link text={<><code>Channel</code> vs <code>BroadcastChannel</code></>} href="/channel#channel-vs-broadcastchannel" />
 
-> **Runtime safety**: whichever primitive you use, every value the client sends to the server is shield-validated against your TypeScript types before it reaches your code — function-call <Link href="/shield#function-arguments" text="arguments" />, <Link href="/shield#channels" text="channel messages" />, and broadcast <Link href="/shield#broadcast" text="publishes" />. A failing check is rejected with `ShieldValidationError`.
+> **Runtime safety**: whichever primitive you use, every value the client sends to the server is shield-validated against your TypeScript types — function-call <Link href="/shield#function-arguments" text="arguments" />, <Link href="/shield#channels" text="channel messages" />, and broadcast <Link href="/shield#broadcast" text="publishes" />. A value that fails validation never reaches your code: it surfaces as `ShieldValidationError` where a result is awaited, or is silently dropped where none is (e.g. a fire-and-forget channel message).
 
 <NeedsLongRunningServer />
 

@@ -60,8 +60,8 @@ The rest of this section adds types, two-way messaging, acks, and binary; see <L
 | `send(data, { ack: true })` | Send and await acknowledgement. |
 | `sendBinary(data)` | Send binary data. Await for backpressure. |
 | `sendBinary(data, { ack: true })` | Send binary and await acknowledgement. |
-| `listen(cb)` | Receive messages. Return a value to ack. Returns unlisten function. |
-| `listenBinary(cb)` | Receive binary. Return a value to ack. Returns unlisten function. |
+| `listen(cb)` | Receive messages. Return a value to ack. Returns an unlisten function. |
+| `listenBinary(cb)` | Receive binary. Return a value to ack. Returns an unlisten function. |
 | `onOpen(cb)` / `onClose(cb)` | Lifecycle callbacks. |
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
