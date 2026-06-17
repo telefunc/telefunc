@@ -54,7 +54,7 @@ price$.pipe(
 
 ## Collaborative editor
 
-A shared `Subject` returned to multiple clients multicasts: when any client calls `next()`, all other clients' subscribers receive the value.
+A shared `Subject` returned to multiple clients multicasts across them: when one client emits with `next()`, every other client's subscribers receive the value through the server. The emitting client's own subscribers receive it locally too — the server doesn't echo a client's `next()` back to that same client.
 
 ```ts
 // Editor.telefunc.ts
