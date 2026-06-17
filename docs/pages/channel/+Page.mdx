@@ -304,7 +304,7 @@ chat.publish({ user: 'Alice', text: 'Hello!', })
 
 Fundamentally, the difference is what a message is addressed to: a channel message is addressed to *someone*, a broadcast message is addressed to *a topic* (the `key`).
 
-A channel is a conversation, like a phone call: it has two fixed ends (the server and the one client that received the channel), it's private to them, and it's over when either side hangs up.
+A channel is a conversation, like a phone call: two fixed ends (the server and the one client that received the channel), private to them, finishes when either side hangs up.
 
 A broadcast is an announcement, like a radio frequency: whoever tunes in to the `key` receives everything published to it, members come and go, and the `key` belongs to no one.
 
