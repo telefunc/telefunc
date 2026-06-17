@@ -3,11 +3,9 @@ import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
 
-Stream values that arrive over time — AI tokens, progress, raw bytes, or lazily-resolved parts of a response — by returning or accepting them like any other value. It works in both directions:
+Stream values that arrive over time — AI tokens, progress, raw bytes, or lazily-resolved parts of a response. Return or accept them like any other value. It works in both directions:
 - **Server → client**: Return `AsyncGenerator`, `ReadableStream`, `File` / `Blob` / `download()`, or nested `Promise` from a telefunction.
 - **Client → server**: Pass a `ReadableStream` as a telefunction argument.
-
-> Streaming works out-of-the-box — including its <Link text="transport" href="/transport" /> (binary HTTP by default; switch to SSE or a reconnecting transport only if you need to).
 
 
 ## Which one should I use?

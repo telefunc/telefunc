@@ -25,7 +25,7 @@ config.channel.transports = ['sse', 'ws']   // default
 
 <ConfigWhereClient />
 
-> **Client vs server `config.channel`.** The settings on this page are **client-side** (`telefunc/client`). The server-side `config.channel` is a *different* object — reconnect/idle timeouts and buffer limits, imported from `telefunc` — see <Link href="/channel#configuration" />. They share a name but live on separate imports and don't overlap, so setting one never clears the other.
+> **Client vs server `config.channel`.** The settings on this page are **client-side** (`telefunc/client`). The server-side `config.channel` is a *different* object (reconnect/idle timeouts and buffer limits), imported from `telefunc` — see <Link href="/channel#configuration" />. They share a name but live on separate imports and don't overlap, so setting one never clears the other.
 
 
 ## Stream transport
@@ -52,8 +52,8 @@ Controls how streamed values are delivered over HTTP.
 ### When to use what
 
 - **Start with `'binary-inline'`** — it's the fastest and works in most setups.
-- **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses, but passes SSE events through without buffering.
-- **Use `'channel'`** when you want streamed values to reconnect automatically after a dropped connection, like Telefunc channels do.
+- **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses but passes SSE events through without buffering.
+- **Use `'channel'`** when you want streamed values to reconnect automatically after a dropped connection (just as Telefunc channels do).
 
 
 ## Channel transport
@@ -123,7 +123,7 @@ for await (const token of gen) {
 
 ## Channel & broadcast config
 
-Beyond transport, channels and broadcasts expose more `config` (server-side):
+Beyond transport, channels and broadcasts expose more server-side `config` options:
 
 - **`config.channel`** — reconnect/idle timeouts and per-peer buffer limits. See <Link href="/channel#configuration" />.
 - **`config.broadcast.transport`** — cross-instance broadcast for multi-server deployments. See <Link href="/channel#multi-server" />, or <Link href="/redis" /> for the Redis adapter.

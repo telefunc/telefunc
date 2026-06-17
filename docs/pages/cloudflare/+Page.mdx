@@ -47,7 +47,7 @@ export default {
 }
 ```
 
-> Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else, and Durable Objects and KV are Cloudflare's primitives for exactly that:
+> Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else, and Durable Objects and KV are Cloudflare's primitives for exactly that purpose:
 >
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
 > - **KV** provides shared storage: it's how stateless workers — wherever a request happens to land — find the Durable Object that holds the state.
@@ -96,7 +96,7 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 Every telefunction call and channel message from a browser must reach the **same Durable Object** — otherwise that browser's channel state would be unavailable.
 
-On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns it to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
+On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns that token to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
 
 <Warning>
 
@@ -173,10 +173,10 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 | Guarantee | Details |
 |---|---|
 | Ordering | Messages are delivered in order. |
-| Buffering | The server buffers messages while the client is disconnected, up to `config.channel.bufferLimit` for text (default: 512 KB) and `config.channel.bufferLimitBinary` for binary (default: 2 MB). Binary frames have a separate budget and can never evict text. |
+| Buffering | The server buffers messages while the client is disconnected — up to `config.channel.bufferLimit` for text (default: 512 KB), and up to `config.channel.bufferLimitBinary` for binary (default: 2 MB). Binary frames have a separate budget and can never evict text. |
 | Replay | Both sides keep a replay buffer. On reconnect, missing messages are replayed and duplicates are ignored. |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
-| Loss | If the disconnect exceeds `config.channel.reconnectTimeout`, the channel closes with `NetworkError` (`isChannel: true`). |
+| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with `NetworkError`. |
 
 ### Broadcast messages (`publish` / `subscribe`)
 
@@ -184,7 +184,7 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 |---|---|
 | Ordering | Publishes for a given key are serialized and delivered in order. |
 | Delivery | `publish()` resolves after all Durable Objects with subscribers have received the message. Client delivery happens over the channel wire. |
-| Presence lag | A new subscriber may miss publishes until its KV presence record is written — typically a few milliseconds. |
+| Presence lag | A new subscriber may miss publishes until its KV presence record is written, which typically takes a few milliseconds. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
 
@@ -213,7 +213,7 @@ Channel state is in-memory JavaScript. If the Durable Object hibernates, that st
 
 </Warning>
 
-Once all channels close and no clients are connected, the Durable Object can hibernate — after the reconnect and idle windows expire.
+Once all channels close, no clients are connected, and the reconnect and idle windows have expired, the Durable Object can hibernate.
 
 ```ts
 import { config } from 'telefunc'

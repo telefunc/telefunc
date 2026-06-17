@@ -8,7 +8,7 @@ Low-level function that processes telefunction requests and returns an HTTP resp
 
 ## Basic usage
 
-Pass the web standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
+Pass the web-standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
 
 ```ts
 // Environment: server
@@ -67,7 +67,7 @@ const httpResponse = await serve({
 |---|---|---|
 | `statusCode` | `200 \| 400 \| 403 \| 422 \| 500` | HTTP status code |
 | `headers` | `[string, string][]` | Response headers |
-| `getReadableWebStream()` | `ReadableStream` | Web standard stream (Hono, Cloudflare, Deno, etc.) |
+| `getReadableWebStream()` | `ReadableStream` | Web-standard stream (Hono, Cloudflare, Deno, etc.) |
 | `pipe(writable)` | `void` | Pipe to Node.js writable (Express, Fastify) |
 | `getBody()` | `Promise<string>` | Full body as string (non-streaming only) |
 | `err` | `unknown` | The error thrown by your telefunction, if any (otherwise `undefined`) — see <Link href="/error-handling" /> |
