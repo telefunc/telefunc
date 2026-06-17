@@ -139,6 +139,11 @@ const headings = [
     url: '/event-based',
   },
   {
+    level: 2,
+    title: 'Testing',
+    url: '/testing',
+  },
+  {
     level: 4,
     title: 'Files',
   },
@@ -154,23 +159,12 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Live',
+    title: 'Streaming',
   },
   {
     level: 2,
-    titleInNav: 'Overview',
-    title: 'Overview: Live',
-    url: '/live',
-  },
-  {
-    level: 2,
-    title: 'Stream',
-    url: '/stream',
-  },
-  {
-    level: 2,
-    title: 'Real-Time',
-    url: '/real-time',
+    title: 'Streaming',
+    url: '/streaming',
   },
   {
     level: 2,
