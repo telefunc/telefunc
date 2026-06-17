@@ -13,7 +13,7 @@ Telefunc has two real-time **primitives** — and one **composition** of them:
 
 `new Channel()` and `new BroadcastChannel()` are returned from a telefunction — they serialize into client-side objects automatically. `Broadcast` is a server-side API, so there's nothing to return.
 
-> By default, channels and broadcasts use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background, see <Link href="/transport" />.
+> By default, channels and broadcasts use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/server" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background (see <Link href="/transport" />).
 
 <NeedsLongRunningServer />
 
@@ -226,7 +226,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
-> In-memory broadcast works out of the box for single-server deployments. For multi-server, set `config.broadcast.transport` — see <Link text="Multi-server" href="#multi-server" />. On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
+> In-memory broadcast works out-of-the-box for single-server deployments. For multi-server, set `config.broadcast.transport` — see <Link text="Multi-server" href="#multi-server" />. On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/cloudflare" />.
 
 
 ## new BroadcastChannel()
@@ -295,7 +295,7 @@ chat.publish({ user: 'Alice', text: 'Hello!', })
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
 
-> The instance has its `key` baked in, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#broadcast" /> / `Broadcast.subscribe(key, cb)` take it first — and have no `onOpen` / `onClose` / `close` / `abort`, since there's no instance to manage.
+> The instance is bound to its `key`, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#broadcast" /> / `Broadcast.subscribe(key, cb)` take it first — and have no `onOpen` / `onClose` / `close` / `abort`, since there's no instance to manage.
 
 
 ## `Channel` vs `BroadcastChannel`
@@ -387,7 +387,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 - Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed and duplicates are ignored.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
-> Reconnection is transparent — you don't need to handle it in your application code.
+> Reconnection is automatic — you don't need to handle it in your application code.
 
 
 ## Error handling

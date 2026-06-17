@@ -10,7 +10,7 @@ import { StreamingBeta } from '../../components'
 
 ## At a glance
 
-There's one umbrella API, `close()`, plus the per-type APIs. They all signal the server to stop producing and release resources — the difference is **graceful** (flush buffered data, then close) vs **immediate** (cancel in-flight work):
+There's one catch-all API, `close()`, plus the per-type APIs. They all signal the server to stop producing and release resources — the difference is **graceful** (flush buffered data, then close) vs **immediate** (cancel in-flight work):
 
 | API | Side | Graceful / immediate | Closes |
 |---|---|---|---|

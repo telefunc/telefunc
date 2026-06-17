@@ -3,9 +3,9 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
-Telefunc supports real-time use cases — chat, file upload progress, live updates, and more. They build on values that stream or stay connected across the client/server boundary — see the <Link text="Live overview" href="/live" />.
+Telefunc supports real-time use cases — chat, file-upload progress, live updates, and more. They're all built on Telefunc values that stream or stay connected across the client/server boundary — see the <Link text="Live overview" href="/live" />.
 
-> Before reaching for Telefunc's real-time primitives directly, consider a high-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> — it wraps the primitives below in an ergonomic API.
+> Before reaching for Telefunc's real-time primitives directly, consider a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> — it wraps the primitives below in a simpler API.
 
 
 ## Which primitive should I use?
@@ -97,7 +97,7 @@ See <Link href="/channel" /> for the full API.
 
 ## Broadcast
 
-Broadcasting is keyed pub/sub — everything sharing a `key` forms a group. There are two pieces: the server-side <Link text={<code>Broadcast</code>} href="/channel#broadcast" /> bus (`publish` / `subscribe` by key), and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, which bridges a client into a key's group. Return a `BroadcastChannel` to broadcast to clients:
+Broadcasting is keyed pub/sub — everyone sharing a `key` is in the same group. There are two pieces: the server-side <Link text={<code>Broadcast</code>} href="/channel#broadcast" /> bus (`publish` / `subscribe` by key), and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, which bridges a client into a key's group. Return a `BroadcastChannel` to broadcast to clients:
 
 ### Notifications
 
@@ -162,7 +162,7 @@ export async function onJoinTeam(teamId: string) {
 }
 ```
 
-`getContext()` and `throw Abort()` only work **synchronously, before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that window — its `listen()` callback runs later, after the telefunction has returned — so **capture what you need in a closure** and check it on each message:
+`getContext()` and `throw Abort()` only work **synchronously, before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that window — its `listen()` callback runs later, after the telefunction has returned — so **capture what you need in a closure** and re-check authorization on each message:
 
 ```ts
 // Room.telefunc.ts
@@ -188,7 +188,7 @@ export async function onJoinRoom(roomId: string) {
 
 ## Reconnection
 
-If the connection drops, Telefunc reconnects automatically, resumes existing channels, and replays buffered messages in order. It's transparent to your application code.
+If the connection drops, Telefunc reconnects automatically, resumes existing channels, and replays buffered messages in order. It's fully automatic: you don't need to handle any of this.
 
 See <Link href="/channel#reconnection" text="Channel reconnection" /> for details.
 
