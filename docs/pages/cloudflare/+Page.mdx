@@ -52,7 +52,7 @@ export default {
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
 > - **KV** provides shared storage: it's how stateless workers — wherever a request happens to land — find the Durable Object that holds the state.
 >
-> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `BroadcastChannel`, there's no state to keep — skip both bindings and use `serve()` instead, see <Link text="Low-level API" href="/server#low-level-api" />.
+> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `BroadcastChannel`, there's no state to keep — skip both bindings and use `serve()` instead (see <Link text="Low-level API" href="/server#low-level-api" />).
 >
 > See <Link href="#architecture" /> for implementation details.
 
@@ -94,7 +94,7 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 ### Session affinity
 
-Every telefunction call and channel message from a browser must reach the **same Durable Object** — otherwise its channel state would not be available.
+Every telefunction call and channel message from a browser must reach the **same Durable Object** — otherwise that browser's channel state would be unavailable.
 
 On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns it to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
 

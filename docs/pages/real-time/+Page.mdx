@@ -147,7 +147,7 @@ See <Link href="/channel#new-broadcastchannel" /> for the full broadcast API.
 
 ## Authorization
 
-A channel or broadcast is opened by a telefunction, so you protect it like any other telefunction (see <Link href="/permissions" />): authorize **at open time** with <Link text="getContext()" href="/getContext" /> and `throw Abort()`.
+A channel or broadcast is opened by a telefunction, so you protect it just as you would any telefunction (see <Link href="/permissions" />): authorize **at open time** with <Link text="getContext()" href="/getContext" /> and `throw Abort()`.
 
 ```ts
 // Team.telefunc.ts
@@ -188,7 +188,7 @@ export async function onJoinRoom(roomId: string) {
 
 ## Reconnection
 
-If the connection drops, Telefunc reconnects automatically, resumes existing channels, and replays buffered messages in order. It's fully automatic: you don't need to handle any of this.
+If the connection drops, Telefunc reconnects automatically, resumes existing channels, and replays buffered messages in order — you don't need to handle any of this.
 
 See <Link href="/channel#reconnection" text="Channel reconnection" /> for details.
 

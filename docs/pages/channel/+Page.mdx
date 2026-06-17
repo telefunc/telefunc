@@ -235,7 +235,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 <Warning>
 
-**Keys are capabilities** — anyone who knows the `key` joins the group. Secure a broadcast one of two ways:
+**Keys are capabilities** — anyone who knows the `key` joins the group. Secure a broadcast in one of two ways:
 - **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
 - **Guard the payload**: whatever you `publish()` reaches every subscriber, so broadcast only non-sensitive data. That's how <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> stays safe — it broadcasts only a *"refetch"* signal (the query key), and each client loads the actual data through its own authorized telefunction.
 
@@ -399,7 +399,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel (thrown synchronously); also rejects pending `ack` sends orphaned by close or close timeout | Closed | Recreate the channel |
-| `ChannelOverflowError` | A buffered send was dropped — backlog exceeded `config.channel.bufferLimit` while the peer was disconnected | **Open** | Only the dropped `send()` rejects; `await` sends to apply backpressure |
+| `ChannelOverflowError` | A buffered send was dropped — backlog exceeded `config.channel.bufferLimit` while the peer was disconnected | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
 
 
 ## Configuration
