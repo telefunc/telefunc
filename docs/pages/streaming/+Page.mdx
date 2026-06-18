@@ -1,0 +1,360 @@
+import { Link } from '@brillout/docpress'
+import { StreamingBeta, NeedsLongRunningServer } from '../../components'
+
+<StreamingBeta />
+
+Telefunc moves values that **stream or stay connected** across the client/server boundary — async sequences, byte streams, files, and persistent connections. You return them from a telefunction, or pass them to one, like any other value.
+
+It works in **both directions**, with no configuration:
+- **Server → client** — return an `async function*` (`AsyncGenerator`), `ReadableStream`, `File`, nested `Promise`, `Channel`, or `BroadcastChannel`.
+- **Client → server** — pass a `ReadableStream`, `File`, or callback as an argument.
+
+> Plain telefunction calls are unaffected — the special handling described here kicks in only when you return or pass one of the types above.
+
+For example, return an `async function*` and read each value as it arrives:
+
+```ts
+// Countdown.telefunc.ts
+// Environment: server
+
+export async function* onCountdown(from: number) {
+  for (let i = from; i >= 0; i--) {
+    yield i
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+}
+```
+
+```tsx
+// Countdown.tsx
+// Environment: client
+
+import { onCountdown } from './Countdown.telefunc'
+
+for await (const n of onCountdown(3)) {
+  console.log(n) // 3, 2, 1, 0 — one per second
+}
+```
+
+The value crosses the network like any return value, but arrives over time. A telefunction can also return several of these at once — generators, streams, and promises side by side, each resolving on its own.
+
+**Which type should I use?**
+
+{/*
+TODO: refactor — previous tables:
+https://github.com/telefunc/telefunc/blob/4f1daef89ec5f48a73258dcd44bac7b0aa8d4669/docs/pages/stream/%2BPage.mdx?plain=1#L11-L25
+https://github.com/telefunc/telefunc/blob/4f1daef89ec5f48a73258dcd44bac7b0aa8d4669/docs/pages/real-time/%2BPage.mdx?plain=1#L11-L20
+https://github.com/telefunc/telefunc/blob/4f1daef89ec5f48a73258dcd44bac7b0aa8d4669/docs/pages/live/%2BPage.mdx?plain=1#L45-L60
+*/}
+
+Direction: **→** server → client · **←** client → server · **↔** two-way.
+
+| | Goal | Use |
+|---|---|---|
+| **→** | Push a sequence — AI tokens, progress, notifications | <Link text={<code>async function*</code>} href="#async-function-async-generators" /> |
+| **→** | Deliver parts of one response as they become ready | <Link text="nested Promise" href="#nested-promise" /> |
+| **→** | Stream raw bytes | <Link text={<code>ReadableStream</code>} href="#readablestream" /> |
+| **→** | Download a file — name, size, progress | <Link text={<code>File</code>} href="/file-download" /> / <Link text={<code>download()</code>} href="/file-download#streaming-with-download" /> |
+| **←** | Upload a file | <Link text={<code>File</code>} href="/file-upload" /> argument |
+| **←** | Stream raw bytes up | <Link text={<code>ReadableStream</code>} href="#readablestream" /> argument |
+| **↔** | Let the server call you back | <Link text="function passing" href="#function-passing" /> |
+| **↔** | Two-way messaging with one client | <Link text={<code>new Channel()</code>} href="#channel" /> |
+| **↔** | Broadcast to many — rooms, presence, live feeds | <Link text={<code>new BroadcastChannel()</code>} href="#channel" /> |
+
+> **Most apps don't use these primitives directly.** Reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> (auto-refetching queries) or <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" /> (reactive operators) — they're built on the primitives below.
+
+> **Handled for you, across all of the above:**
+> - **Validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
+> - **Cleanup** — when the client disconnects or stops reading, `onClose()` fires so your telefunction can release resources. See <Link href="/close" />.
+> - **Transport & reconnection** — streams and channels negotiate a working transport (HTTP, SSE, WebSocket) and recover from dropped connections automatically. Tune it only if you need to — see <Link href="/transport" />.
+> - **Serialization** — structured values use Telefunc's serializer, not just JSON, so `Date`, `Map`, `Set`, `BigInt`, etc. survive the trip; raw bytes travel as `Uint8Array` / `File` / `Blob`.
+> - **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives a typed error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
+
+
+## `async function*` (async generators)
+
+The usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
+
+```ts
+// Chat.telefunc.ts
+// Environment: server
+
+export async function* onChat(prompt: string): AsyncGenerator<string> {
+  const stream = await ai.streamText({ prompt })
+  for await (const token of stream) {
+    yield token
+  }
+}
+```
+
+```tsx
+// Chat.tsx
+// Environment: client
+
+import { onChat } from './Chat.telefunc'
+
+const gen = onChat('Tell me a joke')
+for await (const token of gen) {
+  console.log(token) // Each token arrives as it's yielded
+}
+```
+
+
+## `ReadableStream`
+
+Stream raw bytes — in either direction.
+
+**Server → client** — return a `ReadableStream`:
+
+```ts
+// Download.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+import { Readable } from 'node:stream'
+
+export function onDownload(fileName: string): ReadableStream<Uint8Array> {
+  return Readable.toWeb(fs.createReadStream(`./files/${fileName}`)) as ReadableStream<Uint8Array>
+}
+```
+
+> For named files with `name` / `type` / `size` metadata, return a <Link text={<code>File</code>} href="/file-download" /> or <Link text={<code>Blob</code>} href="/file-download" /> instead.
+
+```ts
+// Download.tsx
+// Environment: client
+
+import { onDownload } from './Download.telefunc'
+
+const stream = await onDownload('report.pdf')
+const reader = stream.getReader()
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  // Process raw bytes
+}
+```
+
+**Client → server** — pass a `ReadableStream` as an argument to stream bytes up to the server:
+
+```ts
+// Ingest.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+import { Writable } from 'node:stream'
+
+export async function onIngest(stream: ReadableStream<Uint8Array>, filename: string) {
+  const dest = fs.createWriteStream(`./uploads/${filename}`)
+  await stream.pipeTo(Writable.toWeb(dest))
+}
+```
+
+```ts
+// Ingest.tsx
+// Environment: client
+
+import { onIngest } from './Ingest.telefunc'
+
+const stream = new ReadableStream({
+  start(controller) {
+    controller.enqueue(new TextEncoder().encode('chunk 1'))
+    controller.enqueue(new TextEncoder().encode('chunk 2'))
+    controller.close()
+  },
+})
+
+await onIngest(stream, 'data.txt')
+```
+
+{/* TODO: move to /file-upload and/or /file-download ?*/}
+
+| Method | Backpressure | Best for |
+|---|---|---|
+| <Link text={<code>File</code>} href="/file-upload" /> / <Link text={<code>Blob</code>} href="/file-upload" /> argument | TCP-level | Finite uploads — files, images, CSV imports |
+| `ReadableStream` argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
+| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | <Link text="Opt-in" href="/channel#backpressure" /> — `await` each send | Low-latency frames — skip the `await` for fire-and-forget |
+| <Link text={<code>new BroadcastChannel().publishBinary()</code>} href="/channel#new-broadcastchannel" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
+
+
+## Nested `Promise`
+
+Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
+
+```ts
+// Dashboard.telefunc.ts
+// Environment: server
+
+export async function onLoadDashboard() {
+  return {
+    title: 'Dashboard',            // Delivered immediately
+    summary: fetchSummary(),        // Resolves independently
+    report: fetchExtensiveReport(), // Resolves independently
+  }
+}
+```
+
+```tsx
+// Dashboard.tsx
+// Environment: client
+
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const res = await onLoadDashboard()
+
+console.log(res.title)             // Available right away
+
+const summary = await res.summary  // Await when needed
+const report = await res.report
+```
+
+> **Don't `await` inside the telefunction** — that blocks the entire response:
+> ```ts
+> // ❌ Blocks everything
+> export async function onLoadDashboard() {
+>   await prepare()
+>   return { title: 'Dashboard' }
+> }
+> ```
+> Return the promise instead:
+> ```ts
+> // ✅ title delivered immediately, promise resolves in the background
+> export async function onLoadDashboard() {
+>   return {
+>     title: 'Dashboard',
+>     data: prepare(),
+>   }
+> }
+> ```
+
+## Function passing
+
+Telefunc can pass functions between client and server:
+
+- **Client → server**: pass a callback as an argument — the server can call it.
+- **Server → client**: return a function from a telefunction — call it later from the client.
+
+```ts
+// Upload.telefunc.ts
+// Environment: server
+
+export async function onUpload(file: File, onProgress: (percent: number) => void) {
+  let loaded = 0
+  for await (const chunk of file.stream()) {
+    writeChunk(chunk)
+    loaded += chunk.byteLength
+    onProgress(Math.round((loaded / file.size) * 100))
+  }
+}
+```
+
+```tsx
+// Upload.tsx
+// Environment: client
+
+await onUpload(file, (percent) => setProgress(percent))
+```
+
+If you only need callback-style interaction, function passing is simpler than a channel.
+
+
+## `Channel`
+
+For ongoing two-way and broadcast messaging, Telefunc has two primitives and one composition:
+
+- **`new Channel()`** — direct messages between one server and one client.
+- **`Broadcast`** — a keyed pub/sub bus (`publish()` / `subscribe()` by `key`), server-side.
+- **`new BroadcastChannel()`** — a `Channel` bridged onto a `Broadcast` key: chat rooms, live feeds, presence.
+
+<NeedsLongRunningServer />
+
+A channel stays open for the lifetime of the page — here the server pushes live metrics to the one client that opened it:
+
+```ts
+// Dashboard.telefunc.ts
+// Environment: server
+
+import { Channel } from 'telefunc'
+
+export async function onDashboard() {
+  const dashboard = new Channel()
+
+  const interval = setInterval(() => {
+    dashboard.send(getMetrics())
+  }, 1000)
+
+  dashboard.onClose(() => clearInterval(interval))
+
+  return { channel: dashboard.client }
+}
+```
+
+```ts
+// Dashboard.tsx
+// Environment: client
+
+const { channel } = await onDashboard()
+channel.listen((metrics) => updateCharts(metrics))
+```
+
+This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, <Link text="authorization" href="/channel#authorization" />, and reconnection — see <Link href="/channel" />.
+
+
+## Mixing
+
+**Mix freely** — a telefunction can return any combination of generators, streams, and promises, nested anywhere in the returned object. Each resolves independently, without blocking the others.
+
+```ts
+// Feed.telefunc.ts
+// Environment: server
+
+export async function onLoadFeed() {
+  async function* notifications(): AsyncGenerator<string> {
+    for (const n of await fetchNotifications()) {
+      yield n.text
+    }
+  }
+
+  return {
+    title: 'Feed',
+    stream: notifications(),
+    fast: Promise.resolve({ count: 42 }),
+    slow: fetchExtensiveReport(),
+  }
+}
+```
+
+```tsx
+// Feed.tsx
+// Environment: client
+
+import { onLoadFeed } from './Feed.telefunc'
+
+const res = await onLoadFeed()
+
+// Static values — available immediately
+console.log(res.title)
+
+// Consume generator and promises independently
+for await (const notification of res.stream) {
+  console.log(notification)
+}
+
+const fast = await res.fast
+const slow = await res.slow
+```
+
+
+## See also
+
+- <Link href="/channel" />
+- <Link href="/file-download" />
+- <Link href="/file-upload" />
+- <Link href="/tanstack-query" />
+- <Link href="/rxjs" />
+- <Link href="/redis" />
+- <Link href="/testing" />
+- <Link href="/transport" />
+- <Link href="/close" />
+- <Link href="/scaling" />
+- <Link href="/cloudflare" />

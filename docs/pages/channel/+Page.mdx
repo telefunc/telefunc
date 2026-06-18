@@ -17,7 +17,7 @@ Telefunc has two real-time **primitives** — and one **composition** of them:
 
 <NeedsLongRunningServer />
 
-> For short-lived callbacks (e.g. progress updates), <Link href="/real-time">function passing</Link> is usually simpler.
+> For short-lived callbacks (e.g. progress updates), <Link href="/streaming#function-passing">function passing</Link> is usually simpler.
 
 
 ## new Channel()
@@ -236,7 +236,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 <Warning>
 
 **Keys are capabilities** — anyone who knows the `key` joins the group. Secure a broadcast in one of two ways:
-- **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="/real-time#authorization" />.
+- **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link href="#authorization" />.
 - **Guard the payload**: whatever you `publish()` reaches every subscriber, so broadcast only non-sensitive data. That's how <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> stays safe — it broadcasts only a *"refetch"* signal (the query key), and each client loads the actual data through its own authorized telefunction.
 
 </Warning>
@@ -251,8 +251,8 @@ import { BroadcastChannel } from 'telefunc'
 
 type ChatMessage = { user: string; text: string }
 
-export async function onJoinChat(username: string) {
-  const chat = new BroadcastChannel<ChatMessage>({ key: 'chat:lobby' })
+export async function onJoinChat(room: string, username: string) {
+  const chat = new BroadcastChannel<ChatMessage>({ key: `chat:${room}` })
 
   chat.onOpen(() => {
     chat.publish({ user: 'system', text: `${username} joined`, })
@@ -272,7 +272,7 @@ export async function onJoinChat(username: string) {
 
 import { onJoinChat } from './Chat.telefunc'
 
-const chat = await onJoinChat('Alice')
+const chat = await onJoinChat('lobby', 'Alice')
 
 // Receive messages published to the key, including this instance's own publishes
 chat.subscribe((msg, info) => {
@@ -281,6 +281,33 @@ chat.subscribe((msg, info) => {
 
 // Publish to every subscriber of the key
 chat.publish({ user: 'Alice', text: 'Hello!', })
+```
+
+### Notifications
+
+A per-user key with a subscribe-only client — the server returns a `BroadcastChannel` keyed to the user, and the client only listens:
+
+```ts
+// Notifications.telefunc.ts
+// Environment: server
+
+import { BroadcastChannel } from 'telefunc'
+
+export async function onListenNotifications(userId: string) {
+  const broadcast = new BroadcastChannel({ key: `notifications:${userId}` })
+  // Sent a toast to *all* clients match the user id (i.e. on all the tabs of all the user's devices)
+  setTimeout(() => broadcast.publish('hello'), 1000)
+  setTimeout(() => broadcast.publish('world'), 2000)
+  return broadcast
+}
+```
+
+```ts
+// Notifications.tsx
+// Environment: client
+
+const broadcast = await onListenNotifications(userId)
+broadcast.subscribe((n) => showToast(n))
 ```
 
 ### BroadcastChannel methods
@@ -296,6 +323,49 @@ chat.publish({ user: 'Alice', text: 'Hello!', })
 | `abort(value?)` | Terminate immediately. |
 
 > The instance is bound to its `key`, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#broadcast" /> / `Broadcast.subscribe(key, cb)` take it first — and have no `onOpen` / `onClose` / `close` / `abort`, since there's no instance to manage.
+
+
+{/* TODO: move to /streaming ? */}
+
+## Authorization
+
+A channel or broadcast is opened by a telefunction, so you protect it just as you would any telefunction (see <Link href="/permissions" />): authorize **at open time** with <Link text="getContext()" href="/getContext" /> and `throw Abort()`.
+
+```ts
+// Team.telefunc.ts
+// Environment: server
+
+import { BroadcastChannel, getContext, Abort } from 'telefunc'
+
+export async function onJoinTeam(teamId: string) {
+  const { user } = getContext()
+  if (!user || !user.teams.includes(teamId)) throw Abort()
+  return new BroadcastChannel({ key: `team:${teamId}` })
+}
+```
+
+`getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />). A channel outlives that window — its `listen()` callback runs later, after the telefunction has returned — so **capture what you need in a closure** and re-check authorization on each message:
+
+```ts
+// Room.telefunc.ts
+// Environment: server
+
+import { Channel, getContext, Abort } from 'telefunc'
+
+export async function onJoinRoom(roomId: string) {
+  const { user } = getContext() // captured once, at open time
+  if (!user) throw Abort()
+
+  const room = new Channel<RoomMessage, RoomMessage>()
+  room.listen((msg) => {
+    if (!canPost(user, msg)) return // per-message check uses the captured user
+    saveMessage(roomId, user.id, msg)
+  })
+  return { channel: room.client }
+}
+```
+
+> <Link href="/shield" /> validates the **type** of every client→server message; authorization — **who** may open a channel or send a message — is up to you, via `getContext()` + `Abort()`.
 
 
 ## `Channel` vs `BroadcastChannel`
@@ -384,7 +454,7 @@ chat.abort({ reason: 'session-expired' })
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
 - Messages sent while offline are buffered and delivered in order on reconnect.
-- Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed and duplicates are ignored.
+- Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed.
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.
@@ -435,9 +505,7 @@ config.channel = {
 
 ## See also
 
-- <Link href="/live" />
-- <Link href="/real-time" />
-- <Link href="/stream" />
+- <Link href="/streaming" />
 - <Link href="/file-upload" />
 - <Link href="/file-download" />
 - <Link href="/transport" />
