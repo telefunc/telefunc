@@ -3,13 +3,91 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
-Telefunc moves values that **stream or stay connected** across the client/server boundary — async sequences, byte streams, files, and persistent connections. You return them from a telefunction, or pass them to one, like any other value.
+Telefunc supports following streaming & real-time primitives:
 
-It works in **both directions**, with no configuration:
-- **Server → client** — return an `async function*` (`AsyncGenerator`), `ReadableStream`, `File`, nested `Promise`, `Channel`, or `BroadcastChannel`.
-- **Client → server** — pass a `ReadableStream`, `File`, or callback as an argument.
+- <Link href="#async-function-async-generators" />:
+  ```ts
+  // AiChat.telefunc.ts
+  // Environment: server
 
-> Plain telefunction calls are unaffected — the special handling described here kicks in only when you return or pass one of the types above.
+  export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
+    const stream = await ai.streamText({ prompt })
+    // The AI messages reach the client over time as a stream of messages
+    for await (const message of stream) {
+      yield message
+    }
+  }
+  ```
+- <Link href="#function-passing" />
+  ```ts
+  // .telefunc.ts
+  // Environment: server
+
+  // TODO/ai: find one or two succinct and realistic example(s) for both directions
+  ```
+- <Link href="#nested-promise" />:
+  ```ts
+  // Dashboard.telefunc.ts
+  // Environment: server
+
+  export async function onLoadDashboard() {
+    return {
+      title: 'Dashboard',             // Delivered immediately
+      summary: fetchSummary(),        // Delivered quickly, but later
+      report: fetchExtensiveReport(), // Delivered much later
+    }
+  }
+  ```
+- <Link href="#readablestream" />
+  ```ts
+  // .telefunc.ts
+  // Environment: server
+
+  // TODO/ai: find a realistic and succinct example
+  ```
+- <Link href="#channel" /> — API for advanced real-time use cases.
+
+
+> A telefunction <Link href="#mix">can mix</Link> — generators, streams, and promises side by side, each resolving independently of each other.
+
+> Telefunc seamlessly handles everything:
+> - ✅ **Runtime type validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
+> - ✅ **Cleanup** — when the client disconnects or stops reading, `onClose()` fires so your telefunction can release resources. See <Link href="/close" />.
+> - ✅ **Transport & reconnection** — streams and channels negotiate a working transport (HTTP, SSE, WebSocket) and recover from dropped connections automatically. Tune it only if you need to — see <Link href="/transport" />.
+> - ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives a typed error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
+
+You can also use higher-level integration like (they use the primitives under the hood):
+- <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> for automatically synced TanStack queries.
+- <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" /> for reactive operators.
+
+
+## `async function*` (async generators)
+
+The usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
+
+```ts
+// AiChat.telefunc.ts
+// Environment: server
+
+export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
+  const stream = await ai.streamText({ prompt })
+  for await (const message of stream) {
+    yield message
+  }
+}
+```
+
+```tsx
+// AiChat.tsx
+// Environment: client
+
+import { onAiPrompt } from './AiChat.telefunc'
+
+const gen = onAiPrompt('Tell me a joke')
+for await (const message of gen) {
+  console.log(message) // Each message arrives as it's yielded
+}
+```
 
 For example, return an `async function*` and read each value as it arrives:
 
@@ -33,69 +111,6 @@ import { onCountdown } from './Countdown.telefunc'
 
 for await (const n of onCountdown(3)) {
   console.log(n) // 3, 2, 1, 0 — one per second
-}
-```
-
-The value crosses the network like any return value, but arrives over time. A telefunction can also return several of these at once — generators, streams, and promises side by side, each resolving on its own.
-
-**Which type should I use?**
-
-{/*
-TODO: refactor — previous tables:
-https://github.com/telefunc/telefunc/blob/4f1daef89ec5f48a73258dcd44bac7b0aa8d4669/docs/pages/stream/%2BPage.mdx?plain=1#L11-L25
-https://github.com/telefunc/telefunc/blob/4f1daef89ec5f48a73258dcd44bac7b0aa8d4669/docs/pages/real-time/%2BPage.mdx?plain=1#L11-L20
-https://github.com/telefunc/telefunc/blob/4f1daef89ec5f48a73258dcd44bac7b0aa8d4669/docs/pages/live/%2BPage.mdx?plain=1#L45-L60
-*/}
-
-Direction: **→** server → client · **←** client → server · **↔** two-way.
-
-| | Goal | Use |
-|---|---|---|
-| **→** | Push a sequence — AI tokens, progress, notifications | <Link text={<code>async function*</code>} href="#async-function-async-generators" /> |
-| **→** | Deliver parts of one response as they become ready | <Link text="nested Promise" href="#nested-promise" /> |
-| **→** | Stream raw bytes | <Link text={<code>ReadableStream</code>} href="#readablestream" /> |
-| **→** | Download a file — name, size, progress | <Link text={<code>File</code>} href="/file-download" /> / <Link text={<code>download()</code>} href="/file-download#streaming-with-download" /> |
-| **←** | Upload a file | <Link text={<code>File</code>} href="/file-upload" /> argument |
-| **←** | Stream raw bytes up | <Link text={<code>ReadableStream</code>} href="#readablestream" /> argument |
-| **↔** | Let the server call you back | <Link text="function passing" href="#function-passing" /> |
-| **↔** | Two-way messaging with one client | <Link text={<code>new Channel()</code>} href="#channel" /> |
-| **↔** | Broadcast to many — rooms, presence, live feeds | <Link text={<code>new BroadcastChannel()</code>} href="#channel" /> |
-
-> **Most apps don't use these primitives directly.** Reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> (auto-refetching queries) or <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" /> (reactive operators) — they're built on the primitives below.
-
-> **Handled for you, across all of the above:**
-> - **Validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
-> - **Cleanup** — when the client disconnects or stops reading, `onClose()` fires so your telefunction can release resources. See <Link href="/close" />.
-> - **Transport & reconnection** — streams and channels negotiate a working transport (HTTP, SSE, WebSocket) and recover from dropped connections automatically. Tune it only if you need to — see <Link href="/transport" />.
-> - **Serialization** — structured values use Telefunc's serializer, not just JSON, so `Date`, `Map`, `Set`, `BigInt`, etc. survive the trip; raw bytes travel as `Uint8Array` / `File` / `Blob`.
-> - **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives a typed error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
-
-
-## `async function*` (async generators)
-
-The usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
-
-```ts
-// Chat.telefunc.ts
-// Environment: server
-
-export async function* onChat(prompt: string): AsyncGenerator<string> {
-  const stream = await ai.streamText({ prompt })
-  for await (const token of stream) {
-    yield token
-  }
-}
-```
-
-```tsx
-// Chat.tsx
-// Environment: client
-
-import { onChat } from './Chat.telefunc'
-
-const gen = onChat('Tell me a joke')
-for await (const token of gen) {
-  console.log(token) // Each token arrives as it's yielded
 }
 ```
 
@@ -186,10 +201,16 @@ Put promises inside the response object **without awaiting them**. The client re
 // Environment: server
 
 export async function onLoadDashboard() {
+  const title = 'Dashboard'
+  const summaryPromise = fetchSummary()
+  const reportPromise = fetchExtensiveReport()
   return {
-    title: 'Dashboard',            // Delivered immediately
-    summary: fetchSummary(),        // Resolves independently
-    report: fetchExtensiveReport(), // Resolves independently
+    // Delivered to the client immediately
+    title,
+    // Delivered to the client when summaryPromise resolves
+    summary: summaryPromise,
+    // Delivered to the client when reportPromise resolves
+    report: reportPromise
   }
 }
 ```
@@ -300,7 +321,7 @@ channel.listen((metrics) => updateCharts(metrics))
 This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, <Link text="authorization" href="/channel#authorization" />, and reconnection — see <Link href="/channel" />.
 
 
-## Mixing
+## Mix
 
 **Mix freely** — a telefunction can return any combination of generators, streams, and promises, nested anywhere in the returned object. Each resolves independently, without blocking the others.
 
