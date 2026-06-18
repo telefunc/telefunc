@@ -218,51 +218,6 @@ const report = await res.report
 > }
 > ```
 
-{/* TODO: move this: */}
-
-**Mix freely** — a telefunction can return any combination of generators, streams, and promises, nested anywhere in the returned object. Each resolves independently, without blocking the others.
-
-```ts
-// Feed.telefunc.ts
-// Environment: server
-
-export async function onLoadFeed() {
-  async function* notifications(): AsyncGenerator<string> {
-    for (const n of await fetchNotifications()) {
-      yield n.text
-    }
-  }
-
-  return {
-    title: 'Feed',
-    stream: notifications(),
-    fast: Promise.resolve({ count: 42 }),
-    slow: fetchExtensiveReport(),
-  }
-}
-```
-
-```tsx
-// Feed.tsx
-// Environment: client
-
-import { onLoadFeed } from './Feed.telefunc'
-
-const res = await onLoadFeed()
-
-// Static values — available immediately
-console.log(res.title)
-
-// Consume generator and promises independently
-for await (const notification of res.stream) {
-  console.log(notification)
-}
-
-const fast = await res.fast
-const slow = await res.slow
-```
-
-
 ## Function passing
 
 Telefunc can pass functions between client and server:
@@ -334,6 +289,51 @@ channel.listen((metrics) => updateCharts(metrics))
 ```
 
 This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, <Link text="authorization" href="/channel#authorization" />, and reconnection — see <Link href="/channel" />.
+
+
+### Mixing
+
+**Mix freely** — a telefunction can return any combination of generators, streams, and promises, nested anywhere in the returned object. Each resolves independently, without blocking the others.
+
+```ts
+// Feed.telefunc.ts
+// Environment: server
+
+export async function onLoadFeed() {
+  async function* notifications(): AsyncGenerator<string> {
+    for (const n of await fetchNotifications()) {
+      yield n.text
+    }
+  }
+
+  return {
+    title: 'Feed',
+    stream: notifications(),
+    fast: Promise.resolve({ count: 42 }),
+    slow: fetchExtensiveReport(),
+  }
+}
+```
+
+```tsx
+// Feed.tsx
+// Environment: client
+
+import { onLoadFeed } from './Feed.telefunc'
+
+const res = await onLoadFeed()
+
+// Static values — available immediately
+console.log(res.title)
+
+// Consume generator and promises independently
+for await (const notification of res.stream) {
+  console.log(notification)
+}
+
+const fast = await res.fast
+const slow = await res.slow
+```
 
 
 ## See also
