@@ -87,7 +87,7 @@ Use `onClose()` from <Link href="/getContext" text="getContext()" /> on the serv
 
 import { getContext } from 'telefunc'
 
-export async function* onAiPromt(prompt: string) {
+export async function* onAiPrompt(prompt: string) {
   const { onClose } = getContext()
   onClose(() => {
     // Release resources, cancel upstream work
