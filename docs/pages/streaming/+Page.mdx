@@ -20,10 +20,15 @@ Telefunc supports following stream & real-time primitives:
   ```
 - <Link href="#function-passing" />:
   ```ts
-  // .telefunc.ts
+  // Notifications.telefunc.ts
   // Environment: server
 
-  // TODO/ai: find one or two succinct and realistic example(s) for both directions
+  export async function onSubscribe(onNotification: (text: string) => void) {
+    // Client → server: the server calls the client's callback as events arrive
+    const unsubscribe = notifications.subscribe((n) => onNotification(n.text))
+    // Server → client: the client calls the returned function to stop listening
+    return unsubscribe
+  }
   ```
 - <Link href="#nested-promise" />:
   ```ts
@@ -40,10 +45,16 @@ Telefunc supports following stream & real-time primitives:
   ```
 - <Link href="#readablestream" />:
   ```ts
-  // .telefunc.ts
+  // Download.telefunc.ts
   // Environment: server
 
-  // TODO/ai: find a realistic and succinct example
+  import fs from 'node:fs'
+  import { Readable } from 'node:stream'
+
+  export function onDownload(fileName: string): ReadableStream<Uint8Array> {
+    // Raw bytes reach the client as they're read from disk
+    return Readable.toWeb(fs.createReadStream(`./files/${fileName}`)) as ReadableStream<Uint8Array>
+  }
   ```
 - <Link href="#channel" />: API for advanced real-time use cases.
 
