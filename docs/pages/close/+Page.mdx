@@ -51,7 +51,7 @@ For specific value types, you can also use the standard JS APIs directly:
 
 ```ts
 // AsyncGenerator — break out of the loop
-for await (const token of gen) {
+for await (const message of gen) {
   if (shouldStop) break
 }
 
@@ -87,14 +87,14 @@ Use `onClose()` from <Link href="/getContext" text="getContext()" /> on the serv
 
 import { getContext } from 'telefunc'
 
-export async function* onChat(prompt: string) {
+export async function* onAiPromt(prompt: string) {
   const { onClose } = getContext()
   onClose(() => {
     // Release resources, cancel upstream work
   })
 
-  for await (const token of ai.streamText({ prompt })) {
-    yield token
+  for await (const message of ai.streamText({ prompt })) {
+    yield message
   }
 }
 ```
