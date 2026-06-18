@@ -300,7 +300,7 @@ channel.listen((metrics) => updateCharts(metrics))
 This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, <Link text="authorization" href="/channel#authorization" />, and reconnection — see <Link href="/channel" />.
 
 
-### Mixing
+## Mixing
 
 **Mix freely** — a telefunction can return any combination of generators, streams, and promises, nested anywhere in the returned object. Each resolves independently, without blocking the others.
 
