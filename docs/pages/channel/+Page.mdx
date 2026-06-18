@@ -294,7 +294,11 @@ A per-user key with a subscribe-only client — the server returns a `BroadcastC
 import { BroadcastChannel } from 'telefunc'
 
 export async function onListenNotifications(userId: string) {
-  return new BroadcastChannel({ key: `notifications:${userId}` })
+  const broadcast = new BroadcastChannel({ key: `notifications:${userId}` })
+  // Sent a toast to *all* clients match the user id (i.e. on all the tabs of all the user's devices)
+  setTimeout(() => broadcast.publish('hello'), 1000)
+  setTimeout(() => broadcast.publish('world'), 2000)
+  return broadcast
 }
 ```
 
@@ -302,8 +306,8 @@ export async function onListenNotifications(userId: string) {
 // Notifications.tsx
 // Environment: client
 
-const notifications = await onListenNotifications(userId)
-notifications.subscribe((n) => showToast(n))
+const broadcast = await onListenNotifications(userId)
+broadcast.subscribe((n) => showToast(n))
 ```
 
 ### BroadcastChannel methods
