@@ -93,7 +93,11 @@ configs:
 
 services:
   redis:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    # DragonflyDB (Redis-compatible). Pulled from GitHub Container Registry instead of
+    # DragonflyDB's self-hosted `docker.dragonflydb.io`, which intermittently answers pulls
+    # with `403 Forbidden` and flakes CI. ghcr.io serves the identical image and is far more
+    # reliable from GitHub Actions runners.
+    image: ghcr.io/dragonflydb/dragonfly:latest
     ulimits:
       memlock: -1
     command:
