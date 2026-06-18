@@ -40,6 +40,13 @@ The value crosses the network like any return value, but arrives over time. A te
 
 **Which type should I use?**
 
+{/*
+TODO: refactor — previous tables:
+https://github.com/telefunc/telefunc/blob/4f1daef89ec5f48a73258dcd44bac7b0aa8d4669/docs/pages/stream/%2BPage.mdx?plain=1#L11-L25
+https://github.com/telefunc/telefunc/blob/4f1daef89ec5f48a73258dcd44bac7b0aa8d4669/docs/pages/real-time/%2BPage.mdx?plain=1#L11-L20
+https://github.com/telefunc/telefunc/blob/4f1daef89ec5f48a73258dcd44bac7b0aa8d4669/docs/pages/live/%2BPage.mdx?plain=1#L45-L60
+*/}
+
 Direction: **→** server → client · **←** client → server · **↔** two-way.
 
 | | Goal | Use |
@@ -159,6 +166,8 @@ const stream = new ReadableStream({
 
 await onIngest(stream, 'data.txt')
 ```
+
+{/* TODO: move to /file-upload and/or /file-download ?*/}
 
 | Method | Backpressure | Best for |
 |---|---|---|
