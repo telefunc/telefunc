@@ -181,7 +181,7 @@ const headings = [
   {
     level: 2,
     title: '`serve()',
-    url: '/telefunc',
+    url: '/serve',
   },
   {
     level: 4,
