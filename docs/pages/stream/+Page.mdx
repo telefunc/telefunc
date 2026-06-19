@@ -7,7 +7,7 @@ Telefunc supports many primitives for streaming and real-time use cases — with
 
 #### Primitives
 
-<Link href="#asyncgenerator" text={<><code>AsyncGenerator</code> (<code>function*</code>)</>} />:
+<Link href="#async-generator" text={<><code>AsyncGenerator</code> (<code>function*</code>)</>} />:
 ```ts
 // AiChat.telefunc.ts
 // Environment: server
@@ -49,7 +49,7 @@ export async function onLoadDashboard() {
 }
 ```
 
-<Link href="#readablestream" text={<code>ReadableStream</code>} />:
+<Link href="#readable-stream" text={<code>ReadableStream</code>} />:
 ```ts
 // Compress.telefunc.ts
 // Environment: server
@@ -80,8 +80,7 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.  
 
 
-{/* TODO/now URL slug: #async-generator */}
-## Primitive: `AsyncGenerator` (`function*`) {#asyncgenerator}
+## Primitive: `AsyncGenerator` (`function*`) {#async-generator}
 
 An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator): the usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
 
@@ -223,8 +222,7 @@ const report = await res.report
 > ```
 
 
-{/* TODO/now URL slug: #readable-stream */}
-## Primitive: `ReadableStream` {#readablestream}
+## Primitive: `ReadableStream` {#readable-stream}
 
 Stream raw bytes with a web-standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
 

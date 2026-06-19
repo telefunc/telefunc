@@ -15,7 +15,7 @@ Passing a `File` / `Blob` argument is one of several ways to move binary data wi
 | Method | Backpressure | Best for |
 |---|---|---|
 | `File` / `Blob` argument | TCP-level | Finite uploads — files, images, CSV imports |
-| <Link text={<code>ReadableStream</code>} href="/stream#readablestream" /> argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
+| <Link text={<code>ReadableStream</code>} href="/stream#readable-stream" /> argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
 | <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | <Link text="Opt-in" href="/channel#backpressure" /> — `await` each send | Low-latency frames — skip the `await` for fire-and-forget |
 | <Link text={<code>new BroadcastChannel().publishBinary()</code>} href="/channel#new-broadcastchannel" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
 
