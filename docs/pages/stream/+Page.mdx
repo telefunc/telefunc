@@ -7,7 +7,7 @@ Telefunc supports many primitives for streaming and real-time use cases — with
 
 #### Primitives
 
-<Link href="#asyncgenerator" /> (`function*`):
+<Link href="#asyncgenerator" text="AsyncGenerator" /> (`function*`):
 ```ts
 // AiChat.telefunc.ts
 // Environment: server
@@ -21,7 +21,7 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 }
 ```
 
-<Link href="#function-passing" /> (callbacks):
+<Link href="#function-passing" text="Function passing" /> (callbacks):
 ```ts
 // Notifications.telefunc.ts
 // Environment: server
@@ -34,7 +34,7 @@ export async function onSubscribe(onNotification: (text: string) => void) {
 }
 ```
 
-<Link href="#concurrent-promise" />:
+<Link href="#concurrent-promise" text={<>Concurrent <code>Promise</code></>} />:
 ```ts ts-only
 // Dashboard.telefunc.ts
 // Environment: server
@@ -49,7 +49,7 @@ export async function onLoadDashboard() {
 }
 ```
 
-<Link href="#readablestream" />:
+<Link href="#readablestream" text={<code>ReadableStream</code>} />:
 ```ts
 // Compress.telefunc.ts
 // Environment: server
@@ -60,9 +60,9 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 }
 ```
 
-<Link href="#channel" />: API for advanced real-time use cases.
+<Link href="#channel" text={<code>Channel</code>} />: API for advanced real-time use cases.
 
-> A telefunction <Link href="#mix">can mix</Link> — generators, streams, and promises side by side, each resolving independently of each other.
+> A telefunction can [mix](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) — generators, streams, and promises side by side, each resolving independently of each other.
 
 #### Integrations
 
@@ -80,7 +80,7 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.  
 
 
-## AsyncGenerator
+## Primitive: AsyncGenerator {#asyncgenerator}
 
 An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator): the usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
 
@@ -134,7 +134,7 @@ for await (const n of onCountdown(3)) {
 ```
 
 
-## `ReadableStream`
+## Primitive: `ReadableStream` {#readablestream}
 
 Stream raw bytes with a web-standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
 
@@ -249,7 +249,7 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 | <Link text={<code>new BroadcastChannel().publishBinary()</code>} href="/channel#new-broadcastchannel" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
 
 
-## Concurrent `Promise`
+## Primitive: Concurrent `Promise` {#concurrent-promise}
 
 Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
 
@@ -305,7 +305,7 @@ const report = await res.report
 > }
 > ```
 
-## Function passing
+## Primitive: Function passing {#function-passing}
 
 Telefunc can pass functions between client and server:
 
@@ -336,7 +336,7 @@ await onUpload(file, (percent) => setProgress(percent))
 If you only need callback-style interaction, function passing is simpler than a channel.
 
 
-## `Channel`
+## Primitive: `Channel` {#channel}
 
 For ongoing two-way and broadcast messaging, Telefunc has two primitives and one composition:
 
@@ -378,49 +378,18 @@ channel.listen((metrics) => updateCharts(metrics))
 This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, <Link text="authorization" href="/channel#authorization" />, and reconnection — see <Link href="/channel" />.
 
 
-## Mix
+## Scaling
 
-**Mix freely** — a telefunction can return any combination of generators, streams, and promises, nested anywhere in the returned object. Each resolves independently, without blocking the others.
+Scale Telefunc horizontally — across multiple instances, containers, or machines — by adding sticky sessions and a cross-instance broadcast transport.
 
-```ts
-// Feed.telefunc.ts
-// Environment: server
+See <Link href="/stream/scale" />.
 
-export async function onLoadFeed() {
-  async function* notifications(): AsyncGenerator<string> {
-    for (const n of await fetchNotifications()) {
-      yield n.text
-    }
-  }
 
-  return {
-    title: 'Feed',
-    stream: notifications(),
-    fast: Promise.resolve({ count: 42 }),
-    slow: fetchExtensiveReport(),
-  }
-}
-```
+## Cloudflare
 
-```tsx
-// Feed.tsx
-// Environment: client
+On Cloudflare Workers, Telefunc routes channels through Durable Objects and fans out broadcasts across regions automatically — so neither a sticky load balancer nor a broadcast transport is needed.
 
-import { onLoadFeed } from './Feed.telefunc'
-
-const res = await onLoadFeed()
-
-// Static values — available immediately
-console.log(res.title)
-
-// Consume generator and promises independently
-for await (const notification of res.stream) {
-  console.log(notification)
-}
-
-const fast = await res.fast
-const slow = await res.slow
-```
+See <Link href="/stream/cloudflare" />.
 
 
 ## See also
