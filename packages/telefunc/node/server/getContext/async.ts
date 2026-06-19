@@ -31,7 +31,7 @@ function restoreContext_async(context: null | Telefunc.Context): any {
   assert(context === null || isObject(context))
   assertWarning(
     !context,
-    'When using `provideTelefuncContext()` (i.e. Async Hooks), then providing the `context` object to the server middleware `telefunc()` has no effect.',
+    'When using `provideTelefuncContext()` (i.e. Async Hooks), then providing the `context` object to the server middleware `serve()` has no effect.',
     { onlyOnce: true },
   )
 }

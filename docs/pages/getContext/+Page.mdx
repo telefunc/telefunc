@@ -48,12 +48,12 @@ For example:
 // Server entry (Hono)
 
 import { Hono } from 'hono'
-import { telefunc } from 'telefunc'
+import { serve } from 'telefunc'
 
 const app = new Hono()
 
 app.all('/_telefunc', async (c) => {
-  const httpResponse = await telefunc({
+  const httpResponse = await serve({
     request: c.req.raw,
     // Provide the context object here:
     context: {
@@ -94,7 +94,7 @@ app.use(async (c, next) => {
 // Server entry (Express.js)
 
 import express from 'express'
-import { telefunc } from 'telefunc'
+import { serve } from 'telefunc'
 
 const app = express()
 
@@ -108,7 +108,7 @@ app.all('/_telefunc', async (req: Request, res: Response) => {
   // @docpress-replace user2 user
   const user2 = await authProviderApi.getUser(req.headers)
 
-  const httpResponse = await telefunc({
+  const httpResponse = await serve({
     // Provide the context object here:
     context: {
       user

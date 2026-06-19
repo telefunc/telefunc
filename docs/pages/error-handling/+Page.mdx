@@ -116,11 +116,11 @@ You can handle the thrown error at your Telefunc server middleware:
 
 // Server (Express.js/Fastify/...)
 
-import { telefunc } from 'telefunc'
+import { serve } from 'telefunc'
 
 // Telefunc middleware
 app.all('/_telefunc', async (req: Request, res: Response) => {
-  const httpResponse = await telefunc(/* ... */)
+  const httpResponse = await serve(/* ... */)
   // Telefunc exposes any error thrown by a telefunction at httpResponse.err
   if (httpResponse.err) {
     // Error handling

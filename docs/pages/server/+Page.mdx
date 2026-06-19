@@ -16,12 +16,12 @@ For example Hono:
 // Environment: server
 
 import { Hono } from 'hono'
-import { telefunc } from 'telefunc'
+import { serve } from 'telefunc'
 
 const app = new Hono()
 
 app.all('/_telefunc', async (c) => {
-  const httpResponse = await telefunc({ request: c.req.raw })
+  const httpResponse = await serve({ request: c.req.raw })
   return new Response(httpResponse.body, {
     status: httpResponse.statusCode,
     headers: { 'content-type': httpResponse.contentType },
@@ -45,12 +45,12 @@ For example Express:
 // Environment: server
 
 import express from 'express'
-import { telefunc } from 'telefunc'
+import { serve } from 'telefunc'
 
 const app = express()
 
 app.all('/_telefunc', async (req, res) => {
-  const httpResponse = await telefunc({
+  const httpResponse = await serve({
     url: req.originalUrl,
     method: req.method,
     readable: req,

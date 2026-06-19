@@ -139,7 +139,7 @@ function assertUrl(runContext: { request: Request; serverConfig: { telefuncUrl: 
   const urlPathname = getUrlPathname(runContext.request.url)
   assertUsage(
     urlPathname === runContext.serverConfig.telefuncUrl,
-    `telefunc({ url }): The pathname of \`url\` is \`${urlPathname}\` but it's expected to be \`${runContext.serverConfig.telefuncUrl}\`. Either make sure that \`url\` is the HTTP request URL, or set \`config.telefuncUrl\` to \`${urlPathname}\`.`,
+    `serve({ url }): The pathname of \`url\` is \`${urlPathname}\` but it's expected to be \`${runContext.serverConfig.telefuncUrl}\`. Either make sure that \`url\` is the HTTP request URL, or set \`config.telefuncUrl\` to \`${urlPathname}\`.`,
   )
 }
 

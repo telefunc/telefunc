@@ -1,6 +1,6 @@
 export { addTelefuncMiddleware }
 
-import { telefunc } from '../../server/index.js'
+import { serve } from '../../server/index.js'
 import { nodeReadableToWebRequest } from '../../../utils/nodeReadableToWebRequest.js'
 import type { ViteDevServer } from 'vite'
 
@@ -16,7 +16,7 @@ function addTelefuncMiddleware(middlewares: ConnectServer) {
 
     const request = nodeReadableToWebRequest(req, 'http://localhost/_telefunc', req.method!, req.headers)
 
-    const httpResponse = await telefunc({ request })
+    const httpResponse = await serve({ request })
     res.setHeader('Content-Type', httpResponse.contentType)
     res.statusCode = httpResponse.statusCode
     res.end(httpResponse.body)
