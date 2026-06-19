@@ -5,7 +5,7 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 Telefunc supports following stream & real-time primitives:
 
-- <Link href="#async-function-async-generators" />:
+- <Link href="#async-function-async-generators" /> (`function*`):
   ```ts
   // AiChat.telefunc.ts
   // Environment: server
@@ -18,19 +18,20 @@ Telefunc supports following stream & real-time primitives:
     }
   }
   ```
-- <Link href="#function-passing" />:
+- <Link href="#function-passing" /> (callbacks):
   ```ts
   // .telefunc.ts
   // Environment: server
 
   // TODO/ai: find one or two succinct and realistic example(s) for both directions
   ```
-- <Link href="#nested-promise" />:
-  ```ts
+- <Link href="#nested-promise" />
+  ```ts ts-only
   // Dashboard.telefunc.ts
   // Environment: server
 
   export async function onLoadDashboard() {
+    // The client receives each property at three different times
     return {
       title: 'Dashboard',             // Delivered immediately
       summary: fetchSummary(),        // Delivered quickly, but later
@@ -61,6 +62,7 @@ You can also use higher-level integration like (they use the primitives under th
 > - ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
 
 
+{/* TODO/now: rename to `## AsyncGenerator` */}
 ## `async function*` (async generators)
 
 The usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
@@ -176,7 +178,7 @@ const stream = new ReadableStream({
     controller.enqueue(new TextEncoder().encode('chunk 1'))
     controller.enqueue(new TextEncoder().encode('chunk 2'))
     controller.close()
-  },
+  }
 })
 
 await onIngest(stream, 'data.txt')
@@ -192,6 +194,7 @@ await onIngest(stream, 'data.txt')
 | <Link text={<code>new BroadcastChannel().publishBinary()</code>} href="/channel#new-broadcastchannel" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
 
 
+{/* TODO/now: rename to Multiple `Promise` */}
 ## Nested `Promise`
 
 Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
@@ -215,7 +218,7 @@ export async function onLoadDashboard() {
 }
 ```
 
-```tsx
+```tsx ts-only
 // Dashboard.tsx
 // Environment: client
 
