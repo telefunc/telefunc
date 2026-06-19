@@ -158,7 +158,7 @@ const headings = [
   },
   {
     level: 2,
-    title: 'Scaling Streaming',
+    title: 'Streaming at Scale',
     url: '/scaling',
   },
   {
