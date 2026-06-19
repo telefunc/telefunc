@@ -65,21 +65,21 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 
 <Link href="#channel" text={<code>Channel</code>} />: API for advanced real-time use cases.
 
-> A telefunction can [mix](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) — generators, streams, and promises side by side, each resolving independently of each other.
+> A telefunction can [mix](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) generators, streams, and promises side by side, each resolving independently.
 
 #### Integrations
 
 <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />: automatically synced TanStack queries.  
 <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" />: reactive operators.  
 
-> Integrations provide an even more seamless and egornomic DX. They're powered by the primitives listed here.
+> Integrations provide an even more seamless and ergonomic DX. They're powered by the primitives listed here.
 
 #### Seamless DX
 
 ✅ **Runtime type validation** — automatically validates every value sent from the client to the server <Link href="/shield#typescript-automatic">against TypeScript types</Link> (no need for Zod).  
 ✅ **Transport** — automatically picks the most performant available <Link href="/transport">transport (HTTP, SSE, WebSocket)</Link>.  
-✅ **Backpressure** — <Link href="/channel#backpressure">automatic backpressure</Link> when network is the bottleneck.  
-✅ **Reconnection** — <Link href="/channel#reconnection">automatic recover</Link> from network issues.  
+✅ **Backpressure** — <Link href="/channel#backpressure">automatic backpressure</Link> when the network is the bottleneck.  
+✅ **Reconnection** — <Link href="/channel#reconnection">automatic recovery</Link> from network issues.  
 
 
 ## Primitive: `AsyncGenerator` (`function*`) {#async-generator}
@@ -312,7 +312,7 @@ const compressed = await onCompress(data)          // data: ReadableStream<Uint8
 const blob = await new Response(compressed).blob()  // drain the gzipped bytes
 ```
 
-The transform can be arbitrarily heavy — for example, compressing a bulky video into a compact, universally-playable MP4, streamed back as it encodes:
+The transform can be arbitrarily heavy — for example, compressing a large video into a smaller MP4 and streaming it back to the client as it encodes:
 
 ```ts
 // CompressVideo.telefunc.ts
@@ -377,7 +377,7 @@ const { channel } = await onDashboard()
 channel.listen((metrics) => updateCharts(metrics))
 ```
 
-This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, and reconnection — see <Link href="/channel" />; authorizing a channel works like any streaming primitive — see <Link text="Authorization" href="#authorization" /> below.
+This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, and reconnection — see <Link href="/channel" />. Authorizing a channel works like any streaming primitive — see <Link text="Authorization" href="#authorization" /> below.
 
 
 ## Authorization
@@ -443,7 +443,7 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 
 <Link text="Channels" href="#channel" /> and broadcasts expose `onClose()` (and `onOpen()`) directly on the instance — e.g. `dashboard.onClose(() => clearInterval(interval))` in the <Link text="Channel example" href="#channel" /> above; see <Link href="/channel#lifecycle" />.
 
-From the client, end a stream early with <Link text={<code>close()</code>} href="/close" /> — or simply stop reading: `break` out of a `for await`, `reader.cancel()` a `ReadableStream`, or `channel.close()` a channel. Drop every reference without closing and Telefunc still cleans up automatically, via garbage collection, a few seconds later.
+From the client, end a stream early with <Link text={<code>close()</code>} href="/close" /> — or simply stop reading: `break` out of a `for await`, `reader.cancel()` a `ReadableStream`, or `channel.close()` a channel. Even if you drop every reference without closing, Telefunc still cleans up automatically via garbage collection a few seconds later.
 
 See also:
 - <Link href="/close" />
