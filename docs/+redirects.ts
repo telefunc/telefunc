@@ -12,4 +12,5 @@ checkType<HeadingsURL>(0 as any as RedirectsURL)
 const redirects = {
   '/remix': '/react-router',
   '/httpHeaders': '/headers',
+  '/telefunc': '/serve',
 } as const satisfies Config['redirects']
