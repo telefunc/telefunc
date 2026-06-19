@@ -388,26 +388,18 @@ export async function onJoinTeam(teamId: string) {
 }
 ```
 
-`getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />). A long-lived stream outlives that window — its data flows later, after the telefunction has returned — so **capture what you need in a closure** and re-check authorization on each message. The example below uses a channel's `listen()` callback, but the same applies whenever you process client→server data after returning (e.g. consuming a `ReadableStream` or `AsyncIterable` argument):
+`getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />) — that single open-time check is enough for most apps.
 
-```ts
-// Room.telefunc.ts
-// Environment: server
-
-import { Channel, getContext, Abort } from 'telefunc'
-
-export async function onJoinRoom(roomId: string) {
-  const { user } = getContext() // captured once, at open time
-  if (!user) throw Abort()
-
-  const room = new Channel<RoomMessage, RoomMessage>()
-  room.listen((msg) => {
-    if (!canPost(user, msg)) return // per-message check uses the captured user
-    saveMessage(roomId, user.id, msg)
-  })
-  return { channel: room.client }
-}
-```
+> **Consider re-checking per message.** A stream's callbacks (a channel's `listen()`, an `AsyncIterable` you consume) run *after* the telefunction returns, when `getContext()` is no longer available — but the authorized values you captured at open time (like `user`) stay valid there. So for sensitive operations you can re-check inside the callback:
+>
+> ```ts
+> room.listen((msg) => {
+>   if (!canPost(user, msg)) return // re-check with the captured user
+>   saveMessage(msg)
+> })
+> ```
+>
+> Most use cases don't need this.
 
 > <Link href="/shield" /> validates the **type** of every client→server message; authorization — **who** may open a stream or send a message — is up to you, via `getContext()` + `Abort()`.
 
