@@ -1,11 +1,9 @@
 import { Link } from '@brillout/docpress'
 import { StreamingBeta } from '../../components'
 
-<StreamingBeta />
-
 **Environment**: server.
 
-`new Telefunc()` is the runtime adapter that processes telefunction requests — including <Link href="/stream">streaming and real-time</Link> (channels, WebSocket). Import it from the entry point for your runtime:
+Use `new Telefunc()` to embed Telefunc into your server, with full-fledged support for <Link href="/stream">Telefunc Stream</Link>.
 
 ```ts choice=Node
 // Environment: server
