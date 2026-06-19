@@ -5,7 +5,7 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 A Telefunc **Stream** is any value that arrives over time. Telefunc moves it across the network as it's produced — fully typed, automatically reconnecting, with no transport to wire up. Streams come in a few shapes:
 
-- <Link href="#asyncgenerator" text="AsyncGenerator" /> (`function*`):
+- <Link href="#primitive-asyncgenerator" text="AsyncGenerator" /> (`function*`):
   ```ts
   // AiChat.telefunc.ts
   // Environment: server
@@ -18,7 +18,7 @@ A Telefunc **Stream** is any value that arrives over time. Telefunc moves it acr
     }
   }
   ```
-- <Link href="#function-passing" text="Function passing" /> (callbacks):
+- <Link href="#primitive-function-passing" text="Function passing" /> (callbacks):
   ```ts
   // Notifications.telefunc.ts
   // Environment: server
@@ -30,7 +30,7 @@ A Telefunc **Stream** is any value that arrives over time. Telefunc moves it acr
     return unsubscribe
   }
   ```
-- <Link href="#concurrent-promise" text={<>Concurrent <code>Promise</code></>} />
+- <Link href="#primitive-concurrent-promise" text={<>Concurrent <code>Promise</code></>} />
   ```ts ts-only
   // Dashboard.telefunc.ts
   // Environment: server
@@ -44,7 +44,7 @@ A Telefunc **Stream** is any value that arrives over time. Telefunc moves it acr
     }
   }
   ```
-- <Link href="#readablestream" text={<code>ReadableStream</code>} />:
+- <Link href="#primitive-readablestream" text={<code>ReadableStream</code>} />:
   ```ts
   // Compress.telefunc.ts
   // Environment: server
@@ -54,7 +54,7 @@ A Telefunc **Stream** is any value that arrives over time. Telefunc moves it acr
     return data.pipeThrough(new CompressionStream('gzip'))
   }
   ```
-- <Link href="#channel" text={<code>Channel</code>} />: API for advanced real-time use cases.
+- <Link href="#primitive-channel" text={<code>Channel</code>} />: API for advanced real-time use cases.
 
 You can also use integrations for further seamless and egornomic DX:
 - <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> for automatically synced TanStack queries.
@@ -70,7 +70,7 @@ You can also use integrations for further seamless and egornomic DX:
 > - ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
 
 
-## Primitive: AsyncGenerator {#asyncgenerator}
+## Primitive: AsyncGenerator
 
 An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator): the usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
 
@@ -124,7 +124,7 @@ for await (const n of onCountdown(3)) {
 ```
 
 
-## Primitive: `ReadableStream` {#readablestream}
+## Primitive: `ReadableStream`
 
 Stream raw bytes with a web-standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
 
@@ -239,7 +239,7 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 | <Link text={<code>new BroadcastChannel().publishBinary()</code>} href="/channel#new-broadcastchannel" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
 
 
-## Primitive: Concurrent `Promise` {#concurrent-promise}
+## Primitive: Concurrent `Promise`
 
 Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
 
@@ -295,7 +295,7 @@ const report = await res.report
 > }
 > ```
 
-## Primitive: Function passing {#function-passing}
+## Primitive: Function passing
 
 Telefunc can pass functions between client and server:
 
@@ -326,7 +326,7 @@ await onUpload(file, (percent) => setProgress(percent))
 If you only need callback-style interaction, function passing is simpler than a channel.
 
 
-## Primitive: `Channel` {#channel}
+## Primitive: `Channel`
 
 For ongoing two-way and broadcast messaging, Telefunc has two primitives and one composition:
 
