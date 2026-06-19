@@ -516,7 +516,7 @@ importers:
         specifier: ^8.0.16
         version: 8.0.16(@types/node@24.0.10)(esbuild@0.27.3)(jiti@2.7.0)
 
-  test/playground-streaming:
+  test/playground-stream:
     dependencies:
       '@tailwindcss/vite':
         specifier: ^4.2.1

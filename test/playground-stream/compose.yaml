@@ -115,7 +115,7 @@ services:
 
   playground-a: &playground
     image: node:24-alpine
-    working_dir: /repo/test/playground-streaming
+    working_dir: /repo/test/playground-stream
     command: node dist/nested/server/index.mjs
     volumes:
       - ../..:/repo
