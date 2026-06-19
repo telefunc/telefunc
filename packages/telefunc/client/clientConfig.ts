@@ -154,6 +154,7 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
     )
     configState.headers = val as Record<string, string>
   } else if (prop === 'httpHeaders') {
+    // TO-DO/next-major-release: remove
     assertWarning(false, '`config.httpHeaders` (client-side) is deprecated, use `config.headers` instead', {
       onlyOnce: true,
       showStackTrace: true,
