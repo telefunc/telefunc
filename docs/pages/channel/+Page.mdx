@@ -183,7 +183,7 @@ const ack = await chat.sendBinary(frame, { ack: true })
 
 ### Backpressure
 
-Both `send()` and `sendBinary()` return a `Promise` that resolves when the receiver has capacity for more data. Await them in a loop to apply backpressure:
+Both `send()` and `sendBinary()` return a `Promise` that resolves when the receiver has capacity for more data. Await them in a loop to apply [backpressure](https://en.wikipedia.org/wiki/Backpressure_routing):
 
 ```ts
 for (const frame of frames) {

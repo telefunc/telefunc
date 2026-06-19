@@ -76,11 +76,10 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 
 #### Seamless DX
 
-✅ **Type validation at runtime** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.  
-✅ **Cleanup** — when the client disconnects or stops reading, <Link href="/close">`onClose()`</Link> fires so you can release resources.  
-✅ **Transport** — automatically picks the most performant working transport (HTTP, SSE, WebSocket). <Link href="/transport">Tune it</Link> only if you need to.  
-✅ **Reconnection** — automatically recovers from network issues.  
-✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" />.  
+✅ **Runtime type validation** — automatically validates every value sent from the client to the server <Link href="/shield#typescript-automatic">against TypeScript types</Link> (no need for Zod).  
+✅ **Transport** — automatically picks the most performant working <Link href="/transport">transport</Link> (HTTP, SSE, WebSocket).  
+✅ **Backpressure** — automatic <Link href="/channel#backpressure">backpressure</Link> when network is the bottleneck.  
+✅ **Reconnection** — automatic recovering from network issues.  
 
 
 ## Primitive: `AsyncGenerator` (`function*`) {#async-generator}
@@ -405,6 +404,14 @@ await onTeamFeed('acme', (text) => showMessage(text))
 
 > **Consider re-checking.** For sensitive operations, consider re-checking authorization with the captured `user` each time the callback runs. Most use cases don't need this.
 
+
+## Cleanup
+
+✅ **Cleanup** — when the client disconnects or stops reading, <Link href="/close">`onClose()`</Link> fires so you can release resources.  
+
+TODO/now implement proper section
+
+
 ## Error handling
 
 The expected-vs-bug distinction described at <Link href="/error-handling" /> applies to streams too:
@@ -414,6 +421,7 @@ The expected-vs-bug distinction described at <Link href="/error-handling" /> app
 See also:
 - <Link href="/error-handling" />
 - <Link href="/channel#error-handling" />
+
 
 ## Scaling
 
