@@ -136,6 +136,93 @@ for await (const n of onCountdown(3)) {
 ```
 
 
+## Primitive: Concurrent `Promise` {#concurrent-promise}
+
+Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
+
+```ts
+// Dashboard.telefunc.ts
+// Environment: server
+
+export async function onLoadDashboard() {
+  const title = 'Dashboard'
+  const summaryPromise = fetchSummary()
+  const reportPromise = fetchExtensiveReport()
+  return {
+    // Delivered to the client immediately
+    title,
+    // Delivered to the client when summaryPromise resolves
+    summary: summaryPromise,
+    // Delivered to the client when reportPromise resolves
+    report: reportPromise
+  }
+}
+```
+
+```tsx ts-only
+// Dashboard.tsx
+// Environment: client
+
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const res = await onLoadDashboard()
+
+console.log(res.title)             // Available right away
+
+const summary = await res.summary  // Await when needed
+const report = await res.report
+```
+
+> **Don't `await` inside the telefunction** — that blocks the entire response:
+> ```ts
+> // ❌ Blocks everything
+> export async function onLoadDashboard() {
+>   await prepare()
+>   return { title: 'Dashboard' }
+> }
+> ```
+> Return the promise instead:
+> ```ts
+> // ✅ title delivered immediately, promise resolves in the background
+> export async function onLoadDashboard() {
+>   return {
+>     title: 'Dashboard',
+>     data: prepare(),
+>   }
+> }
+> ```
+
+## Primitive: `function` passing (callbacks) {#function-passing}
+
+Telefunc can pass functions between client and server:
+
+- **Client → server**: pass a callback as an argument — the server can call it.
+- **Server → client**: return a function from a telefunction — call it later from the client.
+
+```ts
+// Upload.telefunc.ts
+// Environment: server
+
+export async function onUpload(file: File, onProgress: (percent: number) => void) {
+  let loaded = 0
+  for await (const chunk of file.stream()) {
+    writeChunk(chunk)
+    loaded += chunk.byteLength
+    onProgress(Math.round((loaded / file.size) * 100))
+  }
+}
+```
+
+```tsx
+// Upload.tsx
+// Environment: client
+
+await onUpload(file, (percent) => setProgress(percent))
+```
+
+If you only need callback-style interaction, function passing is simpler than a channel.
+
+
 ## Primitive: `ReadableStream` {#readablestream}
 
 Stream raw bytes with a web-standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
@@ -240,93 +327,6 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
   return Readable.toWeb(ffmpeg.stdout) as ReadableStream<Uint8Array>
 }
 ```
-
-
-## Primitive: Concurrent `Promise` {#concurrent-promise}
-
-Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
-
-```ts
-// Dashboard.telefunc.ts
-// Environment: server
-
-export async function onLoadDashboard() {
-  const title = 'Dashboard'
-  const summaryPromise = fetchSummary()
-  const reportPromise = fetchExtensiveReport()
-  return {
-    // Delivered to the client immediately
-    title,
-    // Delivered to the client when summaryPromise resolves
-    summary: summaryPromise,
-    // Delivered to the client when reportPromise resolves
-    report: reportPromise
-  }
-}
-```
-
-```tsx ts-only
-// Dashboard.tsx
-// Environment: client
-
-import { onLoadDashboard } from './Dashboard.telefunc'
-
-const res = await onLoadDashboard()
-
-console.log(res.title)             // Available right away
-
-const summary = await res.summary  // Await when needed
-const report = await res.report
-```
-
-> **Don't `await` inside the telefunction** — that blocks the entire response:
-> ```ts
-> // ❌ Blocks everything
-> export async function onLoadDashboard() {
->   await prepare()
->   return { title: 'Dashboard' }
-> }
-> ```
-> Return the promise instead:
-> ```ts
-> // ✅ title delivered immediately, promise resolves in the background
-> export async function onLoadDashboard() {
->   return {
->     title: 'Dashboard',
->     data: prepare(),
->   }
-> }
-> ```
-
-## Primitive: `function` passing (callbacks) {#function-passing}
-
-Telefunc can pass functions between client and server:
-
-- **Client → server**: pass a callback as an argument — the server can call it.
-- **Server → client**: return a function from a telefunction — call it later from the client.
-
-```ts
-// Upload.telefunc.ts
-// Environment: server
-
-export async function onUpload(file: File, onProgress: (percent: number) => void) {
-  let loaded = 0
-  for await (const chunk of file.stream()) {
-    writeChunk(chunk)
-    loaded += chunk.byteLength
-    onProgress(Math.round((loaded / file.size) * 100))
-  }
-}
-```
-
-```tsx
-// Upload.tsx
-// Environment: client
-
-await onUpload(file, (percent) => setProgress(percent))
-```
-
-If you only need callback-style interaction, function passing is simpler than a channel.
 
 
 ## Primitive: `Channel` {#channel}
