@@ -49,7 +49,7 @@ function getCiJobs() {
     // `splitFiles: true` fans out one CI runner per `.test-*.test.ts` so the suite
     // runs in parallel instead of sequentially.
     {
-      name: 'Playground',
+      name: 'Playground Stream',
       setups: setupModern,
       splitFiles: true,
     },
