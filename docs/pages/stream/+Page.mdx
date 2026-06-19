@@ -3,78 +3,81 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
-**Telefunc Stream** is a set of primitives for streaming and real-time use cases, with a seamless DX.
+Telefunc supports many primitives for streaming and real-time use cases — with a seamless DX.
 
 #### Primitives
 
-- <Link href="#primitive-asyncgenerator" text="AsyncGenerator" /> (`function*`):
-  ```ts
-  // AiChat.telefunc.ts
-  // Environment: server
+<Link href="#primitive-asyncgenerator" text="AsyncGenerator" /> (`function*`):
+```ts
+// AiChat.telefunc.ts
+// Environment: server
 
-  export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
-    const stream = await ai.streamText({ prompt })
-    // The AI messages reach the client over time as a stream of messages
-    for await (const message of stream) {
-      yield message
-    }
+export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
+  const stream = await ai.streamText({ prompt })
+  // The AI messages reach the client over time as a stream of messages
+  for await (const message of stream) {
+    yield message
   }
-  ```
-- <Link href="#primitive-function-passing" text="Function passing" /> (callbacks):
-  ```ts
-  // Notifications.telefunc.ts
-  // Environment: server
+}
+```
 
-  export async function onSubscribe(onNotification: (text: string) => void) {
-    // Client → server: the server calls the client's callback as events arrive
-    const unsubscribe = notifications.subscribe((n) => onNotification(n.text))
-    // Server → client: the client calls the returned function to stop listening
-    return unsubscribe
-  }
-  ```
-- <Link href="#primitive-concurrent-promise" text={<>Concurrent <code>Promise</code></>} />
-  ```ts ts-only
-  // Dashboard.telefunc.ts
-  // Environment: server
+<Link href="#primitive-function-passing" text="Function passing" /> (callbacks):
+```ts
+// Notifications.telefunc.ts
+// Environment: server
 
-  export async function onLoadDashboard() {
-    // The client receives each property at three different times
-    return {
-      title: 'Dashboard',             // Delivered immediately
-      summary: fetchSummary(),        // Delivered quickly, but later
-      report: fetchExtensiveReport(), // Delivered much later
-    }
-  }
-  ```
-- <Link href="#primitive-readablestream" text={<code>ReadableStream</code>} />:
-  ```ts
-  // Compress.telefunc.ts
-  // Environment: server
+export async function onSubscribe(onNotification: (text: string) => void) {
+  // Client → server: the server calls the client's callback as events arrive
+  const unsubscribe = notifications.subscribe((n) => onNotification(n.text))
+  // Server → client: the client calls the returned function to stop listening
+  return unsubscribe
+}
+```
 
-  export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-    // A stream flows in, a transformed stream flows back out
-    return data.pipeThrough(new CompressionStream('gzip'))
+<Link href="#primitive-concurrent-promise" text={<>Concurrent <code>Promise</code></>} />:
+```ts ts-only
+// Dashboard.telefunc.ts
+// Environment: server
+
+export async function onLoadDashboard() {
+  // The client receives each property at three different times
+  return {
+    title: 'Dashboard',             // Delivered immediately
+    summary: fetchSummary(),        // Delivered quickly, but later
+    report: fetchExtensiveReport(), // Delivered much later
   }
-  ```
-- <Link href="#primitive-channel" text={<code>Channel</code>} />: API for advanced real-time use cases.
+}
+```
+
+<Link href="#primitive-readablestream" text={<code>ReadableStream</code>} />:
+```ts
+// Compress.telefunc.ts
+// Environment: server
+
+export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  // A stream flows in, a transformed stream flows back out
+  return data.pipeThrough(new CompressionStream('gzip'))
+}
+```
+
+<Link href="#primitive-channel" text={<code>Channel</code>} />: API for advanced real-time use cases.
 
 > A telefunction can [mix](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) — generators, streams, and promises side by side, each resolving independently of each other.
 
 #### Integrations
 
-- <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> for automatically synced TanStack queries.
-- <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" /> for reactive operators.
+<Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />: automatically synced TanStack queries.  
+<Link text={<code>@telefunc/rxjs</code>} href="/rxjs" />: reactive operators.  
 
 > Integrations provide an even more seamless and egornomic DX. They're powered by the primitives listed here.
 
 #### Seamless DX
 
-Telefunc seamlessly handles:
-- ✅ **Type runtime validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
-- ✅ **Cleanup** — when the client disconnects or stops reading, <Link href="/close">`onClose()`</Link> fires so you can release resources.
-- ✅ **Transport** — automatically picks the most performant working transport (HTTP, SSE, WebSocket). <Link href="/transport">Tune it</Link> only if you need to.
-- ✅ **Reconnection** — automatically recovers from network issues.
-- ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
+✅ **Type validation at runtime** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.  
+✅ **Cleanup** — when the client disconnects or stops reading, <Link href="/close">`onClose()`</Link> fires so you can release resources.  
+✅ **Transport** — automatically picks the most performant working transport (HTTP, SSE, WebSocket). <Link href="/transport">Tune it</Link> only if you need to.  
+✅ **Reconnection** — automatically recovers from network issues.  
+✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.  
 
 
 ## Primitive: AsyncGenerator
