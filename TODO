@@ -1,8 +1,2 @@
-TO-DO/before-merge:
-- Use <Link> instead of []()
-
 TO-DO/soon:
 - Use `createDebug()` instead of `TELEFUNC_SHIELD_DEBUG` (let's do it after no potential conflicts with pending PRs)
-
-TO-DO/next-major-release:
-- rename `telefunc()` into `serve()`

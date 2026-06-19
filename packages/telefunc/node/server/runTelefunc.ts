@@ -92,6 +92,7 @@ function createHttpResponse({
     statusCode,
     headers,
     get contentType() {
+      // TO-DO/next-major-release: remove
       assertWarning(
         false,
         'httpResponse.contentType is deprecated, use httpResponse.headers instead — https://telefunc.com/serve',
@@ -102,6 +103,7 @@ function createHttpResponse({
       return contentType
     },
     get etag() {
+      // TO-DO/next-major-release: remove
       assertWarning(false, 'httpResponse.etag is deprecated and unused.', { onlyOnce: true })
       return null
     },
