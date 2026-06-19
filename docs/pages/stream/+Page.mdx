@@ -17,7 +17,7 @@ Telefunc supports streaming (one-way stream) and real-time (two-way stream) use 
 
 export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
   const stream = await ai.streamText({ prompt })
-  // The AI messages reach the client over time as a stream of messages
+  // The messages from the AI reach the client over time as a stream of messages
   for await (const message of stream) {
     yield message
   }
