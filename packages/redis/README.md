@@ -1,6 +1,6 @@
 # `@telefunc/redis`
 
-Redis-backed broadcast fan-out for Telefunc — publishes on any instance reach subscribers on every other instance.
+Redis-backed broadcast fan-out for Telefunc — a `publish()` on any instance reaches subscribers on every other instance.
 
 ## Install
 
