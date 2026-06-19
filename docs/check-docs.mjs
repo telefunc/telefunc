@@ -54,7 +54,11 @@ for (const file of files) {
   for (const line of src.split('\n')) {
     const m = line.match(/^#{1,6}\s+(.*)/)
     if (m) {
-      const s = slugify(headingText(m[1]))
+      // Honor docpress's custom-anchor syntax `## Title {#custom-id}`: when present,
+      // the id (not the slugified title) determines the heading's hash.
+      // Source: node_modules/@brillout/docpress/dist/parsePageSections.js
+      const customAnchor = /\{#([^}]+)\}/.exec(m[1])?.[1]
+      const s = customAnchor ? slugify(customAnchor) : slugify(headingText(m[1]))
       if (s) slugs.add(s)
     }
   }
