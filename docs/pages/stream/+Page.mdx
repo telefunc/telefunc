@@ -3,7 +3,9 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
-A Telefunc **Stream** is any value that arrives over time. Telefunc moves it across the network as it's produced — fully typed, automatically reconnecting, with no transport to wire up. Streams come in a few shapes:
+**Telefunc Stream** is a set of primitives for streaming and real-time use cases, with a seamless DX.
+
+#### Primitives
 
 - <Link href="#primitive-asyncgenerator" text="AsyncGenerator" /> (`function*`):
   ```ts
@@ -56,18 +58,23 @@ A Telefunc **Stream** is any value that arrives over time. Telefunc moves it acr
   ```
 - <Link href="#primitive-channel" text={<code>Channel</code>} />: API for advanced real-time use cases.
 
-You can also use integrations for further seamless and egornomic DX:
+> A telefunction can [mix](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) — generators, streams, and promises side by side, each resolving independently of each other.
+
+#### Integrations
+
 - <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> for automatically synced TanStack queries.
 - <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" /> for reactive operators.
 
-> A telefunction can [mix](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) — generators, streams, and promises side by side, each resolving independently of each other.
+> Integrations provide an even more seamless and egornomic DX. They're powered by the primitves listed here.
 
-> Telefunc seamlessly handles:
-> - ✅ **Type runtime validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
-> - ✅ **Cleanup** — when the client disconnects or stops reading, <Link href="/close">`onClose()`</Link> fires so you can release resources.
-> - ✅ **Transport** — automatically picks the most performant working transport (HTTP, SSE, WebSocket). <Link href="/transport">Tune it</Link> only if you need to.
-> - ✅ **Reconnection** — automatically recovers from network issues.
-> - ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
+#### Seamless DX
+
+Telefunc seamlessly handles:
+- ✅ **Type runtime validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
+- ✅ **Cleanup** — when the client disconnects or stops reading, <Link href="/close">`onClose()`</Link> fires so you can release resources.
+- ✅ **Transport** — automatically picks the most performant working transport (HTTP, SSE, WebSocket). <Link href="/transport">Tune it</Link> only if you need to.
+- ✅ **Reconnection** — automatically recovers from network issues.
+- ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
 
 
 ## Primitive: AsyncGenerator

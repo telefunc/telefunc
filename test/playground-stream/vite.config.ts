@@ -12,7 +12,7 @@ export default {
   },
   plugins: [react(), vike(), telefunc(), tailwindcss()],
   build: {
-    outDir: `${__dirname}/../../test/playground-streaming/dist/nested`,
+    outDir: `${__dirname}/../../test/playground-stream/dist/nested`,
     minify: false,
   },
 } satisfies UserConfig
