@@ -16,8 +16,9 @@ function pluginTransformTelefuncFiles(): Plugin[] {
   return [
     {
       name: 'telefunc:pluginTransformTelefuncFiles',
-      enforce: 'pre', // TODO: also use `order: 'pre'`
+      enforce: 'pre',
       configResolved: {
+        order: 'pre',
         handler(config) {
           root = toPosixPath(config.root)
           assert(root)
@@ -27,11 +28,13 @@ function pluginTransformTelefuncFiles(): Plugin[] {
         },
       },
       configureServer: {
+        order: 'pre',
         handler() {
           isDev = true
         },
       },
       transform: {
+        order: 'pre',
         filter: {
           id: '**/*.telefunc.*',
         },
