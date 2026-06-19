@@ -20,7 +20,7 @@ type CategoryNames = ExtractCategoryName<(typeof categories)[number]>
 
 const categories = ['Guides', 'API', 'Get Started', 'Overview', 'Miscellaneous'] as const satisfies Config['categories']
 
-const headingsDetached = [...misc()] satisfies HeadingDetachedDefinition[]
+const headingsDetached = [...misc(), ...streamingPages()] satisfies HeadingDetachedDefinition[]
 
 const headings = [
   {
@@ -149,22 +149,12 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Streaming',
+    title: 'Stream',
   },
   {
     level: 2,
-    title: 'Streaming',
-    url: '/streaming',
-  },
-  {
-    level: 2,
-    title: 'Scaling',
-    url: '/scaling',
-  },
-  {
-    level: 2,
-    title: 'Cloudflare',
-    url: '/cloudflare',
+    title: 'Stream',
+    url: '/stream',
   },
   {
     level: 4,
@@ -382,4 +372,20 @@ function misc() {
       },
     ] as const
   ).map((h) => ({ ...h, category: 'Miscellaneous' as const })) satisfies HeadingDetachedDefinition[]
+}
+
+// Detached sub-pages of /stream — reachable from the Stream page, not listed in the nav.
+function streamingPages() {
+  return (
+    [
+      {
+        title: 'Streaming at Scale',
+        url: '/stream/scale',
+      },
+      {
+        title: 'Cloudflare',
+        url: '/stream/cloudflare',
+      },
+    ] as const
+  ).map((h) => ({ ...h, category: 'Guides' as const })) satisfies HeadingDetachedDefinition[]
 }
