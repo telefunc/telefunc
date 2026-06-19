@@ -40,7 +40,7 @@ This is also how you test <Link href="/permissions" /> — set up a context that
 
 A telefunction that opens a <Link text={<code>Channel</code>} href="/channel" /> or `BroadcastChannel` is still a plain function — call it directly to assert it authorizes correctly and wires up its listeners.
 
-The wire protocol itself, though — reconnection, multi-client broadcast, transport upgrades — only comes into play over a real connection, so cover it with an **end-to-end test** against a running server.
+The wire protocol itself, though — reconnection, multi-client broadcast, transport upgrades — only exists over a real connection, so cover it with an **end-to-end test** against a running server.
 
 
 ## See also
