@@ -7,6 +7,8 @@ Telefunc supports many primitives for streaming and real-time use cases — with
 
 #### Primitives
 
+{/* TODO/now align the primitive links bellow with the title of the section (just strip `Primitive:`) */}
+
 <Link href="#asyncgenerator" text="AsyncGenerator" /> (`function*`):
 ```ts
 // AiChat.telefunc.ts
@@ -80,7 +82,7 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.  
 
 
-## Primitive: AsyncGenerator {#asyncgenerator}
+## Primitive: `AsyncGenerator` (`function*`) {#asyncgenerator}
 
 An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator): the usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
 
@@ -305,7 +307,7 @@ const report = await res.report
 > }
 > ```
 
-## Primitive: Function passing {#function-passing}
+## Primitive: `function` passing (callbacks) {#function-passing}
 
 Telefunc can pass functions between client and server:
 
@@ -380,16 +382,16 @@ This is the low-level primitive; most apps reach for a higher-level integration 
 
 ## Scaling
 
-Scale Telefunc horizontally — across multiple instances, containers, or machines — by adding sticky sessions and a cross-instance broadcast transport.
+You can scale Telefunc horizontally (multiple instances/containers/machines) by adding sticky sessions and a cross-instance broadcast transport.
 
-See <Link href="/stream/scale" />.
+See: <Link href="/stream/scale" />.
 
 
 ## Cloudflare
 
 On Cloudflare Workers, Telefunc routes channels through Durable Objects and fans out broadcasts across regions automatically — so neither a sticky load balancer nor a broadcast transport is needed.
 
-See <Link href="/stream/cloudflare" />.
+See: <Link href="/stream/cloudflare" />.
 
 
 ## See also
