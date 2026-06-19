@@ -36,7 +36,7 @@ import { Telefunc } from 'telefunc/cloudflare'
 const tf = new Telefunc()
 ```
 
-> For per-runtime setup see <Link href="/server" />, and <Link href="/cloudflare" /> for Cloudflare specifics. For a low-level request handler without channels, use <Link href="/serve" />.
+> For per-runtime setup see <Link href="/server" />, and <Link href="/streaming/cloudflare" /> for Cloudflare specifics. For a low-level request handler without channels, use <Link href="/serve" />.
 
 
 ## Methods
@@ -46,7 +46,7 @@ const tf = new Telefunc()
 | `serve(input)` | all | Process a request and return the response. The input shape (`{ request }`, `{ req, res }`, `{ request, env, ctx }`, …) and return type vary by runtime — see <Link href="/server#return-value" />. |
 | `installWebSocket(server)` | Node | Enable WebSocket channels on your HTTP server. Idempotent. |
 | `websocket` | Bun | The WebSocket handler — pass it to `Bun.serve({ websocket })`. |
-| `TelefuncDurableObject` | Cloudflare | The Durable Object class to export — see <Link href="/cloudflare" />. |
+| `TelefuncDurableObject` | Cloudflare | The Durable Object class to export — see <Link href="/streaming/cloudflare" />. |
 
 
 ## Context
@@ -66,11 +66,11 @@ See <Link href="/getContext#provide" />.
 
 ## Configuration (Cloudflare)
 
-On Cloudflare the constructor also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, … — see <Link href="/cloudflare#configuration" />.
+On Cloudflare the constructor also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, … — see <Link href="/streaming/cloudflare#configuration" />.
 
 
 ## See also
 
 - <Link href="/server" />
 - <Link href="/serve" />
-- <Link href="/cloudflare" />
+- <Link href="/streaming/cloudflare" />

@@ -82,7 +82,7 @@ Serverless platforms that don't expose sticky-session routing aren't a good fit 
 
 Cloudflare Workers are the exception among serverless platforms: `telefunc/cloudflare` routes channels through Durable Objects instead of sticky sessions, and fans out broadcasts across regions automatically, so neither a sticky load balancer nor a broadcast transport is needed. You scale with the `scale` option instead of a load balancer.
 
-See <Link href="/cloudflare#scaling" text="Cloudflare scaling" />.
+See <Link href="/streaming/cloudflare#scaling" text="Cloudflare scaling" />.
 
 
 ## Sanity check
@@ -93,5 +93,5 @@ After deploying behind a sticky load balancer, open the browser network tab, ref
 ## See also
 
 - <Link href="/redis" />
-- <Link href="/cloudflare" />
+- <Link href="/streaming/cloudflare" />
 - <Link href="/channel" />
