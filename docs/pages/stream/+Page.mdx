@@ -7,63 +7,67 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 #### Primitives
 
-- <Link href="#asyncgenerator" /> (`function*`):
-  ```ts
-  // AiChat.telefunc.ts
-  // Environment: server
+<Link href="#asyncgenerator" /> (`function*`):
+```ts
+// AiChat.telefunc.ts
+// Environment: server
 
-  export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
-    const stream = await ai.streamText({ prompt })
-    // The AI messages reach the client over time as a stream of messages
-    for await (const message of stream) {
-      yield message
-    }
+export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
+  const stream = await ai.streamText({ prompt })
+  // The AI messages reach the client over time as a stream of messages
+  for await (const message of stream) {
+    yield message
   }
-  ```
-- <Link href="#function-passing" /> (callbacks):
-  ```ts
-  // Notifications.telefunc.ts
-  // Environment: server
+}
+```
 
-  export async function onSubscribe(onNotification: (text: string) => void) {
-    // Client → server: the server calls the client's callback as events arrive
-    const unsubscribe = notifications.subscribe((n) => onNotification(n.text))
-    // Server → client: the client calls the returned function to stop listening
-    return unsubscribe
-  }
-  ```
-- <Link href="#concurrent-promise" />
-  ```ts ts-only
-  // Dashboard.telefunc.ts
-  // Environment: server
+<Link href="#function-passing" /> (callbacks):
+```ts
+// Notifications.telefunc.ts
+// Environment: server
 
-  export async function onLoadDashboard() {
-    // The client receives each property at three different times
-    return {
-      title: 'Dashboard',             // Delivered immediately
-      summary: fetchSummary(),        // Delivered quickly, but later
-      report: fetchExtensiveReport(), // Delivered much later
-    }
-  }
-  ```
-- <Link href="#readablestream" />:
-  ```ts
-  // Compress.telefunc.ts
-  // Environment: server
+export async function onSubscribe(onNotification: (text: string) => void) {
+  // Client → server: the server calls the client's callback as events arrive
+  const unsubscribe = notifications.subscribe((n) => onNotification(n.text))
+  // Server → client: the client calls the returned function to stop listening
+  return unsubscribe
+}
+```
 
-  export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-    // A stream flows in, a transformed stream flows back out
-    return data.pipeThrough(new CompressionStream('gzip'))
+<Link href="#concurrent-promise" />:
+```ts ts-only
+// Dashboard.telefunc.ts
+// Environment: server
+
+export async function onLoadDashboard() {
+  // The client receives each property at three different times
+  return {
+    title: 'Dashboard',             // Delivered immediately
+    summary: fetchSummary(),        // Delivered quickly, but later
+    report: fetchExtensiveReport(), // Delivered much later
   }
-  ```
-- <Link href="#channel" />: API for advanced real-time use cases.
+}
+```
+
+<Link href="#readablestream" />:
+```ts
+// Compress.telefunc.ts
+// Environment: server
+
+export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  // A stream flows in, a transformed stream flows back out
+  return data.pipeThrough(new CompressionStream('gzip'))
+}
+```
+
+<Link href="#channel" />: API for advanced real-time use cases.
 
 > A telefunction <Link href="#mix">can mix</Link> — generators, streams, and promises side by side, each resolving independently of each other.
 
 #### Integrations
 
-- <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> for automatically synced TanStack queries.
-- <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" /> for reactive operators.
+<Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />: automatically synced TanStack queries.  
+<Link text={<code>@telefunc/rxjs</code>} href="/rxjs" />: reactive operators.  
 
 > Integrations provide an even more seamless and egornomic DX. They're powered by the primitves listed here.
 
