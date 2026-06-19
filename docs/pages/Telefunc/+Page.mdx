@@ -12,28 +12,28 @@ import { StreamingBeta } from '../../components'
 
 import { Telefunc } from 'telefunc/node'
 
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 ```
 ```ts choice=Bun
 // Environment: server
 
 import { Telefunc } from 'telefunc/bun'
 
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 ```
 ```ts choice=Deno
 // Environment: server
 
 import { Telefunc } from 'telefunc/deno'
 
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 ```
 ```ts choice=Cloudflare
 // Environment: server
 
 import { Telefunc } from 'telefunc/cloudflare'
 
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 ```
 
 > For per-runtime setup see <Link href="/server" />, and <Link href="/stream/cloudflare" /> for Cloudflare specifics. For a low-level request handler without channels, use <Link href="/serve" />.
@@ -55,10 +55,10 @@ Provide the <Link text="getContext()" href="/getContext" /> data per request —
 
 ```ts
 // Node / Bun / Deno
-await tf.serve({ request, context: { user } })
+await telefunc.serve({ request, context: { user } })
 
 // Cloudflare
-const tf = new Telefunc({ context: (request, env) => ({ user }) })
+const telefunc = new Telefunc({ context: (request, env) => ({ user }) })
 ```
 
 See <Link href="/getContext#provide" />.
