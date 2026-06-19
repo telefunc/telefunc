@@ -239,15 +239,6 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 }
 ```
 
-{/* TODO/now: move to /file-upload and/or /file-download ?*/}
-
-| Method | Backpressure | Best for |
-|---|---|---|
-| <Link text={<code>File</code>} href="/file-upload" /> / <Link text={<code>Blob</code>} href="/file-upload" /> argument | TCP-level | Finite uploads — files, images, CSV imports |
-| `ReadableStream` argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
-| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | <Link text="Opt-in" href="/channel#backpressure" /> — `await` each send | Low-latency frames — skip the `await` for fire-and-forget |
-| <Link text={<code>new BroadcastChannel().publishBinary()</code>} href="/channel#new-broadcastchannel" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
-
 
 ## Primitive: Concurrent `Promise` {#concurrent-promise}
 
@@ -375,7 +366,48 @@ const { channel } = await onDashboard()
 channel.listen((metrics) => updateCharts(metrics))
 ```
 
-This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, <Link text="authorization" href="/channel#authorization" />, and reconnection — see <Link href="/channel" />.
+This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, and reconnection — see <Link href="/channel" />; authorizing a channel works like any streaming primitive — see <Link text="Authorization" href="#authorization" /> below.
+
+
+## Authorization
+
+A streaming primitive is opened by a telefunction — whether you return a <Link text="Channel" href="#channel" />, an <Link text="AsyncGenerator" href="#asyncgenerator" />, or a <Link text="ReadableStream" href="#readablestream" />, or receive one as an argument — so you protect it just as you would any telefunction (see <Link href="/permissions" />): authorize **at open time** with <Link text="getContext()" href="/getContext" /> and `throw Abort()`.
+
+```ts
+// Team.telefunc.ts
+// Environment: server
+
+import { BroadcastChannel, getContext, Abort } from 'telefunc'
+
+export async function onJoinTeam(teamId: string) {
+  const { user } = getContext()
+  if (!user || !user.teams.includes(teamId)) throw Abort()
+  return new BroadcastChannel({ key: `team:${teamId}` })
+}
+```
+
+`getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />). A long-lived stream outlives that window — its data flows later, after the telefunction has returned — so **capture what you need in a closure** and re-check authorization on each message. The example below uses a channel's `listen()` callback, but the same applies whenever you process client→server data after returning (e.g. consuming a `ReadableStream` or `AsyncIterable` argument):
+
+```ts
+// Room.telefunc.ts
+// Environment: server
+
+import { Channel, getContext, Abort } from 'telefunc'
+
+export async function onJoinRoom(roomId: string) {
+  const { user } = getContext() // captured once, at open time
+  if (!user) throw Abort()
+
+  const room = new Channel<RoomMessage, RoomMessage>()
+  room.listen((msg) => {
+    if (!canPost(user, msg)) return // per-message check uses the captured user
+    saveMessage(roomId, user.id, msg)
+  })
+  return { channel: room.client }
+}
+```
+
+> <Link href="/shield" /> validates the **type** of every client→server message; authorization — **who** may open a stream or send a message — is up to you, via `getContext()` + `Abort()`.
 
 
 ## Scaling

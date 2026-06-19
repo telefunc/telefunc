@@ -1,12 +1,11 @@
 import { Link } from '@brillout/docpress'
-import { StreamingBeta } from '../../components'
+import { StreamingBeta, PoweredByStreaming } from '../../components'
 
 <StreamingBeta />
 
 Live queries for [TanStack Query](https://tanstack.com/query) — invalidate a query key on the server, and every connected client with a matching query refetches automatically.
 
-{/* TODO/now: DRY */}
-> The `@telefunc/tanstack-query` integration is powered by <Link href="/stream">Telefunc's streaming primitives</Link>.
+<PoweredByStreaming pkg="tanstack-query" />
 
 ## Install
 
