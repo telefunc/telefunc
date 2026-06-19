@@ -34,7 +34,7 @@ import { Telefunc } from 'telefunc/cloudflare'
 const telefunc = new Telefunc()
 ```
 
-> For per-runtime setup see <Link href="/server" />, and <Link href="/stream/cloudflare" /> for Cloudflare specifics. For a low-level request handler without channels, use <Link href="/serve" />.
+> For per-runtime setup see <Link href="/server" />; for Cloudflare specifics see <Link href="/stream/cloudflare" />. For a low-level request handler without channels, use <Link href="/serve" />.
 
 
 ## Methods
@@ -49,7 +49,7 @@ const telefunc = new Telefunc()
 
 ## Context
 
-Provide the <Link text="getContext()" href="/getContext" /> data per request — on Node/Bun/Deno via `serve({ context })`, on Cloudflare via the `context` constructor option:
+Provide the data for <Link text="getContext()" href="/getContext" /> per request — on Node/Bun/Deno via `serve({ context })`, on Cloudflare via the `context` constructor option:
 
 ```ts
 // Node / Bun / Deno

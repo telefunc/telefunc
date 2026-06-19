@@ -5,7 +5,7 @@ import { StreamingBeta } from '../../components'
 
 `close()` and `onClose()` manage the lifecycle of the streams and connections a telefunction returns or accepts — so the server can stop producing and release resources.
 
-> Applies to all <Link href="/stream">streaming and real-time</Link> values — `AsyncGenerator`, `ReadableStream`, files, `Channel`, `BroadcastChannel` — they all close the same way.
+> Applies to all <Link href="/stream">streaming and real-time</Link> values: `AsyncGenerator`, `ReadableStream`, files, `Channel`, and `BroadcastChannel` all close the same way.
 
 
 ## At a glance
@@ -23,7 +23,7 @@ There's one catch-all API, `close()`, plus per-type APIs. They all signal the se
 | <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | either side | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
 | `onClose(cb)` | server | — (cleanup hook) | Fires when the value ends, however it ends |
 
-The rest of this page covers `close()`, `abort()`, and `onClose()` in detail; channel-specific closing is covered on <Link href="/channel#lifecycle" />.
+The rest of this page covers `close()`, `abort()`, and `onClose()` in detail; channel-specific closing is documented on <Link href="/channel#lifecycle" />.
 
 
 ## `close()` (client)

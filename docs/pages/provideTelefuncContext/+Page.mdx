@@ -13,9 +13,9 @@ provideTelefuncContext({ user })
 // getContext() inside telefunctions now returns { user }
 ```
 
-Call it before the telefunction runs (e.g. in a test's setup, or your SSR request handler).
+Call it before the telefunction runs (e.g. in your test setup or your SSR request handler).
 
-> Through <Link text="serve()" href="/serve" /> / <Link text="new Telefunc()" href="/Telefunc" />, the context is provided for you — see <Link href="/getContext#provide" />. Reach for `provideTelefuncContext()` only when a telefunction runs outside both.
+> With <Link text="serve()" href="/serve" /> / <Link text="new Telefunc()" href="/Telefunc" />, the context is provided for you — see <Link href="/getContext#provide" />. Reach for `provideTelefuncContext()` only when a telefunction runs outside both.
 
 
 ## See also

@@ -295,7 +295,7 @@ import { BroadcastChannel } from 'telefunc'
 
 export async function onListenNotifications(userId: string) {
   const broadcast = new BroadcastChannel({ key: `notifications:${userId}` })
-  // Sent a toast to *all* clients match the user id (i.e. on all the tabs of all the user's devices)
+  // Send a toast to *all* clients matching the user id (i.e. on all the tabs of all the user's devices)
   setTimeout(() => broadcast.publish('hello'), 1000)
   setTimeout(() => broadcast.publish('world'), 2000)
   return broadcast
