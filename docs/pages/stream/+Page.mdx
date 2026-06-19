@@ -371,43 +371,37 @@ This is the low-level primitive; most apps reach for a higher-level integration 
 
 ## Authorization
 
-A streaming primitive is opened by a telefunction — whether you return a <Link text="Channel" href="#channel" />, an <Link text="AsyncGenerator" href="#asyncgenerator" />, or a <Link text="ReadableStream" href="#readablestream" />, or receive one as an argument — so you protect it just as you would any telefunction (see <Link href="/permissions" />): authorize **at open time** with <Link text="getContext()" href="/getContext" /> and `throw Abort()`.
+A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link text="getContext()" href="/getContext" /> and `throw Abort()` **at open time**, before you stream anything back. Here the client passes a <Link text="callback" href="#function-passing" /> and the server calls it:
 
 ```ts
-// Team.telefunc.ts
+// TeamFeed.telefunc.ts
 // Environment: server
 
-import { BroadcastChannel, getContext, Abort } from 'telefunc'
+import { getContext, Abort } from 'telefunc'
 
-export async function onJoinTeam(teamId: string) {
+export async function onTeamFeed(teamId: string, onMessage: (text: string) => void) {
   const { user } = getContext()
   if (!user || !user.teams.includes(teamId)) throw Abort()
-  return new BroadcastChannel({ key: `team:${teamId}` })
+
+  // Authorized — push this team's messages to the client
+  watchTeam(teamId, onMessage)
 }
 ```
 
-`getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />). A long-lived stream outlives that window — its data flows later, after the telefunction has returned — so **capture what you need in a closure** and re-check authorization on each message. The example below uses a channel's `listen()` callback, but the same applies whenever you process client→server data after returning (e.g. consuming a `ReadableStream` or `AsyncIterable` argument):
+```tsx
+// TeamFeed.tsx
+// Environment: client
 
-```ts
-// Room.telefunc.ts
-// Environment: server
+import { onTeamFeed } from './TeamFeed.telefunc'
 
-import { Channel, getContext, Abort } from 'telefunc'
-
-export async function onJoinRoom(roomId: string) {
-  const { user } = getContext() // captured once, at open time
-  if (!user) throw Abort()
-
-  const room = new Channel<RoomMessage, RoomMessage>()
-  room.listen((msg) => {
-    if (!canPost(user, msg)) return // per-message check uses the captured user
-    saveMessage(roomId, user.id, msg)
-  })
-  return { channel: room.client }
-}
+await onTeamFeed('acme', (text) => showMessage(text))
 ```
 
-> <Link href="/shield" /> validates the **type** of every client→server message; authorization — **who** may open a stream or send a message — is up to you, via `getContext()` + `Abort()`.
+`getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />) — so authorize there, at open time. The `user` you captured stays valid inside the callback, which runs later.
+
+> **Consider re-checking.** For sensitive operations, you can re-verify authorization with the captured `user` each time the callback runs. Most use cases don't need this.
+
+> <Link href="/shield" /> handles **type** validation; deciding **who** is authorized is up to you, via `getContext()` + `Abort()`.
 
 
 ## Scaling
