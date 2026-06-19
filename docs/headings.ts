@@ -296,8 +296,8 @@ const headings = [
   },
   {
     level: 2,
-    title: '`httpHeaders`',
-    url: '/httpHeaders',
+    title: '`headers`',
+    url: '/headers',
   },
   {
     level: 2,

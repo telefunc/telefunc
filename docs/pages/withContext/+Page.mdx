@@ -35,7 +35,7 @@ for await (const token of gen) {
 | Option | Type | Description |
 |---|---|---|
 | `signal` | `AbortSignal` | Cancel this call and any channels it opens — see <Link href="/close" />. |
-| `headers` | `Record<string, string>` | Extra HTTP headers for this call. Global default: <Link text={<code>config.headers</code>} href="/httpHeaders" />. |
+| `headers` | `Record<string, string>` | Extra HTTP headers for this call. Global default: <Link text={<code>config.headers</code>} href="/headers" />. |
 | `telefuncUrl` | `string` | Override <Link text={<code>config.telefuncUrl</code>} href="/telefuncUrl" /> for this call and its channels. |
 | `stream.transport` | <Link text="Stream transport" href="/transport#stream-transport" /> | Override `config.stream.transport` for streamed values. |
 | `channel.transports` | <Link text="Channel transport" href="/transport#channel-transport" /> | Override `config.channel.transports` for channels. |
@@ -46,6 +46,6 @@ for await (const token of gen) {
 ## See also
 
 - <Link href="/transport" />
-- <Link href="/httpHeaders" />
+- <Link href="/headers" />
 - <Link href="/close" />
 - <Link href="/getContext" />
