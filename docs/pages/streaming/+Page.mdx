@@ -20,10 +20,15 @@ Telefunc supports following stream & real-time primitives:
   ```
 - <Link href="#function-passing" /> (callbacks):
   ```ts
-  // .telefunc.ts
+  // Notifications.telefunc.ts
   // Environment: server
 
-  // TODO/ai: find one or two succinct and realistic example(s) for both directions
+  export async function onSubscribe(onNotification: (text: string) => void) {
+    // Client → server: the server calls the client's callback as events arrive
+    const unsubscribe = notifications.subscribe((n) => onNotification(n.text))
+    // Server → client: the client calls the returned function to stop listening
+    return unsubscribe
+  }
   ```
 - <Link href="#nested-promise" />
   ```ts ts-only
@@ -41,10 +46,13 @@ Telefunc supports following stream & real-time primitives:
   ```
 - <Link href="#readablestream" />:
   ```ts
-  // .telefunc.ts
+  // Compress.telefunc.ts
   // Environment: server
 
-  // TODO/ai: find a realistic and succinct example
+  export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+    // A stream flows in, a transformed stream flows back out
+    return data.pipeThrough(new CompressionStream('gzip'))
+  }
   ```
 - <Link href="#channel" />: API for advanced real-time use cases.
 
@@ -182,6 +190,44 @@ const stream = new ReadableStream({
 })
 
 await onIngest(stream, 'data.txt')
+```
+
+**Both directions** — accept a `ReadableStream` *and* return one, transforming the bytes as they pass through. The simplest transform is gzip compression:
+
+```ts
+// Compress.telefunc.ts
+// Environment: server
+
+export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  return data.pipeThrough(new CompressionStream('gzip'))
+}
+```
+
+```ts
+// Compress.tsx
+// Environment: client
+
+import { onCompress } from './Compress.telefunc'
+
+const compressed = await onCompress(data)          // data: ReadableStream<Uint8Array>
+const blob = await new Response(compressed).blob()  // drain the gzipped bytes
+```
+
+The transform can be arbitrarily heavy — for example, compressing a bulky video into a compact, universally-playable MP4, streamed back as it encodes:
+
+```ts
+// CompressVideo.telefunc.ts
+// Environment: server
+
+import { spawn } from 'node:child_process'
+import { Readable, Writable } from 'node:stream'
+
+export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  // Re-encode to a smaller H.264/MP4, on the fly
+  const ffmpeg = spawn('ffmpeg', ['-i', 'pipe:0', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1'])
+  video.pipeTo(Writable.toWeb(ffmpeg.stdin))
+  return Readable.toWeb(ffmpeg.stdout) as ReadableStream<Uint8Array>
+}
 ```
 
 {/* TODO: move to /file-upload and/or /file-download ?*/}
