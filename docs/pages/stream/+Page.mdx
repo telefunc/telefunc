@@ -134,6 +134,37 @@ for await (const n of onCountdown(3)) {
 ```
 
 
+## Primitive: `function` passing (callbacks) {#function-passing}
+
+Telefunc can pass functions between client and server:
+
+- **Client → server**: pass a callback as an argument — the server can call it.
+- **Server → client**: return a function from a telefunction — call it later from the client.
+
+```ts
+// Upload.telefunc.ts
+// Environment: server
+
+export async function onUpload(file: File, onProgress: (percent: number) => void) {
+  let loaded = 0
+  for await (const chunk of file.stream()) {
+    writeChunk(chunk)
+    loaded += chunk.byteLength
+    onProgress(Math.round((loaded / file.size) * 100))
+  }
+}
+```
+
+```tsx
+// Upload.tsx
+// Environment: client
+
+await onUpload(file, (percent) => setProgress(percent))
+```
+
+If you only need callback-style interaction, function passing is simpler than a channel.
+
+
 ## Primitive: Concurrent `Promise` {#concurrent-promise}
 
 Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
@@ -189,36 +220,6 @@ const report = await res.report
 >   }
 > }
 > ```
-
-## Primitive: `function` passing (callbacks) {#function-passing}
-
-Telefunc can pass functions between client and server:
-
-- **Client → server**: pass a callback as an argument — the server can call it.
-- **Server → client**: return a function from a telefunction — call it later from the client.
-
-```ts
-// Upload.telefunc.ts
-// Environment: server
-
-export async function onUpload(file: File, onProgress: (percent: number) => void) {
-  let loaded = 0
-  for await (const chunk of file.stream()) {
-    writeChunk(chunk)
-    loaded += chunk.byteLength
-    onProgress(Math.round((loaded / file.size) * 100))
-  }
-}
-```
-
-```tsx
-// Upload.tsx
-// Environment: client
-
-await onUpload(file, (percent) => setProgress(percent))
-```
-
-If you only need callback-style interaction, function passing is simpler than a channel.
 
 
 ## Primitive: `ReadableStream` {#readablestream}
