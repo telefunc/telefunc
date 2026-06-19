@@ -228,8 +228,6 @@ export function onVideoTransform(video: ReadableStream<Uint8Array>): ReadableStr
 }
 ```
 
-> For large or long-running media, run the transform as a background job — queue it and notify the client when it's done — instead of holding the request open for the whole encode.
-
 {/* TODO: move to /file-upload and/or /file-download ?*/}
 
 | Method | Backpressure | Best for |
