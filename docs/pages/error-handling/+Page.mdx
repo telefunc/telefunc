@@ -113,6 +113,8 @@ See also: <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={
 
 **2. Handle the error on the server-side.**
 
+TODO/now: showcase onAbort() instead of serve()
+
 You can handle the thrown error using the <Link text="low-level API" href="/serve" />:
 
 ```ts
@@ -161,8 +163,6 @@ If the user's browser can't connect to your server:
   </body>
 </html>
 ```
-
-> `NetworkError` covers both regular telefunction calls and channels — read `err.isChannel` to tell them apart (`false` for regular calls, `true` for channels). Regular calls still throw `ConnectionError` (now a `NetworkError` subclass), so existing `instanceof ConnectionError` checks keep working.
 
 
 ## See also
