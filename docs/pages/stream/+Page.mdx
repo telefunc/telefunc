@@ -407,9 +407,37 @@ await onTeamFeed('acme', (text) => showMessage(text))
 
 ## Cleanup
 
-✅ **Cleanup** — when the client disconnects or stops reading, <Link href="/close">`onClose()`</Link> fires so you can release resources.  
+Every streaming value eventually ends — the client finishes reading it, calls <Link text={<code>close()</code>} href="/close" />, navigates away, or the connection drops for good. However it ends, the server's `onClose()` hook fires so you can release whatever the telefunction opened. Get it from <Link text="getContext()" href="/getContext" />:
 
-TODO/now implement proper section
+```ts
+// AiChat.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+
+export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
+  const { onClose } = getContext()
+
+  // Stop the upstream AI request when the client disconnects or stops reading
+  const controller = new AbortController()
+  onClose(() => controller.abort())
+
+  const stream = await ai.streamText({ prompt, signal: controller.signal })
+  for await (const message of stream) {
+    yield message
+  }
+}
+```
+
+> **Pitfall** — anything a long-lived telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the call and **leaks** unless you release it in `onClose()`. If you set it up, tear it down.
+
+<Link text="Channels" href="#channel" /> and broadcasts expose `onClose()` (and `onOpen()`) directly on the instance — e.g. `dashboard.onClose(() => clearInterval(interval))` in the <Link text="Channel example" href="#channel" /> above; see <Link href="/channel#lifecycle" />.
+
+From the client, end a stream early with <Link text={<code>close()</code>} href="/close" /> — or simply stop reading: `break` out of a `for await`, `reader.cancel()` a `ReadableStream`, or `channel.close()` a channel. Drop every reference without closing and Telefunc still cleans up automatically, via garbage collection, a few seconds later.
+
+See also:
+- <Link href="/close" />
+- <Link href="/channel#lifecycle" />
 
 
 ## Error handling
