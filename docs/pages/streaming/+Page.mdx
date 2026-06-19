@@ -45,15 +45,12 @@ Telefunc supports following stream & real-time primitives:
   ```
 - <Link href="#readablestream" />:
   ```ts
-  // Download.telefunc.ts
+  // Compress.telefunc.ts
   // Environment: server
 
-  import fs from 'node:fs'
-  import { Readable } from 'node:stream'
-
-  export function onDownload(fileName: string): ReadableStream<Uint8Array> {
-    // Raw bytes reach the client as they're read from disk
-    return Readable.toWeb(fs.createReadStream(`./files/${fileName}`)) as ReadableStream<Uint8Array>
+  export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+    // A stream flows in, a transformed stream flows back out
+    return data.pipeThrough(new CompressionStream('gzip'))
   }
   ```
 - <Link href="#channel" />: API for advanced real-time use cases.
@@ -192,6 +189,46 @@ const stream = new ReadableStream({
 
 await onIngest(stream, 'data.txt')
 ```
+
+**Both directions** — accept a `ReadableStream` *and* return one, transforming the bytes as they pass through. The simplest transform is gzip compression:
+
+```ts
+// Compress.telefunc.ts
+// Environment: server
+
+export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  return data.pipeThrough(new CompressionStream('gzip'))
+}
+```
+
+```ts
+// Compress.tsx
+// Environment: client
+
+import { onCompress } from './Compress.telefunc'
+
+const compressed = await onCompress(data)          // data: ReadableStream<Uint8Array>
+const blob = await new Response(compressed).blob()  // drain the gzipped bytes
+```
+
+The transform can be arbitrarily heavy — for example, transcoding video with `ffmpeg`, streaming the result back as each chunk is encoded:
+
+```ts
+// VideoTransform.telefunc.ts
+// Environment: server
+
+import { spawn } from 'node:child_process'
+import { Readable, Writable } from 'node:stream'
+
+export function onVideoTransform(video: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  // WebM in → fragmented MP4 out (fragmented so it streams without a seekable file)
+  const ffmpeg = spawn('ffmpeg', ['-i', 'pipe:0', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1'])
+  video.pipeTo(Writable.toWeb(ffmpeg.stdin))
+  return Readable.toWeb(ffmpeg.stdout) as ReadableStream<Uint8Array>
+}
+```
+
+> For large or long-running media, run the transform as a background job — queue it and notify the client when it's done — instead of holding the request open for the whole encode.
 
 {/* TODO: move to /file-upload and/or /file-download ?*/}
 
