@@ -32,10 +32,10 @@ export default defineConfig({
 import { Telefunc } from 'telefunc/node'
 import type { RequestHandler } from './$types'
 
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 
 const handler: RequestHandler = async (event) => {
-  const response = await tf.serve({ request: event.request })
+  const response = await telefunc.serve({ request: event.request })
   return response ?? new Response('Not found', { status: 404 })
 }
 export { handler as GET, handler as POST }

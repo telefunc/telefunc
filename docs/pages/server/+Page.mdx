@@ -21,17 +21,17 @@ import { serve } from '@hono/node-server'
 import { Telefunc } from 'telefunc/node'
 
 const app = new Hono()
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 
 app.all('/_telefunc', async (c) => {
-  const response = await tf.serve({ request: c.req.raw })
+  const response = await telefunc.serve({ request: c.req.raw })
   return response ?? c.notFound()
 })
 
 const server = serve({ fetch: app.fetch, port: 3000 })
 
 // Enable WebSocket support for channels
-tf.installWebSocket(server)
+telefunc.installWebSocket(server)
 ```
 
 ### With Express
@@ -44,17 +44,17 @@ import express from 'express'
 import { Telefunc } from 'telefunc/node'
 
 const app = express()
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 
 app.all('/_telefunc', async (req, res, next) => {
-  const handled = await tf.serve({ req, res })
+  const handled = await telefunc.serve({ req, res })
   if (!handled) next()
 })
 
 const server = app.listen(3000)
 
 // Enable WebSocket support for channels
-tf.installWebSocket(server)
+telefunc.installWebSocket(server)
 ```
 
 > The Node.js adapter auto-detects your HTTP server from the request socket. `installWebSocket()` is idempotent — calling it multiple times is safe.
@@ -65,7 +65,7 @@ tf.installWebSocket(server)
 
 ```ts
 app.all('/_telefunc', async (c) => {
-  const response = await tf.serve({
+  const response = await telefunc.serve({
     request: c.req.raw,
     context: {
       user: await getUser(c.req),
@@ -85,14 +85,14 @@ app.all('/_telefunc', async (c) => {
 
 import { Telefunc } from 'telefunc/bun'
 
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 
 Bun.serve({
   port: 3000,
-  // Pass tf.websocket to enable WebSocket channels
-  websocket: tf.websocket,
+  // Pass telefunc.websocket to enable WebSocket channels
+  websocket: telefunc.websocket,
   async fetch(request, server) {
-    const response = await tf.serve({ request, server })
+    const response = await telefunc.serve({ request, server })
     if (response) return response
 
     return new Response('Not found', { status: 404 })
@@ -108,10 +108,10 @@ Bun.serve({
 
 import { Telefunc } from 'telefunc/deno'
 
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 
 Deno.serve({ port: 3000 }, async (request, info) => {
-  const response = await tf.serve({ request, info })
+  const response = await telefunc.serve({ request, info })
   if (response) return response
 
   return new Response('Not found', { status: 404 })
@@ -126,13 +126,13 @@ Deno.serve({ port: 3000 }, async (request, info) => {
 
 import { Telefunc } from 'telefunc/cloudflare'
 
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 
-export const TelefuncDurableObject = tf.TelefuncDurableObject
+export const TelefuncDurableObject = telefunc.TelefuncDurableObject
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const response = await tf.serve({ request, env, ctx })
+    const response = await telefunc.serve({ request, env, ctx })
     if (response) return response
 
     return new Response('Not found', { status: 404 })
@@ -164,7 +164,7 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 
 ## Return value
 
-`tf.serve()` returns:
+`telefunc.serve()` returns:
 
 | Runtime | Returns | Meaning |
 |---|---|---|
@@ -174,7 +174,7 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 | Deno | `Response \| undefined` | `undefined` if not a Telefunc request |
 | Cloudflare | `Response \| undefined` | `undefined` if not a Telefunc request |
 
-> `tf.serve()` returns `undefined` (or `false`) for non-Telefunc requests, allowing you to chain it with other handlers.
+> `telefunc.serve()` returns `undefined` (or `false`) for non-Telefunc requests, allowing you to chain it with other handlers.
 
 
 ## Low-level API

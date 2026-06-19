@@ -38,15 +38,15 @@ import { serve } from '@hono/node-server'
 import { Telefunc } from 'telefunc/node'
 
 const app = new Hono()
-const tf = new Telefunc()
+const telefunc = new Telefunc()
 
 app.all('/_telefunc', async (c) => {
-  const response = await tf.serve({ request: c.req.raw })
+  const response = await telefunc.serve({ request: c.req.raw })
   return response ?? c.notFound()
 })
 
 const server = serve({ fetch: app.fetch, port: 3000 })
-tf.installWebSocket(server)
+telefunc.installWebSocket(server)
 ```
 
 ## 4. Create a telefunction
