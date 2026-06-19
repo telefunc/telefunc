@@ -3,7 +3,7 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
-**Telefunc Stream** is a set of primitives for streaming and real-time use cases, with a seamless DX.
+Telefunc supports many primitives for streaming and real-time use cases — with a seamless DX.
 
 #### Primitives
 
@@ -69,16 +69,15 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />: automatically synced TanStack queries.  
 <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" />: reactive operators.  
 
-> Integrations provide an even more seamless and egornomic DX. They're powered by the primitves listed here.
+> Integrations provide an even more seamless and egornomic DX. They're powered by the primitives listed here.
 
 #### Seamless DX
 
-Telefunc seamlessly handles:
-- ✅ **Type runtime validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
-- ✅ **Cleanup** — when the client disconnects or stops reading, <Link href="/close">`onClose()`</Link> fires so you can release resources.
-- ✅ **Transport** — automatically picks the most performant working transport (HTTP, SSE, WebSocket). <Link href="/transport">Tune it</Link> only if you need to.
-- ✅ **Reconnection** — automatically recovers from network issues.
-- ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
+✅ **Type validation at runtime** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.  
+✅ **Cleanup** — when the client disconnects or stops reading, <Link href="/close">`onClose()`</Link> fires so you can release resources.  
+✅ **Transport** — automatically picks the most performant working transport (HTTP, SSE, WebSocket). <Link href="/transport">Tune it</Link> only if you need to.  
+✅ **Reconnection** — automatically recovers from network issues.  
+✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.  
 
 
 ## AsyncGenerator
