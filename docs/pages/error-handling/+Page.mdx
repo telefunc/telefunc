@@ -69,8 +69,6 @@ In this situation, you can:
 You can propagate error information to the frontend like this:
 
 ```ts
-// Environment: server
-
 import { validate } from 'some-library'
 
 function onFormSubmit(data) {
@@ -87,8 +85,6 @@ function onFormSubmit(data) {
 You can also use `throw Abort(someValue)`:
 
 ```ts
-// Environment: server
-
 import { validate } from 'some-library'
 import { Abort } from 'telefunc'
 
