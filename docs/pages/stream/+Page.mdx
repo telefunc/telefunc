@@ -318,16 +318,24 @@ The transform can be arbitrarily heavy — for example, compressing a bulky vide
 // CompressVideo.telefunc.ts
 // Environment: server
 
+import { getContext } from 'telefunc'
 import { spawn } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 
 export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const { onClose } = getContext()
+
   // Re-encode to a smaller H.264/MP4, on the fly
   const ffmpeg = spawn('ffmpeg', ['-i', 'pipe:0', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1'])
+  // Kill the encoder if the client disconnects mid-stream — otherwise the process leaks
+  onClose(() => ffmpeg.kill())
+
   video.pipeTo(Writable.toWeb(ffmpeg.stdin))
   return Readable.toWeb(ffmpeg.stdout) as ReadableStream<Uint8Array>
 }
 ```
+
+> A spawned process outlives the call and would keep burning CPU if the client navigated away mid-encode — so it's released in `onClose()`. See <Link text="Cleanup" href="#cleanup" />.
 
 
 ## Primitive: `Channel` {#channel}
@@ -383,11 +391,13 @@ A streaming telefunction authorizes like any other telefunction (see <Link href=
 import { getContext, Abort } from 'telefunc'
 
 export async function onTeamFeed(teamId: string, onMessage: (text: string) => void) {
-  const { user } = getContext()
+  const { user, onClose } = getContext()
   if (!user || !user.teams.includes(teamId)) throw Abort()
 
   // Authorized — push this team's messages to the client
-  watchTeam(teamId, onMessage)
+  const unwatch = watchTeam(teamId, onMessage)
+  // Stop watching when the client disconnects — otherwise the subscription leaks
+  onClose(unwatch)
 }
 ```
 
