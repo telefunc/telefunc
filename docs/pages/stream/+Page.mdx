@@ -80,6 +80,7 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.  
 
 
+{/* TODO/now URL slug: #async-generator */}
 ## Primitive: `AsyncGenerator` (`function*`) {#asyncgenerator}
 
 An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator): the usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
@@ -222,6 +223,7 @@ const report = await res.report
 > ```
 
 
+{/* TODO/now URL slug: #readable-stream */}
 ## Primitive: `ReadableStream` {#readablestream}
 
 Stream raw bytes with a web-standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
