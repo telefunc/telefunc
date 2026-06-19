@@ -44,6 +44,8 @@ export async function hello({ name }: { name: string }) {
 
 With Telefunc, not only can you seamlessly re-use types across your frontend and backend code, but you also get automatic type-safety at runtime. If you use a TypeScript ORM (e.g. [Prisma](https://www.prisma.io/)) or SQL builder (e.g. [Kysely](https://github.com/koskimas/kysely) and [others](https://github.com/stars/brillout/lists/sql)), then you get end-to-end type safety all the way from database to frontend.
 
+> Telefunc guarantees that **every** value arriving at the server is validated — not just a telefunction's top-level arguments, but also every value the client sends through a <Link href="/streaming" text="streaming primitive" /> (callbacks, channels, streams).
+
 > For a faster development, Telefunc doesn't generate `shield()` and your telefunction arguments aren't validated during development.
 > Telefunc only generates `shield()` upon building your app for production.
 > You can enable the generation of `shield()` for development by setting <Link href="/shield-config">`config.shield.dev`</Link> to `true`.
