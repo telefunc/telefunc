@@ -117,6 +117,10 @@ const headings = [
     color: '#ffd511',
   },
   {
+    level: 4,
+    title: 'Basics',
+  },
+  {
     level: 2,
     title: 'Permissions',
     url: '/permissions',
@@ -145,20 +149,6 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Files',
-  },
-  {
-    level: 2,
-    title: 'File upload',
-    url: '/file-upload',
-  },
-  {
-    level: 2,
-    title: 'File download',
-    url: '/file-download',
-  },
-  {
-    level: 4,
     title: 'Streaming',
   },
   {
@@ -175,6 +165,20 @@ const headings = [
     level: 2,
     title: 'Cloudflare',
     url: '/cloudflare',
+  },
+  {
+    level: 4,
+    title: 'Files',
+  },
+  {
+    level: 2,
+    title: 'File upload',
+    url: '/file-upload',
+  },
+  {
+    level: 2,
+    title: 'File download',
+    url: '/file-download',
   },
   {
     level: 4,
