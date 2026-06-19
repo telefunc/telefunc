@@ -211,17 +211,17 @@ const compressed = await onCompress(data)          // data: ReadableStream<Uint8
 const blob = await new Response(compressed).blob()  // drain the gzipped bytes
 ```
 
-The transform can be arbitrarily heavy — for example, transcoding video with `ffmpeg`, streaming the result back as each chunk is encoded:
+The transform can be arbitrarily heavy — for example, compressing a bulky video into a compact, universally-playable MP4, streamed back as it encodes:
 
 ```ts
-// VideoTransform.telefunc.ts
+// CompressVideo.telefunc.ts
 // Environment: server
 
 import { spawn } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 
-export function onVideoTransform(video: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-  // WebM in → fragmented MP4 out (fragmented so it streams without a seekable file)
+export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  // Re-encode to a smaller H.264/MP4, on the fly
   const ffmpeg = spawn('ffmpeg', ['-i', 'pipe:0', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1'])
   video.pipeTo(Writable.toWeb(ffmpeg.stdin))
   return Readable.toWeb(ffmpeg.stdout) as ReadableStream<Uint8Array>
