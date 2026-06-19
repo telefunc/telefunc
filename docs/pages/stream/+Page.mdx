@@ -7,9 +7,7 @@ Telefunc supports many primitives for streaming and real-time use cases — with
 
 #### Primitives
 
-{/* TODO/now align the primitive links bellow with the title of the section (just strip `Primitive:`) */}
-
-<Link href="#asyncgenerator" text="AsyncGenerator" /> (`function*`):
+<Link href="#asyncgenerator" text={<><code>AsyncGenerator</code> (<code>function*</code>)</>} />:
 ```ts
 // AiChat.telefunc.ts
 // Environment: server
@@ -23,7 +21,7 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 }
 ```
 
-<Link href="#function-passing" text="Function passing" /> (callbacks):
+<Link href="#function-passing" text={<><code>function</code> passing (callbacks)</>} />:
 ```ts
 // Notifications.telefunc.ts
 // Environment: server
