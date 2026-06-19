@@ -17,7 +17,7 @@ Telefunc has two real-time **primitives** — and one **composition** of them:
 
 <NeedsLongRunningServer />
 
-> For short-lived callbacks (e.g. progress updates), <Link href="/streaming#function-passing">function passing</Link> is usually simpler.
+> For short-lived callbacks (e.g. progress updates), <Link href="/stream#function-passing">function passing</Link> is usually simpler.
 
 
 ## new Channel()
@@ -226,7 +226,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
-> In-memory broadcast works out-of-the-box for single-server deployments. For multi-server, set `config.broadcast.transport` — see <Link text="Multi-server" href="#multi-server" />. On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/streaming/cloudflare" />.
+> In-memory broadcast works out-of-the-box for single-server deployments. For multi-server, set `config.broadcast.transport` — see <Link text="Multi-server" href="#multi-server" />. On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/stream/cloudflare" />.
 
 
 ## new BroadcastChannel()
@@ -325,7 +325,7 @@ broadcast.subscribe((n) => showToast(n))
 > The instance is bound to its `key`, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#broadcast" /> / `Broadcast.subscribe(key, cb)` take it first — and have no `onOpen` / `onClose` / `close` / `abort`, since there's no instance to manage.
 
 
-{/* TODO: move to /streaming ? */}
+{/* TODO: move to /stream ? */}
 
 ## Authorization
 
@@ -394,7 +394,7 @@ You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Br
 | Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
-| Multi-server | <Link text="Sticky sessions" href="/streaming/scale" /> | <Link text="Broadcast transport" href="#multi-server" /> |
+| Multi-server | <Link text="Sticky sessions" href="/stream/scale" /> | <Link text="Broadcast transport" href="#multi-server" /> |
 
 
 ## Multi-server
@@ -418,7 +418,7 @@ type BroadcastTransport = {
 
 `send` / `sendBinary` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen` / `listenBinary` return an unsubscribe function and are called at most once per key.
 
-> On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/streaming/cloudflare" />.
+> On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/stream/cloudflare" />.
 
 
 ## Lifecycle
@@ -505,8 +505,8 @@ config.channel = {
 
 ## See also
 
-- <Link href="/streaming" />
+- <Link href="/stream" />
 - <Link href="/file-upload" />
 - <Link href="/file-download" />
 - <Link href="/transport" />
-- <Link href="/streaming/cloudflare" />
+- <Link href="/stream/cloudflare" />

@@ -3,7 +3,7 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
-Telefunc supports following stream & real-time primitives:
+A Telefunc **Stream** is any value that arrives over time. Telefunc moves it across the network as it's produced — fully typed, automatically reconnecting, with no transport to wire up. Streams come in a few shapes:
 
 - <Link href="#asyncgenerator" /> (`function*`):
   ```ts
@@ -424,5 +424,5 @@ const slow = await res.slow
 - <Link href="/testing" />
 - <Link href="/transport" />
 - <Link href="/close" />
-- <Link href="/streaming/scale" />
-- <Link href="/streaming/cloudflare" />
+- <Link href="/stream/scale" />
+- <Link href="/stream/cloudflare" />

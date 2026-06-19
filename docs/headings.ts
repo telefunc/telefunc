@@ -149,12 +149,12 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Streaming',
+    title: 'Stream',
   },
   {
     level: 2,
-    title: 'Streaming',
-    url: '/streaming',
+    title: 'Stream',
+    url: '/stream',
   },
   {
     level: 4,
@@ -374,17 +374,17 @@ function misc() {
   ).map((h) => ({ ...h, category: 'Miscellaneous' as const })) satisfies HeadingDetachedDefinition[]
 }
 
-// Detached sub-pages of /streaming — reachable from the Streaming page, not listed in the nav.
+// Detached sub-pages of /stream — reachable from the Stream page, not listed in the nav.
 function streamingPages() {
   return (
     [
       {
         title: 'Streaming at Scale',
-        url: '/streaming/scale',
+        url: '/stream/scale',
       },
       {
         title: 'Cloudflare',
-        url: '/streaming/cloudflare',
+        url: '/stream/cloudflare',
       },
     ] as const
   ).map((h) => ({ ...h, category: 'Guides' as const })) satisfies HeadingDetachedDefinition[]

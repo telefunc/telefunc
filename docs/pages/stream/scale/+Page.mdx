@@ -3,7 +3,7 @@ import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
 
-If you use <Link href="/streaming">Telefunc's streaming capabilities</Link>, then scaling Telefunc horizontally (multiple Node instances, multiple containers, multiple machines) adds two requirements:
+If you use <Link href="/stream">Telefunc's streaming capabilities</Link>, then scaling Telefunc horizontally (multiple Node instances, multiple containers, multiple machines) adds two requirements:
 
 - **Sticky sessions** (so a reconnecting client returns to the instance holding its channel) — the load balancer in front of your instances must route every request from the same client to the same instance.
 - **Cross-instance broadcast transport** (broadcast publishes must fan out across instances) — install a **broadcast transport** like <Link href="/redis">`@telefunc/redis`</Link>.
@@ -82,7 +82,7 @@ Serverless platforms that don't expose sticky-session routing aren't a good fit 
 
 Cloudflare Workers are the exception among serverless platforms: `telefunc/cloudflare` routes channels through Durable Objects instead of sticky sessions, and fans out broadcasts across regions automatically, so neither a sticky load balancer nor a broadcast transport is needed. You scale with the `scale` option instead of a load balancer.
 
-See <Link href="/streaming/cloudflare#scaling" text="Cloudflare scaling" />.
+See <Link href="/stream/cloudflare#scaling" text="Cloudflare scaling" />.
 
 
 ## Sanity check
@@ -93,5 +93,5 @@ After deploying behind a sticky load balancer, open the browser network tab, ref
 ## See also
 
 - <Link href="/redis" />
-- <Link href="/streaming/cloudflare" />
+- <Link href="/stream/cloudflare" />
 - <Link href="/channel" />

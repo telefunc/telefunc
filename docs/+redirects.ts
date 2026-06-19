@@ -11,6 +11,7 @@ checkType<HeadingsURL>(0 as any as RedirectsURL)
 
 const redirects = {
   '/remix': '/react-router',
-  '/scaling': '/streaming/scale',
-  '/cloudflare': '/streaming/cloudflare',
+  '/scaling': '/stream/scale',
+  '/cloudflare': '/stream/cloudflare',
+  '/streaming': '/stream',
 } as const satisfies Config['redirects']

@@ -10,7 +10,7 @@ The `@telefunc/rxjs` integration lets you pass RxJS `Observable` and `Subject` d
 > Values you stream to the server are **shield-validated at runtime** against your TypeScript types — see <Link href="#shields" />.
 
 {/* TODO/now: DRY */}
-> The `@telefunc/tanstack-query` integration is powered by <Link href="/streaming">Telefunc's streaming primitives</Link>.
+> The `@telefunc/tanstack-query` integration is powered by <Link href="/stream">Telefunc's streaming primitives</Link>.
 
 ## Install
 
@@ -81,7 +81,7 @@ edits.subscribe(edit => applyEdit(edit))
 edits.next({ userId: 'alice', text: 'Hello' })
 ```
 
-> **Single server.** A module-level `Subject` lives in one server process. These multicast examples (the editor above, and *Live cursors* below) work as-is on a single instance. Across multiple instances, each server process has its own `Subject` — so route shared state through a broadcast transport instead, see <Link href="/streaming/scale" />.
+> **Single server.** A module-level `Subject` lives in one server process. These multicast examples (the editor above, and *Live cursors* below) work as-is on a single instance. Across multiple instances, each server process has its own `Subject` — so route shared state through a broadcast transport instead, see <Link href="/stream/scale" />.
 
 
 
@@ -208,6 +208,6 @@ Unsubscribing stops data flow immediately. The underlying <Link href="/channel" 
 
 ## See also
 
-- <Link href="/streaming" />
+- <Link href="/stream" />
 - <Link href="/channel" />
-- <Link href="/streaming/scale" />
+- <Link href="/stream/scale" />
