@@ -72,7 +72,7 @@ You can also use integrations for further seamless and egornomic DX:
 
 ## AsyncGenerator
 
-The usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
+An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator): the usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
 
 ```ts
 // AiChat.telefunc.ts
@@ -126,7 +126,7 @@ for await (const n of onCountdown(3)) {
 
 ## `ReadableStream`
 
-Stream raw bytes — in either direction.
+Stream raw bytes with a web-standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
 
 **Server → client** — return a `ReadableStream`:
 
