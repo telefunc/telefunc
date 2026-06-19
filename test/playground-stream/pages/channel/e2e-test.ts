@@ -349,13 +349,21 @@ function testChannel(isDev: boolean, inDocker = false) {
         channelId = state.upstreamReconnectChannelId
       })
 
-      // Send 2 messages while still online to establish a baseline
-      await page.click('#channel-test-upstream-send')
-      await page.click('#channel-test-upstream-send')
-      await autoRetry(async () => {
-        const ss = await getCleanupState()
-        expect(ss[`upstream_${channelId}_receivedCount`]).toBe('2')
-      })
+      // Establish a baseline of 2 received messages while still online — sending them one at a
+      // time, each confirmed received before the next, rather than back-to-back. During the
+      // initial SSE connect handshake two client→server sends can be split across separate HTTP
+      // requests (the initial-batch SSE POST vs. the streamRequest POST) that the server may
+      // process out of order; it dedups by seq (dropping any seq <= the last one seen), so the
+      // late frame is dropped and the baseline flakes at "1 of 2". Keeping at most one frame in
+      // flight leaves nothing to reorder. The reconnect phase below still fires buffered sends
+      // back-to-back — that rapid-fire exactly-once delivery is the behaviour under test.
+      for (let seq = 1; seq <= 2; seq++) {
+        await page.click('#channel-test-upstream-send')
+        await autoRetry(async () => {
+          const ss = await getCleanupState()
+          expect(ss[`upstream_${channelId}_receivedCount`]).toBe(String(seq))
+        })
+      }
 
       // Go offline
       if (inDocker) stopProxy()
