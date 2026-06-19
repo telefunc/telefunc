@@ -49,6 +49,25 @@ Then a telefunction call throws an error:
 
 > To avoid leaking sensitive information, Telefunc doesn't send the original `Error` object to the frontend.
 
+On the server-side, you can still access the original error — for example to log it. Telefunc exposes it at `httpResponse.err` when using the <Link text="low-level API" href="/serve" />:
+
+```ts
+// server.ts
+// Environment: server
+
+import { serve } from 'telefunc'
+
+app.all('/_telefunc', async (c) => {
+  const httpResponse = await serve({ request: c.req.raw })
+  // Telefunc exposes any error thrown by a telefunction at httpResponse.err
+  if (httpResponse.err) {
+    // Error handling
+  }
+})
+```
+
+> You can also track bugs with the <Link text={<code>onBug()</code>} href="/onBug" /> hook.
+
 
 ## Expected Errors
 
@@ -60,7 +79,7 @@ For example:
 
 In this situation, you can:
  1. Propagate the error to the frontend, or
- 2. handle the error on the server-side.
+ 2. handle the error globally.
 
 <br/>
 
@@ -107,28 +126,26 @@ See also: <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={
 
 <br/>
 
-**2. Handle the error on the server-side.**
+**2. Handle the error globally.**
 
-TODO/now: showcase onAbort() instead of serve()
-
-You can handle the thrown error using the <Link text="low-level API" href="/serve" />:
+Instead of handling `throw Abort(someValue)` at each telefunction call, you can handle it globally — in a single place, for all telefunction calls — with the `onAbort()` hook:
 
 ```ts
-// server.ts
-// Environment: server
+// Environment: client
 
-import { serve } from 'telefunc'
+import { onAbort } from 'telefunc/client'
 
-app.all('/_telefunc', async (c) => {
-  const httpResponse = await serve({ request: c.req.raw })
-  // Telefunc exposes any error thrown by a telefunction at httpResponse.err
-  if (httpResponse.err) {
-    // Error handling
+onAbort((err) => {
+  if (err.abortValue.notLoggedIn) {
+    // Redirect the user to the login page
+    window.location.href = '/login'
   }
 })
 ```
 
-Also see <Link href="/getContext#provide" />.
+This is convenient for cross-cutting concerns, such as redirecting the user to the login page whenever a telefunction runs `throw Abort({ notLoggedIn: true })`.
+
+See also: <Link href="/onAbort" />.
 
 
 ## Network Errors
