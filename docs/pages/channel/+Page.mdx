@@ -20,7 +20,7 @@ Telefunc has two real-time **primitives** — and one **composition** of them:
 > For short-lived callbacks (e.g. progress updates), <Link href="/stream#function-passing">function passing</Link> is usually simpler.
 
 
-## new Channel()
+## `new Channel()`
 
 `new Channel()` creates a private, two-way message pipe between the server and the one client that called the telefunction. The server keeps the `Channel` object and hands the client its end by returning the channel's `.client`. The channel outlives the telefunction call: both ends can `send()` and `listen()` until one side closes it.
 
@@ -198,7 +198,7 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 ```
 
 
-## Broadcast
+## `Broadcast`
 
 `Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the key (via a `BroadcastChannel`). Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
 
@@ -229,7 +229,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 > In-memory broadcast works out-of-the-box for single-server deployments. For multi-server, set `config.broadcast.transport` — see <Link text="Multi-server" href="#multi-server" />. On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/stream/cloudflare" />.
 
 
-## new BroadcastChannel()
+## `new BroadcastChannel()`
 
 `new BroadcastChannel({ key })` is the composition: a `Channel` to the one client that received it, bridged onto a `Broadcast` key. Return it from a telefunction and that client can `publish()` / `subscribe()` on the key — every message reaches every member of the group, including the publisher itself. No `.client` needed: broadcast is symmetric (one message type, no directional flip), so the same instance works on both ends — unlike channels.
 
@@ -419,14 +419,16 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 
 ## Error handling
 
-> A graceful `close()` is not an error — `onClose(err)` receives `undefined`.
+**Channels and broadcasts** signal failure through four errors:
 
 | Error | When | Channel after | Recovery |
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel (thrown synchronously); also rejects pending `ack` sends orphaned by close or close timeout | Closed | Recreate the channel |
-| `ChannelOverflowError` | A buffered send was dropped — backlog exceeded `config.channel.bufferLimit` while the peer was disconnected | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
+| `ChannelOverflowError` | A buffered send was dropped — the buffer exceeded `config.channel.bufferLimit` | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
+
+> A graceful `close()` is not an error (`onClose(err)` receives `undefined`).
 
 
 ## Configuration

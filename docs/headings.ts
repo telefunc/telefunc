@@ -253,13 +253,13 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Channels & Broadcast',
+    title: 'Channels',
   },
   {
     level: 2,
-    title: '`Channel` & `BroadcastChannel`',
+    title: '`Channel`',
     url: '/channel',
-    sectionTitles: ['new Channel()', 'Broadcast', 'new BroadcastChannel()'],
+    sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
   },
   {
     level: 2,
