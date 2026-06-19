@@ -20,11 +20,11 @@ installRedis(redis)
 
 That swaps Telefunc's default in-memory broadcast transport for Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a given key.
 
-`Channel` is per-instance — its reconnects need to land on the instance holding the channel's state. Pair this package with sticky sessions at the load balancer; see [Scaling](https://telefunc.com/scaling).
+`Channel` is per-instance — reconnects must land on the instance holding the channel's state. Pair this package with sticky sessions at the load balancer; see [Scaling](https://telefunc.com/scaling).
 
 ### Sharing an existing client
 
-Pass an [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options (TLS, retry strategy, etc):
+Pass an [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options (e.g. TLS or a retry strategy):
 
 ```ts
 import IORedis from 'ioredis'

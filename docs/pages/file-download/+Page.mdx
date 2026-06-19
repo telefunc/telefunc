@@ -7,7 +7,7 @@ Return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Bl
 
 > **Which API?**
 > - **Bytes already in memory** → return a native `File` / `Blob` (as above).
-> - **Large files, bytes streamed from an upstream source, or when you need progress / cancel / save-to-disk** → wrap them with <Link text={<code>download()</code>} href="#streaming-with-download" />. When the source is a stream, the full payload is never buffered on the server.
+> - **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <Link text={<code>download()</code>} href="#streaming-with-download" />. When the source is a stream, the full payload is never buffered on the server.
 >
 > The tables below break down the memory trade-offs.
 
@@ -132,12 +132,12 @@ Calling `dl.cancel()` aborts the stream — the pending `saveToMemory` call reje
 
 ## Reading strategies
 
-The streaming download is a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob)-shaped object — `dl.stream()`, `dl.text()`, `dl.arrayBuffer()`, `dl.bytes()`, and `dl.slice()` all work and pull from the streaming source as you read:
+The streaming download behaves like a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) — `dl.stream()`, `dl.text()`, `dl.arrayBuffer()`, `dl.bytes()`, and `dl.slice()` all work and pull from the streaming source as you read:
 
 | Method | Returns | Memory | Best for |
 |---|---|---|---|
 | `dl.stream()` | `ReadableStream` | Constant (chunk-sized) | Pipe to disk, S3, or any writable stream |
-| `dl.bytes()` | `Uint8Array` | Full file in memory | Process binary bytes |
+| `dl.bytes()` | `Uint8Array` | Full file in memory | Process raw bytes |
 | `dl.arrayBuffer()` | `ArrayBuffer` | Full file in memory | Process entire file at once |
 | `dl.text()` | `string` | Full file in memory | Read text content |
 | `dl.saveToMemory()` | `File` / `Blob`<sup>‡</sup> | Full file in memory | Use with Web APIs (`URL.createObjectURL`, `<img src>`, ...) |
@@ -163,7 +163,7 @@ const opfsFile = await dl.saveToOpfs()
 imgEl.src = URL.createObjectURL(opfsFile)
 ```
 
-> Web APIs that require a real `File` / `Blob` (`URL.createObjectURL`, `<img src>`, `fetch({body})`, `FormData.append`) need `await dl.saveToMemory()` / `saveToDisk()` / `saveToOpfs()` first. These APIs check for an internal marker that only real `File` / `Blob` instances have.
+> Some Web APIs — `URL.createObjectURL`, `<img src>`, `fetch({body})`, `FormData.append` — require a real `File` / `Blob`, so call `await dl.saveToMemory()` / `saveToDisk()` / `saveToOpfs()` first. These APIs check for an internal marker that only real `File` / `Blob` instances have.
 
 
 ### `saveToDisk({ mode })`

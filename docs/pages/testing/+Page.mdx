@@ -18,7 +18,7 @@ test('onHello', async () => {
 
 ## Providing context
 
-If a telefunction reads <Link text="getContext()" href="/getContext" /> (for the user, headers, …), provide the context in your test setup with <Link text={<code>provideTelefuncContext()</code>} href="/provideTelefuncContext" /> before calling it:
+If a telefunction reads <Link text="getContext()" href="/getContext" /> (e.g. the user or request headers), provide the context in your test setup with <Link text={<code>provideTelefuncContext()</code>} href="/provideTelefuncContext" /> before calling it:
 
 ```ts
 // Team.telefunc.test.ts

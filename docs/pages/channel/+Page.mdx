@@ -128,7 +128,7 @@ ack.accepted // true
 
 On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `chat.client` type flips the message types.
 
-Both generic parameters also drive runtime validation: Telefunc auto-generates shields that check every message and ack arriving at the server against its declared type. See <Link href="/shield" />.
+Both generic parameters also drive runtime validation: Telefunc auto-generates shields that check each message and ack arriving at the server against the type it declares. See <Link href="/shield" />.
 
 
 ### Acknowledgements
@@ -200,7 +200,7 @@ chat.send({ type: 'ping' }) // sent immediately, no await needed
 
 ## `Broadcast`
 
-`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the key (via a `BroadcastChannel`). Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
+`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the `key` (via a `BroadcastChannel`). Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
 
 The static methods run purely on the server — no client, no handle, no lifecycle — and take the `key` as their first argument:
 
@@ -329,7 +329,7 @@ broadcast.subscribe((n) => showToast(n))
 
 ### Fundamentally
 
-Fundamentally, the difference is what a message is addressed to: a channel message is addressed to *someone*, a broadcast message is addressed to *a topic* (the `key`).
+The difference is what a message is addressed to: a channel message is addressed to *someone*, a broadcast message is addressed to *a topic* (the `key`).
 
 A channel is a conversation, like a phone call: two fixed ends (the server and the one client that received the channel), private to them, ending when either side hangs up.
 
@@ -425,7 +425,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
-| `ChannelClosedError` | `send()` on a closed channel (thrown synchronously); also rejects pending `ack` sends orphaned by close or close timeout | Closed | Recreate the channel |
+| `ChannelClosedError` | `send()` on a closed channel (thrown synchronously); also rejects pending `ack` sends still waiting when the channel closes or the close times out | Closed | Recreate the channel |
 | `ChannelOverflowError` | A buffered send was dropped — the buffer exceeded `config.channel.bufferLimit` | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
 
 > A graceful `close()` is not an error (`onClose(err)` receives `undefined`).

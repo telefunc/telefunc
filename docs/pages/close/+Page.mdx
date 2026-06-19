@@ -3,14 +3,14 @@ import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
 
-`close()` and `onClose()` manage the lifecycle of the streams and connections a telefunction returns or accepts — so the server can stop producing and release resources.
+`close()` and `onClose()` manage the lifecycle of the streams and connections a telefunction returns or accepts as arguments — so the server can stop producing and release resources.
 
 > Applies to all <Link href="/stream">streaming and real-time</Link> values: `AsyncGenerator`, `ReadableStream`, files, `Channel`, and `BroadcastChannel` all close the same way.
 
 
 ## At a glance
 
-There's one catch-all API, `close()`, plus per-type APIs. They all signal the server to stop producing and release resources — the difference is **graceful** (flush buffered data, then close) vs **immediate** (cancel in-flight work):
+There's one catch-all API, `close()`, plus several per-type APIs. They all signal the server to stop producing and release resources — the difference is **graceful** (flush buffered data, then close) versus **immediate** (cancel in-flight work):
 
 | API | Side | Graceful / immediate | Closes |
 |---|---|---|---|
@@ -21,7 +21,7 @@ There's one catch-all API, `close()`, plus per-type APIs. They all signal the se
 | `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
 | <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
 | <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | either side | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
-| `onClose(cb)` | server | — (cleanup hook) | Fires when the value ends, however it ends |
+| `onClose(cb)` | server | — (cleanup hook) | Fires when the value ends, however that happens |
 
 The rest of this page covers `close()`, `abort()`, and `onClose()` in detail; channel-specific closing is documented on <Link href="/channel#lifecycle" />.
 
@@ -65,9 +65,9 @@ reader.cancel()
 await channel.close()
 ```
 
-All of these signal the server to stop producing and release resources.
+All of these tell the server to stop producing and free its resources.
 
-> `close()` ends a value **gracefully** (buffered data is flushed). To stop a call **immediately** instead, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, the next read does):
+> `close()` ends a value **gracefully** (buffered data is flushed). To stop a call **immediately** instead, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
 > ```ts
 > // Environment: client
 >
@@ -80,7 +80,7 @@ All of these signal the server to stop producing and release resources.
 
 ## `onClose()` (server)
 
-Use `onClose()` from <Link href="/getContext" text="getContext()" /> on the server to detect when the response ends — whether the value was consumed, the client disconnected, or an error occurred:
+On the server, use `onClose()` from <Link href="/getContext" text="getContext()" /> to detect when the response ends — whether the value was consumed, the client disconnected, or an error occurred:
 
 ```ts
 // Environment: server
@@ -110,7 +110,7 @@ export async function* onAiPrompt(prompt: string) {
 
 If the client drops all references to a returned value without explicitly closing it, the underlying resources are cleaned up automatically via garbage collection. There is a short delay (typically a few seconds) between the value becoming unreachable and the cleanup firing.
 
-Explicit `close()` triggers cleanup immediately. GC cleanup is the fallback for when you forget to close explicitly.
+Explicit `close()` triggers cleanup immediately. GC cleanup is the fallback when you forget to close explicitly.
 
 
 ## See also

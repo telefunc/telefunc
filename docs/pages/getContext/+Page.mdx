@@ -28,7 +28,7 @@ It's most commonly used for implementing permissions, see <Link href="/permissio
 
 ## Provide
 
-Before you can use `getContext()`, you must provide the `context` object when calling `telefunc.serve()`, see <Link href="/server" />.
+Before you can use `getContext()`, you must provide the `context` object when calling `telefunc.serve()` — see <Link href="/server" />.
 
 For example:
 
@@ -118,7 +118,7 @@ app.all('/_telefunc', async (req, res, next) => {
   </TabPanel>
 </Tabs>
 
-> **Outside `serve()`** (server-side rendering, unit tests): provide the context with <Link text={<code>provideTelefuncContext()</code>} href="/provideTelefuncContext" />.
+> **Outside `serve()`** (e.g. server-side rendering or unit tests): provide the context with <Link text={<code>provideTelefuncContext()</code>} href="/provideTelefuncContext" />.
 
 ## Access
 
@@ -228,7 +228,7 @@ context.onClose(() => {
 
 ## `signal`
 
-The context object also includes a `signal` (an `AbortSignal`) that aborts when the call ends. Pass it to APIs that accept one (`fetch`, database clients, etc.) so in-flight work cancels when the client disconnects.
+The context object also includes a `signal` (an `AbortSignal`) that aborts when the call ends. Pass it to APIs that accept an `AbortSignal` (`fetch`, database clients, etc.) so in-flight work cancels when the call ends.
 
 ```ts
 const context = getContext()

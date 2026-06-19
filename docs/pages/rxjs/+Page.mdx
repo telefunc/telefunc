@@ -5,7 +5,7 @@ import { StreamingBeta, PoweredByStreaming } from '../../components'
 
 For reactive streams with full operator support, you can use [RxJS](https://rxjs.dev).
 
-The `@telefunc/rxjs` integration lets you pass RxJS `Observable` and `Subject` directly between client and server — both directions, all operators.
+The `@telefunc/rxjs` integration lets you pass RxJS `Observable` and `Subject` directly between client and server, in both directions and with all operators.
 
 > Values you stream to the server are **shield-validated at runtime** against your TypeScript types — see <Link href="#shields" />.
 
@@ -24,7 +24,7 @@ The Telefunc bundler plugin (Vite, webpack, Next.js, Babel) detects `@telefunc/r
 
 ## Live stock ticker
 
-Server pushes prices every second. The client filters and limits them locally, with standard RxJS operators.
+The server pushes prices every second. The client filters and limits them locally with standard RxJS operators.
 
 ```ts
 // StockPrice.telefunc.ts
@@ -55,7 +55,7 @@ price$.pipe(
 
 ## Collaborative editor
 
-A shared `Subject` returned to multiple clients multicasts across them: when one client emits with `next()`, every other client's subscribers receive the value through the server. The emitting client's own subscribers receive it locally too — the server doesn't echo a client's `next()` back to that same client.
+Return a shared `Subject` to multiple clients and it multicasts among them: when one client emits with `next()`, every other client's subscribers receive the value through the server. The emitting client's own subscribers receive it locally too — the server doesn't echo a client's `next()` back to that same client.
 
 ```ts
 // Editor.telefunc.ts
@@ -80,13 +80,13 @@ edits.subscribe(edit => applyEdit(edit))
 edits.next({ userId: 'alice', text: 'Hello' })
 ```
 
-> **Single server.** A module-level `Subject` lives in one server process. These multicast examples (the editor above, and *Live cursors* below) work as-is on a single instance. Across multiple instances, each server process has its own `Subject` — so route shared state through a broadcast transport instead, see <Link href="/stream/scale" />.
+> **Single server.** A module-level `Subject` lives in one server process. These multicast examples — the editor above and *Live cursors* below — work as-is on a single instance. Across multiple instances, each server process has its own `Subject`, so route shared state through a broadcast transport instead — see <Link href="/stream/scale" />.
 
 
 
 ## Click heatmap (client → server)
 
-Pass an Observable as a telefunction argument. The server subscribes and processes the stream — useful for telemetry, analytics, or any client-driven event stream.
+Pass an Observable as a telefunction argument. The server subscribes and processes the stream — a pattern useful for telemetry, analytics, or any client-driven event stream.
 
 ```ts
 // Heatmap.telefunc.ts
