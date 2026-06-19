@@ -213,7 +213,7 @@ Channel state is in-memory JavaScript. If the Durable Object hibernates, that st
 
 </Warning>
 
-Once all channels close, no clients are connected, and the reconnect and idle windows have expired, the Durable Object can hibernate.
+The Durable Object can hibernate once all channels close, no clients remain connected, and both the reconnect and idle windows have expired.
 
 ```ts
 import { config } from 'telefunc'
