@@ -5,7 +5,7 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 Telefunc supports following stream & real-time primitives:
 
-- <Link href="#async-function-async-generators" /> (`function*`):
+- <Link href="#asyncgenerator" /> (`function*`):
   ```ts
   // AiChat.telefunc.ts
   // Environment: server
@@ -30,7 +30,7 @@ Telefunc supports following stream & real-time primitives:
     return unsubscribe
   }
   ```
-- <Link href="#nested-promise" />
+- <Link href="#concurrent-promise" />
   ```ts ts-only
   // Dashboard.telefunc.ts
   // Environment: server
@@ -70,8 +70,7 @@ You can also use integrations for further seamless and egornomic DX:
 > - ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
 
 
-{/* TODO/now: rename to `## AsyncGenerator` */}
-## `async function*` (async generators)
+## AsyncGenerator
 
 The usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
 
@@ -240,8 +239,7 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 | <Link text={<code>new BroadcastChannel().publishBinary()</code>} href="/channel#new-broadcastchannel" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
 
 
-{/* TODO/now: rename to "## Concurrent `Promise`" */}
-## Nested `Promise`
+## Concurrent `Promise`
 
 Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
 
