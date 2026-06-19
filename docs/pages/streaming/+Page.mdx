@@ -56,17 +56,17 @@ Telefunc supports following stream & real-time primitives:
   ```
 - <Link href="#channel" />: API for advanced real-time use cases.
 
-You can also use higher-level integration like (they use the primitives under the hood):
+You can also use integrations for further seamless and egornomic DX:
 - <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> for automatically synced TanStack queries.
 - <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" /> for reactive operators.
 
 > A telefunction <Link href="#mix">can mix</Link> — generators, streams, and promises side by side, each resolving independently of each other.
 
-> Telefunc seamlessly handles everything:
-> - ✅ **Runtime type validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
-> - ✅ **Cleanup** — when the client disconnects or stops reading, `onClose()` fires so your telefunction can release resources. See <Link href="/close" />.
-> - ✅ **Reconnection** — Automatically recover from network issues
-> - ✅ **Transport** — streams and channels negotiate a working transport (HTTP, SSE, WebSocket). Tune it only if you need to — see <Link href="/transport" />.
+> Telefunc seamlessly handles:
+> - ✅ **Type runtime validation** — every value the client sends to the server is shield-validated against your TypeScript types. See <Link href="/shield" />.
+> - ✅ **Cleanup** — when the client disconnects or stops reading, <Link href="/close">`onClose()`</Link> fires so you can release resources.
+> - ✅ **Transport** — automatically picks the most performant working transport (HTTP, SSE, WebSocket). <Link href="/transport">Tune it</Link> only if you need to.
+> - ✅ **Reconnection** — automatically recovers from network issues.
 > - ✅ **Errors** — expected failures stay distinct from bugs, even mid-stream: if a generator or stream throws, the client receives an error while values already delivered remain available. See <Link href="/error-handling#streaming" text="Error handling — streaming" />.
 
 
