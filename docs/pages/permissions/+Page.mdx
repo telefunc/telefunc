@@ -62,7 +62,7 @@ function TodoItem({ id, text }: { id: string; text: string }) {
 }
 ```
 
-> The same `getContext()` + `throw Abort()` pattern protects <Link href="/stream">streaming and real-time</Link> telefunctions — channels and broadcasts authorize at open time. See <Link href="/stream#authorization" />.
+> You can use the same `getContext()` + `throw Abort()` pattern <Link href="/stream#authorization">to protect streams</Link>.
 
 
 ## `getContext()` wrapping
