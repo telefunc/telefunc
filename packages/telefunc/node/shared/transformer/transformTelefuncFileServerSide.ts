@@ -18,7 +18,7 @@ async function transformTelefuncFileServerSide(src: string, id: string, appRootD
   const config = getServerConfig()
   const isShieldEnabled = isDev ? config.shield.dev : config.shield.prod
   if (id.endsWith('.ts') && isShieldEnabled) {
-    codeShield = generateShield(src, id, appRootDir, exportList)
+    codeShield = await generateShield(src, id, appRootDir, exportList)
   }
 
   const { magicString, getMagicStringResult } = getMagicString(src, id)
