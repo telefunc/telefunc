@@ -99,6 +99,20 @@ Bun.serve({
   },
 })
 ```
+
+### With context
+
+```ts
+const response = await telefunc.serve({
+  request,
+  server,
+  context: {
+    user: await getUser(request),
+  },
+})
+```
+
+> Access `context` inside telefunctions via <Link href="/getContext">`getContext()`</Link>.
 :::
 
 :::Choice{#Deno}
@@ -117,6 +131,20 @@ Deno.serve({ port: 3000 }, async (request, info) => {
   return new Response('Not found', { status: 404 })
 })
 ```
+
+### With context
+
+```ts
+const response = await telefunc.serve({
+  request,
+  info,
+  context: {
+    user: await getUser(request),
+  },
+})
+```
+
+> Access `context` inside telefunctions via <Link href="/getContext">`getContext()`</Link>.
 :::
 
 :::Choice{#Cloudflare}
@@ -157,6 +185,20 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
   ]
 }
 ```
+
+### With context
+
+On Cloudflare, telefunctions run inside the Durable Object — pass `context` as a function to `new Telefunc()` (not to `serve()`):
+
+```ts
+const telefunc = new Telefunc({
+  context: async (request, env: Env) => ({
+    user: await getUser(request, env),
+  }),
+})
+```
+
+> Access `context` inside telefunctions via <Link href="/getContext">`getContext()`</Link>.
 
 > See <Link text="Cloudflare Workers" href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
 :::
