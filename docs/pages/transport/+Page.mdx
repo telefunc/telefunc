@@ -35,7 +35,7 @@ Controls how streamed values are delivered over HTTP.
 | Transport | Content-Type | Description |
 |---|---|---|
 | `'binary-inline'` (default) | `application/octet-stream` | Raw binary chunked response. Lowest overhead. |
-| `'sse-inline'` | `text/event-stream` | Base64url-encoded SSE. Works through proxies that buffer binary. |
+| `'sse-inline'` | `text/event-stream` | Base64url-encoded SSE. Works through proxies that buffer binary responses. |
 | `'channel'` | `text/plain` + channel | Starts over HTTP, then continues over the configured channel transport. |
 
 ### Comparison
@@ -58,7 +58,7 @@ Controls how streamed values are delivered over HTTP.
 
 ## Channel transport
 
-Controls how <Link text={<code>new Channel()</code>} href="/channel" /> and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" /> connections work, and which backend `config.stream.transport = 'channel'` uses.
+Controls how <Link text={<code>new Channel()</code>} href="/channel" /> and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" /> connections work — and which backend `config.stream.transport = 'channel'` uses.
 
 | Transport | Description |
 |---|---|
@@ -83,7 +83,7 @@ All channels share a single multiplexed connection per server URL, so opening ma
 - **Start with `'sse'`** — it works everywhere out-of-the-box.
 - **Use `'ws'`** for high-frequency, real-time traffic that benefits from a full-duplex connection.
 
-> When WebSocket is enabled (see <Link href="/server" />), the server supports both SSE and WS. The client starts on SSE and seamlessly upgrades to WebSocket in the background (open channels keep working without interruption).
+> When WebSocket is enabled (see <Link href="/server" />), the server supports both SSE and WS. The client starts on SSE and upgrades to WebSocket in the background (open channels keep working without interruption).
 
 
 ## Recommended setup

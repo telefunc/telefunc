@@ -3,10 +3,10 @@ import { StreamingBeta } from '../../../components'
 
 <StreamingBeta />
 
-If you use <Link href="/stream">Telefunc's streaming capabilities</Link>, then scaling Telefunc horizontally (multiple Node instances, multiple containers, multiple machines) adds two requirements:
+If you use <Link href="/stream">Telefunc's streaming capabilities</Link>, scaling Telefunc horizontally (multiple Node instances, multiple containers, multiple machines) adds two requirements:
 
-- **Sticky sessions** (so a reconnecting client returns to the instance holding its channel) — the load balancer in front of your instances must route every request from the same client to the same instance.
-- **Cross-instance broadcast transport** (broadcast publishes must fan out across instances) — install a **broadcast transport** like <Link href="/redis">`@telefunc/redis`</Link>.
+- **Sticky sessions** (so a reconnecting client returns to the instance holding its channel) — your load balancer must route every request from a given client to the same instance.
+- **Cross-instance broadcast transport** (broadcast publishes must fan out across instances) — install one like <Link href="/redis">`@telefunc/redis`</Link>.
 
 That's the whole picture. The rest of this page explains why and shows the common configurations.
 
@@ -15,7 +15,7 @@ That's the whole picture. The rest of this page explains why and shows the commo
 
 A Telefunc `Channel` is a stateful connection. Its server-side state — the `Channel` instance, its `send()`/`listen()` closures, any interval the telefunction set up — lives in one Node process. When the client reconnects (network issues, a page reload, an SSE→WS upgrade), the next request has to land on the same process or the channel can't recover.
 
-This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves it for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
+This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves the problem for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
 
 Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and your client's `Channel` ends.
 
@@ -80,7 +80,7 @@ Serverless platforms that don't expose sticky-session routing aren't a good fit 
 
 ## Cloudflare
 
-Cloudflare Workers are the exception among serverless platforms: `telefunc/cloudflare` routes channels through Durable Objects instead of sticky sessions, and fans out broadcasts across regions automatically, so neither a sticky load balancer nor a broadcast transport is needed. You scale with the `scale` option instead of a load balancer.
+Cloudflare Workers are the exception among serverless platforms: `telefunc/cloudflare` routes channels through Durable Objects instead of sticky sessions, and fans out broadcasts across regions automatically. As a result, neither a sticky load balancer nor a broadcast transport is needed. You scale with the `scale` option instead of a load balancer.
 
 See <Link href="/stream/cloudflare#scaling" text="Cloudflare scaling" />.
 
