@@ -192,17 +192,16 @@ When `hello('Eva')` is called in the browser-side, the following happens:
     ```js
     // server.js
 
-    // Server (Express.js/Hono/Fastify/...)
+    // Server (Hono, Express, Fastify, ...)
 
-    import { serve } from 'telefunc'
+    import { Telefunc } from 'telefunc/node'
+
+    const telefunc = new Telefunc()
 
     // Telefunc middleware
-    app.all('/_telefunc', async (request) => {
-      const httpResponse = await serve({ request })
-      return new Response(httpResponse.getReadableWebStream(), {
-        status: httpResponse.statusCode,
-        headers: httpResponse.headers,
-      })
+    app.all('/_telefunc', async (c) => {
+      const response = await telefunc.serve({ request: c.req.raw })
+      return response ?? c.notFound()
     })
     ```
     Replies following HTTP response:
