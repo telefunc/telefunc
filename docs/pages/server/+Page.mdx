@@ -61,21 +61,16 @@ telefunc.installWebSocket(server)
 
 > **Performance tip**: prefer `{ req, res }` over `{ request }` when you have access to the raw Node.js objects (Express, raw `http`, Connect-style middleware). The `req`/`res` path reads the request body directly from the Node `Readable` and writes the response straight to the Node `Writable`, skipping the Web Streams conversion layer. Node's Web Streams implementation is slower than its internal streams; see [nodejs/performance#134](https://github.com/nodejs/performance/issues/134).
 
-### With context
+Pass `context` to expose data to your telefunctions, accessed via <Link href="/getContext">`getContext()`</Link>:
 
 ```ts
-app.all('/_telefunc', async (c) => {
-  const response = await telefunc.serve({
-    request: c.req.raw,
-    context: {
-      user: await getUser(c.req),
-    },
-  })
-  return response ?? c.notFound()
+const response = await telefunc.serve({
+  request: c.req.raw,
+  context: {
+    user: await getUser(c.req),
+  },
 })
 ```
-
-> Access `context` inside telefunctions via <Link href="/getContext">`getContext()`</Link>.
 :::
 
 :::Choice{#Bun}
@@ -100,7 +95,7 @@ Bun.serve({
 })
 ```
 
-### With context
+Pass `context` to expose data to your telefunctions, accessed via <Link href="/getContext">`getContext()`</Link>:
 
 ```ts
 const response = await telefunc.serve({
@@ -111,8 +106,6 @@ const response = await telefunc.serve({
   },
 })
 ```
-
-> Access `context` inside telefunctions via <Link href="/getContext">`getContext()`</Link>.
 :::
 
 :::Choice{#Deno}
@@ -132,7 +125,7 @@ Deno.serve({ port: 3000 }, async (request, info) => {
 })
 ```
 
-### With context
+Pass `context` to expose data to your telefunctions, accessed via <Link href="/getContext">`getContext()`</Link>:
 
 ```ts
 const response = await telefunc.serve({
@@ -143,8 +136,6 @@ const response = await telefunc.serve({
   },
 })
 ```
-
-> Access `context` inside telefunctions via <Link href="/getContext">`getContext()`</Link>.
 :::
 
 :::Choice{#Cloudflare}
@@ -186,9 +177,7 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 }
 ```
 
-### With context
-
-On Cloudflare, telefunctions run inside the Durable Object — pass `context` as a function to `new Telefunc()` (not to `serve()`):
+Pass `context` to expose data to your telefunctions, accessed via <Link href="/getContext">`getContext()`</Link>. On Cloudflare, telefunctions run inside the Durable Object, so `context` is a function passed to `new Telefunc()` (not to `serve()`):
 
 ```ts
 const telefunc = new Telefunc({
@@ -197,8 +186,6 @@ const telefunc = new Telefunc({
   }),
 })
 ```
-
-> Access `context` inside telefunctions via <Link href="/getContext">`getContext()`</Link>.
 
 > See <Link text="Cloudflare Workers" href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
 :::
