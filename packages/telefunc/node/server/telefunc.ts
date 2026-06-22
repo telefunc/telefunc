@@ -58,10 +58,10 @@ async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   return httpResponse
 }
 
-/** @deprecated `telefunc()` has been renamed to `serve()`. */
+/** @deprecated `telefunc()` is deprecated, use `new Telefunc()` instead, see https://telefunc.com/server */
 async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
   // TO-DO/next-major-release: remove
-  assertWarning(false, '`telefunc()` has been renamed to `serve()` — https://telefunc.com/serve', {
+  assertWarning(false, '`telefunc()` is deprecated, use `new Telefunc()` instead, see https://telefunc.com/server', {
     onlyOnce: true,
   })
   return serve(httpRequest)
