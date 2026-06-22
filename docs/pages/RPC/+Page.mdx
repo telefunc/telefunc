@@ -200,8 +200,7 @@ When `hello('Eva')` is called in the browser-side, the following happens:
 
     // Telefunc middleware
     app.all('/_telefunc', async (c) => {
-      const response = await telefunc.serve({ request: c.req.raw })
-      return response ?? c.notFound()
+      return await telefunc.serve({ request: c.req.raw })
     })
     ```
     Replies following HTTP response:
