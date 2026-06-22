@@ -3,7 +3,7 @@ import { StreamingBeta, NeedsLongRunningServer } from '../../components'
 
 <StreamingBeta />
 
-Telefunc supports streaming (one-way stream) and real-time (two-way stream) use cases with:
+Telefunc supports streaming (one-way data flow) and real-time (two-way data flow) use cases with:
 - Primitives
 - Integrations
 - Seamless DX
@@ -70,7 +70,7 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 #### Integrations
 
 <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />: automatically synced TanStack queries.  
-<Link text={<code>@telefunc/rxjs</code>} href="/rxjs" />: reactive operators.  
+<Link text={<code>@telefunc/rxjs</code>} href="/rxjs" />: reactive streams and operators.  
 
 > Integrations provide an even more seamless and ergonomic DX. They're powered by the primitives listed here.
 
@@ -84,7 +84,9 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 
 ## Primitive: `AsyncGenerator` (`function*`) {#async-generator}
 
-An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator): the usual choice for structured values that arrive one piece at a time — AI tokens, notifications, progress updates.
+An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) — the usual choice for structured values that arrive one piece at a time, such as AI tokens, notifications, or progress updates.
+
+Common use case:
 
 ```ts
 // AiChat.telefunc.ts
@@ -110,7 +112,7 @@ for await (const message of gen) {
 }
 ```
 
-For example, return an `async function*` and read each value as it arrives:
+Simple example:
 
 ```ts
 // Countdown.telefunc.ts
@@ -259,7 +261,7 @@ while (true) {
 }
 ```
 
-**Client → server** — pass a `ReadableStream` as an argument to stream bytes up to the server:
+**Client → server** — pass a `ReadableStream` as an argument to stream bytes to the server:
 
 ```ts
 // Ingest.telefunc.ts
@@ -335,12 +337,12 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 }
 ```
 
-> A spawned process outlives the call and would keep burning CPU if the client navigated away mid-encode — so it's released in `onClose()`. See <Link text="Cleanup" href="#cleanup" />.
+> A spawned process outlives the call and keeps burning CPU if the client navigates away mid-encode — so it's released in `onClose()`. See <Link text="Cleanup" href="#cleanup" />.
 
 
 ## Primitive: `Channel` {#channel}
 
-For ongoing two-way and broadcast messaging, Telefunc has two primitives and one composition:
+For ongoing two-way and broadcast messaging, you can use:
 
 - **`new Channel()`** — direct messages between one server and one client.
 - **`Broadcast`** — a keyed pub/sub bus (`publish()` / `subscribe()` by `key`), server-side.
@@ -412,7 +414,7 @@ await onTeamFeed('acme', (text) => showMessage(text))
 
 `getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />) — so authorize there, at open time. The `user` you captured stays valid inside the callback, which runs later.
 
-> **Consider re-checking.** For sensitive operations, consider re-checking authorization with the captured `user` each time the callback runs. Most use cases don't need this.
+> **Consider re-checking.** For sensitive operations, you can re-check authorization with the captured `user` each time the callback runs. Although most use cases don't need this.
 
 
 ## Cleanup
@@ -441,7 +443,7 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 
 > **Pitfall** — anything a long-lived telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the call and **leaks** unless you release it in `onClose()`. If you set it up, tear it down.
 
-<Link text="Channels" href="#channel" /> and broadcasts expose `onClose()` (and `onOpen()`) directly on the instance — e.g. `dashboard.onClose(() => clearInterval(interval))` in the <Link text="Channel example" href="#channel" /> above; see <Link href="/channel#lifecycle" />.
+<Link text="Channels" href="#channel" /> and broadcasts expose `onClose()` (and `onOpen()`) directly on the instance — e.g. `dashboard.onClose(() => clearInterval(interval))` in the <Link text="Channel example" href="#channel" /> above. See <Link href="/channel#lifecycle" />.
 
 From the client, end a stream early with <Link text={<code>close()</code>} href="/close" /> — or simply stop reading: `break` out of a `for await`, `reader.cancel()` a `ReadableStream`, or `channel.close()` a channel. Even if you drop every reference without closing, Telefunc still cleans up automatically via garbage collection a few seconds later.
 
