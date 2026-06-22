@@ -5,20 +5,9 @@ Telefunc can integrate with any server — Hono, Express, Fastify, and more.
 
 ## `new Telefunc()` vs `serve()` {#telefunc-vs-serve}
 
-Telefunc gives you two server APIs:
+Use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> (shown below) — it's the standard way to integrate Telefunc, with full support for <Link href="/stream">streaming and real-time</Link>.
 
-| | <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> | <Link text={<code>serve()</code>} href="/serve" /> |
-|---|---|---|
-| When to use | **Default** — start here | Low-level / advanced |
-| Import | `telefunc/node` (or `/bun`, `/deno`, `/cloudflare`) | `telefunc` |
-| Returns | a ready-to-use `Response` (skips non-Telefunc requests) | a low-level `HttpResponse` you convert yourself |
-| RPC, inline <Link href="/stream">streaming</Link>, SSE channels | ✅ | ✅ |
-| <Link text="WebSocket channels" href="/transport#channel-transport" /> | ✅ | ❌ |
-| Runtime | runtime-specific | universal & stateless |
-
-**Use `new Telefunc()`** (shown below): it returns a ready `Response`, transparently skips non-Telefunc requests, and is the only way to enable <Link text="WebSocket channels" href="/transport#channel-transport" />. Reach for the pure-function `serve()` when you want a stateless, low-level handler with direct control over the HTTP response, or a runtime without a dedicated adapter — it still handles RPC, inline <Link href="/stream">streaming</Link>, and SSE channels, just not WebSocket. See <Link href="#low-level-api" text="Low-level API" /> below.
-
-> Both expose a function named `serve`: the standalone `serve()`, and the `telefunc.serve()` *method* on a `new Telefunc()` instance. They do the same job but return different values — this page's examples use the `telefunc.serve()` method.
+There's also a low-level <Link text={<code>serve()</code>} href="/serve" /> function, for when you want direct control over the HTTP response or a runtime without a dedicated adapter.
 
 > **Upgrading from `telefunc()`?** `telefunc()` was renamed to <Link text="serve()" href="/serve" /> — it still works but is deprecated.
 

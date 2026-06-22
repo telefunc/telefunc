@@ -2,11 +2,11 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Low-level function that turns a telefunction request into an HTTP response. It's a pure function — stateless, side-effect-free, and works on any runtime.
+Low-level function that turns a telefunction request into an HTTP response. It's a pure function: stateless and side-effect-free.
 
-> **Most apps should use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> instead** — it returns a ready-to-use `Response`, transparently skips non-Telefunc requests, and is the only one that enables <Link text="WebSocket channels" href="/transport#channel-transport" />. `serve()` still handles RPC, inline <Link href="/stream">streaming</Link>, and SSE channels; reach for it when you want a stateless, low-level handler with direct control over the HTTP response (or a runtime without a dedicated adapter). See <Link href="/server#telefunc-vs-serve" text="new Telefunc() vs serve()" />.
+> **Most apps should use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> instead** — it's the standard server integration (see <Link href="/server" />). Reach for `serve()` when you want direct, low-level control over the HTTP response, or a runtime without a dedicated adapter.
 
-> Not to be confused with the `telefunc.serve()` *method* on a <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> instance: the standalone `serve()` documented here returns a low-level `HttpResponse` (see <Link href="#response-object" text="Response object" /> below), whereas the method returns a web `Response`.
+> Not to be confused with the `telefunc.serve()` *method* on a <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> instance — the standalone `serve()` here returns a low-level `HttpResponse`, whereas the method returns a web `Response`.
 
 ## Basic usage
 
