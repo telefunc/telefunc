@@ -1,8 +1,25 @@
 import { Link, Tabs } from '@brillout/docpress'
 
-Telefunc can integrate with any server. For production deployments that need streaming, channels, and WebSocket support, use `new Telefunc()`.
+Telefunc can integrate with any server — Hono, Express, Fastify, and more.
 
-> **Upgrading from `telefunc()`?** `telefunc()` was renamed to <Link text="serve()" href="/serve" /> — it still works but is deprecated. Use `serve()` for a low-level request handler, or `new Telefunc()` (shown below) for the full runtime, which adds streaming, channels, and WebSocket.
+
+## `new Telefunc()` vs `serve()` {#telefunc-vs-serve}
+
+Telefunc gives you two server APIs:
+
+| | <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> | <Link text={<code>serve()</code>} href="/serve" /> |
+|---|---|---|
+| When to use | **Default** — start here | Low-level / advanced |
+| Import | `telefunc/node` (or `/bun`, `/deno`, `/cloudflare`) | `telefunc` |
+| Returns | a ready-to-use `Response` | an `HttpResponse` you convert yourself |
+| <Link text="Streaming, channels, WebSocket" href="/stream" /> | ✅ | ❌ |
+| Runtime | runtime-specific | universal & stateless |
+
+**Use `new Telefunc()`** (shown below) unless you specifically want the low-level, pure-function `serve()` — for direct control over the HTTP response, or a runtime without a dedicated adapter, and you don't need <Link href="/stream">streaming</Link>. See <Link href="#low-level-api" text="Low-level API" /> below.
+
+> Both expose a function named `serve`: the standalone `serve()`, and the `telefunc.serve()` *method* on a `new Telefunc()` instance. They do the same job but return different values — this page's examples use the `telefunc.serve()` method.
+
+> **Upgrading from `telefunc()`?** `telefunc()` was renamed to <Link text="serve()" href="/serve" /> — it still works but is deprecated.
 
 
 ## Setup
