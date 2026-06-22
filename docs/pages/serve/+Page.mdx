@@ -2,9 +2,13 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Low-level function that processes telefunction requests and returns an HTTP response. It's a pure function: stateless and side-effect-free.
+Low-level function that turns a telefunction HTTP request into an HTTP response. It's a pure function: stateless and side-effect-free. It runs in every runtime without adapter.
 
-> For <Link href="/stream">streaming and real-time</Link> setups, use the runtime-specific `new Telefunc()` instead, imported from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare`. See <Link href="/server" />.
+> **Most apps should use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> instead** — it's the standard server integration (see <Link href="/server" />) and the only one with <Link text="WebSocket" href="/transport#channel-transport" /> support.
+>
+> Reach for `serve()` when you want direct, low-level control over the HTTP response, or a runtime without a dedicated adapter. It handles <Link href="/stream">streaming</Link> calls, but not <Link text="WebSocket" href="/transport#channel-transport" />.
+
+> Not to be confused with the `telefunc.serve()` *method* on a <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> instance — the standalone `serve()` here returns a low-level `HttpResponse` object, whereas the method returns a standard web `Response`.
 
 ## Basic usage
 
@@ -75,5 +79,6 @@ const httpResponse = await serve({
 
 ## See also
 
+- <Link href="/Telefunc" />
 - <Link href="/server" />
 - <Link href="/getContext" />

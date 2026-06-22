@@ -109,24 +109,20 @@ See also: <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={
 
 **2. Handle the error on the server-side.**
 
-You can handle the thrown error at your Telefunc server middleware:
+Register an <Link text={<code>onBug()</code>} href="/onBug" /> hook — it's called whenever a telefunction throws a bug (any error that isn't `Abort()`):
 
 ```ts
 // server.ts
 // Environment: server
 
-import { serve } from 'telefunc'
+import { onBug } from 'telefunc'
 
-app.all('/_telefunc', async (c) => {
-  const httpResponse = await serve({ request: c.req.raw })
-  // Telefunc exposes any error thrown by a telefunction at httpResponse.err
-  if (httpResponse.err) {
-    // Error handling
-  }
+onBug((err) => {
+  // Error handling (e.g. report to Sentry, Bugsnag, ...)
 })
 ```
 
-Also see <Link href="/getContext#provide" />.
+> With the low-level <Link href="/serve">`serve()`</Link>, the error is also exposed at `httpResponse.err`.
 
 
 ## Network Errors
