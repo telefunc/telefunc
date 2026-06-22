@@ -11,11 +11,12 @@ Telefunc gives you two server APIs:
 |---|---|---|
 | When to use | **Default** — start here | Low-level / advanced |
 | Import | `telefunc/node` (or `/bun`, `/deno`, `/cloudflare`) | `telefunc` |
-| Returns | a ready-to-use `Response` | an `HttpResponse` you convert yourself |
-| <Link text="Streaming, channels, WebSocket" href="/stream" /> | ✅ | ❌ |
+| Returns | a ready-to-use `Response` (skips non-Telefunc requests) | a low-level `HttpResponse` you convert yourself |
+| RPC, inline <Link href="/stream">streaming</Link>, SSE channels | ✅ | ✅ |
+| <Link text="WebSocket channels" href="/transport#channel-transport" /> | ✅ | ❌ |
 | Runtime | runtime-specific | universal & stateless |
 
-**Use `new Telefunc()`** (shown below) unless you specifically want the low-level, pure-function `serve()` — for direct control over the HTTP response, or a runtime without a dedicated adapter, and you don't need <Link href="/stream">streaming</Link>. See <Link href="#low-level-api" text="Low-level API" /> below.
+**Use `new Telefunc()`** (shown below): it returns a ready `Response`, transparently skips non-Telefunc requests, and is the only way to enable <Link text="WebSocket channels" href="/transport#channel-transport" />. Reach for the pure-function `serve()` when you want a stateless, low-level handler with direct control over the HTTP response, or a runtime without a dedicated adapter — it still handles RPC, inline <Link href="/stream">streaming</Link>, and SSE channels, just not WebSocket. See <Link href="#low-level-api" text="Low-level API" /> below.
 
 > Both expose a function named `serve`: the standalone `serve()`, and the `telefunc.serve()` *method* on a `new Telefunc()` instance. They do the same job but return different values — this page's examples use the `telefunc.serve()` method.
 

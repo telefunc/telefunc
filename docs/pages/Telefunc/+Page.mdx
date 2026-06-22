@@ -3,7 +3,7 @@ import { StreamingBeta } from '../../components'
 
 **Environment**: server.
 
-Use `new Telefunc()` to embed Telefunc into your server. It's the standard, recommended way to handle telefunction requests, and the only one with full support for <Link href="/stream">Telefunc Stream</Link> (streaming, channels, and WebSocket).
+Use `new Telefunc()` to embed Telefunc into your server. It's the standard, recommended way to handle telefunction requests: it returns a ready-to-use `Response` and has full support for <Link href="/stream">Telefunc Stream</Link>, including WebSocket channels.
 
 ```ts choice=Node
 // Environment: server
@@ -34,7 +34,7 @@ import { Telefunc } from 'telefunc/cloudflare'
 const telefunc = new Telefunc()
 ```
 
-> For per-runtime setup see <Link href="/server" />; for Cloudflare specifics see <Link href="/stream/cloudflare" />. For the low-level, pure-function alternative (no streaming), see <Link href="/serve" />.
+> For per-runtime setup see <Link href="/server" />; for Cloudflare specifics see <Link href="/stream/cloudflare" />. For the low-level, pure-function alternative — RPC, inline streaming, and SSE channels, but no WebSocket — see <Link href="/serve" />.
 
 
 ## Methods
