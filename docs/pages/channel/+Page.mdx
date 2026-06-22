@@ -128,8 +128,6 @@ ack.accepted // true
 
 On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `chat.client` type flips the message types.
 
-Both generic parameters also drive runtime validation: Telefunc auto-generates shields that check each message and ack arriving at the server against the type it declares. See <Link href="/shield" />.
-
 
 ### Acknowledgements
 
@@ -425,7 +423,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
-| `ChannelClosedError` | `send()` on a closed channel (thrown synchronously); also rejects pending `ack` sends still waiting when the channel closes or the close times out | Closed | Recreate the channel |
+| `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
 | `ChannelOverflowError` | A buffered send was dropped — the buffer exceeded `config.channel.bufferLimit` | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
 
 > A graceful `close()` is not an error (`onClose(err)` receives `undefined`).

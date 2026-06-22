@@ -132,12 +132,12 @@ Calling `dl.cancel()` aborts the stream — the pending `saveToMemory` call reje
 
 ## Reading strategies
 
-The streaming download behaves like a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) — `dl.stream()`, `dl.text()`, `dl.arrayBuffer()`, `dl.bytes()`, and `dl.slice()` all work and pull from the streaming source as you read:
+The streaming download is a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) object — `dl.stream()`, `dl.text()`, `dl.arrayBuffer()`, `dl.bytes()`, and `dl.slice()` all work and pull from the streaming source as you read:
 
 | Method | Returns | Memory | Best for |
 |---|---|---|---|
 | `dl.stream()` | `ReadableStream` | Constant (chunk-sized) | Pipe to disk, S3, or any writable stream |
-| `dl.bytes()` | `Uint8Array` | Full file in memory | Process raw bytes |
+| `dl.bytes()` | `Uint8Array` | Full file in memory | Process raw binary |
 | `dl.arrayBuffer()` | `ArrayBuffer` | Full file in memory | Process entire file at once |
 | `dl.text()` | `string` | Full file in memory | Read text content |
 | `dl.saveToMemory()` | `File` / `Blob`<sup>‡</sup> | Full file in memory | Use with Web APIs (`URL.createObjectURL`, `<img src>`, ...) |

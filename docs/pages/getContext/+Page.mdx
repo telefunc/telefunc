@@ -228,7 +228,7 @@ context.onClose(() => {
 
 ## `signal`
 
-The context object also includes a `signal` (an `AbortSignal`) that aborts when the call ends. Pass it to APIs that accept an `AbortSignal` (`fetch`, database clients, etc.) so in-flight work cancels when the call ends.
+The context object also includes a `signal` (an `AbortSignal`) that aborts when the call ends. Pass it to APIs that accept an `AbortSignal` (`fetch`, database clients, etc.) so in-flight work cancels when the client disconnects.
 
 ```ts
 const context = getContext()

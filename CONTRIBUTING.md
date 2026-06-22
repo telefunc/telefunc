@@ -119,18 +119,6 @@ cd docs/ # From the monorepo root
 pnpm run dev
 ```
 
-**3. Conventions**
-
-These rules are enforced by `pnpm run docs:lint`:
-
-- Internal links use `<Link href="/foo" />`, never markdown `[…](/foo)`.
-- Every `#anchor` link resolves to a real heading.
-
-Also follow these conventions:
-
-- Annotate code with `// Environment: server` or `// Environment: client`; single-environment pages also carry a page-level `**Environment**: server|client`.
-- Match the callout to the note: `<Warning>` for must-heed or security notes, `<Advanced>` for a skippable deep-dive, and a plain `>` blockquote for ordinary notes.
-
 <br/>
 
 
