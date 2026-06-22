@@ -24,10 +24,10 @@ const telefunc = new Telefunc()
 app.all('/_telefunc', async (c) => {
   const response = await telefunc.serve({
     request: c.req.raw,
-    // Expose data to your telefunctions, accessed via getContext()
+    // Provide context, accessed via getContext()
     context: {
-      user: await getUser(c.req),
-    },
+      user: await getUser(c.req)
+    }
   })
   return response ?? c.notFound()
 })
@@ -51,7 +51,14 @@ const app = express()
 const telefunc = new Telefunc()
 
 app.all('/_telefunc', async (req, res, next) => {
-  const handled = await telefunc.serve({ req, res })
+  const handled = await telefunc.serve({
+    req,
+    res,
+    // Provide context, accessed via getContext()
+    context: {
+      user: await getUser(c.req)
+    }
+  })
   if (!handled) next()
 })
 
@@ -84,10 +91,10 @@ Bun.serve({
     const response = await telefunc.serve({
       request,
       server,
-      // Expose data to your telefunctions, accessed via getContext()
+      // Provide context, accessed via getContext()
       context: {
-        user: await getUser(request),
-      },
+        user: await getUser(request)
+      }
     })
     if (response) return response
 
@@ -110,10 +117,10 @@ Deno.serve({ port: 3000 }, async (request, info) => {
   const response = await telefunc.serve({
     request,
     info,
-    // Expose data to your telefunctions, accessed via getContext()
+    // Provide context, accessed via getContext()
     context: {
-      user: await getUser(request),
-    },
+      user: await getUser(request)
+    }
   })
   if (response) return response
 
@@ -130,11 +137,10 @@ Deno.serve({ port: 3000 }, async (request, info) => {
 import { Telefunc } from 'telefunc/cloudflare'
 
 const telefunc = new Telefunc({
-  // Expose data to your telefunctions, accessed via getContext().
-  // On Cloudflare it's a function (telefunctions run in the Durable Object).
+  // Provide context, accessed via getContext()
   context: async (request, env: Env) => ({
-    user: await getUser(request, env),
-  }),
+    user: await getUser(request, env)
+  })
 })
 
 export const TelefuncDurableObject = telefunc.TelefuncDurableObject
@@ -148,6 +154,8 @@ export default {
   },
 }
 ```
+
+> On Cloudflare the `context` is set in a separate function than the request handler. (Because it runs in a Durable Object, whereas the request hanlder doesn't.)
 
 Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 
