@@ -3,15 +3,6 @@ import { Link, Tabs } from '@brillout/docpress'
 Telefunc can integrate with any server — Hono, Express, Fastify, and more.
 
 
-## `new Telefunc()` vs `serve()` {#telefunc-vs-serve}
-
-Use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> (shown below) — it's the standard way to integrate Telefunc, with full support for <Link href="/stream">streaming and real-time</Link>.
-
-There's also a low-level <Link text={<code>serve()</code>} href="/serve" /> function, for when you want direct control over the HTTP response or a runtime without a dedicated adapter — it handles regular calls and <Link href="/stream">streaming</Link>, but not <Link text="WebSocket" href="/transport#channel-transport" />.
-
-> **Upgrading from `telefunc()`?** `telefunc()` was renamed to <Link text="serve()" href="/serve" /> — it still works but is deprecated.
-
-
 ## Setup
 
 <Tabs choice={'runtime'} />
@@ -183,27 +174,12 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 
 > `telefunc.serve()` returns `undefined` (or `false`) for non-Telefunc requests, allowing you to chain it with other handlers.
 
+> There's also a low-level <Link text={<code>serve()</code>} href="/serve" /> function, for when you want direct control over the HTTP response or a runtime without a dedicated adapter.
 
-## Low-level API
 
-If you need direct control over the HTTP response, you can use the core `serve()` function:
-
-```ts
-import { serve } from 'telefunc'
-
-app.all('/_telefunc', async (c) => {
-  const httpResponse = await serve({ request: c.req.raw })
-  return new Response(httpResponse.getReadableWebStream(), {
-    status: httpResponse.statusCode,
-    headers: httpResponse.headers
-  })
-})
-```
-
-See <Link href="/serve" /> for details.
 
 
 ## See also
 
-- <Link href="/serve" />
 - <Link href="/getContext" />
+- <Link href="/serve" />
