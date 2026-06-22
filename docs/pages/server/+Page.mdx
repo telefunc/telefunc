@@ -2,6 +2,8 @@ import { Link, Tabs } from '@brillout/docpress'
 
 Telefunc can integrate with any server — Hono, Express, Fastify, and more.
 
+Use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> (shown below) — the standard integration, with full support for <Link href="/stream">streaming and real-time</Link>. For a low-level, pure-function alternative (no WebSocket), see <Link href="/serve" />.
+
 
 ## Setup
 
@@ -173,8 +175,6 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 | Cloudflare | `Response \| undefined` | `undefined` if not a Telefunc request |
 
 > `telefunc.serve()` returns `undefined` (or `false`) for non-Telefunc requests, allowing you to chain it with other handlers.
-
-> There's also a low-level <Link text={<code>serve()</code>} href="/serve" /> function, for when you want direct control over the HTTP response or a runtime without a dedicated adapter.
 
 
 
