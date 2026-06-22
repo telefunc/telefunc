@@ -22,7 +22,13 @@ const app = new Hono()
 const telefunc = new Telefunc()
 
 app.all('/_telefunc', async (c) => {
-  const response = await telefunc.serve({ request: c.req.raw })
+  const response = await telefunc.serve({
+    request: c.req.raw,
+    // Expose data to your telefunctions, accessed via getContext()
+    context: {
+      user: await getUser(c.req),
+    },
+  })
   return response ?? c.notFound()
 })
 
@@ -59,21 +65,6 @@ telefunc.installWebSocket(server)
 
 > **Performance tip**: prefer `{ req, res }` over `{ request }` when you have access to the raw Node.js objects (Express, raw `http`, Connect-style middleware). The `req`/`res` path reads the request body directly from the Node `Readable` and writes the response straight to the Node `Writable`, skipping the Web Streams conversion layer. Node's Web Streams implementation is slower than its internal streams; see [nodejs/performance#134](https://github.com/nodejs/performance/issues/134).
 
-### With context
-
-```ts
-app.all('/_telefunc', async (c) => {
-  const response = await telefunc.serve({
-    request: c.req.raw,
-    context: {
-      user: await getUser(c.req),
-    },
-  })
-  return response ?? c.notFound()
-})
-```
-
-> Access `context` inside telefunctions via <Link href="/getContext">`getContext()`</Link>.
 :::
 
 :::Choice{#Bun}
@@ -90,7 +81,14 @@ Bun.serve({
   // Pass telefunc.websocket to enable WebSocket channels
   websocket: telefunc.websocket,
   async fetch(request, server) {
-    const response = await telefunc.serve({ request, server })
+    const response = await telefunc.serve({
+      request,
+      server,
+      // Expose data to your telefunctions, accessed via getContext()
+      context: {
+        user: await getUser(request),
+      },
+    })
     if (response) return response
 
     return new Response('Not found', { status: 404 })
@@ -109,7 +107,14 @@ import { Telefunc } from 'telefunc/deno'
 const telefunc = new Telefunc()
 
 Deno.serve({ port: 3000 }, async (request, info) => {
-  const response = await telefunc.serve({ request, info })
+  const response = await telefunc.serve({
+    request,
+    info,
+    // Expose data to your telefunctions, accessed via getContext()
+    context: {
+      user: await getUser(request),
+    },
+  })
   if (response) return response
 
   return new Response('Not found', { status: 404 })
@@ -124,7 +129,13 @@ Deno.serve({ port: 3000 }, async (request, info) => {
 
 import { Telefunc } from 'telefunc/cloudflare'
 
-const telefunc = new Telefunc()
+const telefunc = new Telefunc({
+  // Expose data to your telefunctions, accessed via getContext().
+  // On Cloudflare it's a function (telefunctions run in the Durable Object).
+  context: async (request, env: Env) => ({
+    user: await getUser(request, env),
+  }),
+})
 
 export const TelefuncDurableObject = telefunc.TelefuncDurableObject
 
