@@ -7,7 +7,7 @@ Telefunc can integrate with any server — Hono, Express, Fastify, and more.
 
 Use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> (shown below) — it's the standard way to integrate Telefunc, with full support for <Link href="/stream">streaming and real-time</Link>.
 
-There's also a low-level <Link text={<code>serve()</code>} href="/serve" /> function, for when you want direct control over the HTTP response or a runtime without a dedicated adapter.
+There's also a low-level <Link text={<code>serve()</code>} href="/serve" /> function, for when you want direct control over the HTTP response or a runtime without a dedicated adapter — it handles regular calls and <Link href="/stream">streaming</Link>, but not <Link text="WebSocket" href="/transport#channel-transport" />.
 
 > **Upgrading from `telefunc()`?** `telefunc()` was renamed to <Link text="serve()" href="/serve" /> — it still works but is deprecated.
 
