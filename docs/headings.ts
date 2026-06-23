@@ -254,7 +254,7 @@ const headings = [
   },
   {
     level: 2,
-    title: '`close()` / `onClose()`',
+    title: '`close()`',
     url: '/close',
   },
   {
