@@ -100,15 +100,6 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Server integration',
-  },
-  {
-    level: 2,
-    title: 'Server (Hono, Express, ...)',
-    url: '/server',
-  },
-  {
-    level: 4,
     title: 'Bundler integration',
   },
   {
