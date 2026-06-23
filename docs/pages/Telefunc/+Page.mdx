@@ -1,6 +1,16 @@
 import { Link, Tabs } from '@brillout/docpress'
 import { StreamingBeta } from '../../components'
 
+export const _NodeAdapterNote = () => (
+  // Inline DRY component defined via MDX's export trick (never actually imported).
+  <blockquote>
+    <p>
+      The Node.js adapter auto-detects your HTTP server from the request socket. <code>installWebSocket()</code> is
+      idempotent — calling it multiple times is safe.
+    </p>
+  </blockquote>
+)
+
 **Environment**: server.
 
 Use `new Telefunc()` to embed Telefunc into your server (Hono, Cloudflare, Express, Fastify, ...).
@@ -43,8 +53,11 @@ const server = serve({ fetch: app.fetch, port: 3000 })
 telefunc.installWebSocket(server)
 ```
 
-### With Express
+<_NodeAdapterNote />
 
+:::
+
+:::Choice{#Express}
 ```ts
 // server.ts
 // Environment: server
@@ -61,7 +74,7 @@ app.all('/_telefunc', async (req, res, next) => {
     res,
     // Provide context, accessed via getContext()
     context: {
-      user: await getUser(c.req)
+      user: await getUser(req)
     }
   })
   if (!handled) next()
@@ -73,7 +86,7 @@ const server = app.listen(3000)
 telefunc.installWebSocket(server)
 ```
 
-> The Node.js adapter auto-detects your HTTP server from the request socket. `installWebSocket()` is idempotent — calling it multiple times is safe.
+<_NodeAdapterNote />
 
 > **Performance tip**: prefer `{ req, res }` over `{ request }` when you have access to the raw Node.js objects (Express, raw `http`, Connect-style middleware). The `req`/`res` path reads the request body directly from the Node `Readable` and writes the response straight to the Node `Writable`, skipping the Web Streams conversion layer. Node's Web Streams implementation is slower than its internal streams; see [nodejs/performance#134](https://github.com/nodejs/performance/issues/134).
 
@@ -160,7 +173,7 @@ export default {
 }
 ```
 
-> On Cloudflare the `context` is set in a separate function than the request handler. (Because it runs in a Durable Object, whereas the request hanlder doesn't.)
+> On Cloudflare the `context` is set in a separate function than the request handler. (Because it runs in a Durable Object, whereas the request handler doesn't.)
 
 > On Cloudflare `new Telefunc` also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
 
