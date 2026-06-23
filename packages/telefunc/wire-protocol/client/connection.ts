@@ -1029,24 +1029,26 @@ class ClientConnection implements MuxConnection {
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
-  drainBufferedFramesForReconcile(): OutboundFrame[] {
+  drainBufferedFramesForReconcile(isInitialBatch: boolean): OutboundFrame[] {
     if (this.transport.reconcileMode !== 'batch-on-reconcile') return []
-    // Only eager-batch buffered data alongside the reconcile on the *first* connect, where the
-    // server has no prior state and these are the lowest seqs it will see. On a reconnect
-    // (`sessionId` set) the replay buffer may hold OLDER unacked frames that are only re-sent
-    // after RECONCILED (`applyReconciled`'s `getAfter`); eager-batching a newer frame here would
-    // reach the server first, advance its `lastClientSeq` past the older one, and get the older
-    // one dup-dropped on replay — silent message loss. Defer to the post-RECONCILED release
-    // instead (same ordering discipline as the WS 'release-after-reconciled' mode).
-    if (this.sessionId !== null) return []
+    // The hazard is confined to a *reconnect's* initial batch: the previous wire may have died
+    // with an unacked frame still only in the replay buffer, which is re-sent after RECONCILED
+    // (`applyReconciled`'s `getAfter`). Eager-batching a newer frame into that initial batch
+    // would reach the server first, advance its `lastClientSeq` past the older one, and get the
+    // older one dup-dropped on replay — silent message loss. Defer to the post-RECONCILED
+    // release there (same ordering discipline as the WS 'release-after-reconciled' mode).
+    // Every other reconcile is on a live wire: a fresh connect has no prior server state, and a
+    // reconcile on an established wire (new-channel registration, chained reconcile) has no
+    // in-transit replay frame to jump ahead of — so eager-batch, it saves a round-trip.
+    if (isInitialBatch && this.sessionId !== null) return []
     return this.drainBufferedFrames(this.channels, undefined)
   }
 
-  stageReconcileBatch(): ReconcileBatch {
+  stageReconcileBatch(isInitialBatch = false): ReconcileBatch {
     // This batch includes every channel, so it already covers any pending registration.
     this.cancelRegisterReconcileTimer()
     const reconcileFrame = this.buildReconcileFrame()
-    const movedBufferedFrames = this.drainBufferedFramesForReconcile()
+    const movedBufferedFrames = this.drainBufferedFramesForReconcile(isInitialBatch)
     return { reconcileFrame, movedBufferedFrames }
   }
 
@@ -1634,7 +1636,7 @@ class SseTransport implements ClientChannelTransport {
   }
 
   private stageInitialBatch(): SseInitialBatchStage {
-    const reconcileBatch = this.owner.stageReconcileBatch()
+    const reconcileBatch = this.owner.stageReconcileBatch(true)
     const initialFrames: OutboundFrame[] = []
     initialFrames.push(reconcileBatch.reconcileFrame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
