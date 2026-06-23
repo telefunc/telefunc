@@ -2,7 +2,7 @@ import { Link, Tabs } from '@brillout/docpress'
 import { StreamingBeta } from '../../components'
 
 export const _NodeAdapterNote = () => (
-  // Inline component defined right here via MDX's export trick (not imported) — reused by the Node and Express tabs below.
+  // Inline DRY component defined via MDX's export trick (never actually imported).
   <blockquote>
     <p>
       The Node.js adapter auto-detects your HTTP server from the request socket. <code>installWebSocket()</code> is
