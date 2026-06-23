@@ -43,8 +43,11 @@ const server = serve({ fetch: app.fetch, port: 3000 })
 telefunc.installWebSocket(server)
 ```
 
-### With Express
+> The Node.js adapter auto-detects your HTTP server from the request socket. `installWebSocket()` is idempotent — calling it multiple times is safe.
 
+:::
+
+:::Choice{#Express}
 ```ts
 // server.ts
 // Environment: server
@@ -61,7 +64,7 @@ app.all('/_telefunc', async (req, res, next) => {
     res,
     // Provide context, accessed via getContext()
     context: {
-      user: await getUser(c.req)
+      user: await getUser(req)
     }
   })
   if (!handled) next()

@@ -3,6 +3,7 @@ export { config as default }
 import type { Config } from '@brillout/docpress'
 import logo from './icons/telefunc.svg'
 import iconNode from './icons/runtime/node.svg'
+import iconExpress from './icons/runtime/express.svg'
 import iconBun from './icons/runtime/bun.svg'
 import iconDeno from './icons/runtime/deno.svg'
 import iconCloudflare from './icons/runtime/cloudflare.svg'
@@ -39,6 +40,7 @@ const config: Config = {
     runtime: {
       choices: [
         { name: 'Node', icon: iconNode },
+        { name: 'Express', icon: iconExpress },
         { name: 'Bun', icon: iconBun },
         { name: 'Deno', icon: iconDeno },
         { name: 'Cloudflare', icon: iconCloudflare },
