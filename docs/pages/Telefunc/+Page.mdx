@@ -1,7 +1,8 @@
 import { Link, Tabs } from '@brillout/docpress'
 import { StreamingBeta } from '../../components'
 
-export const NodeAdapterNote = () => (
+export const _NodeAdapterNote = () => (
+  // Inline component defined right here via MDX's export trick (not imported) — reused by the Node and Express tabs below.
   <blockquote>
     <p>
       The Node.js adapter auto-detects your HTTP server from the request socket. <code>installWebSocket()</code> is
@@ -52,7 +53,7 @@ const server = serve({ fetch: app.fetch, port: 3000 })
 telefunc.installWebSocket(server)
 ```
 
-<NodeAdapterNote />
+<_NodeAdapterNote />
 
 :::
 
@@ -85,7 +86,7 @@ const server = app.listen(3000)
 telefunc.installWebSocket(server)
 ```
 
-<NodeAdapterNote />
+<_NodeAdapterNote />
 
 > **Performance tip**: prefer `{ req, res }` over `{ request }` when you have access to the raw Node.js objects (Express, raw `http`, Connect-style middleware). The `req`/`res` path reads the request body directly from the Node `Readable` and writes the response straight to the Node `Writable`, skipping the Web Streams conversion layer. Node's Web Streams implementation is slower than its internal streams; see [nodejs/performance#134](https://github.com/nodejs/performance/issues/134).
 
