@@ -1031,6 +1031,14 @@ class ClientConnection implements MuxConnection {
 
   drainBufferedFramesForReconcile(): OutboundFrame[] {
     if (this.transport.reconcileMode !== 'batch-on-reconcile') return []
+    // Only eager-batch buffered data alongside the reconcile on the *first* connect, where the
+    // server has no prior state and these are the lowest seqs it will see. On a reconnect
+    // (`sessionId` set) the replay buffer may hold OLDER unacked frames that are only re-sent
+    // after RECONCILED (`applyReconciled`'s `getAfter`); eager-batching a newer frame here would
+    // reach the server first, advance its `lastClientSeq` past the older one, and get the older
+    // one dup-dropped on replay — silent message loss. Defer to the post-RECONCILED release
+    // instead (same ordering discipline as the WS 'release-after-reconciled' mode).
+    if (this.sessionId !== null) return []
     return this.drainBufferedFrames(this.channels, undefined)
   }
 
