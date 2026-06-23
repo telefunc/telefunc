@@ -253,13 +253,13 @@ const headings = [
     sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
   },
   {
-    level: 2,
-    title: '`close()`',
-    url: '/close',
+    level: 4,
+    title: 'Hooks',
   },
   {
-    level: 4,
-    title: 'Error Handling',
+    level: 2,
+    title: '`onClose()`',
+    url: '/onClose',
   },
   {
     level: 2,
