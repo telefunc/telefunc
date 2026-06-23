@@ -1,70 +1,218 @@
-import { Link } from '@brillout/docpress'
+import { Link, Tabs } from '@brillout/docpress'
 import { StreamingBeta } from '../../components'
 
 **Environment**: server.
 
-Use `new Telefunc()` to embed Telefunc into your server. It's the standard, recommended way to handle telefunction requests, with full support for <Link href="/stream">Telefunc Stream</Link>.
+Use `new Telefunc()` to embed Telefunc into your server (Hono, Cloudflare, Express, Fastify, ...).
 
-```ts choice=Node
+> Lower-level alternative: <Link href="/serve" />
+
+
+## Setup
+
+<Tabs choice={'runtime'} />
+
+:::Choice{#Node}
+### With Hono, Fastify, or any `Request`-based server
+
+```ts
+// server.ts
 // Environment: server
 
+import { Hono } from 'hono'
+import { serve } from '@hono/node-server'
 import { Telefunc } from 'telefunc/node'
 
+const app = new Hono()
 const telefunc = new Telefunc()
+
+app.all('/_telefunc', async (c) => {
+  const response = await telefunc.serve({
+    request: c.req.raw,
+    // Provide context, accessed via getContext()
+    context: {
+      user: await getUser(c.req)
+    }
+  })
+  return response ?? c.notFound()
+})
+
+const server = serve({ fetch: app.fetch, port: 3000 })
+
+// Enable WebSocket support for channels
+telefunc.installWebSocket(server)
 ```
-```ts choice=Bun
+
+### With Express
+
+```ts
+// server.ts
+// Environment: server
+
+import express from 'express'
+import { Telefunc } from 'telefunc/node'
+
+const app = express()
+const telefunc = new Telefunc()
+
+app.all('/_telefunc', async (req, res, next) => {
+  const handled = await telefunc.serve({
+    req,
+    res,
+    // Provide context, accessed via getContext()
+    context: {
+      user: await getUser(c.req)
+    }
+  })
+  if (!handled) next()
+})
+
+const server = app.listen(3000)
+
+// Enable WebSocket support for channels
+telefunc.installWebSocket(server)
+```
+
+> The Node.js adapter auto-detects your HTTP server from the request socket. `installWebSocket()` is idempotent — calling it multiple times is safe.
+
+> **Performance tip**: prefer `{ req, res }` over `{ request }` when you have access to the raw Node.js objects (Express, raw `http`, Connect-style middleware). The `req`/`res` path reads the request body directly from the Node `Readable` and writes the response straight to the Node `Writable`, skipping the Web Streams conversion layer. Node's Web Streams implementation is slower than its internal streams; see [nodejs/performance#134](https://github.com/nodejs/performance/issues/134).
+
+:::
+
+:::Choice{#Bun}
+```ts
+// server.ts
 // Environment: server
 
 import { Telefunc } from 'telefunc/bun'
 
 const telefunc = new Telefunc()
+
+Bun.serve({
+  port: 3000,
+  // Pass telefunc.websocket to enable WebSocket channels
+  websocket: telefunc.websocket,
+  async fetch(request, server) {
+    const response = await telefunc.serve({
+      request,
+      server,
+      // Provide context, accessed via getContext()
+      context: {
+        user: await getUser(request)
+      }
+    })
+    if (response) return response
+
+    return new Response('Not found', { status: 404 })
+  },
+})
 ```
-```ts choice=Deno
+:::
+
+:::Choice{#Deno}
+```ts
+// server.ts
 // Environment: server
 
 import { Telefunc } from 'telefunc/deno'
 
 const telefunc = new Telefunc()
+
+Deno.serve({ port: 3000 }, async (request, info) => {
+  const response = await telefunc.serve({
+    request,
+    info,
+    // Provide context, accessed via getContext()
+    context: {
+      user: await getUser(request)
+    }
+  })
+  if (response) return response
+
+  return new Response('Not found', { status: 404 })
+})
 ```
-```ts choice=Cloudflare
+:::
+
+:::Choice{#Cloudflare}
+```ts
+// worker.ts
 // Environment: server
 
 import { Telefunc } from 'telefunc/cloudflare'
 
-const telefunc = new Telefunc()
+const telefunc = new Telefunc({
+  // Provide context, accessed via getContext()
+  context: async (request, env: Env) => ({
+    user: await getUser(request, env)
+  })
+})
+
+export const TelefuncDurableObject = telefunc.TelefuncDurableObject
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const response = await telefunc.serve({ request, env, ctx })
+    if (response) return response
+
+    return new Response('Not found', { status: 404 })
+  },
+}
 ```
 
-> For per-runtime setup see <Link href="/server" />; for Cloudflare specifics see <Link href="/stream/cloudflare" />. For the low-level alternative (no WebSocket), see <Link href="/serve" />.
+> On Cloudflare the `context` is set in a separate function than the request handler. (Because it runs in a Durable Object, whereas the request hanlder doesn't.)
+
+> On Cloudflare `new Telefunc` also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
+
+Add the Durable Object and KV bindings to your `wrangler.jsonc`:
+
+```jsonc
+{
+  "durable_objects": {
+    "bindings": [
+      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
+    ]
+  },
+  "kv_namespaces": [
+    { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
+  ],
+  "migrations": [
+    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] }
+  ]
+}
+```
+
+> See <Link text="Cloudflare Workers" href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
+
+
+:::
 
 
 ## Methods
 
 | Method | Runtime | Description |
 |---|---|---|
-| `serve(input)` | all | Process a request and return the response. The input shape (`{ request }`, `{ req, res }`, `{ request, env, ctx }`, …) and return type vary by runtime — see <Link href="/server#return-value" />. |
+| `serve(input)` | all | Process a request and return the response. The input shape (`{ request }`, `{ req, res }`, `{ request, env, ctx }`, …) and return type vary by runtime — see <Link href="#return" />. |
 | `installWebSocket(server)` | Node | Enable WebSocket channels on your HTTP server. Idempotent. |
 | `websocket` | Bun | The WebSocket handler — pass it to `Bun.serve({ websocket })`. |
 | `TelefuncDurableObject` | Cloudflare | The Durable Object class to export — see <Link href="/stream/cloudflare" />. |
 
 
-## Context
+## Return
 
-Provide the data for <Link text="getContext()" href="/getContext" /> per request — on Node/Bun/Deno via `serve({ context })`, on Cloudflare via the `context` constructor option:
+`telefunc.serve()` returns:
 
-```ts
-// Node / Bun / Deno
-await telefunc.serve({ request, context: { user } })
+| Runtime | Returns | Meaning |
+|---|---|---|
+| Node.js (`{ request }`) | `Response \| undefined` | `undefined` if not a Telefunc request |
+| Node.js (`{ req, res }`) | `boolean` | `true` if handled, `false` if not a Telefunc request |
+| Bun | `Response \| undefined` | `undefined` if not a Telefunc request |
+| Deno | `Response \| undefined` | `undefined` if not a Telefunc request |
+| Cloudflare | `Response \| undefined` | `undefined` if not a Telefunc request |
 
-// Cloudflare
-const telefunc = new Telefunc({ context: (request, env) => ({ user }) })
-```
+> `telefunc.serve()` returns `undefined` (or `false`) for non-Telefunc requests, allowing you to chain it with other handlers.
 
-See <Link href="/getContext#provide" />.
-
-
-## Configuration (Cloudflare)
-
-On Cloudflare the constructor also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
+> There's also a low-level <Link text={<code>serve()</code>} href="/serve" /> function.
 
 
 ## See also
