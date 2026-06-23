@@ -5,7 +5,7 @@ import { StreamingBeta } from '../../components'
 
 **Environment**: server & client.
 
-`close()` and `onClose()` manage the lifecycle of streams and connections — so the server can stop producing, and release resources.
+These APIs manage the lifecycle of streams and connections: the client ends a value with `close()` or `abort()`, and the server reacts with `onClose()` and `signal` — so it can stop producing and release resources.
 
 > Applies to all <Link href="/stream">streaming and real-time</Link> values: `AsyncGenerator`, `ReadableStream`, files, `Channel`, and `BroadcastChannel` all close the same way.
 
@@ -24,8 +24,9 @@ There's one catch-all API, `close()`, plus several per-type APIs. They all signa
 | <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
 | <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | either side | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
 | `onClose(cb)` | server | Both | Fires when the connection ends, however it ends |
+| `signal` | server | Both | `AbortSignal` that aborts when the connection ends |
 
-The rest of this page covers `close()`, `abort()`, and `onClose()` in detail; channel-specific closing is documented on <Link href="/channel#lifecycle" />.
+The rest of this page covers `close()`, `abort()`, `onClose()`, and `signal` in detail; channel-specific closing is documented on <Link href="/channel#lifecycle" />.
 
 
 ## `close()`
@@ -110,6 +111,26 @@ export async function* onAiPrompt(prompt: string) {
 **Pitfall** — anything a long-lived telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the call and **leaks** unless you release it in `onClose()`. If you set it up, tear it down here.
 
 </Warning>
+
+
+## `signal`
+
+**Environment**: server.
+
+The context object also includes a `signal` (an `AbortSignal`) that aborts when the response ends — same timing as `onClose()`. Pass it to any API that accepts an `AbortSignal` (`fetch()`, database clients, etc.) so in-flight work cancels when the client disconnects:
+
+```ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+
+export async function getData() {
+  const { signal } = getContext()
+  // The request is cancelled if the client disconnects
+  const response = await fetch('https://api.example.com/data', { signal })
+  return response.json()
+}
+```
 
 
 ## Automatic cleanup (GC)
