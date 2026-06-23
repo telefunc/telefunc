@@ -10,7 +10,7 @@ The common use case is for the server to release resources.
 On the server-side, `onClose()` and the abort `signal` are fired when the telefunction call/<Link href="/stream">stream</Link> closes.
 
 <Warning>
-**Always release resources** — anything a long-lived telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the call and **leaks** unless you release it in `onClose()`. Make sure to always release resources.
+**Performance: always release resources** — anything a long-lived telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the call and **leaks** unless you release it in `onClose()`. Make sure to always release resources.
 </Warning>
 
 
