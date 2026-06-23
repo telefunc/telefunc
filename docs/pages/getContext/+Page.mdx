@@ -4,7 +4,7 @@ import '../../components/tabs.css'
 
 **Environment**: server.
 
-`getContext()` enables telefunctions to access contextual information.
+Enables telefunctions to access contextual information.
 
 ```ts
 // TodoList.telefunc.ts
@@ -28,9 +28,11 @@ It's most commonly used for implementing permissions, see <Link href="/permissio
 
 ## Provide
 
-Before you can use `getContext()`, you must provide the `context` object when calling `telefunc.serve()` — see <Link href="/Telefunc" />.
+You can add `context` properties when calling `telefunc.serve()` — see <Link href="/Telefunc" />.
 
-For example:
+> You can also provide `context` outside the server middleware (e.g. when <Link href="/testing">testing</Link>) via <Link text={<code>provideTelefuncContext()</code>} href="/provideTelefuncContext" />.
+
+Example:
 
 <Tabs>
   <TabList>
@@ -77,8 +79,6 @@ app.use(async (c, next) => {
   await next()
 })
 ```
-> See also:
-> - [Hono Guides > Middleware > Extending the Context in Middleware](https://hono.dev/docs/guides/middleware#extending-the-context-in-middleware)
 
   </TabPanel>
   <TabPanel>
@@ -117,8 +117,6 @@ app.all('/_telefunc', async (req, res, next) => {
 
   </TabPanel>
 </Tabs>
-
-> **Outside `serve()`** (e.g. server-side rendering or unit tests): provide the context with <Link text={<code>provideTelefuncContext()</code>} href="/provideTelefuncContext" />.
 
 ## Access
 
@@ -213,7 +211,7 @@ export async function someTelefunction() {
 
 ## `onClose()`
 
-The context object returned by `getContext()` also includes `onClose()`, a callback that fires exactly once when the call ends — whether the client received everything, the client disconnected, or an error occurred. Use it to release resources.
+The context object includes `onClose()`, a callback that fires exactly once when the call ends — whether the client received everything, the client disconnected, or an error occurred. Use it to release resources.
 
 ```ts
 const context = getContext()
@@ -222,13 +220,16 @@ context.onClose(() => {
 })
 ```
 
+<Link href="/stream">the call</Link>
+
 > See also:
+> - <Link href="/stream" />
 > - <Link href="/close" />
 
 
 ## `signal`
 
-The context object also includes a `signal` (an `AbortSignal`) that aborts when the call ends. Pass it to APIs that accept an `AbortSignal` (`fetch`, database clients, etc.) so in-flight work cancels when the client disconnects.
+The context object includes a `signal` (an `AbortSignal`) that aborts when the call ends. Pass it to APIs that accept an `AbortSignal` (`fetch`, database clients, etc.) so in-flight work cancels when the client disconnects.
 
 ```ts
 const context = getContext()
