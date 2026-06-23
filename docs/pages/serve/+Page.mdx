@@ -4,8 +4,7 @@ import { Link } from '@brillout/docpress'
 
 Low-level function that turns a telefunction HTTP request into an HTTP response. It's a pure function: stateless and side-effect-free. It runs in every runtime without adapter.
 
-> **Most apps should use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> instead** — it's the standard server integration, see:
-> - <Link href="/server" />
+> **Most apps should use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> instead** — it's the standard server integration.
 >
 > Because `new Telefunc()` has full-fledged support for <Link href="/stream">Telefunc Stream</Link>, whereas `serve()` doesn't support the following:
 > - <Link text="WebSocket" href="/transport#channel-transport" />
@@ -84,5 +83,4 @@ const httpResponse = await serve({
 ## See also
 
 - <Link href="/Telefunc" />
-- <Link href="/server" />
 - <Link href="/getContext" />

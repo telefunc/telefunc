@@ -34,7 +34,7 @@ const config: Config = {
 
   umamiId: 'd03d0873-19dc-42c4-a250-cf8500171a9e',
 
-  // Globally-synced runtime toggle (used by /server and /Telefunc).
+  // Globally-synced runtime toggle (used by /Telefunc).
   choices: {
     runtime: {
       choices: [
