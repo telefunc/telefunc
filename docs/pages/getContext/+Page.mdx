@@ -211,30 +211,11 @@ export async function someTelefunction() {
 
 ## `onClose()`
 
-The context object includes `onClose()`, a callback that fires exactly once when the call/<Link href="/stream">stream</Link> ends — whether the client received everything, the client disconnected, or an error occurred. Use it to release resources.
-
-```ts
-const context = getContext()
-context.onClose(() => {
-  // Clean up server-side resources
-})
-```
-
-<Link href="/stream">the call</Link>
-
-> See also:
-> - <Link href="/stream" />
-> - <Link href="/close" />
-
+The context object includes `onClose()`, a callback that fires when the call/<Link href="/stream">stream</Link> ends — use it to release server-side resources. See <Link href="/close#onclose" />.
 
 ## `signal`
 
-The context object includes a `signal` (an `AbortSignal`) that aborts when the call/<Link href="/stream">stream</Link> ends. Pass it to APIs that accept an `AbortSignal` (`fetch`, database clients, etc.) so in-flight work cancels when the client disconnects.
-
-```ts
-const context = getContext()
-const response = await fetch(url, { signal: context.signal })
-```
+The context object includes a `signal` (an `AbortSignal`) that aborts when the call/<Link href="/stream">stream</Link> ends — pass it to APIs that accept an `AbortSignal` (`fetch`, database clients, etc.) to cancel in-flight work. See <Link href="/close#signal" />.
 
 
 ## See also
