@@ -5,7 +5,7 @@ import { StreamingBeta } from '../../components'
 
 **Environment**: server & client.
 
-`close()` and `onClose()` manage the lifecycle of streams and connections — so the server can stop producing, and release resources.
+These APIs manage the lifecycle of streams and connections: the client ends a value with `close()` or `abort()`, and the server reacts with `onClose()` and `signal` — so it can stop producing and release resources.
 
 > Applies to all <Link href="/stream">streaming and real-time</Link> values: `AsyncGenerator`, `ReadableStream`, files, `Channel`, and `BroadcastChannel` all close the same way.
 
