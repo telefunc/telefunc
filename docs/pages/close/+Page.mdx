@@ -3,6 +3,8 @@ import { StreamingBeta } from '../../components'
 
 <StreamingBeta />
 
+**Environment**: server & client.
+
 `close()` and `onClose()` manage the lifecycle of streams and connections — so the server can stop producing, and release resources.
 
 > Applies to all <Link href="/stream">streaming and real-time</Link> values: `AsyncGenerator`, `ReadableStream`, files, `Channel`, and `BroadcastChannel` all close the same way.
@@ -21,12 +23,14 @@ There's one catch-all API, `close()`, plus several per-type APIs. They all signa
 | `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
 | <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
 | <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | either side | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
-| `onClose(cb)` | server | — (cleanup hook) | Fires when the connection ends, however it ends |
+| `onClose(cb)` | server | Both | Fires when the connection ends, however it ends |
 
 The rest of this page covers `close()`, `abort()`, and `onClose()` in detail; channel-specific closing is documented on <Link href="/channel#lifecycle" />.
 
 
-## `close()` (client)
+## `close()`
+
+**Environment**: client.
 
 `close()` from `telefunc/client` gracefully closes any value returned by a telefunction. In one call, it closes every stream, channel, and file nested anywhere in the return value.
 
@@ -78,7 +82,9 @@ All of these tell the server to stop producing and release resources.
 > ```
 
 
-## `onClose()` (server)
+## `onClose()`
+
+**Environment**: server.
 
 On the server, use `onClose()` from <Link href="/getContext" text="getContext()" /> to detect when the response ends — whether the value was consumed, the client disconnected, or an error occurred:
 
