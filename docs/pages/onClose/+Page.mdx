@@ -105,6 +105,15 @@ export async function onLoad() {
 
 You can manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
 
+> **Do I need to close manually? Almost never:**
+> - A <Link href="/stream">stream values</Link> that finishes on its own — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — automatically closes
+> - A garbage collected `channel` also automatically closes.
+> This means `onClose()` will automatically be triggered when all stream values aren't used anymore.
+>
+>  TODO/ai provide React client-side example with useEffect() that (it somewhat surprising) dosn't need close() because React element => no reference => GC => onClose() is triggered automatically.
+>
+> You usually close manually only to release resources **promptly**.
+
 There's one catch-all API, `close()`, plus several per-type APIs.
 
 | API | Side | Graceful / immediate | Closes |
@@ -139,8 +148,6 @@ const { value } = await result.stream.next()
 // Then close everything at once
 close(result)
 ```
-
-> **Do you need to call `close()`?** Often not. A value that finishes on its own — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — releases its resources automatically; and if you drop every reference to a returned value, garbage collection reclaims it a few seconds later. Call `close()` when you want to release **promptly** instead of waiting for GC — typically when you stop consuming a streamed value early.
 
 ### Other ways to close
 
