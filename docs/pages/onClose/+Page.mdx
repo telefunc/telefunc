@@ -158,7 +158,7 @@ function Chat() {
 }
 ```
 
-> **No `ref` needed** — the effect's own closure already reaches the channel (a `ref` is only for access *outside* the effect, e.g. a "send" button calling `channel.send()`). The **`unmounted` flag** guards the async gap: `onChat()` resolves later, so without it, unmounting *during* the handshake — which React StrictMode does on every mount — would open a channel after cleanup ran and never close it.
+> **No `ref` needed** — the effect's own closure already reaches the channel (a `ref` is only for access *outside* the effect, e.g. a "send" button calling `channel.send()`). The **`unmounted` flag** handles the async gap: if you unmount mid-handshake (React StrictMode does this on every mount), `onChat()` resolves *after* cleanup ran, opening a channel that never gets closed — and since it's still listening, GC won't reclaim it either, so it leaks (client *and* server) until you close it.
 
 And a stream you're still consuming in a **`for await` loop** — the running loop keeps it reachable, so end it (e.g. when a React component unmounts):
 
