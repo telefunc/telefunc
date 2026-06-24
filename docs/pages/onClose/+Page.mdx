@@ -103,24 +103,9 @@ export async function onLoad() {
 
 **Environment**: client & server.
 
-You can (and often must) manually close the telefunction call/<Link href="/stream">stream</Link>.
+You can (and often must) manually close <Link href="/stream">telefunction streams</Link>.
 
 > **Do I need to close manually?** A stream **ends on its own** — a generator returns, a `ReadableStream` is read to the end, or the server closes a `channel` — otherwise **you close it**: `break` / `gen.return()` a live `for await` loop, `channel.close()` a `channel` you `listen()` on. (Abandon one without closing and GC reclaims it eventually — a leak backstop, not something to rely on.) <Link href="#when-to-close" text="Details" />
-
-There's one catch-all API, `close()`, plus several per-type APIs.
-
-| API | Side | Graceful / immediate | Closes |
-|---|---|---|---|
-| `close(value)` | client | Graceful | Everything in the returned value (walked recursively) |
-| `gen.return()` / `break` | client | Graceful | One `AsyncGenerator` |
-| `reader.cancel()` | client | Graceful | One `ReadableStream` |
-| <Link text={<code>channel.close()</code>} href="/channel#lifecycle" /> | client & server | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
-| <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
-| `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
-| <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
-
-**Graceful**: flush buffered data, then close.  
-**Immediate**: cancel in-flight work.  
 
 ### When to close
 
@@ -192,6 +177,23 @@ function Clock() {
 
 Closing manually also releases resources **promptly**, instead of waiting for GC.
 
+
+### How to close
+
+There's one catch-all API, `close()`, plus several per-type APIs.
+
+| API | Side | Graceful / immediate | Closes |
+|---|---|---|---|
+| `close(value)` | client | Graceful | Everything in the returned value (walked recursively) |
+| `gen.return()` / `break` | client | Graceful | One `AsyncGenerator` |
+| `reader.cancel()` | client | Graceful | One `ReadableStream` |
+| <Link text={<code>channel.close()</code>} href="/channel#lifecycle" /> | client & server | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
+| <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
+| `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
+| <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
+
+**Graceful**: flush buffered data, then close.  
+**Immediate**: cancel in-flight work.  
 
 
 ### `close()`
