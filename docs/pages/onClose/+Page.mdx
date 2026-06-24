@@ -140,6 +140,8 @@ const { value } = await result.stream.next()
 close(result)
 ```
 
+> **Do you need to call `close()`?** Often not. A value that finishes on its own — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — releases its resources automatically; and if you drop every reference to a returned value, garbage collection reclaims it a few seconds later. Call `close()` when you want to release **promptly** instead of waiting for GC — typically when you stop consuming a streamed value early.
+
 ### Other ways to close
 
 For specific value types, you can also use the standard JS APIs directly:
