@@ -27,7 +27,7 @@ const categories = [
   'Miscellaneous',
 ] as const satisfies Config['categories']
 
-const headingsDetached = [...misc(), ...streamGuides()] satisfies HeadingDetachedDefinition[]
+const headingsDetached = [...misc(), ...guidesMore()] satisfies HeadingDetachedDefinition[]
 
 const headings = [
   {
@@ -372,7 +372,7 @@ function misc() {
   ).map((h) => ({ ...h, category: 'Miscellaneous' as const })) satisfies HeadingDetachedDefinition[]
 }
 
-function streamGuides() {
+function guidesMore() {
   return (
     [
       {
