@@ -230,36 +230,7 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Server Middleware',
-  },
-  {
-    level: 2,
-    title: '`new Telefunc()`',
-    url: '/Telefunc',
-  },
-  {
-    level: 2,
-    title: '`serve()`',
-    url: '/serve',
-  },
-  {
-    level: 4,
-    title: 'Channels',
-  },
-  {
-    level: 2,
-    title: '`Channel`',
-    url: '/channel',
-    sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
-  },
-  {
-    level: 4,
     title: 'Hooks',
-  },
-  {
-    level: 2,
-    title: '`onClose()`',
-    url: '/onClose',
   },
   {
     level: 2,
@@ -270,6 +241,11 @@ const headings = [
     level: 2,
     title: '`onAbort()`',
     url: '/onAbort',
+  },
+  {
+    level: 2,
+    title: '`onClose()`',
+    url: '/onClose',
   },
   {
     level: 4,
@@ -319,6 +295,30 @@ const headings = [
     level: 2,
     title: '`log`',
     url: '/log',
+  },
+  {
+    level: 4,
+    title: 'Server Middleware',
+  },
+  {
+    level: 2,
+    title: '`new Telefunc()`',
+    url: '/Telefunc',
+  },
+  {
+    level: 2,
+    title: '`serve()`',
+    url: '/serve',
+  },
+  {
+    level: 4,
+    title: 'Stream',
+  },
+  {
+    level: 2,
+    title: '`Channel`',
+    url: '/channel',
+    sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
   },
   {
     level: 4,
