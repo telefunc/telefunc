@@ -142,10 +142,11 @@ function Chat() {
 
   useEffect(() => {
     let channel
-    onChat().then((result) => {
+    ;(async () => {
+      const result = await onChat()
       channel = result.channel
       channel.listen((msg) => setMessages((prev) => [...prev, msg]))
-    })
+    })()
     return () => channel?.close() // close on unmount
   }, [])
 
