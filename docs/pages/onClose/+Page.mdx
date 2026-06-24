@@ -23,7 +23,7 @@ export async function onInit(onTick: (n: number) => void) {
 ```
 
 <Warning>
-**Performance: always release resources** — anything a ltelefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
+**Performance: always release resources** — anything a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
 </Warning>
 
 You can also use an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)) and more methods, see:
@@ -105,14 +105,37 @@ export async function onLoad() {
 
 You can manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
 
-> **Do I need to close manually? Almost never:**
-> - A <Link href="/stream">stream values</Link> that finishes on its own — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — automatically closes
-> - A garbage collected `channel` also automatically closes.
-> This means `onClose()` will automatically be triggered when all stream values aren't used anymore.
->
->  TODO/ai provide React client-side example with useEffect() that (it somewhat surprising) dosn't need close() because React element => no reference => GC => onClose() is triggered automatically.
->
-> You usually close manually only to release resources **promptly**.
+> **Do I need to close manually?** Often not:
+> - A value that **finishes on its own** — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — closes automatically.
+> - A value you **stop referencing entirely** is garbage-collected a few seconds later, which closes it too (firing the server's `onClose()`).
+
+A **long-lived stream you keep consuming** is the exception: an active `for await` loop (or an open channel) keeps the value reachable, so GC never reclaims it on its own — you have to end it. For example, stop it when a React component unmounts:
+
+```tsx
+// Clock.tsx
+// Environment: client
+
+import { useEffect, useState } from 'react'
+import { onClock } from './Clock.telefunc'
+
+function Clock() {
+  const [n, setN] = useState(0)
+
+  useEffect(() => {
+    const clock = onClock() // long-lived AsyncGenerator
+    ;(async () => {
+      for await (const tick of clock) setN(tick)
+    })()
+    // The running loop keeps the stream alive, so unmounting won't stop it on
+    // its own — end it to release the server's resources (fires onClose()):
+    return () => void clock.return()
+  }, [])
+
+  return <p>{n}</p>
+}
+```
+
+Closing manually also releases resources **promptly**, instead of waiting for GC.
 
 There's one catch-all API, `close()`, plus several per-type APIs.
 
