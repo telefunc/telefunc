@@ -103,11 +103,13 @@ export async function onLoad() {
 
 **Environment**: client & server.
 
-You can manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
+You can (and sometimes should) manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
 
-> **Do I need to close manually?** Often not:
-> - A value that **finishes on its own** — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — closes automatically.
-> - A value you **stop referencing entirely** is garbage-collected a few seconds later, which closes it too (firing the server's `onClose()`).
+### When to close
+
+**Do I need to close manually? Often not:
+- A value that **finishes on its own** — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — closes automatically.
+- A value you **stop referencing entirely** is garbage-collected a few seconds later, which closes it too (firing the server's `onClose()`).
 
 A **long-lived stream you keep consuming** is the exception: an active `for await` loop (or an open channel) keeps the value reachable, so GC never reclaims it on its own — you have to end it. For example, stop it when a React component unmounts:
 
@@ -126,7 +128,7 @@ function Clock() {
     ;(async () => {
       for await (const tick of clock) setN(tick)
     })()
-    // The running loop keeps the stream alive, so unmounting won't stop it on
+    // ⚠️ The running loop keeps the stream alive, so unmounting won't stop it on
     // its own — end it to release the server's resources (fires onClose()):
     return () => void clock.return()
   }, [])
