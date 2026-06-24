@@ -29,7 +29,7 @@ export async function onInit(onTick: (n: number) => void) {
 You can also use an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)) and more methods, see:
 - <Link href="#listening" />
 
-You can manually close the telefunction via `close()` and other methods, see:
+You can (and often must) manually close the telefunction via `close()` and other methods, see:
 - <Link href="#closing" />
 
 
@@ -103,7 +103,7 @@ export async function onLoad() {
 
 **Environment**: client & server.
 
-You can (and sometimes should) manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
+You can (and often must) manually close the telefunction call/<Link href="/stream">stream</Link>.
 
 > **Do I need to close manually?** A stream **ends on its own** — a generator returns, a `ReadableStream` is read to the end, or the server closes a `channel` — otherwise **you close it**: `break` / `gen.return()` a live `for await` loop, `channel.close()` a `channel` you `listen()` on. (Abandon one without closing and GC reclaims it eventually — a leak backstop, not something to rely on.) <Link href="#when-to-close" text="Details" />
 
