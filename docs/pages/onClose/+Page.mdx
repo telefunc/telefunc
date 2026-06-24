@@ -3,15 +3,35 @@ import { TelefuncStreamBeta } from '../../components'
 
 **Environment**: server & client.
 
-APIs to manage the lifecycle of telefunctions.
+The `onClose()` hook (defined on <Link href="/getContext">`context`</Link>) enables the server to clean up long-lived resources.
 
-The common use case is for the server to release resources.
+```ts
+// Counter.telefunc.ts
+// Environment: server
 
-On the server-side, `onClose()` and the abort `signal` are fired when the telefunction call/<Link href="/stream">stream</Link> closes.
+import { getContext } from 'telefunc'
+
+export async function onInit(onTick: (n: number) => void) {
+  const context = getContext()
+  let n = 0
+  const interval = setInterval(() => onTick(++n), 1000)
+  context.onClose(() => {
+    // ⚠️ Must be released otherwise it runs forever (memory leak)
+    clearInterval(interval)
+  })
+}
+```
 
 <Warning>
-**Performance: always release resources** — anything a long-lived telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the call and **leaks** unless you release it in `onClose()`. Make sure to always release resources.
+**Performance: always release resources** — anything a ltelefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
 </Warning>
+
+You can also use an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)), see:
+- <Link href="#listening" />
+
+On the client-side, you can manually close the telefunction via `close()` and other methods, see:
+- <Link href="#closing" />
+
 
 
 ## At a glance
@@ -95,6 +115,8 @@ All of these tell the server to stop producing and release resources.
 
 **Environment**: server.
 
+On the server-side, `onClose()` and the abort `signal` are fired when the telefunction call/<Link href="/stream">stream</Link> closes.
+
 On the server-side,
 you can release resources and/or cancel in-flight work
 by listening when the telefunction call/<Link href="/stream">stream</Link> is closed.
@@ -147,13 +169,6 @@ export async function onLoad() {
   return response.json()
 }
 ```
-
-
-## Automatic cleanup (GC)
-
-If the client drops all references to a returned value without explicitly closing it, the underlying resources are cleaned up automatically via garbage collection. There is a short delay (typically a few seconds) between the value becoming unreachable and the cleanup firing.
-
-Explicit `close()` triggers cleanup immediately. GC cleanup is the fallback when you forget to close explicitly.
 
 
 ## See also
