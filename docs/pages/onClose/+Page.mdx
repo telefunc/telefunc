@@ -105,7 +105,7 @@ export async function onLoad() {
 
 You can (and sometimes should) manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
 
-> **Do I need to close manually?** TODO/ai single sentence TLDR, with link to setion below
+> **Do I need to close manually?** Usually not — a stream that finishes, or that you stop referencing, closes itself; close manually mainly to release resources **promptly**, or to end a long-lived stream you keep consuming (<Link href="#when-to-close" text="when to close" />).
 
 There's one catch-all API, `close()`, plus several per-type APIs.
 
@@ -128,31 +128,33 @@ You usually don't need to close manually, as streams often close automatically:
 - A value that **finishes on its own** — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — closes automatically.
 - A value you **stop referencing entirely** is garbage-collected a few seconds later, which closes it too (firing the server's `onClose()`).
 
-TODO/ai: remove following (which is kinda obvious I think), with a `channel` that automatically GC's?
+A `channel` is the interesting case — it's callback-based, so nothing keeps it alive on its own; drop it and GC closes it, no cleanup function required:
 
 ```tsx
-// Greeting.tsx
+// Chat.tsx
 // Environment: client
 
-import { useEffect, useState } from 'react'
-import { onGreeting } from './Greeting.telefunc'
+import { useEffect, useRef, useState } from 'react'
+import { onChat } from './Chat.telefunc'
 
-function Greeting() {
-  const [text, setText] = useState('')
+function Chat() {
+  const channelRef = useRef()
+  const [messages, setMessages] = useState<string[]>([])
 
   useEffect(() => {
-    ;(async () => {
-      for await (const word of onGreeting()) setText((t) => t + word)
-    })()
-    // ✅ No cleanup needed — onGreeting() yields a few words then returns, so the
-    //    generator completes on its own, which closes the stream (fires onClose()).
+    onChat().then(({ channel }) => {
+      channelRef.current = channel // keep a reference, else GC closes it while still mounted
+      channel.listen((msg) => setMessages((prev) => [...prev, msg]))
+    })
+    // ✅ No close() — on unmount the ref drops and GC closes the channel a few
+    //    seconds later (fires onClose()). Close it in a cleanup to release promptly.
   }, [])
 
-  return <p>{text}</p>
+  return <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
 }
 ```
 
-The exception is a **long-lived stream you keep consuming**: an active `for await` loop keeps the value reachable, so GC never reclaims it on its own — you have to end it. For example, stop it when a React component unmounts:
+The exception is a stream you consume with a **`for await` loop**: unlike the channel above, the running loop keeps the value reachable, so GC never reclaims it on its own — you have to end it. For example, stop it when a React component unmounts:
 
 ```tsx
 // Clock.tsx
@@ -177,8 +179,6 @@ function Clock() {
   return <p>{n}</p>
 }
 ```
-
-> **A `channel` is different.** It's callback-based (`channel.listen(cb)`), so no consuming loop pins it: dropping the channel on unmount lets GC close it within a few seconds. You don't strictly *need* a cleanup — but call `channel.close()` in one anyway to release **promptly**, otherwise `listen()` keeps firing (and the server keeps the channel open) until GC catches up. You *must* close explicitly only if the channel stays reachable past the component — e.g. stored in a `ref` or a module variable.
 
 Closing manually also releases resources **promptly**, instead of waiting for GC.
 
