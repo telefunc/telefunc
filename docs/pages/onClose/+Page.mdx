@@ -142,19 +142,23 @@ function Chat() {
 
   useEffect(() => {
     let channel
+    let unmounted = false
     ;(async () => {
-      const result = await onChat()
-      channel = result.channel
-      channel.listen((msg) => setMessages((prev) => [...prev, msg]))
+      channel = (await onChat()).channel
+      if (unmounted) channel.close() // unmounted before the handshake resolved
+      else channel.listen((msg) => setMessages((prev) => [...prev, msg]))
     })()
-    return () => channel?.close() // close on unmount
+    return () => {
+      unmounted = true
+      channel?.close() // close on unmount
+    }
   }, [])
 
   return <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
 }
 ```
 
-> A `ref` is only needed when something *outside* the effect touches the channel — e.g. a "send" button handler calling `channel.send()`. For listen-and-close, the effect's own closure is enough.
+> **No `ref` needed** — the effect's own closure already reaches the channel (a `ref` is only for access *outside* the effect, e.g. a "send" button calling `channel.send()`). The **`unmounted` flag** guards the async gap: `onChat()` resolves later, so without it, unmounting *during* the handshake — which React StrictMode does on every mount — would open a channel after cleanup ran and never close it.
 
 And a stream you're still consuming in a **`for await` loop** — the running loop keeps it reachable, so end it (e.g. when a React component unmounts):
 
