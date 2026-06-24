@@ -105,7 +105,7 @@ export async function onLoad() {
 
 You can (and sometimes should) manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
 
-> **Do I need to close manually?** It comes down to reachability. A value that **finishes** (a generator run to completion, a stream read to the end) or that you **drop entirely** closes itself. One you **keep reachable** won't be GC'd, so end it yourself: `break` / `gen.return()` a live `for await` loop, and `channel.close()` a `channel` you `listen()` on. <Link href="#when-to-close" text="Details" />
+> **Do I need to close manually?** A stream **ends on its own** — a generator returns, a `ReadableStream` is read to the end, or the server closes a `channel` — otherwise **you close it**: `break` / `gen.return()` a live `for await` loop, `channel.close()` a `channel` you `listen()` on. (Abandon one without closing and GC reclaims it eventually — a leak backstop, not something to rely on.) <Link href="#when-to-close" text="Details" />
 
 There's one catch-all API, `close()`, plus several per-type APIs.
 
@@ -124,16 +124,18 @@ There's one catch-all API, `close()`, plus several per-type APIs.
 
 ### When to close
 
-Whether you need to close by hand comes down to **reachability**. A value that **finishes** (runs to completion) or that you **drop entirely** closes itself — the latter via garbage collection a few seconds later (firing the server's `onClose()`), so close it yourself to release promptly. A value you **keep reachable** can't be garbage-collected, so you must end it:
+The rule is simple: **a stream ends on its own, or you must close it.** It ends on its own when it runs out — a generator returns, a `ReadableStream` is read to the end — or when the server closes it. Anything else — something still producing that you stop consuming, or a `channel` you `listen()` on — you close by hand:
 
-| Value | Closes itself when… | You **must** close it when… | How |
+| Value | Ends on its own when… | You **must** close it when… | How |
 |---|---|---|---|
-| `AsyncGenerator` | run to completion, or dropped (GC) | you stop a running `for await` early (incl. endless streams) | `break` (auto-calls `return()`), `gen.return()`, `await using`, or `close(gen)` |
-| `ReadableStream` | read to the end, or dropped (GC) | you stop reading a still-open stream early | `reader.cancel()`, `break` a `for await`, or `close(stream)` |
-| `Channel` / `BroadcastChannel` | the server ends it, or you drop it with **no** listener (GC) | you `listen()` on one that stays open — the listener keeps it reachable, so GC never reclaims it | `channel.close()` (graceful) or `channel.abort()` (immediate) |
-| `File` / `Blob` / streamed `Promise` / download | awaited or consumed, or dropped (GC) | rarely — only a partial **download** you keep but don't finish | `close(value)`, or download `.cancel()` |
+| `AsyncGenerator` | it returns — the `for await` runs to completion | it's endless, or you stop iterating early | `break` (auto-calls `return()`), `gen.return()`, `await using`, or `close(gen)` |
+| `ReadableStream` | it's read to the end | you stop reading before the end | `reader.cancel()`, `break` a `for await`, or `close(stream)` |
+| `Channel` / `BroadcastChannel` | the server ends it | it stays open and you `listen()` on it | `channel.close()` (graceful) or `channel.abort()` (immediate) |
+| `File` / `Blob` / streamed `Promise` / download | it resolves — you `await` it | ≈ never (just `await` it; or cancel a download) | `close(value)` / download `.cancel()` |
 
 To cancel a call and **every** stream/channel it opened at once — immediately, without waiting for a graceful close — use `abort(call)` or `withContext(fn, { signal })`; `close(value)` closes everything nested in a return value. (See the close-API table above.)
+
+> **Where does GC come in?** Only as a backstop. If you *abandon* a stream — lose the reference on an error path, forget to close one — telefunc reclaims it when the garbage collector collects the value (firing `onClose()`), so a forgotten stream won't leak *forever*. But it's not a close mechanism you can use: the moment you consume or hold a stream it's reachable, and GC can't touch what's reachable. It's also best-effort and seconds-delayed — so always close explicitly to free the server promptly.
 
 The two cases you'll hit most. **A `channel` you `listen()` on** — close it on unmount:
 
