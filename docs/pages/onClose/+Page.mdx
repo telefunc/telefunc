@@ -111,8 +111,6 @@ Make sure to close open-end <Link href="/stream">Telefunc streams</Link>.
 
 ### When to close
 
-The rule, in one line: **every stream must close on at least one end — the server's or the client's.** The **server** ends it by finishing (a generator returns, a `ReadableStream`'s source runs out) or by closing the `channel`. Otherwise **you** end it on the client. The only way to leak is for *neither* to happen — the server keeps producing while the client keeps it reachable. You can't always count on the server side, so default to the one you control: **if you're not sure the server closes it, close it on the client.**
-
 | Value | Closes server-side when… | You close it (client-side) when… | How |
 |---|---|---|---|
 | `AsyncGenerator` | it returns — the `for await` runs to completion | it's endless, or you stop iterating early | `break` (auto-calls `return()`), `gen.return()`, `await using`, or `close(gen)` |
@@ -120,9 +118,7 @@ The rule, in one line: **every stream must close on at least one end — the ser
 | `Channel` / `BroadcastChannel` | the server ends it | it stays open and you `listen()` on it | `channel.close()` (graceful) or `channel.abort()` (immediate) |
 | `File` / `Blob` / streamed `Promise` / download | it resolves — you `await` it | ≈ never (just `await` it; or cancel a download) | `close(value)` / download `.cancel()` |
 
-To cancel a call and **every** stream/channel it opened at once — immediately, without waiting for a graceful close — use `abort(call)` or `withContext(fn, { signal })`; `close(value)` closes everything nested in a return value. (See the close-API table above.)
-
-The two cases you'll hit most. **A `channel` you `listen()` on** — close it on unmount:
+In a component, the two cases you'll hit are a **`channel` you `listen()` on** and a **`for await` loop** — close both on unmount:
 
 ```tsx
 // Chat.tsx
@@ -147,9 +143,7 @@ function Chat() {
 }
 ```
 
-> **Why close via `open.then()` instead of a saved variable?** `onChat()` resolves asynchronously, so on unmount the channel may not exist yet. Re-using the promise closes it *whenever* the handshake resolves — including an unmount mid-handshake, which React StrictMode triggers on every mount. Skip it and that late channel opens still-listening — and stays open, leaking (client *and* server). No `ref` needed either — the promise already carries the channel to both the listener and the cleanup.
-
-And a stream you're still consuming in a **`for await` loop** — the running loop keeps it reachable, so end it (e.g. when a React component unmounts):
+> Reusing the `open` promise for both the listener and the cleanup closes the channel even if the handshake hasn't resolved by unmount — no `ref` or flag needed.
 
 ```tsx
 // Clock.tsx
@@ -166,17 +160,12 @@ function Clock() {
     ;(async () => {
       for await (const tick of clock) setN(tick)
     })()
-    // ⚠️ The running loop keeps the stream alive, so unmounting won't stop it on
-    // its own — end it to release the server's resources (fires onClose()):
-    return () => void clock.return()
+    return () => void clock.return() // a running loop won't stop on its own
   }, [])
 
   return <p>{n}</p>
 }
 ```
-
-Closing manually frees the server's resources.
-
 
 ### How to close
 
@@ -215,29 +204,7 @@ const { value } = await result.stream.next()
 close(result)
 ```
 
-### Other ways to close
-
-For specific value types, you can also use the standard JS APIs directly:
-
-```ts
-// AsyncGenerator — break out of the loop
-for await (const message of gen) {
-  if (shouldStop) break
-}
-
-// Or call return() directly
-gen.return()
-
-// ReadableStream — cancel the reader
-reader.cancel()
-
-// Channel — close explicitly
-await channel.close()
-```
-
-All of these tell the server to stop producing and release resources.
-
-> `close()` ends a value **gracefully** (buffered data is flushed). To stop a call **immediately** instead, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
+> To stop a call **immediately** instead of gracefully, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
 > ```ts
 > // Environment: client
 >
