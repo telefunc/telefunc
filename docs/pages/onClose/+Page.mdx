@@ -105,13 +105,13 @@ export async function onLoad() {
 
 You can (and often must) manually close <Link href="/stream">telefunction streams</Link>.
 
-> **Do I need to close manually?** A stream **ends on its own** — a generator returns, a `ReadableStream` is read to the end, or the server closes a `channel` — otherwise **you close it**: `break` / `gen.return()` a live `for await` loop, `channel.close()` a `channel` you `listen()` on. (Abandon one without closing and GC reclaims it eventually — a leak backstop, not something to rely on.) <Link href="#when-to-close" text="Details" />
+> **Do I need to close manually?** Every stream must close on **one of its two ends**: the **server** ends it (a generator returns, or it closes the `channel`), or **you** end it on the client (`break` / `gen.return()` a live `for await` loop, `channel.close()` a `channel` you `listen()` on). Make sure one always happens. (Forget, and GC reclaims it eventually — a backstop, not something to rely on.) <Link href="#when-to-close" text="Details" />
 
 ### When to close
 
-The rule is simple: **a stream ends on its own, or you must close it.** It ends on its own when it runs out — a generator returns, a `ReadableStream` is read to the end — or when the server closes it. Anything else — something still producing that you stop consuming, or a `channel` you `listen()` on — you close by hand:
+The rule, in one line: **every stream must close on at least one end — the server's or the client's.** The **server** ends it by finishing (a generator returns, a `ReadableStream`'s source runs out) or by closing the `channel`. Otherwise **you** end it on the client. The only way to leak is for *neither* to happen — the server keeps producing while the client keeps it reachable. You can't always count on the server side, so default to the one you control: **if you're not sure the server closes it, close it on the client.**
 
-| Value | Ends on its own when… | You **must** close it when… | How |
+| Value | Closes server-side when… | You close it (client-side) when… | How |
 |---|---|---|---|
 | `AsyncGenerator` | it returns — the `for await` runs to completion | it's endless, or you stop iterating early | `break` (auto-calls `return()`), `gen.return()`, `await using`, or `close(gen)` |
 | `ReadableStream` | it's read to the end | you stop reading before the end | `reader.cancel()`, `break` a `for await`, or `close(stream)` |
@@ -120,7 +120,7 @@ The rule is simple: **a stream ends on its own, or you must close it.** It ends 
 
 To cancel a call and **every** stream/channel it opened at once — immediately, without waiting for a graceful close — use `abort(call)` or `withContext(fn, { signal })`; `close(value)` closes everything nested in a return value. (See the close-API table above.)
 
-> **Where does GC come in?** Only as a backstop. If you *abandon* a stream — lose the reference on an error path, forget to close one — telefunc reclaims it when the garbage collector collects the value (firing `onClose()`), so a forgotten stream won't leak *forever*. But it's not a close mechanism you can use: the moment you consume or hold a stream it's reachable, and GC can't touch what's reachable. It's also best-effort and seconds-delayed — so always close explicitly to free the server promptly.
+> **Where does GC come in?** It's the client side's automatic backstop. If you *abandon* a stream — lose the reference on an error path, forget to close one — telefunc closes it for you once the garbage collector reclaims the value (firing `onClose()`), so a forgotten stream won't leak *forever*. But it's not a close mechanism you can use: the moment you consume or hold a stream it's reachable, and GC can't touch what's reachable. It's also best-effort and seconds-delayed — so always close explicitly to free the server promptly.
 
 The two cases you'll hit most. **A `channel` you `listen()` on** — close it on unmount:
 
