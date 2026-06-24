@@ -105,7 +105,7 @@ export async function onLoad() {
 
 You can (and sometimes should) manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
 
-> **Do I need to close manually?** Usually not — a stream that finishes, or that you stop referencing, closes itself; close manually mainly to release resources **promptly**, or to end a long-lived stream you keep consuming (<Link href="#when-to-close" text="when to close" />).
+> **Do I need to close manually?** Mostly no — values close when they finish or when you drop them. The catch: a running `for await` loop pins the stream from GC, so `break` / `gen.return()` it. <Link href="#when-to-close" text="Details" />
 
 There's one catch-all API, `close()`, plus several per-type APIs.
 
@@ -128,7 +128,7 @@ You usually don't need to close manually, as streams often close automatically:
 - A value that **finishes on its own** — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — closes automatically.
 - A value you **stop referencing entirely** is garbage-collected a few seconds later, which closes it too (firing the server's `onClose()`).
 
-A `channel` is the interesting case — it's callback-based, so nothing keeps it alive on its own; drop it and GC closes it, no cleanup function required:
+Two things stay open until you end them yourself. A long-lived `channel` you hold a reference to — close it on unmount:
 
 ```tsx
 // Chat.tsx
@@ -143,18 +143,17 @@ function Chat() {
 
   useEffect(() => {
     onChat().then(({ channel }) => {
-      channelRef.current = channel // keep a reference, else GC closes it while still mounted
+      channelRef.current = channel
       channel.listen((msg) => setMessages((prev) => [...prev, msg]))
     })
-    // ✅ No close() — on unmount the ref drops and GC closes the channel a few
-    //    seconds later (fires onClose()). Close it in a cleanup to release promptly.
+    return () => channelRef.current?.close() // close on unmount
   }, [])
 
   return <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
 }
 ```
 
-The exception is a stream you consume with a **`for await` loop**: unlike the channel above, the running loop keeps the value reachable, so GC never reclaims it on its own — you have to end it. For example, stop it when a React component unmounts:
+And a stream you're still consuming in a **`for await` loop** — the running loop keeps it reachable, so end it (e.g. when a React component unmounts):
 
 ```tsx
 // Clock.tsx
