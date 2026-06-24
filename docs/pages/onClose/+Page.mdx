@@ -34,30 +34,27 @@ On the client-side, you can manually close the telefunction via `close()` and ot
 
 
 
-## At a glance
+## Closing
 
-There's one catch-all API, `close()`, plus several per-type APIs. They all signal the server to stop producing and release resources — the difference is **graceful** (flush buffered data, then close) versus **immediate** (cancel in-flight work):
+**Environment**: client, server.
+
+On the client-side, you can manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
+
+There's one catch-all API, `close()`, plus several per-type APIs.
 
 | API | Side | Graceful / immediate | Closes |
 |---|---|---|---|
 | `close(value)` | client | Graceful | Everything in the returned value (walked recursively) |
 | `gen.return()` / `break` | client | Graceful | One `AsyncGenerator` |
 | `reader.cancel()` | client | Graceful | One `ReadableStream` |
-| <Link text={<code>channel.close()</code>} href="/channel#lifecycle" /> | either side | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
+| <Link text={<code>channel.close()</code>} href="/channel#lifecycle" /> | client & server | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
+| <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
 | `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
 | <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
-| <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | either side | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
-| `onClose(cb)` | server | Both | Fires when the call ends, however it ends |
-| `signal` | server | Both | `AbortSignal` that aborts when the call ends, however it ends |
 
-The rest of this page covers `close()`, `abort()`, `onClose()`, and `signal` in detail; channel-specific closing is documented on <Link href="/channel#lifecycle" />.
+**Graceful**: flush buffered data, then close.  
+**Immediate**: cancel in-flight work.  
 
-
-## Closing
-
-**Environment**: client.
-
-On the client-side, you can manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate).
 
 ### `close()`
 
@@ -115,13 +112,17 @@ All of these tell the server to stop producing and release resources.
 
 **Environment**: server.
 
-On the server-side, `onClose()` and the abort `signal` are fired when the telefunction call/<Link href="/stream">stream</Link> closes.
+On the server-side, you can listen when the telefunction call/<Link href="/stream">stream</Link> closes for:
+- Releasing resources
+- Cancel in-flight work
 
-On the server-side,
-you can release resources and/or cancel in-flight work
-by listening when the telefunction call/<Link href="/stream">stream</Link> is closed.
+| API | Side
+|---|---
+| `context.onClose(cb)` | server
+| `context.signal` | server
 
-> The listeners are fired regardless of why it closes — whether all returned values are consumed, the client manually closed, the client disconnected, or an error occurred.
+> The listeners are fired regardless of the closing reason — whether all returned values are consumed, the client manually closed, the client disconnected, or an error occurred.
+
 
 ### `onClose()`
 
