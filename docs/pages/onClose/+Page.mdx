@@ -23,9 +23,9 @@ export async function onInit(onTick: (n: number) => void) {
 ```
 
 <Warning>
-**To avoid memory leaks, make sure to:**
-- **Always release resources**: any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
-- **Always close long-lived Telefunc streams**: an open-ended <Link href="/stream">Telefunc stream</Link> stays open and leaks unless you close it.
+**To avoid memory leaks, make sure to always:**
+- **Release resources**: any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
+- **Close long-lived Telefunc streams**: an open-ended <Link href="/stream">Telefunc stream</Link> stays open and leaks unless you close it.
 </Warning>
 
 You can also use an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)) and more methods, see:
@@ -105,9 +105,9 @@ export async function onLoad() {
 
 **Environment**: client & server.
 
-Make sure to manually close open-end <Link href="/stream">Telefunc streams</Link>.
+Make sure to close open-end <Link href="/stream">Telefunc streams</Link>.
 
-> **Do I need to close manually?** Every stream must close on **one of its two ends**: the **server** ends it (a generator returns, or it closes the `channel`), or **you** end it on the client (`break` / `gen.return()` a live `for await` loop, `channel.close()` a `channel` you `listen()` on). Make sure one always happens — otherwise the stream stays open and leaks. <Link href="#when-to-close" text="Details" />
+> **Every stream must close on one of its two ends**: the **server** ends it (a generator returns, or it closes the `channel`), or **you** end it on the client (`break` / `gen.return()` a live `for await` loop, `channel.close()` a `channel` you `listen()` on). Make sure one always happens — otherwise the stream stays open and leaks. <Link href="#when-to-close" text="Details" />
 
 ### When to close
 
