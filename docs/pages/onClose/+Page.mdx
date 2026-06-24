@@ -45,6 +45,8 @@ On the server-side, you can listen when the telefunction call/<Link href="/strea
 |---|---
 | `context.onClose(cb)` | server
 | `context.signal` | server
+| <Link text={<code>channel.onClose(cb)</code>} href="/channel#lifecycle" /> | client & server
+| <Link text={<code>channel.onOpen(cb)</code>} href="/channel#lifecycle" /> | client & server
 
 > The listeners are fired regardless of the closing reason — whether all returned values are consumed, the client manually closed, the client disconnected, or an error occurred.
 
