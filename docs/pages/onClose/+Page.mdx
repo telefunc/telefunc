@@ -26,19 +26,82 @@ export async function onInit(onTick: (n: number) => void) {
 **Performance: always release resources** — anything a ltelefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
 </Warning>
 
-You can also use an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)), see:
+You can also use an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)) and more methods, see:
 - <Link href="#listening" />
 
-On the client-side, you can manually close the telefunction via `close()` and other methods, see:
+You can manually close the telefunction via `close()` and other methods, see:
 - <Link href="#closing" />
 
+
+## Listening
+
+**Environment**: server.
+
+On the server-side, you can listen when the telefunction call/<Link href="/stream">stream</Link> closes for:
+- Releasing resources
+- Cancel in-flight work
+
+| API | Side
+|---|---
+| `context.onClose(cb)` | server
+| `context.signal` | server
+
+> The listeners are fired regardless of the closing reason — whether all returned values are consumed, the client manually closed, the client disconnected, or an error occurred.
+
+
+### `onClose()`
+
+The <Link href="/getContext">`context` object</Link> includes `onClose()`:
+
+```ts
+// AiChat.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+
+export async function* onAiPrompt(prompt: string) {
+  const { onClose } = getContext()
+  onClose(() => {
+    // Release resources, cancel upstream work
+  })
+
+  for await (const message of ai.streamText({ prompt })) {
+    yield message
+  }
+}
+```
+
+### `signal`
+
+The <Link href="/getContext">`context` object</Link> includes a `signal` (`AbortSignal`) that aborts when the telefunction call closes.
+
+> The `signal` fires at the same time as `onClose()`.
+
+Pass it to any API that accepts an [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) (`fetch()`, database clients, etc.) to cancel in-flight work:
+
+```ts
+// SomeComponent.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+
+export async function onLoad() {
+  const { signal } = getContext()
+  const response = await fetch(
+    'https://api.example.com/data',
+    // Cancel the request, e.g. when the client disconnects
+    { signal }
+  )
+  return response.json()
+}
+```
 
 
 ## Closing
 
-**Environment**: client, server.
+**Environment**: client & server.
 
-On the client-side, you can manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
+You can manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
 
 There's one catch-all API, `close()`, plus several per-type APIs.
 
@@ -106,70 +169,6 @@ All of these tell the server to stop producing and release resources.
 > const call = onLoadDashboard()
 > abort(call) // cancels the in-flight call
 > ```
-
-
-## Listening
-
-**Environment**: server.
-
-On the server-side, you can listen when the telefunction call/<Link href="/stream">stream</Link> closes for:
-- Releasing resources
-- Cancel in-flight work
-
-| API | Side
-|---|---
-| `context.onClose(cb)` | server
-| `context.signal` | server
-
-> The listeners are fired regardless of the closing reason — whether all returned values are consumed, the client manually closed, the client disconnected, or an error occurred.
-
-
-### `onClose()`
-
-The <Link href="/getContext">`context` object</Link> includes `onClose()`:
-
-```ts
-// AiChat.telefunc.ts
-// Environment: server
-
-import { getContext } from 'telefunc'
-
-export async function* onAiPrompt(prompt: string) {
-  const { onClose } = getContext()
-  onClose(() => {
-    // Release resources, cancel upstream work
-  })
-
-  for await (const message of ai.streamText({ prompt })) {
-    yield message
-  }
-}
-```
-
-### `signal`
-
-The <Link href="/getContext">`context` object</Link> includes a `signal` (`AbortSignal`) that aborts when the telefunction call closes.
-
-> The `signal` fires at the same time as `onClose()`.
-
-Pass it to any API that accepts an [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) (`fetch()`, database clients, etc.) to cancel in-flight work:
-
-```ts
-// SomeComponent.telefunc.ts
-// Environment: server
-
-import { getContext } from 'telefunc'
-
-export async function onLoad() {
-  const { signal } = getContext()
-  const response = await fetch(
-    'https://api.example.com/data',
-    // Cancel the request, e.g. when the client disconnects
-    { signal }
-  )
-  return response.json()
-}
-```
 
 
 ## See also
