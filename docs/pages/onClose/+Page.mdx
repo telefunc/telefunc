@@ -128,30 +128,32 @@ You usually don't need to close manually, as streams often close automatically:
 - A value that **finishes on its own** — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — closes automatically.
 - A value you **stop referencing entirely** is garbage-collected a few seconds later, which closes it too (firing the server's `onClose()`).
 
-Two things stay open until you end them yourself. A long-lived `channel` you hold a reference to — close it on unmount:
+Two things stay open until you end them yourself. A long-lived `channel` — close it on unmount:
 
 ```tsx
 // Chat.tsx
 // Environment: client
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { onChat } from './Chat.telefunc'
 
 function Chat() {
-  const channelRef = useRef()
   const [messages, setMessages] = useState<string[]>([])
 
   useEffect(() => {
-    onChat().then(({ channel }) => {
-      channelRef.current = channel
+    let channel
+    onChat().then((result) => {
+      channel = result.channel
       channel.listen((msg) => setMessages((prev) => [...prev, msg]))
     })
-    return () => channelRef.current?.close() // close on unmount
+    return () => channel?.close() // close on unmount
   }, [])
 
   return <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
 }
 ```
+
+> A `ref` is only needed when something *outside* the effect touches the channel — e.g. a "send" button handler calling `channel.send()`. For listen-and-close, the effect's own closure is enough.
 
 And a stream you're still consuming in a **`for await` loop** — the running loop keeps it reachable, so end it (e.g. when a React component unmounts):
 
