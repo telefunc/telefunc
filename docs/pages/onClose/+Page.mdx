@@ -105,7 +105,7 @@ export async function onLoad() {
 
 You can (and sometimes should) manually close the telefunction call/<Link href="/stream">stream</Link> via `close()` (graceful) or `abort()` (immediate), and more.
 
-> **Do I need to close manually?** Mostly no — values close when they finish or when you drop them. The catch: a running `for await` loop pins the stream from GC, so `break` / `gen.return()` it. <Link href="#when-to-close" text="Details" />
+> **Do I need to close manually?** It comes down to reachability. A value that **finishes** (a generator run to completion, a stream read to the end) or that you **drop entirely** closes itself. One you **keep reachable** won't be GC'd, so end it yourself: `break` / `gen.return()` a live `for await` loop, and `channel.close()` a `channel` you `listen()` on. <Link href="#when-to-close" text="Details" />
 
 There's one catch-all API, `close()`, plus several per-type APIs.
 
@@ -124,11 +124,11 @@ There's one catch-all API, `close()`, plus several per-type APIs.
 
 ### When to close
 
-You usually don't need to close manually, as streams often close automatically:
+Whether you need to close by hand comes down to reachability. Some values close on their own:
 - A value that **finishes on its own** — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — closes automatically.
 - A value you **stop referencing entirely** is garbage-collected a few seconds later, which closes it too (firing the server's `onClose()`).
 
-Two things stay open until you end them yourself. A long-lived `channel` — close it on unmount:
+Two things stay open until you end them yourself. A `channel` you `listen()` on — the listener keeps it reachable, so GC won't close it; close it on unmount:
 
 ```tsx
 // Chat.tsx
