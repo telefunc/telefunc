@@ -25,7 +25,7 @@ export async function onInit(onTick: (n: number) => void) {
 <Warning>
 **To avoid memory leaks, make sure to:**
 - **Always release resources**: any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
-- **Always close long-lived telefunc streams**: make sure you always close open-end <Link href="/stream">Telefunc streams</Link>.
+- **Always close long-lived Telefunc streams**: an open-ended <Link href="/stream">Telefunc stream</Link> stays open and leaks unless you close it.
 </Warning>
 
 You can also use an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)) and more methods, see:
