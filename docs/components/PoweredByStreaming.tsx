@@ -8,7 +8,7 @@ function PoweredByStreaming({ pkg }: { pkg: string }) {
     <blockquote>
       <p>
         The <code>@telefunc/{pkg}</code> integration is powered by{' '}
-        <Link href="/stream">Telefunc's streaming primitives</Link>.
+        <Link href="/stream">Telefunc Stream</Link>.
       </p>
     </blockquote>
   )
