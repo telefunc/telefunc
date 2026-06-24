@@ -124,11 +124,18 @@ There's one catch-all API, `close()`, plus several per-type APIs.
 
 ### When to close
 
-Whether you need to close by hand comes down to reachability. Some values close on their own:
-- A value that **finishes on its own** — an `AsyncGenerator` iterated to completion, a `ReadableStream` read to the end — closes automatically.
-- A value you **stop referencing entirely** is garbage-collected a few seconds later, which closes it too (firing the server's `onClose()`).
+Whether you need to close by hand comes down to **reachability**. A value that **finishes** (runs to completion) or that you **drop entirely** closes itself — the latter via garbage collection a few seconds later (firing the server's `onClose()`), so close it yourself to release promptly. A value you **keep reachable** can't be garbage-collected, so you must end it:
 
-Two things stay open until you end them yourself. A `channel` you `listen()` on — the listener keeps it reachable, so GC won't close it; close it on unmount:
+| Value | Closes itself when… | You **must** close it when… | How |
+|---|---|---|---|
+| `AsyncGenerator` | run to completion, or dropped (GC) | you stop a running `for await` early (incl. endless streams) | `break` (auto-calls `return()`), `gen.return()`, `await using`, or `close(gen)` |
+| `ReadableStream` | read to the end, or dropped (GC) | you stop reading a still-open stream early | `reader.cancel()`, `break` a `for await`, or `close(stream)` |
+| `Channel` / `BroadcastChannel` | the server ends it, or you drop it with **no** listener (GC) | you `listen()` on one that stays open — the listener keeps it reachable, so GC never reclaims it | `channel.close()` (graceful) or `channel.abort()` (immediate) |
+| `File` / `Blob` / streamed `Promise` / download | awaited or consumed, or dropped (GC) | rarely — only a partial **download** you keep but don't finish | `close(value)`, or download `.cancel()` |
+
+To cancel a call and **every** stream/channel it opened at once — immediately, without waiting for a graceful close — use `abort(call)` or `withContext(fn, { signal })`; `close(value)` closes everything nested in a return value. (See the close-API table above.)
+
+The two cases you'll hit most. **A `channel` you `listen()` on** — close it on unmount:
 
 ```tsx
 // Chat.tsx
