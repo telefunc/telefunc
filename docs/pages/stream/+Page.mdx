@@ -423,7 +423,7 @@ This is the low-level primitive; most apps reach for a higher-level integration 
 
 ### Cleanup {#channel-cleanup}
 
-A channel stays open until you close it. From the client, `channel.close()` (graceful) or `channel.abort()` (immediate). For example, on unmount:
+A channel doesn't end on its own. Close it from the client with `channel.close()` (graceful) or `channel.abort()` (immediate). For example, on unmount:
 
 ```tsx
 // Chat.tsx
@@ -453,7 +453,7 @@ function Chat() {
 
 ## Cleanup {#cleanup}
 
-A stream stays open until it ends. Either the **server** ends it — the value finishes, or the client disconnects — or **you** close it from the client. If neither happens, the stream leaks.
+An open stream holds resources on the server. It closes automatically when the value finishes or the client disconnects. Otherwise, you must close it from the client — or it leaks.
 
 | Primitive | Ends on its own when | Close it yourself with |
 |---|---|---|
