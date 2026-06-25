@@ -382,41 +382,6 @@ channel.listen((metrics) => updateCharts(metrics))
 This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, and reconnection — see <Link href="/channel" />. Authorizing a channel works like any streaming primitive — see <Link text="Authorization" href="#authorization" /> below.
 
 
-## Authorization
-
-A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link text="getContext()" href="/getContext" /> and `throw Abort()` **at open time**, before you stream anything back. Here the client passes a <Link text="callback" href="#function-passing" /> and the server calls it:
-
-```ts
-// TeamFeed.telefunc.ts
-// Environment: server
-
-import { getContext, Abort } from 'telefunc'
-
-export async function onTeamFeed(teamId: string, onMessage: (text: string) => void) {
-  const { user, onClose } = getContext()
-  if (!user || !user.teams.includes(teamId)) throw Abort()
-
-  // Authorized — push this team's messages to the client
-  const unwatch = watchTeam(teamId, onMessage)
-  // Stop watching when the client disconnects — otherwise the subscription leaks
-  onClose(unwatch)
-}
-```
-
-```tsx
-// TeamFeed.tsx
-// Environment: client
-
-import { onTeamFeed } from './TeamFeed.telefunc'
-
-await onTeamFeed('acme', (text) => showMessage(text))
-```
-
-`getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />) — so authorize there, at open time. The `user` you captured stays valid inside the callback, which runs later.
-
-> **Consider re-checking.** For sensitive operations, you can re-check authorization with the captured `user` each time the callback runs. Although most use cases don't need this.
-
-
 ## Cleanup
 
 Every streaming value eventually ends — the client finishes reading it, calls <Link text={<code>close()</code>} href="/onClose" />, navigates away, or the connection drops for good. However it ends, the server's `onClose()` hook fires so you can release whatever the telefunction opened. Get it from <Link text="getContext()" href="/getContext" />:
@@ -450,6 +415,41 @@ From the client, end a stream early with <Link text={<code>close()</code>} href=
 See also:
 - <Link href="/onClose" />
 - <Link href="/channel#lifecycle" />
+
+
+## Authorization
+
+A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link text="getContext()" href="/getContext" /> and `throw Abort()` **at open time**, before you stream anything back. Here the client passes a <Link text="callback" href="#function-passing" /> and the server calls it:
+
+```ts
+// TeamFeed.telefunc.ts
+// Environment: server
+
+import { getContext, Abort } from 'telefunc'
+
+export async function onTeamFeed(teamId: string, onMessage: (text: string) => void) {
+  const { user, onClose } = getContext()
+  if (!user || !user.teams.includes(teamId)) throw Abort()
+
+  // Authorized — push this team's messages to the client
+  const unwatch = watchTeam(teamId, onMessage)
+  // Stop watching when the client disconnects — otherwise the subscription leaks
+  onClose(unwatch)
+}
+```
+
+```tsx
+// TeamFeed.tsx
+// Environment: client
+
+import { onTeamFeed } from './TeamFeed.telefunc'
+
+await onTeamFeed('acme', (text) => showMessage(text))
+```
+
+`getContext()` and `throw Abort()` only work **before the telefunction returns** (see <Link href="/getContext#access" />) — so authorize there, at open time. The `user` you captured stays valid inside the callback, which runs later.
+
+> **Consider re-checking.** For sensitive operations, you can re-check authorization with the captured `user` each time the callback runs. Although most use cases don't need this.
 
 
 ## Error handling
