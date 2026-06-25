@@ -196,7 +196,7 @@ If you only need callback-style interaction, function passing is simpler than a 
 
 ### Cleanup
 
-A short callback call closes with the telefunction call. Long-lived callback subscriptions should expose an explicit teardown function and also register the same teardown in `onClose()`:
+A function-passing callback is channel-backed and can stay open as long as either side keeps a callback reference. For subscription-style usage, expose an explicit teardown function and also register the same teardown in `onClose()`:
 
 ```ts
 // Notifications.telefunc.ts
