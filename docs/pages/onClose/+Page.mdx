@@ -25,13 +25,13 @@ export async function onInit(onTick: (n: number) => void) {
 <Warning>
 **To avoid memory leaks, make sure to always:**
 - **Release resources**: any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
-- **Close long-lived Telefunc streams**: an open-ended <Link href="/stream">Telefunc stream</Link> stays open and leaks unless you close it.
+- **Close long-lived Telefunc streams**: an open-end <Link href="/stream">Telefunc stream</Link> stays open and leaks unless you close it.
 </Warning>
 
-You can also use an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)) and more methods, see:
+You can use `onClose()`, an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)), and more methods, see:
 - <Link href="#listening" />
 
-You can (and often must) manually close Telefunc streams via `close()` and other methods, see:
+You can close Telefunc streams via `close()` and other methods, see:
 - <Link href="#closing" />
 
 
@@ -105,9 +105,22 @@ export async function onLoad() {
 
 **Environment**: client & server.
 
-Make sure to close open-end <Link href="/stream">Telefunc streams</Link>.
+Make sure to close open-end <Link href="/stream">Telefunc streams</Link> — either the stream automatically ends or you must manually close it:
 
-> **Every stream must close on one of its two ends**: the **server** ends it (a generator returns, or it closes the `channel`), or **you** end it on the client (`break` / `gen.return()` a live `for await` loop, `channel.close()` a `channel` you `listen()` on). Make sure one always happens — otherwise the stream stays open and leaks. <Link href="#when-to-close" text="Details" />
+<Warning>
+  Make sure Telefunc streams always come to an end.
+</Warning>
+
+> A stream can close on one of its two ends: either the server or the client ends it.
+
+TODO/ai:
+ - Create table
+ - Add links to /stream primitive sections
+
+- It naturally ends (a `ReadableStream` ends, a `async function*` finishes, all concurrent promises resolve) => automatic
+- The client disconnected (the user closes his browser tab) => automatic
+- `Channel` => you must manually close it
+- Callbacks => you must manually close it
 
 ### When to close
 
