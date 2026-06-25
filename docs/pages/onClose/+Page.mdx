@@ -1,206 +1,74 @@
-import { Link, Warning } from '@brillout/docpress'
+import { Link } from '@brillout/docpress'
 import { TelefuncStreamBeta } from '../../components'
 
-**Environment**: server & client.
+<TelefuncStreamBeta />
 
-The `onClose()` hook (defined on <Link href="/getContext">`context`</Link>) enables the server to clean up long-lived resources.
+## Server lifecycle APIs
 
-```ts
-// Counter.telefunc.ts
-// Environment: server
-
-import { getContext } from 'telefunc'
-
-export async function onInit(onTick: (n: number) => void) {
-  const context = getContext()
-  let n = 0
-  const interval = setInterval(() => onTick(++n), 1000)
-  context.onClose(() => {
-    // ⚠️ Must be released otherwise it runs forever (memory leak)
-    clearInterval(interval)
-  })
-}
-```
-
-<Warning>
-**To avoid memory leaks, make sure to always:**
-- **Release resources**: any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
-- **Close long-lived Telefunc streams**: an open-end <Link href="/stream">Telefunc stream</Link> stays open and leaks unless you close it.
-</Warning>
-
-You can use `onClose()`, an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)), and more methods, see:
-- <Link href="#listening" />
-
-You can close Telefunc streams via `close()` and other methods, see:
-- <Link href="#closing" />
+| API | Side | Type | Semantics |
+|---|---|---|---|
+| `getContext().onClose(cb)` | server | callback hook | Runs `cb` when the telefunction call closes, regardless of reason. |
+| `getContext().signal` | server | `AbortSignal` | Aborts when the telefunction call closes. |
+| <Link text={<code>channel.onClose(cb)</code>} href="/channel#lifecycle" /> | client & server | callback hook | Runs when that channel closes. |
+| <Link text={<code>channel.onOpen(cb)</code>} href="/channel#lifecycle" /> | client & server | callback hook | Runs when that channel opens. |
 
 
-## Listening
+## Client closing APIs
+
+| API | Side | Close mode | Scope |
+|---|---|---|---|
+| `close(value)` | client | Graceful | Recursively closes streams/channels/files nested in `value`. |
+| `gen.return()` / `break` | client | Graceful | One `AsyncGenerator`. |
+| `reader.cancel()` | client | Graceful | One `ReadableStream`. |
+| <Link text={<code>channel.close()</code>} href="/channel#lifecycle" /> | client & server | Graceful | One `Channel` / `BroadcastChannel`. |
+| <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with optional abort value. |
+| `abort(call)` | client | Immediate | The in-flight call and any channels it opened. |
+| <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | Same scope as `abort(call)`, driven by an `AbortSignal`. |
+
+
+## `onClose()` {#onclose}
 
 **Environment**: server.
 
-On the server-side, you can listen when a <Link href="/stream">Telefunc stream</Link> closes for:
-- Releasing resources
-- Cancel in-flight work
-
-| API | Side
-|---|---
-| `context.onClose(cb)` | server
-| `context.signal` | server
-| <Link text={<code>channel.onClose(cb)</code>} href="/channel#lifecycle" /> | client & server
-| <Link text={<code>channel.onOpen(cb)</code>} href="/channel#lifecycle" /> | client & server
-
-> The listeners are fired regardless of the closing reason — whether all returned values are consumed, the client manually closed, the client disconnected, or an error occurred.
-
-
-### `onClose()`
-
-The <Link href="/getContext">`context` object</Link> includes `onClose()`:
+`onClose()` is available on the <Link href="/getContext">context object</Link>:
 
 ```ts
-// AiChat.telefunc.ts
 // Environment: server
 
 import { getContext } from 'telefunc'
 
-export async function* onAiPrompt(prompt: string) {
-  const { onClose } = getContext()
-  onClose(() => {
-    // Release resources, cancel upstream work
-  })
-
-  for await (const message of ai.streamText({ prompt })) {
-    yield message
-  }
-}
+const { onClose } = getContext()
+onClose(() => {
+  // Release resources and stop upstream work
+})
 ```
 
-### `signal`
+Use it to register teardown for resources created by the call (`setInterval`, event subscriptions, DB cursors, child processes, upstream streams).
 
-The <Link href="/getContext">`context` object</Link> includes a `signal` (`AbortSignal`) that aborts when the telefunction call closes.
 
-> The `signal` fires at the same time as `onClose()`.
+## `signal` {#signal}
 
-Pass it to any API that accepts an [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) (`fetch()`, database clients, etc.) to cancel in-flight work:
+**Environment**: server.
+
+`signal` is available on the <Link href="/getContext">context object</Link> and aborts at the same moment `onClose()` fires.
 
 ```ts
-// SomeComponent.telefunc.ts
 // Environment: server
 
 import { getContext } from 'telefunc'
 
-export async function onLoad() {
-  const { signal } = getContext()
-  const response = await fetch(
-    'https://api.example.com/data',
-    // Cancel the request, e.g. when the client disconnects
-    { signal }
-  )
-  return response.json()
-}
+const { signal } = getContext()
+await fetch('https://api.example.com/data', { signal })
 ```
 
-
-## Closing
-
-**Environment**: client & server.
-
-Make sure to close open-end <Link href="/stream">Telefunc streams</Link> — either the stream automatically ends or you must manually close it:
-
-<Warning>
-  Make sure Telefunc streams always come to an end.
-</Warning>
-
-> A stream can close on one of its two ends: either the server or the client ends it.
-
-TODO/ai:
- - Create table
- - Add links to /stream primitive sections
-
-- It naturally ends (a `ReadableStream` ends, a `async function*` finishes, all concurrent promises resolve) => automatic
-- The client disconnected (the user closes his browser tab) => automatic
-- `Channel` => you must manually close it
-- Callbacks => you must manually close it
-
-### When to close
-
-| Value | Closes server-side when… | You close it (client-side) when… | How |
-|---|---|---|---|
-| `AsyncGenerator` | it returns — the `for await` runs to completion | it's endless, or you stop iterating early | `break` (auto-calls `return()`), `gen.return()`, `await using`, or `close(gen)` |
-| `ReadableStream` | it's read to the end | you stop reading before the end | `reader.cancel()`, `break` a `for await`, or `close(stream)` |
-| `Channel` / `BroadcastChannel` | the server ends it | it stays open and you `listen()` on it | `channel.close()` (graceful) or `channel.abort()` (immediate) |
-| `File` / `Blob` / streamed `Promise` / download | it resolves — you `await` it | ≈ never (just `await` it; or cancel a download) | `close(value)` / download `.cancel()` |
-
-In a component, the two cases you'll hit are a **`channel` you `listen()` on** and a **`for await` loop** — close both on unmount:
-
-```tsx
-// Chat.tsx
-// Environment: client
-
-import { useEffect, useState } from 'react'
-import { onChat } from './Chat.telefunc'
-
-function Chat() {
-  const [messages, setMessages] = useState<string[]>([])
-
-  useEffect(() => {
-    const open = onChat() // Promise<{ channel }>
-    open.then(({ channel }) =>
-      channel.listen((msg) => setMessages((prev) => [...prev, msg])))
-    return () => {
-      open.then(({ channel }) => channel.close()) // close on unmount
-    }
-  }, [])
-
-  return <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
-}
-```
-
-> Reusing the `open` promise for both the listener and the cleanup closes the channel even if the handshake hasn't resolved by unmount — no `ref` or flag needed.
-
-```tsx
-// Clock.tsx
-// Environment: client
-
-import { useEffect, useState } from 'react'
-import { onClock } from './Clock.telefunc'
-
-function Clock() {
-  const [n, setN] = useState(0)
-
-  useEffect(() => {
-    const clock = onClock() // long-lived AsyncGenerator
-    ;(async () => {
-      for await (const tick of clock) setN(tick)
-    })()
-    return () => void clock.return() // a running loop won't stop on its own
-  }, [])
-
-  return <p>{n}</p>
-}
-```
-
-### How to close
-
-There's one catch-all API, `close()`, plus several per-type APIs.
-
-| API | Side | Graceful / immediate | Closes |
-|---|---|---|---|
-| `close(value)` | client | Graceful | Everything in the returned value (walked recursively) |
-| `gen.return()` / `break` | client | Graceful | One `AsyncGenerator` |
-| `reader.cancel()` | client | Graceful | One `ReadableStream` |
-| <Link text={<code>channel.close()</code>} href="/channel#lifecycle" /> | client & server | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
-| <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
-| `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
-| <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
-
-**Graceful**: flush buffered data, then close.  
-**Immediate**: cancel in-flight work.  
+Use it with APIs that accept an [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) to cancel in-flight work on call close.
 
 
-### `close()`
+## `close()`
 
-`close()` from `telefunc/client` gracefully closes any value returned by a telefunction. In one call, it closes every stream, channel, and file nested anywhere in the return value.
+**Environment**: client.
+
+`close()` is exported by `telefunc/client`:
 
 ```ts
 // Environment: client
@@ -209,27 +77,34 @@ import { close } from 'telefunc/client'
 import { onLoadDashboard } from './Dashboard.telefunc'
 
 const result = await onLoadDashboard()
-
-// Read what you need...
-const { value } = await result.stream.next()
-
-// Then close everything at once
 close(result)
 ```
 
-> To stop a call **immediately** instead of gracefully, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
-> ```ts
-> // Environment: client
->
-> import { abort } from 'telefunc/client'
->
-> const call = onLoadDashboard()
-> abort(call) // cancels the in-flight call
-> ```
+It gracefully closes all Telefunc values found recursively in `result`.
+
+
+## `abort()`
+
+**Environment**: client.
+
+`abort()` is exported by `telefunc/client`:
+
+```ts
+// Environment: client
+
+import { abort } from 'telefunc/client'
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const call = onLoadDashboard()
+abort(call)
+```
+
+It immediately cancels the in-flight call (and channels opened by that call).
 
 
 ## See also
 
+- <Link href="/stream#cleanup" />
 - <Link href="/stream" />
-- <Link href="/channel" />
-- <Link href="/getContext" />
+- <Link href="/channel#lifecycle" />
+- <Link href="/withContext" />
