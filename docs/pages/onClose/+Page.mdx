@@ -23,13 +23,15 @@ export async function onInit(onTick: (n: number) => void) {
 ```
 
 <Warning>
-**Performance: always release resources** — anything a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
+**To avoid memory leaks, make sure to always:**
+- **Release resources**: any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
+- **Close long-lived Telefunc streams**: an open-end <Link href="/stream">Telefunc stream</Link> stays open and leaks unless you close it.
 </Warning>
 
-You can also use an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)) and more methods, see:
+You can use `onClose()`, an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)), and more methods, see:
 - <Link href="#listening" />
 
-You can (and often must) manually close the telefunction via `close()` and other methods, see:
+You can close Telefunc streams via `close()` and other methods, see:
 - <Link href="#closing" />
 
 
@@ -37,7 +39,7 @@ You can (and often must) manually close the telefunction via `close()` and other
 
 **Environment**: server.
 
-On the server-side, you can listen when the telefunction call/<Link href="/stream">stream</Link> closes for:
+On the server-side, you can listen when a <Link href="/stream">Telefunc stream</Link> closes for:
 - Releasing resources
 - Cancel in-flight work
 
@@ -103,26 +105,33 @@ export async function onLoad() {
 
 **Environment**: client & server.
 
-You can (and often must) manually close <Link href="/stream">telefunction streams</Link>.
+Make sure to close open-end <Link href="/stream">Telefunc streams</Link> — either the stream automatically ends or you must manually close it:
 
-> **Do I need to close manually?** A stream **ends on its own** — a generator returns, a `ReadableStream` is read to the end, or the server closes a `channel` — otherwise **you close it**: `break` / `gen.return()` a live `for await` loop, `channel.close()` a `channel` you `listen()` on. (Abandon one without closing and GC reclaims it eventually — a leak backstop, not something to rely on.) <Link href="#when-to-close" text="Details" />
+<Warning>
+  Make sure Telefunc streams always come to an end.
+</Warning>
+
+> A stream can close on one of its two ends: either the server or the client ends it.
+
+TODO/ai:
+ - Create table
+ - Add links to /stream primitive sections
+
+- It naturally ends (a `ReadableStream` ends, a `async function*` finishes, all concurrent promises resolve) => automatic
+- The client disconnected (the user closes his browser tab) => automatic
+- `Channel` => you must manually close it
+- Callbacks => you must manually close it
 
 ### When to close
 
-The rule is simple: **a stream ends on its own, or you must close it.** It ends on its own when it runs out — a generator returns, a `ReadableStream` is read to the end — or when the server closes it. Anything else — something still producing that you stop consuming, or a `channel` you `listen()` on — you close by hand:
-
-| Value | Ends on its own when… | You **must** close it when… | How |
+| Value | Closes server-side when… | You close it (client-side) when… | How |
 |---|---|---|---|
 | `AsyncGenerator` | it returns — the `for await` runs to completion | it's endless, or you stop iterating early | `break` (auto-calls `return()`), `gen.return()`, `await using`, or `close(gen)` |
 | `ReadableStream` | it's read to the end | you stop reading before the end | `reader.cancel()`, `break` a `for await`, or `close(stream)` |
 | `Channel` / `BroadcastChannel` | the server ends it | it stays open and you `listen()` on it | `channel.close()` (graceful) or `channel.abort()` (immediate) |
 | `File` / `Blob` / streamed `Promise` / download | it resolves — you `await` it | ≈ never (just `await` it; or cancel a download) | `close(value)` / download `.cancel()` |
 
-To cancel a call and **every** stream/channel it opened at once — immediately, without waiting for a graceful close — use `abort(call)` or `withContext(fn, { signal })`; `close(value)` closes everything nested in a return value. (See the close-API table above.)
-
-> **Where does GC come in?** Only as a backstop. If you *abandon* a stream — lose the reference on an error path, forget to close one — telefunc reclaims it when the garbage collector collects the value (firing `onClose()`), so a forgotten stream won't leak *forever*. But it's not a close mechanism you can use: the moment you consume or hold a stream it's reachable, and GC can't touch what's reachable. It's also best-effort and seconds-delayed — so always close explicitly to free the server promptly.
-
-The two cases you'll hit most. **A `channel` you `listen()` on** — close it on unmount:
+In a component, the two cases you'll hit are a **`channel` you `listen()` on** and a **`for await` loop** — close both on unmount:
 
 ```tsx
 // Chat.tsx
@@ -147,9 +156,7 @@ function Chat() {
 }
 ```
 
-> **Why close via `open.then()` instead of a saved variable?** `onChat()` resolves asynchronously, so on unmount the channel may not exist yet. Re-using the promise closes it *whenever* the handshake resolves — including an unmount mid-handshake, which React StrictMode triggers on every mount. Skip it and that late channel opens still-listening; since GC won't reclaim a listening channel, it leaks (client *and* server). No `ref` needed either — the promise already carries the channel to both the listener and the cleanup.
-
-And a stream you're still consuming in a **`for await` loop** — the running loop keeps it reachable, so end it (e.g. when a React component unmounts):
+> Reusing the `open` promise for both the listener and the cleanup closes the channel even if the handshake hasn't resolved by unmount — no `ref` or flag needed.
 
 ```tsx
 // Clock.tsx
@@ -166,17 +173,12 @@ function Clock() {
     ;(async () => {
       for await (const tick of clock) setN(tick)
     })()
-    // ⚠️ The running loop keeps the stream alive, so unmounting won't stop it on
-    // its own — end it to release the server's resources (fires onClose()):
-    return () => void clock.return()
+    return () => void clock.return() // a running loop won't stop on its own
   }, [])
 
   return <p>{n}</p>
 }
 ```
-
-Closing manually also releases resources **promptly**, instead of waiting for GC.
-
 
 ### How to close
 
@@ -215,29 +217,7 @@ const { value } = await result.stream.next()
 close(result)
 ```
 
-### Other ways to close
-
-For specific value types, you can also use the standard JS APIs directly:
-
-```ts
-// AsyncGenerator — break out of the loop
-for await (const message of gen) {
-  if (shouldStop) break
-}
-
-// Or call return() directly
-gen.return()
-
-// ReadableStream — cancel the reader
-reader.cancel()
-
-// Channel — close explicitly
-await channel.close()
-```
-
-All of these tell the server to stop producing and release resources.
-
-> `close()` ends a value **gracefully** (buffered data is flushed). To stop a call **immediately** instead, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
+> To stop a call **immediately** instead of gracefully, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
 > ```ts
 > // Environment: client
 >
