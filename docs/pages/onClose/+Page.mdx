@@ -1,61 +1,31 @@
-import { Link, Warning } from '@brillout/docpress'
+import { Link } from '@brillout/docpress'
 import { TelefuncStreamBeta } from '../../components'
+
+<TelefuncStreamBeta />
 
 **Environment**: server & client.
 
-The `onClose()` hook (defined on <Link href="/getContext">`context`</Link>) enables the server to clean up long-lived resources.
-
-```ts
-// Counter.telefunc.ts
-// Environment: server
-
-import { getContext } from 'telefunc'
-
-export async function onInit(onTick: (n: number) => void) {
-  const context = getContext()
-  let n = 0
-  const interval = setInterval(() => onTick(++n), 1000)
-  context.onClose(() => {
-    // ⚠️ Must be released otherwise it runs forever (memory leak)
-    clearInterval(interval)
-  })
-}
-```
-
-<Warning>
-**To avoid memory leaks, make sure to always:**
-- **Release resources**: any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call and leaks unless you release it.
-- **Close long-lived Telefunc streams**: an open-end <Link href="/stream">Telefunc stream</Link> stays open and leaks unless you close it.
-</Warning>
-
-You can use `onClose()`, an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)), and more methods, see:
-- <Link href="#listening" />
-
-You can close Telefunc streams via `close()` and other methods, see:
-- <Link href="#closing" />
+The API for listening to and closing Telefunc <Link href="/stream">streams</Link>. For when and why streams need cleanup, see <Link text="Cleanup" href="/stream#cleanup" />.
 
 
 ## Listening
 
 **Environment**: server.
 
-On the server-side, you can listen when a <Link href="/stream">Telefunc stream</Link> closes for:
-- Releasing resources
-- Cancel in-flight work
+Run a callback when a stream closes — to release resources or cancel in-flight work.
 
-| API | Side
-|---|---
-| `context.onClose(cb)` | server
-| `context.signal` | server
-| <Link text={<code>channel.onClose(cb)</code>} href="/channel#lifecycle" /> | client & server
-| <Link text={<code>channel.onOpen(cb)</code>} href="/channel#lifecycle" /> | client & server
+| API | Side | Fires when |
+|---|---|---|
+| `context.onClose(cb)` | server | the call/stream closes |
+| `context.signal` | server | the call/stream closes — as an `AbortSignal` |
+| <Link text={<code>channel.onClose(cb)</code>} href="/channel#lifecycle" /> | client & server | a `Channel` / `BroadcastChannel` closes |
+| <Link text={<code>channel.onOpen(cb)</code>} href="/channel#lifecycle" /> | client & server | a `Channel` / `BroadcastChannel` opens |
 
-> The listeners are fired regardless of the closing reason — whether all returned values are consumed, the client manually closed, the client disconnected, or an error occurred.
+> The listeners fire regardless of the closing reason — whether the returned values are consumed, the client manually closed, the client disconnected, or an error occurred.
 
+### `context.onClose(cb)` {#onclose}
 
-### `onClose()`
-
-The <Link href="/getContext">`context` object</Link> includes `onClose()`:
+From <Link text="getContext()" href="/getContext" />:
 
 ```ts
 // AiChat.telefunc.ts
@@ -75,13 +45,9 @@ export async function* onAiPrompt(prompt: string) {
 }
 ```
 
-### `signal`
+### `context.signal` {#signal}
 
-The <Link href="/getContext">`context` object</Link> includes a `signal` (`AbortSignal`) that aborts when the telefunction call closes.
-
-> The `signal` fires at the same time as `onClose()`.
-
-Pass it to any API that accepts an [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) (`fetch()`, database clients, etc.) to cancel in-flight work:
+An [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) that aborts when the call closes — it fires at the same time as `onClose()`. Pass it to any `AbortSignal`-aware API (`fetch()`, database clients, etc.) to cancel in-flight work:
 
 ```ts
 // SomeComponent.telefunc.ts
@@ -91,11 +57,8 @@ import { getContext } from 'telefunc'
 
 export async function onLoad() {
   const { signal } = getContext()
-  const response = await fetch(
-    'https://api.example.com/data',
-    // Cancel the request, e.g. when the client disconnects
-    { signal }
-  )
+  // Cancel the request, e.g. when the client disconnects
+  const response = await fetch('https://api.example.com/data', { signal })
   return response.json()
 }
 ```
@@ -103,86 +66,9 @@ export async function onLoad() {
 
 ## Closing
 
-**Environment**: client & server.
+**Environment**: client.
 
-Make sure to close open-end <Link href="/stream">Telefunc streams</Link> — either the stream automatically ends or you must manually close it:
-
-<Warning>
-  Make sure Telefunc streams always come to an end.
-</Warning>
-
-> A stream can close on one of its two ends: either the server or the client ends it.
-
-TODO/ai:
- - Create table
- - Add links to /stream primitive sections
-
-- It naturally ends (a `ReadableStream` ends, a `async function*` finishes, all concurrent promises resolve) => automatic
-- The client disconnected (the user closes his browser tab) => automatic
-- `Channel` => you must manually close it
-- Callbacks => you must manually close it
-
-### When to close
-
-| Value | Closes server-side when… | You close it (client-side) when… | How |
-|---|---|---|---|
-| `AsyncGenerator` | it returns — the `for await` runs to completion | it's endless, or you stop iterating early | `break` (auto-calls `return()`), `gen.return()`, `await using`, or `close(gen)` |
-| `ReadableStream` | it's read to the end | you stop reading before the end | `reader.cancel()`, `break` a `for await`, or `close(stream)` |
-| `Channel` / `BroadcastChannel` | the server ends it | it stays open and you `listen()` on it | `channel.close()` (graceful) or `channel.abort()` (immediate) |
-| `File` / `Blob` / streamed `Promise` / download | it resolves — you `await` it | ≈ never (just `await` it; or cancel a download) | `close(value)` / download `.cancel()` |
-
-In a component, the two cases you'll hit are a **`channel` you `listen()` on** and a **`for await` loop** — close both on unmount:
-
-```tsx
-// Chat.tsx
-// Environment: client
-
-import { useEffect, useState } from 'react'
-import { onChat } from './Chat.telefunc'
-
-function Chat() {
-  const [messages, setMessages] = useState<string[]>([])
-
-  useEffect(() => {
-    const open = onChat() // Promise<{ channel }>
-    open.then(({ channel }) =>
-      channel.listen((msg) => setMessages((prev) => [...prev, msg])))
-    return () => {
-      open.then(({ channel }) => channel.close()) // close on unmount
-    }
-  }, [])
-
-  return <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
-}
-```
-
-> Reusing the `open` promise for both the listener and the cleanup closes the channel even if the handshake hasn't resolved by unmount — no `ref` or flag needed.
-
-```tsx
-// Clock.tsx
-// Environment: client
-
-import { useEffect, useState } from 'react'
-import { onClock } from './Clock.telefunc'
-
-function Clock() {
-  const [n, setN] = useState(0)
-
-  useEffect(() => {
-    const clock = onClock() // long-lived AsyncGenerator
-    ;(async () => {
-      for await (const tick of clock) setN(tick)
-    })()
-    return () => void clock.return() // a running loop won't stop on its own
-  }, [])
-
-  return <p>{n}</p>
-}
-```
-
-### How to close
-
-There's one catch-all API, `close()`, plus several per-type APIs.
+End a stream. `close()` is the catch-all; the rest are per-type.
 
 | API | Side | Graceful / immediate | Closes |
 |---|---|---|---|
@@ -195,12 +81,13 @@ There's one catch-all API, `close()`, plus several per-type APIs.
 | <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
 
 **Graceful**: flush buffered data, then close.  
-**Immediate**: cancel in-flight work.  
+**Immediate**: cancel in-flight work.
 
+The per-type APIs — `gen.return()` / `break`, `reader.cancel()`, `channel.close()` / `channel.abort()` — are shown in context in each <Link text="primitive's section" href="/stream#cleanup" />.
 
-### `close()`
+### `close(value)`
 
-`close()` from `telefunc/client` gracefully closes any value returned by a telefunction. In one call, it closes every stream, channel, and file nested anywhere in the return value.
+`close()` from `telefunc/client` gracefully closes any value returned by a telefunction — in one call, every stream, channel, and file nested anywhere in the return value:
 
 ```ts
 // Environment: client
@@ -210,26 +97,31 @@ import { onLoadDashboard } from './Dashboard.telefunc'
 
 const result = await onLoadDashboard()
 
-// Read what you need...
-const { value } = await result.stream.next()
-
-// Then close everything at once
-close(result)
+const { value } = await result.stream.next() // read what you need...
+close(result)                                // ...then close everything at once
 ```
 
-> To stop a call **immediately** instead of gracefully, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
-> ```ts
-> // Environment: client
->
-> import { abort } from 'telefunc/client'
->
-> const call = onLoadDashboard()
-> abort(call) // cancels the in-flight call
-> ```
+### `abort(call)`
+
+`abort()` from `telefunc/client` ends a call **immediately** instead of gracefully — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
+
+```ts
+// Environment: client
+
+import { abort } from 'telefunc/client'
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const call = onLoadDashboard()
+abort(call) // cancels the in-flight call
+```
+
+To abort via an `AbortSignal` instead, use <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" />.
 
 
 ## See also
 
+- <Link text="Cleanup — the guide" href="/stream#cleanup" />
 - <Link href="/stream" />
-- <Link href="/channel" />
+- <Link href="/channel#lifecycle" />
+- <Link href="/withContext" />
 - <Link href="/getContext" />

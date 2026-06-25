@@ -137,6 +137,32 @@ for await (const n of onCountdown(3)) {
 }
 ```
 
+**Cleanup** — a generator ends on its own when it returns (the `for await` runs to completion). For an endless one, `break` out of the loop (which calls `return()` for you) or `gen.return()` it — for example, on React unmount:
+
+```tsx
+// Clock.tsx
+// Environment: client
+
+import { useEffect, useState } from 'react'
+import { onClock } from './Clock.telefunc'
+
+function Clock() {
+  const [n, setN] = useState(0)
+
+  useEffect(() => {
+    const clock = onClock() // long-lived AsyncGenerator
+    ;(async () => {
+      for await (const tick of clock) setN(tick)
+    })()
+    return () => void clock.return() // a running loop won't stop on its own
+  }, [])
+
+  return <p>{n}</p>
+}
+```
+
+On the server, release resources in `onClose()` — see <Link href="#cleanup" />.
+
 
 ## Primitive: `function` passing (callbacks) {#function-passing}
 
@@ -167,6 +193,8 @@ await onUpload(file, (percent) => setProgress(percent))
 ```
 
 If you only need callback-style interaction, function passing is simpler than a channel.
+
+**Cleanup** — the client calls the returned `unsubscribe()` when it's done; if the client disconnects first, the server's `onClose()` fires. See <Link href="#cleanup" />.
 
 
 ## Primitive: Concurrent `Promise` {#concurrent-promise}
@@ -224,6 +252,8 @@ const report = await res.report
 >   }
 > }
 > ```
+
+**Cleanup** — nothing to close: each promise resolves once, then it's done. See <Link href="#cleanup" />.
 
 
 ## Primitive: `ReadableStream` {#readable-stream}
@@ -339,6 +369,8 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 
 > A spawned process outlives the call and keeps burning CPU if the client navigates away mid-encode — so it's released in `onClose()`. See <Link text="Cleanup" href="#cleanup" />.
 
+**Cleanup** — a `ReadableStream` ends when it's read to the end; to stop early, `reader.cancel()` it (or `break` a `for await`). The server releases the source in `onClose()` — as the encoder is killed above.
+
 
 ## Primitive: `Channel` {#channel}
 
@@ -381,10 +413,53 @@ channel.listen((metrics) => updateCharts(metrics))
 
 This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, and reconnection — see <Link href="/channel" />. Authorizing a channel works like any streaming primitive — see <Link text="Authorization" href="#authorization" /> below.
 
+**Cleanup** — a channel stays open until it's closed; it won't end on its own. From the client, `channel.close()` (graceful) or `channel.abort()` (immediate) — for example, on unmount:
+
+```tsx
+// Chat.tsx
+// Environment: client
+
+import { useEffect, useState } from 'react'
+import { onChat } from './Chat.telefunc'
+
+function Chat() {
+  const [messages, setMessages] = useState<string[]>([])
+
+  useEffect(() => {
+    const open = onChat() // Promise<{ channel }>
+    open.then(({ channel }) =>
+      channel.listen((msg) => setMessages((prev) => [...prev, msg])))
+    return () => {
+      open.then(({ channel }) => channel.close()) // close on unmount
+    }
+  }, [])
+
+  return <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
+}
+```
+
+> Reusing the `open` promise for both the listener and the cleanup closes the channel even if the handshake hasn't resolved by unmount — no `ref` or flag needed.
+
+On the server, release resources in `channel.onClose()` — as with `clearInterval` above. See <Link href="#cleanup" /> and <Link href="/channel#lifecycle" />.
+
 
 ## Cleanup
 
-Every streaming value eventually ends — the client finishes reading it, calls <Link text={<code>close()</code>} href="/onClose" />, navigates away, or the connection drops for good. However it ends, the server's `onClose()` hook fires so you can release whatever the telefunction opened. Get it from <Link text="getContext()" href="/getContext" />:
+Every stream must come to an end — otherwise it leaks. It ends on **one of two ends**: the **server** ends it (the value finishes, or the client disconnects), or **you** end it from the client.
+
+| Primitive | Ends on its own when | Close it yourself with |
+|---|---|---|
+| <Link text={<code>AsyncGenerator</code>} href="#async-generator" /> | it finishes (consumed to the end) | `break` / `gen.return()` (endless ones) |
+| <Link text={<code>ReadableStream</code>} href="#readable-stream" /> | it's read to the end | `reader.cancel()` |
+| <Link text="Concurrent Promise" href="#concurrent-promise" /> | all promises resolve | — |
+| <Link text="Callbacks" href="#function-passing" /> | — | the returned `unsubscribe()` |
+| <Link text={<code>Channel</code>} href="#channel" /> | the server closes it | `channel.close()` / `channel.abort()` |
+
+A full client **disconnect** (the user closes the tab) ends everything automatically. To close from the client, use each primitive's method above — or the catch-all <Link text={<code>close(value)</code>} href="/onClose#closing" />, which closes every stream nested in a return value at once. For the complete closing and listening API, see <Link href="/onClose" />.
+
+### Releasing server resources
+
+However a stream ends, the server's `onClose()` hook fires so you can release whatever the telefunction opened. Get it from <Link text="getContext()" href="/getContext" />:
 
 ```ts
 // AiChat.telefunc.ts
@@ -408,13 +483,7 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 
 > **Pitfall** — anything a long-lived telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the call and **leaks** unless you release it in `onClose()`. If you set it up, tear it down.
 
-<Link text="Channels" href="#channel" /> and broadcasts expose `onClose()` (and `onOpen()`) directly on the instance — e.g. `dashboard.onClose(() => clearInterval(interval))` in the <Link text="Channel example" href="#channel" /> above. See <Link href="/channel#lifecycle" />.
-
-From the client, end a stream early with <Link text={<code>close()</code>} href="/onClose" /> — or simply stop reading: `break` out of a `for await`, `reader.cancel()` a `ReadableStream`, or `channel.close()` a channel. Even if you drop every reference without closing, Telefunc still cleans up automatically via garbage collection a few seconds later.
-
-See also:
-- <Link href="/onClose" />
-- <Link href="/channel#lifecycle" />
+<Link text="Channels" href="#channel" /> and broadcasts expose `onClose()` (and `onOpen()`) directly on the instance — e.g. `dashboard.onClose(() => clearInterval(interval))` in the <Link text="Channel example" href="#channel" /> above. See <Link href="/channel#lifecycle" /> and the full <Link text="onClose() API" href="/onClose" />.
 
 
 ## Authorization
