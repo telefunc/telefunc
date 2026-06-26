@@ -136,7 +136,7 @@ function Chat() {
     const open = onChat() // Promise<{ channel }>
     open.then(({ channel }) => {
       channel.listen((msg) => setMessages((prev) => [...prev, msg]))
-    }
+    })
     // Optional:
     const clear = () => open.then(({ channel }) => channel.close())
     return clear
