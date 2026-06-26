@@ -3,12 +3,12 @@ import { TelefuncStreamBeta } from '../../components'
 
 **Environment**: server & client.
 
-The `onClose()` hook (defined on <Link href="/getContext">`context`</Link>) is called when all the streams of a telefunction call are closed.
+The `onClose()` hook (defined on <Link href="/getContext">`context`</Link>) is called when all the streams opened by a telefunction call close.
 
 It's usually used to clear resources.
 
 <Warning>
-Make sure to always clear resources, see:
+Make sure you **always clear long-lived resources** (`setInterval`, an event subscription, a DB cursor, an upstream stream), as explained at:
 - <Link href="/stream#cleanup" />
 </Warning>
 
@@ -114,11 +114,11 @@ export async function onLoad() {
 
 A stream automatically closes itself when the client stops using it.
 
-> **How does it work?** When a `stream` object becomes unreachable (the client drops all references to `stream`), the JavaScript garbage collector clears `stream` and, when this happens, Telefunc closes the stream.
+> **How does it work?** When a `stream` object becomes unreachable (the client drops all references to it), the browser's garbage collector clears `stream` and, when this happens, Telefunc automatically closes the stream.
 
 You therefore usually don't have to manually close streams yourself.
 
-> That said, there is a short delay (typically a few seconds) between the client stops using the stream and the stream being closed. (Because the garbage collector clears unused objects not always immediately.)
+> That said, there is a short delay (typically a few seconds) between the client stops using the stream and the stream being closed. (Because the garbage collector doesn't always immediately clears unused objects.)
 
 For example:
 
@@ -170,9 +170,9 @@ function Clock() {
 }
 ```
 
-Returning `clear` is optional and the stream will still automatically close after React unmounts the component: the garbage collector clears the stream object and then the stream closes.
+It's optional: if you don't return `clear`, the stream will still automatically close itself after React unmounts the component: the garbage collector clears the stream object and then the stream closes itself.
 
-That said, if you want the stream to close as soon as possible, then return `clear` to manually close the stream.
+That said, if you want the stream to close as soon as possible, then make sure to manually close the stream – return `clear` in this example.
 
 ### How to close
 
