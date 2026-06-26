@@ -1,6 +1,6 @@
 // Static docs quality gate — runs without building or starting a server.
 //
-// Checks, across docs/pages/**/+Page.mdx:
+// Checks, across docs/pages/**/+Page.mdx and docs/components/**/*.mdx:
 //   1. Anchor integrity — every internal `#anchor` link resolves to a real heading.
 //   2. Link convention — internal links use <Link>, not bare markdown links.
 //
@@ -10,7 +10,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const pagesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'pages')
+const docsDir = path.dirname(fileURLToPath(import.meta.url))
+const pagesDir = path.join(docsDir, 'pages')
+const componentsDir = path.join(docsDir, 'components')
 
 // Exact replica of docpress's heading-id algorithm.
 // Source: node_modules/@brillout/docpress/dist/utils/determineSectionUrlHash.js
@@ -33,17 +35,17 @@ function headingText(raw) {
     .trim()
 }
 
-function walk(dir) {
+function walk(dir, match) {
   const out = []
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name)
-    if (entry.isDirectory()) out.push(...walk(full))
-    else if (entry.name === '+Page.mdx') out.push(full)
+    if (entry.isDirectory()) out.push(...walk(full, match))
+    else if (match(entry.name)) out.push(full)
   }
   return out
 }
 
-const files = walk(pagesDir)
+const files = walk(pagesDir, (name) => name === '+Page.mdx')
 
 // url ("/channel", "/warning/non-function-export") -> { slugs, file, src }
 const pages = {}
@@ -67,16 +69,33 @@ for (const file of files) {
 
 const errors = []
 
+// Reusable components (docs/components/**/*.mdx) get embedded into pages, so the same
+// link convention applies. They have no URL of their own, so page-relative `#anchor`
+// links can't be resolved and are skipped — only explicit cross-page anchors are checked.
+const components = walk(componentsDir, (name) => name.endsWith('.mdx')).map((file) => ({
+  url: null,
+  rel: path.relative(docsDir, file),
+  src: fs.readFileSync(file, 'utf8'),
+}))
+
+const linkSources = [
+  ...Object.entries(pages).map(([url, page]) => ({
+    url,
+    rel: path.relative(pagesDir, page.file),
+    src: page.src,
+  })),
+  ...components,
+]
+
 // Strip fenced code blocks and code spans so links inside examples aren't checked.
 function stripCode(src) {
   return src.replace(/```[\s\S]*?```/g, '').replace(/`[^`]*`/g, '')
 }
 
-for (const [url, page] of Object.entries(pages)) {
-  const rel = path.relative(pagesDir, page.file)
-  const prose = stripCode(page.src)
+for (const { url, rel, src } of linkSources) {
+  const prose = stripCode(src)
 
-  const hrefs = [...page.src.matchAll(/href="([^"]+)"/g)].map((m) => m[1])
+  const hrefs = [...src.matchAll(/href="([^"]+)"/g)].map((m) => m[1])
   const mdLinks = [...prose.matchAll(/\]\((\/[^)\s]*|#[^)\s]*)\)/g)].map((m) => m[1])
 
   // Anchor integrity: every internal `#anchor` link resolves to a real heading.
@@ -85,6 +104,8 @@ for (const [url, page] of Object.entries(pages)) {
     if (/^https?:/.test(href)) continue
     const [rawPath, anchor] = href.split('#')
     if (!anchor) continue
+    // A page-relative anchor in a URL-less component can't be resolved — skip it.
+    if (rawPath === '' && url === null) continue
     const targetUrl = rawPath === '' ? url : rawPath.replace(/\/$/, '')
     const target = pages[targetUrl]
     if (!target) {
@@ -100,7 +121,7 @@ for (const [url, page] of Object.entries(pages)) {
   }
 }
 
-const linkCount = Object.values(pages).reduce((n, p) => n + [...p.src.matchAll(/href="[^"]*#/g)].length, 0)
+const linkCount = linkSources.reduce((n, s) => n + [...s.src.matchAll(/href="[^"]*#/g)].length, 0)
 
 if (errors.length) {
   console.error(`\n✗ docs quality gate: ${errors.length} issue(s)\n`)
@@ -108,4 +129,6 @@ if (errors.length) {
   console.error('')
   process.exit(1)
 }
-console.log(`✓ docs quality gate: ${files.length} pages, ${linkCount} internal anchor links — all resolve.`)
+console.log(
+  `✓ docs quality gate: ${files.length} pages, ${components.length} components, ${linkCount} internal anchor links — all resolve.`,
+)

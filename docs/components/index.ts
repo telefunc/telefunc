@@ -1,7 +1,7 @@
 export * from './MostlyMutations'
 export { default as ConfigWhereClient } from './ConfigWhereClient.mdx'
 export { default as ConfigWhereServer } from './ConfigWhereServer.mdx'
-export { default as TelefuncStreamBeta } from './TelefuncStreamBeta.mdx'
+export * from './TelefuncStreamBeta'
 export { default as NeedsLongRunningServer } from './NeedsLongRunningServer.mdx'
 export * from './Example'
 export * from './ReadingRecommendation'
