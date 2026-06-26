@@ -24,20 +24,9 @@ Without sticky sessions, a reconnect that lands on a different instance sees no 
 
 A <Link text="broadcast" href="/channel#broadcast" /> is different: publishers and subscribers are intentionally decoupled — they only share a string key. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publish on instance A reach a subscriber on instance B.
 
-In a single-instance setup the default in-memory transport is enough. In a multi-instance setup, configure a transport that fans out across the cluster:
+In a single-instance setup the default in-memory transport is enough. In a multi-instance setup, install a transport that fans out across the cluster — such as <Link text={<code>@telefunc/redis</code>} href="/redis" />. See its <Link text="setup" href="/redis#setup" /> for the few lines of configuration.
 
-```ts
-// server.ts
-// Environment: server
-
-import IORedis from 'ioredis'
-import { installRedis } from '@telefunc/redis'
-
-const redis = new IORedis(process.env.REDIS_URL)
-installRedis(redis)
-```
-
-See <Link href="/redis" /> for details. Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small (about four methods), so you can write a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker.
+Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small (about four methods), so you can write a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker.
 
 
 ## Load balancer setup
