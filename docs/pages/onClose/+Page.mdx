@@ -25,7 +25,7 @@ You can close Telefunc streams via `close()` and other methods, see:
 
 On the server-side, you can listen when a <Link href="/stream">Telefunc stream</Link> closes for:
 - Releasing resources
-- Cancel in-flight work
+- Cancelling in-flight work
 
 | API | Side | Fires when|
 |---|---|---|
@@ -35,7 +35,7 @@ On the server-side, you can listen when a <Link href="/stream">Telefunc stream</
 
 > The listeners are fired regardless of the closing reason — whether all streams finished, the client stops using the streams, the client manually closed, the client disconnected, or an error occurred.
 
-> Every stream eventually ends: at latest when the client disconnects (e.g the user navigates away from your website), but usually sooner when the client stops using the stream, the client manually closes the stream, the network connection is permanently lost (the network connection couldn't be recovered), or an error occurred.
+> Every stream eventually ends: at latest when the client disconnects (e.g. the user navigates away from your website), but usually sooner when the client stops using the stream, the client manually closes the stream, the network connection is permanently lost (the network connection couldn't be recovered), or an error occurred.
 
 
 ### `onClose()`
@@ -118,7 +118,7 @@ A stream automatically closes itself when the client stops using it.
 
 You therefore usually don't have to manually close streams yourself.
 
-> That said, there is a short delay (typically a few seconds) between the client stops using the stream and the stream being closed. (Because the garbage collector doesn't always immediately clears unused objects.)
+> That said, there is a short delay (typically a few seconds) between when the client stops using the stream and when the stream is closed. (Because the garbage collector doesn't always immediately clear unused objects.)
 
 For example:
 
