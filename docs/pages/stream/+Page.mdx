@@ -408,7 +408,7 @@ export async function onInit(onTick: (n: number) => void) {
 Any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call — **make sure you always clear resources when the stream closes**.
 </Warning>
 
-You can also use a `signal` (`AbortSignal) and `channel.onClose()` for listening when a stream closes, see:
+You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to listen for when a stream closes, see:
 - <Link href="/onClose#listening" />
 
 > A stream automatically closes when the client stops using it — you usually don't have to manually close streams, see:
