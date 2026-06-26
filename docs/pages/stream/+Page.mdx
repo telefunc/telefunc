@@ -24,7 +24,7 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 }
 ```
 
-<Link href="#function-passing" text={<><code>function</code> passing (callbacks)</>} />:
+<Link href="#callback" text={<>Callback (<code>function</code> passing)</>} />:
 ```ts
 // Notifications.telefunc.ts
 // Environment: server
@@ -37,7 +37,7 @@ export async function onSubscribe(onNotification: (text: string) => void) {
 }
 ```
 
-<Link href="#concurrent-promise" text={<>Concurrent <code>Promise</code></>} />:
+<Link href="#multiple-promise" text={<>Multiple <code>Promise</code></>} />:
 ```ts ts-only
 // Dashboard.telefunc.ts
 // Environment: server
@@ -138,8 +138,7 @@ for await (const n of onCountdown(3)) {
 ```
 
 
-{/* TODO/ai rename to `## Primitive: Callback (`function` passing) {#callback}` */}
-## Primitive: `function` passing (callbacks) {#function-passing}
+## Primitive: Callback (`function` passing) {#callback}
 
 Telefunc can pass functions between client and server:
 
@@ -170,8 +169,7 @@ await onUpload(file, (percent) => setProgress(percent))
 If you only need callback-style interaction, function passing is simpler than a channel.
 
 
-{/* TODO/ai rename to `## Primitive: Multiple `Promise` {#multiple-promise}` */}
-## Primitive: Concurrent `Promise` {#concurrent-promise}
+## Primitive: Multiple `Promise` {#multiple-promise}
 
 Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
 
@@ -418,7 +416,7 @@ You can also use a `signal` (`AbortSignal) and `channel.onClose()` for listening
 
 ## Authorization
 
-A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link text="getContext()" href="/getContext" /> and `throw Abort()` **at open time**, before you stream anything back. Here the client passes a <Link text="callback" href="#function-passing" /> and the server calls it:
+A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link text="getContext()" href="/getContext" /> and `throw Abort()` **at open time**, before you stream anything back. Here the client passes a <Link text="callback" href="#callback" /> and the server calls it:
 
 ```ts
 // TeamFeed.telefunc.ts
