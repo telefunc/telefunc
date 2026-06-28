@@ -3,7 +3,7 @@ import { TelefuncStreamBeta } from '../../../components'
 
 <TelefuncStreamBeta />
 
-If you use <Link href="/stream">Telefunc's streaming capabilities</Link>, scaling Telefunc horizontally (multiple Node instances, multiple containers, multiple machines) adds two requirements:
+If you use <Link href="/stream">Telefunc Stream</Link>, scaling Telefunc horizontally (multiple Node instances, multiple containers, multiple machines) adds two requirements:
 
 - **Sticky sessions** (so a reconnecting client returns to the instance holding its channel) — your load balancer must route every request from a given client to the same instance.
 - **Cross-instance broadcast transport** (broadcast publishes must fan out across instances) — install one like <Link href="/redis">`@telefunc/redis`</Link>.
