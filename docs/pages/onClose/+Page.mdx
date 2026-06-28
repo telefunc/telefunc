@@ -26,6 +26,8 @@ You can listen when <Link href="/stream">Telefunc streams</Link> close to:
 
 ## `context.onClose()`
 
+**Environment**: server.
+
 The `onClose()` hook (defined on <Link href="/getContext">`context`</Link>) is called when *all* the streams opened by a telefunction call close.
 
 > To listen for a single channel to close, use <Link href="#channel-onclose" /> instead.
@@ -71,6 +73,8 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 
 ## `channel.onClose()`
 
+**Environment**: server & client.
+
 The `onClose()` hook defined on a `new Channel()` instance is called when that channel closes.
 
 > To listen for all streams to close, use <Link href="#context-onclose" /> instead.
@@ -88,8 +92,12 @@ channel.onClose((err) => {
 })
 ```
 
+> The `channel.onClose()` hook can be used on the server- and client-side.
+
 
 ## `context.signal`
+
+**Environment**: server.
 
 The <Link href="/getContext">`context` object</Link> includes a `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)) that aborts when the telefunction call closes.
 

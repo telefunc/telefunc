@@ -453,9 +453,26 @@ await onTeamFeed('acme', (text) => showMessage(text))
 
 ## Error handling
 
-The expected-vs-bug distinction described at <Link href="/error-handling" /> applies to streams too:
-- `throw Abort()` during a stream is relayed <Link href="/error-handling#expected-errors">as an expected error</Link>
-- Any other thrown error is treated <Link href="/error-handling#bugs">as a bug</Link>
+**Environment**: server & client.
+
+```ts
+channel.onClose((err) => {
+  if (!err) {
+    // Graceful close — `close()` completed, channel done
+  } else if (err instanceof Abort) {
+    // Either side called abort(value)
+    console.log(err.abortValue)
+  } else if (err instanceof NetworkError) {
+    // Connection lost (couldn't reconnect)
+  }
+})
+```
+
+> The expected-vs-bug distinction described at <Link href="/error-handling" /> applies to streams too:
+> - `throw Abort()` during a stream is relayed <Link href="/error-handling#expected-errors">as an expected error</Link>
+> - Any other thrown error is treated <Link href="/error-handling#bugs">as a bug</Link>
+
+> The `channel.onClose()` hook can be used on the server- and client-side.
 
 See also:
 - <Link href="/error-handling" />
