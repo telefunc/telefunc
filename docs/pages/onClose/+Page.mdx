@@ -4,13 +4,12 @@ import { Link, Warning } from '@brillout/docpress'
 
 You can listen when <Link href="/stream">Telefunc streams</Link> close to:
 - <Link href="/stream#cleanup">Clear resources</Link>
+  <Warning>
+  Make sure you **always clear long-lived resources** (`setInterval`, an event subscription, a DB cursor, an upstream stream, ...).
+  </Warning>
 - <Link href="/stream#error-handling">Handle errors</Link>
 - Cancel in-flight work
 
-<Warning>
-Make sure you **always clear long-lived resources** (`setInterval`, an event subscription, a DB cursor, an upstream stream), as explained at:
-- <Link href="/stream#cleanup" />
-</Warning>
 
 | API | Side | Fires when|
 |---|---|---|
@@ -22,14 +21,14 @@ Make sure you **always clear long-lived resources** (`setInterval`, an event sub
 
 > Every stream eventually ends: at latest when the client disconnects (e.g. the user navigates away from your website), but usually sooner when the client stops using the stream, the client manually closes the stream, the network connection is permanently lost (the network connection couldn't be recovered), or an error occurred.
 
-> To close streams, see:
-> - <Link href="/close" />
+> To close streams, see: <Link href="/close" />.
 
 
 ## `context.onClose()`
 
-The <Link href="/getContext">`context` object</Link> includes `onClose()`:
-The `onClose()` hook (defined on <Link href="/getContext">`context`</Link>) is called when all the streams opened by a telefunction call close.
+The `onClose()` hook (defined on <Link href="/getContext">`context`</Link>) is called when *all* the streams opened by a telefunction call close.
+
+> To listen for a single channel to close, use <Link href="#channel-onclose" /> instead.
 
 ```ts
 // AiChat.telefunc.ts
@@ -69,7 +68,26 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 }
 ```
 
+
 ## `channel.onClose()`
+
+The `onClose()` hook defined on a `new Channel()` instance is called when that channel closes.
+
+> To listen for all streams to close, use <Link href="#context-onclose" /> instead.
+
+```ts
+channel.onClose((err) => {
+  if (!err) {
+    // Graceful close — `close()` completed, channel done
+  } else if (err instanceof Abort) {
+    // Either side called abort(value)
+    console.log(err.abortValue)
+  } else if (err instanceof NetworkError) {
+    // Connection lost beyond reconnectTimeout
+  }
+})
+```
+
 
 ## `context.signal`
 
@@ -95,7 +113,6 @@ export async function onLoad() {
   return response.json()
 }
 ```
-
 
 
 ## See also

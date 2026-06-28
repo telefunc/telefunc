@@ -2,13 +2,15 @@ import { Link, Warning } from '@brillout/docpress'
 
 **Environment**: client.
 
-Manually close a <Link href="/stream">Telefunc stream</Link>.
+Manually close <Link href="/stream">Telefunc streams</Link>.
 
-You usually don't need to close streams manually, see:
-- <Link href="#when-to-close" />
-
-The `close()` function is one way amongst other to manually close, see:
+The `close()` function is one way amongst other to manually close streams, see:
 - <Link href="#how-to-close" />
+
+> You usually don't need to manually close streams yourself, see: <Link href="#when-to-close" />.
+
+> For listing to streams closing, see: <Link href="/onClose" />.
+
 
 ## When to close
 
@@ -85,8 +87,8 @@ There's one catch-all API, `close()`, plus several per-type APIs.
 | `close(value)` | client | Graceful | Everything in the returned value (walked recursively) |
 | `gen.return()` / `break` | client | Graceful | One `AsyncGenerator` |
 | `reader.cancel()` | client | Graceful | One `ReadableStream` |
-| <Link text={<code>channel.close()</code>} href="/channel#lifecycle" /> | client & server | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
-| <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
+| <Link text={<code>channel.close()</code>} href="/close" /> | client & server | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
+| <Link text={<code>channel.abort(value?)</code>} href="/close" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
 | `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
 | <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
 
@@ -96,7 +98,7 @@ There's one catch-all API, `close()`, plus several per-type APIs.
 
 ## `close()`
 
-`close()` from `telefunc/client` gracefully closes all streams. In one call, it closes every stream the telefunction call opened.
+Gracefully closes *all* streams: in one call, it closes every stream the telefunction call opened.
 
 ```ts
 // Environment: client
@@ -115,7 +117,7 @@ close(result)
 
 ## `abort()`
 
-To stop a call **immediately** instead of gracefully, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
+To stop a call **immediately** instead of gracefully, use `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
 
 ```ts
 // Environment: client
@@ -128,3 +130,9 @@ abort(call) // cancels the in-flight call
 
 To abort via an `AbortSignal` instead, use <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" />.
 
+
+## See also
+
+- <Link href="/onClose" />
+- <Link href="/stream" />
+- <Link href="/channel" />
