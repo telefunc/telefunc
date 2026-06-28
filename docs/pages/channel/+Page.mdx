@@ -357,10 +357,6 @@ You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Br
 ## Lifecycle
 
 ```ts
-chat.onOpen(() => {
-  // Connection established — safe to send
-})
-
 chat.onClose((err) => {
   if (!err) {
     // Graceful close — `close()` completed, channel done
