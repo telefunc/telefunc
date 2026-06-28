@@ -321,6 +321,11 @@ const headings = [
     sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
   },
   {
+    level: 2,
+    title: '`close()`',
+    url: '/close',
+  },
+  {
     level: 4,
     title: 'Plugins',
   },

@@ -1,0 +1,122 @@
+import { Link, Warning } from '@brillout/docpress'
+
+**Environment**: client.
+
+## When to close
+
+A stream automatically closes itself when the client stops using it.
+
+> **How does it work?** When a `stream` object becomes unreachable (the client drops all references to it), the browser's garbage collector clears `stream` and, when this happens, Telefunc automatically closes the stream.
+
+You therefore usually don't have to manually close streams yourself.
+
+> That said, there is a short delay (typically a few seconds) between when the client stops using the stream and when the stream is closed. (Because the garbage collector doesn't always immediately clear unused objects.)
+
+For example:
+
+```tsx
+// Chat.tsx
+// Environment: client
+
+import { useEffect, useState } from 'react'
+import { onChat } from './Chat.telefunc'
+
+function Chat() {
+  const [messages, setMessages] = useState<string[]>([])
+
+  useEffect(() => {
+    const open = onChat() // Promise<{ channel }>
+    open.then(({ channel }) => {
+      channel.listen((msg) => setMessages((prev) => [...prev, msg]))
+    })
+    // Optional:
+    const clear = () => open.then(({ channel }) => channel.close())
+    return clear
+  }, [])
+
+  return <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
+}
+```
+
+```tsx
+// Clock.tsx
+// Environment: client
+
+import { useEffect, useState } from 'react'
+import { onClock } from './Clock.telefunc'
+
+function Clock() {
+  const [n, setN] = useState(0)
+
+  useEffect(() => {
+    const clock = onClock() // long-lived AsyncGenerator
+    ;(async () => {
+      for await (const tick of clock) setN(tick)
+    })()
+    // Optional:
+    const clear = () => void clock.return() // a running loop won't stop on its own
+    return clear
+  }, [])
+
+  return <p>{n}</p>
+}
+```
+
+It's optional: if you don't return `clear`, the stream will still automatically close itself after React unmounts the component: the garbage collector clears the stream object and then the stream closes itself.
+
+That said, if you want the stream to close as soon as possible, then make sure to manually close the stream – return `clear` in this example.
+
+## How to close
+
+From the client, you can manually close a stream early with <Link text={<code>close()</code>} href="/onClose" /> — or simply stop reading: `break` out of a `for await`, `reader.cancel()` a `ReadableStream`, or `channel.close()` a channel.
+
+There's one catch-all API, `close()`, plus several per-type APIs.
+
+| API | Side | Graceful / immediate | Closes |
+|---|---|---|---|
+| `close(value)` | client | Graceful | Everything in the returned value (walked recursively) |
+| `gen.return()` / `break` | client | Graceful | One `AsyncGenerator` |
+| `reader.cancel()` | client | Graceful | One `ReadableStream` |
+| <Link text={<code>channel.close()</code>} href="/channel#lifecycle" /> | client & server | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
+| <Link text={<code>channel.abort(value?)</code>} href="/channel#lifecycle" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
+| `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
+| <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
+
+**Graceful**: flush buffered data, then close.  
+**Immediate**: cancel in-flight work.  
+
+
+## `close()`
+
+`close()` from `telefunc/client` gracefully closes all streams. In one call, it closes every stream the telefunction call opened.
+
+```ts
+// Environment: client
+
+import { close } from 'telefunc/client'
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const result = await onLoadDashboard()
+
+// Read what you need...
+const { value } = await result.stream.next()
+
+// Then close everything at once
+close(result)
+```
+
+## `abort()`
+
+To stop a call **immediately** instead of gracefully, pass the pending call to `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
+
+```ts
+// Environment: client
+
+import { abort } from 'telefunc/client'
+
+const call = onLoadDashboard()
+abort(call) // cancels the in-flight call
+```
+
+To abort via an `AbortSignal` instead, use <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" />.
+
