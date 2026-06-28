@@ -2,44 +2,36 @@ import { Link, Warning } from '@brillout/docpress'
 
 **Environment**: server & client.
 
-The `onClose()` hook (defined on <Link href="/getContext">`context`</Link>) is called when all the streams opened by a telefunction call close.
-
-It's usually used to clear resources.
+You can listen when <Link href="/stream">Telefunc streams</Link> close to:
+- <Link href="/stream#cleanup">Clear resources</Link>
+- <Link href="/stream#error-handling">Handle errors</Link>
+- Cancel in-flight work
 
 <Warning>
 Make sure you **always clear long-lived resources** (`setInterval`, an event subscription, a DB cursor, an upstream stream), as explained at:
 - <Link href="/stream#cleanup" />
 </Warning>
 
-You can use `onClose()`, an abort `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)), and more methods, see:
-- <Link href="#listening" />
-
-You can close Telefunc streams via `close()` and other methods, see:
-- <Link href="/close" />
-
-
-## Listening
-
-**Environment**: server.
-
-On the server-side, you can listen when a <Link href="/stream">Telefunc stream</Link> closes for:
-- Releasing resources
-- Cancelling in-flight work
+Methods to listen:
 
 | API | Side | Fires when|
 |---|---|---|
-| `context.onClose(cb)` | server | *all* stream closes |
-| `context.signal` | server | *all* stream closes |
-| <Link text={<code>channel.onClose(cb)</code>} href="/channel#lifecycle" /> | client & server | *the one* `channel` closes |
+| <Link href="#context-onclose" >`context.onClose(cb)`</Link> | server | *all* stream closes |
+| <Link href="#channel-onclose">`channel.onClose(cb)`</Link> | client & server | *the one* `channel` closes |
+| <Link href="#context-signal" >`context.signal` (`AbortSignal`)</Link> | server | *all* stream closes |
 
 > The listeners are fired regardless of the closing reason — whether all streams finished, the client stops using the streams, the client manually closed, the client disconnected, or an error occurred.
 
 > Every stream eventually ends: at latest when the client disconnects (e.g. the user navigates away from your website), but usually sooner when the client stops using the stream, the client manually closes the stream, the network connection is permanently lost (the network connection couldn't be recovered), or an error occurred.
 
+> To close streams, see:
+> - <Link href="/close" />
 
-## `onClose()`
+
+## `context.onClose()`
 
 The <Link href="/getContext">`context` object</Link> includes `onClose()`:
+The `onClose()` hook (defined on <Link href="/getContext">`context`</Link>) is called when all the streams opened by a telefunction call close.
 
 ```ts
 // AiChat.telefunc.ts
@@ -79,9 +71,11 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 }
 ```
 
-## `signal`
+## `channel.onClose()`
 
-The <Link href="/getContext">`context` object</Link> includes a `signal` (`AbortSignal`) that aborts when the telefunction call closes.
+## `context.signal`
+
+The <Link href="/getContext">`context` object</Link> includes a `signal` ([`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal)) that aborts when the telefunction call closes.
 
 > The `signal` fires at the same time as `onClose()`.
 
