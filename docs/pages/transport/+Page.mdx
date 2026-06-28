@@ -12,7 +12,7 @@ Telefunc has two transport settings:
 | `config.stream.transport` | How <Link href="/stream">streamed values</Link> (`AsyncGenerator`, `ReadableStream`, `Promise`) are delivered |
 | `config.channel.transports` | How <Link text={<code>new Channel()</code>} href="/channel" /> and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" /> connections work |
 
-Plain telefunction calls are always `text/plain` JSON — these settings only affect streaming and channels.
+Plain telefunction calls are always `text/plain` JSON — these settings only affect <Link href="/stream">streams</Link>.
 
 ```ts
 // Environment: client
