@@ -246,6 +246,7 @@ const headings = [
     level: 2,
     title: '`onClose()`',
     url: '/onClose',
+    sectionTitles: ['`context.onClose()`', '`channel.onClose()`', '`context.signal`'],
   },
   {
     level: 4,
