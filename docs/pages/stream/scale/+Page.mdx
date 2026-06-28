@@ -59,7 +59,7 @@ Serverless platforms that don't expose sticky-session routing aren't a good fit 
 
 
 
-## Broadcast across instances
+## Broadcast
 
 <Link href="/channel#broadcast">`Broadcast`</Link> is different: publishers and subscribers are intentionally decoupled — they only share a string key. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publisher on instance A reach a subscriber on instance B.
 
@@ -67,16 +67,36 @@ In a single-instance setup the default in-memory transport is enough. In a multi
 
 > Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small (about four methods), so you can write a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker.
 
+> For Cloudflare Workers, Telefunc has an apadter that uses Durable Objects — see <Link href="/stream/cloudflare" />.
+
+### `BroadcastTransport`
+
+For other backends (NATS, Kafka, …), implement `BroadcastTransport` and assign it to `config.broadcast.transport`. Telefunc wraps it with subscriber multiplexing and same-node delivery, so each `key` only opens one upstream subscription no matter how many local subscribers attach.
+
+```ts
+type BroadcastTransport = {
+  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
+}
+```
+
+`send` / `sendBinary` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen` / `listenBinary` return an unsubscribe function and are called at most once per key.
+
+> On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/stream/cloudflare" />.
 
 ## Cloudflare
 
-Cloudflare Workers are the exception among serverless platforms: `telefunc/cloudflare` routes channels through Durable Objects instead of sticky sessions, and fans out broadcasts across regions automatically. As a result, neither a sticky load balancer nor a broadcast transport is needed. You scale with the `scale` option instead of a load balancer.
+[Cloudflare Workers](https://www.cloudflare.com/products/workers/) is fundamentally different: `telefunc/cloudflare` routes channels through [Durable Objects](https://developers.cloudflare.com/durable-objects/) instead of sticky sessions, and fans out broadcasts across regions automatically. As a result, neither a sticky load balancer nor a broadcast transport is needed. See:
+- <Link href="/stream/cloudflare" />
 
-See <Link href="/stream/cloudflare#scaling" text="Cloudflare scaling" />.
+> You scale with <Link href="/stream/cloudflare#scaling">the `scale` option</Link> instead of a load balancer.
 
 
 ## See also
 
+- <Link href="/stream" />
 - <Link href="/redis" />
 - <Link href="/stream/cloudflare" />
-- <Link href="/channel" />
+- <Link href="/channel#broadcast" />
