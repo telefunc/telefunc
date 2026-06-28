@@ -224,7 +224,9 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
-> In-memory broadcast works out-of-the-box for single-server deployments. For multi-server, set `config.broadcast.transport` — see <Link text="Multi-server" href="#multi-server" />. On Cloudflare Workers, Telefunc uses Durable Objects automatically — see <Link href="/stream/cloudflare" />.
+> By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
+>
+> For <Link href="/stream/scale">scaling horizontally</Link>, you must configure `Broadcast` to publish across all server instances — see <Link href="/stream/scale#broadcast" />
 
 
 ## `new BroadcastChannel()`
@@ -349,31 +351,7 @@ You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Br
 | Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
-| Multi-server | <Link text="Sticky sessions" href="/stream/scale" /> | <Link text="Broadcast transport" href="#multi-server" /> |
-
-
-## Multi-server
-
-By default, broadcast is in-memory — messages only reach subscribers on the same server. To broadcast across multiple servers, configure a transport on `config.broadcast.transport`.
-
-For Redis-backed multi-server routing and broadcast fan-out, see <Link href="/redis" text={<code>@telefunc/redis</code>} />.
-
-### Custom transport
-
-For other backends (NATS, Kafka, …), implement `BroadcastTransport` and assign it to `config.broadcast.transport`. Telefunc wraps it with subscriber multiplexing and same-node delivery, so each `key` only opens one upstream subscription no matter how many local subscribers attach.
-
-```ts
-type BroadcastTransport = {
-  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
-  sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
-  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
-}
-```
-
-`send` / `sendBinary` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen` / `listenBinary` return an unsubscribe function and are called at most once per key.
-
-> On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/stream/cloudflare" />.
+| Multi-server | <Link text="Sticky sessions" href="/stream/scale#sticky-sessions" /> | <Link text="Broadcast transport" href="/stream/scale#broadcast" /> |
 
 
 ## Lifecycle

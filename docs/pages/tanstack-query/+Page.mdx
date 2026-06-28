@@ -140,8 +140,6 @@ Invalidation is prefix-based: invalidating `['global:documents']` matches `['glo
 3. Mutations work the same way — the telefunction runs first, then global keys from `meta.invalidates` are published through <Link text={<code>Broadcast</code>} href="/channel#broadcast" />.
 4. Every connected client with a matching subscription calls `invalidateQueries()`.
 
-> Invalidation works across multiple servers via a <Link text="broadcast transport" href="/channel#multi-server" /> such as <Link href="/redis" text={<code>@telefunc/redis</code>} />.
-
 
 ## See also
 
