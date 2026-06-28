@@ -3,8 +3,6 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-> This is the **server-side** `config.channel` — reconnect/idle timeouts and buffer limits. It's a separate object from the **client-side** <Link text={<code>config.channel.transports</code>} href="/transport#channel-transport" /> (`telefunc/client`). The assignment below sets every server-side field at once and doesn't touch the client transports.
-
 ```ts
 // Environment: server
 
@@ -25,6 +23,8 @@ config.channel = {
   bufferLimitBinary: 2_097_152,         // Per-peer buffer for binary messages (bytes)
 }
 ```
+
+> This is the **server-side** `config.channel` — reconnect/idle timeouts and buffer limits. It's a separate object from the **client-side** <Link text={<code>config.channel.transports</code>} href="/transport#channel-transport" /> (`telefunc/client`). The assignment below sets every server-side field at once and doesn't touch the client transports.
 
 > **What to tune**: the defaults suit typical chat/dashboard traffic; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
