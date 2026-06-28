@@ -354,17 +354,6 @@ You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Br
 | Multi-server | <Link text="Sticky sessions" href="/stream/scale#sticky-sessions" /> | <Link text="Broadcast transport" href="/stream/scale#broadcast" /> |
 
 
-## Reconnection
-
-If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
-
-- Messages sent while offline are buffered and delivered in order on reconnect.
-- Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed.
-- `onOpen()` fires only on initial open, `onClose()` only on permanent close.
-
-> Reconnection is automatic — you don't need to handle it in your application code.
-
-
 ## Error handling
 
 **Channels and broadcasts** signal failure through four errors:
@@ -408,6 +397,17 @@ config.channel = {
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
 > - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit` / `bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
 > - Want reconnects to replay more history → raise the replay buffers; lower them to cap memory.
+
+
+## Reconnection
+
+If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
+
+- Messages sent while offline are buffered and delivered in order on reconnect.
+- Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed.
+- `onOpen()` fires only on initial open, `onClose()` only on permanent close.
+
+> Reconnection is automatic — you don't need to handle it in your application code.
 
 
 ## See also
