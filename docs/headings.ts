@@ -274,6 +274,11 @@ const headings = [
   },
   {
     level: 2,
+    title: '`channel`',
+    url: '/channel-config',
+  },
+  {
+    level: 2,
     title: '`fetch`',
     url: '/fetch',
   },
