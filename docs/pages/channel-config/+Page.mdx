@@ -1,6 +1,8 @@
 import { Link } from '@brillout/docpress'
 import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 
+**Environment**: server.
+
 <TelefuncStreamBeta />
 
 ```ts
@@ -9,14 +11,16 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 import { config } from 'telefunc'
 
 config.channel = {
-  reconnectTimeout: 60_000,        // Hold channels open after disconnect (ms)
-  idleTimeout: 60_000,             // Keep connection alive after last channel closes (ms)
-  pingInterval: 5_000,             // Client ping interval (ms)
-  connectTtl: 5_000,               // Wait for client to connect to new channel (ms)
+  reconnectTimeout: 60_000,             // Hold channels open after disconnect (ms)
+  idleTimeout: 60_000,                  // Keep connection alive after last channel closes (ms)
+  pingInterval: 5_000,                  // Client ping interval (ms)
+  connectTtl: 5_000,                    // Wait for client to connect to new channel (ms)
+
   // Text buffers
-  serverReplayBuffer: 262_144,     // Server replay buffer for text frames (bytes)
-  clientReplayBuffer: 1_048_576,   // Client replay buffer for text frames (bytes)
-  bufferLimit: 524_288,            // Per-peer buffer for text messages (bytes)
+  serverReplayBuffer: 262_144,          // Server replay buffer for text frames (bytes)
+  clientReplayBuffer: 1_048_576,        // Client replay buffer for text frames (bytes)
+  bufferLimit: 524_288,                 // Per-peer buffer for text messages (bytes)
+
   // Binary buffers — separate budget so binary can never evict text
   serverReplayBufferBinary: 2_097_152,  // Server replay buffer for binary frames (bytes)
   clientReplayBufferBinary: 2_097_152,  // Client replay buffer for binary frames (bytes)
@@ -24,11 +28,11 @@ config.channel = {
 }
 ```
 
-> This is the **server-side** `config.channel` — reconnect/idle timeouts and buffer limits. It's a separate object from the **client-side** <Link text={<code>config.channel.transports</code>} href="/transport#channel-transport" /> (`telefunc/client`). The assignment below sets every server-side field at once and doesn't touch the client transports.
+> This is the **server-side** `config.channel` — a separate object from the **client-side** <Link text={<code>config.channel.transports</code>} href="/transport#channel-transport" /> (imported from `telefunc/client`).
 
-> **What to tune**: the defaults suit typical chat/dashboard traffic; tune these only if you run into one of the issues below:
+> **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
-> - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit` / `bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
+> - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit`/`bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
 > - Want reconnects to replay more history → raise the replay buffers; lower them to cap memory.
 
 <ConfigWhereServer />
