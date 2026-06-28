@@ -358,7 +358,7 @@ You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Br
 | Multi-server | <Link text="Sticky sessions" href="/stream/scale#sticky-sessions" /> | <Link text="Broadcast transport" href="/stream/scale#broadcast" /> |
 
 
-## Error handling
+## Errors
 
 **Channels and broadcasts** signal failure through four errors:
 
@@ -370,6 +370,10 @@ You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Br
 | `ChannelOverflowError` | A buffered send was dropped — the buffer exceeded `config.channel.bufferLimit` | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
 
 > A graceful `close()` is not an error (`onClose(err)` receives `undefined`).
+
+See also:
+- <Link href="/stream#error-handling" />
+- <Link href="/error-handling" />
 
 
 ## Reconnection
