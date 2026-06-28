@@ -320,7 +320,7 @@ broadcast.subscribe((n) => showToast(n))
 | `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
 | `onOpen(cb)` / `onClose(cb)` | Lifecycle callbacks. |
 | `close()` | Close gracefully. |
-| `abort(value?)` | Terminate immediately. |
+| `abort(abortValue?)` | Terminate immediately. |
 
 > The instance is bound to its `key`, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#broadcast" /> / `Broadcast.subscribe(key, cb)` take it first — and have no `onOpen` / `onClose` / `close` / `abort`, since there's no instance to manage.
 
@@ -352,30 +352,6 @@ You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Br
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
 | Multi-server | <Link text="Sticky sessions" href="/stream/scale#sticky-sessions" /> | <Link text="Broadcast transport" href="/stream/scale#broadcast" /> |
-
-
-## Lifecycle
-
-```ts
-chat.onClose((err) => {
-  if (!err) {
-    // Graceful close — `close()` completed, channel done
-  } else if (err instanceof Abort) {
-    // Either side called abort(value)
-    console.log(err.abortValue)
-  } else if (err instanceof NetworkError) {
-    // Connection lost beyond reconnectTimeout
-  }
-})
-
-// Clean close from either side
-await chat.close()
-
-// Immediate termination with abort value
-chat.abort({ reason: 'session-expired' })
-```
-
-> After `close()` or `abort()`, calling `send()` throws `ChannelClosedError` synchronously.
 
 
 ## Reconnection
