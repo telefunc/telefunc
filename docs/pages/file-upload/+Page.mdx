@@ -170,7 +170,7 @@ To release resources:
 import { getContext } from 'telefunc'
 import fs from 'node:fs'
 
-export async function onUpload(file: File) => void) {
+export async function onUpload(file: File) {
   const context = getContext()
   const dest = fs.createWriteStream(`./uploads/${file.name}`)
 
