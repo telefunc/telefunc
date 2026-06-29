@@ -93,7 +93,7 @@ An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/R
 - Search results streaming in as they're found
 - Rows of a large SQL query, streamed to the UI
 
-> It's a good fit because a generator **closes itself when it completes**. Other streaming primitives don't have such completion signal.
+> It's a good fit because a generator closes itself when it completes.
 
 #### Example: countdown
 
@@ -261,9 +261,11 @@ const report = await res.report
 
 ## Primitive: `ReadableStream` {#readable-stream}
 
-Stream raw bytes with a web-standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
+Stream raw bytes with a standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
 
-**Server → client** — return a `ReadableStream`:
+#### Server → client
+
+Return a `ReadableStream`:
 
 ```ts
 // Download.telefunc.ts
@@ -277,7 +279,7 @@ export function onDownload(fileName: string): ReadableStream<Uint8Array> {
 }
 ```
 
-> For named files with `name` / `type` / `size` metadata, return a <Link text={<code>File</code>} href="/file-download" /> or <Link text={<code>Blob</code>} href="/file-download" /> instead.
+> You can also return a <Link text={<code>File</code>} href="/file-download" /> or <Link text={<code>Blob</code>} href="/file-download" /> instead.
 
 ```ts
 // Download.tsx
@@ -294,7 +296,9 @@ while (true) {
 }
 ```
 
-**Client → server** — pass a `ReadableStream` as an argument to stream bytes to the server:
+#### Client → server
+
+Pass a `ReadableStream` as a telefunction argument:
 
 ```ts
 // Ingest.telefunc.ts
