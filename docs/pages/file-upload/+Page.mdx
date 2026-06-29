@@ -3,21 +3,9 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Pass `File` or `Blob` arguments to a telefunction like any other value. A single file, multiple files, `File[]` arrays, or files mixed with other arguments — all are supported.
+You can pass [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) and [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) arguments to a telefunction like any other value.
 
-> When a call contains files, Telefunc automatically switches from JSON to a binary format that streams file bytes without buffering.
-
-
-## Choosing a method
-
-Passing a `File` / `Blob` argument is one of several ways to move binary data with Telefunc:
-
-| Method | Backpressure | Best for |
-|---|---|---|
-| `File` / `Blob` argument | TCP-level | Finite uploads — files, images, CSV imports |
-| <Link text={<code>ReadableStream</code>} href="/stream#readable-stream" /> argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
-| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | <Link text="Opt-in" href="/channel#backpressure" /> — `await` each send | Low-latency frames — skip the `await` for fire-and-forget |
-| <Link text={<code>new BroadcastChannel().publishBinary()</code>} href="/channel#new-broadcastchannel" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
+> A single file, multiple files, or files mixed with other arguments — all are supported.
 
 
 ## Example
@@ -66,9 +54,9 @@ function FileUpload() {
 ```
 
 
-## Upload with progress
+## Example: upload with progress
 
-Combine file upload with <Link href="/stream#callback">function passing</Link> to report progress while the server reads the stream.
+Combine file upload with a <Link href="/stream#callback">callback</Link> to report progress.
 
 ```ts
 // Upload.telefunc.ts
@@ -120,7 +108,17 @@ function Upload() {
 }
 ```
 
-The file bytes stream to disk while `onProgress()` reports progress to the client.
+
+## Choosing a method
+
+Passing a `File` / `Blob` argument is one of several ways to move binary data with Telefunc:
+
+| Method | Backpressure | Best for |
+|---|---|---|
+| `File` / `Blob` argument | TCP-level | Finite uploads — files, images, CSV imports |
+| <Link text={<code>ReadableStream</code>} href="/stream#readable-stream" /> argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
+| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | <Link text="Opt-in" href="/channel#backpressure" /> — `await` each send | Low-latency frames — skip the `await` for fire-and-forget |
+| <Link text={<code>new BroadcastChannel().publishBinary()</code>} href="/channel#new-broadcastchannel" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
 
 
 ## Reading strategies
@@ -184,6 +182,8 @@ Telefunc uses a custom binary protocol — no multipart/form-data, no internal b
 3. When your telefunction calls `file.stream()`, bytes are pulled directly from the HTTP stream on demand.
 
 File bytes only flow through memory when you read them — and if you stream to disk, memory consumption is constant regardless of file size.
+
+> When a call contains files, Telefunc automatically switches from JSON to a binary format that streams file bytes without buffering.
 
 
 ## See also

@@ -8,7 +8,7 @@ import { TelefuncStreamBeta, NeedsLongRunningServer } from '../../components'
 - Integrations
 - Seamless DX
 
-> With *stream*, we denote not only `ReadableStream` but, more broadly, any sequence of data made available over time. ([That's how Wikipedia defines *streams*](https://en.wikipedia.org/wiki/Stream_(computing)).)
+> The word *stream* denotes — broadly speaking and [as Wikipedia defines it](https://en.wikipedia.org/wiki/Stream_(computing)) — not only a `ReadableStream` but any sequence of data made available over time.
 
 #### Primitives
 
@@ -382,16 +382,19 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 }
 ```
 
+> The memory consumption is constant regardless of file size.
+
 > A spawned process outlives the call and keeps burning CPU if the client navigates away mid-encode — make sure to close it in `onClose()`, see <Link text="Cleanup" href="#cleanup" />.
 
 
 ## Primitive: `Channel` {#channel}
 
-For ongoing two-way and broadcast messaging, you can use <Link text={<code>new Channel()</code>} href="/channel#new-channel" />, <Link text={<code>Broadcast</code>} href="/channel#broadcast" />, and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" /> — for real-time use cases like chat rooms, live feeds, collaborative editing, and multiplayer games. See <Link href="/channel" /> for the full list and API.
+For ongoing two-way and/or broadcast messaging, you can use a channel, see:
+- <Link href="/channel" />
 
-<NeedsLongRunningServer />
+> This is the low-level primitive that powers Telefunc Stream.
 
-A channel stays open for the lifetime of the page — here the server pushes live metrics to the one client that opened it:
+> Instead of directly using channels, most users reach for high-level primitives (e.g. <Link href="#callback">callbacks</Link>) and high-level integrations (e.g. <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />).
 
 ```ts
 // Dashboard.telefunc.ts
@@ -400,7 +403,7 @@ A channel stays open for the lifetime of the page — here the server pushes liv
 import { Channel } from 'telefunc'
 
 export async function onDashboard() {
-  const dashboard = new Channel()
+  const dashboard = new Channel<never, Metrics>()
 
   const interval = setInterval(() => {
     dashboard.send(getMetrics())
@@ -408,7 +411,7 @@ export async function onDashboard() {
 
   dashboard.onClose(() => clearInterval(interval))
 
-  return { channel: dashboard.client }
+  return dashboard.client
 }
 ```
 
@@ -416,14 +419,9 @@ export async function onDashboard() {
 // Dashboard.tsx
 // Environment: client
 
-const { channel } = await onDashboard()
+const dashboard = await onDashboard()
 channel.listen((metrics) => updateCharts(metrics))
 ```
-
-> This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead.
-
-See:
-- <Link href="/channel" />
 
 
 ## Cleanup

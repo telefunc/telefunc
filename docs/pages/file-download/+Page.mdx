@@ -3,24 +3,11 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) from a telefunction like any other value. The client receives a standard `File` / `Blob` ready for `URL.createObjectURL`, `<img src>`, `fetch({ body })`, `FormData`, etc.
+You can return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) from a telefunction like any other value.
 
-> **Which API?**
-> - **Bytes already in memory** → return a native `File` / `Blob` (as above).
-> - **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <Link text={<code>download()</code>} href="#streaming-with-download" />. When the source is a stream, the full payload is never buffered on the server.
->
-> The tables below break down the memory trade-offs.
+> A single file, multiple files, or files mixed with other return values — all are supported.
 
-
-## Which one should I use?
-
-| Approach | Server memory | Client memory | Best for |
-|---|---|---|---|
-| Native `File` / `Blob` | Full payload | Full payload | Bytes already in memory |
-| `download(file)` / `download(blob)` | Full payload | Depends on consumer<sup>†</sup> | Same + progress / cancel / save-to-disk |
-| `download(stream, opts)` | Constant (chunk-sized) | Depends on consumer<sup>†</sup> | Bytes streamed from upstream (S3, CDN, …) |
-
-<sup>†</sup> Constant when consumed via `dl.stream()`, `dl.saveToOpfs()`, or `dl.saveToDisk()` (except its `'memory'` fallback); full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
+The client receives a standard `File` / `Blob` ready for `URL.createObjectURL`, `<img src>`, `fetch({ body })`, `FormData`, etc.
 
 
 ## Example
@@ -50,43 +37,7 @@ window.open(URL.createObjectURL(pdf))
 ```
 
 
-## Streaming with `download()`
-
-Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
-
-```ts
-// Image.telefunc.ts
-// Environment: server
-
-import { download } from 'telefunc'
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
-
-const s3 = new S3Client({})
-
-export async function onGetImage(key: string) {
-  const res = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: key }))
-  return download(res.Body!.transformToWebStream(), {
-    name: key,
-    size: res.ContentLength,
-    type: res.ContentType,
-  })
-}
-```
-
-```tsx
-// ImageView.tsx
-// Environment: client
-
-import { onGetImage } from './Image.telefunc'
-
-const dl = await onGetImage(s3Key)
-imgEl.src = URL.createObjectURL(await dl.saveToMemory())
-```
-
-> `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are available as soon as `await onGetImage(...)` settles — bytes stream in the background.
-
-
-## Progress + cancel
+## Example: progress + cancel
 
 ```tsx
 // Download.tsx
@@ -130,7 +81,99 @@ function Download({ s3Key }: { s3Key: string }) {
 Calling `dl.cancel()` aborts the stream — the pending `saveToMemory` call rejects with a "Stream cancelled" error.
 
 
+## Example: multiple concurrent downloads
+
+Return any number of `File`, `Blob`, or `download()` values anywhere in the response — in arrays, in nested objects, or mixed with regular data. Each one independently exposes its own `onProgress` / `cancel` / `saveTo*` methods on the client.
+
+```ts
+// Document.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+import { Readable } from 'node:stream'
+import { download } from 'telefunc'
+
+export async function onLoadDocuments(id: string) {
+  return {
+    title: 'My Document',
+    pdf: download(Readable.toWeb(fs.createReadStream(`./docs/${id}.pdf`)), {
+      name: 'doc.pdf',
+      type: 'application/pdf'
+    }),
+    thumbnail: new File([await fs.promises.readFile(`./docs/${id}-thumb.png`)], 'thumb.png', {
+      type: 'image/png',
+    }),
+  }
+}
+```
+
+```tsx
+// Document.tsx
+// Environment: client
+
+const { title, pdf, thumbnail } = await onLoadDocuments(id)
+
+pdfEl.src = URL.createObjectURL(await pdf.saveToMemory())
+thumbEl.src = URL.createObjectURL(thumbnail)
+```
+
+
+## Example: passthrough with `download()`
+
+Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
+
+```ts
+// Image.telefunc.ts
+// Environment: server
+
+import { download } from 'telefunc'
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
+
+const s3 = new S3Client({})
+
+export async function onGetImage(key: string) {
+  const res = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: key }))
+  return download(res.Body!.transformToWebStream(), {
+    name: key,
+    size: res.ContentLength,
+    type: res.ContentType,
+  })
+}
+```
+
+```tsx
+// ImageView.tsx
+// Environment: client
+
+import { onGetImage } from './Image.telefunc'
+
+const dl = await onGetImage(s3Key)
+imgEl.src = URL.createObjectURL(await dl.saveToMemory())
+```
+
+> `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are available as soon as `await onGetImage(...)` settles — bytes stream in the background.
+
+
+## Streaming strategies
+
+**Environment**: server.
+
+If:
+- **Bytes already in memory** → return a native `File` / `Blob`.
+- **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <code>download()</code>. When the source is a stream, the full payload is never buffered on the server.
+
+| Approach | Server memory | Client memory | Best for |
+|---|---|---|---|
+| Native `File` / `Blob` | Full payload | Full payload | Bytes already in memory |
+| `download(file)` / `download(blob)` | Full payload | Depends on consumer<sup>†</sup> | Same + progress / cancel / save-to-disk |
+| `download(stream, opts)` | Constant (chunk-sized) | Depends on consumer<sup>†</sup> | Bytes streamed from upstream (S3, CDN, …) |
+
+<sup>†</sup> Constant when consumed via `dl.stream()`, `dl.saveToOpfs()`, or `dl.saveToDisk()` (except its `'memory'` fallback); full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
+
+
 ## Reading strategies
+
+**Environment**: client.
 
 The streaming download is a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) object — `dl.stream()`, `dl.text()`, `dl.arrayBuffer()`, `dl.bytes()`, and `dl.slice()` all work and pull from the streaming source as you read:
 
@@ -176,41 +219,9 @@ imgEl.src = URL.createObjectURL(opfsFile)
 | `'opfs'` | Streams bytes through browser-private storage ([OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system)), then triggers a native browser download. For large files where in-memory buffering isn't viable. Cross-browser. |
 
 
-## Multiple / nested downloads
-
-Return any number of `File`, `Blob`, or `download()` values anywhere in the response — in arrays, in nested objects, or mixed with regular data. Each one independently exposes its own `onProgress` / `cancel` / `saveTo*` methods on the client.
-
-```ts
-// Document.telefunc.ts
-// Environment: server
-
-import fs from 'node:fs'
-import { Readable } from 'node:stream'
-import { download } from 'telefunc'
-
-export async function onLoadDocument(id: string) {
-  return {
-    title: 'My Document',
-    pdf: download(Readable.toWeb(fs.createReadStream(`./docs/${id}.pdf`)), { name: 'doc.pdf', type: 'application/pdf' }),
-    thumbnail: new File([await fs.promises.readFile(`./docs/${id}-thumb.png`)], 'thumb.png', {
-      type: 'image/png',
-    }),
-  }
-}
-```
-
-```tsx
-// Document.tsx
-// Environment: client
-
-const { title, pdf, thumbnail } = await onLoadDocument(id)
-
-pdfEl.src = URL.createObjectURL(await pdf.saveToMemory())
-thumbEl.src = URL.createObjectURL(thumbnail)
-```
-
-
 ## Limitations
+
+TODO/ai: add intro text like http://localhost:3000/file-upload#limitations — don't hallunicate but root your text in the actual code base
 
 ### One-shot reads
 
