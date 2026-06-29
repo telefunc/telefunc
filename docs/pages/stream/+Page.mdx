@@ -521,7 +521,20 @@ See also:
 
 ## Cancelling
 
-You can cancel a stream at anytime by <Link href="/close">manually closing it</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> to clear resources.
+You can cancel a stream at anytime by <Link href="/close">manually closing it</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> to clear resources (server-side).
+
+```tsx
+// Search.tsx
+// Environment: client
+
+const results = onSearch('computers')
+cancelButton.onclick = () => {
+  // Close it
+  results.return() // fires onClose() on the server
+}
+
+for await (const row of results) render(row)
+```
 
 ```ts
 // Search.telefunc.ts
@@ -530,9 +543,9 @@ You can cancel a stream at anytime by <Link href="/close">manually closing it</L
 import { getContext } from 'telefunc'
 
 export async function* onSearch(query: string) {
-  const { onClose } = getContext()
+  const context = getContext()
   const cursor = db.search(query)
-  onClose(() => {
+  context.onClose(() => {
     // Release the database cursor
     cursor.close()
   })
@@ -541,17 +554,6 @@ export async function* onSearch(query: string) {
 }
 ```
 
-```tsx
-// Search.tsx
-// Environment: client
-
-const results = onSearch('computers')
-cancelButton.onclick = () => {
-  results.return() // fires onClose() on the server
-}
-
-for await (const row of results) render(row)
-```
 
 
 ## Scaling
