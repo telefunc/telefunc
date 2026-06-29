@@ -141,43 +141,6 @@ Each file argument is a standard [`File`](https://developer.mozilla.org/en-US/do
 > For large files, always use `file.stream()` — memory stays constant regardless of file size.
 
 
-## Limitations
-
-File bytes flow directly from the HTTP stream to your code with zero internal buffering. This makes uploads memory-efficient — but there are two trade-offs:
-
-### One-shot reads
-
-Each file can only be read once — calling `.stream()`, `.text()`, or `.arrayBuffer()` a second time throws.
-
-> If you need the data more than once, buffer it into a variable first.
-
-### Read in order
-
-Multiple file arguments must be read in signature order:
-
-```js
-// ✅ Correct order
-await file1.text()
-await file2.text()
-
-// ❌ Out of order — file1 is discarded
-await file2.text()
-await file1.text()
-```
-
-> All files of a single call share one forward-only HTTP stream. Reading `file2` before `file1` would require buffering `file1` in memory.
-
-You can start reads concurrently — they stream in the correct order automatically:
-
-```js
-// ✅ Works — both start in parallel, streamed in order
-await Promise.all([
-  file1.stream().pipeTo(dest1),
-  file2.stream().pipeTo(dest2),
-])
-```
-
-
 ## Cancelling
 
 You can cancel a file upload at anytime with <Link href="/close">`close()`</Link> (client-side) — you can then use the <Link href="/onClose">`onClose()` hook</Link> (server-side) to clear resources — see <Link href="/stream#cleanup" />.
@@ -226,6 +189,43 @@ export async function onUpload(file: File) => void) {
 ## Error handling
 
 You handle errors the same way as you do for Telefunc streams: <Link href="/stream#error-handling" />.
+
+
+## Limitations
+
+File bytes flow directly from the HTTP stream to your code with zero internal buffering. This makes uploads memory-efficient — but there are two trade-offs:
+
+### One-shot reads
+
+Each file can only be read once — calling `.stream()`, `.text()`, or `.arrayBuffer()` a second time throws.
+
+> If you need the data more than once, buffer it into a variable first.
+
+### Read in order
+
+Multiple file arguments must be read in signature order:
+
+```js
+// ✅ Correct order
+await file1.text()
+await file2.text()
+
+// ❌ Out of order — file1 is discarded
+await file2.text()
+await file1.text()
+```
+
+> All files of a single call share one forward-only HTTP stream. Reading `file2` before `file1` would require buffering `file1` in memory.
+
+You can start reads concurrently — they stream in the correct order automatically:
+
+```js
+// ✅ Works — both start in parallel, streamed in order
+await Promise.all([
+  file1.stream().pipeTo(dest1),
+  file2.stream().pipeTo(dest2),
+])
+```
 
 
 ## How it works
