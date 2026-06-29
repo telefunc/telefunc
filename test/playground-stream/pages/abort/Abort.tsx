@@ -8,7 +8,7 @@ import {
   onUploadAbortSingle,
   onUploadAbortMultiple,
 } from './Abort.telefunc'
-import { Abort as TelefuncAbort, abort, withContext } from 'telefunc/client'
+import { Abort as TelefuncAbort, abort, close, withContext } from 'telefunc/client'
 
 function Abort() {
   const [hydrated, setHydrated] = useState(false)
@@ -228,6 +228,29 @@ function Abort() {
         }}
       >
         Upload abort (multiple files)
+      </button>
+
+      <button
+        id="test-upload-close-graceful"
+        onClick={async () => {
+          setResult('')
+          // 1MB file; server reads slowly (sleep(100) between reads). close() mid-upload
+          // gracefully cancels: the call resolves (to undefined) instead of throwing.
+          const content = 'x'.repeat(1_000_000)
+          const file = new File([content], 'close-test.txt', { type: 'text/plain' })
+          const promise = onUploadAbortSingle(file)
+          setTimeout(() => close(promise), 300)
+          try {
+            const res = await promise
+            setResult(JSON.stringify({ method: 'close(call)', resolved: true, result: res ?? null, error: null }))
+          } catch (e: any) {
+            setResult(
+              JSON.stringify({ method: 'close(call)', resolved: false, error: e.message, isAbort: e instanceof TelefuncAbort }),
+            )
+          }
+        }}
+      >
+        Upload close (graceful)
       </button>
     </div>
   )

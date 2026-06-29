@@ -72,12 +72,25 @@ function remoteTelefunctionCall(
   objectAssign(callContext, { abortController })
 
   const { httpRequestBody, requestCloseHandlers } = serializeTelefunctionArguments(callContext)
-  objectAssign(callContext, { httpRequestBody, requestCloseHandlers })
+  const closeState = { gracefullyClosed: false }
+  objectAssign(callContext, { httpRequestBody, requestCloseHandlers, closeState })
+
+  // Gracefully cancel an in-flight request-streaming call (e.g. a file upload): close any
+  // request-side streams, then abort the request. `closeState.gracefullyClosed` tells
+  // makeHttpRequest to settle the call without an error — cancelling is an expected path.
+  const gracefulClose = () => {
+    closeState.gracefullyClosed = true
+    for (const closeHandler of requestCloseHandlers) void closeHandler()
+    abortController.abort()
+  }
 
   const telefunctionReturnPromise = makeHttpRequest(callContext)
 
   setAbortController(telefunctionReturnPromise, abortController)
-  addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)
+  addAsyncGeneratorInterface(telefunctionReturnPromise, abortController, {
+    gracefulClose,
+    hasRequestStreams: requestCloseHandlers.length > 0,
+  })
 
   return telefunctionReturnPromise
 }

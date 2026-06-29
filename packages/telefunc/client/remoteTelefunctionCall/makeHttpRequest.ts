@@ -35,6 +35,7 @@ async function makeHttpRequest(callContext: {
   abortController: AbortController
   channel: { transports: ChannelTransports }
   requestCloseHandlers: CloseHandler[]
+  closeState: { gracefullyClosed: boolean }
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
   connectionKey?: string
   channelIdleTimeout?: number
@@ -63,6 +64,9 @@ async function makeHttpRequest(callContext: {
     })
   } catch (err) {
     if (callContext.abortController.signal.aborted) {
+      // Gracefully closed (e.g. the user cancelled an upload) — settle the call without
+      // an error: cancelling is an expected path, not a failure.
+      if (callContext.closeState.gracefullyClosed) return undefined
       throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
     }
     throw new ConnectionError()

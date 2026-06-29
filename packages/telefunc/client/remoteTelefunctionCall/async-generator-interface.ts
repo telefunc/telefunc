@@ -8,7 +8,11 @@ import { setCloseHandlers } from '../close.js'
 
 /** Augment a promise with the AsyncGenerator interface
  *  so `for await...of` works directly without an intermediate `await`. */
-function addAsyncGeneratorInterface(promise: Promise<unknown>, abortController: AbortController) {
+function addAsyncGeneratorInterface(
+  promise: Promise<unknown>,
+  abortController: AbortController,
+  closeOptions: { gracefulClose: () => void; hasRequestStreams: boolean },
+) {
   // Single execution path: resolves to the real generator once the HTTP response is parsed.
   const resolvedGen: Promise<AsyncGenerator<unknown>> = (async () => {
     const returnValue = await promise
@@ -16,6 +20,19 @@ function addAsyncGeneratorInterface(promise: Promise<unknown>, abortController: 
     setAbortController(returnValue, abortController)
     return returnValue
   })()
+
+  // Track call settlement so close() picks the right strategy. While a request-streaming
+  // call (e.g. a file upload) is still in flight, close() gracefully cancels it by aborting
+  // the request; once the call has resolved to a generator, close() ends it via g.return().
+  let settled = false
+  void promise.then(
+    () => {
+      settled = true
+    },
+    () => {
+      settled = true
+    },
+  )
 
   // Register close handler synchronously so close(promise) works immediately,
   // even before the HTTP response arrives. The handler delegates to the real
@@ -25,7 +42,11 @@ function addAsyncGeneratorInterface(promise: Promise<unknown>, abortController: 
   resolvedGen.catch(() => {})
   const closeHandlers = new WeakMap<object, () => void>()
   closeHandlers.set(promise as object, () => {
-    void resolvedGen.then((g) => g.return(undefined))
+    if (!settled && closeOptions.hasRequestStreams) {
+      closeOptions.gracefulClose()
+    } else {
+      void resolvedGen.then((g) => g.return(undefined))
+    }
   })
   setCloseHandlers(promise, closeHandlers)
 

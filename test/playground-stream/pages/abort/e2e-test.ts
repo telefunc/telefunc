@@ -160,6 +160,26 @@ function testAbort() {
     })
   })
 
+  // close() mid-upload gracefully cancels: the call resolves (to null) without throwing,
+  // and the server still fires onClose().
+  test('close: single file upload — graceful cancel, call resolves without error', async () => {
+    await navigate(`${getServerUrl()}/abort`)
+    await resetCleanupState()
+
+    await page.click('#test-upload-close-graceful')
+    await autoRetry(async () => {
+      const result = await getResult('#abort-result')
+      expect(result.method).toBe('close(call)')
+      expect(result.resolved).toBe(true)
+      expect(result.error).toBe(null)
+      expect(result.result).toBe(null)
+    })
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.uploadAbortSingle).toBe('cleaned-up')
+    })
+  })
+
   // Three 50MB files — file1 consumed fully, client aborts at 3s during
   // post-file1 sleep, file2+file3 error on disconnect
   test('abort: multiple file upload — file1 received, file2+file3 error on disconnect', async () => {
