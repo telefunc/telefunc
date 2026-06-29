@@ -120,17 +120,6 @@ thumbEl.src = URL.createObjectURL(thumbnail)
 ```
 
 
-## Choosing a method
-
-| Approach | Server memory | Client memory | Best for |
-|---|---|---|---|
-| Native `File` / `Blob` | Full payload | Full payload | Bytes already in memory |
-| `download(file)` / `download(blob)` | Full payload | Depends on consumer<sup>†</sup> | Same + progress / cancel / save-to-disk |
-| `download(stream, opts)` | Constant (chunk-sized) | Depends on consumer<sup>†</sup> | Bytes streamed from upstream (S3, CDN, …) |
-
-<sup>†</sup> Constant when consumed via `dl.stream()`, `dl.saveToOpfs()`, or `dl.saveToDisk()` (except its `'memory'` fallback); full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
-
-
 ## Passthrough with `download()`
 
 Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
@@ -165,6 +154,17 @@ imgEl.src = URL.createObjectURL(await dl.saveToMemory())
 ```
 
 > `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are available as soon as `await onGetImage(...)` settles — bytes stream in the background.
+
+
+## Choosing a method
+
+| Approach | Server memory | Client memory | Best for |
+|---|---|---|---|
+| Native `File` / `Blob` | Full payload | Full payload | Bytes already in memory |
+| `download(file)` / `download(blob)` | Full payload | Depends on consumer<sup>†</sup> | Same + progress / cancel / save-to-disk |
+| `download(stream, opts)` | Constant (chunk-sized) | Depends on consumer<sup>†</sup> | Bytes streamed from upstream (S3, CDN, …) |
+
+<sup>†</sup> Constant when consumed via `dl.stream()`, `dl.saveToOpfs()`, or `dl.saveToDisk()` (except its `'memory'` fallback); full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
 
 
 ## Reading strategies
