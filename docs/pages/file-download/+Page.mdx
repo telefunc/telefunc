@@ -236,40 +236,41 @@ The streaming download can only be consumed once — calling `.stream()`, `.byte
 
 ## Cancelling
 
-Stop a download early like any <Link text="stream" href="/stream#cancelling" /> — call `dl.cancel()` (or `reader.cancel()` on `dl.stream()`). Any pending read then rejects — see <Link text="Error handling" href="#error-handling" /> below.
+You can cancel a file download at any time — simply call `dl.cancel()` (or `reader.cancel()` on `dl.stream()`).
 
 ```tsx
-// Backup.tsx
+// Download.tsx
 // Environment: client
 
-const dl = await onDownloadBackup(dir)
-cancelButton.onclick = () => dl.cancel() // aborts the download mid-stream
+const dl = await onDownload(dir)
+cancelButton.onclick = () => dl.cancel() // Cancel the download mid-stream
 await dl.saveToDisk()
 ```
 
 On the server, use <Link text={<code>onClose()</code>} href="/onClose" /> to release resources your telefunction opened when the client cancels:
 
 ```ts
-// Backup.telefunc.ts
+// Download.telefunc.ts
 // Environment: server
 
 import { getContext, download } from 'telefunc'
 import { spawn } from 'node:child_process'
 import { Readable } from 'node:stream'
 
-export async function onDownloadBackup(dir: string) {
+export async function onDownload(dir: string) {
   const { onClose } = getContext()
   const zip = spawn('zip', ['-r', '-', dir]) // streams a .zip to stdout
-  onClose(() => zip.kill()) // client cancelled → kill zip, otherwise the process leaks
+  onClose(() => zip.kill()) // kill zip, otherwise the process leaks
 
   return download(Readable.toWeb(zip.stdout) as ReadableStream<Uint8Array>, {
-    name: 'backup.zip',
+    name: 'dir.zip',
     type: 'application/zip',
   })
 }
 ```
 
-> **You don't always need `onClose()`.** When the `download()` source is a plain stream — like the <Link text="S3 passthrough" href="#passthrough" /> above — Telefunc cancels it for you, aborting the upstream read.
+> **You don't always need `onClose()`.** When the `download()` source is a plain stream — like a <Link text="S3 passthrough" href="#passthrough" /> — the upstream read is automaticlaly cancelled.
+
 
 ## Error handling
 
