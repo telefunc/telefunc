@@ -456,41 +456,6 @@ You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to listen fo
 > - <Link href="/close" />
 
 
-## Cancelling
-
-You can cancel a stream at anytime by <Link href="/close">manually closing it</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> to clear resources.
-
-```ts
-// Search.telefunc.ts
-// Environment: server
-
-import { getContext } from 'telefunc'
-
-export async function* onSearch(query: string) {
-  const { onClose } = getContext()
-  const cursor = db.search(query)
-  onClose(() => {
-    // Release the database cursor
-    cursor.close()
-  })
-
-  for await (const row of cursor) yield row
-}
-```
-
-```tsx
-// Search.tsx
-// Environment: client
-
-const results = onSearch('computers')
-cancelButton.onclick = () => {
-  results.return() // fires onClose() on the server
-}
-
-for await (const row of results) render(row)
-```
-
-
 ## Authorization
 
 A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link text="getContext()" href="/getContext" /> and `throw Abort()` **at open time**, before you stream anything back. Here the client passes a <Link text="callback" href="#callback" /> and the server calls it:
@@ -552,6 +517,41 @@ channel.onClose((err) => {
 See also:
 - <Link href="/error-handling" />
 - <Link href="/channel#errors" />
+
+
+## Cancelling
+
+You can cancel a stream at anytime by <Link href="/close">manually closing it</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> to clear resources.
+
+```ts
+// Search.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+
+export async function* onSearch(query: string) {
+  const { onClose } = getContext()
+  const cursor = db.search(query)
+  onClose(() => {
+    // Release the database cursor
+    cursor.close()
+  })
+
+  for await (const row of cursor) yield row
+}
+```
+
+```tsx
+// Search.tsx
+// Environment: client
+
+const results = onSearch('computers')
+cancelButton.onclick = () => {
+  results.return() // fires onClose() on the server
+}
+
+for await (const row of results) render(row)
+```
 
 
 ## Scaling
