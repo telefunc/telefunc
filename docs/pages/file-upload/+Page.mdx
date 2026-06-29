@@ -7,8 +7,11 @@ You can pass [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) and
 
 > A single file, multiple files, or files mixed with other arguments — all are supported.
 
+> There are multiple streaming and reading strategies, see:
+> - <Link href="#streaming-strategies" />
+> - <Link href="#reading-strategies" />
 
-## Example
+## Example: basic
 
 ```ts
 // FileUpload.telefunc.ts
@@ -109,7 +112,9 @@ function Upload() {
 ```
 
 
-## Choosing a method
+## Streaming strategies
+
+**Environment**: client.
 
 Passing a `File` / `Blob` argument is one of several ways to move binary data with Telefunc:
 
@@ -122,6 +127,8 @@ Passing a `File` / `Blob` argument is one of several ways to move binary data wi
 
 
 ## Reading strategies
+
+**Environment**: server.
 
 Each file argument is a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) object:
 
@@ -190,5 +197,3 @@ File bytes only flow through memory when you read them — and if you stream to 
 
 - <Link href="/file-download" />
 - <Link href="/stream" />
-- <Link href="/channel" />
-- <Link href="/transport" />
