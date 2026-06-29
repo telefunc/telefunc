@@ -190,10 +190,39 @@ import { close } from 'telefunc/client'
 import { onUpload } from './Upload.telefunc'
 
 const call = onUpload(file, onProgress)
-cancelButton.onclick = () => close(call) // stops the upload mid-stream
+cancelButton.onclick = () => close(call) // gracefully cancels the upload
 ```
 
-// TODO/ai: show server-side
+On the server, use the <Link text={<code>onClose()</code>} href="/onClose" /> hook to release resources when the upload is cancelled:
+
+```ts
+// Upload.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+import fs from 'node:fs'
+
+export async function onUpload(file: File, onProgress: (percent: number) => void) {
+  const { onClose } = getContext()
+  const dest = fs.createWriteStream(`./uploads/${file.name}`)
+
+  // Upload cancelled → close the file and discard the partial write
+  onClose(() => {
+    dest.destroy()
+    fs.rm(`./uploads/${file.name}`, { force: true }, () => {})
+  })
+
+  let loaded = 0
+  for await (const chunk of file.stream()) {
+    dest.write(chunk)
+    loaded += chunk.byteLength
+    onProgress(Math.round((loaded / file.size) * 100))
+  }
+  dest.end()
+}
+```
+
+> **Cancelling is an expected path, not an error** — Telefunc fires `onClose()` and never treats the client going away as a bug. You only need `onClose()` to release a resource that won't free itself (a write stream, a temp file, a DB transaction). If you `pipeTo` a destination (`file.stream().pipeTo(dest)`), it's aborted for you when the upload is cancelled — no cleanup needed.
 
 
 ## Error handling
