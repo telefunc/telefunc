@@ -170,10 +170,10 @@ for await (const message of gen) {
 
 ## Primitive: Callback (`function` passing) {#callback}
 
-Telefunc can pass functions between client and server:
+You can pass functions between client and server:
 
-- **Client → server**: pass a callback as an argument — the server can call it.
-- **Server → client**: return a function from a telefunction — call it later from the client.
+- **Client → server**: pass a callback as a telefunction argument — the server calls it.
+- **Server → client**: return a function from a telefunction — the client calls it.
 
 ```ts
 // Upload.telefunc.ts
@@ -222,6 +222,8 @@ export async function onLoadDashboard() {
 }
 ```
 
+> Like the other streaming primitives, you can use <Link href="/onClose">`onClose()`</Link> and <Link href="/close">`close`</Link> to eagerly cancel `fetchExtensiveReport()`
+
 ```tsx ts-only
 // Dashboard.tsx
 // Environment: client
@@ -235,6 +237,7 @@ console.log(res.title)             // Available right away
 const summary = await res.summary  // Await when needed
 const report = await res.report
 ```
+
 
 > **Don't `await` inside the telefunction** — that blocks the entire response:
 > ```ts
