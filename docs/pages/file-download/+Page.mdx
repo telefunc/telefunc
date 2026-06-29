@@ -246,25 +246,11 @@ cancelButton.onclick = () => dl.cancel() // aborts the download mid-stream
 const file = await dl.saveToMemory()
 ```
 
-> See <Link href="/stream#cancelling" /> for all the ways to stop a stream.
-
+// TODO/ai: show server-side
 
 ## Error handling
 
-Same as any <Link text="stream" href="/stream#error-handling" />: the read rejects on failure (connection lost, source error, or cancel), and the expected-vs-bug distinction from <Link href="/error-handling" /> applies.
-
-```tsx
-// Environment: client
-
-const dl = await onGetImage(s3Key)
-try {
-  await dl.saveToDisk()
-} catch (err) {
-  // Connection lost, upstream errored, or the download was cancelled
-}
-```
-
-> See <Link href="/stream#error-handling" /> and <Link href="/error-handling" />.
+You handle errors the same way you do for Telefunc streams: <Link href="/stream#error-handling" />.
 
 
 ## See also
