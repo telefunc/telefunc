@@ -146,6 +146,10 @@ Each file argument is a standard [`File`](https://developer.mozilla.org/en-US/do
 You handle errors the same way as you do for Telefunc streams: <Link href="/stream#error-handling" />.
 
 
+{/*
+TO-DO/eventually: resurrect this section once we implemented graceful cancelation
+https://github.com/telefunc/telefunc/pull/406#issuecomment-4836969446
+
 ## Cancelling
 
 You can cancel a file upload at anytime with <Link href="/close">`close()`</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> (server-side) to clear resources.
@@ -189,6 +193,8 @@ export async function onUpload(file: File) => void) {
 ```
 
 > You only need `onClose()` to release a resource that won't free itself (a write stream, a temp file, a DB transaction). If you `pipeTo` a destination (`file.stream().pipeTo(dest)`), it's automatically cancelled — no cleanup needed.
+
+*/}
 
 
 ## Limitations
