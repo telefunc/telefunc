@@ -387,8 +387,12 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 
 ## Primitive: `Channel` {#channel}
 
-For ongoing two-way and broadcast messaging, you can use a channel, see:
+For ongoing two-way and/or broadcast messaging, you can use a channel, see:
 - <Link href="/channel" />
+
+> This is the low-level primitive that powers Telefunc Stream.
+
+> Instead of directly using channels, most users reach for high-level primitives (e.g. <Link href="#callback">callbacks</Link>) and high-level integrations (e.g. <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />).
 
 ```ts
 // Dashboard.telefunc.ts
@@ -397,7 +401,7 @@ For ongoing two-way and broadcast messaging, you can use a channel, see:
 import { Channel } from 'telefunc'
 
 export async function onDashboard() {
-  const dashboard = new Channel()
+  const dashboard = new Channel<never, Metrics>()
 
   const interval = setInterval(() => {
     dashboard.send(getMetrics())
@@ -405,7 +409,7 @@ export async function onDashboard() {
 
   dashboard.onClose(() => clearInterval(interval))
 
-  return { channel: dashboard.client }
+  return dashboard.client
 }
 ```
 
@@ -413,11 +417,9 @@ export async function onDashboard() {
 // Dashboard.tsx
 // Environment: client
 
-const { channel } = await onDashboard()
+const dashboard = await onDashboard()
 channel.listen((metrics) => updateCharts(metrics))
 ```
-
-> This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead.
 
 
 ## Cleanup
