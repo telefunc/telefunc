@@ -180,7 +180,7 @@ await Promise.all([
 
 ## Cancelling
 
-To save resources, you can cancel a file upload at anytime by <Link href="/close">manually closing it</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> to clear resources — see <Link href="/stream#cleanup" />.
+You can cancel a file upload at anytime with <Link href="/close">`close()`</Link> (client-side) — you can then use the <Link href="/onClose">`onClose()` hook</Link> (server-side) to clear resources — see <Link href="/stream#cleanup" />.
 
 ```tsx
 // Upload.tsx
@@ -189,11 +189,11 @@ To save resources, you can cancel a file upload at anytime by <Link href="/close
 import { close } from 'telefunc/client'
 import { onUpload } from './Upload.telefunc'
 
-const call = onUpload(file, onProgress)
-cancelButton.onclick = () => close(call) // gracefully cancels the upload
+const call = onUpload(file)
+cancelButton.onclick = () => close(call) // cancel the upload
 ```
 
-On the server, use the <Link text={<code>onClose()</code>} href="/onClose" /> hook to release resources when the upload is cancelled:
+To release resources:
 
 ```ts
 // Upload.telefunc.ts
@@ -202,27 +202,25 @@ On the server, use the <Link text={<code>onClose()</code>} href="/onClose" /> ho
 import { getContext } from 'telefunc'
 import fs from 'node:fs'
 
-export async function onUpload(file: File, onProgress: (percent: number) => void) {
+export async function onUpload(file: File) => void) {
   const { onClose } = getContext()
   const dest = fs.createWriteStream(`./uploads/${file.name}`)
 
-  // Upload cancelled → close the file and discard the partial write
   onClose(() => {
+    // Close the file
     dest.destroy()
+    // Discard the partial write
     fs.rm(`./uploads/${file.name}`, { force: true }, () => {})
   })
 
-  let loaded = 0
   for await (const chunk of file.stream()) {
     dest.write(chunk)
-    loaded += chunk.byteLength
-    onProgress(Math.round((loaded / file.size) * 100))
   }
   dest.end()
 }
 ```
 
-> **Cancelling is an expected path, not an error** — Telefunc fires `onClose()` and never treats the client going away as a bug. You only need `onClose()` to release a resource that won't free itself (a write stream, a temp file, a DB transaction). If you `pipeTo` a destination (`file.stream().pipeTo(dest)`), it's aborted for you when the upload is cancelled — no cleanup needed.
+> You only need `onClose()` to release a resource that won't free itself (a write stream, a temp file, a DB transaction). If you `pipeTo` a destination (`file.stream().pipeTo(dest)`), it's automatically cancelled — no cleanup needed.
 
 
 ## Error handling

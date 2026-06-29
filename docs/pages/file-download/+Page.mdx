@@ -247,6 +247,8 @@ cancelButton.onclick = () => dl.cancel() // Cancel the download mid-stream
 await dl.saveToDisk()
 ```
 
+TODO/ai: add note for native `File`/`Blob` use case.
+
 On the server, use <Link text={<code>onClose()</code>} href="/onClose" /> to release resources your telefunction opened when the client cancels:
 
 ```ts
