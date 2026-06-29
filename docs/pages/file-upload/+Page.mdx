@@ -141,6 +141,11 @@ Each file argument is a standard [`File`](https://developer.mozilla.org/en-US/do
 > For large files, always use `file.stream()` — memory stays constant regardless of file size.
 
 
+## Error handling
+
+You handle errors the same way as you do for Telefunc streams: <Link href="/stream#error-handling" />.
+
+
 ## Cancelling
 
 You can cancel a file upload at anytime with <Link href="/close">`close()`</Link> (client-side) — you can then use the <Link href="/onClose">`onClose()` hook</Link> (server-side) to clear resources — see <Link href="/stream#cleanup" />.
@@ -184,11 +189,6 @@ export async function onUpload(file: File) => void) {
 ```
 
 > You only need `onClose()` to release a resource that won't free itself (a write stream, a temp file, a DB transaction). If you `pipeTo` a destination (`file.stream().pipeTo(dest)`), it's automatically cancelled — no cleanup needed.
-
-
-## Error handling
-
-You handle errors the same way as you do for Telefunc streams: <Link href="/stream#error-handling" />.
 
 
 ## Limitations
