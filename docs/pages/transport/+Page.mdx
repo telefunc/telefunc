@@ -5,14 +5,14 @@ import { ConfigWhereClient, TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Telefunc has two transport settings:
+Telefunc has two transport settings to control how messages are delivered:
 
 | Setting | Controls |
 |---|---|
-| `config.stream.transport` | How <Link href="/stream">streamed values</Link> (`AsyncGenerator`, `ReadableStream`, `Promise`) are delivered |
-| `config.channel.transports` | How <Link text={<code>new Channel()</code>} href="/channel" /> and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" /> connections work |
+| `config.stream.transport` | <Link href="/stream">Streaming values</Link> (`AsyncGenerator`, `ReadableStream`, `Promise`) |
+| `config.channel.transports` | <Link text={<code>new Channel()</code>} href="/channel" /> (callbacks, <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />) |
 
-Plain telefunction calls are always `text/plain` JSON — these settings only affect <Link href="/stream">streams</Link>.
+These settings only affect <Link href="/stream">streams</Link> — plain telefunction calls are always `text/plain` JSON.
 
 ```ts
 // Environment: client

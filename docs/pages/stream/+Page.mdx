@@ -86,14 +86,16 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 
 ## Primitive: `AsyncGenerator` (`function*`) {#async-generator}
 
-An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) — a good fit for **short-lived streaming**: a *finite* sequence of values that arrive one at a time and then completes. Examples:
+An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) ([`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator)) is a good fit for **short-lived streaming**: a *finite* sequence of values that arrive one at a time and then completes. Examples:
 
 - AI answer stream
 - Progress updates for a long-running task (e.g. upload)
 - Search results streaming in as they're found
 - Rows of a large SQL query, streamed to the UI
 
-> It's a good fit because a generator **closes itself when it completes**. Other streaming primitives don't have such completion signal.
+> It's a good fit because a generator closes itself when it completes. (Other streaming primitives like <Link href="#callback">callbacks</Link> don't have such completion signal.)
+>
+> You can also use it for any other use cases such as never-ending streams if you want — the only deciding factor is DX. (Telefunc picks a different default <Link href="/transport">transport</Link> but you change it.)
 
 #### Example: countdown
 
@@ -170,10 +172,10 @@ for await (const message of gen) {
 
 ## Primitive: Callback (`function` passing) {#callback}
 
-Telefunc can pass functions between client and server:
+You can pass functions between client and server:
 
-- **Client → server**: pass a callback as an argument — the server can call it.
-- **Server → client**: return a function from a telefunction — call it later from the client.
+- **Client → server**: pass a callback as a telefunction argument — the server calls it.
+- **Server → client**: return a function from a telefunction — the client calls it.
 
 ```ts
 // Upload.telefunc.ts
@@ -196,12 +198,16 @@ export async function onUpload(file: File, onProgress: (percent: number) => void
 await onUpload(file, (percent) => setProgress(percent))
 ```
 
-Under the hood, a passed function **is** a <Link text={<code>Channel</code>} href="#channel" /> — Telefunc opens one for you, sending each call as a message and the return value back as the reply. So a callback has the same lifecycle as a channel, just exposed as an ordinary callable. Reach for a raw `Channel` only when you need more than call-and-return: repeated two-way messaging, broadcast, or binary.
+> The underlying stream automatically closes itself when the client stops using (i.e. referencing) `onProgress`, but you can also manually close eagerly, see <Link href="/close" />.
+
+> Under the hood, a passed function is just a <Link text={<code>Channel</code>} href="#channel" />. A callback has the same lifecycle as a channel, just exposed with a nice JavaScript DX.
+>
+> Reach for a raw `Channel` if you need more than call-and-return — e.g. two-way messaging, broadcast, or binary.
 
 
 ## Primitive: Multiple `Promise` {#multiple-promise}
 
-Put promises inside the response object **without awaiting them**. The client receives the rest of the object immediately, and each promise resolves on its own.
+If you return promises **without awaiting them**, the client receives the rest of the object immediately, and each promise resolves on its own.
 
 ```ts
 // Dashboard.telefunc.ts
@@ -222,6 +228,8 @@ export async function onLoadDashboard() {
 }
 ```
 
+> Like other streaming primitives, you can use <Link href="/onClose">`onClose()`</Link> and <Link href="/close">`close`</Link> to eagerly cancel `fetchExtensiveReport()`
+
 ```tsx ts-only
 // Dashboard.tsx
 // Environment: client
@@ -235,6 +243,7 @@ console.log(res.title)             // Available right away
 const summary = await res.summary  // Await when needed
 const report = await res.report
 ```
+
 
 > **Don't `await` inside the telefunction** — that blocks the entire response:
 > ```ts
@@ -258,9 +267,11 @@ const report = await res.report
 
 ## Primitive: `ReadableStream` {#readable-stream}
 
-Stream raw bytes with a web-standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
+Stream raw bytes with a standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
 
-**Server → client** — return a `ReadableStream`:
+#### Server → client
+
+Return a `ReadableStream`:
 
 ```ts
 // Download.telefunc.ts
@@ -274,7 +285,7 @@ export function onDownload(fileName: string): ReadableStream<Uint8Array> {
 }
 ```
 
-> For named files with `name` / `type` / `size` metadata, return a <Link text={<code>File</code>} href="/file-download" /> or <Link text={<code>Blob</code>} href="/file-download" /> instead.
+> You can also return a <Link text={<code>File</code>} href="/file-download" /> or <Link text={<code>Blob</code>} href="/file-download" /> instead.
 
 ```ts
 // Download.tsx
@@ -291,7 +302,9 @@ while (true) {
 }
 ```
 
-**Client → server** — pass a `ReadableStream` as an argument to stream bytes to the server:
+#### Client → server
+
+Pass a `ReadableStream` as a telefunction argument:
 
 ```ts
 // Ingest.telefunc.ts
@@ -433,7 +446,7 @@ export async function onInit(onTick: (n: number) => void) {
 }
 ```
 <Warning>
-Any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call — **make sure you always clear resources when the stream closes**.
+Any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call — **make sure to always clear resources when the stream closes**.
 </Warning>
 
 You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to listen for when a stream closes, see:

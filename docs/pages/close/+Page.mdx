@@ -4,8 +4,7 @@ import { Link, Warning } from '@brillout/docpress'
 
 Manually close <Link href="/stream">Telefunc streams</Link>.
 
-The `close()` function is one way amongst other to manually close streams, see:
-- <Link href="#how-to-close" />
+The `close()` function is one way amongst other to manually close streams, see: <Link href="#how-to-close" />.
 
 > You usually don't need to manually close streams yourself, see: <Link href="#when-to-close" />.
 
@@ -16,11 +15,11 @@ The `close()` function is one way amongst other to manually close streams, see:
 
 A stream automatically closes itself when the client stops using it.
 
-> **How does it work?** When a `stream` object becomes unreachable (the client drops all references to it), the browser's garbage collector clears `stream` and, when this happens, Telefunc automatically closes the stream.
+> **How does it work?** When a `stream` object becomes unreachable (the client drops all references to it), the browser's garbage collector clears the stream object and the stream automatically closes itself.
 
 You therefore usually don't have to manually close streams yourself.
 
-> That said, there is a short delay (typically a few seconds) between when the client stops using the stream and when the stream is closed. (Because the garbage collector doesn't always immediately clear unused objects.)
+> That said, there is a short delay (typically a few seconds) between when the client stops using the stream and when the stream is closed. (The garbage collector doesn't always immediately clear unused objects.)
 
 For example:
 
