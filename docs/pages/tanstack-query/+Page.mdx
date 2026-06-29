@@ -44,16 +44,16 @@ function App() {
 Keys prefixed with `global:` invalidate through the server — every connected client with a matching query refetches. All other keys invalidate locally (current tab only).
 
 ```tsx
-queryKey: ['todos']                              // local — current tab only
-queryKey: ['global:todos', `user:${userId}`]     // global — all clients with a matching query refetch
-queryKey: ['global:documents', docId]            // global
+queryKey: ['todos']                          // local — current tab only
+queryKey: ['global:todos', `user:${userId}`] // global — all clients with a matching query refetch
+queryKey: ['global:documents', docId]        // global
 ```
 
-> A key is global when its *first* element is a string starting with `global:` — e.g. `['global:todos']` is global, while `['todos', 'global:x']` is local (its first element doesn't start with `global:`).
+> A key is global when its *first* element is a string starting with `global:` — e.g. ``['global:todos', `user:${userId}`]{:js}`` is global, while `['todos', 'global:x']{:js}` is local (its first element doesn't start with `global:`).
 
 > Global keys are carried by Telefunc calls, so two rules apply:
 >
-> - **`queryFn` must call a telefunction.** The invalidation subscription piggybacks on that call. With a non-telefunc `queryFn` (e.g. plain `fetch()`), a global key silently behaves like a local one. The same goes for mutations: global keys in `meta.invalidates` are published server-side after the telefunction succeeds — so `mutationFn` must be a telefunction call too.
+> - **`queryFn` must call a telefunction.** With a non-telefunc `queryFn` (e.g. plain `fetch()`), a global key silently behaves like a local one. The same goes for mutations: global keys in `meta.invalidates` are published server-side after the telefunction succeeds — so `mutationFn` must be a telefunction call too.
 > - **Return the telefunction call directly.** The integration reads the invalidation subscription from whatever `queryFn` returns, so transform the result with `select` instead of inside `queryFn`:
 >   ```js
 >   // ✗ Broken: inside queryFn, getTodos() resolves to an internal wrapper
