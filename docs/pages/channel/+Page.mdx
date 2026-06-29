@@ -7,16 +7,17 @@ import { TelefuncStreamBeta, NeedsLongRunningServer } from '../../components'
 
 The following low-level **primitives** enable all kinds of stream use cases.
 
-{/* TODO/ai: add links */}
-{/* TODO/ai: dedupe this list and the note with the one at /stream */}
-- **`new Channel()`** — direct messages between one server and one client.
-- **`Broadcast`** — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
-- **`new broadcastchannel()`** — broadcast also on the client-side.
+- <Link text={<code>new Channel()</code>} href="#new-channel" /> — direct messages between one server and one client.
+- <Link text={<code>Broadcast</code>} href="#broadcast" /> — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
+- <Link text={<code>new BroadcastChannel()</code>} href="#new-broadcastchannel" /> — broadcast also on the client-side.
 
-> You can use them for both one-way (aka streaming) and two-way streams (aka real-time).
+> You can use them for both one-way (aka streaming) and two-way streams (aka real-time):
 > - Chat rooms
-> - Live feeds (e.g. live sports events)
-> - TODO/ai: find more example
+> - Live feeds (sports scores, stock tickers)
+> - Collaborative editing (presence & cursors)
+> - Multiplayer games
+> - Live dashboards & metrics
+> - Notifications & activity feeds
 
 `new Channel()` and `new BroadcastChannel()` are returned from a telefunction — they serialize into client-side objects automatically. `Broadcast` is a server-side API, so there's nothing to return.
 
