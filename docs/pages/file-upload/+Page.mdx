@@ -178,6 +178,41 @@ await Promise.all([
 ```
 
 
+## Cancelling
+
+An upload is a regular telefunction call, so you cancel it like any <Link text="stream" href="/stream#cancelling" />: `abort()` the in-flight call from `telefunc/client`.
+
+```tsx
+// Environment: client
+
+import { abort } from 'telefunc/client'
+import { onUpload } from './Upload.telefunc'
+
+const call = onUpload(file, onProgress)
+cancelButton.onclick = () => abort(call) // stops the upload mid-stream
+await call
+```
+
+> See <Link href="/stream#cancelling" /> for all the ways to stop a stream.
+
+
+## Error handling
+
+Same as any <Link text="stream" href="/stream#error-handling" />: the call rejects on failure, and the expected-vs-bug distinction from <Link href="/error-handling" /> applies — `throw Abort()` is relayed as an expected error, any other thrown error is treated as a bug.
+
+```tsx
+// Environment: client
+
+try {
+  await onUpload(file, onProgress)
+} catch (err) {
+  // Connection lost, server threw, or the call was aborted
+}
+```
+
+> See <Link href="/stream#error-handling" /> and <Link href="/error-handling" />.
+
+
 ## How it works
 
 > You can skip this section — read it only if you're curious.

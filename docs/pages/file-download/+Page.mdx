@@ -234,6 +234,39 @@ The streaming download can only be consumed once — calling `.stream()`, `.byte
 > If you need the data more than once, materialize it once via `dl.saveToMemory()` (or `saveToOpfs()` for large files) and reuse the returned `File` / `Blob`.
 
 
+## Cancelling
+
+Stop a download early like any <Link text="stream" href="/stream#cancelling" /> — call `dl.cancel()` (or `reader.cancel()` on `dl.stream()`). The pending read / `saveTo*` then rejects with a "Stream cancelled" error.
+
+```tsx
+// Environment: client
+
+const dl = await onGetImage(s3Key)
+cancelButton.onclick = () => dl.cancel() // aborts the download mid-stream
+const file = await dl.saveToMemory()
+```
+
+> See <Link href="/stream#cancelling" /> for all the ways to stop a stream.
+
+
+## Error handling
+
+Same as any <Link text="stream" href="/stream#error-handling" />: the read rejects on failure (connection lost, source error, or cancel), and the expected-vs-bug distinction from <Link href="/error-handling" /> applies.
+
+```tsx
+// Environment: client
+
+const dl = await onGetImage(s3Key)
+try {
+  await dl.saveToDisk()
+} catch (err) {
+  // Connection lost, upstream errored, or the download was cancelled
+}
+```
+
+> See <Link href="/stream#error-handling" /> and <Link href="/error-handling" />.
+
+
 ## See also
 
 - <Link href="/file-upload" />
