@@ -246,23 +246,26 @@ cancelButton.onclick = () => dl.cancel() // aborts the download mid-stream
 const file = await dl.saveToMemory()
 ```
 
-On the server, Telefunc cancels the streamed source automatically — aborting the upstream read (e.g. the S3 request) for you. Use <Link text={<code>onClose()</code>} href="/onClose" /> only to release *extra* resources your telefunction opened:
+On the server, Telefunc cancels the streamed source automatically when the client cancels — aborting the S3 read for you, no cleanup needed:
 
 ```ts
-// Export.telefunc.ts
+// Image.telefunc.ts
 // Environment: server
 
-import { getContext, download } from 'telefunc'
+import { download } from 'telefunc'
 
-export async function onExport(query: string) {
-  const { onClose } = getContext()
-  const cursor = db.export(query)  // an extra resource Telefunc can't see
-  onClose(() => cursor.close())    // cancelled → release it
-
-  // Telefunc cancels the returned stream itself when the client cancels
-  return download(cursor.toStream(), { name: 'export.csv', type: 'text/csv' })
+export async function onGetImage(key: string) {
+  // Client cancelled → Telefunc cancels this stream, aborting the S3 read
+  const res = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: key }))
+  return download(res.Body!.transformToWebStream(), {
+    name: key,
+    size: res.ContentLength,
+    type: res.ContentType,
+  })
 }
 ```
+
+> Holding *extra* resources alongside the stream (a DB cursor, a temp file)? Release them with <Link text={<code>onClose()</code>} href="/onClose" />.
 
 ## Error handling
 
