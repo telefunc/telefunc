@@ -95,10 +95,13 @@ import fs from 'node:fs'
 import { Readable } from 'node:stream'
 import { download } from 'telefunc'
 
-export async function onLoadDocument(id: string) {
+export async function onLoadDocuments(id: string) {
   return {
     title: 'My Document',
-    pdf: download(Readable.toWeb(fs.createReadStream(`./docs/${id}.pdf`)), { name: 'doc.pdf', type: 'application/pdf' }),
+    pdf: download(Readable.toWeb(fs.createReadStream(`./docs/${id}.pdf`)), {
+      name: 'doc.pdf',
+      type: 'application/pdf'
+    }),
     thumbnail: new File([await fs.promises.readFile(`./docs/${id}-thumb.png`)], 'thumb.png', {
       type: 'image/png',
     }),
@@ -110,7 +113,7 @@ export async function onLoadDocument(id: string) {
 // Document.tsx
 // Environment: client
 
-const { title, pdf, thumbnail } = await onLoadDocument(id)
+const { title, pdf, thumbnail } = await onLoadDocuments(id)
 
 pdfEl.src = URL.createObjectURL(await pdf.saveToMemory())
 thumbEl.src = URL.createObjectURL(thumbnail)
