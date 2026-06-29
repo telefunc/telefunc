@@ -387,11 +387,8 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 
 ## Primitive: `Channel` {#channel}
 
-For ongoing two-way and broadcast messaging, you can use <Link text={<code>new Channel()</code>} href="/channel#new-channel" />, <Link text={<code>Broadcast</code>} href="/channel#broadcast" />, and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" /> — for real-time use cases like chat rooms, live feeds, collaborative editing, and multiplayer games. See <Link href="/channel" /> for the full list and API.
-
-<NeedsLongRunningServer />
-
-A channel stays open for the lifetime of the page — here the server pushes live metrics to the one client that opened it:
+For ongoing two-way and broadcast messaging, you can use a channel, see:
+- <Link href="/channel" />
 
 ```ts
 // Dashboard.telefunc.ts
@@ -421,9 +418,6 @@ channel.listen((metrics) => updateCharts(metrics))
 ```
 
 > This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead.
-
-See:
-- <Link href="/channel" />
 
 
 ## Cleanup
