@@ -230,7 +230,7 @@ You handle errors the same way you do for Telefunc streams: <Link href="/stream#
 
 ## Cancelling
 
-You can cancel a file download at any time. Stopping the stream you're reading — `break` out of a `for await`, or `reader.cancel()` on `dl.stream()` — ends gracefully. `dl.cancel()` is the immediate, abort-style cancel: a pending whole-file read (`dl.saveToMemory()` / `dl.saveToDisk()` / `bytes()` / `text()`) then rejects, since it can't return a complete file (handle it like any stream error — see <Link text="Error handling" href="#error-handling" /> below).
+You can cancel a file download at any time. Stopping the stream you're reading — `break` out of a `for await`, or `reader.cancel()` on `dl.stream()` — ends gracefully.
 
 ```tsx
 // Download.tsx
