@@ -222,6 +222,19 @@ export async function onUpload(file: File, onProgress: (percent: number) => void
 }
 ```
 
+> **You don't always need `onClose()`.** A cancelled upload surfaces as a thrown error on the next `file.stream()` read, so you only need to clean up if you opened a resource that won't release itself (a write stream, a temp file, a DB transaction). When that's the case, a plain `try`/`finally` around the read loop works too:
+>
+> ```ts
+> try {
+>   for await (const chunk of file.stream()) dest.write(chunk)
+>   dest.end()
+> } finally {
+>   if (!dest.closed) dest.destroy() // cancelled mid-read → release the resource
+> }
+> ```
+>
+> And if you `pipeTo` a destination (`file.stream().pipeTo(dest)`), it's aborted for you when the upload is cancelled — no cleanup needed.
+
 
 ## Error handling
 
