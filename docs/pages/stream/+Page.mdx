@@ -455,6 +455,18 @@ You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to listen fo
 > - <Link href="/close" />
 
 
+## Cancelling
+
+From the client, you can stop a stream before it finishes:
+
+- **Stop reading** — `break` out of a `for await`, call `gen.return()` on an `AsyncGenerator`, or `reader.cancel()` on a `ReadableStream`.
+- **`close(value)`** (`telefunc/client`) — gracefully close every stream in a returned value at once.
+- **`abort(call)`** (`telefunc/client`) — immediately cancel an in-flight call and any streams it opened.
+
+Cancelling propagates to the server and fires `onClose()` (see <Link href="#cleanup" />), so resources get released.
+
+> For the full API — graceful vs. immediate, per-stream vs. whole-call, and `withContext(fn, { signal })` — see <Link href="/close" />.
+
 
 ## Authorization
 
