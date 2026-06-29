@@ -5,11 +5,18 @@ import { TelefuncStreamBeta, NeedsLongRunningServer } from '../../components'
 
 <TelefuncStreamBeta />
 
-Telefunc has two real-time **primitives** — and one **composition** of them:
+The following low-level **primitives** enable all kinds of stream use cases.
 
-- **`new Channel()`** — a private two-way pipe between the server and *one* client.
-- **`Broadcast`** — a keyed pub/sub **bus**: `publish()` / `subscribe()` by string `key`, server-side.
-- **`new BroadcastChannel()`** — a `Channel` bridged onto a `Broadcast` key; the two primitives combined.
+{/* TODO/ai: add links */}
+{/* TODO/ai: dedupe this list and the note with the one at /stream */}
+- **`new Channel()`** — direct messages between one server and one client.
+- **`Broadcast`** — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
+- **`new broadcastchannel()`** — broadcast also on the client-side.
+
+> You can use them for both one-way (aka streaming) and two-way streams (aka real-time).
+> - Chat rooms
+> - Live feeds (e.g. live sports events)
+> - TODO/ai: find more example
 
 `new Channel()` and `new BroadcastChannel()` are returned from a telefunction — they serialize into client-side objects automatically. `Broadcast` is a server-side API, so there's nothing to return.
 
@@ -235,7 +242,12 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 ## `new BroadcastChannel()`
 
-`new BroadcastChannel({ key })` is the composition: a `Channel` to the one client that received it, bridged onto a `Broadcast` key. Return it from a telefunction and that client can `publish()` / `subscribe()` on the key — every message reaches every member of the group, including the publisher itself. No `.client` needed: broadcast is symmetric (one message type, no directional flip), so the same instance works on both ends — unlike channels.
+`new BroadcastChannel({ key })` enables you to broadcast also on the client-side.
+
+> It creates a `Channel` to the one client that received it, and bridges that client onto a `Broadcast` key.
+>
+> Return it from a telefunction and that client can `publish()` / `subscribe()` on the key — every message reaches every member of the group (both client- and server-side).
+
 
 <Warning>
 
@@ -269,6 +281,8 @@ export async function onJoinChat(room: string, username: string) {
   return chat
 }
 ```
+
+> Unlike channels (`new Channel()`), no `.client` is needed: broadcast is symmetric (one message type, no directional flip), so the same instance has the same message type on both ends.
 
 ```ts
 // Chat.tsx
