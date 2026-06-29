@@ -86,7 +86,7 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 
 ## Primitive: `AsyncGenerator` (`function*`) {#async-generator}
 
-An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) — the natural choice for **short-lived streaming**: a finite sequence of values that arrive one at a time and then completes. For example:
+An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) — the natural choice for **short-lived streaming**: a *finite* sequence of values that arrive one at a time and then completes. For example:
 
 - AI tokens streaming from an LLM completion
 - Progress updates for a long-running task (upload, export, transcoding)
@@ -96,15 +96,15 @@ An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/R
 
 > For **open-ended, long-lived** streams (live feeds, notifications, presence), reach for a <Link text={<code>Channel</code>} href="#channel" /> instead.
 
-Common use case:
+#### Example: AI chat
 
 ```ts
 // AiChat.telefunc.ts
 // Environment: server
 
 export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
-  const stream = await ai.streamText({ prompt })
-  for await (const message of stream) {
+  const answer = await ai(prompt)
+  for await (const message of answer) {
     yield message
   }
 }
@@ -116,13 +116,13 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 
 import { onAiPrompt } from './AiChat.telefunc'
 
-const gen = onAiPrompt('Tell me a joke')
-for await (const message of gen) {
+const answer = onAiPrompt('Tell me a joke')
+for await (const message of answer) {
   console.log(message) // Each message arrives as it's yielded
 }
 ```
 
-Simple example:
+#### Example: countdown
 
 ```ts
 // Countdown.telefunc.ts
