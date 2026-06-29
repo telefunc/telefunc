@@ -336,7 +336,9 @@ const stream = new ReadableStream({
 await onIngest(stream, 'data.txt')
 ```
 
-**Both directions** — accept a `ReadableStream` *and* return one, transforming the bytes as they pass through. The simplest transform is gzip compression:
+#### Both directions
+
+Accept a `ReadableStream` *and* return one, transforming the bytes as they pass through. The simplest transform is gzip compression:
 
 ```ts
 // Compress.telefunc.ts
@@ -380,7 +382,7 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 }
 ```
 
-> A spawned process outlives the call and keeps burning CPU if the client navigates away mid-encode — so it's released in `onClose()`. See <Link text="Cleanup" href="#cleanup" />.
+> A spawned process outlives the call and keeps burning CPU if the client navigates away mid-encode — make sure to close it in `onClose()`, see <Link text="Cleanup" href="#cleanup" />.
 
 
 ## Primitive: `Channel` {#channel}
@@ -388,8 +390,13 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 For ongoing two-way and broadcast messaging, you can use:
 
 - **`new Channel()`** — direct messages between one server and one client.
-- **`Broadcast`** — a keyed pub/sub bus (`publish()` / `subscribe()` by `key`), server-side.
-- **`new BroadcastChannel()`** — a `Channel` bridged onto a `Broadcast` key: chat rooms, live feeds, presence.
+- **`Broadcast`** — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
+- **`new broadcastchannel()`** — broadcast also on the client-side.
+
+> You can use them for both one-way (aka streaming) and two-way streams (aka real-time).
+> - Chat rooms
+> - Live feeds (e.g. live sports events)
+> - TODO/ai: find more example
 
 <NeedsLongRunningServer />
 
@@ -422,7 +429,10 @@ const { channel } = await onDashboard()
 channel.listen((metrics) => updateCharts(metrics))
 ```
 
-This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead. For the full API — typed messages, acknowledgements, binary, broadcast, and reconnection — see <Link href="/channel" />. Authorizing a channel works like any streaming primitive — see <Link text="Authorization" href="#authorization" /> below.
+> This is the low-level primitive; most apps reach for a higher-level integration like <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> instead.
+
+See:
+- <Link href="/channel" />
 
 
 ## Cleanup
