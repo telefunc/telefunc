@@ -83,6 +83,40 @@ function Download({ s3Key }: { s3Key: string }) {
 Calling `dl.cancel()` aborts the stream — the pending `saveToMemory` call rejects with a "Stream cancelled" error.
 
 
+## Example: multiple concurrent downloads
+
+Return any number of `File`, `Blob`, or `download()` values anywhere in the response — in arrays, in nested objects, or mixed with regular data. Each one independently exposes its own `onProgress` / `cancel` / `saveTo*` methods on the client.
+
+```ts
+// Document.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+import { Readable } from 'node:stream'
+import { download } from 'telefunc'
+
+export async function onLoadDocument(id: string) {
+  return {
+    title: 'My Document',
+    pdf: download(Readable.toWeb(fs.createReadStream(`./docs/${id}.pdf`)), { name: 'doc.pdf', type: 'application/pdf' }),
+    thumbnail: new File([await fs.promises.readFile(`./docs/${id}-thumb.png`)], 'thumb.png', {
+      type: 'image/png',
+    }),
+  }
+}
+```
+
+```tsx
+// Document.tsx
+// Environment: client
+
+const { title, pdf, thumbnail } = await onLoadDocument(id)
+
+pdfEl.src = URL.createObjectURL(await pdf.saveToMemory())
+thumbEl.src = URL.createObjectURL(thumbnail)
+```
+
+
 ## Choosing a method
 
 | Approach | Server memory | Client memory | Best for |
@@ -174,40 +208,6 @@ imgEl.src = URL.createObjectURL(opfsFile)
 | `'picker'` | Opens the save-file picker so the user chooses the location. Throws if not supported. |
 | `'memory'` | Buffers bytes in RAM, then triggers a native browser download to the Downloads folder. Cross-browser. |
 | `'opfs'` | Streams bytes through browser-private storage ([OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system)), then triggers a native browser download. For large files where in-memory buffering isn't viable. Cross-browser. |
-
-
-## Multiple / nested downloads
-
-Return any number of `File`, `Blob`, or `download()` values anywhere in the response — in arrays, in nested objects, or mixed with regular data. Each one independently exposes its own `onProgress` / `cancel` / `saveTo*` methods on the client.
-
-```ts
-// Document.telefunc.ts
-// Environment: server
-
-import fs from 'node:fs'
-import { Readable } from 'node:stream'
-import { download } from 'telefunc'
-
-export async function onLoadDocument(id: string) {
-  return {
-    title: 'My Document',
-    pdf: download(Readable.toWeb(fs.createReadStream(`./docs/${id}.pdf`)), { name: 'doc.pdf', type: 'application/pdf' }),
-    thumbnail: new File([await fs.promises.readFile(`./docs/${id}-thumb.png`)], 'thumb.png', {
-      type: 'image/png',
-    }),
-  }
-}
-```
-
-```tsx
-// Document.tsx
-// Environment: client
-
-const { title, pdf, thumbnail } = await onLoadDocument(id)
-
-pdfEl.src = URL.createObjectURL(await pdf.saveToMemory())
-thumbEl.src = URL.createObjectURL(thumbnail)
-```
 
 
 ## Limitations
