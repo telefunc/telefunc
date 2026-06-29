@@ -221,7 +221,7 @@ imgEl.src = URL.createObjectURL(opfsFile)
 
 ## Limitations
 
-TODO/ai: add intro text like http://localhost:3000/file-upload#limitations — don't hallunicate but root your text in the actual code base
+The client receives the `File` / `Blob` as a **lazy, streaming** object: its bytes flow straight from the HTTP response as you read them, without being buffered in memory. This keeps downloads memory-efficient — but comes with one trade-off:
 
 ### One-shot reads
 
