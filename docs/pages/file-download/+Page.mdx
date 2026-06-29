@@ -223,15 +223,9 @@ imgEl.src = URL.createObjectURL(opfsFile)
 | `'opfs'` | Streams bytes through browser-private storage ([OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system)), then triggers a native browser download. For large files where in-memory buffering isn't viable. Cross-browser. |
 
 
-## Limitations
+## Error handling
 
-The client receives the `File` / `Blob` as a **lazy, streaming** object: its bytes flow straight from the HTTP response as you read them, without being buffered in memory. This keeps downloads memory-efficient — but comes with one trade-off:
-
-### One-shot reads
-
-The streaming download can only be consumed once — calling `.stream()`, `.bytes()`, `.text()`, `.arrayBuffer()`, `.slice()`, or any `saveTo*` method a second time throws.
-
-> If you need the data more than once, materialize it once via `dl.saveToMemory()` (or `saveToOpfs()` for large files) and reuse the returned `File` / `Blob`.
+You handle errors the same way you do for Telefunc streams: <Link href="/stream#error-handling" />.
 
 
 ## Cancelling
@@ -274,9 +268,15 @@ export async function onDownload(dir: string) {
 > **You don't always need `onClose()`.** When the `download()` source is a plain stream — like a <Link text="S3 passthrough" href="#passthrough" /> — the upstream read is automatically cancelled.
 
 
-## Error handling
+## Limitations
 
-You handle errors the same way you do for Telefunc streams: <Link href="/stream#error-handling" />.
+The client receives the `File` / `Blob` as a **lazy, streaming** object: its bytes flow straight from the HTTP response as you read them, without being buffered in memory. This keeps downloads memory-efficient — but comes with one trade-off:
+
+### One-shot reads
+
+The streaming download can only be consumed once — calling `.stream()`, `.bytes()`, `.text()`, `.arrayBuffer()`, `.slice()`, or any `saveTo*` method a second time throws.
+
+> If you need the data more than once, materialize it once via `dl.saveToMemory()` (or `saveToOpfs()` for large files) and reuse the returned `File` / `Blob`.
 
 
 ## See also
