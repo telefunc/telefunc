@@ -387,16 +387,7 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 
 ## Primitive: `Channel` {#channel}
 
-For ongoing two-way and broadcast messaging, you can use:
-
-- **`new Channel()`** — direct messages between one server and one client.
-- **`Broadcast`** — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
-- **`new broadcastchannel()`** — broadcast also on the client-side.
-
-> You can use them for both one-way (aka streaming) and two-way streams (aka real-time).
-> - Chat rooms
-> - Live feeds (e.g. live sports events)
-> - TODO/ai: find more example
+For ongoing two-way and broadcast messaging, you can use <Link text={<code>new Channel()</code>} href="/channel#new-channel" />, <Link text={<code>Broadcast</code>} href="/channel#broadcast" />, and <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" /> — for real-time use cases like chat rooms, live feeds, collaborative editing, and multiplayer games. See <Link href="/channel" /> for the full list and API.
 
 <NeedsLongRunningServer />
 
