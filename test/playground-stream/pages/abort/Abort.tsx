@@ -244,9 +244,7 @@ function Abort() {
             const res = await promise
             setResult(JSON.stringify({ method: 'close(call)', resolved: true, result: res ?? null, error: null }))
           } catch (e: any) {
-            setResult(
-              JSON.stringify({ method: 'close(call)', resolved: false, error: e.message, isAbort: e instanceof TelefuncAbort }),
-            )
+            setResult(JSON.stringify({ method: 'close(call)', resolved: false, error: e.message }))
           }
         }}
       >
