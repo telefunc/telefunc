@@ -9,8 +9,12 @@ You can return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File)
 
 The client receives a standard `File` / `Blob` ready for `URL.createObjectURL`, `<img src>`, `fetch({ body })`, `FormData`, etc.
 
+> There are multiple streaming and reading strategies, see:
+> - <Link href="#streaming-strategies" />
+> - <Link href="#reading-strategies" />
 
-## Example
+
+## Example: basic
 
 Return a native `File` or `Blob` like any other value.
 
@@ -158,9 +162,9 @@ imgEl.src = URL.createObjectURL(await dl.saveToMemory())
 
 **Environment**: server.
 
-If:
+You can choose between using `download()` or a native `File` / `Blob`:
 - **Bytes already in memory** → return a native `File` / `Blob`.
-- **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <code>download()</code>. When the source is a stream, the full payload is never buffered on the server.
+- **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <code>download()</code>.
 
 | Approach | Server memory | Client memory | Best for |
 |---|---|---|---|
@@ -234,5 +238,3 @@ The streaming download can only be consumed once — calling `.stream()`, `.byte
 
 - <Link href="/file-upload" />
 - <Link href="/stream" />
-- <Link href="/transport" />
-- <Link href="/onClose" />
