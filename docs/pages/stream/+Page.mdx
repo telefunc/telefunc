@@ -107,11 +107,14 @@ Common use case:
 import { getContext } from 'telefunc'
 
 export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
-  // `signal` aborts when the client stops the stream (e.g. the user presses "Stop"),
-  // cancelling the upstream AI request instead of letting it run on and burn tokens
-  const { signal } = getContext()
+  const { onClose } = getContext()
 
-  const stream = await ai.streamText({ prompt, signal })
+  // When the client stops the stream (e.g. the user presses "Stop"), abort the
+  // upstream AI request — otherwise it keeps running and burning tokens
+  const controller = new AbortController()
+  onClose(() => controller.abort())
+
+  const stream = await ai.streamText({ prompt, signal: controller.signal })
   for await (const message of stream) {
     yield message
   }
@@ -126,7 +129,7 @@ import { onAiPrompt } from './AiChat.telefunc'
 
 const gen = onAiPrompt('Tell me a joke')
 
-// "Stop" button — close the stream early; this aborts the stream on the server
+// "Stop" button — close the stream early; this fires onClose() on the server
 stopButton.onclick = () => gen.return()
 
 for await (const message of gen) {
@@ -134,7 +137,7 @@ for await (const message of gen) {
 }
 ```
 
-> Pressing "Stop" closes the generator (`gen.return()`), which fires the server's `signal` and aborts the upstream AI request. To release resources that aren't an `AbortSignal` (timers, subscriptions, spawned processes), use <Link text={<code>onClose()</code>} href="#cleanup" /> instead.
+> Pressing "Stop" closes the generator (`gen.return()`), which fires `onClose()` on the server and aborts the upstream AI request. `onClose()` is the general-purpose cleanup hook — use it to release any resource (timers, subscriptions, spawned processes, ...) when the stream closes; see <Link text="Cleanup" href="#cleanup" />.
 
 Simple example:
 
