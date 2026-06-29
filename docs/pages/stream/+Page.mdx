@@ -86,14 +86,17 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 
 ## Primitive: `AsyncGenerator` (`function*`) {#async-generator}
 
-An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) — the natural choice for **short-lived streaming**: a *finite* sequence of values that arrive one at a time and then completes. For example:
+An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) — a great fit for **short-lived streaming**: a sequence of values that arrive one at a time. For example:
 
 - AI answer stream
 - Progress updates for a long-running task (upload, export, transcoding)
 - Search results streaming in as they're found
 - Rows of a large query or report, computed and sent one at a time
+- Log or build output lines from a single run
 
-> For **open-ended, long-lived** streams (live feeds, notifications, presence), reach for a <Link text={<code>Channel</code>} href="#channel" /> instead.
+A generator **closes itself when it completes**: once it returns (the client's `for await` loop ends), Telefunc closes the stream automatically. A <Link text="callback" href="#callback" /> has no such completion signal — it stays open until the call closes, so you clean it up yourself (see <Link text="Cleanup" href="#cleanup" />).
+
+> Generators aren't limited to short streams — they can be <Link text="long-lived" href="/close" /> too. The dividing line with a <Link text={<code>Channel</code>} href="#channel" /> isn't lifetime but direction: a generator streams one way (server → client), whereas a channel is for **two-way or broadcast** messaging.
 
 #### Example: AI chat
 
@@ -101,9 +104,17 @@ An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/R
 // AiChat.telefunc.ts
 // Environment: server
 
+import { getContext } from 'telefunc'
+
 export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
-  const answer = await ai(prompt)
-  for await (const message of answer) {
+  const { onClose } = getContext()
+
+  const { stream, cancel } = await ai(prompt)
+  // When the client stops the stream (e.g. the user presses "Stop"), cancel the
+  // upstream AI request — otherwise it keeps running and burning tokens
+  onClose(cancel)
+
+  for await (const message of stream) {
     yield message
   }
 }
@@ -115,11 +126,17 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 
 import { onAiPrompt } from './AiChat.telefunc'
 
-const answer = onAiPrompt('Tell me a joke')
-for await (const message of answer) {
+const gen = onAiPrompt('Tell me a joke')
+
+// "Stop" button — close the stream early; this fires onClose() on the server
+stopButton.onclick = () => gen.return()
+
+for await (const message of gen) {
   console.log(message) // Each message arrives as it's yielded
 }
 ```
+
+> Pressing "Stop" closes the generator (`gen.return()`), which fires `onClose()` on the server and aborts the upstream AI request. `onClose()` is the general-purpose cleanup hook — use it to release any resource (timers, subscriptions, spawned processes, ...) when the stream closes; see <Link text="Cleanup" href="#cleanup" />.
 
 #### Example: countdown
 
