@@ -32,11 +32,11 @@ function App() {
 }
 ```
 
-`withTelefunc()` returns the same `QueryClient` instance. All options and APIs continue to work as before.
+> `withTelefunc()` returns the same `new QueryClient()` instance:
+> - All options and APIs continue to work as before
+> - Any TanStack Query adapter works: React, Vue, Svelte, Solid
 
-> The integration lives in `QueryClient`, so any TanStack Query adapter works: React, Vue, Svelte, Solid. (The peer dependency is `@tanstack/query-core` v5+.) The examples above use React.
-
-> There's no server-side setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads their server extension.
+> There's no server-side setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads it on the server-side.
 
 
 ## Local vs global keys
