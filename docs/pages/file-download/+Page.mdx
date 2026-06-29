@@ -12,17 +12,6 @@ You can return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File)
 > The tables below break down the memory trade-offs.
 
 
-## Which one should I use?
-
-| Approach | Server memory | Client memory | Best for |
-|---|---|---|---|
-| Native `File` / `Blob` | Full payload | Full payload | Bytes already in memory |
-| `download(file)` / `download(blob)` | Full payload | Depends on consumer<sup>†</sup> | Same + progress / cancel / save-to-disk |
-| `download(stream, opts)` | Constant (chunk-sized) | Depends on consumer<sup>†</sup> | Bytes streamed from upstream (S3, CDN, …) |
-
-<sup>†</sup> Constant when consumed via `dl.stream()`, `dl.saveToOpfs()`, or `dl.saveToDisk()` (except its `'memory'` fallback); full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
-
-
 ## Example
 
 Return a native `File` or `Blob` like any other value.
@@ -50,43 +39,7 @@ window.open(URL.createObjectURL(pdf))
 ```
 
 
-## Streaming with `download()`
-
-Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
-
-```ts
-// Image.telefunc.ts
-// Environment: server
-
-import { download } from 'telefunc'
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
-
-const s3 = new S3Client({})
-
-export async function onGetImage(key: string) {
-  const res = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: key }))
-  return download(res.Body!.transformToWebStream(), {
-    name: key,
-    size: res.ContentLength,
-    type: res.ContentType,
-  })
-}
-```
-
-```tsx
-// ImageView.tsx
-// Environment: client
-
-import { onGetImage } from './Image.telefunc'
-
-const dl = await onGetImage(s3Key)
-imgEl.src = URL.createObjectURL(await dl.saveToMemory())
-```
-
-> `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are available as soon as `await onGetImage(...)` settles — bytes stream in the background.
-
-
-## Progress + cancel
+## Example: progress + cancel
 
 ```tsx
 // Download.tsx
@@ -128,6 +81,53 @@ function Download({ s3Key }: { s3Key: string }) {
 ```
 
 Calling `dl.cancel()` aborts the stream — the pending `saveToMemory` call rejects with a "Stream cancelled" error.
+
+
+## Which one should I use?
+
+| Approach | Server memory | Client memory | Best for |
+|---|---|---|---|
+| Native `File` / `Blob` | Full payload | Full payload | Bytes already in memory |
+| `download(file)` / `download(blob)` | Full payload | Depends on consumer<sup>†</sup> | Same + progress / cancel / save-to-disk |
+| `download(stream, opts)` | Constant (chunk-sized) | Depends on consumer<sup>†</sup> | Bytes streamed from upstream (S3, CDN, …) |
+
+<sup>†</sup> Constant when consumed via `dl.stream()`, `dl.saveToOpfs()`, or `dl.saveToDisk()` (except its `'memory'` fallback); full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
+
+
+## Streaming with `download()`
+
+Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
+
+```ts
+// Image.telefunc.ts
+// Environment: server
+
+import { download } from 'telefunc'
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
+
+const s3 = new S3Client({})
+
+export async function onGetImage(key: string) {
+  const res = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: key }))
+  return download(res.Body!.transformToWebStream(), {
+    name: key,
+    size: res.ContentLength,
+    type: res.ContentType,
+  })
+}
+```
+
+```tsx
+// ImageView.tsx
+// Environment: client
+
+import { onGetImage } from './Image.telefunc'
+
+const dl = await onGetImage(s3Key)
+imgEl.src = URL.createObjectURL(await dl.saveToMemory())
+```
+
+> `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are available as soon as `await onGetImage(...)` settles — bytes stream in the background.
 
 
 ## Reading strategies
