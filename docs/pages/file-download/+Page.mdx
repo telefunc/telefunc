@@ -122,7 +122,7 @@ thumbEl.src = URL.createObjectURL(thumbnail)
 ```
 
 
-## Example: passthrough with `download()`
+## Example: passthrough with `download()` {#passthrough}
 
 Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
 
@@ -239,33 +239,37 @@ The streaming download can only be consumed once — calling `.stream()`, `.byte
 Stop a download early like any <Link text="stream" href="/stream#cancelling" /> — call `dl.cancel()` (or `reader.cancel()` on `dl.stream()`). Any pending read then rejects — see <Link text="Error handling" href="#error-handling" /> below.
 
 ```tsx
+// Backup.tsx
 // Environment: client
 
-const dl = await onGetImage(s3Key)
+const dl = await onDownloadBackup(dir)
 cancelButton.onclick = () => dl.cancel() // aborts the download mid-stream
-const file = await dl.saveToMemory()
+await dl.saveToDisk()
 ```
 
-On the server, Telefunc cancels the streamed source automatically when the client cancels — aborting the S3 read for you, no cleanup needed:
+On the server, use <Link text={<code>onClose()</code>} href="/onClose" /> to release resources your telefunction opened when the client cancels:
 
 ```ts
-// Image.telefunc.ts
+// Backup.telefunc.ts
 // Environment: server
 
-import { download } from 'telefunc'
+import { getContext, download } from 'telefunc'
+import { spawn } from 'node:child_process'
+import { Readable } from 'node:stream'
 
-export async function onGetImage(key: string) {
-  // Client cancelled → Telefunc cancels this stream, aborting the S3 read
-  const res = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: key }))
-  return download(res.Body!.transformToWebStream(), {
-    name: key,
-    size: res.ContentLength,
-    type: res.ContentType,
+export async function onDownloadBackup(dir: string) {
+  const { onClose } = getContext()
+  const zip = spawn('zip', ['-r', '-', dir]) // streams a .zip to stdout
+  onClose(() => zip.kill()) // client cancelled → kill zip, otherwise the process leaks
+
+  return download(Readable.toWeb(zip.stdout) as ReadableStream<Uint8Array>, {
+    name: 'backup.zip',
+    type: 'application/zip',
   })
 }
 ```
 
-> Holding *extra* resources alongside the stream (a DB cursor, a temp file)? Release them with <Link text={<code>onClose()</code>} href="/onClose" />.
+> **You don't always need `onClose()`.** When the `download()` source is a plain stream — like the <Link text="S3 passthrough" href="#passthrough" /> above — Telefunc cancels it for you, aborting the upstream read.
 
 ## Error handling
 
