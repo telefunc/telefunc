@@ -9,12 +9,6 @@ You can return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File)
 
 The client receives a standard `File` / `Blob` ready for `URL.createObjectURL`, `<img src>`, `fetch({ body })`, `FormData`, etc.
 
-> **Which API?**
-> - **Bytes already in memory** → return a native `File` / `Blob` (as above).
-> - **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <Link text={<code>download()</code>} href="#passthrough-with-download" />. When the source is a stream, the full payload is never buffered on the server.
->
-> The tables below break down the memory trade-offs.
-
 
 ## Example
 
@@ -124,7 +118,7 @@ thumbEl.src = URL.createObjectURL(thumbnail)
 ```
 
 
-## Passthrough with `download()`
+## Example: passthrough with `download()`
 
 Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
 
@@ -160,7 +154,13 @@ imgEl.src = URL.createObjectURL(await dl.saveToMemory())
 > `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are available as soon as `await onGetImage(...)` settles — bytes stream in the background.
 
 
-## Choosing a method
+## Streaming strategies
+
+**Environment**: server.
+
+If:
+- **Bytes already in memory** → return a native `File` / `Blob`.
+- **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <code>download()</code>. When the source is a stream, the full payload is never buffered on the server.
 
 | Approach | Server memory | Client memory | Best for |
 |---|---|---|---|
@@ -172,6 +172,8 @@ imgEl.src = URL.createObjectURL(await dl.saveToMemory())
 
 
 ## Reading strategies
+
+**Environment**: client.
 
 The streaming download is a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) object — `dl.stream()`, `dl.text()`, `dl.arrayBuffer()`, `dl.bytes()`, and `dl.slice()` all work and pull from the streaming source as you read:
 
@@ -218,6 +220,8 @@ imgEl.src = URL.createObjectURL(opfsFile)
 
 
 ## Limitations
+
+TODO/ai: add intro text like http://localhost:3000/file-upload#limitations — don't hallunicate but root your text in the actual code base
 
 ### One-shot reads
 
