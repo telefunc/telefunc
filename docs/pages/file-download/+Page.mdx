@@ -82,7 +82,7 @@ function Download({ s3Key }: { s3Key: string }) {
 }
 ```
 
-Calling `dl.cancel()` aborts the stream — the pending `saveToMemory` call rejects with a "Stream cancelled" error.
+Calling `dl.cancel()` aborts the download — the pending `saveToMemory` call then rejects.
 
 
 ## Example: multiple concurrent downloads
@@ -236,7 +236,7 @@ The streaming download can only be consumed once — calling `.stream()`, `.byte
 
 ## Cancelling
 
-Stop a download early like any <Link text="stream" href="/stream#cancelling" /> — call `dl.cancel()` (or `reader.cancel()` on `dl.stream()`). The pending read / `saveTo*` then rejects with a "Stream cancelled" error.
+Stop a download early like any <Link text="stream" href="/stream#cancelling" /> — call `dl.cancel()` (or `reader.cancel()` on `dl.stream()`). Any pending read then rejects — see <Link text="Error handling" href="#error-handling" /> below.
 
 ```tsx
 // Environment: client
