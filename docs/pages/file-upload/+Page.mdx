@@ -68,7 +68,7 @@ Passing a `File` / `Blob` argument is one of several ways to move binary data wi
 
 ## Upload with progress
 
-Combine file upload with <Link href="/stream#callback">function passing</Link> to report progress while the server reads the stream.
+Combine file upload with a <Link href="/stream#callback">callback</Link> to report progress.
 
 ```ts
 // Upload.telefunc.ts
@@ -119,8 +119,6 @@ function Upload() {
   )
 }
 ```
-
-The file bytes stream to disk while `onProgress()` reports progress to the client.
 
 
 ## Reading strategies
