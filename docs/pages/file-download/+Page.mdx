@@ -7,7 +7,7 @@ You can return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File)
 
 > **Which API?**
 > - **Bytes already in memory** → return a native `File` / `Blob` (as above).
-> - **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <Link text={<code>download()</code>} href="#streaming-with-download" />. When the source is a stream, the full payload is never buffered on the server.
+> - **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <Link text={<code>download()</code>} href="#passthrough-with-download" />. When the source is a stream, the full payload is never buffered on the server.
 >
 > The tables below break down the memory trade-offs.
 
@@ -131,7 +131,7 @@ thumbEl.src = URL.createObjectURL(thumbnail)
 <sup>†</sup> Constant when consumed via `dl.stream()`, `dl.saveToOpfs()`, or `dl.saveToDisk()` (except its `'memory'` fallback); full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
 
 
-## Streaming with `download()`
+## Passthrough with `download()`
 
 Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
 
