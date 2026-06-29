@@ -382,6 +382,8 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 }
 ```
 
+> The memory consumption is constant regardless of file size.
+
 > A spawned process outlives the call and keeps burning CPU if the client navigates away mid-encode — make sure to close it in `onClose()`, see <Link text="Cleanup" href="#cleanup" />.
 
 
