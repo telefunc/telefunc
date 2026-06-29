@@ -88,7 +88,7 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 
 An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) — a great fit for **short-lived streaming**: a sequence of values that arrive one at a time. For example:
 
-- AI tokens streaming from an LLM completion
+- AI answer stream
 - Progress updates for a long-running task (upload, export, transcoding)
 - Search results streaming in as they're found
 - Rows of a large query or report, computed and sent one at a time
@@ -98,7 +98,7 @@ A generator **closes itself when it completes**: once it returns (the client's `
 
 > Generators aren't limited to short streams — they can be <Link text="long-lived" href="/close" /> too. The dividing line with a <Link text={<code>Channel</code>} href="#channel" /> isn't lifetime but direction: a generator streams one way (server → client), whereas a channel is for **two-way or broadcast** messaging.
 
-Common use case:
+#### Example: AI chat
 
 ```ts
 // AiChat.telefunc.ts
@@ -138,7 +138,7 @@ for await (const message of gen) {
 
 > Pressing "Stop" closes the generator (`gen.return()`), which fires `onClose()` on the server and aborts the upstream AI request. `onClose()` is the general-purpose cleanup hook — use it to release any resource (timers, subscriptions, spawned processes, ...) when the stream closes; see <Link text="Cleanup" href="#cleanup" />.
 
-Simple example:
+#### Example: countdown
 
 ```ts
 // Countdown.telefunc.ts
