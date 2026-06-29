@@ -241,7 +241,22 @@ cancelButton.onclick = () => dl.cancel() // Cancel the download mid-stream
 await dl.saveToDisk()
 ```
 
-TODO/ai: add note for native `File`/`Blob` use case.
+> **Returning a native `File` / `Blob`?** It resolves on the client to a fully-buffered value with no `dl` handle — so there's no `dl.cancel()`, and there's nothing to stream-cancel since the bytes arrive all at once. To cancel such a call, abort the whole telefunction call with an `AbortSignal` via <Link href="/withContext" />:
+
+```tsx
+// Invoice.tsx
+// Environment: client
+
+import { withContext } from 'telefunc/client'
+import { onRenderInvoice } from './Invoice.telefunc'
+
+const controller = new AbortController()
+cancelButton.onclick = () => controller.abort() // Cancel the call
+
+const pdf = await withContext(onRenderInvoice, { signal: controller.signal })(form)
+```
+
+> The same `signal` works for `download()` too — it cancels the call alongside `dl.cancel()`. Aborting also fires <Link text={<code>onClose()</code>} href="/onClose" /> on the server.
 
 On the server, use <Link text={<code>onClose()</code>} href="/onClose" /> to release resources your telefunction opened when the client cancels:
 
