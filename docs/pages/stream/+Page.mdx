@@ -460,7 +460,30 @@ You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to listen fo
 
 To save resources, you can cancel a stream at anytime by <Link href="/close">manually closing it</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> to clear resources.
 
-// TODO/ai: show minimal example
+```ts
+// Search.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+
+export async function* onSearch(query: string) {
+  const { onClose } = getContext()
+  const cursor = db.search(query)
+  onClose(() => cursor.close()) // client cancelled → release the cursor
+
+  for await (const row of cursor) yield row
+}
+```
+
+```tsx
+// Search.tsx
+// Environment: client
+
+const results = onSearch('telefunc')
+cancelButton.onclick = () => results.return() // cancel → fires onClose() on the server
+
+for await (const row of results) render(row)
+```
 
 
 ## Authorization

@@ -193,7 +193,34 @@ const call = onUpload(file, onProgress)
 cancelButton.onclick = () => close(call) // stops the upload mid-stream
 ```
 
-// TODO/ai: show server-side
+On the server, use the <Link text={<code>onClose()</code>} href="/onClose" /> hook to release resources when the upload is cancelled:
+
+```ts
+// Upload.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+import fs from 'node:fs'
+
+export async function onUpload(file: File, onProgress: (percent: number) => void) {
+  const { onClose } = getContext()
+  const dest = fs.createWriteStream(`./uploads/${file.name}`)
+
+  // Upload cancelled → close the file and discard the partial write
+  onClose(() => {
+    dest.destroy()
+    fs.rm(`./uploads/${file.name}`, { force: true }, () => {})
+  })
+
+  let loaded = 0
+  for await (const chunk of file.stream()) {
+    dest.write(chunk)
+    loaded += chunk.byteLength
+    onProgress(Math.round((loaded / file.size) * 100))
+  }
+  dest.end()
+}
+```
 
 
 ## Error handling

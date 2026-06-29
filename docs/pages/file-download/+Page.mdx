@@ -246,7 +246,23 @@ cancelButton.onclick = () => dl.cancel() // aborts the download mid-stream
 const file = await dl.saveToMemory()
 ```
 
-// TODO/ai: show server-side
+On the server, Telefunc cancels the streamed source automatically — aborting the upstream read (e.g. the S3 request) for you. Use <Link text={<code>onClose()</code>} href="/onClose" /> only to release *extra* resources your telefunction opened:
+
+```ts
+// Export.telefunc.ts
+// Environment: server
+
+import { getContext, download } from 'telefunc'
+
+export async function onExport(query: string) {
+  const { onClose } = getContext()
+  const cursor = db.export(query)  // an extra resource Telefunc can't see
+  onClose(() => cursor.close())    // cancelled → release it
+
+  // Telefunc cancels the returned stream itself when the client cancels
+  return download(cursor.toStream(), { name: 'export.csv', type: 'text/csv' })
+}
+```
 
 ## Error handling
 
