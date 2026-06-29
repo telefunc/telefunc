@@ -86,7 +86,15 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 
 ## Primitive: `AsyncGenerator` (`function*`) {#async-generator}
 
-An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) — the usual choice for structured values that arrive one piece at a time, such as AI tokens, notifications, or progress updates.
+An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) returns an [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) — the natural choice for **short-lived streaming**: a finite sequence of values that arrive one at a time and then completes. For example:
+
+- AI tokens streaming from an LLM completion
+- Progress updates for a long-running task (upload, export, transcoding)
+- Search results streaming in as they're found
+- Rows of a large query or report, computed and sent one at a time
+- Log or build output lines from a single run
+
+> For **open-ended, long-lived** streams (live feeds, notifications, presence), reach for a <Link text={<code>Channel</code>} href="#channel" /> instead.
 
 Common use case:
 
