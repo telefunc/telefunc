@@ -458,7 +458,7 @@ You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to listen fo
 
 ## Cancelling
 
-To save resources, you can cancel a stream at anytime by <Link href="/close">manually closing it</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> to clear resources.
+You can cancel a stream at anytime with <Link href="/close">`close()` (and other methods)</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> to clear resources.
 
 ```ts
 // Search.telefunc.ts
