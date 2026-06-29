@@ -9,8 +9,8 @@ Telefunc has two transport settings to control how messages are delivered:
 
 | Setting | Controls |
 |---|---|
-| `config.stream.transport` | <Link href="/stream">Streaming values</Link> (`AsyncGenerator`, `ReadableStream`, `Promise`) |
-| `config.channel.transports` | <Link text={<code>new Channel()</code>} href="/channel" /> (callbacks, <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />) |
+| `config.stream.transport` | <Link href="/stream">Streaming values</Link> (<Link text={<code>AsyncGenerator</code>} href="/stream#async-generator" />, <Link text={<code>ReadableStream</code>} href="/stream#readable-stream" />, <Link text={<code>Promise</code>} href="/stream#multiple-promise" />) |
+| `config.channel.transports` | <Link text={<code>new Channel()</code>} href="/channel" /> (<Link text="callbacks" href="/stream#callback" />, <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />) |
 
 These settings only affect <Link href="/stream">streams</Link> — plain telefunction calls are always `text/plain` JSON.
 
