@@ -93,7 +93,7 @@ An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/R
 - Search results streaming in as they're found
 - Rows of a large SQL query, streamed to the UI
 
-> It's a good fit because a generator closes itself when it completes.
+> It's a good fit because a generator closes itself when it completes. (Other streaming primitives such <Link href="#callback">callbacks</Link> don't have such completion signal.)
 
 #### Example: countdown
 
@@ -198,7 +198,7 @@ await onUpload(file, (percent) => setProgress(percent))
 
 > Under the hood, a passed function *is* a <Link text={<code>Channel</code>} href="#channel" />. A callback has the same lifecycle as a channel, just exposed with a nice JavaScript DX.
 >
-> Reach for a raw `Channel` if you need more than call-and-return such as two-way messaging, broadcast, or binary.
+> Reach for a raw `Channel` if you need more than call-and-return — e.g. two-way messaging, broadcast, or binary.
 
 
 ## Primitive: Multiple `Promise` {#multiple-promise}
