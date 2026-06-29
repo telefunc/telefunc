@@ -148,7 +148,7 @@ You handle errors the same way as you do for Telefunc streams: <Link href="/stre
 
 ## Cancelling
 
-You can cancel a file upload at anytime with <Link href="/close">`close()`</Link> (client-side) — you can then use the <Link href="/onClose">`onClose()` hook</Link> (server-side) to clear resources — see <Link href="/stream#cleanup" />.
+You can cancel a file upload at anytime with <Link href="/close">`close()`</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> (server-side) to clear resources.
 
 ```tsx
 // Upload.tsx
@@ -171,10 +171,10 @@ import { getContext } from 'telefunc'
 import fs from 'node:fs'
 
 export async function onUpload(file: File) => void) {
-  const { onClose } = getContext()
+  const context = getContext()
   const dest = fs.createWriteStream(`./uploads/${file.name}`)
 
-  onClose(() => {
+  context.onClose(() => {
     // Close the file
     dest.destroy()
     // Discard the partial write
