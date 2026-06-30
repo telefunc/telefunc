@@ -420,8 +420,10 @@ export async function onDashboard() {
 // Dashboard.tsx
 // Environment: client
 
+import { onDashboard } from './Dashboard.telefunc'
+
 const dashboard = await onDashboard()
-channel.listen((metrics) => updateCharts(metrics))
+dashboard.listen((metrics) => updateCharts(metrics))
 ```
 
 
