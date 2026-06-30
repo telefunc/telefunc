@@ -141,7 +141,7 @@ invalidate(['global:articles'])
 invalidate(['global:documents', docId])
 ```
 
-> `invalidate()` is for global keys only — local keys have no cross-client subscribers, so they wouldn't reach any client.
+> `invalidate()` is for global keys only. (Local keys have no cross-client subscribers, so they wouldn't reach any client.)
 
 > Invalidation is prefix-based: invalidating `['global:documents']` matches `['global:documents', docId]` too. This is the same behavior as TanStack Query's [`invalidateQueries()`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
 
