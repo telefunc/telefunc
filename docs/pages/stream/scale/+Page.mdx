@@ -55,7 +55,7 @@ In the target group's attributes, enable **Stickiness** with type **Load balance
 
 ### Cloud Run / serverless
 
-Serverless platforms that don't expose sticky-session routing aren't a good fit for `Channel`. Broadcasts still work (publishes round-trip through Redis), but channel reconnects can fail unpredictably. Most teams pair Telefunc with a long-running server tier when they need channels at scale.
+Serverless platforms that don't expose sticky-session routing aren't a good fit for `Channel`. Broadcasts still work (each publish round-trips through Redis), but channel reconnects can fail unpredictably. Most teams pair Telefunc with a long-running server tier when they need channels at scale.
 
 
 
