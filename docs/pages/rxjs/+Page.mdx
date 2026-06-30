@@ -3,11 +3,9 @@ import { TelefuncStreamBeta, PoweredByTelefuncStream } from '../../components'
 
 <TelefuncStreamBeta />
 
-For reactive streams with full operator support, you can use [RxJS](https://rxjs.dev).
+The `@telefunc/rxjs` integration lets you pass [RxJS](https://rxjs.dev) `Observable` and `Subject` instances directly between client and server, in both directions and with all operators.
 
-The `@telefunc/rxjs` integration lets you pass RxJS `Observable` and `Subject` directly between client and server, in both directions and with all operators.
-
-> Values you stream to the server are **shield-validated at runtime** against your TypeScript types — see <Link href="#shields" />.
+> **Automatic type runtime validation**: all value sent from the client to the server are validated <Link href="/shield#typescript-automatic">against TypeScript types</Link> at runtime (no need for Zod).
 
 <PoweredByTelefuncStream pkg="rxjs" />
 
@@ -17,10 +15,12 @@ The `@telefunc/rxjs` integration lets you pass RxJS `Observable` and `Subject` d
 npm install @telefunc/rxjs rxjs
 ```
 
-The Telefunc bundler plugin (Vite, webpack, Next.js, Babel) detects `@telefunc/rxjs` in your dependencies and registers it automatically. Without a Telefunc bundler plugin, register it manually — `import '@telefunc/rxjs/server'` in your server entry and `import '@telefunc/rxjs/client'` in your client entry.
+That's it.
+
+> The Telefunc bundler plugin (Vite, webpack, Next.js, Babel) detects `@telefunc/rxjs` in your dependencies and registers it automatically. Without a Telefunc bundler plugin, register it manually — `import '@telefunc/rxjs/server'` in your server entry and `import '@telefunc/rxjs/client'` in your client entry.
 
 
-## Live stock ticker
+## Example: live stock ticker
 
 The server pushes prices every second. The client filters and limits them locally with standard RxJS operators.
 
@@ -51,7 +51,7 @@ price$.pipe(
 ```
 
 
-## Collaborative editor
+## Example: collaborative editor
 
 Return a shared `Subject` to multiple clients and it multicasts among them: when one client emits with `next()`, every other client's subscribers receive the value through the server. The emitting client's own subscribers receive it locally too — the server doesn't echo a client's `next()` back to that same client.
 
@@ -82,7 +82,7 @@ edits.next({ userId: 'alice', text: 'Hello' })
 
 
 
-## Click heatmap (client → server)
+## Example: click heatmap (client → server)
 
 Pass an Observable as a telefunction argument. The server subscribes and processes the stream — a pattern useful for telemetry, analytics, or any client-driven event stream.
 
@@ -113,7 +113,7 @@ await onTrackClicks(clicks$)
 ```
 
 
-## Live cursors
+## Example: live cursors
 
 A shared Subject multicasts cursor positions among all connected users. The server attaches the user identity from context.
 
@@ -149,7 +149,7 @@ document.addEventListener('mousemove', e => {
 ```
 
 
-## Angular
+## Example: angular
 
 Angular uses RxJS extensively. With `@telefunc/rxjs`, telefunctions return Observables directly — pipe them into templates with `| async`, use them in services, or compose them with the rest of your RxJS code.
 
@@ -191,20 +191,12 @@ export class DashboardComponent {
 ```
 
 
-## Shields
-
-When you pass a `Subject<T>` or `Observable<T>` as a telefunction argument, each `next(v)` value is shield-validated against `T` as it arrives at the server. Terminal signals (`error`, `complete`) are untyped and pass through unshielded.
-
-See <Link href="/shield" /> for how telefunction arguments are validated in general.
-
-
 ## Lifecycle
 
-Unsubscribing stops data flow immediately. The underlying <Link href="/channel" text="channel" /> is cleaned up automatically via GC, or immediately with <Link href="/onClose" text="close()" />.
+Unsubscribing stops data flow immediately. The underlying <Link href="/channel" text="channel" /> is cleaned up <Link href="/close#when-to-close">automatically via GC</Link>, or immediately if you use <Link href="/close">`close()`</Link>.
 
 
 ## See also
 
 - <Link href="/stream" />
 - <Link href="/channel" />
-- <Link href="/stream/scale" />
