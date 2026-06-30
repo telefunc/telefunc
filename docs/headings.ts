@@ -286,7 +286,8 @@ const headings = [
   },
   {
     level: 2,
-    title: '`shield`',
+    titleInNav: '`shield`',
+    title: '`shield` (config)',
     url: '/shield-config',
   },
   {
