@@ -113,7 +113,7 @@ checker):
 
 - **`/Telefunc` (capitalized URL) is a footgun**: it sits oddly beside lowercase
   URLs, is case-sensitive, and `/telefunc` now redirects to `/serve` (not the new
-  page) while `/server` redirects to `/Telefunc`. Easy to mis-link.
+  page) while `/server` redirects to `/Telefunc`. Easy to link incorrectly.
 - **`stream/scale` repeats the Cloudflare note twice** in adjacent sections (mild
   redundancy / DRY).
 - **`config.channel.connectTtl`** uses `Ttl` while every sibling option uses
@@ -146,7 +146,7 @@ checker):
 3. **Document `dl.onProgress()` and `dl.cancel()`** in the `file-download`
    reading-strategies table (resurrect the trimmed "Cancelling" section, or fold its
    API into the table).
-4. **Repoint the three mis-targeted links** on the `close` page (`#close`, `/channel`,
+4. **Repoint the three wrongly targeted links** on the `close` page (`#close`, `/channel`,
    `/channel`).
 5. **Fix the four typos/grammar issues** listed above.
 6. **Unify the illustrative `ai` API** to one shape across `stream` and `onClose`.
