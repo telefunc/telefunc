@@ -2,11 +2,11 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Low-level function that turns a telefunction HTTP request into an HTTP response. It's a pure function: stateless and side-effect-free. It runs in any runtime without an adapter.
+Low-level function that turns a telefunction HTTP request into an HTTP response. It's a pure function: stateless and side-effect-free. It runs in any runtime, with no adapter required.
 
 > **Most apps should use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> instead** — it's the standard server integration.
 >
-> Because `new Telefunc()` has full-fledged support for <Link href="/stream">Telefunc Stream</Link>, whereas `serve()` doesn't support the following:
+> `new Telefunc()` has full-fledged support for <Link href="/stream">Telefunc Stream</Link>, whereas `serve()` doesn't support the following:
 > - <Link text="WebSocket" href="/transport#channel-transport" />
 >   > You can still use <Link href="/stream">Telefunc Stream</Link> but Telefunc won't use the WebSocket transport. (Another transport will be used.)
 > - <Link text="Channels" href="/channel" /> on Cloudflare
