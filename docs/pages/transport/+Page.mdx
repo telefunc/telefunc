@@ -14,13 +14,13 @@ Telefunc has two transport settings that control which network protocol is used 
 
 > These settings only affect <Link href="/stream">streams</Link> — plain telefunction calls are always `text/plain` JSON.
 
-```ts
+```js
 // Environment: client
 
 import { config } from 'telefunc/client'
 
-config.stream.transport = 'binary-inline'   // default
-config.channel.transports = ['sse', 'ws']   // default
+config.stream.transport = 'binary-inline' // default
+config.channel.transports = ['sse', 'ws'] // default
 ```
 
 > These are **client-side** configs (`telefunc/client`) — separate from the **server-side** <Link text={<code>config.channel</code>} href="/channel-config" /> settings.
@@ -30,7 +30,7 @@ config.channel.transports = ['sse', 'ws']   // default
 
 ## Stream transport
 
-Controls how streamed values are delivered over HTTP.
+Controls how streaming values are delivered over HTTP.
 
 | Transport | Content-Type | Description |
 |---|---|---|
@@ -53,7 +53,7 @@ Controls how streamed values are delivered over HTTP.
 
 - **Start with `'binary-inline'`** — it's the fastest and works in most setups.
 - **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses but passes SSE events through without buffering.
-- **Use `'channel'`** when you want streamed values to reconnect automatically after a dropped connection (just as Telefunc channels do).
+- **Use `'channel'`** when you want streamed values to reconnect automatically after a dropped connection (just as <Link href="/channel">Telefunc channels</Link> do).
 
 
 ## Channel transport
