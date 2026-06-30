@@ -28,7 +28,7 @@ config.channel = {
 }
 ```
 
-> This is the **server-side** `config.channel` — a separate object from the **client-side** <Link text={<code>config.channel.transports</code>} href="/transport#channel-transport" /> (`telefunc/client`).
+> This is the **server-side** `config.channel` — a separate object from the **client-side** <Link text={<code>config.channel.transports</code>} href="/transport" /> (`telefunc/client`).
 
 > **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
