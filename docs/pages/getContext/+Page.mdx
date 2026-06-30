@@ -4,7 +4,7 @@ import '../../components/tabs.css'
 
 **Environment**: server.
 
-Enables telefunctions to access contextual information.
+`getContext()` enables telefunctions to access contextual information.
 
 ```ts
 // TodoList.telefunc.ts
@@ -28,10 +28,95 @@ It's most commonly used for implementing permissions, see <Link href="/permissio
 
 ## Provide
 
-You can add `context` properties when calling `telefunc.serve()` — see <Link href="/Telefunc" />.
+Before you can use `getContext()`, you must provide the `context` object when calling `tf.serve()`, see <Link href="/server" />.
 
-> You can also provide `context` outside the server middleware (e.g. when <Link href="/testing">testing</Link>) via <Link text={<code>provideTelefuncContext()</code>} href="/provideTelefuncContext" />.
+For example:
 
+<Tabs>
+  <TabList>
+    <Tab>Hono</Tab>
+    <Tab>Express.js</Tab>
+  </TabList>
+  <TabPanel>
+
+```ts
+// server/index.ts
+// Environment: server
+
+// Server entry (Hono)
+
+import { Hono } from 'hono'
+import { telefunc } from 'telefunc/node'
+
+const app = new Hono()
+const tf = telefunc()
+
+app.all('/_telefunc', async (c) => {
+  const response = await tf.serve({
+    request: c.req.raw,
+    // Provide the context object here:
+    context: {
+      user: c.get('user')
+    }
+  })
+  return response ?? c.notFound()
+})
+
+// Some authentication middleware — sets the user on Hono's context
+app.use(async (c, next) => {
+  const userId = c.req.cookie('user-id')
+  const user = await getUserFromDatabase(userId)
+
+  // Or using a third-party authentication provider (e.g. Auth0):
+  // @docpress-replace user2 user
+  const user2 = await authProviderApi.getUser(c.req.headers)
+
+  // Authentication middlewares usually provide information
+  // about the logged-in user on the context object:
+  c.set('user', user)
+  await next()
+})
+```
+> See also:
+> - [Hono Guides > Middleware > Extending the Context in Middleware](https://hono.dev/docs/guides/middleware#extending-the-context-in-middleware)
+
+  </TabPanel>
+  <TabPanel>
+
+```ts
+// server/index.ts
+// Environment: server
+
+// Server entry (Express.js)
+
+import express from 'express'
+import { telefunc } from 'telefunc/node'
+
+const app = express()
+const tf = telefunc()
+
+// Telefunc middleware
+app.all('/_telefunc', async (req, res, next) => {
+  // Authentication middlewares (e.g. Passport.js or Grant) usually provide information
+  // about the logged-in user on the `req` object:
+  const user = req.user
+
+  // Or when using a third-party authentication provider (e.g. Auth0):
+  // @docpress-replace user2 user
+  const user2 = await authProviderApi.getUser(req.headers)
+
+  // Provide the context object here:
+  const handled = await tf.serve({
+    req,
+    res,
+    context: { user }
+  })
+  if (!handled) next()
+})
+```
+
+  </TabPanel>
+</Tabs>
 
 ## Access
 
@@ -70,25 +155,21 @@ export async function myTelefunction() {
 
 ## TypeScript
 
-You can use the `Telefunc.Context` interface to globally set the type of `const context = getContext()`:
+You can use `Telefunc.Context` to globally set the type of `const context = getContext()`:
 
 ```ts ts-only
 // TelefuncContext.d.ts
 
+import 'telefunc'
 import type { User } from './User.ts'
 
-declare global {
+declare module 'telefunc' {
   namespace Telefunc {
     interface Context {
       user: null | User
     }
   }
 }
-
-// Add this line if TypeScript complains about `declare global` (it requires the file
-// to have at least one `import` or `export` so that TypeScript treats it as a module).
-// https://typescriptlang.org/docs/handbook/2/modules.html#how-javascript-modules-are-defined
-export {}
 ```
 ```ts ts-only
 // User.ts
@@ -123,17 +204,29 @@ export async function someTelefunction() {
 }
 ```
 
-
 ## `onClose()`
 
-The context object includes `onClose()`, see <Link href="/onClose#context-onclose" />.
+The context object returned by `getContext()` also includes `onClose()`, a callback that fires when the request lifecycle ends for any reason. Fires exactly once. Use it to release resources.
+
+```ts
+const context = getContext()
+context.onClose(() => {
+  // Clean up server-side resources
+})
+```
+
 
 ## `signal`
 
-The context object includes a `signal` (an `AbortSignal`), see <Link href="/onClose#context-signal" />.
+The context object also includes an `AbortSignal` that fires when the request ends. Pass it to APIs that accept one (`fetch`, database clients, etc.) so in-flight work cancels when the client disconnects.
+
+```ts
+const context = getContext()
+const response = await fetch(url, { signal: context.signal })
+```
 
 
 ## See also
 
-- <Link href="/permissions" />
-- <Link href="/Telefunc" />
+- <Link href="/server" />
+- <Link href="/getContext" />
