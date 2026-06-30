@@ -6,7 +6,7 @@ Manually close <Link href="/stream">Telefunc streams</Link>.
 
 > The `close()` function is one of several ways to manually close streams — see all methods at <Link href="#how-to-close" />.
 
-> You usually don't need to manually close streams yourself, see: <Link href="#when-to-close" />.
+> You usually don't need to manually close streams yourself — see: <Link href="#when-to-close" />.
 
 > For listening to streams closing, see: <Link href="/onClose" />.
 
@@ -71,7 +71,7 @@ function Clock() {
 }
 ```
 
-It's optional: if you don't return `clear`, the stream will still automatically close itself after React unmounts the component: the garbage collector clears the stream object and then the stream closes itself.
+It's optional: if you don't return `clear`, the stream still closes itself automatically after React unmounts the component — the garbage collector clears the stream object and then the stream closes itself.
 
 That said, if you want the stream to close as soon as possible, manually close it yourself — return `clear` in this example.
 
