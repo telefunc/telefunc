@@ -15,7 +15,7 @@ If you use <Link href="/stream">Telefunc Stream</Link>, scaling Telefunc horizon
 
 A Telefunc `Channel` is a stateful connection. Its server-side state — the `Channel` instance, its `send()`/`listen()` closures, any interval the telefunction set up — lives in one server process. When the client reconnects (network issues, a page reload, an SSE→WS upgrade), the next request has to land on the same process or the channel can't recover.
 
-> This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves the problem for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
+> This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves it for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
 
 > Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and your client's `Channel` ends.
 
@@ -55,7 +55,7 @@ In the target group's attributes, enable **Stickiness** with type **Load balance
 
 ### Cloud Run / serverless
 
-Serverless platforms that don't expose sticky-session routing aren't a good fit for `Channel`. Broadcasts still work (each publish round-trips through Redis), but channel reconnects can fail unpredictably. Most teams pair Telefunc with a long-running server tier when they need channels at scale.
+Serverless platforms that don't expose sticky-session routing aren't a good fit for `Channel`. Broadcasts still work (each publish round-trips through Redis), but channel reconnects fail whenever they land on a different instance. Most teams pair Telefunc with a long-running server tier when they need channels at scale.
 
 
 

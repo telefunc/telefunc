@@ -2,7 +2,7 @@ import { Link, Warning } from '@brillout/docpress'
 
 **Environment**: server & client.
 
-You can listen when <Link href="/stream">Telefunc streams</Link> close to:
+You can run code when <Link href="/stream">Telefunc streams</Link> close, in order to:
 - <Link href="/stream#cleanup">Clear resources</Link>
   <Warning>
   Make sure you **always clear long-lived resources** (`setInterval`, an event subscription, a DB cursor, an upstream stream, ...).
@@ -19,7 +19,7 @@ You can listen when <Link href="/stream">Telefunc streams</Link> close to:
 
 > The listeners fire regardless of why the stream closed — whether all streams finished, the client stopped using the streams, you closed them manually, the client disconnected, or an error occurred.
 
-> Every stream eventually ends — at the latest when the client disconnects (e.g. the user navigates away from your website), but usually sooner: when the client stops using the stream, you close it manually, the network connection is permanently lost (it couldn't be recovered), or an error occurs.
+> Every stream eventually ends — at the latest when the client disconnects (e.g. the user navigates away from your website), but usually sooner: when the client stops using the stream, you close it manually, the network connection is permanently lost (and couldn't be recovered), or an error occurs.
 
 > To close streams, see: <Link href="/close" />.
 

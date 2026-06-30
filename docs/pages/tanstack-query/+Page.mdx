@@ -43,7 +43,7 @@ After installing `@telefunc/tanstack-query`, keys prefixed with `global:` become
 
 > All other keys remain normal (invalidate locally, i.e. current tab only).
 
-> **How does it work?** Under the hood, the `global:` key is sent to the server and then <Link href="/channel#broadcast">broadcast</Link> to every client using a query key that matches. Learn more at <Link href="#how-it-works" />.
+> **How does it work?** Under the hood, the `global:` key is sent to the server and then <Link href="/channel#broadcast">broadcast</Link> to every client that has a matching query key. Learn more at <Link href="#how-it-works" />.
 
 ```js
 queryKey: ['todos']                          // local — current tab only
