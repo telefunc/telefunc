@@ -506,10 +506,9 @@ await onTeamFeed('acme', (text) => showMessage(text))
 **Environment**: server & client.
 
 ```ts
-// Client and server-side:
-channel.onClose((err) => {
+onClose((err) => {
   if (!err) {
-    // Graceful close — `close()` completed, channel done
+    // Graceful close (completed, manual `close()`, or client stopped using stream)
   } else if (err instanceof Abort) {
     // Either side called abort(value)
     console.log(err.abortValue)
@@ -517,18 +516,9 @@ channel.onClose((err) => {
     // Connection lost (couldn't reconnect)
   }
 })
-
-// Server-side:
-context.onClose((err) => {
-  // Same as above
-})
 ```
 
-> See:
-> - <Link href="/onClose">`context.onClose()`</Link>
-> - <Link href="/channel#new-channel">`channel.onClose()`</Link>
-
-> The `channel.onClose()` hook can be used on the server- and client-side, whereas `context.onClose()` can only be used on the server.
+> See: <Link href="/onClose" />
 
 > The expected-vs-bug distinction described at <Link href="/error-handling" /> applies to streams too:
 > - `throw Abort()` during a stream is relayed <Link href="/error-handling#expected-errors">as an expected error</Link>
