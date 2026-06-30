@@ -71,7 +71,7 @@ function Clock() {
 }
 ```
 
-It's optional: if you don't return `clear`, the stream still closes itself automatically after React unmounts the component — the garbage collector clears the stream object and then the stream closes itself.
+Returning `clear` is optional: if you don't, the stream still closes itself automatically after React unmounts the component, once the garbage collector clears the stream object.
 
 That said, if you want the stream to close as soon as possible, manually close it yourself — return `clear` in this example.
 
