@@ -43,7 +43,7 @@ When using `@telefunc/tanstack-query`, keys prefixed with `global:` are special 
 
 > All other keys remain normal (invalidate locally, i.e. current tab only).
 
-> **How does it work?** Under the hood, the `global:` key is sent to the server then <Link href="/channel#broadcast">broadcasted</Link> to all clients that use a maching query. It's powered by <Link href="/stream">Telefunc Stream</Link>.
+> **How does it work?** Under the hood, the `global:` key is sent to the server then <Link href="/channel#broadcast">broadcasted</Link> to all clients that use a matching query. It's powered by <Link href="/stream">Telefunc Stream</Link>.
 
 ```js
 queryKey: ['todos']                          // local — current tab only
@@ -73,8 +73,6 @@ queryKey: ['global:documents', docId]        // global
 
 Use `meta.invalidates` on mutations to invalidate matching queries after the mutation succeeds.
 
-> The `invalidates` field is a `@telefunc/tanstack-query` convention: TanStack Query itself attaches no behavior to `meta`.
-
 ```tsx
 const { data: todos } = useQuery({
   queryKey: ['todos'],
@@ -86,6 +84,8 @@ const add = useMutation({
   meta: { invalidates: [['todos']] },
 })
 ```
+
+> The `invalidates` field is a `@telefunc/tanstack-query` convention: TanStack Query itself attaches no behavior to `meta`.
 
 Global keys work the same way — when a collaborator edits a document, every client viewing it refetches:
 
