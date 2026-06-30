@@ -169,7 +169,6 @@ const binaryAck = await chat.sendBinary(frame, { ack: true })
 
 > A channel-wide `{ ack: true }` only applies to `send()` — `sendBinary()` always opts in per call, so pass `{ ack: true }` to each `sendBinary()` that needs an acknowledgement.
 
-
 ### Binary data
 
 Send and receive raw binary alongside structured messages:
