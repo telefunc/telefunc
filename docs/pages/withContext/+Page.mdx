@@ -39,7 +39,7 @@ for await (const message of gen) {
 | `telefuncUrl` | `string` | Override <Link text={<code>config.telefuncUrl</code>} href="/telefuncUrl" /> for this call and its channels. |
 | `stream.transport` | <Link text="Stream transport" href="/transport#stream-transport" /> | Override `config.stream.transport` for streaming. |
 | `channel.transports` | <Link text="Channel transport" href="/transport#channel-transport" /> | Override `config.channel.transports` for channels. |
-| `channel.connectionKey` | `string` | Calls with the same key share one connection; different keys use separate connections. |
+| `channel.connectionKey` | `string` | By default, all channel calls to the same URL share one connection. Set a key to isolate calls onto separate connections: calls with the same key share a connection, while different keys (and keyless calls) each get their own. |
 | `channel.idleTimeout` | `number` | How long (ms) to keep the underlying connection open after all channels close. Default `60_000`; `0` closes it immediately. |
 
 
