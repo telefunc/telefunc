@@ -5,7 +5,7 @@ import { TelefuncStreamBeta } from '../../../components'
 
 <TelefuncStreamBeta />
 
-Cloudflare-specific setup for <Link href="/stream">Telefunc Stream</Link>.
+Use <Link href="/stream">Telefunc Stream</Link> on [Cloudflare](https://cloudflare.com) (its [Cloudflare Workers](https://www.cloudflare.com/products/workers/) platform).
 
 
 ## Setup
@@ -52,7 +52,7 @@ export default {
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
 > - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, no matter which worker a request lands on.
 >
-> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `BroadcastChannel`, there's no state to keep — skip both bindings and use <Link text={<code>serve()</code>} href="/serve" /> instead.
+> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` nor `BroadcastChannel`, there's no state to keep — you can skip both bindings and use <Link text={<code>serve()</code>} href="/serve" /> instead.
 >
 > See <Link href="#architecture" /> for implementation details.
 
@@ -63,8 +63,8 @@ Pass per-request data to telefunctions via <Link text={<code>getContext()</code>
 ```ts
 const telefunc = new Telefunc({
   context: async (request, env: Env) => ({
-    user: await getUserFromCookie(request, env),
-  }),
+    user: await getUserFromCookie(request, env)
+  })
 })
 ```
 
@@ -73,7 +73,7 @@ See: <Link href="/Telefunc" />.
 
 ## Architecture
 
-Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for channel state and broadcast fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object that holds the WebSocket connection.
+Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for <Link href="/channel">channel</Link> state and <Link href="/channel#broadcast">broadcast</Link> fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object that holds the WebSocket connection.
 
 [KV](https://developers.cloudflare.com/kv/) stores two things:
 - **Session tokens** — pin a browser to the same Durable Object across requests.
@@ -96,7 +96,7 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 ### Session affinity
 
-Every telefunction call and channel message from a browser must reach the **same Durable Object** — otherwise that browser's channel state would be unavailable.
+Every telefunction call and channel message from a client must reach the **same Durable Object** — otherwise that client's channel state would be unavailable.
 
 On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns that token to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
 
@@ -125,7 +125,7 @@ const telefunc = new Telefunc({
 })
 ```
 
-Only specified regions get Durable Objects. Requests from unspecified regions fall back to `locationFallback`.
+Only specified regions get Durable Objects. Requests from unspecified regions fall back to <Link href="#configuration">`locationFallback`</Link>.
 
 
 ## Distributed broadcast
@@ -154,7 +154,7 @@ Publisher (Durable Object)
 
 ### Ordering
 
-Publishes for a given key go through a single authority, so subscribers receive messages in order with a monotonic `seq`.
+<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, so subscribers receive messages in order with a <Link href="/channel#broadcast">monotonic `seq`</Link>.
 
 ### Presence
 
@@ -178,7 +178,7 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 | Buffering | The server buffers messages while the client is disconnected: up to `config.channel.bufferLimit` for text (default: 512 KB) and up to `config.channel.bufferLimitBinary` for binary (default: 2 MB). Binary frames have a separate budget and can never evict text. |
 | Replay | Both sides keep a replay buffer. On reconnect, missing messages are replayed and duplicates are ignored. |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
-| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with `NetworkError`. |
+| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
 
 ### Broadcast messages (`publish` / `subscribe`)
 
@@ -208,13 +208,9 @@ See also: <Link href="/Telefunc" />.
 
 ## Hibernation
 
-<Warning>
-
-**[Hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#why-use-hibernation) while channels are open isn't supported.**
-
-Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
-
-</Warning>
+> **[Hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/#why-use-hibernation) while channels are open isn't supported.**
+>
+> Channel state is in-memory JavaScript. If the Durable Object hibernates, that state is gone. Telefunc keeps the Durable Object alive while channels are open.
 
 The Durable Object can hibernate once all channels are closed, no clients remain connected, and both the reconnect and idle windows have expired.
 
@@ -225,7 +221,7 @@ import { config } from 'telefunc'
 config.channel = {
   reconnectTimeout: 5_000,
   idleTimeout: 5_000,
-  pingInterval: 2_000,
+  pingInterval: 2_000
 }
 ```
 
