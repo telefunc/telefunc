@@ -64,7 +64,31 @@ channel.listen((time) => console.log(time)) // 1700000000000, 1700000001000, ...
 
 Two-way example:
 
-TODO/ai: add simple two-way example
+```ts
+// Echo.telefunc.ts
+// Environment: server
+
+import { Channel } from 'telefunc'
+
+export async function onEcho() {
+  const channel = new Channel<string, string>()
+  channel.listen((text) => channel.send(`echo: ${text}`))
+  return { channel: channel.client }
+}
+```
+
+```ts
+// Echo.tsx
+// Environment: client
+
+import { onEcho } from './Echo.telefunc'
+
+const { channel } = await onEcho()
+channel.listen((text) => console.log(text)) // 'echo: Hello!'
+channel.send('Hello!')
+```
+
+> The client `send()`s and the server `listen()`s, while the server `send()`s and the client `listen()`s — both ends talk over the same channel.
 
 ### Channel methods
 
