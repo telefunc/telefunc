@@ -21,7 +21,7 @@ You can listen when <Link href="/stream">Telefunc streams</Link> close to:
 
 > Every stream eventually ends — at the latest when the client disconnects (e.g. the user navigates away from your website), but usually sooner: when the client stops using the stream, you close it manually, the network connection is permanently lost (and couldn't be recovered), or an error occurs.
 
-> To close streams, see: <Link href="/close" />.
+> See <Link href="/close" /> to manually close streams.
 
 
 ## `context.onClose()`
@@ -40,10 +40,9 @@ import { getContext } from 'telefunc'
 
 export async function* onAiPrompt(prompt: string) {
   const { onClose } = getContext()
-  onClose(() => {
-    // Release resources, cancel upstream work
+  onClose((err) => {
+    // Release resources, handle errors, cancel upstream work, ...
   })
-
   for await (const message of ai.streamText({ prompt })) {
     yield message
   }
@@ -81,18 +80,11 @@ The `onClose()` hook defined on a `new Channel()` instance is called when that c
 
 ```ts
 channel.onClose((err) => {
-  if (!err) {
-    // Graceful close — `close()` completed, channel done
-  } else if (err instanceof Abort) {
-    // Either side called abort(value)
-    console.log(err.abortValue)
-  } else if (err instanceof NetworkError) {
-    // Connection lost beyond reconnectTimeout
-  }
+  // ...
 })
 ```
 
-> The `channel.onClose()` hook can be used on the server- and client-side.
+> The `channel.onClose()` hook can be used on both the server- and client-side.
 
 
 ## `context.signal`
