@@ -2,27 +2,67 @@ import { Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Low-level function that processes telefunction requests and returns an HTTP response. It's a pure function with no side effects.
+Low-level function that turns a telefunction HTTP request into an HTTP response. It's a pure function: stateless and side-effect-free. It runs in any runtime, with no adapter required.
 
-> For most setups, use the runtime-specific `telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare` instead. See <Link href="/server" />.
+> **Most apps should use <Link text={<code>new Telefunc()</code>} href="/Telefunc" /> instead** — it's the standard server integration.
+>
+> `new Telefunc()` has full-fledged support for <Link href="/stream">Telefunc Stream</Link>, whereas `serve()` doesn't support the following:
+> - <Link text="WebSocket" href="/transport#channel-transport" />
+>   > You can still use <Link href="/stream">Telefunc Stream</Link>, but not over the WebSocket transport — Telefunc falls back to another transport instead.
+> - <Link text="Channels" href="/channel" /> on Cloudflare
+>   > You won't be able to use channels on Cloudflare at all. (Because channels need <Link text="Durable Objects" href="/stream/cloudflare" />.)
 
-## Basic usage
 
-Pass the web standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
+## Web `Request`
+
+You can pass the web-standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
 
 ```ts
+// Environment: server
+
 import { serve } from 'telefunc'
 
-const httpResponse = await serve({ request })
+const httpResponse = await serve({
+  // `request` being a `Request` instance
+  request
+})
+
+// Build an HTTP response using the following:
+httpResponse.getReadableWebStream() // or httpResponse.getBody()
+httpResponse.statusCode
+httpResponse.headers
 ```
 
-Convert the result to a [`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response):
+> You can convert the result to a [`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response):
+>
+> ```ts
+> const response = new Response(httpResponse.getReadableWebStream(), {
+>   status: httpResponse.statusCode,
+>   headers: httpResponse.headers
+> })
+> ```
+
+
+## Node.js `req`
+
+You can pass the Node.js [`req` readable stream](https://nodejs.org/api/http.html#class-httpincomingmessage) (e.g. when using [Express](https://expressjs.com)):
 
 ```ts
-const response = new Response(httpResponse.getReadableWebStream(), {
-  status: httpResponse.statusCode,
-  headers: httpResponse.headers,
+// Environment: server
+
+import { serve } from 'telefunc'
+
+const httpResponse = await serve({
+  url: req.originalUrl,
+  method: req.method,
+  readable: req,
+  headers: req.headers
 })
+
+// Build an HTTP response using the following:
+httpResponse.getReadableWebStream() // or httpResponse.getBody()
+httpResponse.statusCode
+httpResponse.headers
 ```
 
 
@@ -32,29 +72,14 @@ Pass a `context` object to make request-scoped data available inside telefunctio
 
 ```ts
 const httpResponse = await serve({
-  request,
+  // ...
   context: {
-    user: await getUser(request),
-  },
+    user: await getUser(request)
+  }
 })
 ```
 
 > The `context` parameter is optional — only needed if you use `getContext()`. See <Link href="/getContext#provide" />.
-
-
-## Node.js `req`
-
-For [Express](https://expressjs.com), [Fastify](https://fastify.dev), or any Node.js framework, pass the `req` readable stream:
-
-```ts
-const httpResponse = await serve({
-  url: req.originalUrl,
-  method: req.method,
-  readable: req,
-  headers: req.headers,
-  context: { /* ... */ },
-})
-```
 
 
 ## Response object
@@ -65,17 +90,13 @@ const httpResponse = await serve({
 |---|---|---|
 | `statusCode` | `200 \| 400 \| 403 \| 422 \| 500` | HTTP status code |
 | `headers` | `[string, string][]` | Response headers |
-| `getReadableWebStream()` | `ReadableStream` | Web standard stream (Hono, Cloudflare, Deno, etc.) |
-| `pipe(writable)` | `void` | Pipe to Node.js writable (Express, Fastify) |
-| `getBody()` | `Promise<string>` | Full body as string (non-streaming only) |
-
-
-## Runtime adapters
-
-For production deployments with channels and WebSocket support, use the runtime-specific `telefunc()` from `telefunc/node`, `telefunc/bun`, `telefunc/deno`, or `telefunc/cloudflare`. See <Link href="/server" /> for examples.
+| `getReadableWebStream()` | `ReadableStream` | Web-standard stream (Hono, Cloudflare, Deno, etc.) |
+| `pipe(writable)` | `Promise<void>` | Pipe to Node.js writable (Express, Fastify) |
+| `getBody()` | `Promise<string>` | Full body as string (awaits streaming if needed) |
+| `err` | `unknown` | The error thrown by your telefunction, if any (otherwise `undefined`) — see <Link href="/error-handling" /> |
 
 
 ## See also
 
-- <Link href="/server" /> — server integration examples
-- <Link href="/getContext" /> — request context
+- <Link href="/Telefunc" />
+- <Link href="/getContext" />

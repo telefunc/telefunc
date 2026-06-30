@@ -109,23 +109,20 @@ See also: <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={
 
 **2. Handle the error on the server-side.**
 
-You can handle the thrown error using the <Link text="low-level API" href="/serve" />:
+Register an <Link text={<code>onBug()</code>} href="/onBug" /> hook — it's called whenever a telefunction throws a bug (any error that isn't `Abort()`):
 
 ```ts
 // server.ts
+// Environment: server
 
-import { serve } from 'telefunc'
+import { onBug } from 'telefunc'
 
-app.all('/_telefunc', async (c) => {
-  const httpResponse = await serve({ request: c.req.raw })
-  // Telefunc exposes any error thrown by a telefunction at httpResponse.err
-  if (httpResponse.err) {
-    // Error handling
-  }
+onBug((err) => {
+  // Error handling (e.g. report to Sentry, Bugsnag, ...)
 })
 ```
 
-Also see <Link href="/getContext#provide" />.
+> With the low-level <Link href="/serve">`serve()`</Link>, the error is also exposed at `httpResponse.err`.
 
 
 ## Network Errors
@@ -140,12 +137,12 @@ If the user's browser can't connect to your server:
   <body>
     <script type="module">
       import { hello } from './hello.telefunc.js'
-      import { ConnectionError } from 'telefunc/client'
+      import { NetworkError } from 'telefunc/client'
 
       try {
         await hello('Eva')
       } catch(err) {
-        if (err instanceof ConnectionError) {
+        if (err instanceof NetworkError) {
           // There is a network problem:
           //  - the user isn't connected to the internet, or
           //  - your server is down.
@@ -162,67 +159,3 @@ If the user's browser can't connect to your server:
 
 - <Link href="/onBug" />
 - <Link href="/abort-vs-error" />
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
