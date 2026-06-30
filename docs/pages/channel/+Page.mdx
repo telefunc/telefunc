@@ -243,7 +243,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 ## `new BroadcastChannel()`
 
-`new BroadcastChannel({ key })` lets you broadcast from the client-side as well.
+`new BroadcastChannel({ key })` lets you broadcast from and to the client-side (whereas `Broadcast` is serer-side only).
 
 > It creates a `Channel` to the one client that received it, and bridges that client onto a `Broadcast` key.
 >
