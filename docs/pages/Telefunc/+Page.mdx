@@ -39,7 +39,7 @@ app.all('/_telefunc', async (c) => {
 
 const server = serve({ fetch: app.fetch, port: 3000 })
 
-// Enable WebSocket support for channels
+// Enable WebSocket support for streams
 telefunc.installWebSocket(server)
 ```
 
@@ -47,7 +47,7 @@ telefunc.installWebSocket(server)
 
 :::Choice{#Express}
 
-With the Node.js [`req` object](https://nodejs.org/api/http.html#class-httpincomingmessage) and [`res` object](https://nodejs.org/api/http.html#class-httpserverresponse) (Express.js):
+With the Node.js [`req` object](https://nodejs.org/api/http.html#class-httpincomingmessage) and [`res` object](https://nodejs.org/api/http.html#class-httpserverresponse) (e.g. Express.js):
 
 ```ts
 // server.ts
@@ -73,7 +73,7 @@ app.all('/_telefunc', async (req, res, next) => {
 
 const server = app.listen(3000)
 
-// Enable WebSocket support for channels
+// Enable WebSocket support for streams
 telefunc.installWebSocket(server)
 ```
 
@@ -92,7 +92,7 @@ const telefunc = new Telefunc()
 
 Bun.serve({
   port: 3000,
-  // Pass telefunc.websocket to enable WebSocket channels
+  // Enable WebSocket support for streams
   websocket: telefunc.websocket,
   async fetch(request, server) {
     const response = await telefunc.serve({
@@ -150,6 +150,7 @@ const telefunc = new Telefunc({
   })
 })
 
+// Enable streams
 export const TelefuncDurableObject = telefunc.TelefuncDurableObject
 
 export default {
@@ -184,11 +185,14 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 }
 ```
 
-> See <Link text="Cloudflare Workers" href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
+> See <Link href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
 
 
 :::
 
+> See also:
+> - <Link href="/getContext"/>
+> - <Link href="/stream"/>
 
 ## Methods
 
@@ -207,12 +211,12 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 | Runtime | Returns | Meaning |
 |---|---|---|
 | Node.js (`{ request }`) | `Response \| undefined` | `undefined` if not a Telefunc request |
-| Node.js (`{ req, res }`) | `boolean` | `true` if handled, `false` if not a Telefunc request |
+| Node.js (`{ req, res }`) | `boolean` | `false` if not a Telefunc request |
 | Bun | `Response \| undefined` | `undefined` if not a Telefunc request |
 | Deno | `Response \| undefined` | `undefined` if not a Telefunc request |
 | Cloudflare | `Response \| undefined` | `undefined` if not a Telefunc request |
 
-> `telefunc.serve()` returns a falsy value (`undefined` or `false`) for non-Telefunc requests, allowing you to chain it with other handlers.
+> `telefunc.serve()` returns a falsy value (`undefined` or `false`) for non-Telefunc requests, so that you can chain it with other handlers.
 
 
 ## See also
