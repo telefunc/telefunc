@@ -291,7 +291,7 @@ The client receives the `File` / `Blob` as a **lazy, streaming** object: its byt
 
 ### One-shot reads
 
-The streaming download can only be consumed once — calling `.stream()`, `.bytes()`, `.text()`, `.arrayBuffer()`, `.slice()`, or any `saveTo*` method a second time throws.
+The streaming download can only be consumed once — calling `.stream()`, `.bytes()`, `.text()`, `.arrayBuffer()`, or any `saveTo*` method a second time throws. (`.slice()` is lazy: it doesn't consume on its own, but reading the resulting slice consumes the download.)
 
 > If you need the data more than once, materialize it once via `dl.saveToMemory()` (or `saveToOpfs()` for large files) and reuse the returned `File` / `Blob`.
 
