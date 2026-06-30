@@ -82,7 +82,7 @@ function Download({ s3Key }: { s3Key: string }) {
 }
 ```
 
-Calling `dl.cancel()` aborts the download — the pending `saveToMemory` call then rejects.
+Calling `dl.cancel()` aborts the download — the pending `saveToMemory()` call then rejects.
 
 
 ## Example: multiple concurrent downloads
