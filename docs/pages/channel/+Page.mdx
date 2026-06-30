@@ -300,11 +300,11 @@ export async function onJoinChat(room: string, username: string) {
   const chat = new BroadcastChannel<ChatMessage>({ key: `chat:${room}` })
 
   chat.onOpen(() => {
-    chat.publish({ user: 'system', text: `${username} joined`, })
+    chat.publish({ user: 'system', text: `${username} joined` })
   })
 
   chat.onClose(() => {
-    chat.publish({ user: 'system', text: `${username} left`, })
+    chat.publish({ user: 'system', text: `${username} left` })
   })
 
   return chat
