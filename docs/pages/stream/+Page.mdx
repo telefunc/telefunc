@@ -496,7 +496,7 @@ import { onTeamFeed } from './TeamFeed.telefunc'
 await onTeamFeed('acme', (text) => showMessage(text))
 ```
 
-`getContext()` and `throw Abort()` only work **before the telefunction returns** — so authorize at open time. The `context.user` you capture stays valid inside callbacks which runs later (via JavaScript closure).
+`getContext()` and `throw Abort()` only work **before the telefunction returns** — so authorize at open time. The `context.user` you capture stays valid inside callbacks which run later (via JavaScript closure).
 
 > **Consider re-checking.** For sensitive operations, you can re-check authorization with the captured `context.user` each time the callback runs, although most use cases don't need this.
 
