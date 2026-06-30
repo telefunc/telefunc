@@ -140,7 +140,7 @@ export async function onGetImage(key: string) {
   return download(res.Body!.transformToWebStream(), {
     name: key,
     size: res.ContentLength,
-    type: res.ContentType,
+    type: res.ContentType
   })
 }
 ```
