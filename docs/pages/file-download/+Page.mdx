@@ -162,8 +162,8 @@ imgEl.src = URL.createObjectURL(await dl.saveToMemory())
 
 **Environment**: server.
 
-You can choose between `download()` and a native `File` / `Blob`:
-- **Bytes already in memory** → return a native `File` / `Blob`.
+You can choose between `download()` and a native `File`/`Blob`:
+- **Bytes already in memory** → return a native `File`/`Blob`.
 - **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <code>download()</code>.
 
 | Approach | Server memory | Client memory | Best for |

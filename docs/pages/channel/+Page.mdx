@@ -21,7 +21,7 @@ The following low-level **primitives** enable every kind of stream use case.
 
 `new Channel()` and `new BroadcastChannel()` are returned from a telefunction — they serialize into client-side objects automatically. `Broadcast` is a server-side API, so there's nothing to return.
 
-> By default, channels and broadcasts use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/Telefunc" />), the client starts on SSE and transparently upgrades to WebSocket in the background (see <Link href="/transport" />).
+> By default, channels and broadcasts use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/Telefunc" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background (see <Link href="/transport" />).
 
 <NeedsLongRunningServer />
 
@@ -243,7 +243,7 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 ## `new BroadcastChannel()`
 
-`new BroadcastChannel({ key })` extends broadcasting to the client-side (whereas `Broadcast` is server-side only).
+`new BroadcastChannel({ key })` lets you broadcast from and to the client-side (whereas `Broadcast` is server-side only).
 
 > It creates a `Channel` to the one client that received it, and bridges that client onto a `Broadcast` key.
 >
