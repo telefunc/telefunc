@@ -23,7 +23,9 @@ config.stream.transport = 'binary-inline' // default
 config.channel.transports = ['sse', 'ws'] // default
 ```
 
-> These are **client-side** configs (`telefunc/client`) — separate from the **server-side** <Link text={<code>config.channel</code>} href="/channel-config" /> settings.
+> These are **client-side** configs — separate from following **server-side** settings:
+> - <Link href="/channel-config">`config.channel`</Link>: reconnect/idle timeouts and per-peer buffer limits
+> - <Link href="/stream/scale#broadcast">`config.broadcast.transport`</Link>: cross-instance broadcast for multi-server deployments
 
 <ConfigWhereClient />
 
@@ -47,7 +49,7 @@ Controls how streaming values are delivered over HTTP.
 | `'channel'` (SSE) | 🟡 | ✅ | ✅ | None |
 | `'channel'` (WS) | ✅ | 🟡 | ✅ | <Link text="Server setup" href="/Telefunc" /> |
 
-*Key: ✅ good · 🟡 partial / caveats · ❌ none*
+*✅ good · 🟡 partial / caveats · ❌ none*
 
 ### When to use what
 
@@ -62,28 +64,29 @@ Set the network protocol used by <Link text={<code>new Channel()</code>} href="/
 
 | Transport | Description |
 |---|---|
-| `'sse'` | HTTP requests + SSE stream. Works without extra server setup. |
-| `'ws'` | Multiplexed WebSocket. Requires <Link text="WebSocket server setup" href="/Telefunc" />. |
+| `'sse'` | HTTP requests + SSE stream.<br/><small>No extra server setup: works with both <Link href="/Telefunc">`new Telefunc()`</Link> and <Link href="/serve">`serve()`</Link></small>. |
+| `'ws'` | Multiplexed WebSocket.<br/><small>Extra server setup: works only with <Link href="/Telefunc">`new Telefunc()`</Link> (it supports WebSocket whereas <Link href="/serve">`serve()`</Link> doesn't)</small>. |
 
-The client default is `['sse', 'ws']` — start on SSE, then upgrade to WebSocket once the server offers it. The server offers SSE out-of-the-box and adds WebSocket when you install an adapter (see <Link href="/Telefunc" />).
+The client default is `['sse', 'ws']` — start on SSE, then upgrade to WebSocket once the server offers it. The server offers SSE out-of-the-box, and adds WebSocket if you set up your server via <Link href="/Telefunc">`new Telefunc()`</Link> (instead of <Link href="/serve">`serve()`</Link>).
+
+> The client starts on SSE and upgrades to WebSocket in the background.
 
 All channels share a single multiplexed connection per server URL, so opening many channels doesn't open many connections.
 
 ### Comparison
 
-| | Throughput | Recovery | Proxy/CDN | Setup |
+| | Throughput | Recovery | Proxy/CDN | Server setup |
 |---|---|---|---|---|
 | `'sse'` | 🟡 | ✅ | ✅ | None |
-| `'ws'` | ✅ | ✅ | 🟡 | <Link text="Server setup" href="/Telefunc" /> |
+| `'ws'` | ✅ | ✅ | 🟡 | WebSocket |
 
-*Key: ✅ good · 🟡 partial / caveats · ❌ none*
+*✅ good · 🟡 partial / caveats · ❌ none*
 
 ### When to use what
 
 - **Start with `'sse'`** — it works everywhere out-of-the-box.
 - **Use `'ws'`** for high-frequency, real-time traffic that benefits from a full-duplex connection.
 
-> When WebSocket is enabled (see <Link href="/Telefunc" />), the server supports both SSE and WS. The client starts on SSE and upgrades to WebSocket in the background (open channels keep working without interruption).
 
 
 ## Recommended setup
@@ -92,16 +95,16 @@ All channels share a single multiplexed connection per server URL, so opening ma
 |---|---|
 | Best default | `config.stream.transport = 'binary-inline'` |
 | Proxy buffers binary | `config.stream.transport = 'sse-inline'` |
-| Streams with reconnection | `config.stream.transport = 'channel'` |
+| Reconnection | `config.stream.transport = 'channel'` |
 | Channels without WS | `config.channel.transports = ['sse']` |
-| Full-duplex channels | `config.channel.transports = ['sse', 'ws']` + <Link text="Server setup" href="/Telefunc" /> |
+| Full-duplex channels | `config.channel.transports = ['sse', 'ws']` |
 
 
 ## Per-call overrides
 
-Override transport for a single call (instead of globally) with <Link text={<code>withContext()</code>} href="/withContext" /> from `telefunc/client`:
+Override transport for a single call (instead of globally) with <Link text={<code>withContext()</code>} href="/withContext" />:
 
-```ts
+```js
 // Environment: client
 
 import { onAIChat } from './Chat.telefunc'
@@ -113,20 +116,12 @@ const call = withContext(onAIChat, {
 })
 
 const gen = call('Tell me a joke')
-for await (const token of gen) {
-  console.log(token)
+for await (const message of gen) {
+  console.log(message)
 }
 ```
 
-> `withContext()` also takes a per-call `signal`, `headers`, and `telefuncUrl` — see <Link href="/withContext" /> for the full list.
 
-
-## Channel & broadcast config
-
-Beyond transport, channels and broadcasts expose more server-side `config` options:
-
-- **`config.channel`** — reconnect/idle timeouts and per-peer buffer limits. See <Link href="/channel-config" />.
-- **`config.broadcast.transport`** — cross-instance broadcast for multi-server deployments. See <Link href="/stream/scale#broadcast" />.
 
 
 ## See also
