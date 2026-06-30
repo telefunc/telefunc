@@ -90,7 +90,7 @@ channel.listen((text) => console.log(text)) // 'echo: Hello!'
 channel.send('Hello!')
 ```
 
-### Channel methods
+### `Channel` methods
 
 | Method | Description |
 |---|---|
@@ -236,7 +236,7 @@ channel.send({ type: 'ping' }) // sent immediately, no await needed
 
 ## `Broadcast`
 
-`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the `key` (via a `BroadcastChannel`). Publishers and subscribers are decoupled; all they share is the string `key`. It's the fan-out layer that `BroadcastChannel` (below) is built on.
+`Broadcast` is a keyed pub/sub **bus**: a message published to a `key` reaches every subscriber of that `key` — server-side subscribers (via `Broadcast.subscribe()`) and clients bridged into the `key` (via <Link href="#new-broadcastchannel">`new BroadcastChannel()`</Link>). Publishers and subscribers are decoupled; all they share is the `key` string. It's the fan-out layer that `new BroadcastChannel()` is built on.
 
 The static methods run purely on the server — no client, no handle, no lifecycle — and take the `key` as their first argument:
 
@@ -254,13 +254,13 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 
 `publish()` returns a receipt and `subscribe()` receives the same `info`:
 
-```ts
+```js
 info.key        // 'room:lobby' — the broadcast key
 info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `{ seq, timestamp }` once the message is accepted.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
@@ -273,15 +273,17 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 > It creates a `Channel` to the one client that received it, and bridges that client onto a `Broadcast` key.
 >
-> Return it from a telefunction and that client can `publish()` / `subscribe()` on the key — every message reaches every member of the group (both client-side and server-side).
+> Return it from a telefunction and the receiving client can `publish()` / `subscribe()` on the key — every message reaches every member of the group (both client-side and server-side).
 
 
 <Warning>
 
 **Keys are capabilities** — anyone who knows the `key` joins the group. Secure a broadcast in one of two ways:
-- **Guard the key**: derive it from **authorized server-side context** (e.g. the user from <Link text="getContext()" href="/getContext" />), never from raw client input — see <Link text="Authorization" href="/stream#authorization" />.
-- **Guard the payload**: whatever you `publish()` reaches every subscriber, so broadcast only non-sensitive data. That's how <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> stays safe — it broadcasts only a *"refetch"* signal (the query key), and each client loads the actual data through its own authorized telefunction.
+- **Guard the key**: derive it from **authorized server-side context** (e.g. the user ID from <Link href="/getContext">`getContext()`</Link>), never from client-side input.
+- **Guard the payload**: whatever you `publish()` reaches every subscriber, so broadcast only non-sensitive data. That's how <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" /> stays safe — it broadcasts only a *"refetch"* signal, and each client loads the actual data through its own authorized telefunction.
 
+See also:
+- <Link href="/stream#authorization" />
 </Warning>
 
 ### Chat example
@@ -309,7 +311,7 @@ export async function onJoinChat(room: string, username: string) {
 }
 ```
 
-> Unlike channels (`new Channel()`), no `.client` is needed: broadcast is symmetric (one message type, no directional flip), so the same instance has the same message type on both ends.
+> Unlike channels (`new Channel()`), no `.client` is needed: broadcast is symmetric — the same instance has the same message type on both ends (no directional flip).
 
 ```ts
 // Chat.tsx
@@ -325,7 +327,7 @@ chat.subscribe((msg, info) => {
 })
 
 // Publish to every subscriber of the key
-chat.publish({ user: 'Alice', text: 'Hello!', })
+chat.publish({ user: 'Alice', text: 'Hello!' })
 ```
 
 ### Notifications
@@ -336,11 +338,13 @@ A per-user key with a subscribe-only client — the server returns a `BroadcastC
 // Notifications.telefunc.ts
 // Environment: server
 
-import { BroadcastChannel } from 'telefunc'
+import { BroadcastChannel, getContext } from 'telefunc'
 
-export async function onListenNotifications(userId: string) {
-  const broadcast = new BroadcastChannel({ key: `notifications:${userId}` })
-  // Send a toast to *all* clients matching the user id (i.e. on all the tabs of all the user's devices)
+export async function onListenNotifications() {
+  const context = getContext()
+  const broadcast = new BroadcastChannel({ key: `notifications:${context.userId}` })
+  // Send a toast to *all* clients matching the user id, i.e. on all the tabs of
+  // all the user's devices.
   setTimeout(() => broadcast.publish('hello'), 1000)
   setTimeout(() => broadcast.publish('world'), 2000)
   return broadcast
@@ -351,11 +355,11 @@ export async function onListenNotifications(userId: string) {
 // Notifications.tsx
 // Environment: client
 
-const broadcast = await onListenNotifications(userId)
+const broadcast = await onListenNotifications()
 broadcast.subscribe((n) => showToast(n))
 ```
 
-### BroadcastChannel methods
+### `BroadcastChannel` methods
 
 | Method | Description |
 |---|---|
@@ -363,11 +367,12 @@ broadcast.subscribe((n) => showToast(n))
 | `subscribe(cb)` | Receive `(data, info)`. Returns an unsubscribe function. |
 | `publishBinary(data)` | Publish raw binary to every subscriber. Returns a receipt. |
 | `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
-| `onOpen(cb)` / `onClose(cb)` | Lifecycle callbacks. |
+| `onOpen(cb)` | Called when the channel opens. |
+| `onClose(cb)` | Called when the channel closes. |
 | `close()` | Close gracefully. |
 | `abort(abortValue?)` | Terminate immediately. |
 
-> The instance is bound to its `key`, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#broadcast" /> / `Broadcast.subscribe(key, cb)` take it first — and have no `onOpen` / `onClose` / `close` / `abort`, since there's no instance to manage.
+> The instance is bound to its `key`, so `publish(data)` / `subscribe(cb)` take no key. The static <Link text={<code>Broadcast.publish(key, data)</code>} href="#broadcast" /> / `Broadcast.subscribe(key, cb)` have no `onOpen` / `onClose` / `close` / `abort` since there's no instance to manage.
 
 
 ## `new BroadcastChannel()` VS `new Channel()`
@@ -384,7 +389,7 @@ Only the two ends of a channel can use it, while anything that knows a broadcast
 
 ### Technically
 
-You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Broadcast.publish()` / `Broadcast.subscribe()`. The server holds a private channel to the one client that received it, then bridges that client into the keyed broadcast group — the same group those static methods publish to and subscribe from.
+`new BroadcastChannel()` is essentially `new Channel()` combined with the static `Broadcast.publish()` / `Broadcast.subscribe()`: the server holds a private channel to the one client that received it, then bridges that client into the keyed broadcast group.
 
 ### Comparison
 
@@ -393,7 +398,7 @@ You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Br
 | Topology | One server ↔ one client | All members sharing a `key` (server and client) |
 | Methods | `send()` / `listen()` | `publish()` / `subscribe()` |
 | Delivery | The other end | Every subscriber of the `key`, including the publisher |
-| Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
+| Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance, and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
 | Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
 | Multi-server | <Link text="Sticky sessions" href="/stream/scale#sticky-sessions" /> | <Link text="Broadcast transport" href="/stream/scale#broadcast" /> |
@@ -403,14 +408,14 @@ You can think of `new BroadcastChannel()` as `new Channel()` plus the static `Br
 
 Channels and broadcasts signal failure through four errors:
 
-| Error | When | Channel after | Recovery |
+| Error | When | Channel state | Recovery |
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
 | `ChannelOverflowError` | A buffered send was dropped — the buffer exceeded `config.channel.bufferLimit` | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
 
-> A graceful `close()` is not an error (`onClose(err)` receives `undefined`).
+> A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
 See also:
 - <Link href="/stream#error-handling" />
