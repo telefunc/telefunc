@@ -125,7 +125,7 @@ const telefunc = new Telefunc({
 })
 ```
 
-Only specified regions get Durable Objects. Requests from unspecified regions fall back to `locationFallback`.
+Only specified regions get Durable Objects. When you use the per-region object form, make sure to include every region your users connect from — a request whose nearest region isn't in the `scale` map throws. (`locationFallback` only applies when the request's location can't be resolved to one of the six regions, not as a fallback for a region you left out of the map.)
 
 
 ## Distributed broadcast
@@ -200,7 +200,7 @@ const telefunc = new Telefunc({
   instanceName: 'telefunc',              // Base name for DO instances (default)
   scale: 1,                              // DOs per region (default)
   locationFallback: 'weur',              // Fallback region (default)
-  jurisdiction: 'eu',                    // Restrict DOs to a jurisdiction
+  jurisdiction: 'eu',                    // Restrict DOs to a jurisdiction (optional, no default)
 })
 ```
 
