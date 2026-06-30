@@ -175,12 +175,12 @@ The `hello.telefunc.js` file is never loaded in the browser: instead Telefunc tr
 ```js
 // hello.telefunc.js (after Telefunc transformation)
 // Environment: Browser
-import { __internal_makeHttpRequest } from 'telefunc/client'
-export const hello = (...args) => __internal_makeHttpRequest('/hello.telefunc.js:hello', args)
+import { __remoteTelefunctionCall } from 'telefunc/client'
+export const hello = (...args) => __remoteTelefunctionCall('/hello.telefunc.js', 'hello', args)
 ```
 
 When `hello('Eva')` is called in the browser-side, the following happens:
- 1. On the browser-side, the `__internal_makeHttpRequest()` function makes an HTTP request to the server.
+ 1. On the browser-side, the `__remoteTelefunctionCall()` function makes an HTTP request to the server.
     ```
     POST /_telefunc HTTP/1.1
     {
