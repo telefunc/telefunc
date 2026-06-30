@@ -33,7 +33,7 @@ export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
 
 export async function onSubscribe(onNotification: (text: string) => void) {
   // Client → server: the server calls the client's callback as events arrive
-  const unsubscribe = notifications.subscribe((n) => onNotification(n.text))
+  const unsubscribe = notifications.subscribe((text) => onNotification(text))
   // Server → client: the client calls the returned function to stop listening
   return unsubscribe
 }
@@ -49,7 +49,7 @@ export async function onLoadDashboard() {
   return {
     title: 'Dashboard',             // Delivered immediately
     summary: fetchSummary(),        // Delivered quickly, but later
-    report: fetchExtensiveReport(), // Delivered much later
+    report: fetchExtensiveReport()  // Delivered much later
   }
 }
 ```
