@@ -265,7 +265,7 @@ const headings = [
   },
   {
     level: 2,
-    title: '`channel`',
+    title: '`channel` (config)',
     url: '/channel-config',
   },
   {
