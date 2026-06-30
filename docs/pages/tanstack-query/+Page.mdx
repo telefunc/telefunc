@@ -144,29 +144,29 @@ invalidate(['global:documents', docId])
 
 ## How it works
 
-The `@telefunc/tanstack-query` integration uses <Link href="/stream">Telefunc Stream</Link> under the hood (in particular <Link href="/channel">channels</Link> and <Link href="/channel#broadcast">broadcasts</Link>).
-
 ### Local keys
 
-Queries: normal (`@telefunc/tanstack-query` has no effect).
+Query: normal (`@telefunc/tanstack-query` has no effect).
 
-Mutations:
+Mutation:
 
 1. The mutation succeeds.
 2. <Link href="#install">`withTelefunc()`</Link> calls [`invalidateQueries()`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys) on the current client for matching local keys.
 
-#### Global keys
+### Global keys
 
-Queries:
+> Global keys are powered by <Link href="/stream">Telefunc Stream</Link> under the hood (in particular <Link href="/channel">channels</Link> and <Link href="/channel#broadcast">broadcasts</Link>).
 
-1. If it's <Link href="#local-vs-global-keys">a global key</Link>, then <Link href="#install">`withTelefunc()`</Link> sends `queryKey` alongside the query telefuncion call.
+Query:
+
+1. If it's <Link href="#local-vs-global-keys">a global key</Link>, then <Link href="#install">`withTelefunc()`</Link> sends `queryKey` alongside the query telefunction call.
 1. The query telefunction executes, and the client subscribes to invalidation events for that key.
    > It subscribes only if the telefunction call succeeds (i.e. it doesn't throw an error), therefore <Link href="/permissions">authorization</Link> is respected.
-1. Every connected client with a subscription that matches the gloabl key calls [`invalidateQueries()`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
 
-Mutations:
-1. <Link href="#install">`withTelefunc()`</Link> sends global keys from <Link href="#mutations">`meta.invalidates`</Link> alongside the telefuncion mutation call.
-1. The server <Link href="/channel#broadcast">broadcasts</Link> an invalidation event to the clients that use a query key that matches a global key.
+Mutation:
+1. <Link href="#install">`withTelefunc()`</Link> sends all the global keys from <Link href="#mutations">`meta.invalidates`</Link> alongside the telefunction mutation call.
+1. The server <Link href="/channel#broadcast">broadcasts</Link> an invalidation event to the clients that subscribe to a query key that matches a global key.
+1. Every connected client (with a subscription that matches a gloabl key) calls [`invalidateQueries()`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
 
 
 ## See also
