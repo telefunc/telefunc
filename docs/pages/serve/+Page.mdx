@@ -8,9 +8,9 @@ Low-level function that turns a telefunction HTTP request into an HTTP response.
 >
 > `new Telefunc()` has full-fledged support for <Link href="/stream">Telefunc Stream</Link>, whereas `serve()` doesn't support the following:
 > - <Link text="WebSocket" href="/transport#channel-transport" />
->   > You can still use <Link href="/stream">Telefunc Stream</Link> but Telefunc won't use the WebSocket transport. (Another transport will be used.)
+>   > You can still use <Link href="/stream">Telefunc Stream</Link>, but not over the WebSocket transport — Telefunc falls back to another transport instead.
 > - <Link text="Channels" href="/channel" /> on Cloudflare
->   > You won't be able to use channels on Cloudflare at all. (Because channels need <Link text="Durable Objects" href="/stream/cloudflare" />.)
+>   > You won't be able to use channels on Cloudflare, because channels there need <Link text="Durable Objects" href="/stream/cloudflare" />.
 
 
 ## Basic usage

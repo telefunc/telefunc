@@ -74,7 +74,7 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />: automatically synced TanStack queries.  
 <Link text={<code>@telefunc/rxjs</code>} href="/rxjs" />: reactive streams and operators.  
 
-> Integrations provide an even more seamless and ergonomic DX. They're powered by the primitives listed here.
+> Integrations require even less code and handle more for you. They're powered by the primitives listed here.
 
 #### Seamless DX
 
@@ -86,7 +86,7 @@ export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uin
 
 ## Primitive: `AsyncGenerator` (`function*`) {#async-generator}
 
-An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) ([`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator)) is a good fit for **short-lived streaming**: a *finite* sequence of values that arrive one at a time and then completes. Examples:
+An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) ([`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator)) is a good fit for **short-lived streaming**: a *finite* sequence of values that arrive one at a time, after which the stream completes. Examples:
 
 - AI answer stream
 - Progress updates for a long-running task (e.g. upload)
@@ -95,7 +95,7 @@ An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/R
 
 > It's a good fit because a generator closes itself when it completes. (Other streaming primitives like <Link href="#callback">callbacks</Link> have no such completion signal.)
 >
-> You can also use it for any other use case, such as never-ending streams, if you want — the deciding factor is DX. (While Telefunc picks a different default <Link href="/transport">transport</Link> depending on the primitive, you can change the transport to match your needs.)
+> You can also use it for any other use case, such as never-ending streams — choose the primitive that gives you the nicest code. (While Telefunc picks a different default <Link href="/transport">transport</Link> depending on the primitive, you can change the transport to match your needs.)
 
 #### Example: countdown
 
@@ -199,7 +199,7 @@ export async function onUpload(file: File, onProgress: (percent: number) => void
 await onUpload(file, (percent) => setProgress(percent))
 ```
 
-> The underlying stream automatically closes itself when the client stops using (i.e. referencing) `onProgress`, but you can also manually close it (eagerly), see <Link href="/close" />.
+> The underlying stream closes itself once the client stops referencing `onProgress`, but you can also close it eagerly yourself, see <Link href="/close" />.
 
 > Under the hood, a passed function is just a <Link text={<code>Channel</code>} href="#channel" />. A callback has the same lifecycle as a channel, only exposed with a nicer JavaScript DX.
 >
@@ -449,7 +449,7 @@ export async function onInit(onTick: (n: number) => void) {
 Any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call — **make sure to always clear resources when the stream closes**.
 </Warning>
 
-You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to listen for when a stream closes, see:
+You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to detect when a stream closes, see:
 - <Link href="/onClose" />
 
 > A stream automatically closes when the client stops using it — you usually don't have to manually close streams, see:
