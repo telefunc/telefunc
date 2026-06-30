@@ -50,7 +50,7 @@ export default {
 > Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else — Durable Objects and KV are Cloudflare's primitives for exactly that:
 >
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
-> - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, wherever a request lands.
+> - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, no matter which worker a request lands on.
 >
 > Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `BroadcastChannel`, there's no state to keep — skip both bindings and use <Link text={<code>serve()</code>} href="/serve" /> instead.
 >

@@ -17,9 +17,9 @@ You can listen when <Link href="/stream">Telefunc streams</Link> close to:
 | <Link href="#channel-onclose">`channel.onClose(cb)`</Link> | client & server | *the one* `channel` closes |
 | <Link href="#context-signal" >`context.signal` (`AbortSignal`)</Link> | server | *all* stream closes |
 
-> The listeners are fired regardless of the closing reason — whether all streams finished, the client stops using the streams, the client manually closed, the client disconnected, or an error occurred.
+> The listeners fire regardless of why the stream closed — whether all streams finished, the client stopped using the streams, the client closed them manually, the client disconnected, or an error occurred.
 
-> Every stream eventually ends: at latest when the client disconnects (e.g. the user navigates away from your website), but usually sooner when the client stops using the stream, the client manually closes the stream, the network connection is permanently lost (the network connection couldn't be recovered), or an error occurred.
+> Every stream eventually ends — at the latest when the client disconnects (e.g. the user navigates away from your website), but usually sooner: when the client stops using the stream, the client closes the stream manually, the network connection is permanently lost (it couldn't be recovered), or an error occurs.
 
 > To close streams, see: <Link href="/close" />.
 
