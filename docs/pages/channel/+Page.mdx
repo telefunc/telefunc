@@ -11,15 +11,15 @@ The following low-level **primitives** enable all kinds of <Link href="/stream">
 - <Link text={<code>Broadcast</code>} href="#broadcast" /> — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
 - <Link text={<code>new BroadcastChannel()</code>} href="#new-broadcastchannel" /> — broadcast also on the client-side.
 
-> You can use them for both one-way streams (aka streaming) and two-way streams (aka real-time):
+> You can use them for one-way streams (aka streaming) as well as two-way streams (aka real-time):
 > - Chat rooms
 > - Live feeds (sports scores, stock tickers)
-> - Collaborative editing (presence & cursors)
+> - Collaborative editing
 > - Multiplayer games
 > - Live dashboards & metrics
 > - Notifications & activity feeds
 
-`new Channel()` and `new BroadcastChannel()` are returned from a telefunction — they serialize into client-side objects automatically. `Broadcast` is a server-side API, so there's nothing to return.
+An instance `new Channel()` or `new BroadcastChannel()` is returned from a telefunction and passed to the client (it serializes into client-side objects automatically). `Broadcast` is a server-side API, so there's nothing to return.
 
 > By default, channels and broadcasts use **SSE** and work without extra server setup. When WebSocket is enabled (see <Link href="/Telefunc" />), the client starts on SSE and seamlessly upgrades to WebSocket in the background (see <Link href="/transport" />).
 
