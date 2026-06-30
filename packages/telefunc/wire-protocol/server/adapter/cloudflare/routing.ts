@@ -5,6 +5,7 @@ export {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
+  assertLocationFallbackIsScaled,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
   getShardIndicesForBucket,
@@ -15,7 +16,7 @@ export type { CloudflareScale, LocationBucket, SessionRoutingTarget }
 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { TELEFUNC_SESSION_HEADER } from '../../../constants.js'
-import { assert } from '../../../../utils/assert.js'
+import { assert, assertUsage } from '../../../../utils/assert.js'
 
 /**
  * Cloudflare routing primitives for Telefunc's session and broadcast Durable Objects.
@@ -164,6 +165,22 @@ function getBucketScale(scale: CloudflareScale | undefined, locationBucket: Loca
     `Cloudflare WebSocket scale for location bucket "${locationBucket}" must be a non-negative integer. Received ${String(count)}.`,
   )
   return count
+}
+
+/**
+ * A per-region `scale` map may omit regions; requests from those regions route to `locationFallback`.
+ * That only works when `locationFallback` itself is scaled — otherwise the fallback lands on a bucket
+ * with no shards and routing throws at request time. Enforce it once, at config time.
+ */
+function assertLocationFallbackIsScaled(
+  scale: CloudflareScale | undefined,
+  locationFallback: DurableObjectLocationHint,
+): void {
+  if (typeof scale !== 'object') return
+  assertUsage(
+    getScaleCountForBucket(scale, locationFallback) > 0,
+    `Cloudflare \`locationFallback\` "${locationFallback}" must appear in your per-region \`scale\` map with a count greater than 0, since requests from regions you didn't list route to it (\`locationFallback\` defaults to "weur").`,
+  )
 }
 
 function getScaleCountForBucket(scale: CloudflareScale | undefined, locationBucket: LocationBucket): number {
