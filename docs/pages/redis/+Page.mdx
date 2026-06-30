@@ -5,7 +5,9 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Redis-backed broadcast fan-out across Telefunc instances — `publish()` on one instance reaches `subscribe()` on every other instance subscribed to the same key.
+Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — `publish()` on one server instance reaches `subscribe()` on all other server instances.
+
+> You only need this if you scale horizontally, see <Link href="/stream/scale" />.
 
 ## Install
 
