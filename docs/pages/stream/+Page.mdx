@@ -136,12 +136,13 @@ import { getContext } from 'telefunc'
 
 export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
   const { onClose } = getContext()
-  const { stream, cancel } = await ai(prompt)
 
   // When the client stops the stream (e.g. the user presses "Stop"), cancel the
   // upstream AI request — otherwise it keeps running and burning AI tokens
-  onClose(cancel)
+  const controller = new AbortController()
+  onClose(() => controller.abort())
 
+  const stream = await ai.streamText({ prompt, signal: controller.signal })
   for await (const message of stream) {
     yield message
   }
