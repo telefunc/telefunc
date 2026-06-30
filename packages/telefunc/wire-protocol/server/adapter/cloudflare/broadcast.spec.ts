@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   DEFAULT_BROADCAST_BUCKETS,
+  assertLocationFallbackIsScaled,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
   getShardIndicesForBucket,
@@ -234,6 +235,27 @@ describe('cloudflare broadcast routing', () => {
       locationBucket: 'weur',
       shardOrdinal: 0,
     })
+  })
+
+  it('routes a recognized region missing from the scale map to locationFallback instead of throwing', () => {
+    // `ABQ` resolves to `wnam`, which is absent from this per-region scale map.
+    const wnamRequest = createCloudflareRequest({ colo: 'ABQ' })
+    const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur')
+
+    expect(target).toMatchObject({
+      sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
+      locationBucket: 'weur',
+    })
+    expect([0, 1]).toContain(target.shardOrdinal)
+  })
+
+  it('rejects a per-region scale map whose locationFallback region has no shards', () => {
+    // `locationFallback` is where unlisted regions land, so it must itself be scaled.
+    expect(() => assertLocationFallbackIsScaled({ enam: 3, apac: 2 }, 'weur')).toThrow(/locationFallback/)
+    expect(() => assertLocationFallbackIsScaled({ weur: 2, apac: 1 }, 'weur')).not.toThrow()
+    // A uniform numeric scale (or the default) applies to every region, so any fallback is fine.
+    expect(() => assertLocationFallbackIsScaled(4, 'weur')).not.toThrow()
+    expect(() => assertLocationFallbackIsScaled(undefined, 'weur')).not.toThrow()
   })
 
   it('writes KV presence on subscribe and reads it during publish fanout', async () => {

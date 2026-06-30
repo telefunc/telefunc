@@ -93,6 +93,7 @@ vi.mock('./routing.js', () => ({
   TELEFUNC_BROADCAST_BUCKET_HEADER: 'x-telefunc-broadcast-bucket',
   TELEFUNC_SESSION_HEADER: 'x-telefunc-session',
   TELEFUNC_SHARD_HEADER: 'x-telefunc-shard',
+  assertLocationFallbackIsScaled: vi.fn(),
   resolveSessionRoutingTarget: vi.fn(
     (baseInstanceName: string, scale: unknown, request: Request, locationFallback: string) => {
       void scale
