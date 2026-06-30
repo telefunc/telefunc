@@ -77,7 +77,7 @@ That said, if you want the stream to close as soon as possible, manually close i
 
 ## How to close
 
-From the client, you can manually close a stream early with <Link text={<code>close()</code>} href="/onClose" /> — or simply stop reading: `break` out of a `for await`, `reader.cancel()` a `ReadableStream`, or `channel.close()` a channel.
+From the client, you can manually close a stream early with <Link text={<code>close()</code>} href="#close" /> — or simply stop reading: `break` out of a `for await`, `reader.cancel()` a `ReadableStream`, or `channel.close()` a channel.
 
 There's one catch-all API, `close()`, plus several <Link href="/stream">per-stream-primitive</Link> APIs.
 
@@ -86,8 +86,8 @@ There's one catch-all API, `close()`, plus several <Link href="/stream">per-stre
 | `close(value)` | client | Graceful | Everything in the returned value (walked recursively) |
 | `gen.return()` / `break` | client | Graceful | One `AsyncGenerator` |
 | `reader.cancel()` | client | Graceful | One `ReadableStream` |
-| <Link text={<code>channel.close()</code>} href="/close" /> | client & server | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
-| <Link text={<code>channel.abort(value?)</code>} href="/close" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
+| <Link text={<code>channel.close()</code>} href="/channel#channel-methods" /> | client & server | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
+| <Link text={<code>channel.abort(value?)</code>} href="/channel#channel-methods" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
 | `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
 | <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
 
