@@ -13,25 +13,56 @@ Low-level function that turns a telefunction HTTP request into an HTTP response.
 >   > You won't be able to use channels on Cloudflare at all. (Because channels need <Link text="Durable Objects" href="/stream/cloudflare" />.)
 
 
-## Basic usage
+## Web `Request`
 
-Pass the web-standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
+You can pass the web-standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
 
 ```ts
 // Environment: server
 
 import { serve } from 'telefunc'
 
-const httpResponse = await serve({ request })
+const httpResponse = await serve({
+  // `request` being a `Request` instance
+  request
+})
+
+// Build an HTTP response using the following:
+httpResponse.getReadableWebStream() // or httpResponse.getBody()
+httpResponse.statusCode
+httpResponse.headers
 ```
 
-Convert the result to a [`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response):
+> You can convert the result to a [`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response):
+>
+> ```ts
+> const response = new Response(httpResponse.getReadableWebStream(), {
+>   status: httpResponse.statusCode,
+>   headers: httpResponse.headers
+> })
+> ```
+
+
+## Node.js `req`
+
+You can pass the Node.js [`req` readable stream](https://nodejs.org/api/http.html#class-httpincomingmessage) (e.g. when using [Express](https://expressjs.com)):
 
 ```ts
-const response = new Response(httpResponse.getReadableWebStream(), {
-  status: httpResponse.statusCode,
-  headers: httpResponse.headers,
+// Environment: server
+
+import { serve } from 'telefunc'
+
+const httpResponse = await serve({
+  url: req.originalUrl,
+  method: req.method,
+  readable: req,
+  headers: req.headers
 })
+
+// Build an HTTP response using the following:
+httpResponse.getReadableWebStream() // or httpResponse.getBody()
+httpResponse.statusCode
+httpResponse.headers
 ```
 
 
@@ -41,29 +72,14 @@ Pass a `context` object to make request-scoped data available inside telefunctio
 
 ```ts
 const httpResponse = await serve({
-  request,
+  // ...
   context: {
-    user: await getUser(request),
-  },
+    user: await getUser(request)
+  }
 })
 ```
 
 > The `context` parameter is optional — only needed if you use `getContext()`. See <Link href="/getContext#provide" />.
-
-
-## Node.js `req`
-
-For [Express](https://expressjs.com), [Fastify](https://fastify.dev), or any Node.js framework, pass the `req` readable stream:
-
-```ts
-const httpResponse = await serve({
-  url: req.originalUrl,
-  method: req.method,
-  readable: req,
-  headers: req.headers,
-  context: { /* ... */ },
-})
-```
 
 
 ## Response object
