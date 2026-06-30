@@ -60,10 +60,10 @@ queryKey: ['global:documents', docId]        // global
 > - **`queryFn` and `mutationFn` must call a telefunction.** With a non-telefunc `queryFn` (e.g. plain `fetch()`), a global key silently behaves like a local one. The same goes for mutations (so that global keys in `meta.invalidates` are sent to server when the mutation succeeds).
 > - **Return the telefunction call directly.** The `@telefunc/tanstack-query` integration reads the invalidation subscription from whatever `queryFn` returns. Transform the result with `select` instead of inside `queryFn`:
 >   ```js
->   // ✗ Broken: inside queryFn, getTodos() resolves to an internal wrapper
+>   // ❌ Broken: queryFn doesn't direclty return getTodos()
 >   queryFn: async () => (await getTodos()).items
 >
->   // ✓ Return the call directly, transform with select
+>   // ✅ Return the call directly, transform with select
 >   queryFn: () => getTodos(),
 >   select: (todos) => todos.items,
 >   ```
