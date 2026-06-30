@@ -179,11 +179,6 @@ const headings = [
   },
   {
     level: 2,
-    title: '`@telefunc/redis`',
-    url: '/redis',
-  },
-  {
-    level: 2,
     title: '`@telefunc/rxjs`',
     url: '/rxjs',
   },
@@ -393,6 +388,10 @@ function guidesMore() {
       {
         title: 'Stream on Cloudflare',
         url: '/stream/cloudflare',
+      },
+      {
+        title: '`@telefunc/redis`',
+        url: '/redis',
       },
     ] as const
   ).map((h) => ({ ...h, category: 'Guides (more)' as const })) satisfies HeadingDetachedDefinition[]
