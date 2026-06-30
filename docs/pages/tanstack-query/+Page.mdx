@@ -43,7 +43,7 @@ When using `@telefunc/tanstack-query`, keys prefixed with `global:` are special 
 
 > All other keys remain normal (invalidate locally, i.e. current tab only).
 
-> **How does it work?** Under the hood, the `global:` key is sent to the server then <Link href="/channel#broadcast">broadcasted</Link> to all clients that use a maching query. It's powered by <Link href="/stream">Telefunc Stream</Link>.
+> **How does it work?** Under the hood, the `global:` key is sent to the server then <Link href="/channel#broadcast">broadcasted</Link> to all clients that use a matching query. It's powered by <Link href="/stream">Telefunc Stream</Link>.
 
 ```js
 queryKey: ['todos']                          // local — current tab only
@@ -58,9 +58,9 @@ queryKey: ['global:documents', docId]        // global
 > For global keys to work, make sure that:
 >
 > - **`queryFn` and `mutationFn` must call a telefunction.** With a non-telefunc `queryFn` (e.g. plain `fetch()`), a global key silently behaves like a local one. The same goes for mutations (so that global keys in `meta.invalidates` are sent to server when the mutation succeeds).
-> - **Return the telefunction call directly.** The `@telefunc/tanstack-query` integration reads the invalidation subscription from whatever `queryFn` returns. Transform the result with `select` instead of inside `queryFn`:
+> - **Return the telefunction call directly.** The integration sets up live invalidation based on the value `queryFn` returns, so `queryFn` must return the telefunction call as-is. Unwrapping or transforming the result inside `queryFn` breaks this, and the global key silently falls back to local-only. Transform the result with `select` instead:
 >   ```js
->   // ❌ Broken: queryFn doesn't direclty return getTodos()
+>   // ❌ Broken: transforming inside queryFn breaks invalidation
 >   queryFn: async () => (await getTodos()).items
 >
 >   // ✅ Return the call directly, transform with select
