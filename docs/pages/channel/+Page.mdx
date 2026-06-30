@@ -36,19 +36,21 @@ It creates a two-way message pipe between the server and the one client that cal
 
 Simple example:
 
-```ts
-// Clock.telefunc.ts
+```js
+// Clock.telefunc.js
 // Environment: server
 
 import { Channel } from 'telefunc'
 
 export async function onClock() {
-  const channel = new Channel<never, number>()
+  const channel = new Channel()
   const interval = setInterval(() => channel.send(Date.now()), 1000)
   channel.onClose(() => clearInterval(interval))
   return { channel: channel.client }
 }
 ```
+
+> The server returns `channel.client`: the client gets the same API but with message directions flipped.
 
 ```ts
 // Clock.tsx
@@ -64,14 +66,14 @@ channel.listen((time) => console.log(time)) // 1700000000000, 1700000001000, ...
 
 Two-way example:
 
-```ts
-// Echo.telefunc.ts
+```js
+// Echo.telefunc.js
 // Environment: server
 
 import { Channel } from 'telefunc'
 
 export async function onEcho() {
-  const channel = new Channel<string, string>()
+  const channel = new Channel()
   channel.listen((text) => channel.send(`echo: ${text}`))
   return { channel: channel.client }
 }
@@ -98,11 +100,10 @@ channel.send('Hello!')
 | `sendBinary(data, { ack: true })` | Send binary and await acknowledgement. |
 | `listen(cb)` | Receive messages. Return a value to ack. Returns an unlisten function. |
 | `listenBinary(cb)` | Receive binary. Return a value to ack. Returns an unlisten function. |
-| `onOpen(cb)` / `onClose(cb)` | Lifecycle callbacks. |
+| `onOpen(cb)` | Called when the channel opens. |
+| `onClose(cb)` | Called when the channel closes. |
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
-
-Server: return the channel's `.client` from the telefunction. The client gets the same API with message directions flipped.
 
 
 ### TypeScript
@@ -129,18 +130,18 @@ type ClientToServer = (message: ClientMessage) => { accepted: true }
 type ServerToClient = (message: ServerMessage) => { delivered: true }
 
 export async function onJoinRoom() {
-  const chat = new Channel<ClientToServer, ServerToClient>({ ack: true })
+  const channel = new Channel<ClientToServer, ServerToClient>({ ack: true })
 
-  chat.listen((message) => {
+  channel.listen((message) => {
     if (message.type === 'join') {
-      chat.send({ type: 'system', text: `Joined ${message.roomId}` })
+      channel.send({ type: 'system', text: `Joined ${message.roomId}` })
       return { accepted: true }
     }
-    chat.send({ type: 'chat', text: `echo: ${message.text}` })
+    channel.send({ type: 'chat', text: `echo: ${message.text}` })
     return { accepted: true }
   })
 
-  return { channel: chat.client }
+  return { channel: channel.client }
 }
 ```
 
@@ -162,7 +163,7 @@ const ack = await channel.send({ type: 'join', roomId: 'general' })
 ack.accepted // true
 ```
 
-On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `chat.client` type flips the message types.
+On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `ClientMessage`. The `channel.client` type flips the message types.
 
 
 ### Acknowledgements
@@ -170,25 +171,25 @@ On the server, `send()` sends `ServerMessage`. On the client, `send()` sends `Cl
 #### Channel-wide
 
 ```ts
-const chat = new Channel<ClientToServer, ServerToClient>({ ack: true })
+const channel = new Channel<ClientToServer, ServerToClient>({ ack: true })
 
 // Every send() returns a Promise with the listener's return value
-const ack = await chat.send({ type: 'status', text: 'OK' })
+const ack = await channel.send({ type: 'status', text: 'OK' })
 ```
 
 #### Per-send
 
 ```ts
-const chat = new Channel<ClientToServer, ServerToClient>()
+const channel = new Channel<ClientToServer, ServerToClient>()
 
 // Opt in for a single send
-const ack = await chat.send(data, { ack: true })
+const ack = await channel.send(data, { ack: true })
 
 // Opt out on an ack-default channel
-await chat.send(data, { ack: false }) // Promise<void>, no ack value
+await channel.send(data, { ack: false }) // Promise<void>, no ack value
 
 // Binary acks work the same way
-const binaryAck = await chat.sendBinary(frame, { ack: true })
+const binaryAck = await channel.sendBinary(frame, { ack: true })
 ```
 
 > A channel-wide `{ ack: true }` only applies to `send()` — `sendBinary()` always opts in per call, so pass `{ ack: true }` to each `sendBinary()` that needs an acknowledgement.
@@ -199,8 +200,8 @@ Send and receive raw binary alongside structured messages:
 
 ```ts
 // Server
-await chat.sendBinary(new Uint8Array([1, 2, 3]))
-const unlisten = chat.listenBinary((data) => {
+await channel.sendBinary(new Uint8Array([1, 2, 3]))
+const unlisten = channel.listenBinary((data) => {
   console.log(data.byteLength)
   return { processed: true } // ack value (optional)
 })
@@ -213,7 +214,7 @@ channel.listenBinary((data) => {
 })
 
 // Binary acks
-const ack = await chat.sendBinary(frame, { ack: true })
+const ack = await channel.sendBinary(frame, { ack: true })
 ```
 
 ### Backpressure
@@ -222,14 +223,14 @@ Both `send()` and `sendBinary()` return a `Promise` that resolves when the recei
 
 ```ts
 for (const frame of frames) {
-  await chat.sendBinary(frame) // blocks until the receiver is ready
+  await channel.sendBinary(frame) // blocks until the receiver is ready
 }
 ```
 
 Fire-and-forget is also fine — data is always sent immediately regardless of whether you await:
 
 ```ts
-chat.send({ type: 'ping' }) // sent immediately, no await needed
+channel.send({ type: 'ping' }) // sent immediately, no await needed
 ```
 
 
