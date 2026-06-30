@@ -73,7 +73,7 @@ See: <Link href="/Telefunc" />.
 
 ## Architecture
 
-Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for channel state and broadcast fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object as the WebSocket connection.
+Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for channel state and broadcast fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object that holds the WebSocket connection.
 
 [KV](https://developers.cloudflare.com/kv/) stores two things:
 - **Session tokens** — pin a browser to the same Durable Object across requests.

@@ -5,7 +5,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — `publish()` on one server instance reaches `subscribe()` on all other server instances.
+Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on all the others.
 
 > You only need this if you scale horizontally — see <Link href="/stream/scale" />.
 
@@ -29,7 +29,7 @@ That swaps the default in-memory broadcast transport for one backed by Redis Pub
 
 ### Sharing an existing client
 
-Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options such as TLS or retry strategy.
+Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options such as TLS or a retry strategy.
 
 ```ts
 // Environment: server
