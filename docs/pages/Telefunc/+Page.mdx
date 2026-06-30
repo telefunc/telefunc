@@ -31,7 +31,7 @@ app.all('/_telefunc', async (c) => {
     request: c.req.raw,
     // Provide context, accessed via getContext()
     context: {
-      user: await getUser(c.req)
+      user: await c.get('user')
     }
   })
   return response ?? c.notFound()
@@ -47,7 +47,7 @@ telefunc.installWebSocket(server)
 
 :::Choice{#Express}
 
-With the Node.js [`req` object](https://nodejs.org/api/http.html#class-httpincomingmessage) and [`res` object](https://nodejs.org/api/http.html#class-httpserverresponse) (e.g. Express.js):
+With the Node.js [`req` object](https://nodejs.org/api/http.html#class-httpincomingmessage) and [`res` object](https://nodejs.org/api/http.html#class-httpserverresponse) (e.g. [Express](https://expressjs.com)):
 
 ```ts
 // server.ts
