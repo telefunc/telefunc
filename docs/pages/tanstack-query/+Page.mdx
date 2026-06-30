@@ -34,7 +34,7 @@ function App() {
 > - All options and APIs continue to work as before
 > - Any TanStack Query adapter works: React, Vue, Svelte, Solid
 
-> There's no server-side setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them on the server side.
+> There isn't any other setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them.
 
 
 ## Local vs global keys
@@ -93,7 +93,7 @@ When using <Link href="#local-vs-global-keys">a global key</Link>, every connect
 
 #### Example:
 
-Consider a collaborative document editor: when one user edits a document, every client viewing it refetches:
+Consider a collaborative document editor: when one user edits a document, every other user viewing it refetches:
 
 ```tsx
 const { data: doc } = useQuery({
