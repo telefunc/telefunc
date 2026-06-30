@@ -21,6 +21,7 @@ import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
+  assertLocationFallbackIsScaled,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { assertUsage } from '../utils/assert.js'
@@ -70,6 +71,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const baseInstanceName = options?.instanceName ?? 'telefunc'
   const scale = options?.scale
   const locationFallback = options?.locationFallback ?? 'weur'
+  assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
 
   const crosswsAdapter = crossws({
