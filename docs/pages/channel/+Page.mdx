@@ -5,7 +5,7 @@ import { TelefuncStreamBeta, NeedsLongRunningServer } from '../../components'
 
 <TelefuncStreamBeta />
 
-The following low-level **primitives** enable all kinds of stream use cases.
+The following low-level **primitives** enable every kind of stream use case.
 
 - <Link text={<code>new Channel()</code>} href="#new-channel" /> — direct messages between one server and one client.
 - <Link text={<code>Broadcast</code>} href="#broadcast" /> — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
@@ -34,7 +34,7 @@ The following low-level **primitives** enable all kinds of stream use cases.
 
 ## `new Channel()`
 
-`new Channel()` creates a private, two-way message pipe between the server and the one client that called the telefunction. The server keeps the `Channel` object and hands the client its end by returning the channel's `.client`. The channel outlives the telefunction call: both ends can `send()` and `listen()` until one side closes it.
+`new Channel()` creates a private, two-way message pipe between the server and the one client that called the telefunction. The server keeps the `Channel` object and hands the client its end by returning the channel's `.client`. The channel outlives the telefunction call: both ends can `send()` and `listen()` until either side closes it.
 
 The simplest case — the server pushes live updates to the one client that opened the channel:
 
@@ -234,7 +234,7 @@ info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
 ```
 
-`seq` is monotonic per `key`, useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >

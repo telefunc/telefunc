@@ -39,11 +39,11 @@ function App() {
 
 ## Local vs global keys
 
-When using `@telefunc/tanstack-query`, keys prefixed with `global:` are special because they invalidate globally: *every* connected client with a matching query refetches.
+When using `@telefunc/tanstack-query`, keys prefixed with `global:` invalidate globally: *every* connected client with a matching query refetches.
 
 > All other keys remain normal (invalidate locally, i.e. current tab only).
 
-> **How does it work?** Under the hood, the `global:` key is sent to the server then <Link href="/channel#broadcast">broadcasted</Link> to the clients that use a query key that matches. Learn more at: <Link href="#how-it-works" />.
+> **How does it work?** Under the hood, the `global:` key is sent to the server and then <Link href="/channel#broadcast">broadcast</Link> to every client whose query key matches. Learn more at <Link href="#how-it-works" />.
 
 ```js
 queryKey: ['todos']                          // local — current tab only
@@ -155,7 +155,7 @@ Query: normal (`@telefunc/tanstack-query` has no effect).
 Mutation:
 
 1. The mutation succeeds.
-2. <Link href="#install">`withTelefunc()`</Link> calls [`invalidateQueries()`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys) on the current client for matching local keys.
+2. <Link href="#install">`withTelefunc()`</Link> calls [`invalidateQueries()`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys) on the current client for the matching local keys.
 
 ### Global keys
 

@@ -73,13 +73,13 @@ function Clock() {
 
 It's optional: if you don't return `clear`, the stream will still automatically close itself after React unmounts the component: the garbage collector clears the stream object and then the stream closes itself.
 
-That said, if you want the stream to close as soon as possible, then make sure to manually close the stream – return `clear` in this example.
+That said, if you want the stream to close as soon as possible, manually close it yourself — return `clear` in this example.
 
 ## How to close
 
 From the client, you can manually close a stream early with <Link text={<code>close()</code>} href="/onClose" /> — or simply stop reading: `break` out of a `for await`, `reader.cancel()` a `ReadableStream`, or `channel.close()` a channel.
 
-There's one catch-all API, `close()`, plus several per-type APIs.
+There's one catch-all API, `close()`, plus several per-stream-type APIs.
 
 | API | Side | Graceful / immediate | Closes |
 |---|---|---|---|

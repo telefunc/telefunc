@@ -8,7 +8,7 @@ import { TelefuncStreamBeta } from '../../components'
 - Integrations
 - Seamless DX
 
-> The word *stream* denotes — broadly speaking and [as Wikipedia defines it](https://en.wikipedia.org/wiki/Stream_(computing)) — not only a `ReadableStream` but any sequence of data made available over time.
+> Here the word *stream* means — broadly speaking, [as Wikipedia defines it](https://en.wikipedia.org/wiki/Stream_(computing)) — not just a `ReadableStream` but any sequence of data made available over time.
 
 #### Primitives
 
@@ -93,9 +93,9 @@ An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/R
 - Search results streaming in as they're found
 - Rows of a large SQL query, streamed to the UI
 
-> It's a good fit because a generator closes itself when it completes. (Other streaming primitives like <Link href="#callback">callbacks</Link> don't have such a completion signal.)
+> It's a good fit because a generator closes itself when it completes. (Other streaming primitives like <Link href="#callback">callbacks</Link> have no such completion signal.)
 >
-> You can also use it for any other use case, such as never-ending streams, if you want — the only deciding factor is DX. (Telefunc picks a different default <Link href="/transport">transport</Link> in that case, but you can change it.)
+> You can also use it for any other use case, such as never-ending streams — the only deciding factor is DX. (Telefunc picks a different default <Link href="/transport">transport</Link> in that case, but you can change it.)
 
 #### Example: countdown
 
@@ -199,9 +199,9 @@ export async function onUpload(file: File, onProgress: (percent: number) => void
 await onUpload(file, (percent) => setProgress(percent))
 ```
 
-> The underlying stream automatically closes itself when the client stops referencing `onProgress`, but you can also close it eagerly yourself, see <Link href="/close" />.
+> The underlying stream closes itself automatically when the client stops referencing `onProgress`, but you can also close it eagerly yourself, see <Link href="/close" />.
 
-> Under the hood, a passed function is just a <Link text={<code>Channel</code>} href="#channel" />. A callback has the same lifecycle as a channel, just exposed with a nice JavaScript DX.
+> Under the hood, a passed function is just a <Link text={<code>Channel</code>} href="#channel" />. A callback has the same lifecycle as a channel, only exposed with a nicer JavaScript DX.
 >
 > Reach for a raw `Channel` if you need more than call-and-return — e.g. two-way messaging, broadcast, or binary.
 
@@ -458,7 +458,7 @@ You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to listen fo
 
 ## Authorization
 
-A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link text="getContext()" href="/getContext" /> and `throw Abort()` **at open time**, before you stream anything back. Here the client passes a <Link text="callback" href="#callback" /> and the server calls it:
+A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link text="getContext()" href="/getContext" /> and `throw Abort()` **at open time**, before you stream anything back to the client. Here the client passes a <Link text="callback" href="#callback" /> and the server calls it:
 
 ```ts
 // TeamFeed.telefunc.ts
@@ -558,7 +558,7 @@ export async function* onSearch(query: string) {
 
 ## Scaling
 
-You can scale Telefunc horizontally (multiple instances/containers/machines) by adding sticky sessions and a cross-instance broadcast transport.
+You can scale Telefunc horizontally (across multiple instances, containers, or machines) by adding sticky sessions and a cross-instance broadcast transport.
 
 See: <Link href="/stream/scale" />.
 
