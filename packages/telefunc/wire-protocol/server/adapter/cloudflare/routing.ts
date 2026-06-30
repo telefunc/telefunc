@@ -99,7 +99,12 @@ function resolveSessionRoutingTarget(
   request: Request,
   locationFallback: DurableObjectLocationHint,
 ): SessionRoutingTarget {
-  const locationBucket = resolveCloudflareLocationHint(request, locationFallback)
+  let locationBucket = resolveCloudflareLocationHint(request, locationFallback)
+  // With a per-region `scale` map, a recognized region the user didn't list has no Durable Objects
+  // of its own — route those requests to the `locationFallback` region instead of failing.
+  if (getScaleCountForBucket(scale, locationBucket) === 0) {
+    locationBucket = locationFallback
+  }
   const shardIndices = getShardIndicesForBucket(scale, locationBucket)
   const shardOrdinal = shardIndices[Math.floor(Math.random() * shardIndices.length)]!
   const sessionInstanceName = getSessionShardName(baseInstanceName, locationBucket, shardOrdinal)

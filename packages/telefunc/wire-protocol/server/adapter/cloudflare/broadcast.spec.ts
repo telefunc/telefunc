@@ -236,6 +236,18 @@ describe('cloudflare broadcast routing', () => {
     })
   })
 
+  it('routes a recognized region missing from the scale map to locationFallback instead of throwing', () => {
+    // `ABQ` resolves to `wnam`, which is absent from this per-region scale map.
+    const wnamRequest = createCloudflareRequest({ colo: 'ABQ' })
+    const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur')
+
+    expect(target).toMatchObject({
+      sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
+      locationBucket: 'weur',
+    })
+    expect([0, 1]).toContain(target.shardOrdinal)
+  })
+
   it('writes KV presence on subscribe and reads it during publish fanout', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()
