@@ -1,278 +1,55 @@
-import { Link, Warning } from '@brillout/docpress'
-import { TelefuncStreamBeta } from '../../components'
+import { Link } from '@brillout/docpress'
 
-<TelefuncStreamBeta noLink />
+Telefunc supports streaming in both directions:
+- **Server → client**: Return `AsyncGenerator`, `ReadableStream`, or nested `Promise` from a telefunction.
+- **Client → server**: Pass a `ReadableStream` as a telefunction argument.
 
-*Telefunc Stream* supports streaming (one-way streams) and real-time (two-way streams) with:
-- Primitives
-- Integrations
-- Seamless DX
-
-> Here the word *stream* means — broadly speaking, [as Wikipedia defines it](https://en.wikipedia.org/wiki/Stream_(computing)) — not just a `ReadableStream` but any sequence of data made available over time.
-
-#### Primitives
-
-1. <Link href="#async-generator" text={<><code>AsyncGenerator</code> (<code>function*</code>)</>} />:
-   ```ts
-   // AiChat.telefunc.ts
-   // Environment: server
-
-   export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
-     const stream = await ai.streamText({ prompt })
-     // The messages from the AI reach the client over time as a stream of messages
-     for await (const message of stream) {
-       yield message
-     }
-   }
-   ```
-
-1. <Link href="#callback" text={<>Callback (<code>function</code> passing)</>} />:
-   ```ts
-   // Notifications.telefunc.ts
-   // Environment: server
-
-   export async function onSubscribe(onNotification: (text: string) => void) {
-     // Client → server: the server calls the client's callback as events arrive
-     const unsubscribe = notifications.subscribe((text) => onNotification(text))
-     // Server → client: the client calls the returned function to stop listening
-     return unsubscribe
-   }
-   ```
-
-1. <Link href="#multiple-promise" text={<>Multiple <code>Promise</code></>} />:
-   ```ts ts-only
-   // Dashboard.telefunc.ts
-   // Environment: server
-
-   export async function onLoadDashboard() {
-     // The client receives each property at three different times
-     return {
-       title: 'Dashboard',             // Delivered immediately
-       summary: fetchSummary(),        // Delivered quickly, but later
-       report: fetchExtensiveReport()  // Delivered much later
-     }
-   }
-   ```
-
-1. <Link href="#readable-stream" text={<code>ReadableStream</code>} />:
-   ```ts
-   // Compress.telefunc.ts
-   // Environment: server
-
-   export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-     // A stream flows in, a transformed stream flows back out
-     return data.pipeThrough(new CompressionStream('gzip'))
-   }
-   ```
-
-1. <Link href="#channel" text={<code>Channel</code>} />: API for advanced real-time use cases.
-
-> A single telefunction can [mix primitives](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) (generators, channels, promises, ...) side by side, each resolving independently.
-
-#### Integrations
-
-<Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />: automatically synced TanStack queries.  
-<Link text={<code>@telefunc/rxjs</code>} href="/rxjs" />: reactive streams and operators.  
-
-> Integrations provide an even more seamless DX: they handle more for you. They're powered by the primitives listed on this page.
-
-#### Seamless DX
-
-✅ **Runtime type validation** — automatically validates every value sent from the client to the server <Link href="/shield#typescript-automatic">against your TypeScript types</Link> (no need for Zod).  
-✅ **Transport** — automatically picks the most performant available <Link href="/transport">transport (HTTP, SSE, WebSocket)</Link>.  
-✅ **Backpressure** — <Link href="/channel#backpressure">automatic backpressure</Link> when the network is the bottleneck.  
-✅ **Reconnection** — <Link href="/channel#reconnection">automatic recovery</Link> from network issues.  
+> Streaming works out of the box with zero config. Plain telefunction calls are unaffected.
 
 
-## Primitive: `AsyncGenerator` (`function*`) {#async-generator}
+## Which one should I use?
 
-An [`async function*`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*) ([`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator)) is a good fit for **short-lived streaming**: a *finite* sequence of values that arrive one at a time and then completes. Examples:
+| Type | Best for | Values |
+|---|---|---|
+| [`AsyncGenerator`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AsyncGenerator) | AI tokens, notifications, progress updates | Structured (JSON-serializable) |
+| [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) | Raw byte streams without file metadata | Binary (`Uint8Array`) |
+| <Link text={<code>File</code>} href="/file-download" /> / <Link text={<code>Blob</code>} href="/file-download" /> | File downloads with `name` / `type` / `size` | Binary (`Uint8Array`) |
+| <Link text={<code>download()</code>} href="/file-download#download" /> | File / Blob downloads with progress + cancel, or upstream-streamed bytes | Binary (`Uint8Array`) |
+| Nested [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise) | Lazy parts of a response that resolve independently | Any serializable value |
 
-- AI answer stream
-- Progress updates for a long-running task (e.g. upload)
-- Streaming search results as they're found
-- Rows of a large SQL query, streamed to the UI
 
-> It's a good fit because a generator closes itself when it completes. (Other streaming primitives like <Link href="#callback">callbacks</Link> have no such completion signal.)
->
-> You can also use it for any other use case such as never-ending streams — the deciding factor is usually just DX. (Telefunc picks a different default <Link href="/transport">transport</Link> depending on the primitive, but you can change the transport to match your needs.)
+## `AsyncGenerator`
 
-#### Example: countdown
-
-A simple example:
+The usual choice for incremental structured values.
 
 ```ts
-// Countdown.telefunc.ts
+// Chat.telefunc.ts
 // Environment: server
 
-export async function* onCountdown(from: number) {
-  for (let i = from; i >= 0; i--) {
-    yield i
-    await new Promise((resolve) => setTimeout(resolve, 1000))
+export async function* onChat(prompt: string): AsyncGenerator<string> {
+  const stream = await ai.streamText({ prompt })
+  for await (const token of stream) {
+    yield token
   }
 }
 ```
 
 ```tsx
-// Countdown.tsx
+// Chat.tsx
 // Environment: client
 
-import { onCountdown } from './Countdown.telefunc'
+import { onChat } from './Chat.telefunc'
 
-for await (const n of onCountdown(3)) {
-  console.log(n) // 3, 2, 1, 0 — one per second
+const gen = onChat('Tell me a joke')
+for await (const token of gen) {
+  console.log(token) // Each token arrives as it's yielded
 }
 ```
 
-#### Example: AI chat
 
-A full-fledged example:
+## `ReadableStream`
 
-```ts
-// AiChat.telefunc.ts
-// Environment: server
-
-import { getContext } from 'telefunc'
-
-export async function* onAiPrompt(prompt: string): AsyncGenerator<string> {
-  const context = getContext()
-  const { stream, cancel } = await ai(prompt)
-
-  // When the client stops the stream (e.g. the user presses "Stop"), cancel the
-  // upstream AI request — otherwise it keeps running and burning AI tokens
-  context.onClose(cancel)
-
-  for await (const message of stream) {
-    yield message
-  }
-}
-```
-
-```tsx
-// AiChat.tsx
-// Environment: client
-
-import { onAiPrompt } from './AiChat.telefunc'
-
-const gen = onAiPrompt('Tell me a joke')
-
-// "Stop" button — close the stream early; this fires onClose() on the server
-stopButton.onclick = () => gen.return()
-
-for await (const message of gen) {
-  console.log(message) // Each message arrives as it's yielded
-}
-```
-
-> See also:
-> - <Link href="#cancelling" />
-> - <Link href="#cleanup" />
-> - <Link href="/onClose" />
-
-
-
-## Primitive: Callback (`function` passing) {#callback}
-
-You can pass functions between client and server:
-
-- **Client → server**: pass a callback as a telefunction argument — the server calls it.
-- **Server → client**: return a function from a telefunction — the client calls it.
-
-```ts
-// Upload.telefunc.ts
-// Environment: server
-
-export async function onUpload(file: File, onProgress: (percent: number) => void) {
-  let loaded = 0
-  for await (const chunk of file.stream()) {
-    writeChunk(chunk)
-    loaded += chunk.byteLength
-    onProgress(Math.round((loaded / file.size) * 100))
-  }
-}
-```
-
-```tsx
-// Upload.tsx
-// Environment: client
-
-await onUpload(file, (percent) => setProgress(percent))
-```
-
-> The underlying stream automatically closes itself when the client stops using (i.e. stops referencing) `onProgress`, but you can also manually close it (eagerly), see <Link href="/close" />.
-
-> Under the hood, a passed function is just a <Link text={<code>Channel</code>} href="#channel" />. A callback has the same lifecycle as a channel, only exposed with a nicer JavaScript DX.
->
-> Reach for a raw `Channel` if you need more than call-and-return — e.g. two-way messaging, broadcast, or binary.
-
-
-## Primitive: Multiple `Promise` {#multiple-promise}
-
-If you return promises **without awaiting them**, the client receives the rest of the object immediately, and each promise resolves on its own.
-
-```ts
-// Dashboard.telefunc.ts
-// Environment: server
-
-export async function onLoadDashboard() {
-  const title = 'Dashboard'
-  const summaryPromise = fetchSummary()
-  const reportPromise = fetchExtensiveReport()
-  return {
-    // Delivered to the client immediately
-    title,
-    // Delivered to the client when summaryPromise resolves
-    summary: summaryPromise,
-    // Delivered to the client when reportPromise resolves
-    report: reportPromise
-  }
-}
-```
-
-```tsx ts-only
-// Dashboard.tsx
-// Environment: client
-
-import { onLoadDashboard } from './Dashboard.telefunc'
-
-const res = await onLoadDashboard()
-
-console.log(res.title)             // Available right away
-
-const summary = await res.summary  // Await when needed
-const report = await res.report
-```
-
-
-> **Don't `await` inside the telefunction** — that blocks the entire response:
-> ```ts
-> export async function onLoadDashboard() {
->   // ❌ Blocks the entire call
->   const data = await prepare()
->   return { title: 'Dashboard', data }
-> }
-> ```
-> Return the promise instead:
-> ```ts
-> export async function onLoadDashboard() {
->   // ✅ title delivered immediately, promise resolves in the background
->   return {
->     title: 'Dashboard',
->     data: prepare()
->   }
-> }
-> ```
-
-> As with other streaming primitives, you can use <Link href="/onClose">`onClose()`</Link> and <Link href="/close">`close`</Link> to eagerly cancel (e.g. `fetchExtensiveReport()`).
-
-
-## Primitive: `ReadableStream` {#readable-stream}
-
-Stream raw bytes with a standard [`ReadableStream`](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream) — in either direction.
-
-#### Server → client
-
-Return a `ReadableStream`:
+Use `ReadableStream` when you need to stream raw bytes.
 
 ```ts
 // Download.telefunc.ts
@@ -285,6 +62,8 @@ export function onDownload(fileName: string): ReadableStream<Uint8Array> {
   return Readable.toWeb(fs.createReadStream(`./files/${fileName}`)) as ReadableStream<Uint8Array>
 }
 ```
+
+> For named files with `name` / `type` / `size` metadata, return a <Link text={<code>File</code>} href="/file-download" /> or <Link text={<code>Blob</code>} href="/file-download" /> instead.
 
 ```ts
 // Download.tsx
@@ -301,12 +80,60 @@ while (true) {
 }
 ```
 
-> You can also return a `File` or `Blob` instead, see: <Link href="/file-download" />.
+## Nested `Promise`
+
+Return unawaited promises inside the response object — the client gets the surrounding values immediately while each promise resolves independently.
+
+```ts
+// Dashboard.telefunc.ts
+// Environment: server
+
+export async function onLoadDashboard() {
+  return {
+    title: 'Dashboard',            // Delivered immediately
+    summary: fetchSummary(),        // Resolves independently
+    report: fetchExtensiveReport(), // Resolves independently
+  }
+}
+```
+
+```tsx
+// Dashboard.tsx
+// Environment: client
+
+import { onLoadDashboard } from './Dashboard.telefunc'
+
+const res = await onLoadDashboard()
+
+console.log(res.title)             // Available right away
+
+const summary = await res.summary  // Await when needed
+const report = await res.report
+```
+
+> **Don't `await` inside the telefunction** — that blocks the entire response:
+> ```ts
+> // ❌ Blocks everything
+> export async function onLoadDashboard() {
+>   await prepare()
+>   return { title: 'Dashboard' }
+> }
+> ```
+> Return the promise instead:
+> ```ts
+> // ✅ title delivered immediately, promise resolves in the background
+> export async function onLoadDashboard() {
+>   return {
+>     title: 'Dashboard',
+>     data: prepare(),
+>   }
+> }
+> ```
 
 
-#### Client → server
+## Client → server streaming
 
-Pass a `ReadableStream` as a telefunction argument:
+Pass a `ReadableStream` as a telefunction argument to stream bytes from the client to the server.
 
 ```ts
 // Ingest.telefunc.ts
@@ -332,264 +159,115 @@ const stream = new ReadableStream({
     controller.enqueue(new TextEncoder().encode('chunk 1'))
     controller.enqueue(new TextEncoder().encode('chunk 2'))
     controller.close()
-  }
+  },
 })
 
 await onIngest(stream, 'data.txt')
 ```
 
-#### Both directions
+| Method | Backpressure | Best for |
+|---|---|---|
+| <Link text={<code>File</code>} href="/file-upload" /> / <Link text={<code>Blob</code>} href="/file-upload" /> argument | TCP-level | Finite uploads — files, images, CSV imports |
+| `ReadableStream` argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
+| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | No | Fire-and-forget binary — low-latency frames where dropping is acceptable |
+| <Link text={<code>new Broadcast().publishBinary()</code>} href="/channel#new-broadcast" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
 
-Accept a `ReadableStream` *and* return one, transforming the bytes as they pass through.
 
-A simple example transform with gzip compression:
+## Mixed return types
+
+A telefunction can return any combination of generators, streams, and promises.
 
 ```ts
-// Compress.telefunc.ts
+// Dashboard.telefunc.ts
 // Environment: server
 
-export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-  return data.pipeThrough(new CompressionStream('gzip'))
-}
-```
+export async function onLoadDashboard() {
+  async function* notifications(): AsyncGenerator<string> {
+    for (const n of await fetchNotifications()) {
+      yield n.text
+    }
+  }
 
-```ts
-// Compress.tsx
-// Environment: client
-
-import { onCompress } from './Compress.telefunc'
-
-const compressed = await onCompress(data) // data: ReadableStream<Uint8Array>
-const blob = await new Response(compressed).blob() // drain the gzipped bytes
-```
-
-The transform can be arbitrarily heavy — for example, compressing a large video into a smaller MP4 and streaming it back to the client as it encodes:
-
-```ts
-// CompressVideo.telefunc.ts
-// Environment: server
-
-import { getContext } from 'telefunc'
-import { spawn } from 'node:child_process'
-import { Readable, Writable } from 'node:stream'
-
-export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-  const { onClose } = getContext()
-
-  // Re-encode to a smaller H.264/MP4, on the fly
-  const args = ['-i', 'pipe:0', '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1']
-  const ffmpeg = spawn('ffmpeg', args)
-  // Kill the encoder if the client disconnects mid-stream — otherwise the process leaks
-  onClose(() => ffmpeg.kill())
-
-  video.pipeTo(Writable.toWeb(ffmpeg.stdin))
-  return Readable.toWeb(ffmpeg.stdout) as ReadableStream<Uint8Array>
-}
-```
-
-> The memory consumption is constant regardless of file size.
-
-> A spawned process outlives the call and keeps burning CPU if the client navigates away mid-encode — make sure to terminate it in `onClose()`, see <Link text="Cleanup" href="#cleanup" />.
-
-
-## Primitive: `Channel` {#channel}
-
-For ongoing two-way or broadcast messaging, you can use a channel, see:
-- <Link href="/channel" />
-
-> This is the low-level primitive that powers most of Telefunc Stream.
-
-> Instead of directly using channels, most users reach for high-level primitives (e.g. <Link href="#callback">callbacks</Link>) and high-level integrations (e.g. <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />).
-
-```js
-// Dashboard.telefunc.js
-// Environment: server
-
-import { Channel } from 'telefunc'
-
-export async function onDashboard() {
-  const channel = new Channel()
-
-  const interval = setInterval(() => {
-    channel.send(getMetrics())
-  }, 1000)
-
-  channel.onClose(() => clearInterval(interval))
-
-  return channel.client
-}
-```
-
-```ts
-// Dashboard.jsx
-// Environment: client
-
-import { onDashboard } from './Dashboard.telefunc'
-
-const channel = await onDashboard()
-channel.listen((metrics) => updateCharts(metrics))
-```
-
-
-## Cleanup
-
-**Environment**: server.
-
-Make sure you always clean up resources:
-
-```ts
-// Counter.telefunc.ts
-// Environment: server
-
-import { getContext } from 'telefunc'
-
-export async function onInit(onTick: (n: number) => void) {
-  const context = getContext()
-  let n = 0
-  const interval = setInterval(() => onTick(++n), 1000)
-  context.onClose(() => { // [!code highlight]
-    // ⚠️ Must be released otherwise it runs forever // [!code highlight]
-    clearInterval(interval) // [!code highlight]
-  }) // [!code highlight]
-}
-```
-<Warning>
-Any resource a telefunction opens (`setInterval`, an event subscription, a DB cursor, an upstream stream) outlives the telefunction call — **make sure to always clear resources when streams close**.
-</Warning>
-
-You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to listen for when a stream closes, see:
-- <Link href="/onClose" />
-
-> A stream automatically closes when the client stops using it — you usually don't have to manually close streams, see:
-> - <Link href="/close" />
-
-
-## Authorization
-
-**Environment**: server.
-
-A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link href="/getContext">`getContext()`</Link> and `throw Abort()` **at open time**, before you stream anything back to the client. Here the client passes a <Link text="callback" href="#callback" /> and the server calls it:
-
-```ts
-// TeamFeed.telefunc.ts
-// Environment: server
-
-import { getContext, Abort } from 'telefunc'
-
-export async function onTeamFeed(teamId: string, onMessage: (text: string) => void) {
-  const context = getContext()
-  if (!context.user?.teams.includes(teamId)) throw Abort()
-
-  // Authorized — push this team's messages to the client
-  const unwatch = watchTeam(teamId, onMessage)
-  // Stop watching when the client disconnects — otherwise the subscription leaks
-  context.onClose(unwatch)
+  return {
+    title: 'Dashboard',
+    stream: notifications(),
+    fast: Promise.resolve({ count: 42 }),
+    slow: fetchExtensiveReport(),
+  }
 }
 ```
 
 ```tsx
-// TeamFeed.tsx
+// Dashboard.tsx
 // Environment: client
 
-import { onTeamFeed } from './TeamFeed.telefunc'
+import { onLoadDashboard } from './Dashboard.telefunc'
 
-await onTeamFeed('acme', (text) => showMessage(text))
+const res = await onLoadDashboard()
+
+// Static values — available immediately
+console.log(res.title)
+
+// Consume generator and promises independently
+for await (const notification of res.stream) {
+  console.log(notification)
+}
+
+const fast = await res.fast
+const slow = await res.slow
 ```
 
-`getContext()` and `throw Abort()` only work **before the telefunction returns** — so authorize at open time. The `context.user` you capture stays valid inside callbacks which run later (via JavaScript closure).
+> Multiple generators and promises resolve concurrently without blocking each other.
 
-> **Consider re-checking.** For sensitive operations, you can re-check authorization with the captured `context.user` each time the callback runs, although most use cases don't need this.
+
+## Cancellation & cleanup
+
+See <Link href="/close" /> for all cancellation methods (`close()`, `break`, `gen.return()`, `reader.cancel()`) and server-side cleanup via `onClose()`.
+
+
+## Transport
+
+By default, streamed values are sent as raw binary chunks over HTTP (`application/octet-stream`). You can switch transport globally or per call.
+
+| Transport | Description |
+|---|---|
+| `'binary-inline'` (default) | Raw binary chunked HTTP response. Lowest overhead. |
+| `'sse-inline'` | Base64url-encoded Server-Sent Events — works through proxies that buffer binary |
+| `'channel'` | Delivers over the configured channel transport (`'sse'` or `'ws'`) with reconnection support |
+
+```ts
+// Environment: client
+
+import { config } from 'telefunc/client'
+
+config.stream.transport = 'sse-inline'
+```
+
+Override per call:
+
+```ts
+import { onChat } from './Chat.telefunc'
+import { withContext } from 'telefunc/client'
+
+const gen = withContext(onChat, {
+  stream: { transport: 'channel' },
+})('Tell me a joke')
+```
+
+See <Link href="/transport" /> for a full comparison.
 
 
 ## Error handling
 
-**Environment**: server & client.
+Telefunc distinguishes expected failures from bugs — even in streaming responses. If a generator or stream throws, the client receives a typed error while values already delivered remain available.
 
-```ts
-onClose((err) => {
-  if (!err) {
-    // Graceful close
-  } else if (err instanceof Abort) {
-    // Either side called abort(value)
-    console.log(err.abortValue)
-  } else if (err instanceof NetworkError) {
-    // Connection lost (couldn't reconnect)
-  }
-})
-```
-
-> See: <Link href="/onClose" />
-
-> The expected-vs-bug distinction described at <Link href="/error-handling" /> applies to streams too:
-> - `throw Abort()` during a stream is relayed <Link href="/error-handling#expected-errors">as an expected error</Link>
-> - Any other thrown error is treated <Link href="/error-handling#bugs">as a bug</Link>
-
-See also:
-- <Link href="/error-handling" />
-- <Link href="/channel#errors" />
-
-
-## Cancelling
-
-**Environment**: server & client.
-
-You can cancel a stream at any time by <Link href="/close">manually closing it</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> to clear resources (server-side).
-
-```tsx
-// Search.tsx
-// Environment: client
-
-const results = onSearch('computers')
-cancelButton.onclick = () => {
-  // Close it
-  results.return() // fires onClose() on the server
-}
-
-for await (const row of results) render(row)
-```
-
-```ts
-// Search.telefunc.ts
-// Environment: server
-
-import { getContext } from 'telefunc'
-
-export async function* onSearch(query: string) {
-  const context = getContext()
-  const cursor = db.search(query)
-  context.onClose(() => {
-    // Release the database cursor
-    cursor.close()
-  })
-
-  for await (const row of cursor) yield row
-}
-```
-
-
-
-## Scaling
-
-You can scale Telefunc horizontally (multiple server instances across multiple processes, containers, or machines) by adding sticky sessions and a cross-instance broadcast transport.
-
-See: <Link href="/stream/scale" />.
-
-
-## Cloudflare
-
-On Cloudflare Workers, Telefunc routes channels through Durable Objects and fans out broadcasts across regions automatically — so neither a sticky load balancer nor a broadcast transport is needed.
-
-See: <Link href="/stream/cloudflare" />.
+See <Link href="/error-handling" /> for details.
 
 
 ## See also
 
-- <Link href="/tanstack-query" />
-- <Link href="/rxjs" />
-- <Link href="/stream/cloudflare" />
-- <Link href="/channel" />
-- <Link href="/close" />
-- <Link href="/onClose" />
-- <Link href="/transport" />
-- <Link href="/stream/scale" />
-- <Link href="/redis" />
+- <Link href="/real-time" /> — function passing, channels, and upload progress
+- <Link href="/file-upload" /> — streaming file uploads
+- <Link href="/file-download" /> — streaming file downloads
+- <Link href="/channel" /> — bidirectional channels
+- <Link href="/transport" /> — transport comparison and configuration

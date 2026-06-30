@@ -43,8 +43,6 @@ export async function hello({ name }: { name: string }) {
 
 With Telefunc, not only can you seamlessly re-use types across your frontend and backend code, but you also get automatic type-safety at runtime. If you use a TypeScript ORM (e.g. [Prisma](https://www.prisma.io/)) or SQL builder (e.g. [Kysely](https://github.com/koskimas/kysely) and [others](https://github.com/stars/brillout/lists/sql)), then you get end-to-end type safety all the way from database to frontend.
 
-> Telefunc guarantees that **every** value arriving at the server is validated — not just a telefunction's top-level arguments, but also every value the client sends through a <Link href="/stream" text="streaming primitive" /> (callbacks, channels, streams).
-
 > For a faster development, Telefunc doesn't generate `shield()` and your telefunction arguments aren't validated during development.
 > Telefunc only generates `shield()` upon building your app for production.
 > You can enable the generation of `shield()` for development by setting <Link href="/shield-config">`config.shield.dev`</Link> to `true`.
@@ -153,6 +151,82 @@ List of `shield()` types:
 `t.any` | `any` | `true`
 
 
-## See also
+## Beyond top-level arguments
 
-- <Link href="/permissions" />
+Telefunc's automatic `shield()` generation isn't limited to a telefunction's direct arguments. It also emits **sub-shields** for values nested inside your types wherever the RPC boundary extends — callbacks and channels below, and <Link href="/integrations/rxjs#shields" text="RxJS streams" /> via `@telefunc/rxjs`. Sub-shields come from the same TypeScript types, so the runtime check always matches the declared type.
+
+The invariant: **only values arriving at the server are validated.** Values flowing the other way are trusted (the server is the trust boundary).
+
+### Function arguments
+
+A callback passed as an argument, or a function returned to the client, extends the RPC boundary to a second call site:
+
+- **Client-passed callback** — its **return value** is validated when the server invokes it.
+- **Server-returned function** — its **arguments** are validated when the client invokes it.
+
+```ts
+// Upload.telefunc.ts
+export async function onUpload(
+  file: File,
+  onProgress: (percent: number) => void,  // void → client must resolve with `undefined`
+) {
+  onProgress(50)
+}
+
+export async function getUser(id: string) {
+  return {
+    refresh: (after: number) => fetchUser(id),  // `after` is validated when the client calls refresh(n)
+  }
+}
+```
+
+> `void` return types compile to a shield that accepts only `undefined`. A callback typed `() => Promise<void>` that returns a truthy value is rejected — otherwise `if (await cb()) …` would branch on client-returned garbage.
+
+
+### Channels
+
+[`new Channel<ClientToServer, ServerToClient>()`](/channel) declares two typed directions, each a function signature `(msg) => ack`. Telefunc generates two sub-shields that fire on the server:
+
+- **`data`** — validates messages arriving from the client (input to `listen()`).
+- **`ack`** — validates the ack returned by the client's `listen()` to a server-initiated `send(..., { ack: true })`.
+
+```ts
+const events = new Channel<
+  (msg: { text: string }) => { received: true },  // client → server
+  (msg: { tick: number }) => void                  // server → client
+>()
+
+events.listen((msg) => {
+  // `msg.text` is shield-checked before this runs; non-matching messages are dropped.
+  return { received: true }
+})
+
+// ack from the client's listen is shield-checked against `void` (= undefined).
+await events.send({ tick: 1 }, { ack: true })
+```
+
+> A direction typed `never` rejects any value at runtime — it means "no traffic expected on this direction." If you send traffic on a `never` direction anyway, the corresponding `data` or `ack` shield will fail. Make sure the direction you actually use at runtime isn't `never`.
+
+
+### Broadcast
+
+[`new Broadcast<T>({ key })`](/channel#new-broadcast) declares the message type `T` flowing through a keyed pub/sub topic. Telefunc generates a `data` sub-shield that fires on the server when a client calls `publish()` on a `Broadcast` returned from a telefunction:
+
+```ts
+// Chat.telefunc.ts
+export async function onJoinChat(roomId: string) {
+  const room = new Broadcast<{ user: string; text: string }>({ key: `chat:${roomId}` })
+  return room
+}
+```
+
+```ts
+// Client side
+const chat = await onJoinChat(roomId)
+await chat.publish({ user: 'Alice', text: 'Hello!' })
+// Server validates `{ user: string; text: string }` against the declared `T` before
+// fanning out to subscribers. A failing shield rejects this `publish()` promise with
+// `ShieldValidationError` and the message is not delivered.
+```
+
+Server-side `publish()` calls (from inside a telefunction or via the static `Broadcast.publish(key, data)`) are not shield-validated — the server is the trust boundary, so values originating there flow through as-is.

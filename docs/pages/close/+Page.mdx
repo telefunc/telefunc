@@ -1,137 +1,76 @@
-import { Link, Warning } from '@brillout/docpress'
+import { Link } from '@brillout/docpress'
 
-**Environment**: client & server.
+`close()` and `onClose()` manage the lifecycle of telefunction values — anything returned from or passed to a telefunction that holds an open connection.
 
-Manually close <Link href="/stream">Telefunc streams</Link>.
+## `close()` (client)
 
-> The `close()` function is one of several ways to manually close streams — see all methods at <Link href="#how-to-close" />.
-
-> You usually don't need to manually close streams yourself — see: <Link href="#when-to-close" />.
-
-> For listening to streams closing, see: <Link href="/onClose" />.
-
-
-## When to close
-
-A stream automatically closes itself when the client stops using it.
-
-> **How does it work?** When a `stream` object becomes unreachable (the client drops all references to it), the browser's garbage collector clears the stream object and the stream automatically closes itself.
-
-You therefore usually don't have to manually close streams yourself.
-
-> That said, there is a short delay (typically a few seconds) between when the client stops using the stream and when the stream is closed. (The garbage collector doesn't always immediately clear unused objects.)
-
-For example:
-
-```tsx
-// Chat.tsx
-// Environment: client
-
-import { useEffect, useState } from 'react'
-import { onChat } from './Chat.telefunc'
-
-function Chat() {
-  const [messages, setMessages] = useState<string[]>([])
-
-  useEffect(() => {
-    const open = onChat() // Promise<{ channel }>
-    open.then(({ channel }) => {
-      channel.listen((msg) => setMessages((prev) => [...prev, msg]))
-    })
-    // Optional:
-    const clear = () => open.then(({ channel }) => channel.close())
-    return clear
-  }, [])
-
-  return <ul>{messages.map((m, i) => <li key={i}>{m}</li>)}</ul>
-}
-```
-
-```tsx
-// Clock.tsx
-// Environment: client
-
-import { useEffect, useState } from 'react'
-import { onClock } from './Clock.telefunc'
-
-function Clock() {
-  const [n, setN] = useState(0)
-
-  useEffect(() => {
-    const clock = onClock() // long-lived AsyncGenerator
-    ;(async () => {
-      for await (const tick of clock) setN(tick)
-    })()
-    // Optional:
-    const clear = () => void clock.return() // a running loop won't stop on its own
-    return clear
-  }, [])
-
-  return <p>{n}</p>
-}
-```
-
-Returning `clear` is optional: if you don't, the stream still closes itself automatically after React unmounts the component — the garbage collector clears the stream object and then the stream closes itself.
-
-That said, if you want the stream to close as soon as possible, manually close it yourself — return `clear` in this example.
-
-## How to close
-
-From the client, you can manually close a stream early with <Link text={<code>close()</code>} href="#close" /> — or simply stop reading: `break` out of a `for await`, `reader.cancel()` a `ReadableStream`, or `channel.close()` a channel.
-
-There's one catch-all API, `close()`, plus several <Link href="/stream">per-stream-primitive</Link> APIs.
-
-| API | Side | Graceful / immediate | Closes |
-|---|---|---|---|
-| `close(value)` | client | Graceful | Everything in the returned value (walked recursively) |
-| `gen.return()` / `break` | client | Graceful | One `AsyncGenerator` |
-| `reader.cancel()` | client | Graceful | One `ReadableStream` |
-| <Link text={<code>channel.close()</code>} href="/channel#channel-methods" /> | client & server | Graceful | One `Channel` / `BroadcastChannel` (both ends) |
-| <Link text={<code>channel.abort(value?)</code>} href="/channel#channel-methods" /> | client & server | Immediate | One `Channel` / `BroadcastChannel`, with an abort value |
-| `abort(call)` | client | Immediate | The in-flight call and any channels it opened |
-| <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" /> | client | Immediate | The call and any channels it opened, via an `AbortSignal` |
-
-**Graceful**: flush buffered data, then close.  
-**Immediate**: cancel in-flight work.  
-
-
-## `close()`
-
-Gracefully closes *all* streams: in one call, it closes every stream the telefunction call opened.
+`close()` from `telefunc/client` gracefully closes any value returned by a telefunction. It walks the return value recursively and closes everything in one call.
 
 ```ts
-// Environment: client
-
 import { close } from 'telefunc/client'
 import { onLoadDashboard } from './Dashboard.telefunc'
 
 const result = await onLoadDashboard()
 
 // Read what you need...
-const { value } = await result.stream.next()
+const first = await result.stream.next()
 
 // Then close everything at once
 close(result)
 ```
 
-## `abort()`
+### Other ways to close
 
-To stop a call **immediately** instead of gracefully, use `abort()` — the request is cancelled, and the pending call rejects with an `Abort` error (or, if you're mid-stream, that error surfaces on the next read instead):
+For specific value types, you can also use the standard JS APIs directly:
 
 ```ts
-// Environment: client
+// AsyncGenerator — break out of the loop
+for await (const token of gen) {
+  if (shouldStop) break
+}
 
-import { abort } from 'telefunc/client'
+// Or call return() directly
+gen.return()
 
-const call = onLoadDashboard()
-abort(call) // cancels the in-flight call
+// ReadableStream — cancel the reader
+reader.cancel()
+
+// Channel — close explicitly
+await channel.close()
 ```
 
-To abort via an `AbortSignal` instead, use <Link text={<code>{'withContext(fn, { signal })'}</code>} href="/withContext" />.
+All of these signal the server to stop producing and release resources.
+
+
+## `onClose()` (server)
+
+Use `onClose()` from <Link href="/getContext" text="getContext()" /> on the server to detect when the response ends — whether the value was consumed, the client disconnected, or an error occurred:
+
+```ts
+import { getContext } from 'telefunc'
+
+export async function* onChat(prompt: string) {
+  const { onClose } = getContext()
+  onClose(() => {
+    // Release resources, cancel upstream work
+  })
+
+  for await (const token of ai.streamText({ prompt })) {
+    yield token
+  }
+}
+```
+
+
+## Automatic cleanup (GC)
+
+If the client drops all references to a returned value without explicitly closing it, the underlying resources are cleaned up automatically via garbage collection. There is a short delay (typically a few seconds) between the value becoming unreachable and the cleanup firing.
+
+Explicit `close()` is instant. GC cleanup is the fallback for when user code forgets.
 
 
 ## See also
 
-- <Link href="/onClose" />
 - <Link href="/stream" />
 - <Link href="/channel" />
+- <Link href="/getContext" />
