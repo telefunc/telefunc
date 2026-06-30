@@ -6,18 +6,18 @@ import { TelefuncStreamBeta } from '../../../components'
 If you use <Link href="/stream">Telefunc Stream</Link>, scaling Telefunc horizontally (multiple Node instances, multiple containers, multiple machines) adds two requirements:
 
 - **Sticky sessions** (so a reconnecting client returns to the same server instance) — your load balancer must route every request from a given client to the same instance.
-  > Required: every stream needs this.
+  > Required: every <Link href="/stream">stream</Link> needs this.
 - **Cross-instance broadcast transport** (a <Link href="/channel#broadcast">broadcast</Link> must reach subscribers on every server instance) — install one such as <Link href="/redis">`@telefunc/redis`</Link>.
   > Optional: this is required only for streams that broadcast.
 
 
 ## Sticky sessions
 
-A Telefunc `Channel` is a stateful connection. Its server-side state — the `Channel` instance, its `send()`/`listen()` closures, any interval the telefunction set up — lives in one server process. When the client reconnects (network issues, a page reload, an SSE→WS upgrade), the next request has to land on the same process or the channel can't recover.
+A <Link href="/channel#broadcast">`Channel`</Link> is a stateful connection. Its server-side state — the `new Channel()` instance, its `send()`/`listen()` closures, any interval the telefunction set up — lives in one server process. When the client reconnects (network issues, a page reload, an SSE→WS upgrade), the next request has to land on the same process or the channel can't recover.
 
 > This is the same constraint Socket.IO documents under [Using multiple nodes](https://socket.io/docs/v4/using-multiple-nodes/). The same load-balancer feature solves the problem for Telefunc: a sticky session, usually backed by a cookie or by the client IP.
 
-> Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and your client's `Channel` ends.
+> Without sticky sessions, a reconnect that lands on a different instance sees no matching channel state, the recovery handshake fails, and the client's `Channel` ends.
 
 > Sanity check: after deploying behind a sticky load balancer, open the browser network tab, refresh once, and confirm every request to `/_telefunc` carries the same sticky cookie. If two consecutive requests carry different sticky values, the load balancer isn't configured for sticky sessions.
 
@@ -61,9 +61,9 @@ Serverless platforms that don't expose sticky-session routing aren't a good fit 
 
 ## Broadcast
 
-<Link href="/channel#broadcast">`Broadcast`</Link> is different: publishers and subscribers are intentionally decoupled — they only share a string key. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publisher on instance A reach a subscriber on instance B.
+<Link href="/channel#broadcast">`Broadcast`</Link> is different: publishers and subscribers are intentionally decoupled — they only share a `key` string. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publisher on instance A reach a subscriber on instance B.
 
-In a single-instance setup the default in-memory transport is enough. In a multi-instance setup, install a transport that fans out across the cluster — such as <Link text={<code>@telefunc/redis</code>} href="/redis" />.
+In a single-instance setup, the default in-memory transport is enough. In a multi-instance setup, install a transport that fans out across the cluster — such as <Link text={<code>@telefunc/redis</code>} href="/redis" />.
 
 > Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small (about four methods), so you can write a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker.
 
@@ -73,7 +73,7 @@ In a single-instance setup the default in-memory transport is enough. In a multi
 
 For other backends (NATS, Kafka, …), implement `BroadcastTransport` and assign it to `config.broadcast.transport`. Telefunc wraps it with subscriber multiplexing and same-node delivery, so each `key` only opens one upstream subscription no matter how many local subscribers attach.
 
-```ts
+```ts ts-only
 type BroadcastTransport = {
   send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
   listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
@@ -82,7 +82,7 @@ type BroadcastTransport = {
 }
 ```
 
-`send` / `sendBinary` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen` / `listenBinary` return an unsubscribe function and are called at most once per key.
+`send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` return an unsubscribe function and are called at most once per key.
 
 > On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/stream/cloudflare" />.
 
@@ -91,7 +91,7 @@ type BroadcastTransport = {
 [Cloudflare Workers](https://www.cloudflare.com/products/workers/) takes a different approach: `telefunc/cloudflare` routes channels through [Durable Objects](https://developers.cloudflare.com/durable-objects/) instead of sticky sessions, and fans out broadcasts across regions automatically. As a result, neither a sticky load balancer nor a broadcast transport is needed. See:
 - <Link href="/stream/cloudflare" />
 
-> You scale with <Link href="/stream/cloudflare#scaling">the `scale` option</Link> instead of a load balancer.
+> You scale with <Link href="/stream/cloudflare#scaling">the `scale` option</Link> instead of a using load balancer.
 
 
 ## See also
