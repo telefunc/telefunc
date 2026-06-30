@@ -11,7 +11,7 @@ The following low-level **primitives** enable all kinds of stream use cases.
 - <Link text={<code>Broadcast</code>} href="#broadcast" /> — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
 - <Link text={<code>new BroadcastChannel()</code>} href="#new-broadcastchannel" /> — broadcast also on the client-side.
 
-> You can use them for both one-way (aka streaming) and two-way streams (aka real-time):
+> You can use them for both one-way streams (aka streaming) and two-way streams (aka real-time):
 > - Chat rooms
 > - Live feeds (sports scores, stock tickers)
 > - Collaborative editing (presence & cursors)
@@ -243,11 +243,11 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 ## `new BroadcastChannel()`
 
-`new BroadcastChannel({ key })` enables you to broadcast also on the client-side.
+`new BroadcastChannel({ key })` lets you broadcast from the client-side as well.
 
 > It creates a `Channel` to the one client that received it, and bridges that client onto a `Broadcast` key.
 >
-> Return it from a telefunction and that client can `publish()` / `subscribe()` on the key — every message reaches every member of the group (both client- and server-side).
+> Return it from a telefunction and that client can `publish()` / `subscribe()` on the key — every message reaches every member of the group (both client-side and server-side).
 
 
 <Warning>

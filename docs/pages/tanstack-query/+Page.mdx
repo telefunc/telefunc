@@ -34,7 +34,7 @@ function App() {
 > - All options and APIs continue to work as before
 > - Any TanStack Query adapter works: React, Vue, Svelte, Solid
 
-> There's no server-side setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads it on the server-side.
+> There's no server-side setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them on the server side.
 
 
 ## Local vs global keys
@@ -78,7 +78,7 @@ const add = useMutation({
 
 #### Global keys
 
-When using <Link href="#local-vs-global-keys">a global key</Link>, every connected clients refetches.
+When using <Link href="#local-vs-global-keys">a global key</Link>, every connected client refetches.
 
 > Local and global keys can be mixed in a single mutation:
 >
@@ -93,7 +93,7 @@ When using <Link href="#local-vs-global-keys">a global key</Link>, every connect
 
 #### Example:
 
-For example an online collaborative document editor: when a collaborator edits a document, every client viewing it refetches:
+Consider a collaborative document editor: when one user edits a document, every client viewing it refetches:
 
 ```tsx
 const { data: doc } = useQuery({

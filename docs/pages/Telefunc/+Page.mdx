@@ -162,7 +162,7 @@ export default {
 }
 ```
 
-> On Cloudflare the `context` is set in a separate function than the request handler. (Because it runs in a Durable Object, whereas the request handler doesn't.)
+> On Cloudflare the `context` is set in a separate function from the request handler. (Because it runs in a Durable Object, whereas the request handler doesn't.)
 
 > On Cloudflare `new Telefunc` also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
 

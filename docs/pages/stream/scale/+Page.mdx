@@ -7,7 +7,7 @@ If you use <Link href="/stream">Telefunc Stream</Link>, scaling Telefunc horizon
 
 - **Sticky sessions** (so a reconnecting client returns to the same server instance) — your load balancer must route every request from a given client to the same instance.
   > Required: every stream requires this.
-- **Cross-instance broadcast transport** (a <Link href="/channel#broadcast">broadcast</Link> must be delivered across all server instances) — install one like <Link href="/redis">`@telefunc/redis`</Link>.
+- **Cross-instance broadcast transport** (a <Link href="/channel#broadcast">broadcast</Link> must reach subscribers on every server instance) — install one such as <Link href="/redis">`@telefunc/redis`</Link>.
   > Optional: this is required only for streams that broadcast.
 
 
@@ -67,7 +67,7 @@ In a single-instance setup the default in-memory transport is enough. In a multi
 
 > Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small (about four methods), so you can write a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker.
 
-> For Cloudflare Workers, Telefunc has an apadter that uses Durable Objects — see <Link href="/stream/cloudflare" />.
+> For Cloudflare Workers, Telefunc has an adapter that uses Durable Objects — see <Link href="/stream/cloudflare" />.
 
 ### `BroadcastTransport`
 
