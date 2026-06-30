@@ -155,6 +155,16 @@ const headings = [
     url: '/stream',
   },
   {
+    level: 2,
+    title: '`@telefunc/tanstack-query`',
+    url: '/tanstack-query',
+  },
+  {
+    level: 2,
+    title: '`@telefunc/rxjs`',
+    url: '/rxjs',
+  },
+  {
     level: 4,
     title: 'Files',
   },
@@ -167,20 +177,6 @@ const headings = [
     level: 2,
     title: 'File download',
     url: '/file-download',
-  },
-  {
-    level: 4,
-    title: 'Integrations',
-  },
-  {
-    level: 2,
-    title: '`@telefunc/tanstack-query`',
-    url: '/tanstack-query',
-  },
-  {
-    level: 2,
-    title: '`@telefunc/rxjs`',
-    url: '/rxjs',
   },
   {
     level: 1,
