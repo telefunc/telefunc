@@ -508,7 +508,7 @@ await onTeamFeed('acme', (text) => showMessage(text))
 ```ts
 onClose((err) => {
   if (!err) {
-    // Graceful close (completed, manual `close()`, or client stopped using stream)
+    // Graceful close
   } else if (err instanceof Abort) {
     // Either side called abort(value)
     console.log(err.abortValue)
