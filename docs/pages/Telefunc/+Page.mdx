@@ -162,7 +162,7 @@ export default {
 }
 ```
 
-> On Cloudflare the `context` is set in a separate function from the request handler, because it runs in a Durable Object whereas the request handler doesn't.
+> On Cloudflare the `context` is set in a separate function from the request handler. (Because it runs in a Durable Object, whereas the request handler doesn't.)
 
 > On Cloudflare `new Telefunc` also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
 
@@ -195,7 +195,7 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 | Method | Runtime | Description |
 |---|---|---|
 | `serve(input)` | all | Process a request and return the response. The input shape (`{ request }`, `{ req, res }`, `{ request, env, ctx }`, …) and return type vary by runtime — see <Link href="#return" />. |
-| `installWebSocket(server)` | Node | Enable WebSocket channels on your HTTP server. Idempotent: calling it multiple times is safe. (The Node.js adapter auto-detects your HTTP server from the request socket.)|
+| `installWebSocket(server)` | Node | Enable WebSocket channels on your HTTP server. Idempotent (calling it multiple times is safe). (The Node.js adapter auto-detects your HTTP server from the request socket.)|
 | `websocket` | Bun | The WebSocket handler — pass it to `Bun.serve({ websocket })`. |
 | `TelefuncDurableObject` | Cloudflare | The Durable Object class to export — see <Link href="/stream/cloudflare" />. |
 
