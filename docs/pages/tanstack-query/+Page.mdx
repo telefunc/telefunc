@@ -113,7 +113,6 @@ const edit = useMutation({
 Make sure that:
 
 1. **`queryFn` and `mutationFn` must call a telefunction.**
-   > With a non-telefunc `queryFn` (e.g. plain `fetch()`), a global key silently behaves like a local one (because it <Link href="#how-it-works">isn't sent to the server</Link>). The same goes for mutations (because global keys in `meta.invalidates` <Link href="#how-it-works">aren't sent to the server</Link>).
 1. **Return the telefunction call directly.** Transform the result with `select` instead of inside `queryFn`:
    ```js
    // ❌ Broken: queryFn doesn't direclty return getTodos()
@@ -123,7 +122,7 @@ Make sure that:
    queryFn: () => getTodos(),
    select: (todos) => todos.items,
    ```
-   > The `@telefunc/tanstack-query` integration must access the return value of the telefunction call. (Under the hood, `@telefunc/tanstack-query` <Link href="#how-it-works">wraps the return value of telefunction calls</Link>.)
+   > The `@telefunc/tanstack-query` integration must access the return value of the telefunction call.
 
 
 ## Server-side invalidation
