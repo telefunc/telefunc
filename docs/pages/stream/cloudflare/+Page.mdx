@@ -52,7 +52,7 @@ export default {
 > - **Durable Objects** provide stateful compute: each channel lives on a Durable Object, which holds the connection and its state.
 > - **KV** provides shared storage: it's how stateless workers find the Durable Object that holds the state, no matter which worker a request lands on.
 >
-> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` nor `BroadcastChannel`, there's no state to keep — you can skip both bindings and use <Link text={<code>serve()</code>} href="/serve" /> instead.
+> Both bindings are required whenever you use `telefunc/cloudflare`. If your app doesn't use `Channel` or `BroadcastChannel`, there's no state to keep — you can skip both bindings and use <Link text={<code>serve()</code>} href="/serve" /> instead.
 >
 > See <Link href="#architecture" /> for implementation details.
 
