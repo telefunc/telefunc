@@ -17,7 +17,7 @@ To develop Telefunc's source code:
 **1. Install**
 
 ```shell
-git clone git@github.com:brillout/telefunc
+git clone git@github.com:telefunc/telefunc
 cd telefunc/ # Go to the monorepo root
 pnpm install
 ```
@@ -104,7 +104,7 @@ To develop Telefunc's documentation (`https://telefunc.com`):
 **1. Install**
 
 ```shell
-git clone git@github.com:brillout/telefunc
+git clone git@github.com:telefunc/telefunc
 cd telefunc/ # Go to the monorepo root
 pnpm install
 ```

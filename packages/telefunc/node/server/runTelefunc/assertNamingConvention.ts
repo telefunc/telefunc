@@ -77,7 +77,7 @@ async function assertCollocation(telefuncFilePath: string, appRootDir: string | 
       collocatedFilesMatchNot.push(fileName)
     }
   })
-  /* There seem to be a race condition: https://github.com/brillout/telefunc/issues/61
+  /* There seem to be a race condition: https://github.com/telefunc/telefunc/issues/61
   assert(collocatedFilesMatchYes.length >= 1, { telefuncFilePathAbsolute, collocatedFiles })
   */
   assertWarning(

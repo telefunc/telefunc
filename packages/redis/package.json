@@ -2,10 +2,10 @@
   "name": "@telefunc/redis",
   "version": "0.1.0",
   "description": "Redis broadcast transport for Telefunc — fan out Broadcast messages across multiple server instances.",
-  "homepage": "https://github.com/brillout/telefunc/tree/main/packages/redis#readme",
+  "homepage": "https://github.com/telefunc/telefunc/tree/main/packages/redis#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/brillout/telefunc.git",
+    "url": "git+https://github.com/telefunc/telefunc.git",
     "directory": "packages/redis"
   },
   "license": "MIT",

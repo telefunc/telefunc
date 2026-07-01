@@ -34,7 +34,7 @@ function pluginDev(): Plugin[] {
     {
       name: 'telefunc:pluginDev:serverMiddleware',
       apply: apply('dev', { skipMiddlewareMode: true }),
-      // Ensure that SvelteKit's configureServer() has precedence, see https://github.com/brillout/telefunc/pull/54
+      // Ensure that SvelteKit's configureServer() has precedence, see https://github.com/telefunc/telefunc/pull/54
       enforce: 'post',
       configureServer: {
         handler(server) {

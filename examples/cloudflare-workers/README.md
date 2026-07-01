@@ -2,7 +2,7 @@ Example of deploying telefunctions to [Cloudflare Workers](https://workers.cloud
 
 Setup:
 ```bash
-git clone git@github.com:brillout/telefunc
+git clone git@github.com:telefunc/telefunc
 cd telefunc/examples/cloudflare-workers/
 npm install
 ```

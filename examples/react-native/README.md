@@ -2,7 +2,7 @@ Example of using Telefunc with [React Native](https://reactnative.dev/) and [Exp
 
 To run it:
 ```bash
-git clone git@github.com:brillout/telefunc
+git clone git@github.com:telefunc/telefunc
 cd telefunc/examples/react-native/
 npm install
 npm run start

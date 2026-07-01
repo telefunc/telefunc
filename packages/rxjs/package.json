@@ -2,10 +2,10 @@
   "name": "@telefunc/rxjs",
   "version": "0.1.0",
   "description": "RxJS Observable and Subject support for Telefunc — pass rxjs primitives transparently between client and server.",
-  "homepage": "https://github.com/brillout/telefunc/tree/main/packages/rxjs#readme",
+  "homepage": "https://github.com/telefunc/telefunc/tree/main/packages/rxjs#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/brillout/telefunc.git",
+    "url": "git+https://github.com/telefunc/telefunc.git",
     "directory": "packages/rxjs"
   },
   "license": "MIT",

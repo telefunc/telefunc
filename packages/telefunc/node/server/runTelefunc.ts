@@ -285,7 +285,7 @@ async function runTelefunc_({
   const runContext = { requestContext }
 
   {
-    // TO-DO/eventually: remove? Since `serverConfig` is global I don't think we need to set it to `runContext`, see for example https://github.com/brillout/telefunc/commit/5e3367d2d463b72e805e75ddfc68ef7f177a35c0
+    // TO-DO/eventually: remove? Since `serverConfig` is global I don't think we need to set it to `runContext`, see for example https://github.com/telefunc/telefunc/commit/5e3367d2d463b72e805e75ddfc68ef7f177a35c0
     const serverConfig = getServerConfig()
     objectAssign(runContext, {
       request,

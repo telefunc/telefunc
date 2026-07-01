@@ -176,7 +176,7 @@
     "typescript"
   ],
   "description": "Remote functions.",
-  "repository": "https://github.com/brillout/telefunc",
+  "repository": "https://github.com/telefunc/telefunc",
   "homepage": "https://telefunc.com",
   "license": "MIT"
 }
