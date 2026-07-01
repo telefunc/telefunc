@@ -10,6 +10,7 @@ function ChatDemo() {
   const [joined, setJoined] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
+  const [hydrated, setHydrated] = useState(false)
   const channelRef = useRef<Awaited<ReturnType<typeof onJoinChat>> | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -45,6 +46,7 @@ function ChatDemo() {
   }, [messages])
 
   useEffect(() => {
+    setHydrated(true)
     return () => {
       channelRef.current?.close()
     }
@@ -52,7 +54,7 @@ function ChatDemo() {
 
   if (!joined) {
     return (
-      <div style={{ padding: '20px 0' }}>
+      <div id={hydrated ? 'hydrated' : undefined} style={{ padding: '20px 0' }}>
         <h1 style={{ fontSize: 18, fontWeight: 600, marginBottom: 12 }}>Chat (pub/sub demo)</h1>
         <div style={{ display: 'flex', gap: 8 }}>
           <input

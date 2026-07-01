@@ -18,6 +18,7 @@ function ChannelDemo() {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [connected, setConnected] = useState(false)
   const [echoInput, setEchoInput] = useState('')
+  const [hydrated, setHydrated] = useState(false)
   const channelRef = useRef<Awaited<ReturnType<typeof onChannelInit>>['channel'] | null>(null)
   const idRef = useRef(0)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -66,13 +67,14 @@ function ChannelDemo() {
   }, [logs])
 
   useEffect(() => {
+    setHydrated(true)
     return () => {
       channelRef.current?.close()
     }
   }, [])
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '80vh' }}>
+    <div id={hydrated ? 'hydrated' : undefined} style={{ display: 'flex', flexDirection: 'column', height: '80vh' }}>
       <div style={{ padding: '12px 0', borderBottom: '1px solid #eee', marginBottom: 8 }}>
         <h1 style={{ fontSize: 18, fontWeight: 600, marginBottom: 12 }}>Channel Test</h1>
         <div style={{ display: 'flex', gap: 8 }}>
