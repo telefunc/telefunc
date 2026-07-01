@@ -1,0 +1,38 @@
+{
+  "scripts": {
+    "dev": "fuser -k 24679/tcp 2>/dev/null; rm -rf ./node_modules/.vite && vike dev",
+    "dev:prof": "fuser -k 24679/tcp 2>/dev/null; rm -rf ./node_modules/.vite && mkdir -p profiles && NODE_OPTIONS='--cpu-prof --cpu-prof-dir=./profiles' vike dev",
+    "build": "vike build",
+    "preview": "vike build && node dist/nested/server/index.mjs",
+    "preview:prof": "vike build && mkdir -p profiles && node --cpu-prof --cpu-prof-dir=./profiles dist/nested/server/index.mjs",
+    "preview:cluster": "vike build && docker compose down --remove-orphans && exec docker compose up 2>&1",
+    "preview:cluster:prof": "vike build && docker compose down --remove-orphans && exec docker compose -f compose.yaml -f compose.prof.yaml up 2>&1",
+    "preview:cluster:down": "docker compose down --remove-orphans",
+    "test:docker": "vike build && docker compose down --remove-orphans && docker compose up --force-recreate 2>&1; code=$?; if [ \"$code\" = \"130\" ] || [ \"$code\" = \"143\" ]; then exit 0; fi; exit $code"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.1",
+    "@tanstack/ai": "^0.13.0",
+    "@tanstack/ai-react": "^0.7.7",
+    "@tanstack/react-query": "^5.95.2",
+    "@telefunc/redis": "workspace:*",
+    "@telefunc/rxjs": "workspace:*",
+    "@telefunc/tanstack-query": "workspace:*",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@universal-middleware/core": "^0.4.17",
+    "@vikejs/hono": "^0.2.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "hono": "^4.10.4",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "rxjs": "^7.8.0",
+    "tailwindcss": "^4.2.1",
+    "telefunc": "0.2.20",
+    "typescript": "^5.9.3",
+    "vike": "^0.4.259",
+    "vike-react": "^0.6.21",
+    "vite": "^8.0.16"
+  },
+  "type": "module"
+}

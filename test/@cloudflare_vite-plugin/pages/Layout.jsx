@@ -16,6 +16,12 @@ function Layout({ children }) {
         <a className="navitem" href="/todo">
           To-Do
         </a>
+        <a className="navitem" href="/channel">
+          Channel
+        </a>
+        <a className="navitem" href="/chat">
+          Chat
+        </a>
       </Sidebar>
       <Content>{children}</Content>
     </PageLayout>

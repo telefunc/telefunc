@@ -1,62 +1,82 @@
 export { executeTelefunction }
 
-import { isAbort, Abort } from '../Abort.js'
-import { restoreContext, Telefunc } from '../getContext.js'
+import { isAbort } from '../Abort.js'
+import { restoreContext } from '../context/context.js'
+import type { Context } from '../context/context.js'
+import { createRequestContext } from '../context/requestContext.js'
 import type { Telefunction } from '../types.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
+import { isAsyncGenerator } from '../../../utils/isAsyncGenerator.js'
+import { validateTelefunctionError } from './validateTelefunctionError.js'
+import type { ConfigResolved } from '../serverConfig.js'
 
 async function executeTelefunction(runContext: {
   telefunction: Telefunction
   telefunctionName: string
   telefuncFilePath: string
   telefunctionArgs: unknown[]
-  providedContext: Telefunc.Context | null
+  context: Context
+  requestContext: ReturnType<typeof createRequestContext>
+  request: Request
+  requestExtensions: Record<string, Record<string, unknown>>
+  serverConfig: ConfigResolved
 }) {
-  const { telefunction, telefunctionArgs } = runContext
+  const { telefunction, telefunctionArgs, requestExtensions } = runContext
+  const { extensions } = runContext.serverConfig
 
-  restoreContext(runContext.providedContext)
+  /** Restore unified context before executing `fn`. */
+  const withContext = <T>(fn: () => T): T => restoreContext(runContext.context, fn)
 
   let telefunctionReturn: unknown
-  let telefunctionError: unknown
+  let telefunctionTopLevelError: unknown
   let telefunctionHasErrored = false
   let telefunctionAborted = false
-  const onError = (err: unknown) => {
-    assertUsage(
-      typeof err === 'object' && err !== null,
-      `The telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) threw a non-object error: \`${err}\`. Make sure the telefunction does \`throw new Error(${err})\` instead.`,
-    )
-    assertUsage(
-      err !== Abort,
-      `Missing parentheses \`()\` in \`throw Abort\` (it should be \`throw Abort()\`) at telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}).`,
-    )
+  const onTopLevelError = (err: unknown) => {
+    validateTelefunctionError(err, runContext)
     if (isAbort(err)) {
       telefunctionAborted = true
       telefunctionReturn = err.abortValue
+      runContext.requestContext.responseAbort.abort(err.abortValue)
     } else {
       telefunctionHasErrored = true
-      telefunctionError = err
+      telefunctionTopLevelError = err
     }
   }
 
   let resultSync: unknown
   try {
-    resultSync = telefunction.apply(null, telefunctionArgs)
+    resultSync = withContext(() => telefunction.apply(null, telefunctionArgs))
   } catch (err: unknown) {
-    onError(err)
+    onTopLevelError(err)
   }
 
   if (!telefunctionHasErrored && !telefunctionAborted) {
     assertUsage(
-      isPromise(resultSync),
-      `The telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) did not return a promise. A telefunction should always return a promise (e.g. define it as a \`async function\`).`,
+      isPromise(resultSync) || isAsyncGenerator(resultSync),
+      `The telefunction ${runContext.telefunctionName}() (${runContext.telefuncFilePath}) did not return a promise or async generator. A telefunction should always be defined as \`async function\` or \`async function*\`.`,
     )
-    try {
-      telefunctionReturn = await resultSync
-    } catch (err: unknown) {
-      onError(err)
+    if (isPromise(resultSync)) {
+      try {
+        telefunctionReturn = await resultSync
+      } catch (err: unknown) {
+        onTopLevelError(err)
+      }
+    } else {
+      telefunctionReturn = resultSync
     }
   }
 
-  return { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionError }
+  if (!telefunctionHasErrored && !telefunctionAborted) {
+    for (const ext of extensions) {
+      if (ext.hooks?.onTelefunctionResult && requestExtensions[ext.name]) {
+        const data = requestExtensions[ext.name]!
+        telefunctionReturn = await withContext(() =>
+          ext.hooks!.onTelefunctionResult!({ result: telefunctionReturn, data }),
+        )
+      }
+    }
+  }
+
+  return { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionTopLevelError }
 }

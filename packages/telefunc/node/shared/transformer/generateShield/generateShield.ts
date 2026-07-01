@@ -4,7 +4,8 @@ export { logResult }
 // For ./generateShield.spec.ts
 export { testGenerateShield }
 
-import { Project, SourceFile, getCompilerOptionsFromTsConfig } from 'ts-morph'
+import { Project, SourceFile, Type, TypeAliasDeclaration, getCompilerOptionsFromTsConfig } from 'ts-morph'
+import { toPathKey } from '../../../../utils/pathKey.js'
 import { assert, assertUsage, assertWarning } from '../../../../utils/assert.js'
 import { assertModuleScope } from '../../../../utils/assertModuleScope.js'
 import { getRandomId } from '../../../../utils/getRandomId.js'
@@ -18,7 +19,21 @@ import pc from '@brillout/picocolors'
 import { fileURLToPath } from 'node:url'
 const __dirname_ = path.dirname(fileURLToPath(import.meta.url))
 
+/** The three code outputs shield generation emits per telefunction:
+ *  - `Main`   — `__telefunc_shield(fn, [...verifiers])` — arg-shape validator tuple.
+ *  - `Return` — `__applyReturnShields(fn, { ... })` — data-flow shields for the return value.
+ *  - `Args`   — `__applyArgumentShields(fn, { ... })` — data-flow shields for the arguments. */
+const enum ShieldKind {
+  Main = 'main',
+  Return = 'return',
+  Args = 'args',
+}
+
+/** One record per (telefunction, ShieldKind). `Main` is always logged; `Return`/`Args` only when
+ *  the telefunction has corresponding sub-shield sites. `failed=true` means the emission couldn't
+ *  be produced because a type expression didn't resolve to a literal. */
 type GeneratedShield = {
+  kind: ShieldKind
   telefuncFilePath: string
   telefunctionName: string
   failed: boolean
@@ -36,12 +51,13 @@ function generateShield(
   appRootDir: string,
   exportList: ExportList,
 ): string {
-  const { project, shieldGenSource } = getProject(telefuncFilePath, telefuncFileCode, appRootDir)
+  const { project, shieldGenSource, shieldsEscapedName } = getProject(telefuncFilePath, telefuncFileCode, appRootDir)
   const shieldCode = generateShieldCode({
     project,
     shieldGenSource,
     telefuncFilePath,
     exportList,
+    shieldsEscapedName,
   })
   return shieldCode
 }
@@ -49,7 +65,7 @@ function generateShield(
 function getProject(telefuncFilePath: string, telefuncFileCode: string, appRootDir: string, isTest?: true) {
   const tsConfigFilePath = isTest ? null : findTsConfig(telefuncFilePath, appRootDir)
   const key = tsConfigFilePath ?? '__no_tsconfig'
-  const typeToShieldFilePath = path.join(getFilesystemRoot(), '__telefunc_TypeToShield.ts')
+  const typeToShieldFilePath = getTypeToShieldPath()
   // When shield() generation fails, avoid showing unrelated errors in TypeScript diagnostics
   const tsConfigAddendum = { skipLibCheck: true }
 
@@ -87,7 +103,7 @@ function getProject(telefuncFilePath: string, telefuncFileCode: string, appRootD
     assert(compilerOptionsResolved.skipLibCheck === true)
 
     // This source file is used for evaluating the template literal types' values
-    project.createSourceFile(typeToShieldFilePath, getTypeToShieldSrc())
+    project.addSourceFileAtPath(typeToShieldFilePath)
   }
   const project = projects[key]!
   objectAssign(project, { tsConfigFilePath })
@@ -109,7 +125,7 @@ function getProject(telefuncFilePath: string, telefuncFileCode: string, appRootD
   const shieldGenSource = project.createSourceFile(shieldGenFilePath, undefined, { overwrite: true })
   shieldGenSource.addImportDeclaration({
     moduleSpecifier: getImportPath(shieldGenFilePath, typeToShieldFilePath),
-    namedImports: ['TypeToShield'],
+    namedImports: ['TypeToShield', 'ShieldStr', 'ShieldField'],
   })
 
   const telefuncFileSource = project.getSourceFile(telefuncFilePath)
@@ -117,7 +133,17 @@ function getProject(telefuncFilePath: string, telefuncFileCode: string, appRootD
   // The code written in the file at `telefuncFilePath` isn't equal `telefuncFileCode` because of transforms
   telefuncFileSource.replaceWithText(telefuncFileCode)
 
-  return { project, shieldGenSource }
+  const probeProps = project
+    .getSourceFileOrThrow(typeToShieldFilePath)
+    .getTypeAliasOrThrow('_TelefuncShieldsKeyProbe')
+    .getType()
+    .getProperties()
+  assert(probeProps.length === 1)
+  const [probeProp] = probeProps
+  assert(probeProp)
+  const shieldsEscapedName = probeProp.getEscapedName()
+
+  return { project, shieldGenSource, shieldsEscapedName }
 }
 
 function generateShieldCode({
@@ -125,6 +151,7 @@ function generateShieldCode({
   shieldGenSource,
   telefuncFilePath,
   exportList,
+  shieldsEscapedName,
 }: {
   project: Project & { tsConfigFilePath: null | string }
   shieldGenSource: SourceFile
@@ -132,72 +159,215 @@ function generateShieldCode({
   // All exports of `.telefunc.js` files must be functions, thus we generate a shield() for each export.
   // If an export isn't a function then the error message is a bit ugly: https://github.com/brillout/telefunc/issues/142
   exportList: ExportList
+  shieldsEscapedName: string
 }): string {
   shieldGenSource.addImportDeclaration({
     moduleSpecifier: getTelefuncFileImportPath(telefuncFilePath),
     namedImports: exportList.map((e) => e.exportName),
   })
 
-  // Assign the template literal type to a string, then diagnostics are used to get the value of the template literal type.
+  // Aliases are batched so reads below amortize into a single typecheck — any `addTypeAlias`
+  // invalidates ts-morph's cache. `@ts-ignore` silences TS6196 on these internal aliases (issue #229).
   for (const e of exportList) {
-    const typeAlias = shieldGenSource.addTypeAlias({
-      name: getShieldName(e.exportName),
-      type: `TypeToShield<typeof ${e.exportName}>`,
-    })
-    // Suppress TypeScript error TS6196 "is declared but never used"
-    // https://github.com/brillout/telefunc/issues/229
-    shieldGenSource.insertText(
-      typeAlias.getStart(),
-      '// @ts-ignore Used internally by Telefunc at compile time (not runtime)\n',
+    addAlias(shieldGenSource, `${e.exportName}Shield`, `TypeToShield<typeof ${e.exportName}>`)
+    addAlias(shieldGenSource, `${e.exportName}Ret`, `Awaited<ReturnType<typeof ${e.exportName}>>`)
+    addAlias(shieldGenSource, `${e.exportName}Args`, `Parameters<typeof ${e.exportName}>`)
+  }
+
+  project.resolveSourceFileDependencies()
+  assert(project.compilerOptions.get().strict === true)
+
+  // Discover. Every kind (main / return / args) is walked independently — a failure on one has
+  // no bearing on the others. Each ends up as its own record downstream.
+  type Site = { segments: string[]; name: string; expr: string }
+  type Discovered = {
+    e: ExportList[number]
+    mainShield: string | undefined
+    returnSites: Site[]
+    argumentSites: Site[]
+  }
+  const discovered: Discovered[] = []
+  for (const e of exportList) {
+    const mainShield = evalAlias(shieldGenSource, `${e.exportName}Shield`)
+    if (mainShield === 'NON_FUNCTION_EXPORT') continue
+    const retAlias = getAlias(shieldGenSource, `${e.exportName}Ret`)
+    const argsAlias = getAlias(shieldGenSource, `${e.exportName}Args`)
+    const returnSites: Site[] = []
+    const argumentSites: Site[] = []
+    walkSites(
+      retAlias.getType(),
+      `${e.exportName}Ret`,
+      retAlias,
+      'args',
+      (t) => `TypeToShield<${t}>`,
+      returnSites,
+      shieldsEscapedName,
     )
+    // The emitted shields always use array form (wrapped in `[...]`) so the runtime
+    // `verifyOuter` only has to handle one shape.
+    walkSites(
+      argsAlias.getType(),
+      `${e.exportName}Args`,
+      argsAlias,
+      'return',
+      (t) => `\`[\${ShieldStr<Awaited<ReturnType<${t}>>>}]\``,
+      argumentSites,
+      shieldsEscapedName,
+    )
+    discovered.push({ e, mainShield, returnSites, argumentSites })
+  }
+
+  // Combined-literal alias per side. Each side resolves independently of the others (and of the
+  // main shield) — no implicit failure chain.
+  for (const d of discovered) {
+    if (d.returnSites.length > 0) addAlias(shieldGenSource, `${d.e.exportName}SubRet`, subAlias(d.returnSites))
+    if (d.argumentSites.length > 0) addAlias(shieldGenSource, `${d.e.exportName}SubArgs`, subAlias(d.argumentSites))
   }
 
   let shieldCode = [
-    'import { shield as __telefunc_shield } from "telefunc";',
+    'import { shield as __telefunc_shield, __applyReturnShields, __applyArgumentShields } from "telefunc";',
     'const __telefunc_t = __telefunc_shield.type;',
   ].join('\n')
 
-  // Add the dependent source files to the project
-  project.resolveSourceFileDependencies()
-
-  assert(project.compilerOptions.get().strict === true)
-
-  for (const exportedFunction of exportList) {
-    const typeAliasName = getShieldName(exportedFunction.exportName)
-    const typeAlias = shieldGenSource.getTypeAlias(typeAliasName)
-    assert(typeAlias, `Failed to get type alias \`${typeAliasName}\`.`)
-
-    const shieldStrType = typeAlias.getType()
-    const shieldStr = shieldStrType.getLiteralValue()
-    assert(shieldStr === undefined || typeof shieldStr === 'string')
-
-    if (shieldStr === 'NON_FUNCTION_EXPORT') continue
-
-    const failed = shieldStr === undefined
-
-    generatedShields.push({
-      project,
-      telefuncFilePath,
-      telefunctionName: exportedFunction.exportName,
-      failed,
-    })
-
-    if (failed) continue
-
-    shieldCode += '\n'
-    shieldCode += `__telefunc_shield(${exportedFunction.localName}, ${shieldStr}, { __autoGenerated: true });`
+  const processSide = (d: Discovered, sites: Site[], aliasSuffix: string, applyFn: string) => {
+    if (sites.length === 0) return null
+    const raw = evalAlias(shieldGenSource, `${d.e.exportName}${aliasSuffix}`)
+    if (raw === undefined) return { code: '', failed: true }
+    const values = raw.split(SHIELD_SEP)
+    assert(
+      values.length === sites.length,
+      `${d.e.exportName}${aliasSuffix}: ${values.length} parts, expected ${sites.length}`,
+    )
+    const entries = formatEntries(sites, values)
+    return { code: entries ? `\n${applyFn}(${d.e.localName}, { ${entries} });` : '', failed: false }
   }
 
-  // We don't need the source file anymore now that we have `shieldCode`
-  shieldGenSource.delete()
+  for (const d of discovered) {
+    const common = { project, telefuncFilePath, telefunctionName: d.e.exportName }
+    const ret = processSide(d, d.returnSites, 'SubRet', '__applyReturnShields')
+    const args = processSide(d, d.argumentSites, 'SubArgs', '__applyArgumentShields')
 
-  shieldCode += '\n'
-  return shieldCode
+    if (d.mainShield !== undefined)
+      shieldCode += `\n__telefunc_shield(${d.e.localName}, ${d.mainShield}, { __autoGenerated: true });`
+    if (ret) shieldCode += ret.code
+    if (args) shieldCode += args.code
+
+    generatedShields.push({ ...common, kind: ShieldKind.Main, failed: d.mainShield === undefined })
+    if (ret) generatedShields.push({ ...common, kind: ShieldKind.Return, failed: ret.failed })
+    if (args) generatedShields.push({ ...common, kind: ShieldKind.Args, failed: args.failed })
+  }
+
+  shieldGenSource.delete()
+  return shieldCode + '\n'
+}
+
+/** Combined template-literal alias body for one side's sites — values come back via `split(SHIELD_SEP)`. */
+function subAlias(sites: readonly { expr: string }[]): string {
+  return `\`${sites.map((s) => `\${${s.expr}}`).join(SHIELD_SEP)}\``
+}
+
+/** Internal alias — read via ts-morph at build time. `@ts-ignore` silences TS6196 (issue #229). */
+function addAlias(source: SourceFile, name: string, type: string) {
+  return source.addTypeAlias({
+    name,
+    type,
+    leadingTrivia: '// @ts-ignore Internal — read at build time via ts-morph getLiteralValue()\n',
+  })
+}
+
+function getAlias(source: SourceFile, name: string): TypeAliasDeclaration {
+  const alias = source.getTypeAlias(name)
+  assert(alias, `Type alias \`${name}\` not found.`)
+  return alias
+}
+
+function evalAlias(source: SourceFile, name: string): string | undefined {
+  const val = getAlias(source, name).getType().getLiteralValue()
+  assert(val === undefined || typeof val === 'string', `Type alias \`${name}\` resolved to non-string literal.`)
+  return val
+}
+
+/** Separator for the combined-literal trick — unicode PUA, never appears in shield output. */
+const SHIELD_SEP = '\uE000'
+
+/** Walk the structural composition of `type`, pushing one shield site per shielded value into `out`.
+ *  Shielded: callables (`callableName` / `callableExpr`) and types declaring `[TELEFUNC_SHIELDS]`.
+ *  Descends anonymous objects and tuples only; primitives, class instances, named types, and arrays
+ *  terminate (no shields, no children worth inspecting). Uses `locationNode` to resolve generic
+ *  parameters against their actual type arguments. */
+function walkSites(
+  type: Type,
+  typeRef: string,
+  locationNode: TypeAliasDeclaration,
+  callableName: string,
+  callableExpr: (typeRef: string) => string,
+  out: { segments: string[]; name: string; expr: string }[],
+  shieldsEscapedName: string,
+  segments: string[] = [],
+): void {
+  if (type.getCallSignatures().length > 0) {
+    out.push({ segments, name: callableName, expr: callableExpr(typeRef) })
+    return
+  }
+  const shieldsProp = type.getProperty(shieldsEscapedName)
+  if (shieldsProp) {
+    // Every entry gets a shield — no skips. `never`, `void`, `undefined` all map to concrete
+    // runtime verifiers via `ShieldStr` (`__telefunc_t.never` rejects everything;
+    // `__telefunc_t.const(undefined)` accepts only undefined). Skipping here would let a
+    // non-TS client bypass the type contract for positions TypeScript marks uninhabited.
+    for (const entry of shieldsProp.getTypeAtLocation(locationNode).getProperties()) {
+      const name = entry.getName()
+      out.push({ segments, name, expr: `\`[\${ShieldStr<ShieldField<${typeRef}, '${name}'>>}]\`` })
+    }
+    return
+  }
+  if (type.isTuple()) {
+    type.getTupleElements().forEach((el, i) => {
+      walkSites(el, `${typeRef}[${i}]`, locationNode, callableName, callableExpr, out, shieldsEscapedName, [
+        ...segments,
+        String(i),
+      ])
+    })
+    return
+  }
+  if (type.isAnonymous()) {
+    for (const prop of type.getProperties()) {
+      const name = prop.getName()
+      const propType = prop.getTypeAtLocation(locationNode)
+      walkSites(propType, `${typeRef}['${name}']`, locationNode, callableName, callableExpr, out, shieldsEscapedName, [
+        ...segments,
+        name,
+      ])
+    }
+  }
+}
+
+/** Group parallel `sites` + `values` by path-key, returning `"path": { name: value, ... }` fragments
+ *  joined by `, `. Returns `null` if `sites` is empty (emit nothing). */
+function formatEntries(
+  sites: readonly { segments: string[]; name: string }[],
+  values: readonly string[],
+): string | null {
+  if (sites.length === 0) return null
+  const byKey = new Map<string, string[]>()
+  for (let i = 0; i < sites.length; i++) {
+    const { segments, name } = sites[i]!
+    const key = toPathKey(segments)
+    let entries = byKey.get(key)
+    if (!entries) byKey.set(key, (entries = []))
+    entries.push(`${name}: ${values[i]}`)
+  }
+  return Array.from(byKey, ([key, entries]) => `${JSON.stringify(key)}: { ${entries.join(', ')} }`).join(', ')
 }
 
 async function testGenerateShield(telefuncFileCode: string): Promise<string> {
-  const telefuncFilePath = `virtual-${getRandomId()}.telefunc.ts`
-  const { project, shieldGenSource } = getProject(telefuncFilePath, telefuncFileCode, '/fake-user-root-dir/', true)
+  const telefuncFilePath = path.join(__dirname_, `virtual-${getRandomId()}.telefunc.ts`)
+  const { project, shieldGenSource, shieldsEscapedName } = getProject(
+    telefuncFilePath,
+    telefuncFileCode,
+    '/fake-user-root-dir/',
+    true,
+  )
   objectAssign(project, { tsConfigFilePath: null })
   const exportList = await getExportList(telefuncFileCode)
   const shieldCode = generateShieldCode({
@@ -205,6 +375,7 @@ async function testGenerateShield(telefuncFileCode: string): Promise<string> {
     shieldGenSource,
     telefuncFilePath,
     exportList,
+    shieldsEscapedName,
   })
   return shieldCode
 }
@@ -240,12 +411,13 @@ function logResult(appRootDir: string, logSuccessPrefix: string, logIntro: null 
   if (logIntro) console.log(logIntro)
   printSuccesses(appRootDir, logSuccessPrefix)
   printFailures(appRootDir)
+  printSubShieldFailures(appRootDir)
   resultAlreadyLogged = true
   generatedShields.length = 0
 }
 
 function printFailures(appRootDir: string) {
-  const failures = generatedShields.filter((s) => s.failed)
+  const failures = generatedShields.filter((s) => s.kind === ShieldKind.Main && s.failed)
   const projects = unique(failures.map((f) => f.project))
 
   let hasTypeScriptErrors = false
@@ -279,8 +451,25 @@ function printFailures(appRootDir: string) {
   )
 }
 
+function printSubShieldFailures(appRootDir: string) {
+  const failures = generatedShields.filter((s) => s.kind !== ShieldKind.Main && s.failed)
+  assertWarning(
+    failures.length === 0,
+    [
+      'Main shield() succeeded but sub-shields (return/args data-flow shields) could not be fully generated for telefunction',
+      failures.length === 1 ? '' : 's',
+      ' ',
+      formatGeneratedShields(failures, appRootDir),
+      '.',
+      ' Arg-shape validation still works; only nested data-flow validation is missing.',
+      ' See https://telefunc.com/shield#typescript-automatic for more information.',
+    ].join(''),
+    { onlyOnce: true },
+  )
+}
+
 function printSuccesses(appRootDir: string, logSuccessPrefix: string) {
-  const successes = generatedShields.filter((s) => !s.failed)
+  const successes = generatedShields.filter((s) => s.kind === ShieldKind.Main && !s.failed)
   if (successes.length > 0) {
     console.log(
       [
@@ -305,31 +494,18 @@ function formatList(list: string[]): string {
   return new Intl.ListFormat('en').format(list)
 }
 
-function getShieldName(telefunctionName: string) {
-  return `${telefunctionName}Shield` as const
-}
-
-let typeToShieldFileSrc: string | undefined
-function getTypeToShieldSrc() {
-  if (!typeToShieldFileSrc) {
+let typeToShieldFilePath: string | undefined
+function getTypeToShieldPath() {
+  if (!typeToShieldFilePath) {
     try {
-      typeToShieldFileSrc = fs.readFileSync(`${__dirname_}/TypeToShield.d.ts`).toString()
+      typeToShieldFilePath = fs.realpathSync(`${__dirname_}/TypeToShield.d.ts`)
     } catch {
-      typeToShieldFileSrc = fs.readFileSync(`${__dirname_}/TypeToShield.ts`).toString()
+      typeToShieldFilePath = fs.realpathSync(`${__dirname_}/TypeToShield.ts`)
     }
+    assert(fs.readFileSync(typeToShieldFilePath, 'utf8').includes('SimpleType'))
   }
-  assert(typeToShieldFileSrc)
-  assert(typeToShieldFileSrc.includes('SimpleType'))
-  return typeToShieldFileSrc
-}
-
-function getFilesystemRoot(): string {
-  if (process.platform !== 'win32') {
-    return '/'
-  }
-  const fsRoot = process.cwd().split(path.sep)[0]
-  assert(fsRoot)
-  return fsRoot
+  assert(typeToShieldFilePath)
+  return typeToShieldFilePath
 }
 
 function assertTelefuncFilesSource(

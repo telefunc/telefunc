@@ -5,10 +5,6 @@ import type { UserConfig } from 'vite'
 
 export default {
   plugins: [react(), vike(), telefunc()],
-  // @ts-expect-error
-  vitePluginServerEntry: {
-    disableAutoImport: true,
-  },
   build: {
     outDir: `${__dirname}/../../test/playground/dist/nested`,
   },

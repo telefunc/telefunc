@@ -1,6 +1,6 @@
 export { applyShield }
 
-import { shieldApply, shieldIsMissing } from '../shield.js'
+import { shieldApply, shieldIsMissing, logShieldError } from '../shield.js'
 import { assertWarning } from '../../../utils/assert.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import type { Telefunction } from '../types.js'
@@ -32,15 +32,16 @@ function applyShield(runContext: {
     return { isValidRequest: true }
   }
 
-  let logShieldErrors = runContext.serverConfig.log.shieldErrors
-  if ((logShieldErrors.dev && !isProduction()) || (logShieldErrors.prod && isProduction())) {
-    const errMsg = [
-      `Shield Validation Error: the arguments passed to the telefunction ${telefunctionName}() (${telefuncFilePath}) have the wrong type.`,
-      `Arguments: \`${JSON.stringify(telefunctionArgs)}\`.`,
-      `Wrong type: ${applyResult}`,
-    ].join(' ')
-    console.error(errMsg)
-  }
+  logShieldError(
+    {
+      telefunctionName,
+      telefuncFilePath,
+      subject: 'the arguments passed',
+      wrongType: applyResult,
+      extra: `Arguments: \`${JSON.stringify(telefunctionArgs)}\`.`,
+    },
+    runContext.serverConfig.log.shieldErrors,
+  )
 
   return { isValidRequest: false }
 }

@@ -1,13 +1,13 @@
 export { handleTelefunc }
 
-import { telefunc, config } from 'telefunc'
+import { serve, config } from 'telefunc'
 
 config.disableNamingConvention = true
 
 async function handleTelefunc(request) {
-  const httpResponse = await telefunc({ request })
+  const httpResponse = await serve({ request })
   return new Response(httpResponse.body, {
-    headers: { 'content-type': httpResponse.contentType },
+    headers: httpResponse.headers,
     status: httpResponse.statusCode,
   })
 }

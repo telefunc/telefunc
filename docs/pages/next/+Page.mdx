@@ -29,16 +29,16 @@ export default nextConfig
 // app/api/telefunc/route.ts
 // Environment: server
 
-import { telefunc, config } from 'telefunc'
+import { Telefunc } from 'telefunc/node'
+import { config } from 'telefunc'
 
 config.telefuncUrl = '/api/telefunc'
 
+const telefunc = new Telefunc()
+
 async function handler(request: Request) {
-  const httpResponse = await telefunc({ request })
-  return new Response(httpResponse.body, {
-    status: httpResponse.statusCode,
-    headers: { 'content-type': httpResponse.contentType },
-  })
+  const response = await telefunc.serve({ request })
+  return response ?? new Response('Not found', { status: 404 })
 }
 export { handler as GET, handler as POST }
 ```

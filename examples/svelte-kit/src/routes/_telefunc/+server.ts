@@ -1,8 +1,8 @@
-import { telefunc } from 'telefunc'
+import { serve } from 'telefunc'
 import type { RequestHandler } from './$types'
 
 const handler: RequestHandler = async (event) => {
-  const response = await telefunc({
+  const response = await serve({
     request: event.request,
     context: {
       // We pass the `context` object here, see https://telefunc.com/getContext
@@ -10,7 +10,7 @@ const handler: RequestHandler = async (event) => {
     },
   })
   return new Response(response.body, {
-    headers: new Headers({ 'content-type': response.contentType }),
+    headers: response.headers,
     status: response.statusCode,
   })
 }

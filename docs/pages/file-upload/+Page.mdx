@@ -1,8 +1,17 @@
-Telefunc supports [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) and [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) arguments — you can pass them to a telefunction just like any other argument. Any signature works: single file, multiple files, `File[]` arrays, mixed with other arguments — it's completely transparent.
+import { Link } from '@brillout/docpress'
+import { TelefuncStreamBeta } from '../../components'
 
-> When a telefunction call contains files, Telefunc automatically switches from JSON to [`multipart/form-data`](https://developer.mozilla.org/en-US/docs/Web/API/FormData).
+<TelefuncStreamBeta />
 
-## Example
+You can pass [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) and [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) arguments to a telefunction like any other value.
+
+> A single file, multiple files, or files mixed with other arguments — all are supported.
+
+> There are multiple streaming and reading strategies, see:
+> - <Link href="#streaming-strategies" />
+> - <Link href="#reading-strategies" />
+
+## Example: basic
 
 ```ts
 // FileUpload.telefunc.ts
@@ -11,7 +20,7 @@ Telefunc supports [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File
 import fs from 'node:fs'
 
 export async function onUpload(file: File, description: string) {
-  // Stream to disk — constant memory usage, no matter the file size
+  // Stream to disk — constant memory, no matter the file size
   const writable = fs.createWriteStream(`./uploads/${file.name}`)
   for await (const chunk of file.stream()) {
     writable.write(chunk)
@@ -48,123 +57,200 @@ function FileUpload() {
 ```
 
 
+## Example: upload with progress
+
+Combine file upload with a <Link href="/stream#callback">callback</Link> to report progress.
+
+```ts
+// Upload.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+
+export async function onUpload(file: File, onProgress: (percent: number) => void) {
+  const total = file.size
+  let loaded = 0
+
+  const dest = fs.createWriteStream(`./uploads/${file.name}`)
+
+  for await (const chunk of file.stream()) {
+    dest.write(chunk)
+    loaded += chunk.byteLength
+    onProgress(Math.round((loaded / total) * 100))
+  }
+
+  dest.end()
+}
+```
+
+```tsx
+// Upload.tsx
+// Environment: client
+
+import { useState } from 'react'
+import { onUpload } from './Upload.telefunc'
+
+function Upload() {
+  const [progress, setProgress] = useState(0)
+
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    await onUpload(file, (percent) => {
+      setProgress(percent)
+    })
+  }
+
+  return (
+    <div>
+      <input type="file" onChange={handleUpload} />
+      <div style={{ width: `${progress}%`, height: 4, background: '#3b82f6' }} />
+    </div>
+  )
+}
+```
+
+
+## Streaming strategies
+
+**Environment**: client.
+
+Passing a `File` / `Blob` argument is one of several ways to move binary data with Telefunc:
+
+| Method | Backpressure | Best for |
+|---|---|---|
+| `File` / `Blob` argument | TCP-level | Finite uploads — files, images, CSV imports |
+| <Link text={<code>ReadableStream</code>} href="/stream#readable-stream" /> argument | Yes | Long-lived streams — video feed, sensor data, continuous audio |
+| <Link text={<code>new Channel().sendBinary()</code>} href="/channel#binary-data" /> | <Link text="Opt-in" href="/channel#backpressure" /> — `await` each send | Low-latency frames — skip the `await` for fire-and-forget |
+| <Link text={<code>new BroadcastChannel().publishBinary()</code>} href="/channel#new-broadcastchannel" /> | Publish-side only | Broadcast binary — video to multiple subscribers |
+
+
 ## Reading strategies
+
+**Environment**: server.
 
 Each file argument is a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) object:
 
-| Method | Memory usage | Use case |
+| Method | Memory | Best for |
 |---|---|---|
-| `file.stream()` | Low — chunk size<sup>(1)</sup> | Pipe to disk, S3, etc. |
-| `file.arrayBuffer()` | High — file size<sup>(2)</sup> | Process in memory |
-| `file.text()` | High — file size<sup>(2)</sup> | Read text content |
+| `file.stream()` | Constant (chunk-sized) | Pipe to disk, S3, or any writable stream |
+| `file.arrayBuffer()` | Full file in memory | Process entire file at once |
+| `file.text()` | Full file in memory | Read text content |
 
-<div style={{fontSize: '0.94em', color: '#64748b'}}>
-(1): Only a single file chunk at a time is loaded in memory. Thus, memory consumption is low and constant (the chunk size). Recommended if files are expected to be large.  
-(2): The whole file is loaded in memory. For large files (e.g. a large videos) this leads to prohibitively high memory usage.
-</div>
+> For large files, always use `file.stream()` — memory stays constant regardless of file size.
+
+
+## Error handling
+
+You handle errors the same way as you do for Telefunc streams: <Link href="/stream#error-handling" />.
+
+
+{/*
+TODO/after-merge: remove & update TO-DO
+TO-DO/eventually: resurrect this section once we implemented graceful cancelation
+https://github.com/telefunc/telefunc/pull/406#issuecomment-4836969446
+
+### Cancelling
+
+You can cancel a file upload at anytime with <Link href="/close">`close()`</Link> — you can then use the <Link href="/onClose">`onClose()` hook</Link> (server-side) to clear resources.
+
+```tsx
+// Upload.tsx
+// Environment: client
+
+import { close } from 'telefunc/client'
+import { onUpload } from './Upload.telefunc'
+
+const call = onUpload(file)
+cancelButton.onclick = () => close(call) // cancel the upload
+```
+
+To release resources:
+
+```ts
+// Upload.telefunc.ts
+// Environment: server
+
+import { getContext } from 'telefunc'
+import fs from 'node:fs'
+
+export async function onUpload(file: File) => void) {
+  const context = getContext()
+  const dest = fs.createWriteStream(`./uploads/${file.name}`)
+
+  context.onClose(() => {
+    // Close the file
+    dest.destroy()
+    // Discard the partial write
+    fs.rm(`./uploads/${file.name}`, { force: true }, () => {})
+  })
+
+  for await (const chunk of file.stream()) {
+    dest.write(chunk)
+  }
+  dest.end()
+}
+```
+
+> You only need `onClose()` to release a resource that won't free itself (a write stream, a temp file, a DB transaction). If you `pipeTo` a destination (`file.stream().pipeTo(dest)`), it's automatically cancelled — no cleanup needed.
+
+*/}
+
 
 ## Limitations
 
-For best performance and efficiency, nothing is buffered internally — file bytes flow directly from the HTTP stream to your code. If you don't read a file argument, the file bytes never leave the sender (the user's browser).
-
-This zero-buffering design comes with following inherent limitations.
+File bytes flow directly from the HTTP stream to your code with zero internal buffering. This makes uploads memory-efficient — but there are two trade-offs:
 
 ### One-shot reads
 
-Each file can only be read once — calling `.stream()`, `.text()`, or `.arrayBuffer()` a second time throws an error.
+Each file can only be read once — calling `.stream()`, `.text()`, or `.arrayBuffer()` a second time throws.
 
-> The HTTP stream isn't buffered and can therefore only be consumed once.
-
-If you need the data multiple times, buffer it into a variable first.
+> If you need the data more than once, buffer it into a variable first.
 
 ### Read in order
 
-When a telefunction has multiple file arguments (e.g. `file1` and `file2`), they must be read in the order they appear in the function signature.
-
-> Reading out of order causes `file1` to be discarded (with a warning).
-
-> That's because all files share a single forward-only HTTP stream (reading `file2` before `file1` would require buffering `file1` in memory).
-
-That said, you don't need to `await` each file before starting reading the next — you can kick off reads concurrently (e.g. `Promise.all([file1.text(), file2.text()])`) and they will be automatically streamed in the correct order.
-
+Multiple file arguments must be read in signature order:
 
 ```js
-// ✅ Works
+// ✅ Correct order
 await file1.text()
 await file2.text()
 
-// ❌ Doesn't work
+// ❌ Out of order — file1 is discarded
 await file2.text()
 await file1.text()
 ```
+
+> All files of a single call share one forward-only HTTP stream. Reading `file2` before `file1` would require buffering `file1` in memory.
+
+You can start reads concurrently — they stream in the correct order automatically:
+
 ```js
-// ✅ Works
-file1.text()
-file2.text()
-
-// ❌ Doesn't work
-file2.text()
-file1.text()
-```
-```js
-// ✅ Works
+// ✅ Works — both start in parallel, streamed in order
 await Promise.all([
-  file1.text()
-  file2.text()
+  file1.stream().pipeTo(dest1),
+  file2.stream().pipeTo(dest2),
 ])
-
-// ❌ Doesn't work
-await Promise.all([
-  file2.text()
-  file1.text()
-])
-```
-```js
-// ✅ Works
-await Promise.all([
-  file1.stream().pipeTo(..)
-  file2.stream().pipeTo(..)
-])
-
-// ❌ Doesn't work
-await Promise.all([
-  file2.stream().pipeTo(..)
-  file1.stream().pipeTo(..)
-])
-```
-
-
-## Server integration
-
-Pass the [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object directly:
-
-```ts
-const httpResponse = await telefunc({ request })
-```
-
-Alternatively, with Express, Fastify, or any Node.js framework, you can pass the request as a [`Readable`](https://nodejs.org/api/stream.html#readable-streams) stream along with the `Content-Type` header:
-
-```ts
-app.all('/_telefunc', async (req, res) => {
-  const httpResponse = await telefunc({
-    url: req.originalUrl,
-    method: req.method,
-    readable: req,
-    contentType: req.headers['content-type'] || '',
-  })
-  res.status(httpResponse.statusCode).type(httpResponse.contentType).send(httpResponse.body)
-})
 ```
 
 
 ## How it works
 
-> You can skip reading this section. Read this only if you're curious.
+> You can skip this section — read it only if you're curious.
 
-Telefunc uses a custom multipart stream parser — files are **not** buffered into memory on the server.
+Telefunc uses a custom binary protocol — no multipart/form-data, no internal buffering.
 
-1. The client serializes the telefunction call into a `multipart/form-data` request. File/Blob arguments are replaced with placeholder descriptors and sent as separate binary parts.
-2. On the server, Telefunc parses the metadata first, then creates lazy `File`/`Blob` objects that **reference the HTTP body stream** without reading it yet.
-3. When your telefunction calls `file.stream()`, `file.text()`, or `file.arrayBuffer()`, the bytes are pulled directly from the HTTP stream on demand.
+1. The client serializes the call into a binary request: metadata first, followed by raw file bytes.
+2. The server parses metadata and creates lazy `File`/`Blob` objects that **reference the HTTP body stream** without reading it.
+3. When your telefunction calls `file.stream()`, bytes are pulled directly from the HTTP stream on demand.
 
-This means **file bytes only flow through memory when you read them** — and if you stream to disk, memory consumption is constant regardless of file size.
+File bytes only flow through memory when you read them — and if you stream to disk, memory consumption is constant regardless of file size.
+
+> When a call contains files, Telefunc automatically switches from JSON to a binary format that streams file bytes without buffering.
+
+
+## See also
+
+- <Link href="/file-download" />
+- <Link href="/stream" />

@@ -4,7 +4,7 @@ import '../../components/tabs.css'
 
 **Environment**: server.
 
-`getContext()` enables telefunctions to access contextual information.
+Enables telefunctions to access contextual information.
 
 ```ts
 // TodoList.telefunc.ts
@@ -28,103 +28,10 @@ It's most commonly used for implementing permissions, see <Link href="/permissio
 
 ## Provide
 
-Before you can use `getContext()`, you must provide the `context` object to your Telefunc server middleware, see:
-- <Link href="/server" />
-- <Link href="/telefunc" />
+You can add `context` properties when calling `telefunc.serve()` — see <Link href="/Telefunc" />.
 
-For example:
+> You can also provide `context` outside the server middleware (e.g. when <Link href="/testing">testing</Link>) via <Link text={<code>provideTelefuncContext()</code>} href="/provideTelefuncContext" />.
 
-<Tabs>
-  <TabList>
-    <Tab>Hono</Tab>
-    <Tab>Express.js</Tab>
-  </TabList>
-  <TabPanel>
-
-```ts
-// server/index.ts
-// Environment: server
-
-// Server entry (Hono)
-
-import { Hono } from 'hono'
-import { telefunc } from 'telefunc'
-
-const app = new Hono()
-
-app.all('/_telefunc', async (c) => {
-  const httpResponse = await telefunc({
-    request: c.req.raw,
-    // Provide the context object here:
-    context: {
-      user: c.get('user')
-    }
-  })
-  return new Response(httpResponse.body, {
-    status: httpResponse.statusCode,
-    headers: { 'content-type': httpResponse.contentType }
-  })
-})
-
-// Some authentication middleware — sets the user on Hono's context
-app.use(async (c, next) => {
-  const userId = c.req.cookie('user-id')
-  const user = await getUserFromDatabase(userId)
-
-  // Or using a third-party authentication provider (e.g. Auth0):
-  // @docpress-replace user2 user
-  const user2 = await authProviderApi.getUser(c.req.headers)
-
-  // Authentication middlewares usually provide information
-  // about the logged-in user on the context object:
-  c.set('user', user)
-  await next()
-})
-```
-> See also:
-> - [Hono Guides > Middleware > Extending the Context in Middleware](https://hono.dev/docs/guides/middleware#extending-the-context-in-middleware)
-
-  </TabPanel>
-  <TabPanel>
-
-```ts
-// server/index.ts
-// Environment: server
-
-// Server entry (Express.js)
-
-import express from 'express'
-import { telefunc } from 'telefunc'
-
-const app = express()
-
-// Telefunc middleware
-app.all('/_telefunc', async (req: Request, res: Response) => {
-  // Authentication middlewares (e.g. Passport.js or Grant) usually provide information
-  // about the logged-in user on the `req` object:
-  const user = req.user
-
-  // Or when using a third-party authentication provider (e.g. Auth0):
-  // @docpress-replace user2 user
-  const user2 = await authProviderApi.getUser(req.headers)
-
-  const httpResponse = await telefunc({
-    // Provide the context object here:
-    context: {
-      user
-    },
-    url: req.url,
-    method: req.method,
-    body: req.body
-  })
-
-  const { body, statusCode, contentType } = httpResponse
-  res.status(statusCode).type(contentType).send(body)
-})
-```
-
-  </TabPanel>
-</Tabs>
 
 ## Access
 
@@ -216,7 +123,17 @@ export async function someTelefunction() {
 }
 ```
 
+
+## `onClose()`
+
+The context object includes `onClose()`, see <Link href="/onClose#context-onclose" />.
+
+## `signal`
+
+The context object includes a `signal` (an `AbortSignal`), see <Link href="/onClose#context-signal" />.
+
+
 ## See also
 
-- <Link href="/server" />
-- <Link href="/getContext" />
+- <Link href="/permissions" />
+- <Link href="/Telefunc" />

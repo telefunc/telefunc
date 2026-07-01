@@ -18,9 +18,16 @@ type HeadingsURL = ExtractHeadingUrl<(typeof headings)[number]> | ExtractHeading
 type ExtractCategoryName<C> = C extends { name: infer N extends string } ? N : C extends string ? C : never
 type CategoryNames = ExtractCategoryName<(typeof categories)[number]>
 
-const categories = ['Guides', 'API', 'Get Started', 'Overview', 'Miscellaneous'] as const satisfies Config['categories']
+const categories = [
+  'Guides',
+  'Guides (more)',
+  'API',
+  'Get Started',
+  'Overview',
+  'Miscellaneous',
+] as const satisfies Config['categories']
 
-const headingsDetached = [...misc()] satisfies HeadingDetachedDefinition[]
+const headingsDetached = [...misc(), ...guidesMore()] satisfies HeadingDetachedDefinition[]
 
 const headings = [
   {
@@ -93,15 +100,6 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Server integration',
-  },
-  {
-    level: 2,
-    title: 'Server (Hono, Express, ...)',
-    url: '/server',
-  },
-  {
-    level: 4,
     title: 'Bundler integration',
   },
   {
@@ -115,6 +113,10 @@ const headings = [
     title: 'Guides',
     titleIcon: iconScroll,
     color: '#ffd511',
+  },
+  {
+    level: 4,
+    title: 'Basics',
   },
   {
     level: 2,
@@ -140,8 +142,41 @@ const headings = [
   },
   {
     level: 2,
+    title: 'Testing',
+    url: '/testing',
+  },
+  {
+    level: 4,
+    title: 'Streaming & real-time',
+  },
+  {
+    level: 2,
+    title: 'Stream',
+    url: '/stream',
+  },
+  {
+    level: 2,
+    title: '`@telefunc/tanstack-query`',
+    url: '/tanstack-query',
+  },
+  {
+    level: 2,
+    title: '`@telefunc/rxjs`',
+    url: '/rxjs',
+  },
+  {
+    level: 4,
+    title: 'Files',
+  },
+  {
+    level: 2,
     title: 'File upload',
     url: '/file-upload',
+  },
+  {
+    level: 2,
+    title: 'File download',
+    url: '/file-download',
   },
   {
     level: 1,
@@ -160,6 +195,16 @@ const headings = [
     url: '/getContext',
   },
   {
+    level: 2,
+    title: '`provideTelefuncContext()`',
+    url: '/provideTelefuncContext',
+  },
+  {
+    level: 2,
+    title: '`withContext()`',
+    url: '/withContext',
+  },
+  {
     level: 4,
     title: 'Protection',
   },
@@ -176,16 +221,7 @@ const headings = [
   },
   {
     level: 4,
-    title: 'Server Middleware',
-  },
-  {
-    level: 2,
-    title: '`telefunc()',
-    url: '/telefunc',
-  },
-  {
-    level: 4,
-    title: 'Error Handling',
+    title: 'Hooks',
   },
   {
     level: 2,
@@ -196,6 +232,12 @@ const headings = [
     level: 2,
     title: '`onAbort()`',
     url: '/onAbort',
+  },
+  {
+    level: 2,
+    title: '`onClose()`',
+    url: '/onClose',
+    sectionTitles: ['`context.onClose()`', '`channel.onClose()`', '`context.signal`'],
   },
   {
     level: 4,
@@ -213,8 +255,19 @@ const headings = [
   },
   {
     level: 2,
-    title: '`httpHeaders`',
-    url: '/httpHeaders',
+    title: '`headers`',
+    url: '/headers',
+  },
+  {
+    level: 2,
+    title: '`transport`',
+    url: '/transport',
+  },
+  {
+    level: 2,
+    titleInNav: '`channel`',
+    title: '`channel` (config)',
+    url: '/channel-config',
   },
   {
     level: 2,
@@ -223,7 +276,7 @@ const headings = [
   },
   {
     level: 2,
-    title: '`telefuncFiles',
+    title: '`telefuncFiles`',
     url: '/telefuncFiles',
   },
   {
@@ -233,13 +286,43 @@ const headings = [
   },
   {
     level: 2,
-    title: '`shield`',
+    titleInNav: '`shield`',
+    title: '`shield` (config)',
     url: '/shield-config',
   },
   {
     level: 2,
     title: '`log`',
     url: '/log',
+  },
+  {
+    level: 4,
+    title: 'Server Middleware',
+  },
+  {
+    level: 2,
+    title: '`new Telefunc()`',
+    url: '/Telefunc',
+  },
+  {
+    level: 2,
+    title: '`serve()`',
+    url: '/serve',
+  },
+  {
+    level: 4,
+    title: 'Stream',
+  },
+  {
+    level: 2,
+    title: '`Channel`',
+    url: '/channel',
+    sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
+  },
+  {
+    level: 2,
+    title: '`close()`',
+    url: '/close',
   },
   {
     level: 4,
@@ -291,4 +374,23 @@ function misc() {
       },
     ] as const
   ).map((h) => ({ ...h, category: 'Miscellaneous' as const })) satisfies HeadingDetachedDefinition[]
+}
+
+function guidesMore() {
+  return (
+    [
+      {
+        title: 'Stream at Scale',
+        url: '/stream/scale',
+      },
+      {
+        title: 'Stream on Cloudflare',
+        url: '/stream/cloudflare',
+      },
+      {
+        title: '`@telefunc/redis`',
+        url: '/redis',
+      },
+    ] as const
+  ).map((h) => ({ ...h, category: 'Guides (more)' as const })) satisfies HeadingDetachedDefinition[]
 }
