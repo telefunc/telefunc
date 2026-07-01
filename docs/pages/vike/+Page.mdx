@@ -27,7 +27,7 @@ export default {
 
 ## 3. Server integration
 
-Install the Telefunc server middleware. For example with Hono:
+Install the <Link href="/Telefunc">Telefunc server middleware</Link>. For example, with Hono:
 
 ```ts
 // server.ts
@@ -35,18 +35,18 @@ Install the Telefunc server middleware. For example with Hono:
 
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
-import { telefunc } from 'telefunc/node'
+import { Telefunc } from 'telefunc/node'
 
 const app = new Hono()
-const tf = telefunc()
+const telefunc = new Telefunc()
 
 app.all('/_telefunc', async (c) => {
-  const response = await tf.serve({ request: c.req.raw })
+  const response = await telefunc.serve({ request: c.req.raw })
   return response ?? c.notFound()
 })
 
 const server = serve({ fetch: app.fetch, port: 3000 })
-tf.installWebSocket(server)
+telefunc.installWebSocket(server)
 ```
 
 ## 4. Create a telefunction

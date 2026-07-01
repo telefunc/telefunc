@@ -1,38 +1,44 @@
 import { Link } from '@brillout/docpress'
-import { ConfigWhereClient } from '../../components'
+import { ConfigWhereClient, TelefuncStreamBeta } from '../../components'
 
 **Environment**: client.
 
-Telefunc has two transport settings:
+<TelefuncStreamBeta />
+
+Telefunc has two transport settings that control which network protocol is used to deliver messages:
 
 | Setting | Controls |
 |---|---|
-| `config.stream.transport` | How <Link href="/stream">streamed values</Link> (`AsyncGenerator`, `ReadableStream`, `Promise`) are delivered |
-| `config.channel.transports` | How <Link text={<code>channel()</code>} href="/channel" /> connections work |
+| `config.stream.transport` | Streaming (<Link text={<code>AsyncGenerator</code>} href="/stream#async-generator" />, <Link text={<code>ReadableStream</code>} href="/stream#readable-stream" />, <Link text={<code>Promise</code>} href="/stream#multiple-promise" />) |
+| `config.channel.transports` | <Link text={<code>new Channel()</code>} href="/channel" /> (<Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, <Link text="callbacks" href="/stream#callback" />) |
 
-Plain telefunction calls are always `text/plain` JSON — these settings only affect streaming and channels.
+> These settings only affect <Link href="/stream">streams</Link> — plain telefunction calls are always `text/plain` JSON.
 
-```ts
+```js
 // Environment: client
 
 import { config } from 'telefunc/client'
 
-config.stream.transport = 'binary-inline'   // default
-config.channel.transports = ['sse']            // default
+config.stream.transport = 'binary-inline' // default
+config.channel.transports = ['sse', 'ws'] // default
 ```
+
+> These are **client-side** configs — separate from the following **server-side** settings:
+> - <Link href="/channel-config">`config.channel`</Link>: reconnect/idle timeouts and per-peer buffer limits
+> - <Link href="/stream/scale#broadcast">`config.broadcast.transport`</Link>: cross-instance broadcast for multi-server deployments
 
 <ConfigWhereClient />
 
 
 ## Stream transport
 
-Controls how streamed values are delivered over HTTP.
+Controls how streaming values are delivered over HTTP.
 
 | Transport | Content-Type | Description |
 |---|---|---|
 | `'binary-inline'` (default) | `application/octet-stream` | Raw binary chunked response. Lowest overhead. |
-| `'sse-inline'` | `text/event-stream` | Base64url-encoded SSE. Works through proxies that buffer binary. |
-| `'channel'` | `text/plain` + channel | Starts in HTTP, continues over the configured channel transport. |
+| `'sse-inline'` | `text/event-stream` | Base64url-encoded SSE. Works through proxies that buffer binary responses. |
+| `'channel'` | `text/plain` + channel | Starts over HTTP, then continues over the configured channel transport. |
 
 ### Comparison
 
@@ -41,35 +47,46 @@ Controls how streamed values are delivered over HTTP.
 | `'binary-inline'` | ✅ | 🟡 | ❌ | None |
 | `'sse-inline'` | 🟡 | ✅ | ❌ | None |
 | `'channel'` (SSE) | 🟡 | ✅ | ✅ | None |
-| `'channel'` (WS) | ✅ | 🟡 | ✅ | <Link text="Server setup" href="/server" /> |
+| `'channel'` (WS) | ✅ | 🟡 | ✅ | <Link text="Server setup" href="/Telefunc" /> |
+
+*✅ good · 🟡 partial / caveats · ❌ none*
 
 ### When to use what
 
 - **Start with `'binary-inline'`** — it's the fastest and works in most setups.
-- **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses but passes SSE events through.
-- **Use `'channel'`** when you want streamed values to use the same reconnecting transport as Telefunc channels.
+- **Switch to `'sse-inline'`** if a proxy or CDN buffers binary HTTP responses but passes SSE events through without buffering.
+- **Use `'channel'`** when you want streamed values to reconnect automatically after a dropped connection (just as <Link href="/channel">Telefunc channels</Link> do).
 
 
 ## Channel transport
 
-Controls how <Link text={<code>channel()</code>} href="/channel" /> connections work, and which backend `config.stream.transport = 'channel'` uses.
+Set the network protocol used by <Link text={<code>new Channel()</code>} href="/channel" />, <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, and <Link href="/stream">stream primitives</Link> that use channels under the hood.
 
 | Transport | Description |
 |---|---|
-| `'sse'` (default) | HTTP requests + SSE stream. Works without extra server setup. |
-| `'ws'` | Multiplexed WebSocket. Requires <Link text="WebSocket server setup" href="/server" />. |
+| `'sse'` | HTTP requests + SSE stream.<br/><small>No extra server setup: works with both <Link href="/Telefunc">`new Telefunc()`</Link> and <Link href="/serve">`serve()`</Link></small>. |
+| `'ws'` | Multiplexed WebSocket.<br/><small>Extra server setup: works only with <Link href="/Telefunc">`new Telefunc()`</Link> (it supports WebSocket whereas <Link href="/serve">`serve()`</Link> doesn't)</small>. |
+
+The client default is `['sse', 'ws']` — start on SSE, then upgrade to WebSocket if possible. SSE is supported out-of-the-box, while WebSocket is supported if you set up your server via <Link href="/Telefunc">`new Telefunc()`</Link> (instead of <Link href="/serve">`serve()`</Link>).
+
+> The client starts on SSE and upgrades to WebSocket in the background.
+
+All channels share a single multiplexed connection per server URL, so opening many channels doesn't open many connections.
 
 ### Comparison
 
-| | Throughput | Recovery | Proxy/CDN | Setup |
+| | Throughput | Recovery | Proxy/CDN | Server setup |
 |---|---|---|---|---|
 | `'sse'` | 🟡 | ✅ | ✅ | None |
-| `'ws'` | ✅ | ✅ | 🟡 | <Link text="Server setup" href="/server" /> |
+| `'ws'` | ✅ | ✅ | 🟡 | WebSocket |
 
-- **Start with `'sse'`** — it works everywhere out of the box.
-- **Use `'ws'`** for chatty real-time traffic where you want full-duplex.
+*✅ good · 🟡 partial / caveats*
 
-> When WebSocket is enabled (see <Link href="/server" />), the server supports both SSE and WS. The client starts on SSE and seamlessly upgrades to WebSocket in the background — no interruption to your application code.
+### When to use what
+
+- **Start with `'sse'`** — it works everywhere out-of-the-box.
+- **Use `'ws'`** for high-frequency, real-time traffic that benefits from a full-duplex connection.
+
 
 
 ## Recommended setup
@@ -78,32 +95,37 @@ Controls how <Link text={<code>channel()</code>} href="/channel" /> connections 
 |---|---|
 | Best default | `config.stream.transport = 'binary-inline'` |
 | Proxy buffers binary | `config.stream.transport = 'sse-inline'` |
-| Streams with reconnection | `config.stream.transport = 'channel'` |
+| Reconnection | `config.stream.transport = 'channel'` |
 | Channels without WS | `config.channel.transports = ['sse']` |
-| Full-duplex channels | `config.channel.transports = ['sse', 'ws']` + <Link text="Server setup" href="/server" /> |
+| Full-duplex channels | `config.channel.transports = ['sse', 'ws']` |
 
 
-## Per-call override
+## Per-call overrides
 
-Override the transport for a single call using `withContext()`:
+Override transport for a single call (instead of globally) with <Link text={<code>withContext()</code>} href="/withContext" />:
 
-```ts
+```js
+// Environment: client
+
 import { onAIChat } from './Chat.telefunc'
 import { withContext } from 'telefunc/client'
 
-const gen = withContext(onAIChat, {
-  stream: { transport: 'channel' },
-  channel: { transports: ['ws'] },
-})('Tell me a joke')
+const call = withContext(onAIChat, {
+  stream: { transport: 'channel' },  // override config.stream.transport
+  channel: { transports: ['ws'] },   // override config.channel.transports
+})
 
-for await (const token of gen) {
-  console.log(token)
+const gen = call('Tell me a joke')
+for await (const message of gen) {
+  console.log(message)
 }
 ```
 
 
+
+
 ## See also
 
-- <Link href="/stream" /> — streaming values
-- <Link href="/real-time" /> — real-time patterns
-- <Link href="/channel" /> — channel API
+- <Link href="/stream" />
+- <Link href="/channel" />
+- <Link href="/channel-config" />

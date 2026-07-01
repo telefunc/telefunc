@@ -1,22 +1,20 @@
 import { Link } from '@brillout/docpress'
+import { TelefuncStreamBeta } from '../../components'
 
-Return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) from a telefunction like any other value. The client receives a standard `File` / `Blob` ready for `URL.createObjectURL`, `<img src>`, `fetch({ body })`, `FormData`, etc.
+<TelefuncStreamBeta />
 
-> For large downloads or bytes streamed through your server from an upstream source, use `download()` to get progress, cancel, and save-to-disk support without buffering the full payload — on the server OR the client.
+You can return a [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) or [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) from a telefunction like any other value.
 
+> A single file, multiple files, or files mixed with other return values — all are supported.
 
-## Which one should I use?
+The client receives a standard `File` / `Blob` ready for `URL.createObjectURL`, `<img src>`, `fetch({ body })`, `FormData`, etc.
 
-| Approach | Server memory | Client memory | Best for |
-|---|---|---|---|
-| Native `File` / `Blob` | Full payload | Full payload | Bytes already in memory |
-| `download(file)` / `download(blob)` | Full payload | Depends on consumer<sup>†</sup> | Same + progress / cancel / save-to-disk |
-| `download(stream, opts)` | Constant (chunk-sized) | Depends on consumer<sup>†</sup> | Bytes streamed from upstream (S3, CDN, …) |
-
-<sup>†</sup> Constant when consumed via `dl.stream()` / `dl.saveToDisk()` / `dl.saveToOpfs()`; full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
+> There are multiple streaming and reading strategies, see:
+> - <Link href="#streaming-strategies" />
+> - <Link href="#reading-strategies" />
 
 
-## Example
+## Example: basic
 
 Return a native `File` or `Blob` like any other value.
 
@@ -43,43 +41,7 @@ window.open(URL.createObjectURL(pdf))
 ```
 
 
-## Streaming with `download()`
-
-Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
-
-```ts
-// Image.telefunc.ts
-// Environment: server
-
-import { download } from 'telefunc'
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
-
-const s3 = new S3Client({})
-
-export async function onGetImage(key: string) {
-  const res = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: key }))
-  return download(res.Body!.transformToWebStream(), {
-    name: key,
-    size: res.ContentLength,
-    type: res.ContentType,
-  })
-}
-```
-
-```tsx
-// ImageView.tsx
-// Environment: client
-
-import { onGetImage } from './Image.telefunc'
-
-const dl = await onGetImage(s3Key)
-imgEl.src = URL.createObjectURL(await dl.saveToMemory())
-```
-
-> `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are usable as soon as `await onGetImage(...)` settles — bytes stream in the background.
-
-
-## Progress + cancel
+## Example: progress + cancel
 
 ```tsx
 // Download.tsx
@@ -120,24 +82,128 @@ function Download({ s3Key }: { s3Key: string }) {
 }
 ```
 
-Calling `dl.cancel()` aborts the stream — the pending `saveToMemory` call rejects with a "Stream cancelled" error.
+Calling `dl.cancel()` aborts the download — the pending `saveToMemory()` call then rejects.
+
+
+## Example: multiple concurrent downloads
+
+Return any number of `File`, `Blob`, or `download()` values anywhere in the response — in arrays, in nested objects, or mixed with regular data. Each one exposes its own `onProgress` / `cancel` / `saveTo*` methods on the client, independently of the others.
+
+```ts
+// Document.telefunc.ts
+// Environment: server
+
+import fs from 'node:fs'
+import { Readable } from 'node:stream'
+import { download } from 'telefunc'
+
+export async function onLoadDocuments(id: string) {
+  return {
+    title: 'My Document',
+    pdf: download(Readable.toWeb(fs.createReadStream(`./docs/${id}.pdf`)), {
+      name: 'doc.pdf',
+      type: 'application/pdf'
+    }),
+    thumbnail: new File([await fs.promises.readFile(`./docs/${id}-thumb.png`)], 'thumb.png', {
+      type: 'image/png',
+    }),
+  }
+}
+```
+
+```tsx
+// Document.tsx
+// Environment: client
+
+const { title, pdf, thumbnail } = await onLoadDocuments(id)
+
+pdfEl.src = URL.createObjectURL(await pdf.saveToMemory())
+thumbEl.src = URL.createObjectURL(thumbnail)
+```
+
+
+## Example: passthrough with `download()` {#passthrough}
+
+Wrap a `ReadableStream` with `download()` to stream bytes from an upstream source through your server without buffering.
+
+```ts
+// Image.telefunc.ts
+// Environment: server
+
+import { download } from 'telefunc'
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'
+
+const s3 = new S3Client({})
+
+export async function onGetImage(key: string) {
+  const res = await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: key }))
+  return download(res.Body!.transformToWebStream(), {
+    name: key,
+    size: res.ContentLength,
+    type: res.ContentType
+  })
+}
+```
+
+```tsx
+// ImageView.tsx
+// Environment: client
+
+import { onGetImage } from './Image.telefunc'
+
+const dl = await onGetImage(s3Key)
+imgEl.src = URL.createObjectURL(await dl.saveToMemory())
+```
+
+> `dl.name`, `dl.type`, `dl.size`, `dl.lastModified` are available as soon as `await onGetImage(...)` settles — bytes stream in the background.
+
+
+## Streaming strategies
+
+**Environment**: server.
+
+You can choose between `download()` and a native `File`/`Blob`:
+- **Bytes already in memory** → return a native `File`/`Blob`.
+- **Large files, bytes streamed from an upstream source, or anything needing progress / cancel / save-to-disk** → wrap them with <code>download()</code>.
+
+| Approach | Server memory | Client memory | Best for |
+|---|---|---|---|
+| Native `File` / `Blob` | Full payload | Full payload | Bytes already in memory |
+| `download(file)` / `download(blob)` | Full payload | Depends on consumer<sup>†</sup> | Same + progress / cancel / save-to-disk |
+| `download(stream, opts)` | Constant (chunk-sized) | Depends on consumer<sup>†</sup> | Bytes streamed from upstream (S3, CDN, …) |
+
+<sup>†</sup> Constant when consumed via `dl.stream()`, `dl.saveToOpfs()`, or `dl.saveToDisk()` (except its `'memory'` fallback); full payload when consumed via `dl.saveToMemory()` / `dl.text()` / `dl.arrayBuffer()`.
+
+### `download()`
+
+A `download()` value exposes progress and cancellation on the client. (Native `File` / `Blob` returns don't — wrap your bytes with <Link text={<code>download()</code>} href="#passthrough" /> to opt in.)
+
+| Member | Type | Description |
+|---|---|---|
+| `dl.onProgress(cb)` | `(loaded, total) => void` | Register a callback fired as bytes arrive. `loaded` is the bytes received so far; `total` is the full size (from `download()`'s `size` / the upstream `Content-Length`), or `undefined` if unknown. Fires immediately with the current progress if bytes already arrived; can be called more than once to register multiple callbacks. |
+| `dl.loaded` | `number` | Bytes received so far. |
+| `dl.cancel()` | `void` | Abort the download. Any pending read (`saveToMemory()`, `text()`, …) then rejects. |
 
 
 ## Reading strategies
 
-The streaming download is a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob)-shaped object — `dl.stream()`, `dl.text()`, `dl.arrayBuffer()`, `dl.bytes()`, `dl.slice()` all work and pull from the streaming source as you read:
+**Environment**: client.
+
+The streaming download is a standard [`File`](https://developer.mozilla.org/en-US/docs/Web/API/File) / [`Blob`](https://developer.mozilla.org/en-US/docs/Web/API/Blob) object — `dl.stream()`, `dl.text()`, `dl.arrayBuffer()`, `dl.bytes()`, and `dl.slice()` all work and pull from the streaming source as you read:
 
 | Method | Returns | Memory | Best for |
 |---|---|---|---|
 | `dl.stream()` | `ReadableStream` | Constant (chunk-sized) | Pipe to disk, S3, or any writable stream |
-| `dl.bytes()` | `Uint8Array` | Full file in memory | Process binary bytes |
+| `dl.bytes()` | `Uint8Array` | Full file in memory | Process raw binary |
 | `dl.arrayBuffer()` | `ArrayBuffer` | Full file in memory | Process entire file at once |
 | `dl.text()` | `string` | Full file in memory | Read text content |
 | `dl.saveToMemory()` | `File` / `Blob`<sup>‡</sup> | Full file in memory | Use with Web APIs (`URL.createObjectURL`, `<img src>`, ...) |
-| `dl.saveToDisk(opts?)` | `File` (disk-backed) | Constant (chunk-sized) | Save to user's filesystem (picker or Downloads folder) |
-| `dl.saveToOpfs(path?)` | `File` (disk-backed) | Constant (chunk-sized) | Stash in browser-private storage |
+| `dl.saveToDisk(opts?)` | `File` (disk-backed) | Constant<sup>§</sup> | Save to user's filesystem (picker or Downloads folder) |
+| `dl.saveToOpfs(path?)` | `File` (disk-backed) | Constant (chunk-sized) | Stash in browser-private storage ([OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system)) |
 
 <sup>‡</sup> `File` for `FileDownload`, `Blob` for `BlobDownload`.
+
+<sup>§</sup> Constant in `'picker'` / `'opfs'` mode; the `'memory'` fallback (default when `showSaveFilePicker` is unavailable) buffers the full file in RAM.
 
 > For large files, prefer `dl.stream()` / `dl.saveToDisk()` / `dl.saveToOpfs()` — memory stays constant regardless of file size.
 
@@ -154,7 +220,7 @@ const opfsFile = await dl.saveToOpfs()
 imgEl.src = URL.createObjectURL(opfsFile)
 ```
 
-> Web APIs that require a real Blob brand (`URL.createObjectURL`, `<img src>`, `fetch({body})`, `FormData.append`) need `await dl.saveToMemory()` / `saveToDisk()` / `saveToOpfs()` first — those APIs check the internal Blob slot, which only real `File` / `Blob` instances have.
+> Some Web APIs — `URL.createObjectURL`, `<img src>`, `fetch({body})`, `FormData.append` — require a real `File` / `Blob`, so call `await dl.saveToMemory()` / `saveToDisk()` / `saveToOpfs()` first. These APIs check for an internal marker that only real `File` / `Blob` instances have.
 
 
 ### `saveToDisk({ mode })`
@@ -164,40 +230,64 @@ imgEl.src = URL.createObjectURL(opfsFile)
 | _(omitted)_ | `'picker'` if [`showSaveFilePicker`](https://developer.mozilla.org/en-US/docs/Web/API/Window/showSaveFilePicker) is available, else `'memory'`. |
 | `'picker'` | Opens the save-file picker so the user chooses the location. Throws if not supported. |
 | `'memory'` | Buffers bytes in RAM, then triggers a native browser download to the Downloads folder. Cross-browser. |
-| `'opfs'` | Streams bytes via browser-private storage, then triggers a native browser download. For large files where in-memory buffering isn't viable. Cross-browser. |
+| `'opfs'` | Streams bytes through browser-private storage ([OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system)), then triggers a native browser download. For large files where in-memory buffering isn't viable. Cross-browser. |
 
 
-## Multiple / nested downloads
+## Error handling
 
-Return any number of `File`, `Blob`, or `download()` values, anywhere in the response — arrays, nested objects, mixed with regular data. Each one independently exposes its own `onProgress` / `cancel` / `saveTo*` methods on the client.
+You handle errors the same way you do for Telefunc streams: <Link href="/stream#error-handling" />.
+
+
+{/*
+TODO/after-merge: remove & update TO-DO
+TO-DO/eventually: resurrect this section once we implemented graceful cancelation
+https://github.com/telefunc/telefunc/pull/406#issuecomment-4836969446
+
+### Cancelling
+
+You can cancel a file download at any time. Stopping the stream you're reading — `break` out of a `for await`, or `reader.cancel()` on `dl.stream()` — ends gracefully.
+
+```tsx
+// Download.tsx
+// Environment: client
+
+const dl = await onDownload(dir)
+cancelButton.onclick = () => dl.cancel() // Cancel the download mid-stream
+await dl.saveToDisk()
+```
+
+TO-DO: add note for native `File`/`Blob` use case?
+
+On the server, use <Link text={<code>onClose()</code>} href="/onClose" /> to release resources your telefunction opened when the client cancels:
 
 ```ts
-// Document.telefunc.ts
+// Download.telefunc.ts
 // Environment: server
 
-import fs from 'node:fs'
-import { download } from 'telefunc'
+import { getContext, download } from 'telefunc'
+import { spawn } from 'node:child_process'
+import { Readable } from 'node:stream'
 
-export async function onLoadDocument(id: string) {
-  return {
-    title: 'My Document',
-    pdf: download(fs.createReadStream(`./docs/${id}.pdf`), { name: 'doc.pdf', type: 'application/pdf' }),
-    thumbnail: new File([await fs.promises.readFile(`./docs/${id}-thumb.png`)], 'thumb.png', {
-      type: 'image/png',
-    }),
-  }
+export async function onDownload(dir: string) {
+  const { onClose } = getContext()
+  const zip = spawn('zip', ['-r', '-', dir]) // streams a .zip to stdout
+  onClose(() => zip.kill()) // kill zip, otherwise the process leaks
+
+  return download(Readable.toWeb(zip.stdout) as ReadableStream<Uint8Array>, {
+    name: 'dir.zip',
+    type: 'application/zip',
+  })
 }
 ```
 
-```tsx
-const { title, pdf, thumbnail } = await onLoadDocument(id)
+> **You don't always need `onClose()`.** When the `download()` source is a plain stream — like a <Link text="S3 passthrough" href="#passthrough" /> — the upstream read is automatically cancelled.
 
-pdfEl.src = URL.createObjectURL(await pdf.saveToMemory())
-thumbEl.src = URL.createObjectURL(thumbnail)
-```
+*/}
 
 
 ## Limitations
+
+The client receives the `File` / `Blob` as a **lazy, streaming** object: its bytes flow straight from the HTTP response as you read them, without being buffered in memory. This keeps downloads memory-efficient — but comes with one trade-off:
 
 ### One-shot reads
 
@@ -208,6 +298,5 @@ The streaming download can only be consumed once — calling `.stream()`, `.byte
 
 ## See also
 
-- <Link href="/file-upload" /> — file uploads (client → server)
-- <Link href="/stream" /> — `ReadableStream` and `AsyncGenerator` returns
-- <Link href="/transport" /> — transport configuration
+- <Link href="/file-upload" />
+- <Link href="/stream" />
