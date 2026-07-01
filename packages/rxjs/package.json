@@ -14,7 +14,10 @@
     "client": "@telefunc/rxjs/client"
   },
   "type": "module",
-  "sideEffects": ["./dist/server.js", "./dist/client.js"],
+  "sideEffects": [
+    "./dist/server.js",
+    "./dist/client.js"
+  ],
   "exports": {
     "./package.json": "./package.json",
     "./server": {

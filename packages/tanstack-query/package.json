@@ -13,7 +13,9 @@
     "server": "@telefunc/tanstack-query/server"
   },
   "type": "module",
-  "sideEffects": ["./dist/server.js"],
+  "sideEffects": [
+    "./dist/server.js"
+  ],
   "exports": {
     "./package.json": "./package.json",
     ".": {

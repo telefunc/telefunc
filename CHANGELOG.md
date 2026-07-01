@@ -1,3 +1,28 @@
+## [0.2.21](https://github.com/brillout/telefunc/compare/v0.2.20...v0.2.21) (2026-07-01)
+
+
+* add runtime-specific adapters + Cloudflare Durable Object sharding ([8ca551e](https://github.com/brillout/telefunc/commit/8ca551e2837379f36a82ffdfce607c17f14291cc))
+
+
+### Bug Fixes
+
+* disable naming convention inside Cloudflare Workers ([4d34d6a](https://github.com/brillout/telefunc/commit/4d34d6a096c3693bf36cd18897434d67a57f38b3))
+* replace `declare module 'telefunc'` with `declare global` ([#279](https://github.com/brillout/telefunc/issues/279)) ([38eafc5](https://github.com/brillout/telefunc/commit/38eafc5c10b6251788ba9142219b5f5780358164))
+* use Vite's `root` as default for `config.root` ([#262](https://github.com/brillout/telefunc/issues/262)) ([00d8dd3](https://github.com/brillout/telefunc/commit/00d8dd3d54f9d528f8ffe72144040861528c2510))
+
+
+### Features
+
+* stream (closes [#135](https://github.com/brillout/telefunc/issues/135), [#36](https://github.com/brillout/telefunc/issues/36)) ([#264](https://github.com/brillout/telefunc/issues/264)) ([1f42c8e](https://github.com/brillout/telefunc/commit/1f42c8e7382785e170f19cd3ec809456c645425d))
+
+
+### BREAKING CHANGES
+
+* `telefuncWebSocket()` API changed (now returns adapter object).
+Old direct calls must be updated to the new runtime-specific usage.
+
+
+
 ## [0.2.20](https://github.com/brillout/telefunc/compare/v0.2.19...v0.2.20) (2026-04-10)
 
 
