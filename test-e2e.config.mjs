@@ -44,13 +44,11 @@ function getCiJobs() {
       name: 'Vite',
       setups,
     },
-    // Playground dev/preview scripts use bash-only syntax (`fuser`, `rm -rf`, `2>/dev/null`)
-    // and the docker test needs Linux containers. Ubuntu-only.
-    // `splitFiles: true` fans out one CI runner per `.test-*.test.ts` so the suite
-    // runs in parallel instead of sequentially.
     {
       name: 'Playground Stream',
+      // Tests use bash-only syntax (`fuser`, `rm -rf`, `2>/dev/null`) and the docker test needs Linux containers => Ubuntu-only
       setups: setupModern,
+      // Fans out one CI runner per `.test-*.test.ts` so the suite runs in parallel instead of sequentially
       splitFiles: true,
     },
     {
