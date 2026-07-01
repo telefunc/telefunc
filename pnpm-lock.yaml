@@ -395,8 +395,8 @@ importers:
         specifier: 7.29.0
         version: 7.29.0
       '@brillout/release-me':
-        specifier: ^0.4.5
-        version: 0.4.5(conventional-commits-filter@5.0.0)
+        specifier: ^0.4.16
+        version: 0.4.16(conventional-commits-filter@5.0.0)
       '@cloudflare/workers-types':
         specifier: ^4.20260305.1
         version: 4.20260615.1
@@ -1348,8 +1348,8 @@ packages:
   '@brillout/picocolors@1.0.30':
     resolution: {integrity: sha512-xJjdgyN1H0qh2nB2xlzazIipiDixuUd9oD5msh/Qv5bXJG9j8MSD/m4lREt6Z10ej6FF31b8vB4tdT7lDUbiyA==}
 
-  '@brillout/release-me@0.4.5':
-    resolution: {integrity: sha512-U5SdlYZjl5bVWFzYiPgy6Sm+nq4OkNdLdpycl0NbICtScNwnejX2WYdXZ96gRYrchHpKxEmFSyspTQhzYETvzA==}
+  '@brillout/release-me@0.4.16':
+    resolution: {integrity: sha512-ZuLZPX2rn8VxpkuhL7xavlJ44MB6FwzdqaOjcPEKXokQ9Q3x3bm8m1k1tLVXx++gWs4hCqBSuZTw4MBFIjJHtQ==}
     hasBin: true
 
   '@brillout/replace@0.1.4':
@@ -6146,11 +6146,6 @@ packages:
     resolution: {integrity: sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA==}
     hasBin: true
 
-  semver@7.7.2:
-    resolution: {integrity: sha512-RF0Fw+rO5AMf9MAyaRXI4AV0Ulj5lMHqVxxdSgiVbixSCXoEmmX/jk0CuJw4+3SqroYO9VoUh+HcuJivvtJemA==}
-    engines: {node: '>=10'}
-    hasBin: true
-
   semver@7.7.4:
     resolution: {integrity: sha512-vFKC2IEtQnVhpT78h1Yp8wzwrf8CM+MzKMHGJZfBtzhZNycRFnXsHk6E5TxIkkMsgNS7mdX3AGB7x2QM2di4lA==}
     engines: {node: '>=10'}
@@ -8022,14 +8017,14 @@ snapshots:
 
   '@brillout/picocolors@1.0.30': {}
 
-  '@brillout/release-me@0.4.5(conventional-commits-filter@5.0.0)':
+  '@brillout/release-me@0.4.16(conventional-commits-filter@5.0.0)':
     dependencies:
-      '@brillout/picocolors': 1.0.28
+      '@brillout/picocolors': 1.0.30
       commander: 11.1.0
       conventional-changelog: 7.0.2(conventional-commits-filter@5.0.0)
       conventional-changelog-angular: 8.0.0
       execa: 5.1.1
-      semver: 7.7.2
+      semver: 7.7.4
     transitivePeerDependencies:
       - conventional-commits-filter
 
@@ -8928,7 +8923,7 @@ snapshots:
       nopt: 5.0.0
       npmlog: 5.0.1
       rimraf: 3.0.2
-      semver: 7.7.2
+      semver: 7.7.4
       tar: 6.1.11
     transitivePeerDependencies:
       - encoding
@@ -13122,8 +13117,6 @@ snapshots:
   search-insights@2.17.3: {}
 
   semver@6.3.1: {}
-
-  semver@7.7.2: {}
 
   semver@7.7.4: {}
 

@@ -116,7 +116,7 @@
     "@babel/core": "7.29.0",
     "@babel/parser": "7.29.0",
     "@babel/types": "7.29.0",
-    "@brillout/release-me": "^0.4.5",
+    "@brillout/release-me": "^0.4.16",
     "@cloudflare/workers-types": "^4.20260305.1",
     "@nuxt/types": "^2.18.1",
     "@types/express": "^5.0.3",
