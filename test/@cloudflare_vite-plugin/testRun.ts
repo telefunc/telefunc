@@ -7,9 +7,16 @@ import { testCounter, testRunClassic } from '../../test/utils'
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testCloudflareBindings()
   testRunClassic(cmd, {
-    tolerateError: (log) => log.logText.includes('Detected multiple renderers concurrently rendering'),
+    tolerateError: (log) =>
+      log.logText.includes('Detected multiple renderers concurrently rendering') ||
+      // The Channel/Chat streaming (SSE) connection surfaces a benign
+      // `net::ERR_ALPN_NEGOTIATION_FAILED` browser error; the channel still works
+      // (the message flow is asserted by testChannel()/testChat()).
+      log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED'),
   })
   testTodolist()
+  testChannel()
+  testChat()
 }
 
 function testCloudflareBindings() {
@@ -56,6 +63,85 @@ function testTodolist() {
     expect(await page.textContent('#root')).toContain(todoItemNew)
   })
 }
+// Tests the `Channel` stream use case (pages/channel): a bidirectional channel
+// that streams server-pushed ticks, replies to a ping with a welcome message,
+// and echoes messages back to the client.
+function testChannel() {
+  test('Channel (stream)', async () => {
+    await page.goto(getServerUrl() + '/channel')
+    await autoRetry(
+      async () => {
+        expect(await page.locator('#hydrated').count()).toBe(1)
+      },
+      { timeout: 5000 },
+    )
+    await page.click('#connect-btn')
+    // The client sends a `ping` on connect and the server replies with a `welcome`.
+    await autoRetry(
+      async () => {
+        const log = await page.textContent('#log')
+        expect(log).toContain('Connected!')
+        expect(log).toContain('{"type":"welcome"}')
+      },
+      { timeout: 10000 },
+    )
+    // The server pushes a `tick` message every second.
+    await autoRetry(
+      async () => {
+        expect(await page.textContent('#log')).toContain('{"type":"tick","count":1}')
+      },
+      { timeout: 10000 },
+    )
+    // The server echoes messages back to the client.
+    const echoText = `echo-${Math.random()}`
+    await page.fill('#echo-input', echoText)
+    await page.click('#send-echo-btn')
+    await autoRetry(
+      async () => {
+        const log = (await page.textContent('#log')) ?? ''
+        // Once for the outgoing message, once for the server's echo back.
+        const occurrences = log.split(echoText).length - 1
+        expect(occurrences >= 2).toBe(true)
+      },
+      { timeout: 10000 },
+    )
+    await page.click('#disconnect-btn')
+    await autoRetry(
+      async () => {
+        expect(await page.textContent('#log')).toContain('Disconnected')
+      },
+      { timeout: 5000 },
+    )
+  })
+}
+
+// Tests the `BroadcastChannel` pub/sub use case (pages/chat): joining subscribes to
+// the channel, whose server-side `onOpen` publishes a "joined" system message that is
+// broadcast back to the subscribed client. This exercises the full BroadcastChannel
+// round-trip (subscribe → onOpen → publish → client delivery → render).
+function testChat() {
+  test('Chat (broadcast channel)', async () => {
+    await page.goto(getServerUrl() + '/chat')
+    await autoRetry(
+      async () => {
+        expect(await page.locator('#hydrated').count()).toBe(1)
+      },
+      { timeout: 5000 },
+    )
+    const username = `user-${Math.floor(Math.random() * 1e6)}`
+    await page.fill('input[placeholder="Pick a username..."]', username)
+    await page.locator('button', { hasText: 'Join' }).click()
+    // Joining opens the channel, whose `onOpen` publishes a system "joined" message
+    // that is broadcast back to the subscribed client.
+    await autoRetry(
+      async () => {
+        expect(await page.textContent('#root')).toContain(`${username} joined`)
+      },
+      { timeout: 10000 },
+    )
+  })
+}
+
 async function getNumberOfItems() {
   return await page.evaluate(() => document.querySelectorAll('li').length)
 }
