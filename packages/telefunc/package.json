@@ -119,7 +119,6 @@
     "@brillout/release-me": "^0.4.5",
     "@cloudflare/workers-types": "^4.20260305.1",
     "@nuxt/types": "^2.18.1",
-    "@tanstack/query-core": "^5.95.2",
     "@types/express": "^5.0.3",
     "@types/node": "^24.0.4",
     "@types/react": "^19.2.14",
@@ -135,8 +134,7 @@
     "@babel/types": ">=7.0.0",
     "react": ">=18.0.0",
     "react-streaming": ">=0.3.3",
-    "vite": ">=6.3.0",
-    "@tanstack/query-core": ">=5.0.0"
+    "vite": ">=6.3.0"
   },
   "peerDependenciesMeta": {
     "@babel/core": {
@@ -155,9 +153,6 @@
       "optional": true
     },
     "react": {
-      "optional": true
-    },
-    "@tanstack/query-core": {
       "optional": true
     }
   },

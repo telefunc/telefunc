@@ -403,9 +403,6 @@ importers:
       '@nuxt/types':
         specifier: ^2.18.1
         version: 2.18.1
-      '@tanstack/query-core':
-        specifier: ^5.95.2
-        version: 5.101.0
       '@types/express':
         specifier: ^5.0.3
         version: 5.0.3
