@@ -16,7 +16,10 @@
 * stream (closes [#135](https://github.com/brillout/telefunc/issues/135), [#36](https://github.com/brillout/telefunc/issues/36)) ([#264](https://github.com/brillout/telefunc/issues/264)) ([1f42c8e](https://github.com/brillout/telefunc/commit/1f42c8e7382785e170f19cd3ec809456c645425d))
 
 
-### BREAKING CHANGES
+### MINOR BREAKING CHANGES
+
+> [!NOTE]
+> We recommend ignoring `MINOR BREAKING CHANGES` unless this version breaks your app, see [Vike Versioning](https://vike.dev/versioning).
 
 * `telefuncWebSocket()` API changed (now returns adapter object).
 Old direct calls must be updated to the new runtime-specific usage.
