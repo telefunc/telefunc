@@ -37,7 +37,9 @@ async function handler(request: Request): Promise<Response> {
 
 ## Node.js `req`
 
-You can pass the Node.js [`req` readable stream](https://nodejs.org/api/http.html#class-httpincomingmessage), and apply the result to the Node.js [`res` object](https://nodejs.org/api/http.html#class-httpserverresponse) (e.g. when using [Express](https://expressjs.com)):
+You can pass the Node.js [`req` readable stream](https://nodejs.org/api/http.html#class-httpincomingmessage), and apply the result to the Node.js [`res` object](https://nodejs.org/api/http.html#class-httpserverresponse).
+
+For example when using [Express](https://expressjs.com):
 
 ```ts
 // Environment: server
@@ -55,7 +57,6 @@ app.all('/_telefunc', async (req, res) => {
     headers: req.headers
   })
 
-  // Apply httpResponse to Express's `res`
   res.status(httpResponse.statusCode)
   for (const [name, value] of httpResponse.headers) {
     res.setHeader(name, value)
