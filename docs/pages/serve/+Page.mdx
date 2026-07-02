@@ -15,54 +15,55 @@ Low-level function that turns a telefunction HTTP request into an HTTP response.
 
 ## Web `Request`
 
-You can pass the web-standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object:
+You can pass the web-standard [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) object, and build a web-standard [`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response) object from the result:
 
 ```ts
 // Environment: server
 
 import { serve } from 'telefunc'
 
-const httpResponse = await serve({
-  // `request` being a `Request` instance
-  request
-})
+// A fetch-style handler (Hono, Cloudflare Workers, Deno, Bun, ...)
+async function handler(request: Request): Promise<Response> {
+  const httpResponse = await serve({ request })
 
-// Build an HTTP response using the following:
-httpResponse.getReadableWebStream() // or httpResponse.getBody()
-httpResponse.statusCode
-httpResponse.headers
+  // Convert httpResponse to a web-standard Response
+  return new Response(httpResponse.getReadableWebStream(), {
+    status: httpResponse.statusCode,
+    headers: httpResponse.headers
+  })
+}
 ```
-
-> You can convert the result to a [`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response):
->
-> ```ts
-> const response = new Response(httpResponse.getReadableWebStream(), {
->   status: httpResponse.statusCode,
->   headers: httpResponse.headers
-> })
-> ```
 
 
 ## Node.js `req`
 
-You can pass the Node.js [`req` readable stream](https://nodejs.org/api/http.html#class-httpincomingmessage) (e.g. when using [Express](https://expressjs.com)):
+You can pass the Node.js [`req` readable stream](https://nodejs.org/api/http.html#class-httpincomingmessage), and apply the result to the Node.js [`res` object](https://nodejs.org/api/http.html#class-httpserverresponse) (e.g. when using [Express](https://expressjs.com)):
 
 ```ts
 // Environment: server
 
+import express from 'express'
 import { serve } from 'telefunc'
 
-const httpResponse = await serve({
-  url: req.originalUrl,
-  method: req.method,
-  readable: req,
-  headers: req.headers
+const app = express()
+
+app.all('/_telefunc', async (req, res) => {
+  const httpResponse = await serve({
+    url: req.originalUrl,
+    method: req.method,
+    readable: req,
+    headers: req.headers
+  })
+
+  // Apply httpResponse to Express's `res`
+  res.status(httpResponse.statusCode)
+  for (const [name, value] of httpResponse.headers) {
+    res.setHeader(name, value)
+  }
+  await httpResponse.pipe(res)
 })
 
-// Build an HTTP response using the following:
-httpResponse.getReadableWebStream() // or httpResponse.getBody()
-httpResponse.statusCode
-httpResponse.headers
+app.listen(3000)
 ```
 
 
