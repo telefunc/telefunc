@@ -7,6 +7,7 @@ export {
   onCloseChannelOnClose,
   onCloseStreamAndChannelOnClose,
   onClosePassedFnOnClose,
+  onGcPassedFnOnClose,
 }
 
 import { Channel, getContext } from 'telefunc'
@@ -111,6 +112,25 @@ async function onClosePassedFnOnClose(callback: () => void) {
     cleanupState.closePassedFnOnClose_contextOnClose = 'fired'
   })
   return { callback }
+}
+
+/**
+ * Client passes a function, then drops it without ever calling `close()`. The server neither
+ * stores nor returns the callback, so once GC reclaims its stub the request-side channel must
+ * close and `context.onClose` must fire — no explicit close from the client.
+ * Regression test for holder-side GC cleanup of passed callbacks.
+ */
+async function onGcPassedFnOnClose(callback: () => void) {
+  cleanupState.gcPassedFnOnClose_contextOnClose = 'not-fired'
+  cleanupState.gcPassedFnOnClose_callbackCalled = 'false'
+  callback()
+  cleanupState.gcPassedFnOnClose_callbackCalled = 'true'
+  getContext().onClose(() => {
+    cleanupState.gcPassedFnOnClose_contextOnClose = 'fired'
+  })
+  // Deliberately returns nothing referencing `callback`: its server-side stub is now
+  // unreachable and must be collectable.
+  return { ok: true }
 }
 
 // ── Mixed ────────────────────────────────────────────────────────────

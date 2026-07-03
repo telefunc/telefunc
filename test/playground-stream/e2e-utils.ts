@@ -1,4 +1,14 @@
-export { resetCleanupState, getCleanupState, navigate, getResult, sleep, restartProxy, stopProxy, startProxy }
+export {
+  resetCleanupState,
+  getCleanupState,
+  forceServerGc,
+  navigate,
+  getResult,
+  sleep,
+  restartProxy,
+  stopProxy,
+  startProxy,
+}
 
 import { page, getServerUrl } from '@brillout/test-e2e'
 import { execSync } from 'node:child_process'
@@ -37,6 +47,11 @@ async function resetCleanupState() {
 async function getCleanupState(): Promise<Record<string, string>> {
   const resp = await fetch(`${getServerUrl()}/api/cleanup-state`)
   return resp.json()
+}
+
+/** Forces a full GC on the server (via `/api/gc`) so GC-driven cleanup is deterministic in tests. */
+async function forceServerGc() {
+  await fetch(`${getServerUrl()}/api/gc`, { method: 'POST' })
 }
 
 /**

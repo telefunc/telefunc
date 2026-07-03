@@ -14,12 +14,25 @@ import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { getChannelMux } from '../../../wire-protocol/server/mux.js'
 import { ChannelStreamSource } from '../../../wire-protocol/ChannelStreamSource.js'
+import { GcRegistry } from '../../../wire-protocol/gcRegistry.js'
+import { wrapProxy } from '../../../wire-protocol/wrapProxy.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ReviverType, TypeContract, ServerReviverContext } from '../../../wire-protocol/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
 import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
+
+// Holder-side GC tracking of revived request stubs (callback channels, streams). One shared
+// instance: it's a passive FinalizationRegistry, and its scan timer runs only while stubs are
+// tracked (see GcRegistry) — so it keeps nothing alive and doesn't block hibernation when idle.
+// It must NOT be created per-request: a per-request closure hung on the (rooted) request context
+// pins that request's `envelope.args` via the V8 scope chain, so the stub is never collected.
+const globalObject = getGlobalObject('node/server/runTelefunc/parseHttpRequest.ts', {
+  gcRegistry: new GcRegistry(),
+})
 
 type RunContext = {
   request: Request
@@ -107,9 +120,24 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           ...baseContext,
           validators: buildShieldValidators(shields[toPathKey(segments)] ?? {}, shieldCtx),
         }),
-        ({ close, abort }) => {
-          requestContext.onTopLevelError(close)
-          requestContext.responseAbort.onAbort(abort)
+        (revived) => {
+          {
+            // Destructure into locals so nothing here closes over `revived` — a closure over it
+            // would pin `revived.value` (the wrapper) and defeat the GC-close. Same discipline as
+            // the client response path.
+            const { value, close } = revived
+            assert(isObjectOrFunction(value))
+            // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
+            // underlying channel/stream closes and the client releases the original.
+            const wrapper = wrapProxy(value)
+            globalObject.gcRegistry.register(wrapper, close)
+            revived.value = wrapper
+          }
+          {
+            const { close, abort } = revived
+            requestContext.onTopLevelError(close)
+            requestContext.responseAbort.onAbort(abort)
+          }
         },
       )
       return envelope.args
