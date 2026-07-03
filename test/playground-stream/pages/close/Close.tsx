@@ -12,6 +12,7 @@ import {
   onCloseChannelOnClose,
   onCloseStreamAndChannelOnClose,
   onClosePassedFnOnClose,
+  onGcPassedFnOnClose,
 } from './Close.telefunc'
 
 function Close() {
@@ -206,6 +207,22 @@ function Close() {
         }}
       >
         Close passed fn result
+      </button>
+
+      <h2>Passed function GC cleanup</h2>
+
+      <button
+        id="test-gc-passed-fn-onclose"
+        onClick={async () => {
+          setResult('')
+          // Pass a throwaway callback and keep no reference to it or the result. The server's
+          // stub becomes collectable; a forced server GC must then close the request-side channel
+          // and fire context.onClose — with no explicit close() from the client.
+          await onGcPassedFnOnClose(() => {})
+          setResult(JSON.stringify({ method: 'gc(passed-fn-onclose)', phase: 'returned' }))
+        }}
+      >
+        Passed fn: context.onClose fires after server GC
       </button>
 
       <h2>{'Mixed: { generator, stream, channel, fn }'}</h2>

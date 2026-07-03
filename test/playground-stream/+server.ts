@@ -45,6 +45,19 @@ app.post('/api/cleanup-state/reset', async (c) => {
   return c.json({ ok: true })
 })
 
+// Forces server-side GC so tests can deterministically exercise GC-driven cleanup (e.g. a
+// dropped passed-callback's stub being reclaimed → its channel closing → context.onClose firing).
+// Requires the server to run with `--expose-gc` (see this playground's dev/preview scripts).
+app.post('/api/gc', async (c) => {
+  const gc = (globalThis as { gc?: () => void }).gc
+  if (!gc) return c.json({ ok: false, reason: 'gc not exposed (run node with --expose-gc)' }, 500)
+  for (let i = 0; i < 5; i++) {
+    gc()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  return c.json({ ok: true })
+})
+
 app.post('/api/server-close-trigger', async (c) => {
   const channelId = c.req.query('channelId')
   if (!channelId) return c.json({ ok: false, reason: 'missing channelId' }, 400)

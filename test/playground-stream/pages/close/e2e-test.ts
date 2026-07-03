@@ -1,7 +1,7 @@
 export { testClose }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, navigate, getResult, sleep } from '../../e2e-utils'
+import { resetCleanupState, getCleanupState, forceServerGc, navigate, getResult, sleep } from '../../e2e-utils'
 
 function testClose() {
   // ── Targeted: generator ──────────────────────────────────────────────
@@ -182,6 +182,35 @@ function testClose() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.closePassedFnOnClose_contextOnClose).toBe('fired')
+    })
+  })
+
+  // ── Passed function: context.onClose fires after server GC (no explicit close) ──
+
+  test('close: passed function GC — context.onClose fires after the server GC-reclaims a dropped callback', async () => {
+    await navigate(`${getServerUrl()}/close`)
+    await resetCleanupState()
+
+    await page.click('#test-gc-passed-fn-onclose')
+
+    // Telefunc returned and the server invoked the callback.
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.method).toBe('gc(passed-fn-onclose)')
+      expect(result.phase).toBe('returned')
+    })
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.gcPassedFnOnClose_callbackCalled).toBe('true')
+    })
+
+    // No explicit close() and no returned reference: the callback's server-side stub is
+    // unreachable. Forcing GC must reclaim it, close the request-side channel, and fire
+    // context.onClose. Force GC each retry so it keeps trying until the stub is collected.
+    await autoRetry(async () => {
+      await forceServerGc()
+      const state = await getCleanupState()
+      expect(state.gcPassedFnOnClose_contextOnClose).toBe('fired')
     })
   })
 

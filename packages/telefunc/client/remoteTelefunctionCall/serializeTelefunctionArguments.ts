@@ -8,17 +8,10 @@ import { createRequestReplacer } from '../../wire-protocol/client/request/regist
 import { encodeRequestEnvelope } from '../../wire-protocol/frame.js'
 import { pumpClientProducerToChannel } from '../../wire-protocol/client/request/pumpToChannel.js'
 import { ClientChannel } from '../../wire-protocol/client/channel.js'
-import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
 import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/types.js'
 import { CloseHandler } from '../close.js'
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { GcRegistry } from '../../wire-protocol/gcRegistry.js'
-
-const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {
-  gcRegistry: new GcRegistry(),
-})
 
 type CallContext = {
   telefuncFilePath: string
@@ -85,26 +78,20 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
       },
     },
     function onReplaced(replaced) {
-      {
-        // Track the user's actual value — when they drop all references to it, close.
-        // (Unlike the response side, we don't create a value here; the user already
-        //  holds the original, so it serves as its own GC anchor.)
-        const { value, close } = replaced
-        assert(isObjectOrFunction(value))
-        globalObject.gcRegistry.register(value, close)
-      }
-
-      {
-        const { close, abort } = replaced
-        abortSignal.addEventListener(
-          'abort',
-          () => {
-            abort(makeAbortError(undefined, callContext))
-          },
-          { once: true },
-        )
-        requestCloseHandlers.push(close)
-      }
+      // The client owns the original value here; it stays alive on this end via its channel
+      // listener / stream pump. Its holder-side counterpart (the server) GC-tracks the stub and
+      // closes the channel when done — so the client releases it on that close, on abort, or on
+      // an explicit `close()`. GC-tracking the original here would be the wrong side (and dead:
+      // the channel listener pins it).
+      const { close, abort } = replaced
+      abortSignal.addEventListener(
+        'abort',
+        () => {
+          abort(makeAbortError(undefined, callContext))
+        },
+        { once: true },
+      )
+      requestCloseHandlers.push(close)
     },
     callContext.extensionRequestTypes,
   )
