@@ -22,14 +22,19 @@ type Entry = {
  *    been collected but the FinalizationRegistry callback hasn't run yet.
  *
  * Both paths funnel into the same idempotent `fireCleanup`, so neither double-runs.
+ *
+ * The scan timer runs **only while entries are tracked** — it starts on the first
+ * `register()` and stops once the set empties. So a single shared instance keeps no
+ * timer when idle: an isolate with nothing tracked (e.g. a Cloudflare Durable Object
+ * with no open callback/stream channels) has no pending work and can hibernate.
  */
 class GcRegistry {
   private finalReg: FinalizationRegistry<Entry>
   private entries = new Set<Entry>()
+  private scanTimer: ReturnType<typeof setInterval> | null = null
 
-  constructor(periodicScanMs = 5000) {
+  constructor(private readonly periodicScanMs = 5000) {
     this.finalReg = new FinalizationRegistry<Entry>((entry) => this.fireCleanup(entry))
-    unrefTimer(setInterval(() => this.scan(), periodicScanMs))
   }
 
   register(target: object, close: CloseFn): void {
@@ -38,12 +43,14 @@ class GcRegistry {
     // Pass `entry` as both held value and unregister token so we can deregister
     // from inside fireCleanup without keeping a separate token map.
     this.finalReg.register(target, entry, entry)
+    if (!this.scanTimer) this.scanTimer = unrefTimer(setInterval(() => this.scan(), this.periodicScanMs))
   }
 
   private scan(): void {
     for (const entry of this.entries) {
       if (entry.ref.deref() === undefined) this.fireCleanup(entry)
     }
+    this.stopScanIfIdle()
   }
 
   private fireCleanup(entry: Entry): void {
@@ -56,6 +63,14 @@ class GcRegistry {
     } catch {
       // Cleanup errors are swallowed — there's no caller to surface them to,
       // and a throw here would break other entries' cleanup in the same scan.
+    }
+    this.stopScanIfIdle()
+  }
+
+  private stopScanIfIdle(): void {
+    if (this.scanTimer && this.entries.size === 0) {
+      clearInterval(this.scanTimer)
+      this.scanTimer = null
     }
   }
 }
