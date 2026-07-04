@@ -90,6 +90,9 @@ function tolerateError({ logSource, logText }) {
       // Error: [DocPress][Warning] prop `text` is deprecated
       'prop `text` is deprecated',
 
+      // Telefunc's Vike extension is intentionally exported at `telefunc/vike` (instead of `telefunc/config`), see https://github.com/telefunc/telefunc/issues/381
+      'is exported at telefunc/vike, but it should be exported at telefunc/config instead',
+
       // [18:54:59.547][/docs/.test-preview.test.ts][pnpm run preview][stderr] warnings when minifying css:
       // Warning: G] Transforming this CSS nesting syntax is not supported in the configured target environment ("chrome87", "edge88", "es2020", "firefox78", "safari14") [unsupported-css-nesting]
       'CSS nesting syntax is not supported in the configured target environment',

@@ -84,6 +84,17 @@
       "types": "./dist/node/babel/plugin.d.ts",
       "default": "./dist/node/babel/plugin.js"
     },
+    "./universal-middleware": {
+      "worker": "./dist/node/universal-middleware/index.js",
+      "browser": "./dist/client/poisen-pills/universal-middleware.js",
+      "types": "./dist/node/universal-middleware/index.d.ts",
+      "default": "./dist/node/universal-middleware/index.js"
+    },
+    "./vike": {
+      "browser": "./dist/client/poisen-pills/vike.js",
+      "types": "./dist/node/vike/+config.d.ts",
+      "default": "./dist/node/vike/+config.js"
+    },
     "./__internal/loadBuildEntry": {
       "worker": "./dist/node/server/runTelefunc/loadTelefuncFilesUsingVite/loadBuildEntry.js",
       "browser": "./dist/client/poisen-pills/__internal/loadBuildEntry.js",
@@ -122,22 +133,28 @@
     "@types/express": "^5.0.3",
     "@types/node": "^24.0.4",
     "@types/react": "^19.2.14",
+    "@universal-middleware/core": "^0.4.17",
     "next": "^15.3.4",
     "react": "^19.2.4",
     "react-streaming": "^0.4.17",
     "typescript": "^5.8.3",
+    "vike": "^0.4.259",
     "vite": "^8.0.16"
   },
   "peerDependencies": {
     "@babel/core": ">=7.0.0",
     "@babel/parser": ">=7.0.0",
     "@babel/types": ">=7.0.0",
+    "@universal-middleware/core": ">=0.4.13",
     "react": ">=18.0.0",
     "react-streaming": ">=0.3.3",
     "vite": ">=6.3.0"
   },
   "peerDependenciesMeta": {
     "@babel/core": {
+      "optional": true
+    },
+    "@universal-middleware/core": {
       "optional": true
     },
     "@babel/parser": {
