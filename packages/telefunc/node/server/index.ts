@@ -16,6 +16,16 @@ export type { ShieldValidator, ShieldValidators } from './shield.js'
 export { onBug } from './runTelefunc/onBug.js'
 export { Channel } from '../../wire-protocol/server/channel.js'
 export { Broadcast, BroadcastChannel } from '../../wire-protocol/server/server-broadcast.js'
+export { room } from '../../wire-protocol/room/server.js'
+export type {
+  Room,
+  RoomInfo,
+  RoomOptions,
+  RoomMeta,
+  ParticipantMeta,
+  LocalParticipant,
+  RemoteParticipant,
+} from '../../wire-protocol/room/types.js'
 export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
 export type { ChannelBase, ClientChannel } from '../../wire-protocol/channel.js'

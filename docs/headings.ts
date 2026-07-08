@@ -321,6 +321,12 @@ const headings = [
   },
   {
     level: 2,
+    title: '`room()`',
+    url: '/room',
+    sectionTitles: ['`Room`', '`LocalParticipant`', '`RemoteParticipant`'],
+  },
+  {
+    level: 2,
     title: '`close()`',
     url: '/close',
   },

@@ -14,6 +14,7 @@ import { testStreamToServer } from './pages/stream-to-server/e2e-test'
 import { testLiveQuery } from './pages/live-query/e2e-test'
 import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
+import { testRoom } from './pages/room/e2e-test'
 
 function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   run(cmd, {
@@ -85,4 +86,6 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   testRxjs()
 
   testPublish()
+
+  testRoom()
 }

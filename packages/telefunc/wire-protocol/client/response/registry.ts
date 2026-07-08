@@ -8,6 +8,7 @@ import { blobReviver } from './blob.js'
 import { fileDownloadReviver } from './fileDownload.js'
 import { blobDownloadReviver } from './blobDownload.js'
 import { promiseReviver } from './promise.js'
+import { roomReviver, roomParticipantReviver } from './room.js'
 import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
@@ -24,6 +25,8 @@ const clientTypes = [
   fileDownloadReviver,
   blobDownloadReviver,
   promiseReviver,
+  roomReviver,
+  roomParticipantReviver,
   broadcastReviver,
   channelReviver,
   functionReviver,

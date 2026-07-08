@@ -1,0 +1,163 @@
+export { Room }
+
+import React, { useEffect, useState } from 'react'
+import { onCreateRoom, onGetRoom, onJoinAsServer, onKick, onCloseRoom } from './Room.telefunc'
+
+/** Render every poll so the e2e autoRetry sees fresh data on each iteration (see Publish.tsx). */
+async function pollUntil(render: () => { done: boolean }) {
+  for (let poll = 0; poll < 50; poll++) {
+    if (render().done) break
+    await new Promise((r) => setTimeout(r, 200))
+  }
+}
+
+function Room() {
+  const [result, setResult] = useState<string>('')
+  const [hydrated, setHydrated] = useState(false)
+  useEffect(() => setHydrated(true), [])
+
+  return (
+    <div id={hydrated ? 'hydrated' : undefined}>
+      <pre id="room-result">{result}</pre>
+
+      <h2>Presence & Chat</h2>
+
+      <button
+        id="test-room-chat"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-chat:${crypto.randomUUID()}`
+          await onCreateRoom(roomId, { size: 10 })
+          const lobby = await onGetRoom(roomId)
+
+          const events: string[] = []
+          lobby.onJoin((m) => events.push(`join:${m.meta.name}`))
+          lobby.onLeave((m) => events.push(`leave:${m.meta.name}`))
+          const received: Array<{ text: unknown; from: unknown }> = []
+          lobby.subscribe((data, _info, from) => {
+            received.push({ text: (data as { text: string }).text, from: from.meta.name })
+          })
+
+          const me = await lobby.join({ name: 'Alice' })
+          const countAfterJoin = lobby.count
+          const updates: unknown[] = []
+          lobby.getParticipant(me.id)!.onUpdate((meta, prev) => updates.push([meta.score, prev.score]))
+
+          const ack = await me.publish({ text: 'hello' })
+          await me.setMeta({ name: 'Alice', score: 42 })
+          await me.leave()
+
+          await pollUntil(() => {
+            const state = {
+              events,
+              received,
+              updates,
+              countAfterJoin,
+              count: lobby.count,
+              ack: { key: ack.key, seq: ack.seq },
+            }
+            setResult(JSON.stringify(state))
+            return { done: events.length >= 2 && received.length >= 1 && updates.length >= 1 }
+          })
+        }}
+      >
+        Join, publish, setMeta, leave
+      </button>
+
+      <h2>Server-Joined Participant</h2>
+
+      <button
+        id="test-room-participant"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-participant:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const observer = await onGetRoom(roomId)
+          const received: Array<{ text: unknown; from: unknown }> = []
+          observer.subscribe((data, _info, from) => {
+            received.push({ text: (data as { text: string }).text, from: from.meta.name })
+          })
+
+          // Joined server-side — arrives as a standalone participant with its own stub channel.
+          const me = await onJoinAsServer(roomId, 'Bob')
+          await me.publish({ text: 'from-bob' })
+          await me.setMeta({ name: 'Bobby' })
+
+          await pollUntil(() => {
+            const state = {
+              received,
+              count: observer.count,
+              remoteMetaName: observer.getParticipant(me.id)?.meta.name ?? null,
+              localMetaName: me.meta.name ?? null,
+            }
+            setResult(JSON.stringify(state))
+            return {
+              done: received.length >= 1 && state.remoteMetaName === 'Bobby' && state.localMetaName === 'Bobby',
+            }
+          })
+        }}
+      >
+        Server-side join + publish
+      </button>
+
+      <h2>Binary (isolated mode)</h2>
+
+      <button
+        id="test-room-binary"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-binary:${crypto.randomUUID()}`
+          await onCreateRoom(roomId, { isolated: true })
+          const videoRoom = await onGetRoom(roomId)
+          const me = await videoRoom.join({ name: 'Cam' })
+
+          const frames: Array<{ size: number; firstByte: number; fromSelf: boolean }> = []
+          videoRoom.subscribeBinary((data, _info, from) => {
+            frames.push({ size: data.byteLength, firstByte: data[0]!, fromSelf: from.id === me.id })
+          })
+
+          // selfDelivery defaults to true — our own frames come back to us.
+          for (let i = 0; i < 3; i++) {
+            await me.publishBinary(new Uint8Array(64).fill(i + 1))
+          }
+
+          await pollUntil(() => {
+            setResult(JSON.stringify({ frames }))
+            return { done: frames.length >= 3 }
+          })
+        }}
+      >
+        Publish 3 binary frames
+      </button>
+
+      <h2>Admin (kick & close)</h2>
+
+      <button
+        id="test-room-admin"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-admin:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const lobby = await onGetRoom(roomId)
+          const me = await lobby.join({ name: 'Eve' })
+
+          let kicked = false
+          let closed = false
+          me.onLeave(() => (kicked = true))
+          lobby.onClose(() => (closed = true))
+
+          await onKick(roomId, me.id)
+          await onCloseRoom(roomId)
+
+          await pollUntil(() => {
+            const state = { kicked, closed, isClosed: lobby.isClosed, count: lobby.count }
+            setResult(JSON.stringify(state))
+            return { done: kicked && closed && lobby.isClosed }
+          })
+        }}
+      >
+        Kick participant, close room
+      </button>
+    </div>
+  )
+}

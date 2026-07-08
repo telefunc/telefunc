@@ -34,6 +34,8 @@ export type {
   BlobDownloadMetadata,
   ChannelContract,
   BroadcastContract,
+  RoomContract,
+  RoomParticipantContract,
   FunctionContract,
   FileDownload,
   BlobDownload,
@@ -43,6 +45,9 @@ export type {
 import type { ServerChannel } from './server/channel.js'
 import type { ServerBroadcast } from './server/server-broadcast.js'
 import type { ClientChannel, ClientBroadcast } from './client/channel.js'
+import type { ServerRoom, ServerLocalParticipant } from './room/server.js'
+import type { Room, LocalParticipant } from './room/types.js'
+import type { RoomSnapshotMetadata, ParticipantStubMetadata } from './room/shared.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
 import type { FileDownload, BlobDownload } from './client/response/DownloadClasses.js'
@@ -234,6 +239,10 @@ type DownloadProgress = (loaded: number, total: number | undefined) => void
 type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
 
 type BroadcastContract = TypeContract<ServerBroadcast, ClientBroadcast, { channelId: string; key: string }>
+
+type RoomContract = TypeContract<ServerRoom, Room, RoomSnapshotMetadata>
+
+type RoomParticipantContract = TypeContract<ServerLocalParticipant, LocalParticipant, ParticipantStubMetadata>
 
 type FunctionContract = TypeContract<
   (...args: readonly unknown[]) => unknown,

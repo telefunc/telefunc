@@ -8,6 +8,8 @@ export const SERIALIZER_PREFIX_PROMISE = '!TelefuncPromise:'
 export const SERIALIZER_PREFIX_CHANNEL = '!TelefuncChannel:'
 export const SERIALIZER_PREFIX_FUNCTION = '!TelefuncFunction:'
 export const SERIALIZER_PREFIX_BROADCAST = '!TelefuncBroadcast:'
+export const SERIALIZER_PREFIX_ROOM = '!TelefuncRoom:'
+export const SERIALIZER_PREFIX_ROOM_PARTICIPANT = '!TelefuncRoomParticipant:'
 
 /** Marker key used on the ack payload of a server-returned function when its arg shield
  *  rejects the incoming args. The client-side reviver detects this and throws on the

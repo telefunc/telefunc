@@ -11,6 +11,15 @@ export { withContext } from './withContext.js'
 export { ConnectionError } from './ConnectionError.js'
 export { NetworkError } from '../shared/NetworkError.js'
 export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/channel-errors.js'
+export type {
+  Room,
+  RoomInfo,
+  RoomOptions,
+  RoomMeta,
+  ParticipantMeta,
+  LocalParticipant,
+  RemoteParticipant,
+} from '../wire-protocol/room/types.js'
 
 export type { TelefuncClientExtension } from './extensions.js'
 export type {

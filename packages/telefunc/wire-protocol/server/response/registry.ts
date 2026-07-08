@@ -7,6 +7,7 @@ import { blobReplacer } from './blob.js'
 import { fileDownloadReplacer } from './fileDownload.js'
 import { blobDownloadReplacer } from './blobDownload.js'
 import { promiseReplacer } from './promise.js'
+import { roomReplacer, roomParticipantReplacer } from './room.js'
 import { broadcastReplacer } from './broadcast.js'
 import { channelReplacer } from './channel.js'
 import { functionReplacer } from './function.js'
@@ -25,6 +26,8 @@ const serverTypes = [
   fileReplacer,
   blobReplacer,
   promiseReplacer,
+  roomReplacer,
+  roomParticipantReplacer,
   broadcastReplacer,
   channelReplacer,
   functionReplacer,
