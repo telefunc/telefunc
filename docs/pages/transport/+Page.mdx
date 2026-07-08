@@ -9,8 +9,8 @@ Telefunc has two transport settings that control which network protocol is used 
 
 | Setting | Controls |
 |---|---|
-| `config.stream.transport` | Streaming (<Link text={<code>AsyncGenerator</code>} href="/stream#async-generator" />, <Link text={<code>ReadableStream</code>} href="/stream#readable-stream" />, <Link text={<code>Promise</code>} href="/stream#multiple-promise" />) |
-| `config.channel.transports` | <Link text={<code>new Channel()</code>} href="/channel" /> (<Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, <Link text="callbacks" href="/stream#callback" />) |
+| `config.stream.transport` | Streaming (<Link href="/stream#async-generator"><code>AsyncGenerator</code></Link>, <Link href="/stream#readable-stream"><code>ReadableStream</code></Link>, <Link href="/stream#multiple-promise"><code>Promise</code></Link>) |
+| `config.channel.transports` | <Link href="/channel"><code>new Channel()</code></Link> (<Link href="/channel#new-broadcastchannel"><code>new BroadcastChannel()</code></Link>, <Link href="/stream#callback">callbacks</Link>) |
 
 > These settings only affect <Link href="/stream">streams</Link> — plain telefunction calls are always `text/plain` JSON.
 
@@ -47,7 +47,7 @@ Controls how streaming values are delivered over HTTP.
 | `'binary-inline'` | ✅ | 🟡 | ❌ | None |
 | `'sse-inline'` | 🟡 | ✅ | ❌ | None |
 | `'channel'` (SSE) | 🟡 | ✅ | ✅ | None |
-| `'channel'` (WS) | ✅ | 🟡 | ✅ | <Link text="Server setup" href="/Telefunc" /> |
+| `'channel'` (WS) | ✅ | 🟡 | ✅ | <Link href="/Telefunc">Server setup</Link> |
 
 *✅ good · 🟡 partial / caveats · ❌ none*
 
@@ -60,7 +60,7 @@ Controls how streaming values are delivered over HTTP.
 
 ## Channel transport
 
-Set the network protocol used by <Link text={<code>new Channel()</code>} href="/channel" />, <Link text={<code>new BroadcastChannel()</code>} href="/channel#new-broadcastchannel" />, and <Link href="/stream">stream primitives</Link> that use channels under the hood.
+Set the network protocol used by <Link href="/channel"><code>new Channel()</code></Link>, <Link href="/channel#new-broadcastchannel"><code>new BroadcastChannel()</code></Link>, and <Link href="/stream">stream primitives</Link> that use channels under the hood.
 
 | Transport | Description |
 |---|---|
@@ -102,7 +102,7 @@ All channels share a single multiplexed connection per server URL, so opening ma
 
 ## Per-call overrides
 
-Override transport for a single call (instead of globally) with <Link text={<code>withContext()</code>} href="/withContext" />:
+Override transport for a single call (instead of globally) with <Link href="/withContext"><code>withContext()</code></Link>:
 
 ```js
 // Environment: client

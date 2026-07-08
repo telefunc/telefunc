@@ -63,7 +63,7 @@ Serverless platforms that don't expose sticky-session routing aren't a good fit 
 
 <Link href="/channel#broadcast">`Broadcast`</Link> is different: publishers and subscribers are intentionally decoupled — they only share a `key` string. Each instance keeps its own subscriber list locally, and the broadcast transport is what makes a publisher on instance A reach a subscriber on instance B.
 
-In a single-instance setup, the default in-memory transport is enough. In a multi-instance setup, install a transport that fans out across the cluster — such as <Link text={<code>@telefunc/redis</code>} href="/redis" />.
+In a single-instance setup, the default in-memory transport is enough. In a multi-instance setup, install a transport that fans out across the cluster — such as <Link href="/redis"><code>@telefunc/redis</code></Link>.
 
 > Redis is the only adapter shipped today, but the `BroadcastTransport` interface is small (about four methods), so you can write a custom transport on top of NATS, Kafka, RabbitMQ, or any other message broker.
 
