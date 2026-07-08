@@ -67,6 +67,8 @@ import { TelefuncStreamBeta } from '../../components'
 
 1. <Link href="#channel"><code>Channel</code></Link>: API for advanced real-time use cases.
 
+1. <Link href="#room"><code>Room</code></Link>: multi-party rooms with presence — who's connected, join/leave events, per-member streams.
+
 > A single telefunction can [mix primitives](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) (generators, channels, promises, ...) side by side, each resolving independently.
 
 #### Integrations
@@ -428,6 +430,39 @@ import { onDashboard } from './Dashboard.telefunc'
 
 const channel = await onDashboard()
 channel.listen((metrics) => updateCharts(metrics))
+```
+
+
+## Primitive: `Room` {#room}
+
+For multi-party use cases — chat, game lobbies, video calls, collaboration — where *who is connected* matters, use a room, see:
+- <Link href="/room" />
+
+> Built on top of channels: a `Room` adds presence, participant metadata, private messages, and admin controls to keyed pub/sub.
+
+```ts
+// Lobby.telefunc.ts
+// Environment: server
+
+import { Room } from 'telefunc'
+
+export async function onGetLobby() {
+  return await Room.get('lobby')
+}
+```
+
+```ts
+// Lobby.jsx
+// Environment: client
+
+import { onGetLobby } from './Lobby.telefunc'
+
+const lobby = await onGetLobby()
+lobby.onJoin((member) => console.log(`${member.meta.name} joined`))
+lobby.subscribe((data, info, from) => showMessage(from.meta.name, data))
+
+const me = await lobby.join({ name: 'Alice' })
+await me.publish({ text: 'hello' })
 ```
 
 
