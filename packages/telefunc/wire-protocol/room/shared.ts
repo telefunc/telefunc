@@ -12,7 +12,9 @@ export {
   frameWithMemberId,
   unframeMemberId,
   hasRoomTag,
+  normalizeJoinOptions,
   RoomState,
+  ParticipantBase,
 }
 export type {
   RoomConfigRecord,
@@ -34,10 +36,10 @@ export type {
   BinaryWants,
 }
 
-import { assert } from '../../utils/assert.js'
+import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
-import type { ChannelPublishInfo } from '../channel.js'
-import type { ParticipantMeta, RemoteParticipant, RoomMeta } from './types.js'
+import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
+import type { JoinOptions, LocalParticipant, ParticipantMeta, RemoteParticipant, RoomMeta } from './types.js'
 
 // ---------------------------------------------------------------------------
 // Keys & records
@@ -184,6 +186,13 @@ function hasRoomTag(value: unknown): value is { __r: string } {
   return isObject(value) && typeof value.__r === 'string'
 }
 
+/** Validates `join(meta, options)` arguments; returns the resolved `selfDelivery`. */
+function normalizeJoinOptions(meta: unknown, options: JoinOptions | undefined): boolean {
+  assertUsage(isObject(meta), 'join() meta should be an object')
+  assertUsage(options === undefined || isObject(options), 'join() options should be an object')
+  return options?.selfDelivery !== false
+}
+
 // ---------------------------------------------------------------------------
 // Member IDs — UUIDs, framed as a fixed 16-byte prefix on binary messages
 // ---------------------------------------------------------------------------
@@ -252,6 +261,7 @@ type RoomStateOptions = {
   meta: RoomMeta
   size: number
   members: MemberSnapshot[]
+  closed?: boolean
   /** Fired whenever the number of attached listeners changes — lets the owner
    *  (de)activate its event source (adapter subscription, wire subscription). */
   onListenersChanged: () => void
@@ -272,7 +282,7 @@ class RoomState {
   readonly roomId: string
   meta: RoomMeta
   size: number
-  closed = false
+  closed: boolean
   /** Bumped on every membership change — guards async KV reconciles against going stale. */
   membershipVersion = 0
 
@@ -303,6 +313,7 @@ class RoomState {
     this.roomId = opts.roomId
     this.meta = opts.meta
     this.size = opts.size
+    this.closed = opts.closed === true
     this._onListenersChanged = opts.onListenersChanged
     this._onCallbackError = opts.onCallbackError
     for (const member of opts.members) this._createEntry(member)
@@ -568,6 +579,95 @@ class RoomState {
       } catch (err) {
         this._onCallbackError(err)
       }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ParticipantBase — the shared half of every LocalParticipant
+// ---------------------------------------------------------------------------
+
+/**
+ * The private-message inbox and the leave lifecycle, identical on server and client.
+ * Flavors supply the transport through the abstract operations and their own error pipeline.
+ */
+abstract class ParticipantBase implements LocalParticipant {
+  readonly id: string
+  readonly selfDelivery: boolean
+  /** @internal */ _meta: ParticipantMeta
+  protected _left = false
+  private _leftFired = false
+  private _leaveCbs: Array<() => void> = []
+  private readonly _messageCbs: Array<(data: unknown, fromId: string) => void> = []
+
+  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean) {
+    this.id = id
+    this._meta = meta
+    this.selfDelivery = selfDelivery
+  }
+
+  get meta(): ParticipantMeta {
+    return this._meta
+  }
+
+  abstract publish(data: unknown): Promise<ChannelPublishAck>
+  abstract publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
+  abstract send(to: string | RemoteParticipant, data: unknown): Promise<void>
+  abstract setMeta(meta: ParticipantMeta): Promise<void>
+  abstract leave(): Promise<void>
+  /** A user callback threw — each side reports through its own pipeline. */
+  protected abstract _reportError(err: unknown): void
+
+  listen(callback: (data: unknown, fromId: string) => void): () => void {
+    this._messageCbs.push(callback)
+    return () => {
+      const i = this._messageCbs.indexOf(callback)
+      if (i >= 0) this._messageCbs.splice(i, 1)
+    }
+  }
+
+  /** @internal — a direct message arrived on this member's inbox. */
+  _deliverMessage(fromId: string, data: unknown): void {
+    for (const cb of [...this._messageCbs]) {
+      try {
+        cb(data, fromId)
+      } catch (err) {
+        this._reportError(err)
+      }
+    }
+  }
+
+  onLeave(callback: () => void): () => void {
+    if (this._leftFired) {
+      this._invoke(callback)
+      return () => {}
+    }
+    this._leaveCbs.push(callback)
+    return () => {
+      const i = this._leaveCbs.indexOf(callback)
+      if (i >= 0) this._leaveCbs.splice(i, 1)
+    }
+  }
+
+  /** @internal — the member is gone (left, kicked, room closed, or holder disconnected). */
+  _onLeft(): void {
+    this._left = true
+    if (this._leftFired) return
+    this._leftFired = true
+    const cbs = this._leaveCbs
+    this._leaveCbs = []
+    for (const cb of cbs) this._invoke(cb)
+  }
+
+  protected _assertActive(): void {
+    if (this._left) throw new Error('Participant has left the room')
+  }
+
+  private _invoke(cb: () => void): void {
+    try {
+      cb()
+    } catch (err) {
+      this._reportError(err)
     }
   }
 }

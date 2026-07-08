@@ -14,10 +14,12 @@ import { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { ACK_STATUS, encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
+  ParticipantBase,
   ROOM_KEY_NAMESPACE,
   RoomState,
   frameWithMemberId,
   hasRoomTag,
+  normalizeJoinOptions,
   roomConfigKvKey,
   roomDmKey,
   roomMainKey,
@@ -747,33 +749,19 @@ class ServerRoom implements Room {
 const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomParticipant')
 
 /** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. */
-class ServerLocalParticipant implements LocalParticipant {
+class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
-  readonly id: string
-  readonly selfDelivery: boolean
-
   /** @internal */ readonly _room: ServerRoom
-  /** @internal */ _meta: ParticipantMeta
   /** @internal */ readonly _joinedAt: number
-  private _left = false
-  private _leftFired = false
-  private _leaveCbs: Array<() => void> = []
-  private readonly _messageCbs: Array<(data: unknown, fromId: string) => void> = []
 
   constructor(serverRoom: ServerRoom, id: string, meta: ParticipantMeta, joinedAt: number, selfDelivery: boolean) {
+    super(id, meta, selfDelivery)
     this._room = serverRoom
-    this.id = id
-    this._meta = meta
     this._joinedAt = joinedAt
-    this.selfDelivery = selfDelivery
   }
 
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
-  }
-
-  get meta(): ParticipantMeta {
-    return this._meta
   }
 
   async publish(data: unknown): Promise<ChannelPublishAck> {
@@ -792,25 +780,6 @@ class ServerLocalParticipant implements LocalParticipant {
     await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
   }
 
-  listen(callback: (data: unknown, fromId: string) => void): () => void {
-    this._messageCbs.push(callback)
-    return () => {
-      const i = this._messageCbs.indexOf(callback)
-      if (i >= 0) this._messageCbs.splice(i, 1)
-    }
-  }
-
-  /** @internal — a direct message arrived on this member's inbox. */
-  _deliverMessage(fromId: string, data: unknown): void {
-    for (const cb of [...this._messageCbs]) {
-      try {
-        cb(data, fromId)
-      } catch (err) {
-        reportRoomError(err)
-      }
-    }
-  }
-
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
     await this._room._setMemberMeta(this.id, meta)
@@ -824,30 +793,8 @@ class ServerLocalParticipant implements LocalParticipant {
     this._onLeft() // fires even when the room wasn't observing (no echo applied)
   }
 
-  onLeave(callback: () => void): () => void {
-    if (this._leftFired) {
-      invokeCallback(callback)
-      return () => {}
-    }
-    this._leaveCbs.push(callback)
-    return () => {
-      const i = this._leaveCbs.indexOf(callback)
-      if (i >= 0) this._leaveCbs.splice(i, 1)
-    }
-  }
-
-  /** @internal — the member is gone (left, kicked, room closed, or holder disconnected). */
-  _onLeft(): void {
-    this._left = true
-    if (this._leftFired) return
-    this._leftFired = true
-    const cbs = this._leaveCbs
-    this._leaveCbs = []
-    for (const cb of cbs) invokeCallback(cb)
-  }
-
-  private _assertActive(): void {
-    if (this._left) throw new Error('Participant has left the room')
+  protected _reportError(err: unknown): void {
+    reportRoomError(err)
   }
 }
 
@@ -1062,27 +1009,12 @@ function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta; s
   return { meta, size }
 }
 
-/** Validates `join(meta, options)` arguments; returns the resolved `selfDelivery`. */
-function normalizeJoinOptions(meta: unknown, options: JoinOptions | undefined): boolean {
-  assertUsage(isObject(meta), 'join() meta should be an object')
-  assertUsage(options === undefined || isObject(options), 'join() options should be an object')
-  return options?.selfDelivery !== false
-}
-
 function makeEid(): string {
   return Math.random().toString(36).slice(2, 10)
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
-}
-
-function invokeCallback(cb: () => void): void {
-  try {
-    cb()
-  } catch (err) {
-    reportRoomError(err)
-  }
 }
 
 function reportRoomError(err: unknown): void {
