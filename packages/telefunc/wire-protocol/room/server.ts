@@ -384,7 +384,11 @@ class ServerRoom implements Room {
    *  the target's owning node subscribes to (see `_onDm`). */
   async _sendDm(from: string, to: string, data: unknown): Promise<void> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
-    if (!this._state.getRemote(to)) throw new Error(`Participant not found: ${to}`)
+    // The local view lags while unobserved (and briefly right after the observe transition,
+    // until the KV resync lands) — consult the authoritative record before rejecting.
+    if (!this._state.getRemote(to) && (await getRoomKV().get(roomMemberKvKey(this.id, to))) === null) {
+      throw new Error(`Participant not found: ${to}`)
+    }
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, data }
     await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
   }

@@ -374,6 +374,20 @@ describe('direct messages', () => {
     await alice.leave()
     await expect(alice.send(bob.id, 'x')).rejects.toThrow('Participant has left')
   })
+
+  it("delivers to a member the sender's stale local view doesn't know yet (KV fallback)", async () => {
+    const a = await Room.create('dm-lag')
+    const alice = await a.join({ name: 'Alice' })
+    const b = await Room.get('dm-lag') // snapshot: alice only
+    const bob = await a.join({ name: 'Bob' }) // b is unobserved — it missed this join
+    const bobInbox: unknown[] = []
+    bob.listen((data, fromId) => bobInbox.push([data, fromId]))
+
+    // b's local view lags; the KV member record is authoritative.
+    await (b as ServerRoom)._sendDm(alice.id, bob.id, 'catch-up')
+
+    expect(bobInbox).toEqual([['catch-up', alice.id]])
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────
