@@ -263,12 +263,11 @@ class ServerRoom implements Room {
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     const selfDelivery = normalizeJoinOptions(meta, options)
-    const { id, joinedAt } = await this._createMember(meta)
-    const participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery)
-    this._localParticipants.set(id, participant)
-    this._syncSubs() // subscribe before announcing, so cross-node events flow from now on
-    this._state.applyJoin(id, meta, joinedAt)
-    await publishCtrl(this.id, { __r: 'join', id, meta, joinedAt })
+    let participant!: ServerLocalParticipant
+    await this._admitMember(meta, (id, joinedAt) => {
+      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery)
+      this._localParticipants.set(id, participant)
+    })
     return participant
   }
 
@@ -315,8 +314,23 @@ class ServerRoom implements Room {
 
   // ── Membership operations (shared by local participants and stub requests) ──
 
-  /** @internal — KV half of a join, guarding against a concurrent `Room.close()`. */
-  async _createMember(meta: ParticipantMeta): Promise<{ id: string; joinedAt: number }> {
+  /** Join choreography shared by local `join()` and stub `req-join`. `track` registers the
+   *  holder first — the member must count as owned before `_syncSubs()` brings up its inbox
+   *  subscription and heartbeat, and before its join is announced. */
+  private async _admitMember(
+    meta: ParticipantMeta,
+    track: (id: string, joinedAt: number) => void,
+  ): Promise<{ id: string; joinedAt: number }> {
+    const { id, joinedAt } = await this._createMember(meta)
+    track(id, joinedAt)
+    this._syncSubs()
+    this._state.applyJoin(id, meta, joinedAt)
+    await publishCtrl(this.id, { __r: 'join', id, meta, joinedAt })
+    return { id, joinedAt }
+  }
+
+  /** KV half of a join, guarding against a concurrent `Room.close()`. */
+  private async _createMember(meta: ParticipantMeta): Promise<{ id: string; joinedAt: number }> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
     const id = crypto.randomUUID()
@@ -523,11 +537,9 @@ class ServerRoom implements Room {
       switch (req.__r) {
         case 'req-join': {
           const meta = isObject(req.meta) ? req.meta : {}
-          const { id, joinedAt } = await this._createMember(meta)
-          stub._stubMembers.set(id, { selfDelivery: req.selfDelivery !== false })
-          this._syncSubs() // subscribe before announcing, so cross-node events flow from now on
-          this._state.applyJoin(id, meta, joinedAt)
-          await publishCtrl(this.id, { __r: 'join', id, meta, joinedAt })
+          const { id, joinedAt } = await this._admitMember(meta, (id) =>
+            stub._stubMembers.set(id, { selfDelivery: req.selfDelivery !== false }),
+          )
           return { ok: true, id, joinedAt }
         }
         case 'req-leave':
