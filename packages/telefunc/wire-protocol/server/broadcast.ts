@@ -28,13 +28,13 @@ type BroadcastAdapter = {
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult>
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
-  /** KV — required by `room()`. Reads the value stored at `key`, or `null` if absent. */
+  /** KV — required by `Room`. Reads the value stored at `key`, or `null` if absent. */
   get?(key: string): string | null | Promise<string | null>
-  /** KV — required by `room()`. Stores `value` at `key` (upsert). */
+  /** KV — required by `Room`. Stores `value` at `key` (upsert). */
   set?(key: string, value: string): void | Promise<void>
-  /** KV — required by `room()`. Removes the value stored at `key` (no-op if absent). */
+  /** KV — required by `Room`. Removes the value stored at `key` (no-op if absent). */
   delete?(key: string): void | Promise<void>
-  /** KV — required by `room()`. Lists all stored keys starting with `prefix`. */
+  /** KV — required by `Room`. Lists all stored keys starting with `prefix`. */
   keys?(prefix: string): string[] | Promise<string[]>
 }
 
@@ -59,13 +59,13 @@ type BroadcastTransport = {
     key: string,
     onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
   ): () => void
-  /** Optional KV — required by `room()` when a transport is installed. Reads the value at `key`, or `null`. */
+  /** Optional KV — required by `Room` when a transport is installed. Reads the value at `key`, or `null`. */
   get?(key: string): string | null | Promise<string | null>
-  /** Optional KV — required by `room()` when a transport is installed. Stores `value` at `key` (upsert). */
+  /** Optional KV — required by `Room` when a transport is installed. Stores `value` at `key` (upsert). */
   set?(key: string, value: string): void | Promise<void>
-  /** Optional KV — required by `room()` when a transport is installed. Removes the value at `key`. */
+  /** Optional KV — required by `Room` when a transport is installed. Removes the value at `key`. */
   delete?(key: string): void | Promise<void>
-  /** Optional KV — required by `room()` when a transport is installed. Lists stored keys starting with `prefix`. */
+  /** Optional KV — required by `Room` when a transport is installed. Lists stored keys starting with `prefix`. */
   keys?(prefix: string): string[] | Promise<string[]>
 }
 
@@ -202,7 +202,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     if (!this.transport) return null
     assertUsage(
       typeof this.transport[method] === 'function',
-      `The installed broadcast transport doesn't implement the KV method \`${method}()\` required by \`room()\` — implement \`get()\`, \`set()\`, \`delete()\`, and \`keys()\` on the transport, backed by a store all server instances can reach.`,
+      `The installed broadcast transport doesn't implement the KV method \`${method}()\` required by \`Room\` — implement \`get()\`, \`set()\`, \`delete()\`, and \`keys()\` on the transport, backed by a store all server instances can reach.`,
     )
     return this.transport
   }

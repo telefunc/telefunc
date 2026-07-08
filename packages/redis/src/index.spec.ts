@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Redis } from 'ioredis'
-import { DefaultBroadcastAdapter } from 'telefunc'
+import { config, DefaultBroadcastAdapter, Room } from 'telefunc'
 import { RedisTransport } from './index.js'
 
 // Fake `ioredis` — `defineCommand` + `duplicate()` + broadcast subscribe/dispatch. Lua
@@ -10,11 +10,39 @@ class FakeIoredis {
   /** `seqKey → counter` for the in-script `INCR`. */
   private readonly counters = new Map<string, number>()
   private readonly listeners: Array<(channel: Uint8Array, message: Uint8Array) => void> = []
+  /** Backs GET/SET/DEL/SCAN. */
+  private readonly store = new Map<string, string>()
   /** Mocked clock so tests can assert deterministic ts. */
   private clockMs = 1_700_000_000_000
 
   setClock(ms: number): void {
     this.clockMs = ms
+  }
+
+  async get(key: string): Promise<string | null> {
+    return this.store.get(key) ?? null
+  }
+
+  async set(key: string, value: string): Promise<'OK'> {
+    this.store.set(key, value)
+    return 'OK'
+  }
+
+  async del(key: string): Promise<number> {
+    return this.store.delete(key) ? 1 : 0
+  }
+
+  /** Single-page SCAN honoring a literal MATCH pattern with a trailing `*` (the only shape the transport emits). */
+  async scan(
+    _cursor: string,
+    _match: 'MATCH',
+    pattern: string,
+    _count: 'COUNT',
+    _n: number,
+  ): Promise<[string, string[]]> {
+    const literalPrefix = pattern.slice(0, -1).replace(/\\([*?[\]\\])/g, '$1')
+    const keys = [...this.store.keys()].filter((key) => key.startsWith(literalPrefix))
+    return ['0', keys]
   }
 
   // `duplicate()` would normally allocate a new TCP connection; in the fake we
@@ -137,5 +165,59 @@ describe('Redis adapter — live delivery', () => {
     expect(Array.from(received[0]!.payload)).toEqual([0xde, 0xad, 0xbe, 0xef])
     expect(received[0]!.seq).toBe(1)
     expect(received[0]!.timestamp).toBe(1_700_000_003_000)
+  })
+})
+
+describe('Redis adapter — KV (backs `Room` state)', () => {
+  it('round-trips values under the transport prefix and strips it from keys()', async () => {
+    const { fake, adapter } = newAdapter()
+
+    expect(await adapter.get('telefunc:room:lobby:config')).toBe(null)
+    await adapter.set('telefunc:room:lobby:config', '{"a":1}')
+    expect(await adapter.get('telefunc:room:lobby:config')).toBe('{"a":1}')
+    expect(await fake.get('tf:kv:telefunc:room:lobby:config')).toBe('{"a":1}') // namespaced in Redis
+
+    await adapter.set('telefunc:room:lobby:m:x', '{}')
+    await adapter.set('unrelated', '{}')
+    expect((await adapter.keys('telefunc:room:')).sort()).toEqual([
+      'telefunc:room:lobby:config',
+      'telefunc:room:lobby:m:x',
+    ])
+
+    await adapter.delete('telefunc:room:lobby:config')
+    expect(await adapter.get('telefunc:room:lobby:config')).toBe(null)
+  })
+
+  it('matches glob metacharacters in room IDs literally, not as patterns', async () => {
+    const { adapter } = newAdapter()
+
+    await adapter.set('telefunc:room:a*b:config', '{}')
+    await adapter.set('telefunc:room:axb:config', '{}')
+
+    expect(await adapter.keys('telefunc:room:a*b')).toEqual(['telefunc:room:a*b:config'])
+  })
+})
+
+describe('Room over the Redis transport', () => {
+  // End-to-end: install the transport globally (per-isolate — safe, vitest isolates spec files)
+  // and run the full room lifecycle so KV and pub/sub delegation are exercised together.
+  it('runs the full room lifecycle — create, join, publish, kick', async () => {
+    const fake = new FakeIoredis()
+    config.broadcast.transport = new RedisTransport({ redis: fake as unknown as Redis })
+
+    const lobby = await Room.create('lobby', { meta: { topic: 'redis' }, size: 10 })
+    const observer = await Room.get('lobby')
+    const log: string[] = []
+    observer.onJoin((m) => log.push(`join:${m.meta.name}`))
+    observer.onLeave((m) => log.push(`leave:${m.id}`))
+    observer.subscribe((data, _info, from) => log.push(`msg:${from.meta.name}:${data}`))
+
+    const me = await lobby.join({ name: 'Alice' })
+    await me.publish('hello')
+    await Room.removeParticipant('lobby', me.id)
+
+    expect(log).toEqual([`join:Alice`, `msg:Alice:hello`, `leave:${me.id}`])
+    expect(observer.count).toBe(0)
+    expect(await Room.list()).toMatchObject([{ id: 'lobby', meta: { topic: 'redis' }, count: 0 }])
   })
 })

@@ -692,3 +692,42 @@ describe('cloudflare broadcast routing', () => {
     _resetBroadcastAdapterForTesting(previousTransport)
   })
 })
+
+describe('cloudflare KV store (backs `Room` state)', () => {
+  function createTransportWithKV() {
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const kv = createMockKV()
+    transport.attachKV(kv)
+    return { transport, kv }
+  }
+
+  it('round-trips values under the `tfkv:` namespace and strips it from keys()', async () => {
+    const { transport, kv } = createTransportWithKV()
+
+    expect(await transport.get('telefunc:room:lobby:config')).toBeNull()
+    await transport.set('telefunc:room:lobby:config', '{"a":1}')
+    expect(await transport.get('telefunc:room:lobby:config')).toBe('{"a":1}')
+    expect(await kv.get('tfkv:telefunc:room:lobby:config')).toBe('{"a":1}') // namespaced in Workers KV
+
+    await transport.set('telefunc:room:lobby:m:x', '{}')
+    expect((await transport.keys('telefunc:room:')).sort()).toEqual([
+      'telefunc:room:lobby:config',
+      'telefunc:room:lobby:m:x',
+    ])
+
+    await transport.delete('telefunc:room:lobby:config')
+    expect(await transport.get('telefunc:room:lobby:config')).toBeNull()
+  })
+
+  it('does not leak broadcast presence records into the KV keyspace', async () => {
+    const { transport } = createTransportWithKV()
+    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
+    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+
+    transport.subscribe('telefunc:room:lobby', () => {})
+    await flushMicrotasks()
+    await transport.set('telefunc:room:lobby:config', '{}')
+
+    expect(await transport.keys('')).toEqual(['telefunc:room:lobby:config'])
+  })
+})

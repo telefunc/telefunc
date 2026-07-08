@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { Broadcast } from '../server/server-broadcast.js'
 import {
@@ -9,10 +10,18 @@ import {
 } from '../server/broadcast.js'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
-import { room, RoomStubChannel, ServerRoom, type ServerLocalParticipant } from './server.js'
+import { Room, RoomStubChannel, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
-import { frameWithMemberId, roomMainKey, unframeMemberId, type RoomSnapshotMetadata } from './shared.js'
+import {
+  frameWithMemberId,
+  roomMainKey,
+  roomMemberKvKey,
+  unframeMemberId,
+  type RoomMemberRecord,
+  type RoomSnapshotMetadata,
+} from './shared.js'
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 
@@ -28,44 +37,41 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
 // instances, phantom rooms after close, key collisions between room IDs.
 // ───────────────────────────────────────────────────────────────────────────
 
-describe('room entry point', () => {
-  it('create → get returns the same room config; room(id) is a get shorthand', async () => {
-    await room.create('lobby', { meta: { topic: 'general' }, size: 5 })
-    const viaGet = await room.get('lobby')
-    const viaCall = await room('lobby')
-    for (const lobby of [viaGet, viaCall]) {
-      expect(lobby.id).toBe('lobby')
-      expect(lobby.meta).toEqual({ topic: 'general' })
-      expect(lobby.size).toBe(5)
-      expect(lobby.count).toBe(0)
-      expect(lobby.isEmpty).toBe(true)
-      expect(lobby.isClosed).toBe(false)
-    }
+describe('Room entry point', () => {
+  it('create → get returns the same room config', async () => {
+    await Room.create('lobby', { meta: { topic: 'general' }, size: 5 })
+    const lobby = await Room.get('lobby')
+    expect(lobby.id).toBe('lobby')
+    expect(lobby.meta).toEqual({ topic: 'general' })
+    expect(lobby.size).toBe(5)
+    expect(lobby.count).toBe(0)
+    expect(lobby.isEmpty).toBe(true)
+    expect(lobby.isClosed).toBe(false)
   })
 
   it('create throws on an existing room; get throws on a missing one', async () => {
-    await room.create('dup')
-    await expect(room.create('dup')).rejects.toThrow('Room already exists: dup')
-    await expect(room.get('nope')).rejects.toThrow('Room not found: nope')
+    await Room.create('dup')
+    await expect(Room.create('dup')).rejects.toThrow('Room already exists: dup')
+    await expect(Room.get('nope')).rejects.toThrow('Room not found: nope')
   })
 
   it('size defaults to Infinity and is a hint — joins beyond capacity are not rejected', async () => {
-    const lobby = await room.create('unbounded')
+    const lobby = await Room.create('unbounded')
     expect(lobby.size).toBe(Infinity)
     expect(lobby.isFull).toBe(false)
 
-    const tiny = await room.create('tiny', { size: 1 })
+    const tiny = await Room.create('tiny', { size: 1 })
     await tiny.join()
     await tiny.join() // not enforced
     expect(tiny.count).toBe(2)
   })
 
   it('list() reflects rooms and their live member counts', async () => {
-    await room.create('a')
-    const b = await room.create('b', { meta: { topic: 'x' }, size: 2 })
+    await Room.create('a')
+    const b = await Room.create('b', { meta: { topic: 'x' }, size: 2 })
     await b.join()
 
-    const rooms = (await room.list()).sort((x, y) => x.id.localeCompare(y.id))
+    const rooms = (await Room.list()).sort((x, y) => x.id.localeCompare(y.id))
     expect(rooms).toEqual([
       { id: 'a', meta: {}, size: Infinity, count: 0, isEmpty: true, isFull: false },
       { id: 'b', meta: { topic: 'x' }, size: 2, count: 1, isEmpty: false, isFull: false },
@@ -75,66 +81,66 @@ describe('room entry point', () => {
   // Room IDs may contain `:` (e.g. `video:demo`). A room whose ID extends another room's
   // member-key prefix must not leak into that room's member enumeration or `list()`.
   it('room IDs containing colons do not collide with member records', async () => {
-    const a = await room.create('a')
+    const a = await Room.create('a')
     await a.join()
-    await room.create('a:m:b')
+    await Room.create('a:m:b')
 
-    const rooms = await room.list()
+    const rooms = await Room.list()
     expect(rooms.map((r) => r.id).sort()).toEqual(['a', 'a:m:b'])
     expect(rooms.find((r) => r.id === 'a')!.count).toBe(1)
     expect(rooms.find((r) => r.id === 'a:m:b')!.count).toBe(0)
   })
 
   it('update() is a full replace — omitted size resets to Infinity — and fires onUpdate', async () => {
-    const lobby = await room.create('conf', { meta: { topic: 'a' }, size: 2 })
+    const lobby = await Room.create('conf', { meta: { topic: 'a' }, size: 2 })
     const updates: Array<[unknown, unknown]> = []
     lobby.onUpdate((meta, prev) => updates.push([meta, prev]))
 
-    await room.update('conf', { meta: { topic: 'b' } })
+    await Room.update('conf', { meta: { topic: 'b' } })
 
     expect(updates).toEqual([[{ topic: 'b' }, { topic: 'a' }]])
     expect(lobby.meta).toEqual({ topic: 'b' })
     expect(lobby.size).toBe(Infinity)
-    await expect(room.update('conf', { isolated: true })).rejects.toThrow('fixed at creation')
-    await expect(room.update('gone', {})).rejects.toThrow('Room not found: gone')
+    await expect(Room.update('conf', { isolated: true })).rejects.toThrow('fixed at creation')
+    await expect(Room.update('gone', {})).rejects.toThrow('Room not found: gone')
   })
 
   it('close() fires onClose on observers, removes the room, and fails later joins', async () => {
-    const lobby = await room.create('closing')
+    const lobby = await Room.create('closing')
     const me = await lobby.join()
     let closed = false
     let meLeft = false
     lobby.onClose(() => (closed = true))
     me.onLeave(() => (meLeft = true))
 
-    await room.close('closing')
+    await Room.close('closing')
 
     expect(closed).toBe(true)
     expect(meLeft).toBe(true)
     expect(lobby.isClosed).toBe(true)
     expect(lobby.count).toBe(0)
-    await expect(room.get('closing')).rejects.toThrow('Room not found')
+    await expect(Room.get('closing')).rejects.toThrow('Room not found')
     await expect(lobby.join()).rejects.toThrow('Room is closed')
-    await expect(room.close('closing')).rejects.toThrow('Room not found')
-    expect(await room.list()).toEqual([])
+    await expect(Room.close('closing')).rejects.toThrow('Room not found')
+    expect(await Room.list()).toEqual([])
   })
 
   it('removeParticipant() kicks: the member leaves everywhere, its LocalParticipant fires onLeave', async () => {
-    const lobby = await room.create('kick')
+    const lobby = await Room.create('kick')
     const me = await lobby.join({ name: 'Alice' })
-    const observer = await room.get('kick')
+    const observer = await Room.get('kick')
     const kicked: string[] = []
     observer.onLeave((m) => kicked.push(m.id))
     let meLeft = false
     me.onLeave(() => (meLeft = true))
 
-    await room.removeParticipant('kick', me.id)
+    await Room.removeParticipant('kick', me.id)
 
     expect(kicked).toEqual([me.id])
     expect(meLeft).toBe(true)
     expect(lobby.count).toBe(0)
     await expect(me.publish({ text: 'too late' })).rejects.toThrow('Participant has left')
-    await expect(room.removeParticipant('kick', me.id)).rejects.toThrow('Participant not found')
+    await expect(Room.removeParticipant('kick', me.id)).rejects.toThrow('Participant not found')
   })
 })
 
@@ -145,8 +151,8 @@ describe('room entry point', () => {
 
 describe('presence', () => {
   it('join() announces the member on every observing instance — and exactly once on the origin', async () => {
-    const a = await room.create('presence')
-    const b = await room.get('presence')
+    const a = await Room.create('presence')
+    const b = await Room.get('presence')
     const joinsA: string[] = []
     const joinsB: unknown[] = []
     a.onJoin((m) => joinsA.push(m.id))
@@ -162,8 +168,8 @@ describe('presence', () => {
   })
 
   it('leave() removes the member everywhere and fires onLeave + onEmpty', async () => {
-    const a = await room.create('leaving')
-    const b = await room.get('leaving')
+    const a = await Room.create('leaving')
+    const b = await Room.get('leaving')
     const events: string[] = []
     b.onLeave((m) => events.push(`leave:${m.id}`))
     b.onEmpty(() => events.push('empty'))
@@ -178,7 +184,7 @@ describe('presence', () => {
   })
 
   it('onFull fires when the room reaches capacity', async () => {
-    const lobby = await room.create('full', { size: 2 })
+    const lobby = await Room.create('full', { size: 2 })
     let full = 0
     lobby.onFull(() => full++)
 
@@ -190,11 +196,11 @@ describe('presence', () => {
   })
 
   it('getParticipants() on an unobserved instance resyncs from KV', async () => {
-    const a = await room.create('lazy')
+    const a = await Room.create('lazy')
     const me = await a.join({ name: 'Alice' })
 
     // `b` has no listeners/joins/stubs — it did not receive the join event.
-    const b = await room.get('lazy')
+    const b = await Room.get('lazy')
     await me.setMeta({ name: 'Alicia' })
     const members = await b.getParticipants()
 
@@ -203,8 +209,8 @@ describe('presence', () => {
   })
 
   it('setMeta() propagates to remote views — firing onUpdate exactly once on the origin', async () => {
-    const a = await room.create('meta')
-    const b = await room.get('meta')
+    const a = await Room.create('meta')
+    const b = await Room.get('meta')
     const seenOnB: unknown[] = []
     b.onJoin((m) => m.onUpdate((meta, prev) => seenOnB.push([meta, prev])))
 
@@ -234,8 +240,8 @@ describe('presence', () => {
 
 describe('data pub/sub', () => {
   it('publish() reaches room-level subscribers with sender identity and publish info', async () => {
-    const a = await room.create('chat')
-    const b = await room.get('chat')
+    const a = await Room.create('chat')
+    const b = await Room.get('chat')
     const received: Array<{ data: unknown; from: unknown; key: string; seq: number }> = []
     b.subscribe((data, info, from) => received.push({ data, from: from.meta, key: info.key, seq: info.seq }))
 
@@ -248,7 +254,7 @@ describe('data pub/sub', () => {
   })
 
   it("per-member subscribe receives only that member's messages", async () => {
-    const lobby = await room.create('duo')
+    const lobby = await Room.create('duo')
     const alice = await lobby.join({ name: 'Alice' })
     const bob = await lobby.join({ name: 'Bob' })
 
@@ -263,8 +269,8 @@ describe('data pub/sub', () => {
   })
 
   it('publishers receive their own messages by default; selfDelivery=false suppresses only their holder', async () => {
-    const a = await room.create('echo')
-    const b = await room.get('echo')
+    const a = await Room.create('echo')
+    const b = await Room.get('echo')
     const seenOnA: unknown[] = []
     const seenOnB: unknown[] = []
     a.subscribe((data) => seenOnA.push(data))
@@ -280,8 +286,8 @@ describe('data pub/sub', () => {
   })
 
   it('binary round-trips with the 16-byte member ID frame, preserving high-bit bytes', async () => {
-    const a = await room.create('bin')
-    const b = await room.get('bin')
+    const a = await Room.create('bin')
+    const b = await Room.get('bin')
     const received: Array<{ bytes: number[]; from: string }> = []
     b.subscribeBinary((data, _info, from) => received.push({ bytes: [...data], from: from.id }))
 
@@ -299,8 +305,8 @@ describe('data pub/sub', () => {
 
 describe('isolated mode', () => {
   it('routes data over per-member keys while control stays on the main key', async () => {
-    const a = await room.create('vid', { isolated: true })
-    const b = await room.get('vid')
+    const a = await Room.create('vid', { isolated: true })
+    const b = await Room.get('vid')
     const received: unknown[] = []
     b.subscribe((data, _info, from) => received.push([data, from.meta]))
 
@@ -332,7 +338,7 @@ describe('room stub channel', () => {
   }
 
   async function createServedRoom(id: string) {
-    const serverRoom = (await room.create(id)) as ServerRoom
+    const serverRoom = (await Room.create(id)) as ServerRoom
     const stub = new RoomStubChannel(serverRoom)
     stub._registerChannel()
     serverRoom._attachStub(stub)
@@ -364,7 +370,7 @@ describe('room stub channel', () => {
 
   it('client publishes are validated: own member passes, impersonation is rejected', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('auth')
-    const observer = await room.get('auth')
+    const observer = await Room.get('auth')
     const received: unknown[] = []
     observer.subscribe((data, _info, from) => received.push([data, from.id]))
     const { id } = await joinViaStub(stub, peer, 1)
@@ -395,7 +401,7 @@ describe('room stub channel', () => {
 
   it('the client vanishing (channel shutdown) makes its members leave the room', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('vanish')
-    const observer = await room.get('vanish')
+    const observer = await Room.get('vanish')
     const leaves: string[] = []
     observer.onLeave((m) => leaves.push(m.id))
     const { id } = await joinViaStub(stub, peer, 1)
@@ -405,7 +411,7 @@ describe('room stub channel', () => {
 
     expect(leaves).toEqual([id])
     expect(serverRoom.count).toBe(0)
-    expect(await room.list()).toMatchObject([{ id: 'vanish', count: 0 }])
+    expect(await Room.list()).toMatchObject([{ id: 'vanish', count: 0 }])
   })
 })
 
@@ -574,6 +580,74 @@ describe('ClientRoom', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
+// Liveness — graceful departures travel as events; a hard node crash leaves
+// member records behind. Owners heartbeat `seenAt`; stale records are reaped
+// on read and on every heartbeat, with the leave announced to all observers.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('liveness', () => {
+  async function backdate(roomId: string, memberId: string): Promise<void> {
+    const adapter = getBroadcastAdapter()
+    const key = roomMemberKvKey(roomId, memberId)
+    const record = parse((await adapter.get!(key)) as string) as RoomMemberRecord
+    const stale: RoomMemberRecord = { ...record, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 }
+    await adapter.set!(key, stringify(stale))
+  }
+
+  it('reaps members with a stale heartbeat on read, announcing the leave everywhere', async () => {
+    const a = await Room.create('crashed')
+    const me = await a.join({ name: 'Ghost' })
+    const observer = await Room.get('crashed')
+    const leaves: string[] = []
+    observer.onLeave((m) => leaves.push(m.id))
+
+    await backdate('crashed', me.id) // simulate: the owning node died 2 minutes ago
+
+    expect(await Room.list()).toMatchObject([{ id: 'crashed', count: 0 }])
+    expect(leaves).toEqual([me.id])
+    expect(observer.count).toBe(0)
+    expect(a.count).toBe(0) // the (supposed) owner learned via the reaper's event too
+    await expect(me.publish('boo')).rejects.toThrow('Participant has left')
+  })
+
+  it('owners refresh their members every heartbeat interval', async () => {
+    vi.useFakeTimers()
+    try {
+      const a = await Room.create('hb')
+      const me = await a.join()
+      const adapter = getBroadcastAdapter()
+      const key = roomMemberKvKey('hb', me.id)
+      const before = (parse((await adapter.get!(key)) as string) as RoomMemberRecord).seenAt
+
+      await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
+
+      const after = (parse((await adapter.get!(key)) as string) as RoomMemberRecord).seenAt
+      expect(after).toBe(before + ROOM_HEARTBEAT_INTERVAL_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a heartbeat discovering its member gone (reaped elsewhere) applies the leave locally', async () => {
+    vi.useFakeTimers()
+    try {
+      const a = await Room.create('hb-gone')
+      const me = await a.join()
+      let left = false
+      me.onLeave(() => (left = true))
+
+      await getBroadcastAdapter().delete!(roomMemberKvKey('hb-gone', me.id))
+      await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
+
+      expect(left).toBe(true)
+      expect(a.count).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
 // Adapter requirements — rooms need the adapter's KV; a custom adapter
 // without it must fail loud and clear, not half-work.
 // ───────────────────────────────────────────────────────────────────────────
@@ -587,6 +661,6 @@ describe('adapter KV requirement', () => {
       publishBinary: () => ({ seq: 1, timestamp: 1 }),
     }
     _resetBroadcastAdapterForTesting(pubSubOnly)
-    await expect(room.create('kv-less')).rejects.toThrow(/KV methods required by `room\(\)`/)
+    await expect(Room.create('kv-less')).rejects.toThrow(/KV methods required by `Room`/)
   })
 })

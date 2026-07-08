@@ -71,10 +71,12 @@ type RoomConfigRecord = {
   isolated: boolean
 }
 
-/** Stored at `roomMemberKvKey`. */
+/** Stored at `roomMemberKvKey`. `seenAt` is the liveness timestamp: the owning node refreshes
+ *  it every `ROOM_HEARTBEAT_INTERVAL_MS`; records older than `ROOM_MEMBER_TTL_MS` are reaped. */
 type RoomMemberRecord = {
   meta: ParticipantMeta
   joinedAt: number
+  seenAt: number
 }
 
 function sizeToWire(size: number): number | null {

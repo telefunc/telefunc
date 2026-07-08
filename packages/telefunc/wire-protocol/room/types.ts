@@ -31,7 +31,7 @@ type RoomOptions = {
   isolated?: boolean
 }
 
-/** Lightweight room snapshot returned by `room.list()`. */
+/** Lightweight room snapshot returned by `Room.list()`. */
 type RoomInfo = {
   readonly id: string
   readonly meta: RoomMeta
@@ -51,7 +51,7 @@ type ParticipantBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) =>
 /**
  * A multi-party room with presence, membership, and events. One type, same on server and
  * client — a `Room` can be returned from a telefunction as-is. Admin operations live on the
- * server-side `room.*` entry point, not on the instance.
+ * server-side `Room.*` statics, not on the instance.
  */
 type Room = {
   /** The ID the room was created with. */
@@ -78,13 +78,13 @@ type Room = {
   onJoin(callback: (member: RemoteParticipant) => void): () => void
   /** A participant left (or was removed). */
   onLeave(callback: (member: RemoteParticipant) => void): () => void
-  /** The room was reconfigured via `room.update()`. */
+  /** The room was reconfigured via `Room.update()`. */
   onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void
   /** The last participant left. */
   onEmpty(callback: () => void): () => void
   /** The room reached capacity (`count >= size`). */
   onFull(callback: () => void): () => void
-  /** The room was closed via `room.close()` (on the client, also: the connection is gone). */
+  /** The room was closed via `Room.close()` (on the client, also: the connection is gone). */
   onClose(callback: () => void): () => void
 }
 

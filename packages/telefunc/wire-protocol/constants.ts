@@ -223,6 +223,15 @@ export const FC_SELF_TIME_WINDOW_MS = 1000
  *  telefunc when the choke is elsewhere. */
 export const FC_SELF_UTIL_THRESHOLD = 0.5
 
+// ===== Rooms =====
+
+/** How often a node refreshes the liveness timestamp of the room members it owns. */
+export const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
+/** Age after which a member record counts as dead and is reaped. Sized for one missed
+ *  heartbeat plus eventually-consistent KV backends (Workers KV propagates within ~60s).
+ *  Graceful departures (leave, disconnect, close) are immediate — this is crash recovery. */
+export const ROOM_MEMBER_TTL_MS = 120_000
+
 // ===== Session routing =====
 
 /** User-facing header for sticky session routing (opaque token). */

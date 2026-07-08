@@ -18,6 +18,8 @@ import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
+/** Namespace of the adapter's KV store (`get`/`set`/`delete`/`keys`) within the Workers KV binding. */
+const KV_STORE_PREFIX = 'tfkv:'
 
 /** Unwrap Cloudflare DO RPC proxy into a plain object.
  *  RPC properties are lazy stubs that must be awaited to resolve their values. */
@@ -349,6 +351,38 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     } while (cursor)
 
     return result
+  }
+
+  // --- KV (backs `Room` state) ---
+  //
+  // Stored in the same Workers KV namespace as broadcast presence, under its own
+  // `tfkv:` prefix. Room state tolerates KV's eventual consistency: live updates
+  // travel as broadcast events, KV is durability + late-joiner seed + crash reaping
+  // (`ROOM_MEMBER_TTL_MS` is sized for KV's propagation delay).
+
+  async get(key: string): Promise<string | null> {
+    return await this.requireKV().get(KV_STORE_PREFIX + key)
+  }
+
+  async set(key: string, value: string): Promise<void> {
+    await this.requireKV().put(KV_STORE_PREFIX + key, value)
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.requireKV().delete(KV_STORE_PREFIX + key)
+  }
+
+  async keys(prefix: string): Promise<string[]> {
+    const kv = this.requireKV()
+    const fullPrefix = KV_STORE_PREFIX + prefix
+    const keys: string[] = []
+    let cursor: string | undefined
+    do {
+      const list = await kv.list({ prefix: fullPrefix, cursor })
+      for (const entry of list.keys) keys.push(entry.name.slice(KV_STORE_PREFIX.length))
+      cursor = list.list_complete ? undefined : list.cursor
+    } while (cursor)
+    return keys
   }
 
   // --- Local subscriber tracking ---

@@ -1,5 +1,4 @@
-export { room, ServerRoom, ServerLocalParticipant, RoomStubChannel, bindParticipantStubChannel }
-export type { RoomEntry }
+export { Room, ServerRoom, ServerLocalParticipant, RoomStubChannel, bindParticipantStubChannel }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -7,7 +6,9 @@ import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTel
 import { assert, assertUsage } from '../../utils/assert.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { getBroadcastAdapter } from '../server/broadcast.js'
 import { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
@@ -42,20 +43,23 @@ import type {
   LocalParticipant,
   ParticipantMeta,
   RemoteParticipant,
-  Room,
+  Room as RoomInstance,
   RoomInfo,
   RoomMeta,
   RoomOptions,
 } from './types.js'
 assertIsNotBrowser()
 
+/** `Room` is one identifier with two meanings, like the built-in `Date`: the statics object
+ *  below (value) and the instance type from ./types.js — re-established locally so the two
+ *  merge into a single export. */
+type Room = RoomInstance
+
 // ---------------------------------------------------------------------------
-// `room` entry point
+// `Room` entry point
 // ---------------------------------------------------------------------------
 
-type RoomEntry = {
-  /** Get an existing room — shorthand for `room.get(id)`. Throws if it doesn't exist. */
-  (id: string): Promise<Room>
+type RoomStatic = {
   /** Create a new room. Throws if it already exists. */
   create(id: string, options?: RoomOptions): Promise<Room>
   /** Get an existing room. Throws if it doesn't exist. */
@@ -75,22 +79,22 @@ type RoomEntry = {
  * clients receive `Room` and `LocalParticipant` objects by returning them from telefunctions.
  *
  * ```ts
- * import { room } from 'telefunc'
+ * import { Room } from 'telefunc'
  *
- * await room.create('lobby', { meta: { topic: 'general' }, size: 100 })
- * const lobby = await room('lobby')
+ * await Room.create('lobby', { meta: { topic: 'general' }, size: 100 })
+ * const lobby = await Room.get('lobby')
  * const me = await lobby.join({ name: 'Alice' })
  * await me.publish({ text: 'hello' })
  * ```
  */
-const room: RoomEntry = Object.assign((id: string) => getRoom(id), {
+const Room: RoomStatic = {
   create: createRoom,
   get: getRoom,
   list: listRooms,
   update: updateRoom,
   close: closeRoom,
   removeParticipant,
-})
+}
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
@@ -107,7 +111,7 @@ async function getRoom(id: string): Promise<Room> {
   const kv = getRoomKV()
   const config = await readConfig(kv, id)
   if (config === null) throw new Error(`Room not found: ${id}`)
-  return new ServerRoom(id, config, await readMembers(kv, id))
+  return new ServerRoom(id, config, await readMembers(kv, id, 'reap'))
 }
 
 async function listRooms(): Promise<RoomInfo[]> {
@@ -119,7 +123,7 @@ async function listRooms(): Promise<RoomInfo[]> {
     const id = key.slice(ROOM_KEY_NAMESPACE.length, -configSuffix.length)
     const config = await readConfig(kv, id)
     if (config === null) continue // closed concurrently
-    const count = (await readMembers(kv, id)).length
+    const count = (await readMembers(kv, id, 'reap')).length
     const size = sizeFromWire(config.size)
     rooms.push({ id, meta: config.meta, size, count, isEmpty: count === 0, isFull: count >= size })
   }
@@ -148,7 +152,7 @@ async function closeRoom(id: string): Promise<void> {
   // Event first so observers disconnect promptly; then KV cleanup. A join racing the
   // cleanup re-checks the config after writing its member record and rolls back.
   await publishCtrl(id, { __r: 'closed' })
-  for (const member of await readMembers(kv, id)) await kv.delete(roomMemberKvKey(id, member.id))
+  for (const member of await readMembers(kv, id, 'keep')) await kv.delete(roomMemberKvKey(id, member.id))
   await kv.delete(roomConfigKvKey(id))
 }
 
@@ -195,6 +199,8 @@ class ServerRoom implements Room {
   private _mainBinaryUnsub: (() => void) | null = null
   private readonly _memberTextUnsubs = new Map<string, () => void>()
   private readonly _memberBinaryUnsubs = new Map<string, () => void>()
+  private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private _heartbeatBusy = false
 
   constructor(roomId: string, config: RoomConfigRecord, members: MemberSnapshot[]) {
     this._isolated = config.isolated
@@ -287,13 +293,14 @@ class ServerRoom implements Room {
 
   // ── Membership operations (shared by local participants and stub requests) ──
 
-  /** @internal — KV half of a join, guarding against a concurrent `room.close()`. */
+  /** @internal — KV half of a join, guarding against a concurrent `Room.close()`. */
   async _createMember(meta: ParticipantMeta): Promise<{ id: string; joinedAt: number }> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
     const id = crypto.randomUUID()
     const joinedAt = Date.now()
-    await kv.set(roomMemberKvKey(this.id, id), stringify({ meta, joinedAt } satisfies RoomMemberRecord))
+    const record: RoomMemberRecord = { meta, joinedAt, seenAt: joinedAt }
+    await kv.set(roomMemberKvKey(this.id, id), stringify(record))
     // The room may have been closed between the check and the write — roll back.
     if ((await readConfig(kv, this.id)) === null) {
       await kv.delete(roomMemberKvKey(this.id, id))
@@ -320,7 +327,8 @@ class ServerRoom implements Room {
     if (raw === null) throw new Error(`Participant not found (left?): ${id}`)
     const record = parse(raw) as RoomMemberRecord
     const prev = this._state.getRemote(id)?.meta ?? record.meta
-    await kv.set(memberKey, stringify({ meta, joinedAt: record.joinedAt } satisfies RoomMemberRecord))
+    const next: RoomMemberRecord = { meta, joinedAt: record.joinedAt, seenAt: Date.now() }
+    await kv.set(memberKey, stringify(next))
     const eid = makeEid()
     this._state.applyParticipantMeta(id, meta, prev, eid)
     await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, eid })
@@ -549,6 +557,8 @@ class ServerRoom implements Room {
         adapter.subscribeBinary(roomMainKey(this.id), (framed, info) => this._onBinary(framed, info)),
       )
     }
+
+    this._syncHeartbeat()
   }
 
   private _anyStubWantsBinary(): boolean {
@@ -585,9 +595,56 @@ class ServerRoom implements Room {
 
   private async _refreshMembers(): Promise<void> {
     const version = this._state.membershipVersion
-    const members = await readMembers(getRoomKV(), this.id)
+    const members = await readMembers(getRoomKV(), this.id, 'reap')
     // An event that applied while we were reading is fresher than the snapshot — drop it.
     if (this._state.membershipVersion === version) this._state.reconcile(members)
+  }
+
+  // ── Liveness heartbeat ──
+  //
+  // Graceful departures (leave, kick, close, stub death) are handled by events. A hard node
+  // crash leaves member records behind — so the node that owns a member refreshes its `seenAt`
+  // every interval, and every heartbeat also reaps members whose owner stopped refreshing.
+
+  private _ownedMemberIds(): string[] {
+    const owned = [...this._localParticipants.keys()]
+    for (const stub of this._stubs) owned.push(...stub._stubMembers.keys())
+    return owned
+  }
+
+  private _syncHeartbeat(): void {
+    const want = !this._state.closed && this._ownedMemberIds().length > 0
+    if (want && !this._heartbeatTimer) {
+      this._heartbeatTimer = unrefTimer(
+        setInterval(() => void this._heartbeatTick().catch(reportRoomError), ROOM_HEARTBEAT_INTERVAL_MS),
+      )
+    } else if (!want && this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer)
+      this._heartbeatTimer = null
+    }
+  }
+
+  private async _heartbeatTick(): Promise<void> {
+    if (this._heartbeatBusy) return // a slow KV must not pile up overlapping ticks
+    this._heartbeatBusy = true
+    try {
+      const kv = getRoomKV()
+      for (const id of this._ownedMemberIds()) {
+        const memberKey = roomMemberKvKey(this.id, id)
+        const raw = await kv.get(memberKey)
+        if (raw === null) {
+          // Reaped or kicked while this node wasn't listening — the reaper already
+          // published the leave event; only the local view needs to catch up.
+          this._applyLeave(id)
+          continue
+        }
+        const record = parse(raw) as RoomMemberRecord
+        await kv.set(memberKey, stringify({ ...record, seenAt: Date.now() } satisfies RoomMemberRecord))
+      }
+      await readMembers(kv, this.id, 'reap')
+    } finally {
+      this._heartbeatBusy = false
+    }
   }
 }
 
@@ -817,7 +874,7 @@ function getRoomKV(): RoomKV {
   const missing = (['get', 'set', 'delete', 'keys'] as const).filter((method) => !adapter[method])
   assertUsage(
     missing.length === 0,
-    `The installed broadcast adapter doesn't implement ${missing.map((m) => `\`${m}()\``).join(', ')} — the KV methods required by \`room()\`.`,
+    `The installed broadcast adapter doesn't implement ${missing.map((m) => `\`${m}()\``).join(', ')} — the KV methods required by \`Room\`.`,
   )
   return {
     get: async (key) => await adapter.get!(key),
@@ -836,7 +893,9 @@ async function readConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord 
   return raw === null ? null : (parse(raw) as RoomConfigRecord)
 }
 
-async function readMembers(kv: RoomKV, roomId: string): Promise<MemberSnapshot[]> {
+/** Read a room's member records. With `'reap'`, members whose owning node stopped
+ *  heartbeating (hard crash) are deleted and their leave is announced to all observers. */
+async function readMembers(kv: RoomKV, roomId: string, staleMembers: 'reap' | 'keep'): Promise<MemberSnapshot[]> {
   const prefix = roomMemberKvPrefix(roomId)
   const members: MemberSnapshot[] = []
   for (const key of await kv.keys(prefix)) {
@@ -847,6 +906,11 @@ async function readMembers(kv: RoomKV, roomId: string): Promise<MemberSnapshot[]
     const raw = await kv.get(key)
     if (raw === null) continue // member left concurrently
     const record = parse(raw) as RoomMemberRecord
+    if (staleMembers === 'reap' && Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
+      await kv.delete(key)
+      await publishCtrl(roomId, { __r: 'leave', id })
+      continue
+    }
     members.push({ id, meta: record.meta, joinedAt: record.joinedAt })
   }
   return members

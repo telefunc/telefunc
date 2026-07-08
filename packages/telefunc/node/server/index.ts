@@ -16,9 +16,9 @@ export type { ShieldValidator, ShieldValidators } from './shield.js'
 export { onBug } from './runTelefunc/onBug.js'
 export { Channel } from '../../wire-protocol/server/channel.js'
 export { Broadcast, BroadcastChannel } from '../../wire-protocol/server/server-broadcast.js'
-export { room } from '../../wire-protocol/room/server.js'
+// `Room` is both the statics object and the instance type — one export carries both meanings.
+export { Room } from '../../wire-protocol/room/server.js'
 export type {
-  Room,
   RoomInfo,
   RoomOptions,
   RoomMeta,

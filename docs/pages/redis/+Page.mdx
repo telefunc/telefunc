@@ -5,7 +5,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance.
+Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance. <Link href="/room">Rooms</Link> work across instances too: room state lives in Redis keys, room events travel over Redis Pub/Sub.
 
 > You only need this if you scale horizontally — see <Link href="/stream/scale" />.
 

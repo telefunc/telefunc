@@ -5,11 +5,11 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-`room()` adds multi-party **rooms** on top of <Link href="/channel">channels</Link>: presence (who's in the room), participant metadata, per-member subscriptions, and admin controls.
+`Room` adds multi-party **rooms** on top of <Link href="/channel">channels</Link>: presence (who's in the room), participant metadata, per-member subscriptions, and admin controls.
 
 > Use rooms for video chat, collaborative editing, game lobbies — anything where *who is connected* matters. When you only need messaging or pub/sub, use <Link href="/channel">channels</Link> instead.
 
-| | <Link href="/channel#new-channel">`new Channel()`</Link> | <Link href="/channel#new-broadcastchannel">`new BroadcastChannel()`</Link> | `room()` |
+| | <Link href="/channel#new-channel">`new Channel()`</Link> | <Link href="/channel#new-broadcastchannel">`new BroadcastChannel()`</Link> | `Room` |
 |---|---|---|---|
 | Server-client pipe | ✓ | ✓ | ✓ |
 | Topic-based pub/sub | - | ✓ | ✓ |
@@ -20,22 +20,22 @@ import { TelefuncStreamBeta } from '../../components'
 | Per-member subscribe | - | - | ✓ |
 
 
-## `room()`
+## `Room`
 
-`room` is the server-side entry point. Clients get a `Room` by receiving it from a telefunction.
+`Room.*` statics are the server-side entry point — like <Link href="/channel#broadcast">`Broadcast.*`</Link>. Clients get a room by receiving it from a telefunction.
 
 ```ts
 // Lobby.telefunc.ts
 // Environment: server
 
-import { room } from 'telefunc'
+import { Room } from 'telefunc'
 
 export async function onCreateLobby(topic: string) {
-  return await room.create('lobby', { meta: { topic }, size: 100 })
+  return await Room.create('lobby', { meta: { topic }, size: 100 })
 }
 
 export async function onGetLobby() {
-  return await room('lobby') // same as room.get('lobby')
+  return await Room.get('lobby')
 }
 ```
 
@@ -54,19 +54,20 @@ const me = await lobby.join({ name: 'Alice' })
 await me.publish({ text: 'hello' })
 ```
 
-### Methods
+> `Room` is one identifier with two meanings, like the built-in `Date`: the statics (`Room.get()`) and the instance type (`const lobby: Room`).
+
+### Static methods
 
 | Method | Returns | Throws |
 |---|---|---|
-| `room.create(id, options?)` | `Room` | If the room already exists |
-| `room.get(id)` | `Room` | If the room doesn't exist |
-| `room(id)` | `Room` — shorthand for `room.get(id)` | If the room doesn't exist |
-| `room.list()` | `RoomInfo[]` | - |
-| `room.update(id, options)` | `void` | If the room doesn't exist |
-| `room.close(id)` | `void` | If the room doesn't exist |
-| `room.removeParticipant(id, participantId)` | `void` | If the room or participant doesn't exist |
+| `Room.create(id, options?)` | `Room` | If the room already exists |
+| `Room.get(id)` | `Room` | If the room doesn't exist |
+| `Room.list()` | `RoomInfo[]` | - |
+| `Room.update(id, options)` | `void` | If the room doesn't exist |
+| `Room.close(id)` | `void` | If the room doesn't exist |
+| `Room.removeParticipant(id, participantId)` | `void` | If the room or participant doesn't exist |
 
-Options (for `room.create()` and `room.update()`):
+Options (for `Room.create()` and `Room.update()`):
 
 ```ts
 type RoomOptions = {
@@ -76,13 +77,13 @@ type RoomOptions = {
 }
 ```
 
-- `room.update()` does a **full replace**: omitted options reset to their defaults (e.g. omitting `size` resets it to `Infinity`). Merging metadata is your job.
-- `room.close()` disconnects all participants, fires `onClose()` on every observer, and removes the room. Afterwards `await room(id)` throws.
+- `Room.update()` does a **full replace**: omitted options reset to their defaults (e.g. omitting `size` resets it to `Infinity`). Merging metadata is your job.
+- `Room.close()` disconnects all participants, fires `onClose()` on every observer, and removes the room. Afterwards `Room.get(id)` throws.
 - `size` is a **hint**: Telefunc tracks it (`count`, `isFull`, `onFull()`) but never rejects a join — you decide:
 
 ```ts
 export async function onJoinLobby(name: string) {
-  const lobby = await room('lobby')
+  const lobby = await Room.get('lobby')
   if (lobby.isFull) throw new Error('room is full')
   return await lobby.join({ name })
 }
@@ -90,37 +91,37 @@ export async function onJoinLobby(name: string) {
 
 ### Authorization
 
-Admin operations live on `room.*` — not on the `Room` instance — so a `Room` handed to clients carries no privileged methods. Authorize admin operations in their own telefunctions:
+Admin operations live on the `Room.*` statics — not on the instance — so a room handed to clients carries no privileged methods. Authorize admin operations in their own telefunctions:
 
 ```ts
 // RoomAdmin.telefunc.ts
 // Environment: server
 
-import { room, getContext } from 'telefunc'
+import { Room, getContext } from 'telefunc'
 
 export async function onCloseRoom(roomId: string) {
   const { user } = getContext()
   if (!user.isAdmin) throw new Error('unauthorized')
-  await room.close(roomId)
+  await Room.close(roomId)
 }
 
 export async function onKick(roomId: string, participantId: string) {
   const { user } = getContext()
   if (!user.isAdmin) throw new Error('unauthorized')
-  await room.removeParticipant(roomId, participantId)
+  await Room.removeParticipant(roomId, participantId)
 }
 ```
 
 <Warning>
 
-**Room IDs are capabilities** — a telefunction that returns `await room(roomId)` gives the caller full membership of that room. Derive room IDs from **authorized server-side context**, or verify access before returning the room:
+**Room IDs are capabilities** — a telefunction that returns `await Room.get(roomId)` gives the caller full membership of that room. Derive room IDs from **authorized server-side context**, or verify access before returning the room:
 
 ```ts
 export async function onJoinRoom(roomId: string, token: string) {
   const access = await db.verifyToken(token, roomId)
   if (!access) throw new Error('unauthorized')
-  const theRoom = await room(roomId)
-  return await theRoom.join({ name: access.userName })
+  const room = await Room.get(roomId)
+  return await room.join({ name: access.userName })
 }
 ```
 
@@ -128,10 +129,9 @@ See also:
 - <Link href="/stream#authorization" />
 </Warning>
 
+### Instance methods
 
-## `Room`
-
-One type, same on server and client — return it from a telefunction as-is. No `.client` is needed: everything on `Room` works identically on both sides.
+One type, same on server and client — return it from a telefunction as-is. No `.client` is needed: everything on a room instance works identically on both sides.
 
 | Method | Description |
 |---|---|
@@ -141,7 +141,7 @@ One type, same on server and client — return it from a telefunction as-is. No 
 | `subscribe(cb)` | Receive all participant messages: `(data, info, from)`. Returns an unsubscribe function. |
 | `subscribeBinary(cb)` | Same, for binary messages. |
 | `onJoin(cb)` / `onLeave(cb)` | A participant joined / left (or was removed). |
-| `onUpdate(cb)` | The room was reconfigured via `room.update()`: `(meta, prev)`. |
+| `onUpdate(cb)` | The room was reconfigured via `Room.update()`: `(meta, prev)`. |
 | `onEmpty(cb)` / `onFull(cb)` | The last participant left / the room reached capacity. |
 | `onClose(cb)` | The room was closed. |
 
@@ -174,7 +174,7 @@ Both receive from the same stream — a `publish()` reaches room-level subscribe
 
 ## `LocalParticipant`
 
-Your own handle, returned by `Room.join()`. One type, same on server and client — return it from a telefunction as-is. Publish-only: receiving happens on `Room` and `RemoteParticipant`.
+Your own handle, returned by `join()`. One type, same on server and client — return it from a telefunction as-is. Publish-only: receiving happens on the room and on `RemoteParticipant`.
 
 | Method | Description |
 |---|---|
@@ -186,19 +186,19 @@ Your own handle, returned by `Room.join()`. One type, same on server and client 
 
 Properties: `id`, `meta`, and `selfDelivery`.
 
-- `selfDelivery` (default: `true`): whether your own publishes are delivered back to your side's `Room`. Set it to `false` for e.g. video, where you don't want your own frames back.
-- A participant's membership follows its holder: when the client that received a `LocalParticipant` (or the `Room` it joined through) disconnects, the participant leaves the room.
+- `selfDelivery` (default: `true`): whether your own publishes are delivered back to your side's room. Set it to `false` for e.g. video, where you don't want your own frames back.
+- A participant's membership follows its holder: when the client that received a `LocalParticipant` (or the room it joined through) disconnects, the participant leaves the room.
 
 ```ts
 // Client
 const me = await lobby.join({ name: 'Alice', score: 0 })
-await me.setMeta({ name: 'Alice', score: 42 }) // full replace, like room.update()
+await me.setMeta({ name: 'Alice', score: 42 }) // full replace, like Room.update()
 ```
 
 
 ## `RemoteParticipant`
 
-Another room member, as seen through a `Room`.
+Another room member, as seen through a room.
 
 | Method | Description |
 |---|---|
@@ -226,14 +226,14 @@ Isolated mode gives each participant their own upstream pub/sub key, removing pu
 // VideoChat.telefunc.ts
 // Environment: server
 
-import { room } from 'telefunc'
+import { Room } from 'telefunc'
 
 export async function onCreateVideoRoom(roomId: string) {
-  await room.create(`video:${roomId}`, { isolated: true })
+  await Room.create(`video:${roomId}`, { isolated: true })
 }
 
 export async function onJoinVideoRoom(roomId: string, name: string) {
-  const videoRoom = await room(`video:${roomId}`)
+  const videoRoom = await Room.get(`video:${roomId}`)
   const me = await videoRoom.join({ name })
   return { me, videoRoom }
 }
@@ -267,17 +267,30 @@ The server can also observe without joining — e.g. for moderation:
 
 ```ts
 export async function onModerate(roomId: string) {
-  const theRoom = await room(roomId)
-  theRoom.subscribe((data, info, from) => {
+  const room = await Room.get(roomId)
+  room.subscribe((data, info, from) => {
     console.log(`${from.meta.name} sent:`, data)
   })
 }
 ```
 
 
+## Scaling & multiple servers
+
+Room state lives in the broadcast adapter's KV, and room events travel over its pub/sub — so rooms scale exactly like <Link href="/channel#broadcast">`Broadcast`</Link> does:
+
+- **Single server**: the default in-memory adapter works out-of-the-box.
+- **Multiple servers**: install a cross-instance transport and every server sees the same rooms.
+  <Link href="/redis">`@telefunc/redis`</Link> supports rooms out-of-the-box (state in Redis keys, events over Redis pub/sub, Cluster included), and so does the <Link href="/stream/cloudflare">Cloudflare integration</Link> (state in Workers KV, events over Durable Objects).
+- **Custom transports**: implement the KV methods (`get()`, `set()`, `delete()`, `keys()`) on your `BroadcastTransport`, backed by a store all server instances can reach. Rooms fail with a clear error until they're implemented.
+
+See also:
+- <Link href="/stream/scale" />
+
+
 ## How it works
 
-- **One pub/sub key per room.** Presence events and data flow through the room's <Link href="/channel#broadcast">`Broadcast`</Link> key. In isolated mode, data moves to per-member keys while presence stays on the room key.
+- **One pub/sub key per room.** Presence events and data flow through the room's `Broadcast` key. In isolated mode, data moves to per-member keys while presence stays on the room key.
 - **Binary framing.** Binary messages are prefixed with the sender's 16-byte participant ID — fixed-size, so no length field is needed.
-- **Distributed state.** Room configuration and member records live in the broadcast adapter's KV, so every server instance sees the same rooms. The default in-memory adapter works out-of-the-box for single-server deployments; for <Link href="/stream/scale">scaling horizontally</Link>, the configured broadcast transport must also implement the KV methods (`get()`, `set()`, `delete()`, `keys()`).
-- **Lazy subscriptions.** A `Room` subscribes to its pub/sub key only while observed, and clients receive the binary stream only while binary listeners exist.
+- **Crash-safe presence.** Graceful departures (leave, kick, close, disconnect) propagate instantly as events. Against hard crashes, the server owning a participant refreshes a liveness timestamp on its member record every 30 seconds; members whose owner stops refreshing are reaped — and their leave announced — after 2 minutes.
+- **Lazy subscriptions.** A room subscribes to its pub/sub key only while observed, and clients receive the binary stream only while binary listeners exist.

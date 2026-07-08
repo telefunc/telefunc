@@ -7,8 +7,9 @@ import { assert } from './assert.js'
 import { callDefinedCommand } from './callDefinedCommand.js'
 
 /** Wires Redis-backed fan-out into the telefunc broadcast transport so
- *  `Broadcast.publish()`/`subscribe()` cross instances. Pair with sticky-session routing
- *  at the load balancer so each client's channel traffic stays on one instance. */
+ *  `Broadcast.publish()`/`subscribe()` and `Room` state cross instances. Pair with
+ *  sticky-session routing at the load balancer so each client's channel traffic
+ *  stays on one instance. */
 function installRedis(redis: Redis | Cluster, options: InstallRedisOptions = {}): void {
   config.broadcast.transport = new RedisTransport({ redis, prefix: options.prefix })
 }
@@ -127,10 +128,48 @@ class RedisTransport implements BroadcastTransport {
     return { seq, timestamp }
   }
 
+  // ── KV (backs `Room` state) ───────────────────────────────────────────
+
+  async get(key: string): Promise<string | null> {
+    return await this.publisher.get(this.kvKey(key))
+  }
+
+  async set(key: string, value: string): Promise<void> {
+    await this.publisher.set(this.kvKey(key), value)
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.publisher.del(this.kvKey(key))
+  }
+
+  async keys(prefix: string): Promise<string[]> {
+    const namespace = this.kvKey('')
+    const pattern = `${escapeGlob(this.kvKey(prefix))}*`
+    const keys: string[] = []
+    // On a Cluster, SCAN only walks the node it's sent to — walk every master.
+    // Master keyspaces are disjoint, so no deduplication is needed.
+    for (const node of this.scanTargets()) {
+      let cursor = '0'
+      do {
+        const [next, page] = await node.scan(cursor, 'MATCH', pattern, 'COUNT', 250)
+        cursor = next
+        for (const key of page) keys.push(key.slice(namespace.length))
+      } while (cursor !== '0')
+    }
+    return keys
+  }
+
+  private scanTargets(): Array<Redis | Cluster> {
+    const cluster = this.publisher as Cluster
+    return typeof cluster.nodes === 'function' ? cluster.nodes('master') : [this.publisher]
+  }
+
   // ── Key naming (private) ──────────────────────────────────────────────
   //
   // `{<key>}` braces force seq counter and broadcast channel onto the same Redis
   // Cluster hash slot, so the publish Lua script can touch both keys atomically.
+  // KV keys are unbraced: they're single-key operations, and `keys()` needs them
+  // spread across slots rather than pinned to one.
 
   private seqKey(key: string): string {
     return `${this.prefix}seq:{${key}}`
@@ -139,6 +178,15 @@ class RedisTransport implements BroadcastTransport {
   private channelKey(key: string, kind: 't' | 'b'): string {
     return `${this.prefix}${kind}:{${key}}`
   }
+
+  private kvKey(key: string): string {
+    return `${this.prefix}kv:${key}`
+  }
+}
+
+/** SCAN's MATCH is a glob — keys built from user-supplied room IDs must match literally. */
+function escapeGlob(pattern: string): string {
+  return pattern.replace(/[*?[\]\\]/g, '\\$&')
 }
 
 type TextOnMessage = (payload: string, info: { seq: number; timestamp: number }) => void
