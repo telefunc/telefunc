@@ -767,6 +767,12 @@ class ServerLocalParticipant extends ParticipantBase {
     return await this._room._publishData(this.id, { binary: frameWithMemberId(this.id, data) })
   }
 
+  /** @internal — publish a client-framed payload (the frame already carries this member's ID). */
+  _publishFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
+    this._assertActive()
+    return this._room._publishData(this.id, { binary: framed })
+  }
+
   async send(to: string | RemoteParticipant, data: unknown): Promise<void> {
     this._assertActive()
     await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
@@ -891,7 +897,7 @@ function bindParticipantStubChannel(
   channel.listenBinary(async (framed: Uint8Array) => {
     try {
       if (unframeMemberId(framed)?.from !== participant.id) throw new Error('Malformed room binary publish')
-      return { ok: true, ack: await participant._room._publishData(participant.id, { binary: framed }) }
+      return { ok: true, ack: await participant._publishFramed(framed) }
     } catch (err) {
       return { ok: false, err: errorMessage(err) } satisfies ReqOkAck
     }

@@ -287,6 +287,13 @@ describe('data pub/sub', () => {
     expect(seenOnB).toEqual(['echoed', 'not-here']) // everyone else: sees both
   })
 
+  it('rejects a stub binary publish from a participant that already left — like the text path', async () => {
+    const lobby = await Room.create('late-frame')
+    const me = (await lobby.join()) as ServerLocalParticipant
+    await me.leave()
+    expect(() => me._publishFramed(frameWithMemberId(me.id, new Uint8Array([1])))).toThrow('Participant has left')
+  })
+
   it('binary round-trips with the 16-byte member ID frame, preserving high-bit bytes', async () => {
     const a = await Room.create('bin')
     const b = await Room.get('bin')
