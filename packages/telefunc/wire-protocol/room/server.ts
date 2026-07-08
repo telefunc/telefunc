@@ -71,6 +71,8 @@ type RoomStatic = {
   create(id: string, options?: RoomOptions): Promise<Room>
   /** Get an existing room. Throws if it doesn't exist. */
   get(id: string): Promise<Room>
+  /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
+  join(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant>
   /** List all rooms. */
   list(): Promise<RoomInfo[]>
   /** Admin: replace the room's configuration — omitted options reset to their defaults. */
@@ -101,6 +103,7 @@ type RoomStatic = {
 const Room: RoomStatic = {
   create: createRoom,
   get: getRoom,
+  join: joinRoom,
   list: listRooms,
   update: updateRoom,
   close: closeRoom,
@@ -122,6 +125,10 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 async function getRoom(id: string): Promise<Room> {
   const { kv, config } = await requireRoom(id)
   return new ServerRoom(id, config, await readMembers(kv, id))
+}
+
+async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant> {
+  return await (await getRoom(id)).join(meta, options)
 }
 
 async function listRooms(): Promise<RoomInfo[]> {

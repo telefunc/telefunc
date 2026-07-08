@@ -62,6 +62,7 @@ await me.publish({ text: 'hello' })
 |---|---|---|
 | `Room.create(id, options?)` | `Room` | If the room already exists |
 | `Room.get(id)` | `Room` | If the room doesn't exist |
+| `Room.join(id, meta?, options?)` | `LocalParticipant` | If the room doesn't exist |
 | `Room.list()` | `RoomInfo[]` | - |
 | `Room.update(id, options)` | `void` | If the room doesn't exist |
 | `Room.close(id)` | `void` | If the room doesn't exist |
@@ -79,6 +80,7 @@ type RoomOptions = {
 }
 ```
 
+- `Room.join(id, meta?, options?)` is a shorthand for `(await Room.get(id)).join(meta, options)` — for telefunctions that only need the participant, not the room.
 - `Room.update()` does a **full replace**: omitted options reset to their defaults (e.g. omitting `size` resets it to `Infinity`). Merging metadata is your job.
 - `Room.close()` disconnects all participants, fires `onClose()` on every observer, and removes the room. Afterwards `Room.get(id)` throws.
 - `size` is a **hint**: Telefunc tracks it (`count`, `isFull`, `onFull()`) but never rejects a join — you decide:
@@ -122,8 +124,7 @@ export async function onKick(roomId: string, participantId: string) {
 export async function onJoinRoom(roomId: string, token: string) {
   const access = await db.verifyToken(token, roomId)
   if (!access) throw new Error('unauthorized')
-  const room = await Room.get(roomId)
-  return await room.join({ name: access.userName })
+  return await Room.join(roomId, { name: access.userName })
 }
 ```
 

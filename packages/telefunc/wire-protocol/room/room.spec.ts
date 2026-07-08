@@ -66,6 +66,18 @@ describe('Room entry point', () => {
     expect(tiny.count).toBe(2)
   })
 
+  it('Room.join() is a shorthand for get + join', async () => {
+    await Room.create('shortcut')
+    const observer = await Room.get('shortcut')
+
+    const me = await Room.join('shortcut', { name: 'Bot' }, { selfDelivery: false })
+
+    expect(me.meta).toEqual({ name: 'Bot' })
+    expect(me.selfDelivery).toBe(false)
+    expect((await observer.getParticipants()).map((m) => m.meta)).toEqual([{ name: 'Bot' }])
+    await expect(Room.join('nope')).rejects.toThrow('Room not found: nope')
+  })
+
   it('list() reflects rooms and their live member counts', async () => {
     await Room.create('a')
     const b = await Room.create('b', { meta: { topic: 'x' }, size: 2 })

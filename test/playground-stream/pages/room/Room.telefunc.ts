@@ -15,8 +15,7 @@ async function onGetRoom(roomId: string) {
 /** Server-side join returning a standalone `LocalParticipant` — exercises the participant
  *  stub (its own channel), unlike client-side `room.join()` which rides the room's stub. */
 async function onJoinAsServer(roomId: string, name: string) {
-  const theRoom = await Room.get(roomId)
-  return await theRoom.join({ name })
+  return await Room.join(roomId, { name })
 }
 
 async function onAnnounce(roomId: string, data: unknown) {
