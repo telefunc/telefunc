@@ -4,6 +4,7 @@ export {
   roomMemberDataKey,
   roomDmKey,
   roomConfigKvKey,
+  roomIdFromConfigKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
   sizeToWire,
@@ -63,6 +64,11 @@ function roomDmKey(roomId: string, memberId: string): string {
 /** KV key of the room's config record. */
 function roomConfigKvKey(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:config`
+}
+/** Inverse of `roomConfigKvKey` — `null` for keys that aren't room config records. */
+function roomIdFromConfigKey(key: string): string | null {
+  if (!key.startsWith(ROOM_KEY_NAMESPACE) || !key.endsWith(':config')) return null
+  return key.slice(ROOM_KEY_NAMESPACE.length, -':config'.length)
 }
 /** KV key of one member record. */
 function roomMemberKvKey(roomId: string, memberId: string): string {

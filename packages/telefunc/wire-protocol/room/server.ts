@@ -9,7 +9,7 @@ import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
-import { getBroadcastAdapter } from '../server/broadcast.js'
+import { getBroadcastAdapter, type BroadcastAdapter } from '../server/broadcast.js'
 import { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { ACK_STATUS, encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
@@ -22,6 +22,7 @@ import {
   normalizeJoinOptions,
   roomConfigKvKey,
   roomDmKey,
+  roomIdFromConfigKey,
   roomMainKey,
   roomMemberDataKey,
   roomMemberKvKey,
@@ -119,23 +120,19 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 }
 
 async function getRoom(id: string): Promise<Room> {
-  assertRoomId(id)
-  const kv = getRoomKV()
-  const config = await readConfig(kv, id)
-  if (config === null) throw new Error(`Room not found: ${id}`)
-  return new ServerRoom(id, config, await readMembers(kv, id, 'reap'))
+  const { kv, config } = await requireRoom(id)
+  return new ServerRoom(id, config, await readMembers(kv, id))
 }
 
 async function listRooms(): Promise<RoomInfo[]> {
   const kv = getRoomKV()
-  const configSuffix = ':config'
   const rooms: RoomInfo[] = []
   for (const key of await kv.keys(ROOM_KEY_NAMESPACE)) {
-    if (!key.endsWith(configSuffix)) continue
-    const id = key.slice(ROOM_KEY_NAMESPACE.length, -configSuffix.length)
+    const id = roomIdFromConfigKey(key)
+    if (id === null) continue
     const config = await readConfig(kv, id)
     if (config === null) continue // closed concurrently
-    const count = (await readMembers(kv, id, 'reap')).length
+    const count = (await readMembers(kv, id)).length
     const size = sizeFromWire(config.size)
     rooms.push({ id, meta: config.meta, size, count, isEmpty: count === 0, isFull: count >= size })
   }
@@ -143,11 +140,8 @@ async function listRooms(): Promise<RoomInfo[]> {
 }
 
 async function updateRoom(id: string, options: RoomOptions): Promise<void> {
-  assertRoomId(id)
   const { meta, size } = normalizeOptions(options)
-  const kv = getRoomKV()
-  const config = await readConfig(kv, id)
-  if (config === null) throw new Error(`Room not found: ${id}`)
+  const { kv, config } = await requireRoom(id)
   assertUsage(
     options?.isolated === undefined || options.isolated === config.isolated,
     "A room's `isolated` mode is fixed at creation — room.update() cannot change it",
@@ -158,24 +152,20 @@ async function updateRoom(id: string, options: RoomOptions): Promise<void> {
 }
 
 async function closeRoom(id: string): Promise<void> {
-  assertRoomId(id)
-  const kv = getRoomKV()
-  if ((await readConfig(kv, id)) === null) throw new Error(`Room not found: ${id}`)
+  const { kv } = await requireRoom(id)
   // Event first so observers disconnect promptly; then KV cleanup. A join racing the
   // cleanup re-checks the config after writing its member record and rolls back.
   await publishCtrl(id, { __r: 'closed' })
-  for (const member of await readMembers(kv, id, 'keep')) await kv.delete(roomMemberKvKey(id, member.id))
+  for (const { key } of await listMemberKeys(kv, id)) await kv.delete(key)
   await kv.delete(roomConfigKvKey(id))
 }
 
 async function removeParticipant(id: string, participantId: string): Promise<void> {
-  assertRoomId(id)
   assertUsage(
     typeof participantId === 'string' && participantId.length > 0,
     'The participant ID should be a non-empty string',
   )
-  const kv = getRoomKV()
-  if ((await readConfig(kv, id)) === null) throw new Error(`Room not found: ${id}`)
+  const { kv } = await requireRoom(id)
   const memberKey = roomMemberKvKey(id, participantId)
   if ((await kv.get(memberKey)) === null) throw new Error(`Participant not found: ${participantId}`)
   await kv.delete(memberKey)
@@ -183,16 +173,12 @@ async function removeParticipant(id: string, participantId: string): Promise<voi
 }
 
 async function announceToRoom(id: string, data: unknown): Promise<void> {
-  assertRoomId(id)
-  const kv = getRoomKV()
-  if ((await readConfig(kv, id)) === null) throw new Error(`Room not found: ${id}`)
+  await requireRoom(id)
   await getBroadcastAdapter().publish(roomMainKey(id), stringify({ __r: 'announce', data } satisfies RoomEnvelope))
 }
 
 async function sendToParticipant(id: string, participantId: string, data: unknown): Promise<void> {
-  assertRoomId(id)
-  const kv = getRoomKV()
-  if ((await readConfig(kv, id)) === null) throw new Error(`Room not found: ${id}`)
+  const { kv } = await requireRoom(id)
   if ((await kv.get(roomMemberKvKey(id, participantId))) === null) {
     throw new Error(`Participant not found: ${participantId}`)
   }
@@ -689,7 +675,7 @@ class ServerRoom implements Room {
 
   private async _refreshMembers(): Promise<void> {
     const version = this._state.membershipVersion
-    const members = await readMembers(getRoomKV(), this.id, 'reap')
+    const members = await readMembers(getRoomKV(), this.id)
     // An event that applied while we were reading is fresher than the snapshot — drop it.
     if (this._state.membershipVersion === version) this._state.reconcile(members)
   }
@@ -735,7 +721,7 @@ class ServerRoom implements Room {
         const record = parse(raw) as RoomMemberRecord
         await kv.set(memberKey, stringify({ ...record, seenAt: Date.now() } satisfies RoomMemberRecord))
       }
-      await readMembers(kv, this.id, 'reap')
+      await readMembers(kv, this.id)
     } finally {
       this._heartbeatBusy = false
     }
@@ -933,14 +919,9 @@ function bindParticipantStubChannel(
 // KV access
 // ---------------------------------------------------------------------------
 
-type RoomKV = {
-  get(key: string): Promise<string | null>
-  set(key: string, value: string): Promise<void>
-  delete(key: string): Promise<void>
-  keys(prefix: string): Promise<string[]>
-}
-
 /** Room state lives in the broadcast adapter's KV so every server node sees the same rooms. */
+type RoomKV = Required<Pick<BroadcastAdapter, 'get' | 'set' | 'delete' | 'keys'>>
+
 function getRoomKV(): RoomKV {
   const adapter = getBroadcastAdapter()
   const missing = (['get', 'set', 'delete', 'keys'] as const).filter((method) => !adapter[method])
@@ -948,16 +929,16 @@ function getRoomKV(): RoomKV {
     missing.length === 0,
     `The installed broadcast adapter doesn't implement ${missing.map((m) => `\`${m}()\``).join(', ')} — the KV methods required by \`Room\`.`,
   )
-  return {
-    get: async (key) => await adapter.get!(key),
-    set: async (key, value) => {
-      await adapter.set!(key, value)
-    },
-    delete: async (key) => {
-      await adapter.delete!(key)
-    },
-    keys: async (prefix) => await adapter.keys!(prefix),
-  }
+  return adapter as RoomKV
+}
+
+/** Statics prologue: validate the ID and load the room's config — or throw `Room not found`. */
+async function requireRoom(id: string): Promise<{ kv: RoomKV; config: RoomConfigRecord }> {
+  assertRoomId(id)
+  const kv = getRoomKV()
+  const config = await readConfig(kv, id)
+  if (config === null) throw new Error(`Room not found: ${id}`)
+  return { kv, config }
 }
 
 async function readConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord | null> {
@@ -965,20 +946,15 @@ async function readConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord 
   return raw === null ? null : (parse(raw) as RoomConfigRecord)
 }
 
-/** Read a room's member records. With `'reap'`, members whose owning node stopped
- *  heartbeating (hard crash) are deleted and their leave is announced to all observers. */
-async function readMembers(kv: RoomKV, roomId: string, staleMembers: 'reap' | 'keep'): Promise<MemberSnapshot[]> {
-  const prefix = roomMemberKvPrefix(roomId)
+/** Read a room's member records, reaping members whose owning node stopped heartbeating
+ *  (hard crash): their record is deleted and their leave announced to all observers. */
+async function readMembers(kv: RoomKV, roomId: string): Promise<MemberSnapshot[]> {
   const members: MemberSnapshot[] = []
-  for (const key of await kv.keys(prefix)) {
-    const id = key.slice(prefix.length)
-    // Member IDs are UUIDs — anything else under the prefix belongs to another room
-    // whose ID happens to start with `${roomId}:m:` (e.g. its `:config` key).
-    if (!uuidToBytes(id)) continue
+  for (const { key, id } of await listMemberKeys(kv, roomId)) {
     const raw = await kv.get(key)
     if (raw === null) continue // member left concurrently
     const record = parse(raw) as RoomMemberRecord
-    if (staleMembers === 'reap' && Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
+    if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
       await kv.delete(key)
       await publishCtrl(roomId, { __r: 'leave', id })
       continue
@@ -986,6 +962,18 @@ async function readMembers(kv: RoomKV, roomId: string, staleMembers: 'reap' | 'k
     members.push({ id, meta: record.meta, joinedAt: record.joinedAt })
   }
   return members
+}
+
+/** Keys of a room's member records. Member IDs are UUIDs — anything else under the prefix
+ *  belongs to another room whose ID happens to start with `${roomId}:m:` (e.g. its `:config` key). */
+async function listMemberKeys(kv: RoomKV, roomId: string): Promise<Array<{ key: string; id: string }>> {
+  const prefix = roomMemberKvPrefix(roomId)
+  const memberKeys: Array<{ key: string; id: string }> = []
+  for (const key of await kv.keys(prefix)) {
+    const id = key.slice(prefix.length)
+    if (uuidToBytes(id)) memberKeys.push({ key, id })
+  }
+  return memberKeys
 }
 
 // ---------------------------------------------------------------------------
