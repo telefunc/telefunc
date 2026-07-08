@@ -323,7 +323,7 @@ const headings = [
     level: 2,
     title: '`Room`',
     url: '/room',
-    sectionTitles: ['`Room`', '`LocalParticipant`', '`RemoteParticipant`'],
+    sectionTitles: ['Rooms', 'Participants', 'Messaging', 'Recipes'],
   },
   {
     level: 2,

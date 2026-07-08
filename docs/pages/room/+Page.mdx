@@ -74,7 +74,7 @@ await me.publish({ text: 'hello' })
 > `Room` is one identifier with two meanings, like the built-in `Date`: the statics (`Room.get()`) and the instance type (`const lobby: Room`).
 
 
-## Rooms {#rooms}
+## Rooms
 
 `Room.*` statics are the server-side entry point — like <Link href="/channel#broadcast">`Broadcast.*`</Link>. Clients get a room by receiving it from a telefunction.
 
@@ -223,7 +223,7 @@ gameRoom.onJoin((member) => {
 
 ## Messaging
 
-### Room-wide messages {#room-wide-messages}
+### Room-wide messages
 
 **Room-level** — `subscribe()` receives every participant's messages with sender identity. Use it when all messages are processed the same way (chat, notifications):
 
@@ -247,7 +247,7 @@ Both receive from the same stream — a `publish()` reaches room-level subscribe
 
 > Per-member binary subscriptions also drive **wire delivery**: a client receives a member's binary stream only while it subscribes to that member (or to the whole room). Text messages always flow — they carry presence.
 
-### Private messages {#private-messages}
+### Private messages
 
 `send()` delivers to exactly one participant — a whisper, an invite, a game move. Privacy is transport-level: the message travels over the target's private inbox key, so no other participant's connection ever receives it (it also never appears on `subscribe()` streams).
 
@@ -266,7 +266,7 @@ lobby.onJoin(async (member) => {
 - `send()` accepts a `RemoteParticipant` or a participant ID. Sending to an unknown or departed participant throws.
 - `fromId` is the **verified** sender — Telefunc rejects sends from non-members, so it can't be spoofed. The empty string is reserved for <Link href="#room-authored-messages">room-authored whispers</Link> (`Room.send()`).
 
-### Room-authored messages {#room-authored-messages}
+### Room-authored messages
 
 Messages don't have to come from a participant — the room itself can speak. `Room.announce()` broadcasts to everyone, `Room.send()` whispers to one participant; neither requires joining, and receivers can't confuse them with participant messages:
 
