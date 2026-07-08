@@ -12,7 +12,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 #### Primitives
 
-1. <Link href="#async-generator" text={<><code>AsyncGenerator</code> (<code>function*</code>)</>} />:
+1. <Link href="#async-generator"><><code>AsyncGenerator</code> (<code>function*</code>)</></Link>:
    ```ts
    // AiChat.telefunc.ts
    // Environment: server
@@ -26,7 +26,7 @@ import { TelefuncStreamBeta } from '../../components'
    }
    ```
 
-1. <Link href="#callback" text={<>Callback (<code>function</code> passing)</>} />:
+1. <Link href="#callback"><>Callback (<code>function</code> passing)</></Link>:
    ```ts
    // Notifications.telefunc.ts
    // Environment: server
@@ -39,7 +39,7 @@ import { TelefuncStreamBeta } from '../../components'
    }
    ```
 
-1. <Link href="#multiple-promise" text={<>Multiple <code>Promise</code></>} />:
+1. <Link href="#multiple-promise"><>Multiple <code>Promise</code></></Link>:
    ```ts ts-only
    // Dashboard.telefunc.ts
    // Environment: server
@@ -54,7 +54,7 @@ import { TelefuncStreamBeta } from '../../components'
    }
    ```
 
-1. <Link href="#readable-stream" text={<code>ReadableStream</code>} />:
+1. <Link href="#readable-stream"><code>ReadableStream</code></Link>:
    ```ts
    // Compress.telefunc.ts
    // Environment: server
@@ -65,14 +65,14 @@ import { TelefuncStreamBeta } from '../../components'
    }
    ```
 
-1. <Link href="#channel" text={<code>Channel</code>} />: API for advanced real-time use cases.
+1. <Link href="#channel"><code>Channel</code></Link>: API for advanced real-time use cases.
 
 > A single telefunction can [mix primitives](https://gist.github.com/brillout/155c8eb4cbaa043bc52e96c0c2ed7086) (generators, channels, promises, ...) side by side, each resolving independently.
 
 #### Integrations
 
-<Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />: automatically synced TanStack queries.  
-<Link text={<code>@telefunc/rxjs</code>} href="/rxjs" />: reactive streams and operators.  
+<Link href="/tanstack-query"><code>@telefunc/tanstack-query</code></Link>: automatically synced TanStack queries.  
+<Link href="/rxjs"><code>@telefunc/rxjs</code></Link>: reactive streams and operators.  
 
 > Integrations provide an even more seamless DX: they handle more for you. They're powered by the primitives listed on this page.
 
@@ -201,7 +201,7 @@ await onUpload(file, (percent) => setProgress(percent))
 
 > The underlying stream automatically closes itself when the client stops using (i.e. stops referencing) `onProgress`, but you can also manually close it (eagerly), see <Link href="/close" />.
 
-> Under the hood, a passed function is just a <Link text={<code>Channel</code>} href="#channel" />. A callback has the same lifecycle as a channel, only exposed with a nicer JavaScript DX.
+> Under the hood, a passed function is just a <Link href="#channel"><code>Channel</code></Link>. A callback has the same lifecycle as a channel, only exposed with a nicer JavaScript DX.
 >
 > Reach for a raw `Channel` if you need more than call-and-return — e.g. two-way messaging, broadcast, or binary.
 
@@ -389,7 +389,7 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
 
 > The memory consumption is constant regardless of file size.
 
-> A spawned process outlives the call and keeps burning CPU if the client navigates away mid-encode — make sure to terminate it in `onClose()`, see <Link text="Cleanup" href="#cleanup" />.
+> A spawned process outlives the call and keeps burning CPU if the client navigates away mid-encode — make sure to terminate it in `onClose()`, see <Link href="#cleanup">Cleanup</Link>.
 
 
 ## Primitive: `Channel` {#channel}
@@ -399,7 +399,7 @@ For ongoing two-way or broadcast messaging, you can use a channel, see:
 
 > This is the low-level primitive that powers most of Telefunc Stream.
 
-> Instead of directly using channels, most users reach for high-level primitives (e.g. <Link href="#callback">callbacks</Link>) and high-level integrations (e.g. <Link text={<code>@telefunc/tanstack-query</code>} href="/tanstack-query" />).
+> Instead of directly using channels, most users reach for high-level primitives (e.g. <Link href="#callback">callbacks</Link>) and high-level integrations (e.g. <Link href="/tanstack-query"><code>@telefunc/tanstack-query</code></Link>).
 
 ```js
 // Dashboard.telefunc.js
@@ -468,7 +468,7 @@ You can also use a `signal` (`AbortSignal`) and `channel.onClose()` to listen fo
 
 **Environment**: server.
 
-A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link href="/getContext">`getContext()`</Link> and `throw Abort()` **at open time**, before you stream anything back to the client. Here the client passes a <Link text="callback" href="#callback" /> and the server calls it:
+A streaming telefunction authorizes like any other telefunction (see <Link href="/permissions" />): check <Link href="/getContext">`getContext()`</Link> and `throw Abort()` **at open time**, before you stream anything back to the client. Here the client passes a <Link href="#callback">callback</Link> and the server calls it:
 
 ```ts
 // TeamFeed.telefunc.ts

@@ -176,7 +176,7 @@ You can choose between `download()` and a native `File`/`Blob`:
 
 ### `download()`
 
-A `download()` value exposes progress and cancellation on the client. (Native `File` / `Blob` returns don't — wrap your bytes with <Link text={<code>download()</code>} href="#passthrough" /> to opt in.)
+A `download()` value exposes progress and cancellation on the client. (Native `File` / `Blob` returns don't — wrap your bytes with <Link href="#passthrough"><code>download()</code></Link> to opt in.)
 
 | Member | Type | Description |
 |---|---|---|
@@ -258,7 +258,7 @@ await dl.saveToDisk()
 
 TO-DO: add note for native `File`/`Blob` use case?
 
-On the server, use <Link text={<code>onClose()</code>} href="/onClose" /> to release resources your telefunction opened when the client cancels:
+On the server, use <Link href="/onClose"><code>onClose()</code></Link> to release resources your telefunction opened when the client cancels:
 
 ```ts
 // Download.telefunc.ts
@@ -280,7 +280,7 @@ export async function onDownload(dir: string) {
 }
 ```
 
-> **You don't always need `onClose()`.** When the `download()` source is a plain stream — like a <Link text="S3 passthrough" href="#passthrough" /> — the upstream read is automatically cancelled.
+> **You don't always need `onClose()`.** When the `download()` source is a plain stream — like a <Link href="#passthrough">S3 passthrough</Link> — the upstream read is automatically cancelled.
 
 */}
 

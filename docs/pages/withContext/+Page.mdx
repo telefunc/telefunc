@@ -35,10 +35,10 @@ for await (const message of gen) {
 | Option | Type | Description |
 |---|---|---|
 | `signal` | `AbortSignal` | Cancel this call and any channels it opens. See also: <Link href="/close" />. |
-| `headers` | `Record<string, string>` | Extra HTTP headers for this call. Global default: <Link text={<code>config.headers</code>} href="/headers" />. |
-| `telefuncUrl` | `string` | Override <Link text={<code>config.telefuncUrl</code>} href="/telefuncUrl" /> for this call and its channels. |
-| `stream.transport` | <Link text="Stream transport" href="/transport#stream-transport" /> | Override `config.stream.transport` for streaming. |
-| `channel.transports` | <Link text="Channel transport" href="/transport#channel-transport" /> | Override `config.channel.transports` for channels. |
+| `headers` | `Record<string, string>` | Extra HTTP headers for this call. Global default: <Link href="/headers"><code>config.headers</code></Link>. |
+| `telefuncUrl` | `string` | Override <Link href="/telefuncUrl"><code>config.telefuncUrl</code></Link> for this call and its channels. |
+| `stream.transport` | <Link href="/transport#stream-transport">Stream transport</Link> | Override `config.stream.transport` for streaming. |
+| `channel.transports` | <Link href="/transport#channel-transport">Channel transport</Link> | Override `config.channel.transports` for channels. |
 | `channel.connectionKey` | `string` | By default, all channel calls to the same URL share one connection. Set a key to split calls across separate connections: calls with the same key share a connection, while different keys each get their own (keyless calls all share the default connection). |
 | `channel.idleTimeout` | `number` | How long (ms) to keep the underlying connection open after all channels close. Default `60_000`; `0` closes it immediately. |
 
