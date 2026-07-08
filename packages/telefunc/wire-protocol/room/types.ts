@@ -87,6 +87,8 @@ type Room = {
   onLeave(callback: (member: RemoteParticipant) => void): () => void
   /** The room was reconfigured via `Room.update()`. */
   onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void
+  /** A room-authored message arrived (`Room.announce()`) — e.g. system notices. */
+  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void
   /** The last participant left. */
   onEmpty(callback: () => void): () => void
   /** The room reached capacity (`count >= size`). */
@@ -110,10 +112,11 @@ type LocalParticipant = {
   publish(data: unknown): Promise<ChannelPublishAck>
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
 
-  /** Send a private message to one participant — nobody else receives it. */
-  send(to: string, data: unknown): Promise<void>
-  /** Receive private messages addressed to you: `(data, from)`. Returns an unlisten function. */
-  listen(callback: (data: unknown, from: string) => void): () => void
+  /** Send a private message to one participant (or their ID) — nobody else receives it. */
+  send(to: string | RemoteParticipant, data: unknown): Promise<void>
+  /** Receive private messages addressed to you. `fromId` is the sender's participant ID —
+   *  empty for server-authored messages (`Room.send()`). Returns an unlisten function. */
+  listen(callback: (data: unknown, fromId: string) => void): () => void
 
   /** Replace your metadata. Propagates to all observers in real time. */
   setMeta(meta: ParticipantMeta): Promise<void>

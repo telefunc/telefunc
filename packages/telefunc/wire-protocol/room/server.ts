@@ -28,6 +28,7 @@ import {
   sizeToWire,
   unframeMemberId,
   uuidToBytes,
+  type BinaryWants,
   type MemberSnapshot,
   type ParticipantStubRequest,
   type ReqJoinAck,
@@ -75,6 +76,10 @@ type RoomStatic = {
   close(id: string): Promise<void>
   /** Admin: remove a participant from the room. */
   removeParticipant(id: string, participantId: string): Promise<void>
+  /** Publish a room-authored message — no sender, delivered to `onAnnounce()` (e.g. system notices). */
+  announce(id: string, data: unknown): Promise<void>
+  /** Send a server-authored private message to one participant — arrives on `listen()` with an empty `fromId`. */
+  send(id: string, participantId: string, data: unknown): Promise<void>
 }
 
 /**
@@ -97,6 +102,8 @@ const Room: RoomStatic = {
   update: updateRoom,
   close: closeRoom,
   removeParticipant,
+  announce: announceToRoom,
+  send: sendToParticipant,
 }
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
@@ -171,6 +178,26 @@ async function removeParticipant(id: string, participantId: string): Promise<voi
   if ((await kv.get(memberKey)) === null) throw new Error(`Participant not found: ${participantId}`)
   await kv.delete(memberKey)
   await publishCtrl(id, { __r: 'leave', id: participantId })
+}
+
+async function announceToRoom(id: string, data: unknown): Promise<void> {
+  assertRoomId(id)
+  const kv = getRoomKV()
+  if ((await readConfig(kv, id)) === null) throw new Error(`Room not found: ${id}`)
+  await getBroadcastAdapter().publish(roomMainKey(id), stringify({ __r: 'announce', data } satisfies RoomEnvelope))
+}
+
+async function sendToParticipant(id: string, participantId: string, data: unknown): Promise<void> {
+  assertRoomId(id)
+  const kv = getRoomKV()
+  if ((await readConfig(kv, id)) === null) throw new Error(`Room not found: ${id}`)
+  if ((await kv.get(roomMemberKvKey(id, participantId))) === null) {
+    throw new Error(`Participant not found: ${participantId}`)
+  }
+  // An empty `from` marks the message as server-authored — clients can't spoof it, their
+  // DMs are validated against the members joined through their own stub.
+  const envelope: RoomDmEnvelope = { __r: 'dm', to: participantId, from: '', data }
+  await getBroadcastAdapter().publish(roomDmKey(id, participantId), stringify(envelope))
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +321,9 @@ class ServerRoom implements Room {
   onClose(callback: () => void): () => void {
     return this._state.onClose(callback)
   }
+  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
+    return this._state.onAnnounce(callback)
+  }
 
   // ── Membership operations (shared by local participants and stub requests) ──
 
@@ -379,6 +409,8 @@ class ServerRoom implements Room {
     if (event.__r === 'data') {
       const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
       this._state.applyData(event.from, event.data, info, this._suppress(event.from))
+    } else if (event.__r === 'announce') {
+      this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
     } else {
       this._applyCtrl(event)
     }
@@ -404,7 +436,7 @@ class ServerRoom implements Room {
     if (this._stubs.size > 0) {
       const wireData = encodePublishBinary(framed, rawInfo)
       for (const stub of this._stubs) {
-        if (!stub._wantsBinary) continue
+        if (!stub._wantsBinaryFrom(unframed.from)) continue
         if (stub._stubMembers.get(unframed.from)?.selfDelivery === false) continue
         stub._relayPublishBinary(wireData)
       }
@@ -523,6 +555,12 @@ class ServerRoom implements Room {
           this._assertStubMember(stub, req.id)
           await this._sendDm(req.id, req.to, req.data)
           return { ok: true }
+        case 'sub-binary': {
+          const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
+          stub._binaryWants = { all: req.all === true, members: new Set(members) }
+          this._syncSubs()
+          return { ok: true }
+        }
         default:
           return undefined
       }
@@ -575,19 +613,26 @@ class ServerRoom implements Room {
     // Events between construction (KV snapshot) and this subscription were missed — resync.
     if (becomesObserved) void this._refreshMembers().catch(reportRoomError)
 
-    const wantBinary = open && (this._anyStubWantsBinary() || state.binaryListenerCount > 0)
+    const binaryWants = this._aggregateBinaryWants()
+    const wantAnyBinary = open && (binaryWants.all || binaryWants.members.size > 0)
     if (this._isolated) {
-      // Isolated mode: data flows on per-member keys, one subscription per member.
+      // Isolated mode: data flows on per-member keys, one subscription per member —
+      // and only the members whose binary someone actually wants.
       const wantText = open && (this._stubs.size > 0 || state.dataListenerCount > 0)
       const memberIds = open ? state.listMemberIds() : []
+      const binaryIds = !wantAnyBinary
+        ? []
+        : binaryWants.all
+          ? memberIds
+          : memberIds.filter((id) => binaryWants.members.has(id))
       this._syncMemberSubs(this._memberTextUnsubs, wantText ? memberIds : [], (memberId) =>
         adapter.subscribe(roomMemberDataKey(this.id, memberId), (serialized, info) => this._onText(serialized, info)),
       )
-      this._syncMemberSubs(this._memberBinaryUnsubs, wantBinary ? memberIds : [], (memberId) =>
+      this._syncMemberSubs(this._memberBinaryUnsubs, binaryIds, (memberId) =>
         adapter.subscribeBinary(roomMemberDataKey(this.id, memberId), (framed, info) => this._onBinary(framed, info)),
       )
     } else {
-      this._setSub('_mainBinaryUnsub', wantBinary, () =>
+      this._setSub('_mainBinaryUnsub', wantAnyBinary, () =>
         adapter.subscribeBinary(roomMainKey(this.id), (framed, info) => this._onBinary(framed, info)),
       )
     }
@@ -601,9 +646,16 @@ class ServerRoom implements Room {
     this._syncHeartbeat()
   }
 
-  private _anyStubWantsBinary(): boolean {
-    for (const stub of this._stubs) if (stub._wantsBinary) return true
-    return false
+  /** Union of this holder's own binary listeners and every client stub's declared wants. */
+  private _aggregateBinaryWants(): { all: boolean; members: Set<string> } {
+    const local: BinaryWants = this._state.binaryWants()
+    if (local.all) return { all: true, members: new Set() }
+    const members = new Set(local.members)
+    for (const stub of this._stubs) {
+      if (stub._binaryWants.all) return { all: true, members: new Set() }
+      for (const id of stub._binaryWants.members) members.add(id)
+    }
+    return { all: false, members }
   }
 
   private _setSub(field: '_mainUnsub' | '_mainBinaryUnsub', want: boolean, subscribe: () => () => void): void {
@@ -706,7 +758,7 @@ class ServerLocalParticipant implements LocalParticipant {
   private _left = false
   private _leftFired = false
   private _leaveCbs: Array<() => void> = []
-  private readonly _messageCbs: Array<(data: unknown, from: string) => void> = []
+  private readonly _messageCbs: Array<(data: unknown, fromId: string) => void> = []
 
   constructor(serverRoom: ServerRoom, id: string, meta: ParticipantMeta, joinedAt: number, selfDelivery: boolean) {
     this._room = serverRoom
@@ -735,12 +787,12 @@ class ServerLocalParticipant implements LocalParticipant {
     return await this._room._publishData(this.id, { binary: frameWithMemberId(this.id, data) })
   }
 
-  async send(to: string, data: unknown): Promise<void> {
+  async send(to: string | RemoteParticipant, data: unknown): Promise<void> {
     this._assertActive()
-    await this._room._sendDm(this.id, to, data)
+    await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
   }
 
-  listen(callback: (data: unknown, from: string) => void): () => void {
+  listen(callback: (data: unknown, fromId: string) => void): () => void {
     this._messageCbs.push(callback)
     return () => {
       const i = this._messageCbs.indexOf(callback)
@@ -749,10 +801,10 @@ class ServerLocalParticipant implements LocalParticipant {
   }
 
   /** @internal — a direct message arrived on this member's inbox. */
-  _deliverMessage(from: string, data: unknown): void {
+  _deliverMessage(fromId: string, data: unknown): void {
     for (const cb of [...this._messageCbs]) {
       try {
-        cb(data, from)
+        cb(data, fromId)
       } catch (err) {
         reportRoomError(err)
       }
@@ -814,7 +866,13 @@ class RoomStubChannel extends ServerBroadcast {
   private readonly _room: ServerRoom
   /** @internal — members the remote client joined through this stub. */
   readonly _stubMembers = new Map<string, { selfDelivery: boolean }>()
-  /** @internal */ _wantsBinary = false
+  /** @internal — which members' binary streams the client declared it wants (`sub-binary`). */
+  _binaryWants: { all: boolean; members: Set<string> } = { all: false, members: new Set() }
+
+  /** @internal */
+  _wantsBinaryFrom(memberId: string): boolean {
+    return this._binaryWants.all || this._binaryWants.members.has(memberId)
+  }
 
   constructor(serverRoom: ServerRoom) {
     super({ key: roomMainKey(serverRoom.id) })
@@ -841,17 +899,10 @@ class RoomStubChannel extends ServerBroadcast {
     )
   }
 
-  override _onPeerBroadcastSubscribe(binary: boolean): void {
-    if (!binary) return // text always flows — it carries presence
-    this._wantsBinary = true
-    this._room._syncSubs()
-  }
-
-  override _onPeerBroadcastUnsubscribe(binary: boolean): void {
-    if (!binary) return
-    this._wantsBinary = false
-    this._room._syncSubs()
-  }
+  // Text always flows (it carries presence); binary delivery is member-selective, declared
+  // by the client's `sub-binary` request — the coarse BROADCAST_(UN)SUB ctrls are ignored.
+  override _onPeerBroadcastSubscribe(): void {}
+  override _onPeerBroadcastUnsubscribe(): void {}
 
   /** @internal */
   _relayPublishText(wireText: string): void {

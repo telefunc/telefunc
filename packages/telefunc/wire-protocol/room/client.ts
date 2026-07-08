@@ -11,6 +11,7 @@ import {
   hasRoomTag,
   sizeFromWire,
   unframeMemberId,
+  type BinaryWants,
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
   type ParticipantStubRequest,
@@ -40,6 +41,7 @@ class ClientRoom implements Room {
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   private _binaryUnsub: (() => void) | null = null
+  private _lastBinaryWantsSent = ''
 
   constructor(stub: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
     this._stub = stub
@@ -129,6 +131,9 @@ class ClientRoom implements Room {
   onClose(callback: () => void): () => void {
     return this._state.onClose(callback)
   }
+  onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
+    return this._state.onAnnounce(callback)
+  }
 
   // ── Requests & publishes (used by ClientRoomParticipant) ──
 
@@ -193,6 +198,9 @@ class ClientRoom implements Room {
       case 'closed':
         this._applyClosed()
         return
+      case 'announce':
+        this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+        return
       case 'dm':
         // Relayed from this member's private inbox — only its own stub ever receives it.
         this._localParticipants.get(event.to)?._deliverMessage(event.from, event.data)
@@ -218,16 +226,27 @@ class ClientRoom implements Room {
     this._localParticipants.clear()
   }
 
-  /** The wire binary stream is subscribed only while binary listeners exist (bandwidth). */
+  /** Binary delivery is member-selective: the wanted set (all / specific members) is declared
+   *  to the server, which relays only those members' frames. Declared synchronously — like
+   *  `subscribe()` — so same-connection FIFO guarantees a publish right after subscribing gets
+   *  its own frame back. Listener changes that leave the set unchanged send nothing. */
   private _syncBinarySub(): void {
-    const want = !this._state.closed && this._state.binaryListenerCount > 0
-    if (want && !this._binaryUnsub) {
+    const wants: BinaryWants = this._state.closed ? { all: false, members: [] } : this._state.binaryWants()
+    const wantAny = wants.all || wants.members.length > 0
+
+    if (wantAny && !this._binaryUnsub) {
       this._binaryUnsub = this._stub.subscribeBinary((framed, info) => this._onBinaryFrame(framed, info))
-    } else if (!want && this._binaryUnsub) {
+    } else if (!wantAny && this._binaryUnsub) {
       const unsub = this._binaryUnsub
       this._binaryUnsub = null
       unsub()
     }
+
+    if (this._state.closed) return // stub is dead — nothing to declare
+    const encoded = wants.all ? 'all' : [...wants.members].sort().join(',')
+    if (encoded === this._lastBinaryWantsSent) return
+    this._lastBinaryWantsSent = encoded
+    void this._stub.send({ __r: 'sub-binary', all: wants.all, members: wants.members }, { ack: false }).catch(() => {})
   }
 }
 
@@ -244,7 +263,7 @@ abstract class ClientParticipantBase implements LocalParticipant {
   protected _left = false
   private _leftFired = false
   private _leaveCbs: Array<() => void> = []
-  private readonly _messageCbs: Array<(data: unknown, from: string) => void> = []
+  private readonly _messageCbs: Array<(data: unknown, fromId: string) => void> = []
 
   constructor(roomId: string, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
     this._roomId = roomId
@@ -260,11 +279,11 @@ abstract class ClientParticipantBase implements LocalParticipant {
 
   abstract publish(data: unknown): Promise<ChannelPublishAck>
   abstract publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
-  abstract send(to: string, data: unknown): Promise<void>
+  abstract send(to: string | RemoteParticipant, data: unknown): Promise<void>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
 
-  listen(callback: (data: unknown, from: string) => void): () => void {
+  listen(callback: (data: unknown, fromId: string) => void): () => void {
     this._messageCbs.push(callback)
     return () => {
       const i = this._messageCbs.indexOf(callback)
@@ -273,10 +292,10 @@ abstract class ClientParticipantBase implements LocalParticipant {
   }
 
   /** @internal — a direct message arrived on this member's inbox. */
-  _deliverMessage(from: string, data: unknown): void {
+  _deliverMessage(fromId: string, data: unknown): void {
     for (const cb of [...this._messageCbs]) {
       try {
-        cb(data, from)
+        cb(data, fromId)
       } catch (err) {
         reportRoomError(err)
       }
@@ -330,9 +349,10 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return await this._room._publishBinaryData(frameWithMemberId(this.id, data))
   }
 
-  async send(to: string, data: unknown): Promise<void> {
+  async send(to: string | RemoteParticipant, data: unknown): Promise<void> {
     this._assertActive()
-    unwrapOkAck(await this._room._request({ __r: 'req-dm', id: this.id, to, data }))
+    const toId = typeof to === 'string' ? to : to.id
+    unwrapOkAck(await this._room._request({ __r: 'req-dm', id: this.id, to: toId, data }))
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -382,9 +402,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return unwrapPublishAck(await this._channel.sendBinary(frameWithMemberId(this.id, data), { ack: true }))
   }
 
-  async send(to: string, data: unknown): Promise<void> {
+  async send(to: string | RemoteParticipant, data: unknown): Promise<void> {
     this._assertActive()
-    unwrapOkAck(await this._request({ __r: 'req-dm', to, data }))
+    unwrapOkAck(await this._request({ __r: 'req-dm', to: typeof to === 'string' ? to : to.id, data }))
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {

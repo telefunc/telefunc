@@ -1,7 +1,7 @@
 export { Room }
 
 import React, { useEffect, useState } from 'react'
-import { onCreateRoom, onGetRoom, onJoinAsServer, onKick, onCloseRoom } from './Room.telefunc'
+import { onCreateRoom, onGetRoom, onJoinAsServer, onAnnounce, onSystemSend, onKick, onCloseRoom } from './Room.telefunc'
 
 /** Render every poll so the e2e autoRetry sees fresh data on each iteration (see Publish.tsx). */
 async function pollUntil(render: () => { done: boolean }) {
@@ -142,7 +142,7 @@ function Room() {
         Publish 3 binary frames
       </button>
 
-      <h2>Admin (kick & close)</h2>
+      <h2>Admin (announce, system send, kick & close)</h2>
 
       <button
         id="test-room-admin"
@@ -153,22 +153,34 @@ function Room() {
           const lobby = await onGetRoom(roomId)
           const me = await lobby.join({ name: 'Eve' })
 
+          // Room-authored messages: a broadcast to everyone, and a whisper (fromId === '').
+          const announcements: unknown[] = []
+          lobby.onAnnounce((data) => announcements.push(data))
+          const system: Array<{ data: unknown; fromId: string }> = []
+          me.listen((data, fromId) => system.push({ data, fromId }))
+
           let kicked = false
           let closed = false
           me.onLeave(() => (kicked = true))
           lobby.onClose(() => (closed = true))
 
+          await onAnnounce(roomId, 'maintenance')
+          await onSystemSend(roomId, me.id, 'welcome')
+          await pollUntil(() => {
+            setResult(JSON.stringify({ announcements, system }))
+            return { done: announcements.length >= 1 && system.length >= 1 }
+          })
+
           await onKick(roomId, me.id)
           await onCloseRoom(roomId)
-
           await pollUntil(() => {
-            const state = { kicked, closed, isClosed: lobby.isClosed, count: lobby.count }
+            const state = { announcements, system, kicked, closed, isClosed: lobby.isClosed, count: lobby.count }
             setResult(JSON.stringify(state))
             return { done: kicked && closed && lobby.isClosed }
           })
         }}
       >
-        Kick participant, close room
+        Announce, system send, kick, close
       </button>
     </div>
   )

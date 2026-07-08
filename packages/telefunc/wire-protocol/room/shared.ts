@@ -23,6 +23,7 @@ export type {
   RoomEnvelope,
   RoomCtrlEnvelope,
   RoomDataEnvelope,
+  RoomAnnounceEnvelope,
   RoomDmEnvelope,
   RoomStubRequest,
   ParticipantStubRequest,
@@ -30,6 +31,7 @@ export type {
   ReqOkAck,
   ReqJoinAck,
   ReqPublishAck,
+  BinaryWants,
 }
 
 import { assert } from '../../utils/assert.js'
@@ -138,19 +140,24 @@ type RoomCtrlEnvelope =
 /** A participant's message. Published on the room's main key (shared mode) or the member's own key (isolated mode). */
 type RoomDataEnvelope = { __r: 'data'; from: string; data: unknown }
 
-type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope
+/** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. */
+type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
+
+type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
 
 /** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
  *  privacy: only the target's owning node subscribes, only its holder receives the relay.
  *  `to` lets a holder of several participants route the message to the right one. */
 type RoomDmEnvelope = { __r: 'dm'; to: string; from: string; data: unknown }
 
-/** Client→server requests on a `Room` stub channel. `id` identifies the sending participant. */
+/** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
+ *  `sub-binary` declares which members' binary streams the client wants relayed (full replace). */
 type RoomStubRequest =
   | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown }
+  | { __r: 'sub-binary'; all: boolean; members: string[] }
 
 /** Client→server requests on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubRequest =
@@ -164,6 +171,9 @@ type ParticipantStubNotice =
   | { __r: 'left' }
   | { __r: 'p-meta'; meta: ParticipantMeta }
   | { __r: 'dm'; from: string; data: unknown }
+
+/** Which members' binary streams a holder wants — `all` (room-level listeners) or a specific set. */
+type BinaryWants = { all: boolean; members: string[] }
 
 type ReqOkAck = { ok: true } | { ok: false; err: string }
 type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }
@@ -281,6 +291,7 @@ class RoomState {
   private readonly _emptyCbs: Array<() => void> = []
   private readonly _fullCbs: Array<() => void> = []
   private readonly _closeCbs: Array<() => void> = []
+  private readonly _announceCbs: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
 
   private _eventListenerCount = 0
   private _dataListenerCount = 0
@@ -319,6 +330,17 @@ class RoomState {
   /** Listeners needing the binary data stream. */
   get binaryListenerCount(): number {
     return this._binaryListenerCount
+  }
+
+  /** Which members' binary streams this holder needs delivered — drives the wire/adapter
+   *  subscriptions on both sides (client declares it, server aggregates it per stub). */
+  binaryWants(): BinaryWants {
+    if (this._roomBinaryCbs.length > 0) return { all: true, members: [] }
+    const members: string[] = []
+    for (const entry of this._members.values()) {
+      if (entry.binaryCbs.length > 0) members.push(entry.id)
+    }
+    return { all: false, members }
   }
 
   getRemote(id: string): RemoteParticipant | null {
@@ -364,6 +386,9 @@ class RoomState {
   onClose(cb: () => void): () => void {
     return this._register(this._closeCbs, cb, 'event')
   }
+  onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
+    return this._register(this._announceCbs, cb, 'event')
+  }
 
   // ── Event application ──
 
@@ -389,6 +414,7 @@ class RoomState {
     this.membershipVersion++
     this._fireAll(entry.leaveCbs)
     this._fireAll(this._leaveCbs, entry.remote)
+    this._releaseEntryListeners(entry)
     this._wasFull = this.isFull
     if (this._members.size === 0) this._fireAll(this._emptyCbs)
   }
@@ -416,9 +442,16 @@ class RoomState {
     if (this.closed) return
     this.closed = true
     this.membershipVersion++
-    for (const entry of this._members.values()) this._fireAll(entry.leaveCbs)
+    for (const entry of this._members.values()) {
+      this._fireAll(entry.leaveCbs)
+      this._releaseEntryListeners(entry)
+    }
     this._members.clear()
     this._fireAll(this._closeCbs)
+  }
+
+  applyAnnounce(data: unknown, info: ChannelPublishInfo): void {
+    this._fireAll(this._announceCbs, data, info)
   }
 
   applyData(from: string, data: unknown, info: ChannelPublishInfo, suppress: boolean): void {
@@ -498,14 +531,27 @@ class RoomState {
   private _register<T>(list: T[], cb: T, kind: ListenerKind): () => void {
     list.push(cb)
     this._bumpListenerCount(kind, 1)
-    let removed = false
+    // List membership is the source of truth: `_releaseEntryListeners` may have already
+    // emptied the list, and a second unlisten call must not decrement twice.
     return () => {
-      if (removed) return
-      removed = true
       const i = list.indexOf(cb)
-      if (i >= 0) list.splice(i, 1)
+      if (i < 0) return
+      list.splice(i, 1)
       this._bumpListenerCount(kind, -1)
     }
+  }
+
+  /** A member entry is being discarded — its listeners die with it. Releasing them keeps the
+   *  counters truthful (callers rarely unsubscribe in `onLeave`), which lets the owners drop
+   *  wire/adapter subscriptions the departed member was holding open. */
+  private _releaseEntryListeners(entry: MemberEntry): void {
+    this._bumpListenerCount('data', -entry.dataCbs.length)
+    this._bumpListenerCount('binary', -entry.binaryCbs.length)
+    this._bumpListenerCount('event', -(entry.updateCbs.length + entry.leaveCbs.length))
+    entry.dataCbs.length = 0
+    entry.binaryCbs.length = 0
+    entry.updateCbs.length = 0
+    entry.leaveCbs.length = 0
   }
 
   private _bumpListenerCount(kind: ListenerKind, delta: number): void {

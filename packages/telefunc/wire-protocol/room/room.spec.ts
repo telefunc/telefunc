@@ -301,6 +301,44 @@ describe('data pub/sub', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
+// Selective binary — bug classes targeted: unwanted members' frames crossing
+// the wire (bandwidth), departed members' listeners pinning subscriptions
+// open (the `onLeave(() => decoder.close())` pattern never unsubscribes).
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('selective binary delivery', () => {
+  it("isolated mode subscribes only the wanted members' upstream keys", async () => {
+    const a = await Room.create('sel', { isolated: true })
+    const cam1 = await a.join({ name: 'cam1' })
+    const cam2 = await a.join({ name: 'cam2' })
+    const b = await Room.get('sel')
+
+    const frames: string[] = []
+    b.getParticipant(cam1.id)!.subscribeBinary((data) => frames.push(`cam1:${data[0]}`))
+    await cam1.publishBinary(new Uint8Array([1]))
+    await cam2.publishBinary(new Uint8Array([2])) // nobody wants cam2 — b never subscribed its key
+
+    expect(frames).toEqual(['cam1:1'])
+  })
+
+  it("releases a departed member's listeners — the decoder pattern must not pin subscriptions", async () => {
+    const a = await Room.create('release', { isolated: true })
+    const cam = await a.join({ name: 'cam' })
+    const b = await Room.get('release')
+
+    // The documented pattern: subscribe on join, close the decoder on leave — no unsubscribe.
+    b.getParticipant(cam.id)!.subscribeBinary(() => {})
+    expect(b.getParticipant(cam.id)).not.toBe(null)
+
+    await cam.leave()
+
+    const bState = (b as ServerRoom)._state
+    expect(bState.binaryWants()).toEqual({ all: false, members: [] })
+    expect(bState.binaryListenerCount).toBe(0)
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
 // Direct messages — bug classes targeted: privacy leaks (a DM reaching room
 // subscribers or a non-target holder), lost sender identity, dangling sends
 // to unknown or departed participants.
@@ -320,7 +358,7 @@ describe('direct messages', () => {
     a.subscribe((data) => roomStream.push(data))
     b.subscribe((data) => roomStream.push(data))
 
-    await alice.send(bob.id, 'psst')
+    await alice.send(a.getParticipant(bob.id)!, 'psst') // target as object — or pass the ID
 
     expect(bobInbox).toEqual([['psst', alice.id]])
     expect(aliceInbox).toEqual([]) // not echoed to the sender
@@ -335,6 +373,46 @@ describe('direct messages', () => {
     const bob = await lobby.join()
     await alice.leave()
     await expect(alice.send(bob.id, 'x')).rejects.toThrow('Participant has left')
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// Room-authored messages — system notices without a synthetic member: they
+// carry no sender, never pollute the member list, and can't be spoofed by
+// clients (their publishes/DMs are validated against their own members).
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('room-authored messages', () => {
+  it('announce() reaches onAnnounce() everywhere — and never the participant streams', async () => {
+    const a = await Room.create('sys')
+    const b = await Room.get('sys')
+    await a.join({ name: 'Alice' })
+    const announced: unknown[] = []
+    const streamed: unknown[] = []
+    b.onAnnounce((data, info) => announced.push([data, info.key]))
+    b.subscribe((data) => streamed.push(data))
+
+    await Room.announce('sys', { text: 'maintenance at noon' })
+
+    expect(announced).toEqual([[{ text: 'maintenance at noon' }, 'sys']])
+    expect(streamed).toEqual([])
+    await expect(Room.announce('gone', 'x')).rejects.toThrow('Room not found: gone')
+  })
+
+  it('Room.send() whispers to one participant with an empty fromId', async () => {
+    const lobby = await Room.create('automod')
+    const alice = await lobby.join({ name: 'Alice' })
+    const bob = await lobby.join({ name: 'Bob' })
+    const aliceInbox: unknown[] = []
+    const bobInbox: unknown[] = []
+    alice.listen((data, fromId) => aliceInbox.push([data, fromId]))
+    bob.listen((data) => bobInbox.push(data))
+
+    await Room.send('automod', alice.id, { warning: 'watch the language' })
+
+    expect(aliceInbox).toEqual([[{ warning: 'watch the language' }, '']]) // '' = server-authored
+    expect(bobInbox).toEqual([])
+    await expect(Room.send('automod', crypto.randomUUID(), 'x')).rejects.toThrow('Participant not found')
   })
 })
 
@@ -425,18 +503,25 @@ describe('room stub channel', () => {
     expect(serverRoom.count).toBe(1)
   })
 
-  it('binary frames are relayed only after the client subscribes to the binary stream', async () => {
+  it("binary frames are relayed member-selectively, per the client's declared wants", async () => {
     const { serverRoom, stub, peer } = await createServedRoom('lazy-bin')
-    const me = await serverRoom.join()
+    const wanted = await serverRoom.join({ name: 'wanted' })
+    const unwanted = await serverRoom.join({ name: 'unwanted' })
 
-    await me.publishBinary(new Uint8Array([1]))
-    expect(peer.decoded().filter((f) => f.tag === TAG.PUBLISH_BINARY)).toEqual([])
+    await wanted.publishBinary(new Uint8Array([1]))
+    expect(peer.decoded().filter((f) => f.tag === TAG.PUBLISH_BINARY)).toEqual([]) // nothing declared yet
 
-    stub._onPeerBroadcastSubscribe(true)
-    await me.publishBinary(new Uint8Array([2]))
-    const relayed = peer.decoded().filter((f) => f.tag === TAG.PUBLISH_BINARY)
-    expect(relayed.length).toBe(1)
-    expect(unframeMemberId(relayed[0]!.data)!.from).toBe(me.id)
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', all: false, members: [wanted.id] }), 60)
+    await wanted.publishBinary(new Uint8Array([2]))
+    await unwanted.publishBinary(new Uint8Array([3]))
+    let relayed = peer.decoded().filter((f) => f.tag === TAG.PUBLISH_BINARY)
+    expect(relayed.length).toBe(1) // only the wanted member's frame crossed the wire
+    expect(unframeMemberId(relayed[0]!.data)!.from).toBe(wanted.id)
+
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', all: true, members: [] }), 61)
+    await unwanted.publishBinary(new Uint8Array([4]))
+    relayed = peer.decoded().filter((f) => f.tag === TAG.PUBLISH_BINARY)
+    expect(relayed.length).toBe(2)
   })
 
   it('the client vanishing (channel shutdown) makes its members leave the room', async () => {
@@ -654,6 +739,63 @@ describe('ClientRoom', () => {
 
     unsubscribe()
     expect(fake.binarySubscribed()).toBe(false)
+  })
+
+  it('declares its binary wants to the server — member-selective, sent synchronously, deduped', () => {
+    const cam1 = crypto.randomUUID()
+    const cam2 = crypto.randomUUID()
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(
+      fake.stub,
+      createSnapshot('wants', {
+        members: [
+          { id: cam1, meta: {}, joinedAt: 1 },
+          { id: cam2, meta: {}, joinedAt: 2 },
+        ],
+      }),
+    )
+    const subBinaryMsgs = () => fake.sent.filter((m) => m.__r === 'sub-binary')
+
+    // Each widening is declared synchronously — a publish right after subscribing must be
+    // preceded by its declaration on the wire (same-connection FIFO).
+    const unsub1 = clientRoom.getParticipant(cam1)!.subscribeBinary(() => {})
+    expect(subBinaryMsgs()).toEqual([{ __r: 'sub-binary', all: false, members: [cam1] }])
+    clientRoom.getParticipant(cam2)!.subscribeBinary(() => {})
+    expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: false, members: [cam1, cam2] })
+
+    // A room-level listener upgrades the declaration to `all`; listener changes that leave the
+    // effective set unchanged send nothing.
+    const unsubAll = clientRoom.subscribeBinary(() => {})
+    expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: true, members: [] })
+    const sentCount = subBinaryMsgs().length
+    const unsubDup = clientRoom.getParticipant(cam1)!.subscribeBinary(() => {})
+    expect(subBinaryMsgs().length).toBe(sentCount)
+
+    // Dropping back to one member narrows it again.
+    unsubDup()
+    unsubAll()
+    unsub1()
+    expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: false, members: [cam2] })
+  })
+
+  it("a member leaving releases its listeners — the client's declaration narrows without an unsubscribe", () => {
+    const cam = crypto.randomUUID()
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(
+      fake.stub,
+      createSnapshot('wants-release', { members: [{ id: cam, meta: {}, joinedAt: 1 }] }),
+    )
+    clientRoom.getParticipant(cam)!.subscribeBinary(() => {}) // never unsubscribed
+    expect(fake.binarySubscribed()).toBe(true)
+
+    fake.emit({ __r: 'leave', id: cam })
+
+    expect(fake.binarySubscribed()).toBe(false) // wire stream released
+    expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
+      __r: 'sub-binary',
+      all: false,
+      members: [],
+    })
   })
 
   it('a standalone participant joined with selfDelivery=false suppresses its echo in a sibling room', async () => {

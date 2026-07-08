@@ -1,4 +1,4 @@
-export { onCreateRoom, onGetRoom, onJoinAsServer, onKick, onCloseRoom }
+export { onCreateRoom, onGetRoom, onJoinAsServer, onAnnounce, onSystemSend, onKick, onCloseRoom }
 
 import { Room } from 'telefunc'
 
@@ -17,6 +17,14 @@ async function onGetRoom(roomId: string) {
 async function onJoinAsServer(roomId: string, name: string) {
   const theRoom = await Room.get(roomId)
   return await theRoom.join({ name })
+}
+
+async function onAnnounce(roomId: string, data: unknown) {
+  await Room.announce(roomId, data)
+}
+
+async function onSystemSend(roomId: string, participantId: string, data: unknown) {
+  await Room.send(roomId, participantId, data)
 }
 
 async function onKick(roomId: string, participantId: string) {
