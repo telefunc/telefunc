@@ -213,8 +213,8 @@ class ServerRoom implements Room {
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
 
-  private _mainUnsub: (() => void) | null = null
-  private _mainBinaryUnsub: (() => void) | null = null
+  private readonly _mainSub = new SubSlot()
+  private readonly _mainBinarySub = new SubSlot()
   private readonly _memberTextUnsubs = new Map<string, () => void>()
   private readonly _memberBinaryUnsubs = new Map<string, () => void>()
   private readonly _dmUnsubs = new Map<string, () => void>()
@@ -274,7 +274,7 @@ class ServerRoom implements Room {
   async getParticipants(): Promise<RemoteParticipant[]> {
     // While observed, the event stream keeps the local view fresh. While unobserved,
     // no listeners exist that a change could notify — resync silently from KV.
-    if (!this._state.closed && !this._mainUnsub) await this._refreshMembers()
+    if (!this._state.closed && !this._mainSub.active) await this._refreshMembers()
     return this._state.listRemotes()
   }
 
@@ -606,8 +606,8 @@ class ServerRoom implements Room {
       this._localParticipants.size > 0 ||
       state.eventListenerCount + state.dataListenerCount + state.binaryListenerCount > 0
 
-    const becomesObserved = open && observed && this._mainUnsub === null
-    this._setSub('_mainUnsub', open && observed, () =>
+    const becomesObserved = open && observed && !this._mainSub.active
+    this._mainSub.sync(open && observed, () =>
       adapter.subscribe(roomMainKey(this.id), (serialized, info) => this._onText(serialized, info)),
     )
     // Events between construction (KV snapshot) and this subscription were missed — resync.
@@ -632,7 +632,7 @@ class ServerRoom implements Room {
         adapter.subscribeBinary(roomMemberDataKey(this.id, memberId), (framed, info) => this._onBinary(framed, info)),
       )
     } else {
-      this._setSub('_mainBinaryUnsub', wantAnyBinary, () =>
+      this._mainBinarySub.sync(wantAnyBinary, () =>
         adapter.subscribeBinary(roomMainKey(this.id), (framed, info) => this._onBinary(framed, info)),
       )
     }
@@ -656,16 +656,6 @@ class ServerRoom implements Room {
       for (const id of stub._binaryWants.members) members.add(id)
     }
     return { all: false, members }
-  }
-
-  private _setSub(field: '_mainUnsub' | '_mainBinaryUnsub', want: boolean, subscribe: () => () => void): void {
-    const current = this[field]
-    if (want && !current) {
-      this[field] = subscribe()
-    } else if (!want && current) {
-      this[field] = null
-      current()
-    }
   }
 
   private _syncMemberSubs(
@@ -991,6 +981,25 @@ async function listMemberKeys(kv: RoomKV, roomId: string): Promise<Array<{ key: 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** One adapter subscription, reconciled to a desired on/off state. */
+class SubSlot {
+  private _unsub: (() => void) | null = null
+
+  get active(): boolean {
+    return this._unsub !== null
+  }
+
+  sync(want: boolean, subscribe: () => () => void): void {
+    if (want && !this._unsub) {
+      this._unsub = subscribe()
+    } else if (!want && this._unsub) {
+      const unsub = this._unsub
+      this._unsub = null
+      unsub()
+    }
+  }
+}
 
 async function publishCtrl(roomId: string, event: RoomCtrlEnvelope): Promise<void> {
   await getBroadcastAdapter().publish(roomMainKey(roomId), stringify(event))
