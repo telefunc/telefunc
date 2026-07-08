@@ -1,3 +1,12 @@
+## [0.2.22](https://github.com/telefunc/telefunc/compare/v0.2.21...v0.2.22) (2026-07-08)
+
+
+### Bug Fixes
+
+* update @brillout/json-serializer@^0.5.25 ([bed70e3](https://github.com/telefunc/telefunc/commit/bed70e370aa1681357939fa18a93d5773b74b237))
+
+
+
 ## [0.2.21](https://github.com/brillout/telefunc/compare/v0.2.20...v0.2.21) (2026-07-01)
 
 
