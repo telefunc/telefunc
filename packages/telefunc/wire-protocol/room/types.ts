@@ -3,6 +3,7 @@ export type {
   RoomInfo,
   RoomOptions,
   RoomMeta,
+  JoinOptions,
   ParticipantMeta,
   LocalParticipant,
   RemoteParticipant,
@@ -29,6 +30,12 @@ type RoomOptions = {
    *  contention on platforms that map each key to a separate coordinator (e.g. Cloudflare
    *  Durable Objects). Clients don't see the difference. Fixed at creation. */
   isolated?: boolean
+}
+
+type JoinOptions = {
+  /** Whether your own publishes are delivered back to your side's room (default: `true`).
+   *  Turn off for e.g. video, where you don't want your own frames back. */
+  selfDelivery?: boolean
 }
 
 /** Lightweight room snapshot returned by `Room.list()`. */
@@ -65,7 +72,7 @@ type Room = {
   readonly isClosed: boolean
 
   /** Join the room. Returns your own participant handle. */
-  join(meta?: ParticipantMeta): Promise<LocalParticipant>
+  join(meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant>
 
   getParticipants(): Promise<RemoteParticipant[]>
   getParticipant(id: string): RemoteParticipant | null
@@ -89,23 +96,27 @@ type Room = {
 }
 
 /**
- * Your own participant handle, returned by `Room.join()`. One type, same on server and client —
- * can be returned from a telefunction as-is. Publish-only: receiving happens on `Room` and
- * `RemoteParticipant`.
+ * Your own participant handle, returned by `join()`. One type, same on server and client —
+ * can be returned from a telefunction as-is. Room-wide messages are received on `Room` and
+ * `RemoteParticipant`; only direct messages addressed to you arrive here (`listen()`).
  */
 type LocalParticipant = {
   readonly id: string
   readonly meta: ParticipantMeta
+  /** Whether your own publishes are delivered back to your side's room. Set at `join()`. */
+  readonly selfDelivery: boolean
 
+  /** Publish a message to the whole room. */
   publish(data: unknown): Promise<ChannelPublishAck>
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
 
+  /** Send a private message to one participant — nobody else receives it. */
+  send(to: string, data: unknown): Promise<void>
+  /** Receive private messages addressed to you: `(data, from)`. Returns an unlisten function. */
+  listen(callback: (data: unknown, from: string) => void): () => void
+
   /** Replace your metadata. Propagates to all observers in real time. */
   setMeta(meta: ParticipantMeta): Promise<void>
-
-  /** Whether your own publishes are delivered back to your side's `Room` (default: `true`).
-   *  Set to `false` for e.g. video, where you don't want your own frames back. */
-  selfDelivery: boolean
 
   leave(): Promise<void>
   /** You left — voluntarily, kicked, room closed, or disconnected. */

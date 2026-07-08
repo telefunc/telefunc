@@ -276,13 +276,15 @@ describe('data pub/sub', () => {
     a.subscribe((data) => seenOnA.push(data))
     b.subscribe((data) => seenOnB.push(data))
 
-    const me = await a.join()
-    await me.publish('echoed')
-    me.selfDelivery = false
-    await me.publish('muted')
+    const chatty = await a.join({ name: 'chatty' })
+    const muted = await a.join({ name: 'muted' }, { selfDelivery: false })
+    await chatty.publish('echoed')
+    await muted.publish('not-here')
 
-    expect(seenOnA).toEqual(['echoed']) // own holder: second publish suppressed
-    expect(seenOnB).toEqual(['echoed', 'muted']) // everyone else: sees both
+    expect(chatty.selfDelivery).toBe(true)
+    expect(muted.selfDelivery).toBe(false)
+    expect(seenOnA).toEqual(['echoed']) // own holder: the muted participant's publish suppressed
+    expect(seenOnB).toEqual(['echoed', 'not-here']) // everyone else: sees both
   })
 
   it('binary round-trips with the 16-byte member ID frame, preserving high-bit bytes', async () => {
@@ -295,6 +297,44 @@ describe('data pub/sub', () => {
     await me.publishBinary(new Uint8Array([0x00, 0x7f, 0x80, 0xff]))
 
     expect(received).toEqual([{ bytes: [0x00, 0x7f, 0x80, 0xff], from: me.id }])
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// Direct messages — bug classes targeted: privacy leaks (a DM reaching room
+// subscribers or a non-target holder), lost sender identity, dangling sends
+// to unknown or departed participants.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('direct messages', () => {
+  it('delivers privately across instances — only the target hears it', async () => {
+    const a = await Room.create('dm')
+    const b = await Room.get('dm')
+    const alice = await a.join({ name: 'Alice' })
+    const bob = await b.join({ name: 'Bob' })
+    const bobInbox: unknown[] = []
+    const aliceInbox: unknown[] = []
+    const roomStream: unknown[] = []
+    bob.listen((data, from) => bobInbox.push([data, from]))
+    alice.listen((data) => aliceInbox.push(data))
+    a.subscribe((data) => roomStream.push(data))
+    b.subscribe((data) => roomStream.push(data))
+
+    await alice.send(bob.id, 'psst')
+
+    expect(bobInbox).toEqual([['psst', alice.id]])
+    expect(aliceInbox).toEqual([]) // not echoed to the sender
+    expect(roomStream).toEqual([]) // never on the room stream
+  })
+
+  it('rejects unknown targets and departed senders', async () => {
+    const lobby = await Room.create('dm-err')
+    const alice = await lobby.join()
+    await expect(alice.send(crypto.randomUUID(), 'x')).rejects.toThrow('Participant not found')
+
+    const bob = await lobby.join()
+    await alice.leave()
+    await expect(alice.send(bob.id, 'x')).rejects.toThrow('Participant has left')
   })
 })
 
@@ -413,6 +453,54 @@ describe('room stub channel', () => {
     expect(serverRoom.count).toBe(0)
     expect(await Room.list()).toMatchObject([{ id: 'vanish', count: 0 }])
   })
+
+  it('relays a DM only to the stub owning the target', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('dm-stub')
+    const { id } = await joinViaStub(stub, peer, 1)
+    const bystander = new RoomStubChannel(serverRoom)
+    bystander._registerChannel()
+    serverRoom._attachStub(bystander)
+    const bystanderPeer = attachPeer(bystander)
+
+    const sender = await serverRoom.join({ name: 'Srv' })
+    await sender.send(id, 'psst')
+
+    const dmFramesOf = (frames: any[]) =>
+      frames.filter((f) => f.tag === TAG.PUBLISH && (JSON.parse(f.text) as { __r: string }).__r === 'dm')
+    expect(dmFramesOf(peer.decoded()).length).toBe(1) // the owner's stub got it
+    expect(dmFramesOf(bystanderPeer.decoded())).toEqual([]) // nobody else did
+  })
+
+  it("routes a stub member's DM to a server-held participant, validating the sender", async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('dm-stub-send')
+    const target = await serverRoom.join({ name: 'Srv' })
+    const inbox: unknown[] = []
+    target.listen((data, from) => inbox.push([data, from]))
+    const { id } = await joinViaStub(stub, peer, 1)
+
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-dm', id, to: target.id, data: 'hi' }), 2)
+    // Impersonation: a sender ID not joined through this stub is rejected.
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-dm', id: target.id, to: target.id, data: 'spoof' }), 3)
+
+    expect(inbox).toEqual([['hi', id]])
+    const acks = peer.decoded().filter((f) => f.tag === TAG.ACK_RES)
+    expect(JSON.parse(acks.find((f) => f.ackedSeq === 2).text).ok).toBe(true)
+    expect(JSON.parse(acks.find((f) => f.ackedSeq === 3).text).ok).toBe(false)
+  })
+
+  it('a stub member joined with selfDelivery=false gets no echo of its own publishes', async () => {
+    const { stub, peer } = await createServedRoom('quiet-stub')
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: {}, selfDelivery: false }), 1)
+    const ack = peer.decoded().find((f) => f.tag === TAG.ACK_RES && f.ackedSeq === 1)
+    const { id } = JSON.parse(ack.text) as { id: string }
+
+    await stub._onPeerPublishAckReqMessage(stringify({ __r: 'data', from: id, data: 'own' }), 2)
+
+    const dataFrames = peer
+      .decoded()
+      .filter((f) => f.tag === TAG.PUBLISH && (JSON.parse(f.text) as { __r: string }).__r === 'data')
+    expect(dataFrames).toEqual([]) // the echo was skipped at the relay, not just client-side
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -425,6 +513,7 @@ type FakeStub = {
   emit: (envelope: unknown) => void
   emitBinary: (framed: Uint8Array) => void
   published: unknown[]
+  sent: Array<{ __r: string }>
   binarySubscribed: () => boolean
   stub: ClientBroadcast
 }
@@ -433,6 +522,7 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
   const textCbs: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
   const binaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
   const published: unknown[] = []
+  const sent: Array<{ __r: string }> = []
   let seq = 0
   const info = () => ({ key: 'fake', seq: ++seq, timestamp: 1 })
   const stub = {
@@ -444,8 +534,10 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
       binaryCbs.push(cb)
       return () => binaryCbs.splice(binaryCbs.indexOf(cb), 1)
     },
-    send: async (msg: { __r: string }) =>
-      msg.__r === 'req-join' ? { ok: true, id: joinAck?.id ?? crypto.randomUUID(), joinedAt: 1 } : { ok: true },
+    send: async (msg: { __r: string }) => {
+      sent.push(msg)
+      return msg.__r === 'req-join' ? { ok: true, id: joinAck?.id ?? crypto.randomUUID(), joinedAt: 1 } : { ok: true }
+    },
     publish: async (envelope: unknown) => {
       published.push(envelope)
       return info()
@@ -457,6 +549,7 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
     emit: (envelope) => [...textCbs].forEach((cb) => cb(envelope, info())),
     emitBinary: (framed) => [...binaryCbs].forEach((cb) => cb(framed, info())),
     published,
+    sent,
     binarySubscribed: () => binaryCbs.length > 0,
     stub: stub as unknown as ClientBroadcast,
   }
@@ -504,6 +597,24 @@ describe('ClientRoom', () => {
     expect(received).toEqual([['hi', 'flow', memberId]])
   })
 
+  it('send() wires DMs through the stub; inbox relays route to the right participant', async () => {
+    const memberId = crypto.randomUUID()
+    const fake = createFakeStub({ id: memberId })
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('dms'))
+    const me = await clientRoom.join({}, { selfDelivery: false })
+    const inbox: unknown[] = []
+    me.listen((data, from) => inbox.push([data, from]))
+
+    const peer = crypto.randomUUID()
+    await me.send(peer, 'psst')
+    expect(fake.sent).toContainEqual({ __r: 'req-dm', id: memberId, to: peer, data: 'psst' })
+    expect(fake.sent).toContainEqual({ __r: 'req-join', meta: {}, selfDelivery: false })
+
+    fake.emit({ __r: 'dm', to: memberId, from: peer, data: 'reply' })
+    fake.emit({ __r: 'dm', to: crypto.randomUUID(), from: peer, data: 'not-mine' })
+    expect(inbox).toEqual([['reply', peer]])
+  })
+
   it('applies leave/p-meta/update/closed events to state and local participants', async () => {
     const fake = createFakeStub()
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('events', { size: 5, meta: { topic: 'a' } }))
@@ -545,7 +656,7 @@ describe('ClientRoom', () => {
     expect(fake.binarySubscribed()).toBe(false)
   })
 
-  it('selfDelivery=false on a standalone participant suppresses its echo in a sibling room', async () => {
+  it('a standalone participant joined with selfDelivery=false suppresses its echo in a sibling room', async () => {
     const roomId = `sibling-${crypto.randomUUID()}`
     const fake = createFakeStub()
     const clientRoom = new ClientRoom(fake.stub, createSnapshot(roomId))
@@ -566,16 +677,16 @@ describe('ClientRoom', () => {
       id: crypto.randomUUID(),
       meta: {},
       joinedAt: 1,
+      selfDelivery: false,
     })
-
+    const other = crypto.randomUUID()
     fake.emit({ __r: 'join', id: me.id, meta: {}, joinedAt: 1 })
-    me.selfDelivery = false
-    fake.emit({ __r: 'data', from: me.id, data: 'own-frame' })
-    expect(received).toEqual([]) // suppressed via the shared registry
+    fake.emit({ __r: 'join', id: other, meta: {}, joinedAt: 2 })
 
-    me.selfDelivery = true
-    fake.emit({ __r: 'data', from: me.id, data: 'wanted' })
-    expect(received).toEqual(['wanted'])
+    fake.emit({ __r: 'data', from: me.id, data: 'own-frame' })
+    fake.emit({ __r: 'data', from: other, data: 'their-frame' })
+
+    expect(received).toEqual(['their-frame']) // own echo suppressed via the shared registry, from revive on
   })
 })
 

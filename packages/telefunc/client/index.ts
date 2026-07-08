@@ -16,6 +16,7 @@ export type {
   RoomInfo,
   RoomOptions,
   RoomMeta,
+  JoinOptions,
   ParticipantMeta,
   LocalParticipant,
   RemoteParticipant,

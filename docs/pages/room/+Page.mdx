@@ -135,7 +135,7 @@ One type, same on server and client — return it from a telefunction as-is. No 
 
 | Method | Description |
 |---|---|
-| `join(meta?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. |
+| `join(meta?, options?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. Options: `{ selfDelivery?: boolean }`. |
 | `getParticipants()` | All current participants (<Link href="#remoteparticipant">`RemoteParticipant[]`</Link>). |
 | `getParticipant(id)` | A single participant, or `null`. |
 | `subscribe(cb)` | Receive all participant messages: `(data, info, from)`. Returns an unsubscribe function. |
@@ -174,19 +174,21 @@ Both receive from the same stream — a `publish()` reaches room-level subscribe
 
 ## `LocalParticipant`
 
-Your own handle, returned by `join()`. One type, same on server and client — return it from a telefunction as-is. Publish-only: receiving happens on the room and on `RemoteParticipant`.
+Your own handle, returned by `join()`. One type, same on server and client — return it from a telefunction as-is. Room-wide messages are received on the room and on `RemoteParticipant`; only <Link href="#direct-messages">direct messages</Link> addressed to you arrive here.
 
 | Method | Description |
 |---|---|
-| `publish(data)` | Publish a message to the room. Returns a receipt (`{ key, seq, timestamp }`). |
-| `publishBinary(data)` | Publish raw binary to the room. Returns a receipt. |
+| `publish(data)` | Publish a message to the whole room. Returns a receipt (`{ key, seq, timestamp }`). |
+| `publishBinary(data)` | Publish raw binary to the whole room. Returns a receipt. |
+| `send(to, data)` | Send a private message to one participant — nobody else receives it. |
+| `listen(cb)` | Receive private messages addressed to you: `(data, from)`. Returns an unlisten function. |
 | `setMeta(meta)` | Replace your metadata — propagates to all observers in real time. |
 | `leave()` | Leave the room. |
 | `onLeave(cb)` | You left — voluntarily, kicked, room closed, or disconnected. |
 
-Properties: `id`, `meta`, and `selfDelivery`.
+Read-only properties: `id`, `meta`, and `selfDelivery`.
 
-- `selfDelivery` (default: `true`): whether your own publishes are delivered back to your side's room. Set it to `false` for e.g. video, where you don't want your own frames back.
+- `selfDelivery` (default: `true`, set at `join()`): whether your own publishes are delivered back to your side's room. Turn it off for e.g. video, where you don't want your own frames back: `join({ name }, { selfDelivery: false })`.
 - A participant's membership follows its holder: when the client that received a `LocalParticipant` (or the room it joined through) disconnects, the participant leaves the room.
 
 ```ts
@@ -194,6 +196,22 @@ Properties: `id`, `meta`, and `selfDelivery`.
 const me = await lobby.join({ name: 'Alice', score: 0 })
 await me.setMeta({ name: 'Alice', score: 42 }) // full replace, like Room.update()
 ```
+
+### Direct messages
+
+`send()` delivers to exactly one participant — a whisper, an invite, a game move. Privacy is transport-level: the message travels over the target's private inbox key, so no other participant's connection ever receives it (it also never appears on `subscribe()` streams).
+
+```ts
+// Alice's client
+const me = await lobby.join({ name: 'Alice' })
+me.listen((data, from) => console.log(`whisper from ${from}:`, data))
+
+// Bob's client
+const bob = await lobby.join({ name: 'Bob' })
+await bob.send(aliceId, 'meet me in room 2')
+```
+
+> Direct messages are addressed by participant ID (e.g. from `getParticipants()` or `onJoin()`). Sending to an unknown or departed participant throws.
 
 
 ## `RemoteParticipant`
@@ -234,7 +252,7 @@ export async function onCreateVideoRoom(roomId: string) {
 
 export async function onJoinVideoRoom(roomId: string, name: string) {
   const videoRoom = await Room.get(`video:${roomId}`)
-  const me = await videoRoom.join({ name })
+  const me = await videoRoom.join({ name }, { selfDelivery: false }) // don't echo our own frames
   return { me, videoRoom }
 }
 ```
@@ -246,7 +264,6 @@ export async function onJoinVideoRoom(roomId: string, name: string) {
 import { onJoinVideoRoom } from './VideoChat.telefunc'
 
 const { me, videoRoom } = await onJoinVideoRoom('demo', 'Alice')
-me.selfDelivery = false // don't receive our own frames back
 
 // Send: camera -> encode -> publish
 captureAndEncode(camera, (frame) => me.publishBinary(frame))

@@ -2,6 +2,7 @@ export {
   ROOM_KEY_NAMESPACE,
   roomMainKey,
   roomMemberDataKey,
+  roomDmKey,
   roomConfigKvKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
@@ -22,6 +23,7 @@ export type {
   RoomEnvelope,
   RoomCtrlEnvelope,
   RoomDataEnvelope,
+  RoomDmEnvelope,
   RoomStubRequest,
   ParticipantStubRequest,
   ParticipantStubNotice,
@@ -49,6 +51,10 @@ function roomMainKey(roomId: string): string {
 /** Pub/sub key carrying one member's data in isolated mode. */
 function roomMemberDataKey(roomId: string, memberId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:m:${memberId}`
+}
+/** Pub/sub key carrying one member's private inbox — only the member's owning node subscribes. */
+function roomDmKey(roomId: string, memberId: string): string {
+  return `${ROOM_KEY_NAMESPACE}${roomId}:dm:${memberId}`
 }
 /** KV key of the room's config record. */
 function roomConfigKvKey(roomId: string): string {
@@ -114,6 +120,7 @@ type ParticipantStubMetadata = {
   id: string
   meta: ParticipantMeta
   joinedAt: number
+  selfDelivery: boolean
 }
 
 /** Presence & lifecycle events, published on the room's main key by whichever node caused them.
@@ -133,21 +140,30 @@ type RoomDataEnvelope = { __r: 'data'; from: string; data: unknown }
 
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope
 
-/** Client→server requests on a `Room` stub channel. */
+/** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
+ *  privacy: only the target's owning node subscribes, only its holder receives the relay.
+ *  `to` lets a holder of several participants route the message to the right one. */
+type RoomDmEnvelope = { __r: 'dm'; to: string; from: string; data: unknown }
+
+/** Client→server requests on a `Room` stub channel. `id` identifies the sending participant. */
 type RoomStubRequest =
-  | { __r: 'req-join'; meta: ParticipantMeta }
+  | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
-  | { __r: 'req-self-delivery'; id: string; on: boolean }
+  | { __r: 'req-dm'; id: string; to: string; data: unknown }
 
 /** Client→server requests on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubRequest =
   | { __r: 'req-publish'; data: unknown }
   | { __r: 'req-set-meta'; meta: ParticipantMeta }
+  | { __r: 'req-dm'; to: string; data: unknown }
   | { __r: 'req-leave' }
 
 /** Server→client notices on a standalone `LocalParticipant` stub channel. */
-type ParticipantStubNotice = { __r: 'left' } | { __r: 'p-meta'; meta: ParticipantMeta }
+type ParticipantStubNotice =
+  | { __r: 'left' }
+  | { __r: 'p-meta'; meta: ParticipantMeta }
+  | { __r: 'dm'; from: string; data: unknown }
 
 type ReqOkAck = { ok: true } | { ok: false; err: string }
 type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }

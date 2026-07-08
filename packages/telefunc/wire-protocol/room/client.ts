@@ -17,11 +17,12 @@ import {
   type ReqJoinAck,
   type ReqOkAck,
   type ReqPublishAck,
+  type RoomDmEnvelope,
   type RoomEnvelope,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './shared.js'
-import type { LocalParticipant, ParticipantMeta, RemoteParticipant, Room, RoomMeta } from './types.js'
+import type { JoinOptions, LocalParticipant, ParticipantMeta, RemoteParticipant, Room, RoomMeta } from './types.js'
 
 // ---------------------------------------------------------------------------
 // ClientRoom
@@ -82,11 +83,13 @@ class ClientRoom implements Room {
     return this._state.closed
   }
 
-  async join(meta: ParticipantMeta = {}): Promise<LocalParticipant> {
+  async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     assertUsage(isObject(meta), 'join() meta should be an object')
-    const ack = (await this._request({ __r: 'req-join', meta })) as ReqJoinAck
+    assertUsage(options === undefined || isObject(options), 'join() options should be an object')
+    const selfDelivery = options?.selfDelivery !== false
+    const ack = (await this._request({ __r: 'req-join', meta, selfDelivery })) as ReqJoinAck
     if (!ack.ok) throw new Error(ack.err)
-    const participant = new ClientRoomParticipant(this, ack.id, meta)
+    const participant = new ClientRoomParticipant(this, ack.id, meta, selfDelivery)
     this._localParticipants.set(ack.id, participant)
     this._state.applyJoin(ack.id, meta, ack.joinedAt) // the relayed event is absorbed
     return participant
@@ -136,11 +139,6 @@ class ClientRoom implements Room {
     return ack as ReqJoinAck | ReqOkAck
   }
 
-  /** @internal — fire-and-forget: pure delivery preference, nothing to await. */
-  _sendSelfDelivery(memberId: string, on: boolean): void {
-    void this._stub.send({ __r: 'req-self-delivery', id: memberId, on }, { ack: false }).catch(() => {})
-  }
-
   /** @internal */
   async _publishData(from: string, data: unknown): Promise<ChannelPublishAck> {
     return await this._stub.publish({ __r: 'data', from, data } satisfies RoomEnvelope)
@@ -161,7 +159,7 @@ class ClientRoom implements Room {
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     if (!hasRoomTag(envelope)) return
-    const event = envelope as RoomEnvelope
+    const event = envelope as RoomEnvelope | RoomDmEnvelope
     switch (event.__r) {
       case 'data':
         this._state.applyData(
@@ -194,6 +192,10 @@ class ClientRoom implements Room {
         return
       case 'closed':
         this._applyClosed()
+        return
+      case 'dm':
+        // Relayed from this member's private inbox — only its own stub ever receives it.
+        this._localParticipants.get(event.to)?._deliverMessage(event.from, event.data)
     }
   }
 
@@ -236,39 +238,50 @@ class ClientRoom implements Room {
 /** Shared behavior of both client-side `LocalParticipant` flavors. */
 abstract class ClientParticipantBase implements LocalParticipant {
   readonly id: string
+  readonly selfDelivery: boolean
   /** @internal */ _meta: ParticipantMeta
   protected readonly _roomId: string
   protected _left = false
   private _leftFired = false
   private _leaveCbs: Array<() => void> = []
-  private _selfDelivery = true
+  private readonly _messageCbs: Array<(data: unknown, from: string) => void> = []
 
-  constructor(roomId: string, id: string, meta: ParticipantMeta) {
+  constructor(roomId: string, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
     this._roomId = roomId
     this.id = id
     this._meta = meta
+    this.selfDelivery = selfDelivery
+    if (!selfDelivery) setSuppressed(roomId, id, true)
   }
 
   get meta(): ParticipantMeta {
     return this._meta
   }
 
-  get selfDelivery(): boolean {
-    return this._selfDelivery
-  }
-  set selfDelivery(on: boolean) {
-    if (this._selfDelivery === on) return
-    this._selfDelivery = on
-    setSuppressed(this._roomId, this.id, !on)
-    this._selfDeliveryChanged(on)
-  }
-
   abstract publish(data: unknown): Promise<ChannelPublishAck>
   abstract publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
+  abstract send(to: string, data: unknown): Promise<void>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
-  /** Propagate the preference to the server so it can skip relaying the echo entirely. */
-  protected abstract _selfDeliveryChanged(on: boolean): void
+
+  listen(callback: (data: unknown, from: string) => void): () => void {
+    this._messageCbs.push(callback)
+    return () => {
+      const i = this._messageCbs.indexOf(callback)
+      if (i >= 0) this._messageCbs.splice(i, 1)
+    }
+  }
+
+  /** @internal — a direct message arrived on this member's inbox. */
+  _deliverMessage(from: string, data: unknown): void {
+    for (const cb of [...this._messageCbs]) {
+      try {
+        cb(data, from)
+      } catch (err) {
+        reportRoomError(err)
+      }
+    }
+  }
 
   onLeave(callback: () => void): () => void {
     if (this._leftFired) {
@@ -302,8 +315,8 @@ abstract class ClientParticipantBase implements LocalParticipant {
 class ClientRoomParticipant extends ClientParticipantBase {
   private readonly _room: ClientRoom
 
-  constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta) {
-    super(clientRoom.id, id, meta)
+  constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
+    super(clientRoom.id, id, meta, selfDelivery)
     this._room = clientRoom
   }
 
@@ -315,6 +328,11 @@ class ClientRoomParticipant extends ClientParticipantBase {
   async publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._publishBinaryData(frameWithMemberId(this.id, data))
+  }
+
+  async send(to: string, data: unknown): Promise<void> {
+    this._assertActive()
+    unwrapOkAck(await this._room._request({ __r: 'req-dm', id: this.id, to, data }))
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -334,10 +352,6 @@ class ClientRoomParticipant extends ClientParticipantBase {
       this._onLeft()
     }
   }
-
-  protected _selfDeliveryChanged(on: boolean): void {
-    this._room._sendSelfDelivery(this.id, on)
-  }
 }
 
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant` — owns its stub channel. */
@@ -345,13 +359,14 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
 
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
-    super(metadata.roomId, metadata.id, metadata.meta)
+    super(metadata.roomId, metadata.id, metadata.meta, metadata.selfDelivery)
     this._channel = channel
 
     channel.listen((notice: unknown) => {
       if (!hasRoomTag(notice)) return
       const msg = notice as ParticipantStubNotice
       if (msg.__r === 'p-meta') this._meta = msg.meta
+      else if (msg.__r === 'dm') this._deliverMessage(msg.from, msg.data)
       else this._onLeft()
     })
     channel.onClose(() => this._onLeft())
@@ -365,6 +380,11 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   async publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
     return unwrapPublishAck(await this._channel.sendBinary(frameWithMemberId(this.id, data), { ack: true }))
+  }
+
+  async send(to: string, data: unknown): Promise<void> {
+    this._assertActive()
+    unwrapOkAck(await this._request({ __r: 'req-dm', to, data }))
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -383,11 +403,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       this._onLeft()
       void this._channel.close().catch(() => {})
     }
-  }
-
-  protected _selfDeliveryChanged(): void {
-    // Suppression happens in the sibling `ClientRoom` (via the registry) — the server keeps
-    // relaying, since it can't know which room stub belongs to this participant's holder.
   }
 
   private _request(req: ParticipantStubRequest): Promise<unknown> {

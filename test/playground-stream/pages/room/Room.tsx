@@ -83,16 +83,28 @@ function Room() {
           await me.publish({ text: 'from-bob' })
           await me.setMeta({ name: 'Bobby' })
 
+          // Direct message: a room-joined participant whispers to the standalone one.
+          // Privacy: it must reach Bob's inbox and never the room stream.
+          const ally = await observer.join({ name: 'Ally' })
+          const dms: Array<{ data: unknown; fromAlly: boolean }> = []
+          me.listen((data, from) => dms.push({ data, fromAlly: from === ally.id }))
+          await ally.send(me.id, 'psst')
+
           await pollUntil(() => {
             const state = {
               received,
               count: observer.count,
               remoteMetaName: observer.getParticipant(me.id)?.meta.name ?? null,
               localMetaName: me.meta.name ?? null,
+              dms,
             }
             setResult(JSON.stringify(state))
             return {
-              done: received.length >= 1 && state.remoteMetaName === 'Bobby' && state.localMetaName === 'Bobby',
+              done:
+                received.length >= 1 &&
+                state.remoteMetaName === 'Bobby' &&
+                state.localMetaName === 'Bobby' &&
+                dms.length >= 1,
             }
           })
         }}

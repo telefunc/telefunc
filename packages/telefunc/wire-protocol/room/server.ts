@@ -19,6 +19,7 @@ import {
   frameWithMemberId,
   hasRoomTag,
   roomConfigKvKey,
+  roomDmKey,
   roomMainKey,
   roomMemberDataKey,
   roomMemberKvKey,
@@ -35,11 +36,13 @@ import {
   type RoomConfigRecord,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
+  type RoomDmEnvelope,
   type RoomEnvelope,
   type RoomMemberRecord,
   type RoomStubRequest,
 } from './shared.js'
 import type {
+  JoinOptions,
   LocalParticipant,
   ParticipantMeta,
   RemoteParticipant,
@@ -199,6 +202,7 @@ class ServerRoom implements Room {
   private _mainBinaryUnsub: (() => void) | null = null
   private readonly _memberTextUnsubs = new Map<string, () => void>()
   private readonly _memberBinaryUnsubs = new Map<string, () => void>()
+  private readonly _dmUnsubs = new Map<string, () => void>()
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _heartbeatBusy = false
 
@@ -242,10 +246,10 @@ class ServerRoom implements Room {
     return this._state.closed
   }
 
-  async join(meta: ParticipantMeta = {}): Promise<LocalParticipant> {
-    assertUsage(isObject(meta), 'join() meta should be an object')
+  async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
+    const selfDelivery = normalizeJoinOptions(meta, options)
     const { id, joinedAt } = await this._createMember(meta)
-    const participant = new ServerLocalParticipant(this, id, meta, joinedAt)
+    const participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery)
     this._localParticipants.set(id, participant)
     this._syncSubs() // subscribe before announcing, so cross-node events flow from now on
     this._state.applyJoin(id, meta, joinedAt)
@@ -344,6 +348,15 @@ class ServerRoom implements Room {
     return Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), { meta: result.meta })
   }
 
+  /** @internal — send a private message: published on the target's inbox key, which only
+   *  the target's owning node subscribes to (see `_onDm`). */
+  async _sendDm(from: string, to: string, data: unknown): Promise<void> {
+    if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
+    if (!this._state.getRemote(to)) throw new Error(`Participant not found: ${to}`)
+    const envelope: RoomDmEnvelope = { __r: 'dm', to, from, data }
+    await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+  }
+
   private async _assertOpen(kv: RoomKV): Promise<void> {
     if (this._state.closed || (await readConfig(kv, this.id)) === null) {
       throw new Error(`Room is closed: ${this.id}`)
@@ -395,6 +408,28 @@ class ServerRoom implements Room {
         if (stub._stubMembers.get(unframed.from)?.selfDelivery === false) continue
         stub._relayPublishBinary(wireData)
       }
+    }
+  }
+
+  /** A message on the inbox key of a member this instance owns — route it to the holder:
+   *  a server-side participant's listeners, or the one client stub the member joined through. */
+  private _onDm(serialized: string, rawInfo: WirePublishInfo): void {
+    let envelope: unknown
+    try {
+      envelope = parse(serialized)
+    } catch {
+      return // junk on the reserved key
+    }
+    if (!hasRoomTag(envelope) || envelope.__r !== 'dm') return
+    const dm = envelope as RoomDmEnvelope
+    const local = this._localParticipants.get(dm.to)
+    if (local) {
+      local._deliverMessage(dm.from, dm.data)
+      return
+    }
+    const wireText = encodePublishText(serialized, rawInfo)
+    for (const stub of this._stubs) {
+      if (stub._stubMembers.has(dm.to)) stub._relayPublishText(wireText)
     }
   }
 
@@ -469,7 +504,7 @@ class ServerRoom implements Room {
         case 'req-join': {
           const meta = isObject(req.meta) ? req.meta : {}
           const { id, joinedAt } = await this._createMember(meta)
-          stub._stubMembers.set(id, { selfDelivery: true })
+          stub._stubMembers.set(id, { selfDelivery: req.selfDelivery !== false })
           this._syncSubs() // subscribe before announcing, so cross-node events flow from now on
           this._state.applyJoin(id, meta, joinedAt)
           await publishCtrl(this.id, { __r: 'join', id, meta, joinedAt })
@@ -484,11 +519,10 @@ class ServerRoom implements Room {
           this._assertStubMember(stub, req.id)
           await this._setMemberMeta(req.id, isObject(req.meta) ? req.meta : {})
           return { ok: true }
-        case 'req-self-delivery': {
-          const member = stub._stubMembers.get(req.id)
-          if (member) member.selfDelivery = req.on !== false
+        case 'req-dm':
+          this._assertStubMember(stub, req.id)
+          await this._sendDm(req.id, req.to, req.data)
           return { ok: true }
-        }
         default:
           return undefined
       }
@@ -557,6 +591,12 @@ class ServerRoom implements Room {
         adapter.subscribeBinary(roomMainKey(this.id), (framed, info) => this._onBinary(framed, info)),
       )
     }
+
+    // Inbox subscriptions follow ownership, not listeners — a holder must always be
+    // able to receive direct messages addressed to its members.
+    this._syncMemberSubs(this._dmUnsubs, open ? this._ownedMemberIds() : [], (memberId) =>
+      adapter.subscribe(roomDmKey(this.id, memberId), (serialized, info) => this._onDm(serialized, info)),
+    )
 
     this._syncHeartbeat()
   }
@@ -658,7 +698,7 @@ const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomP
 class ServerLocalParticipant implements LocalParticipant {
   readonly [SERVER_PARTICIPANT_BRAND] = true
   readonly id: string
-  selfDelivery = true
+  readonly selfDelivery: boolean
 
   /** @internal */ readonly _room: ServerRoom
   /** @internal */ _meta: ParticipantMeta
@@ -666,12 +706,14 @@ class ServerLocalParticipant implements LocalParticipant {
   private _left = false
   private _leftFired = false
   private _leaveCbs: Array<() => void> = []
+  private readonly _messageCbs: Array<(data: unknown, from: string) => void> = []
 
-  constructor(serverRoom: ServerRoom, id: string, meta: ParticipantMeta, joinedAt: number) {
+  constructor(serverRoom: ServerRoom, id: string, meta: ParticipantMeta, joinedAt: number, selfDelivery: boolean) {
     this._room = serverRoom
     this.id = id
     this._meta = meta
     this._joinedAt = joinedAt
+    this.selfDelivery = selfDelivery
   }
 
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
@@ -691,6 +733,30 @@ class ServerLocalParticipant implements LocalParticipant {
   async publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._publishData(this.id, { binary: frameWithMemberId(this.id, data) })
+  }
+
+  async send(to: string, data: unknown): Promise<void> {
+    this._assertActive()
+    await this._room._sendDm(this.id, to, data)
+  }
+
+  listen(callback: (data: unknown, from: string) => void): () => void {
+    this._messageCbs.push(callback)
+    return () => {
+      const i = this._messageCbs.indexOf(callback)
+      if (i >= 0) this._messageCbs.splice(i, 1)
+    }
+  }
+
+  /** @internal — a direct message arrived on this member's inbox. */
+  _deliverMessage(from: string, data: unknown): void {
+    for (const cb of [...this._messageCbs]) {
+      try {
+        cb(data, from)
+      } catch (err) {
+        reportRoomError(err)
+      }
+    }
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -819,6 +885,9 @@ function bindParticipantStubChannel(
         case 'req-set-meta':
           await participant.setMeta(isObject(req.meta) ? req.meta : {})
           return { ok: true } satisfies ReqOkAck
+        case 'req-dm':
+          await participant.send(req.to, req.data)
+          return { ok: true } satisfies ReqOkAck
         case 'req-leave':
           await participant.leave()
           return { ok: true } satisfies ReqOkAck
@@ -844,6 +913,11 @@ function bindParticipantStubChannel(
   const remote = participant._room._state.getRemote(participant.id)
   const unlistenMeta = remote?.onUpdate((meta) => void channel.send({ __r: 'p-meta', meta }).catch(() => {}))
 
+  // The participant's holder is the client — forward inbox deliveries to it.
+  const unlistenDm = participant.listen((data, from) => {
+    void channel.send({ __r: 'dm', from, data }).catch(() => {})
+  })
+
   const unlistenLeave = participant.onLeave(() => {
     void channel.send({ __r: 'left' }).catch(() => {})
     void channel.close().catch(() => {})
@@ -851,6 +925,7 @@ function bindParticipantStubChannel(
 
   channel.onClose(() => {
     unlistenMeta?.()
+    unlistenDm()
     unlistenLeave()
     // The client is gone (page closed, GC, network death) — presence says the member leaves.
     void participant.leave().catch(reportRoomError)
@@ -935,6 +1010,13 @@ function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta; s
   const size = options?.size ?? Infinity
   assertUsage(typeof size === 'number' && size > 0 && !Number.isNaN(size), 'options.size should be a positive number')
   return { meta, size }
+}
+
+/** Validates `join(meta, options)` arguments; returns the resolved `selfDelivery`. */
+function normalizeJoinOptions(meta: unknown, options: JoinOptions | undefined): boolean {
+  assertUsage(isObject(meta), 'join() meta should be an object')
+  assertUsage(options === undefined || isObject(options), 'join() options should be an object')
+  return options?.selfDelivery !== false
 }
 
 function makeEid(): string {

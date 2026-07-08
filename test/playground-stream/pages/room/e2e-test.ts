@@ -17,6 +17,7 @@ type ParticipantResult = {
   count: number
   remoteMetaName: string | null
   localMetaName: string | null
+  dms: Array<{ data: string; fromAlly: boolean }>
 }
 
 type BinaryResult = {
@@ -53,18 +54,20 @@ function testRoom() {
     })
   })
 
-  test('room: server-joined participant publishes and updates metadata', async () => {
+  test('room: server-joined participant publishes, updates metadata, receives a DM', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-participant')
 
     await autoRetry(async () => {
       const result = await getResult<ParticipantResult>('#room-result')
 
-      expect(result.received).deep.equal([{ text: 'from-bob', from: 'Bob' }])
-      expect(result.count).toBe(1)
+      expect(result.received).deep.equal([{ text: 'from-bob', from: 'Bob' }]) // the DM never hit the room stream
+      expect(result.count).toBe(2) // Bob + Ally
       // setMeta propagated both to the room's remote view and back to the participant stub.
       expect(result.remoteMetaName).toBe('Bobby')
       expect(result.localMetaName).toBe('Bobby')
+      // The DM reached the standalone participant's inbox, with sender identity.
+      expect(result.dms).deep.equal([{ data: 'psst', fromAlly: true }])
     })
   })
 
