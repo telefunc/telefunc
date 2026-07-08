@@ -9,17 +9,20 @@ import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
-import { getBroadcastAdapter } from '../server/broadcast.js'
+import { getBroadcastAdapter, type BroadcastAdapter } from '../server/broadcast.js'
 import { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { ACK_STATUS, encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
+  ParticipantBase,
   ROOM_KEY_NAMESPACE,
   RoomState,
   frameWithMemberId,
   hasRoomTag,
+  normalizeJoinOptions,
   roomConfigKvKey,
   roomDmKey,
+  roomIdFromConfigKey,
   roomMainKey,
   roomMemberDataKey,
   roomMemberKvKey,
@@ -117,23 +120,19 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 }
 
 async function getRoom(id: string): Promise<Room> {
-  assertRoomId(id)
-  const kv = getRoomKV()
-  const config = await readConfig(kv, id)
-  if (config === null) throw new Error(`Room not found: ${id}`)
-  return new ServerRoom(id, config, await readMembers(kv, id, 'reap'))
+  const { kv, config } = await requireRoom(id)
+  return new ServerRoom(id, config, await readMembers(kv, id))
 }
 
 async function listRooms(): Promise<RoomInfo[]> {
   const kv = getRoomKV()
-  const configSuffix = ':config'
   const rooms: RoomInfo[] = []
   for (const key of await kv.keys(ROOM_KEY_NAMESPACE)) {
-    if (!key.endsWith(configSuffix)) continue
-    const id = key.slice(ROOM_KEY_NAMESPACE.length, -configSuffix.length)
+    const id = roomIdFromConfigKey(key)
+    if (id === null) continue
     const config = await readConfig(kv, id)
     if (config === null) continue // closed concurrently
-    const count = (await readMembers(kv, id, 'reap')).length
+    const count = (await readMembers(kv, id)).length
     const size = sizeFromWire(config.size)
     rooms.push({ id, meta: config.meta, size, count, isEmpty: count === 0, isFull: count >= size })
   }
@@ -141,11 +140,8 @@ async function listRooms(): Promise<RoomInfo[]> {
 }
 
 async function updateRoom(id: string, options: RoomOptions): Promise<void> {
-  assertRoomId(id)
   const { meta, size } = normalizeOptions(options)
-  const kv = getRoomKV()
-  const config = await readConfig(kv, id)
-  if (config === null) throw new Error(`Room not found: ${id}`)
+  const { kv, config } = await requireRoom(id)
   assertUsage(
     options?.isolated === undefined || options.isolated === config.isolated,
     "A room's `isolated` mode is fixed at creation — room.update() cannot change it",
@@ -156,24 +152,20 @@ async function updateRoom(id: string, options: RoomOptions): Promise<void> {
 }
 
 async function closeRoom(id: string): Promise<void> {
-  assertRoomId(id)
-  const kv = getRoomKV()
-  if ((await readConfig(kv, id)) === null) throw new Error(`Room not found: ${id}`)
+  const { kv } = await requireRoom(id)
   // Event first so observers disconnect promptly; then KV cleanup. A join racing the
   // cleanup re-checks the config after writing its member record and rolls back.
   await publishCtrl(id, { __r: 'closed' })
-  for (const member of await readMembers(kv, id, 'keep')) await kv.delete(roomMemberKvKey(id, member.id))
+  for (const { key } of await listMemberKeys(kv, id)) await kv.delete(key)
   await kv.delete(roomConfigKvKey(id))
 }
 
 async function removeParticipant(id: string, participantId: string): Promise<void> {
-  assertRoomId(id)
   assertUsage(
     typeof participantId === 'string' && participantId.length > 0,
     'The participant ID should be a non-empty string',
   )
-  const kv = getRoomKV()
-  if ((await readConfig(kv, id)) === null) throw new Error(`Room not found: ${id}`)
+  const { kv } = await requireRoom(id)
   const memberKey = roomMemberKvKey(id, participantId)
   if ((await kv.get(memberKey)) === null) throw new Error(`Participant not found: ${participantId}`)
   await kv.delete(memberKey)
@@ -181,16 +173,12 @@ async function removeParticipant(id: string, participantId: string): Promise<voi
 }
 
 async function announceToRoom(id: string, data: unknown): Promise<void> {
-  assertRoomId(id)
-  const kv = getRoomKV()
-  if ((await readConfig(kv, id)) === null) throw new Error(`Room not found: ${id}`)
+  await requireRoom(id)
   await getBroadcastAdapter().publish(roomMainKey(id), stringify({ __r: 'announce', data } satisfies RoomEnvelope))
 }
 
 async function sendToParticipant(id: string, participantId: string, data: unknown): Promise<void> {
-  assertRoomId(id)
-  const kv = getRoomKV()
-  if ((await readConfig(kv, id)) === null) throw new Error(`Room not found: ${id}`)
+  const { kv } = await requireRoom(id)
   if ((await kv.get(roomMemberKvKey(id, participantId))) === null) {
     throw new Error(`Participant not found: ${participantId}`)
   }
@@ -225,8 +213,8 @@ class ServerRoom implements Room {
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
 
-  private _mainUnsub: (() => void) | null = null
-  private _mainBinaryUnsub: (() => void) | null = null
+  private readonly _mainSub = new SubSlot()
+  private readonly _mainBinarySub = new SubSlot()
   private readonly _memberTextUnsubs = new Map<string, () => void>()
   private readonly _memberBinaryUnsubs = new Map<string, () => void>()
   private readonly _dmUnsubs = new Map<string, () => void>()
@@ -275,19 +263,18 @@ class ServerRoom implements Room {
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     const selfDelivery = normalizeJoinOptions(meta, options)
-    const { id, joinedAt } = await this._createMember(meta)
-    const participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery)
-    this._localParticipants.set(id, participant)
-    this._syncSubs() // subscribe before announcing, so cross-node events flow from now on
-    this._state.applyJoin(id, meta, joinedAt)
-    await publishCtrl(this.id, { __r: 'join', id, meta, joinedAt })
+    let participant!: ServerLocalParticipant
+    await this._admitMember(meta, (id, joinedAt) => {
+      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery)
+      this._localParticipants.set(id, participant)
+    })
     return participant
   }
 
   async getParticipants(): Promise<RemoteParticipant[]> {
     // While observed, the event stream keeps the local view fresh. While unobserved,
     // no listeners exist that a change could notify — resync silently from KV.
-    if (!this._state.closed && !this._mainUnsub) await this._refreshMembers()
+    if (!this._state.closed && !this._mainSub.active) await this._refreshMembers()
     return this._state.listRemotes()
   }
 
@@ -327,8 +314,23 @@ class ServerRoom implements Room {
 
   // ── Membership operations (shared by local participants and stub requests) ──
 
-  /** @internal — KV half of a join, guarding against a concurrent `Room.close()`. */
-  async _createMember(meta: ParticipantMeta): Promise<{ id: string; joinedAt: number }> {
+  /** Join choreography shared by local `join()` and stub `req-join`. `track` registers the
+   *  holder first — the member must count as owned before `_syncSubs()` brings up its inbox
+   *  subscription and heartbeat, and before its join is announced. */
+  private async _admitMember(
+    meta: ParticipantMeta,
+    track: (id: string, joinedAt: number) => void,
+  ): Promise<{ id: string; joinedAt: number }> {
+    const { id, joinedAt } = await this._createMember(meta)
+    track(id, joinedAt)
+    this._syncSubs()
+    this._state.applyJoin(id, meta, joinedAt)
+    await publishCtrl(this.id, { __r: 'join', id, meta, joinedAt })
+    return { id, joinedAt }
+  }
+
+  /** KV half of a join, guarding against a concurrent `Room.close()`. */
+  private async _createMember(meta: ParticipantMeta): Promise<{ id: string; joinedAt: number }> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
     const id = crypto.randomUUID()
@@ -382,7 +384,11 @@ class ServerRoom implements Room {
    *  the target's owning node subscribes to (see `_onDm`). */
   async _sendDm(from: string, to: string, data: unknown): Promise<void> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
-    if (!this._state.getRemote(to)) throw new Error(`Participant not found: ${to}`)
+    // The local view lags while unobserved (and briefly right after the observe transition,
+    // until the KV resync lands) — consult the authoritative record before rejecting.
+    if (!this._state.getRemote(to) && (await getRoomKV().get(roomMemberKvKey(this.id, to))) === null) {
+      throw new Error(`Participant not found: ${to}`)
+    }
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, data }
     await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
   }
@@ -535,11 +541,9 @@ class ServerRoom implements Room {
       switch (req.__r) {
         case 'req-join': {
           const meta = isObject(req.meta) ? req.meta : {}
-          const { id, joinedAt } = await this._createMember(meta)
-          stub._stubMembers.set(id, { selfDelivery: req.selfDelivery !== false })
-          this._syncSubs() // subscribe before announcing, so cross-node events flow from now on
-          this._state.applyJoin(id, meta, joinedAt)
-          await publishCtrl(this.id, { __r: 'join', id, meta, joinedAt })
+          const { id, joinedAt } = await this._admitMember(meta, (id) =>
+            stub._stubMembers.set(id, { selfDelivery: req.selfDelivery !== false }),
+          )
           return { ok: true, id, joinedAt }
         }
         case 'req-leave':
@@ -606,8 +610,8 @@ class ServerRoom implements Room {
       this._localParticipants.size > 0 ||
       state.eventListenerCount + state.dataListenerCount + state.binaryListenerCount > 0
 
-    const becomesObserved = open && observed && this._mainUnsub === null
-    this._setSub('_mainUnsub', open && observed, () =>
+    const becomesObserved = open && observed && !this._mainSub.active
+    this._mainSub.sync(open && observed, () =>
       adapter.subscribe(roomMainKey(this.id), (serialized, info) => this._onText(serialized, info)),
     )
     // Events between construction (KV snapshot) and this subscription were missed — resync.
@@ -632,7 +636,7 @@ class ServerRoom implements Room {
         adapter.subscribeBinary(roomMemberDataKey(this.id, memberId), (framed, info) => this._onBinary(framed, info)),
       )
     } else {
-      this._setSub('_mainBinaryUnsub', wantAnyBinary, () =>
+      this._mainBinarySub.sync(wantAnyBinary, () =>
         adapter.subscribeBinary(roomMainKey(this.id), (framed, info) => this._onBinary(framed, info)),
       )
     }
@@ -658,16 +662,6 @@ class ServerRoom implements Room {
     return { all: false, members }
   }
 
-  private _setSub(field: '_mainUnsub' | '_mainBinaryUnsub', want: boolean, subscribe: () => () => void): void {
-    const current = this[field]
-    if (want && !current) {
-      this[field] = subscribe()
-    } else if (!want && current) {
-      this[field] = null
-      current()
-    }
-  }
-
   private _syncMemberSubs(
     subs: Map<string, () => void>,
     wantedIds: string[],
@@ -687,7 +681,7 @@ class ServerRoom implements Room {
 
   private async _refreshMembers(): Promise<void> {
     const version = this._state.membershipVersion
-    const members = await readMembers(getRoomKV(), this.id, 'reap')
+    const members = await readMembers(getRoomKV(), this.id)
     // An event that applied while we were reading is fresher than the snapshot — drop it.
     if (this._state.membershipVersion === version) this._state.reconcile(members)
   }
@@ -733,7 +727,7 @@ class ServerRoom implements Room {
         const record = parse(raw) as RoomMemberRecord
         await kv.set(memberKey, stringify({ ...record, seenAt: Date.now() } satisfies RoomMemberRecord))
       }
-      await readMembers(kv, this.id, 'reap')
+      await readMembers(kv, this.id)
     } finally {
       this._heartbeatBusy = false
     }
@@ -747,33 +741,19 @@ class ServerRoom implements Room {
 const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomParticipant')
 
 /** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. */
-class ServerLocalParticipant implements LocalParticipant {
+class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
-  readonly id: string
-  readonly selfDelivery: boolean
-
   /** @internal */ readonly _room: ServerRoom
-  /** @internal */ _meta: ParticipantMeta
   /** @internal */ readonly _joinedAt: number
-  private _left = false
-  private _leftFired = false
-  private _leaveCbs: Array<() => void> = []
-  private readonly _messageCbs: Array<(data: unknown, fromId: string) => void> = []
 
   constructor(serverRoom: ServerRoom, id: string, meta: ParticipantMeta, joinedAt: number, selfDelivery: boolean) {
+    super(id, meta, selfDelivery)
     this._room = serverRoom
-    this.id = id
-    this._meta = meta
     this._joinedAt = joinedAt
-    this.selfDelivery = selfDelivery
   }
 
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
-  }
-
-  get meta(): ParticipantMeta {
-    return this._meta
   }
 
   async publish(data: unknown): Promise<ChannelPublishAck> {
@@ -787,28 +767,15 @@ class ServerLocalParticipant implements LocalParticipant {
     return await this._room._publishData(this.id, { binary: frameWithMemberId(this.id, data) })
   }
 
+  /** @internal — publish a client-framed payload (the frame already carries this member's ID). */
+  _publishFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
+    this._assertActive()
+    return this._room._publishData(this.id, { binary: framed })
+  }
+
   async send(to: string | RemoteParticipant, data: unknown): Promise<void> {
     this._assertActive()
     await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
-  }
-
-  listen(callback: (data: unknown, fromId: string) => void): () => void {
-    this._messageCbs.push(callback)
-    return () => {
-      const i = this._messageCbs.indexOf(callback)
-      if (i >= 0) this._messageCbs.splice(i, 1)
-    }
-  }
-
-  /** @internal — a direct message arrived on this member's inbox. */
-  _deliverMessage(fromId: string, data: unknown): void {
-    for (const cb of [...this._messageCbs]) {
-      try {
-        cb(data, fromId)
-      } catch (err) {
-        reportRoomError(err)
-      }
-    }
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -824,30 +791,8 @@ class ServerLocalParticipant implements LocalParticipant {
     this._onLeft() // fires even when the room wasn't observing (no echo applied)
   }
 
-  onLeave(callback: () => void): () => void {
-    if (this._leftFired) {
-      invokeCallback(callback)
-      return () => {}
-    }
-    this._leaveCbs.push(callback)
-    return () => {
-      const i = this._leaveCbs.indexOf(callback)
-      if (i >= 0) this._leaveCbs.splice(i, 1)
-    }
-  }
-
-  /** @internal — the member is gone (left, kicked, room closed, or holder disconnected). */
-  _onLeft(): void {
-    this._left = true
-    if (this._leftFired) return
-    this._leftFired = true
-    const cbs = this._leaveCbs
-    this._leaveCbs = []
-    for (const cb of cbs) invokeCallback(cb)
-  }
-
-  private _assertActive(): void {
-    if (this._left) throw new Error('Participant has left the room')
+  protected _reportError(err: unknown): void {
+    reportRoomError(err)
   }
 }
 
@@ -877,9 +822,8 @@ class RoomStubChannel extends ServerBroadcast {
   constructor(serverRoom: ServerRoom) {
     super({ key: roomMainKey(serverRoom.id) })
     this._room = serverRoom
-    // Requests ride the plain channel message path. `ServerBroadcast` blocks the public
-    // `listen()` (a `Room` isn't user-listenable) — register through the base class.
-    ServerChannel.prototype.listen.call(this, (msg: unknown) => this._room._handleStubRequest(this, msg))
+    // Stub requests (join/leave/set-meta/dm/sub-binary) arrive as channel messages.
+    this._listen((msg: unknown) => this._room._handleStubRequest(this, msg))
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
@@ -953,7 +897,7 @@ function bindParticipantStubChannel(
   channel.listenBinary(async (framed: Uint8Array) => {
     try {
       if (unframeMemberId(framed)?.from !== participant.id) throw new Error('Malformed room binary publish')
-      return { ok: true, ack: await participant._room._publishData(participant.id, { binary: framed }) }
+      return { ok: true, ack: await participant._publishFramed(framed) }
     } catch (err) {
       return { ok: false, err: errorMessage(err) } satisfies ReqOkAck
     }
@@ -987,14 +931,9 @@ function bindParticipantStubChannel(
 // KV access
 // ---------------------------------------------------------------------------
 
-type RoomKV = {
-  get(key: string): Promise<string | null>
-  set(key: string, value: string): Promise<void>
-  delete(key: string): Promise<void>
-  keys(prefix: string): Promise<string[]>
-}
-
 /** Room state lives in the broadcast adapter's KV so every server node sees the same rooms. */
+type RoomKV = Required<Pick<BroadcastAdapter, 'get' | 'set' | 'delete' | 'keys'>>
+
 function getRoomKV(): RoomKV {
   const adapter = getBroadcastAdapter()
   const missing = (['get', 'set', 'delete', 'keys'] as const).filter((method) => !adapter[method])
@@ -1002,16 +941,16 @@ function getRoomKV(): RoomKV {
     missing.length === 0,
     `The installed broadcast adapter doesn't implement ${missing.map((m) => `\`${m}()\``).join(', ')} — the KV methods required by \`Room\`.`,
   )
-  return {
-    get: async (key) => await adapter.get!(key),
-    set: async (key, value) => {
-      await adapter.set!(key, value)
-    },
-    delete: async (key) => {
-      await adapter.delete!(key)
-    },
-    keys: async (prefix) => await adapter.keys!(prefix),
-  }
+  return adapter as RoomKV
+}
+
+/** Statics prologue: validate the ID and load the room's config — or throw `Room not found`. */
+async function requireRoom(id: string): Promise<{ kv: RoomKV; config: RoomConfigRecord }> {
+  assertRoomId(id)
+  const kv = getRoomKV()
+  const config = await readConfig(kv, id)
+  if (config === null) throw new Error(`Room not found: ${id}`)
+  return { kv, config }
 }
 
 async function readConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord | null> {
@@ -1019,20 +958,15 @@ async function readConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord 
   return raw === null ? null : (parse(raw) as RoomConfigRecord)
 }
 
-/** Read a room's member records. With `'reap'`, members whose owning node stopped
- *  heartbeating (hard crash) are deleted and their leave is announced to all observers. */
-async function readMembers(kv: RoomKV, roomId: string, staleMembers: 'reap' | 'keep'): Promise<MemberSnapshot[]> {
-  const prefix = roomMemberKvPrefix(roomId)
+/** Read a room's member records, reaping members whose owning node stopped heartbeating
+ *  (hard crash): their record is deleted and their leave announced to all observers. */
+async function readMembers(kv: RoomKV, roomId: string): Promise<MemberSnapshot[]> {
   const members: MemberSnapshot[] = []
-  for (const key of await kv.keys(prefix)) {
-    const id = key.slice(prefix.length)
-    // Member IDs are UUIDs — anything else under the prefix belongs to another room
-    // whose ID happens to start with `${roomId}:m:` (e.g. its `:config` key).
-    if (!uuidToBytes(id)) continue
+  for (const { key, id } of await listMemberKeys(kv, roomId)) {
     const raw = await kv.get(key)
     if (raw === null) continue // member left concurrently
     const record = parse(raw) as RoomMemberRecord
-    if (staleMembers === 'reap' && Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
+    if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
       await kv.delete(key)
       await publishCtrl(roomId, { __r: 'leave', id })
       continue
@@ -1042,9 +976,40 @@ async function readMembers(kv: RoomKV, roomId: string, staleMembers: 'reap' | 'k
   return members
 }
 
+/** Keys of a room's member records. Member IDs are UUIDs — anything else under the prefix
+ *  belongs to another room whose ID happens to start with `${roomId}:m:` (e.g. its `:config` key). */
+async function listMemberKeys(kv: RoomKV, roomId: string): Promise<Array<{ key: string; id: string }>> {
+  const prefix = roomMemberKvPrefix(roomId)
+  const memberKeys: Array<{ key: string; id: string }> = []
+  for (const key of await kv.keys(prefix)) {
+    const id = key.slice(prefix.length)
+    if (uuidToBytes(id)) memberKeys.push({ key, id })
+  }
+  return memberKeys
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** One adapter subscription, reconciled to a desired on/off state. */
+class SubSlot {
+  private _unsub: (() => void) | null = null
+
+  get active(): boolean {
+    return this._unsub !== null
+  }
+
+  sync(want: boolean, subscribe: () => () => void): void {
+    if (want && !this._unsub) {
+      this._unsub = subscribe()
+    } else if (!want && this._unsub) {
+      const unsub = this._unsub
+      this._unsub = null
+      unsub()
+    }
+  }
+}
 
 async function publishCtrl(roomId: string, event: RoomCtrlEnvelope): Promise<void> {
   await getBroadcastAdapter().publish(roomMainKey(roomId), stringify(event))
@@ -1063,27 +1028,12 @@ function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta; s
   return { meta, size }
 }
 
-/** Validates `join(meta, options)` arguments; returns the resolved `selfDelivery`. */
-function normalizeJoinOptions(meta: unknown, options: JoinOptions | undefined): boolean {
-  assertUsage(isObject(meta), 'join() meta should be an object')
-  assertUsage(options === undefined || isObject(options), 'join() options should be an object')
-  return options?.selfDelivery !== false
-}
-
 function makeEid(): string {
   return Math.random().toString(36).slice(2, 10)
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
-}
-
-function invokeCallback(cb: () => void): void {
-  try {
-    cb()
-  } catch (err) {
-    reportRoomError(err)
-  }
 }
 
 function reportRoomError(err: unknown): void {

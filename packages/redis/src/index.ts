@@ -168,8 +168,8 @@ class RedisTransport implements BroadcastTransport {
   //
   // `{<key>}` braces force seq counter and broadcast channel onto the same Redis
   // Cluster hash slot, so the publish Lua script can touch both keys atomically.
-  // KV keys are unbraced: they're single-key operations, and `keys()` needs them
-  // spread across slots rather than pinned to one.
+  // KV keys are unbraced: every KV operation is single-key, so no cross-key
+  // atomicity — and thus no hash tag — is needed.
 
   private seqKey(key: string): string {
     return `${this.prefix}seq:{${key}}`

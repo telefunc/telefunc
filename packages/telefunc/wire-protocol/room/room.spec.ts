@@ -287,6 +287,13 @@ describe('data pub/sub', () => {
     expect(seenOnB).toEqual(['echoed', 'not-here']) // everyone else: sees both
   })
 
+  it('rejects a stub binary publish from a participant that already left — like the text path', async () => {
+    const lobby = await Room.create('late-frame')
+    const me = (await lobby.join()) as ServerLocalParticipant
+    await me.leave()
+    expect(() => me._publishFramed(frameWithMemberId(me.id, new Uint8Array([1])))).toThrow('Participant has left')
+  })
+
   it('binary round-trips with the 16-byte member ID frame, preserving high-bit bytes', async () => {
     const a = await Room.create('bin')
     const b = await Room.get('bin')
@@ -373,6 +380,20 @@ describe('direct messages', () => {
     const bob = await lobby.join()
     await alice.leave()
     await expect(alice.send(bob.id, 'x')).rejects.toThrow('Participant has left')
+  })
+
+  it("delivers to a member the sender's stale local view doesn't know yet (KV fallback)", async () => {
+    const a = await Room.create('dm-lag')
+    const alice = await a.join({ name: 'Alice' })
+    const b = await Room.get('dm-lag') // snapshot: alice only
+    const bob = await a.join({ name: 'Bob' }) // b is unobserved — it missed this join
+    const bobInbox: unknown[] = []
+    bob.listen((data, fromId) => bobInbox.push([data, fromId]))
+
+    // b's local view lags; the KV member record is authoritative.
+    await (b as ServerRoom)._sendDm(alice.id, bob.id, 'catch-up')
+
+    expect(bobInbox).toEqual([['catch-up', alice.id]])
   })
 })
 

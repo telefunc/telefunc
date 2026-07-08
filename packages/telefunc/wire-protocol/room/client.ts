@@ -1,14 +1,16 @@
 export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant }
 
-import { assert, assertUsage } from '../../utils/assert.js'
+import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isObject } from '../../utils/isObject.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import {
+  ParticipantBase,
   RoomState,
   frameWithMemberId,
   hasRoomTag,
+  normalizeJoinOptions,
   sizeFromWire,
   unframeMemberId,
   type BinaryWants,
@@ -50,10 +52,10 @@ class ClientRoom implements Room {
       meta: snapshot.meta,
       size: sizeFromWire(snapshot.size),
       members: snapshot.members,
+      closed: snapshot.closed,
       onListenersChanged: () => this._syncBinarySub(),
       onCallbackError: reportRoomError,
     })
-    this._state.closed = snapshot.closed
 
     // Text events always flow (they carry presence); binary is subscribed on demand.
     stub.subscribe((envelope, info) => this._onEnvelope(envelope, info))
@@ -86,9 +88,7 @@ class ClientRoom implements Room {
   }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
-    assertUsage(isObject(meta), 'join() meta should be an object')
-    assertUsage(options === undefined || isObject(options), 'join() options should be an object')
-    const selfDelivery = options?.selfDelivery !== false
+    const selfDelivery = normalizeJoinOptions(meta, options)
     const ack = (await this._request({ __r: 'req-join', meta, selfDelivery })) as ReqJoinAck
     if (!ack.ok) throw new Error(ack.err)
     const participant = new ClientRoomParticipant(this, ack.id, meta, selfDelivery)
@@ -254,79 +254,24 @@ class ClientRoom implements Room {
 // Local participants
 // ---------------------------------------------------------------------------
 
-/** Shared behavior of both client-side `LocalParticipant` flavors. */
-abstract class ClientParticipantBase implements LocalParticipant {
-  readonly id: string
-  readonly selfDelivery: boolean
-  /** @internal */ _meta: ParticipantMeta
+/** Client-side half of both `LocalParticipant` flavors: links `selfDelivery` suppression
+ *  to the sibling room via the registry below. */
+abstract class ClientParticipantBase extends ParticipantBase {
   protected readonly _roomId: string
-  protected _left = false
-  private _leftFired = false
-  private _leaveCbs: Array<() => void> = []
-  private readonly _messageCbs: Array<(data: unknown, fromId: string) => void> = []
 
   constructor(roomId: string, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
+    super(id, meta, selfDelivery)
     this._roomId = roomId
-    this.id = id
-    this._meta = meta
-    this.selfDelivery = selfDelivery
     if (!selfDelivery) setSuppressed(roomId, id, true)
   }
 
-  get meta(): ParticipantMeta {
-    return this._meta
-  }
-
-  abstract publish(data: unknown): Promise<ChannelPublishAck>
-  abstract publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
-  abstract send(to: string | RemoteParticipant, data: unknown): Promise<void>
-  abstract setMeta(meta: ParticipantMeta): Promise<void>
-  abstract leave(): Promise<void>
-
-  listen(callback: (data: unknown, fromId: string) => void): () => void {
-    this._messageCbs.push(callback)
-    return () => {
-      const i = this._messageCbs.indexOf(callback)
-      if (i >= 0) this._messageCbs.splice(i, 1)
-    }
-  }
-
-  /** @internal — a direct message arrived on this member's inbox. */
-  _deliverMessage(fromId: string, data: unknown): void {
-    for (const cb of [...this._messageCbs]) {
-      try {
-        cb(data, fromId)
-      } catch (err) {
-        reportRoomError(err)
-      }
-    }
-  }
-
-  onLeave(callback: () => void): () => void {
-    if (this._leftFired) {
-      invokeCallback(callback)
-      return () => {}
-    }
-    this._leaveCbs.push(callback)
-    return () => {
-      const i = this._leaveCbs.indexOf(callback)
-      if (i >= 0) this._leaveCbs.splice(i, 1)
-    }
-  }
-
-  /** @internal — the member is gone (left, kicked, room closed, or wire death). */
-  _onLeft(): void {
-    this._left = true
-    if (this._leftFired) return
-    this._leftFired = true
+  override _onLeft(): void {
     setSuppressed(this._roomId, this.id, false)
-    const cbs = this._leaveCbs
-    this._leaveCbs = []
-    for (const cb of cbs) invokeCallback(cb)
+    super._onLeft()
   }
 
-  protected _assertActive(): void {
-    if (this._left) throw new Error('Participant has left the room')
+  protected _reportError(err: unknown): void {
+    reportRoomError(err)
   }
 }
 
@@ -471,14 +416,6 @@ function unwrapPublishAck(ack: unknown): ChannelPublishAck {
   const res = ack as ReqPublishAck
   if (!res.ok) throw new Error(res.err)
   return res.ack
-}
-
-function invokeCallback(cb: () => void): void {
-  try {
-    cb()
-  } catch (err) {
-    reportRoomError(err)
-  }
 }
 
 function reportRoomError(err: unknown): void {
