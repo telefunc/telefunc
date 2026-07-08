@@ -364,7 +364,7 @@ importers:
         specifier: ^0.2.6
         version: 0.2.6
       '@brillout/json-serializer':
-        specifier: ^0.5.23
+        specifier: ^0.5.25
         version: 0.5.25
       '@brillout/picocolors':
         specifier: ^1.0.28
