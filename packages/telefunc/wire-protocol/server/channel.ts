@@ -239,6 +239,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   listen(callback: ChannelListener<ClientToServer>): () => void {
+    return this._listen(callback)
+  }
+
+  /** Registration primitive behind `listen()` — separate so subclasses that repurpose the
+   *  public verb (`ServerBroadcast` forbids it) can still receive channel messages. */
+  protected _listen(callback: ChannelListener<ClientToServer>): () => void {
     this._listeners.push(callback)
     return () => {
       const i = this._listeners.indexOf(callback)

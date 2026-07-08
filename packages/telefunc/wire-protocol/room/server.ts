@@ -877,9 +877,8 @@ class RoomStubChannel extends ServerBroadcast {
   constructor(serverRoom: ServerRoom) {
     super({ key: roomMainKey(serverRoom.id) })
     this._room = serverRoom
-    // Requests ride the plain channel message path. `ServerBroadcast` blocks the public
-    // `listen()` (a `Room` isn't user-listenable) — register through the base class.
-    ServerChannel.prototype.listen.call(this, (msg: unknown) => this._room._handleStubRequest(this, msg))
+    // Stub requests (join/leave/set-meta/dm/sub-binary) arrive as channel messages.
+    this._listen((msg: unknown) => this._room._handleStubRequest(this, msg))
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
