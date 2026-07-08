@@ -2,7 +2,8 @@ export { roomReplacer, roomParticipantReplacer }
 
 import type { ReplacerType, RoomContract, RoomParticipantContract, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_ROOM, SERIALIZER_PREFIX_ROOM_PARTICIPANT } from '../../constants.js'
-import { bindParticipantStubChannel, RoomStubChannel, ServerLocalParticipant, ServerRoom } from '../../room/server.js'
+import { ServerLocalParticipant, ServerRoom } from '../../room/server.js'
+import { bindParticipantStubChannel, RoomStubChannel } from '../../room/stubs.js'
 import { sizeToWire } from '../../room/shared.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()

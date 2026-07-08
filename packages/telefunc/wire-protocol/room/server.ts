@@ -1,4 +1,4 @@
-export { Room, ServerRoom, ServerLocalParticipant, RoomStubChannel, bindParticipantStubChannel }
+export { Room, ServerRoom, ServerLocalParticipant, reportRoomError }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -10,12 +10,12 @@ import { unrefTimer } from '../../utils/unrefTimer.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { getBroadcastAdapter, type BroadcastAdapter } from '../server/broadcast.js'
-import { ServerChannel } from '../server/channel.js'
-import { ServerBroadcast } from '../server/server-broadcast.js'
-import { ACK_STATUS, encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
+import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
   ParticipantBase,
   ROOM_KEY_NAMESPACE,
+  errorMessage,
+  makeEid,
   RoomState,
   frameWithMemberId,
   hasRoomTag,
@@ -33,10 +33,8 @@ import {
   uuidToBytes,
   type BinaryWants,
   type MemberSnapshot,
-  type ParticipantStubRequest,
   type ReqJoinAck,
   type ReqOkAck,
-  type ReqPublishAck,
   type RoomConfigRecord,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
@@ -45,6 +43,7 @@ import {
   type RoomMemberRecord,
   type RoomStubRequest,
 } from './shared.js'
+import type { RoomStubChannel } from './stubs.js'
 import type {
   JoinOptions,
   LocalParticipant,
@@ -370,7 +369,7 @@ class ServerRoom implements Room {
     if (raw === null) throw new Error(`Participant not found (left?): ${id}`)
     const record = parse(raw) as RoomMemberRecord
     const prev = this._state.getRemote(id)?.meta ?? record.meta
-    const next: RoomMemberRecord = { meta, joinedAt: record.joinedAt, seenAt: Date.now() }
+    const next: RoomMemberRecord = { ...record, meta, seenAt: Date.now() }
     await kv.set(memberKey, stringify(next))
     const eid = makeEid()
     this._state.applyParticipantMeta(id, meta, prev, eid)
@@ -804,137 +803,6 @@ class ServerLocalParticipant extends ParticipantBase {
 }
 
 // ---------------------------------------------------------------------------
-// Wire stubs
-// ---------------------------------------------------------------------------
-
-/**
- * The channel registered with a response when a `Room` crosses the wire.
- * - server→client: room events & data relayed as PUBLISH frames (pre-peer buffered,
- *   replayed on reconnect). Text always flows — it carries presence; binary is opt-in.
- * - client→server: join/leave/set-meta as ack-bearing channel messages; publishes as
- *   PUBLISH(_BINARY)_ACK_REQ frames, validated against the members joined through this stub.
- */
-class RoomStubChannel extends ServerBroadcast {
-  private readonly _room: ServerRoom
-  /** @internal — members the remote client joined through this stub. */
-  readonly _stubMembers = new Map<string, { selfDelivery: boolean }>()
-  /** @internal — which members' binary streams the client declared it wants (`sub-binary`). */
-  _binaryWants: { all: boolean; members: Set<string> } = { all: false, members: new Set() }
-
-  /** @internal */
-  _wantsBinaryFrom(memberId: string): boolean {
-    return this._binaryWants.all || this._binaryWants.members.has(memberId)
-  }
-
-  constructor(serverRoom: ServerRoom) {
-    super({ key: roomMainKey(serverRoom.id) })
-    this._room = serverRoom
-    // Stub requests (join/leave/set-meta/dm/sub-binary) arrive as channel messages.
-    this._listen((msg: unknown) => this._room._handleStubRequest(this, msg))
-  }
-
-  override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    return this._ackPublish(this._room._publishFromStub(this, { text }), seq)
-  }
-
-  override _onPeerPublishBinaryAckReqMessage(binary: Uint8Array, seq: number): Promise<void> {
-    return this._ackPublish(this._room._publishFromStub(this, { binary }), seq)
-  }
-
-  private _ackPublish(publishing: Promise<ChannelPublishAck>, seq: number): Promise<void> {
-    return this._trackAck(
-      publishing.then(
-        (ack) => this._sendAckRes(seq, stringify(ack)),
-        (err: unknown) => this._sendAckRes(seq, errorMessage(err), ACK_STATUS.ERROR),
-      ),
-    )
-  }
-
-  // Text always flows (it carries presence); binary delivery is member-selective, declared
-  // by the client's `sub-binary` request — the coarse BROADCAST_(UN)SUB ctrls are ignored.
-  override _onPeerBroadcastSubscribe(): void {}
-  override _onPeerBroadcastUnsubscribe(): void {}
-
-  /** @internal */
-  _relayPublishText(wireText: string): void {
-    if (this._peer) this._peer.sendPublish(wireText)
-    else this._prePeerBuffer.pushPublish(wireText)
-  }
-
-  /** @internal */
-  _relayPublishBinary(wireData: Uint8Array): void {
-    if (this._peer) this._peer.sendPublishBinary(wireData)
-    else this._prePeerBuffer.pushPublishBinary(wireData)
-  }
-}
-
-/**
- * Wire a fresh channel to a `ServerLocalParticipant` for serialization (see
- * `roomParticipantReplacer`). The client sends publish/set-meta/leave requests;
- * the server pushes metadata updates and the leave notice.
- */
-function bindParticipantStubChannel(
-  channel: ServerChannel<unknown, unknown>,
-  participant: ServerLocalParticipant,
-): void {
-  channel.listen(async (msg: unknown) => {
-    if (!hasRoomTag(msg)) return undefined
-    const req = msg as ParticipantStubRequest
-    try {
-      switch (req.__r) {
-        case 'req-publish':
-          return { ok: true, ack: await participant.publish(req.data) } satisfies ReqPublishAck
-        case 'req-set-meta':
-          await participant.setMeta(isObject(req.meta) ? req.meta : {})
-          return { ok: true } satisfies ReqOkAck
-        case 'req-dm':
-          await participant.send(req.to, req.data)
-          return { ok: true } satisfies ReqOkAck
-        case 'req-leave':
-          await participant.leave()
-          return { ok: true } satisfies ReqOkAck
-        default:
-          return undefined
-      }
-    } catch (err) {
-      return { ok: false, err: errorMessage(err) } satisfies ReqOkAck
-    }
-  })
-
-  channel.listenBinary(async (framed: Uint8Array) => {
-    try {
-      if (unframeMemberId(framed)?.from !== participant.id) throw new Error('Malformed room binary publish')
-      return { ok: true, ack: await participant._publishFramed(framed) }
-    } catch (err) {
-      return { ok: false, err: errorMessage(err) } satisfies ReqOkAck
-    }
-  })
-
-  // Keep the client-side `participant.meta` fresh. Serializing a participant that already left
-  // is possible (leave raced the response) — then there's no remote view left to observe.
-  const remote = participant._room._state.getRemote(participant.id)
-  const unlistenMeta = remote?.onUpdate((meta) => void channel.send({ __r: 'p-meta', meta }).catch(() => {}))
-
-  // The participant's holder is the client — forward inbox deliveries to it.
-  const unlistenDm = participant.listen((data, from) => {
-    void channel.send({ __r: 'dm', from, data }).catch(() => {})
-  })
-
-  const unlistenLeave = participant.onLeave(() => {
-    void channel.send({ __r: 'left' }).catch(() => {})
-    void channel.close().catch(() => {})
-  })
-
-  channel.onClose(() => {
-    unlistenMeta?.()
-    unlistenDm()
-    unlistenLeave()
-    // The client is gone (page closed, GC, network death) — presence says the member leaves.
-    void participant.leave().catch(reportRoomError)
-  })
-}
-
-// ---------------------------------------------------------------------------
 // KV access
 // ---------------------------------------------------------------------------
 
@@ -1033,14 +901,6 @@ function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta; s
   const size = options?.size ?? Infinity
   assertUsage(typeof size === 'number' && size > 0 && !Number.isNaN(size), 'options.size should be a positive number')
   return { meta, size }
-}
-
-function makeEid(): string {
-  return Math.random().toString(36).slice(2, 10)
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }
 
 function reportRoomError(err: unknown): void {

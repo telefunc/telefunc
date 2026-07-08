@@ -14,6 +14,8 @@ export {
   unframeMemberId,
   hasRoomTag,
   normalizeJoinOptions,
+  makeEid,
+  errorMessage,
   RoomState,
   ParticipantBase,
 }
@@ -197,6 +199,17 @@ function normalizeJoinOptions(meta: unknown, options: JoinOptions | undefined): 
   assertUsage(isObject(meta), 'join() meta should be an object')
   assertUsage(options === undefined || isObject(options), 'join() options should be an object')
   return options?.selfDelivery !== false
+}
+
+/** Event ID for `p-meta`/`update` envelopes — only needs to make the origin's own echo
+ *  recognizable, not to be globally unique. */
+function makeEid(): string {
+  return Math.random().toString(36).slice(2, 10)
+}
+
+/** How errors travel inside `ok: false` acks. */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 // ---------------------------------------------------------------------------

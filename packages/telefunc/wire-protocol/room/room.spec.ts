@@ -12,7 +12,8 @@ import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
-import { Room, RoomStubChannel, ServerRoom, type ServerLocalParticipant } from './server.js'
+import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
+import { RoomStubChannel } from './stubs.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import {
   frameWithMemberId,
