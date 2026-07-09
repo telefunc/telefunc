@@ -50,7 +50,7 @@ function Room() {
           const me = await lobby.join({ name: 'Alice' })
           const countAfterJoin = lobby.count
           const updates: unknown[] = []
-          lobby.getParticipant(me.id)!.onUpdate((meta, prev) => updates.push([meta.score, prev.score]))
+          ;(await lobby.getParticipant(me.id))!.onUpdate((meta, prev) => updates.push([meta.score, prev.score]))
 
           const ack = await me.publish({ text: 'hello' })
           await me.setMeta({ name: 'Alice', score: 42 })
@@ -91,6 +91,12 @@ function Room() {
           const me = await onJoinAsServer(roomId, 'Bob')
           await me.publish({ text: 'from-bob' })
           await me.setMeta({ name: 'Bobby' })
+          // Live handle (meta stays fresh); retry — the join event may still be in flight.
+          let remoteMe = await observer.getParticipant(me.id)
+          for (let i = 0; i < 50 && !remoteMe; i++) {
+            await new Promise((r) => setTimeout(r, 200))
+            remoteMe = await observer.getParticipant(me.id)
+          }
 
           // Direct message: a room-joined participant whispers to the standalone one.
           // Privacy: it must reach Bob's inbox and never the room stream.
@@ -103,7 +109,7 @@ function Room() {
             const state = {
               received,
               count: observer.count,
-              remoteMetaName: observer.getParticipant(me.id)?.meta.name ?? null,
+              remoteMetaName: remoteMe?.meta.name ?? null,
               localMetaName: me.meta.name ?? null,
               dms,
             }

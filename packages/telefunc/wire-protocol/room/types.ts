@@ -26,8 +26,8 @@ type ParticipantMeta = Record<string, unknown>
 /** A message's verified sender — one concept across every lane (`subscribe()`, `listen()`):
  *  the live `RemoteParticipant` whenever the holder's room view knows the sender, or an
  *  `{ id, meta }` snapshot stamped by the sender's own node otherwise (a standalone participant,
- *  or a message racing ahead of its sender's join). `room.getParticipant(from.id)` upgrades a
- *  snapshot to the live handle once the roster catches up. */
+ *  or a message racing ahead of its sender's join). `await room.getParticipant(from.id)`
+ *  upgrades a snapshot to the live handle. */
 type Sender = { readonly id: string; readonly meta: ParticipantMeta }
 
 /** Guards private messages (`Room.guard(room, { onSend })`): runs before every `send()` from a
@@ -95,7 +95,9 @@ type Room = {
   join(meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant>
 
   getParticipants(): Promise<RemoteParticipant[]>
-  getParticipant(id: string): RemoteParticipant | null
+  /** One participant, or `null` if they're not a member. Like `getParticipants()`, loads the
+   *  member view on first need; once the view is loaded it resolves from it without I/O. */
+  getParticipant(id: string): Promise<RemoteParticipant | null>
 
   /** Receive all participant messages. Returns an unsubscribe function. */
   subscribe(callback: RoomListener): () => void

@@ -237,7 +237,7 @@ export async function onJoinChat(roomId: string) {
       await db.messages.insert({ id: message.id, roomId, authorId: from.id, author: from.meta.name, ...message })
     },
   })
-  return { room, me: await room.join({ name: getContext().user.name }) }
+  return { room } // the client joins — its join ack fences the history read (below)
 }
 
 export async function onChatHistory(roomId: string) {
@@ -245,13 +245,13 @@ export async function onChatHistory(roomId: string) {
 }
 ```
 
-**Replay.** Subscribe first, fetch history second — that exact order is what makes the seam lossless:
+**Replay.** Subscribe, join, then fetch history — that exact order is what makes the seam lossless:
 
 ```ts
 // Chat.tsx
 // Environment: client
 
-const { room, me } = await onJoinChat('lobby')
+const { room } = await onJoinChat('lobby')
 
 const seen = new Set<string>()
 const show = (message) => {
@@ -260,13 +260,20 @@ const show = (message) => {
   renderMessage(message)
 }
 
-room.subscribe((message) => show(message))                          // 1. live, from this instant on
-for (const message of await onChatHistory('lobby')) show(message)   // 2. the past, read after step 1
+room.subscribe((message) => show(message))                          // 1. declare the subscription
+const me = await room.join({ name })                                // 2. the join ack is the fence
+for (const message of await onChatHistory('lobby')) show(message)   // 3. the past — read after 1 is live
 
 await me.publish({ id: crypto.randomUUID(), text: 'hi' })           // sender mints the ID
 ```
 
-Why this order: the history read happens *after* the subscription is live, so every message falls in at least one of the two sources — a message published between the two steps lands in **both**, and the ID check drops the duplicate. The reverse order (fetch, then subscribe) opens a gap instead: a message published in between lands in **neither**, and no dedup can recover it.
+Why this is airtight:
+
+- The subscription declaration (step 1) and the join request (step 2) travel the same ordered connection, so by the time `join()` resolves, the server has already activated your subscription — **the join ack doubles as a fence**.
+- The history read (step 3) therefore starts strictly after the live stream did, and the store hook writes each message *before* it's published — so every message lands in at least one of the two sources. A message published between the steps lands in **both**, and the ID check drops the duplicate.
+- The reverse order (fetch history, then subscribe) opens a gap instead: a message published in between lands in **neither**, and no dedup can recover it. Gaps are unrecoverable; overlaps are one `Set` lookup.
+
+> Why not one telefunction call returning `{ room, history }`? Your subscription can only go live after that response returns — a history read inside the same call always precedes it, re-opening the gap. Closing it server-side would mean rooms retaining messages; message storage is exactly what stays in your database. The second call costs one concurrent round-trip on page load.
 
 ### Enforce capacity
 
@@ -322,7 +329,7 @@ type RoomOptions = {
 |---|---|
 | `join(meta?, options?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. Options: `{ selfDelivery?: boolean }`. |
 | `getParticipants()` | All current participants — `Promise<RemoteParticipant[]>` (loads the member list on first need). |
-| `getParticipant(id)` | A single participant — a synchronous lookup into the loaded member view (see the note below). |
+| `getParticipant(id)` | One participant, or `null` if they're not a member — `Promise<RemoteParticipant \| null>`. |
 | `subscribe(cb)` | Receive all participant messages: `(data, info, from)`. Returns an unsubscribe function. |
 | `subscribeBinary(cb)` | Same, for binary messages. |
 | `onJoin(cb)` / `onLeave(cb)` | A participant joined / left (or was removed): `(member)`. |
@@ -333,7 +340,7 @@ type RoomOptions = {
 
 State getters: `id`, `meta`, `size`, `count`, `isEmpty`, `isFull`, `isClosed`.
 
-> **The member view loads once, on first need.** `Room.get()` is deliberately cheap: it knows the exact `count` immediately but doesn't read the member records. The first thing that needs them — `await getParticipants()`, or attaching a room-level listener — loads the view, and from then on the room's event stream keeps it live. That's the whole contract behind the two lookups: `getParticipants()` is async because it may perform that first load; `getParticipant(id)` is a synchronous O(1) read of the loaded view (so it's free to call in render loops and message handlers), returning `null` for a member the view doesn't hold — before the first load, or after that member left. Need a single member on a freshly fetched room? Call `await getParticipants()` once, then look up freely.
+> **The member view loads once, on first need.** `Room.get()` is deliberately cheap: it knows the exact `count` immediately but doesn't read the member records. The first thing that needs them — `getParticipants()`, `getParticipant()`, or attaching a room-level listener — loads the view; from then on the room's event stream keeps it live and both lookups resolve from it without further I/O. `getParticipant()` resolving `null` means exactly one thing: not a member.
 
 ### `LocalParticipant`
 
@@ -374,7 +381,7 @@ Every message callback receives its verified sender as `from: Sender` — `{ id,
 In two situations there's no live object to hand you, and `from` is a plain `{ id, meta }` snapshot instead — same fields, same correct values:
 
 - **You hold a participant but no room.** A telefunction can return just the participant — `return await Room.join(roomId, meta)` — without the room. Its `me.listen()` still tells you exactly who sent each private message; there's simply no room object around to look the sender up in.
-- **A message outruns its sender's join.** Presence events and messages travel on separate streams, and on some multi-server backends a message can arrive a few milliseconds before the join event announcing its sender. Rather than delaying or dropping the message, Telefunc delivers it immediately — the sender's identity is carried inside the message itself, and the live object takes over as soon as the join lands.
+- **A message outruns its sender's join.** Presence events and messages travel on separate streams so each can scale independently, and streams have no ordering *between* them. On the in-memory and <Link href="/redis">Redis</Link> transports this never materializes — their delivery is globally ordered — but backends that give every key its own coordinator (Cloudflare Durable Objects) can skew two streams by a few milliseconds. Delaying the message until the join lands would gate the fast lane on the slow one (and need a timeout policy — worse); dropping it would lose data. So Telefunc delivers immediately — the sender's identity is carried inside the message itself, and the live object takes over as soon as the join lands, typically one tick later.
 
 Either way your code reads `from.id` and `from.meta` and never branches.
 

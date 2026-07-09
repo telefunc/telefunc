@@ -350,7 +350,8 @@ class ServerRoom implements Room {
     return this._state.listRemotes()
   }
 
-  getParticipant(id: string): RemoteParticipant | null {
+  async getParticipant(id: string): Promise<RemoteParticipant | null> {
+    await this._ensureRoster()
     return this._state.getRemote(id)
   }
 
@@ -978,7 +979,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   protected override _resolveSender(id: string): Sender | null {
-    return this._room.getParticipant(id)
+    return this._room._state.getRemote(id) // sync view read — delivery must not wait on I/O
   }
 
   protected _reportError(err: unknown): void {

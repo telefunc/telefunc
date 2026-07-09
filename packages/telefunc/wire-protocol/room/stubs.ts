@@ -150,7 +150,7 @@ function bindParticipantStubChannel(
 
   // Keep the client-side `participant.meta` fresh. Serializing a participant that already left
   // is possible (leave raced the response) — then there's no remote view left to observe.
-  const remote = participant._room.getParticipant(participant.id)
+  const remote = participant._room._state.getRemote(participant.id)
   const unlistenMeta = remote?.onUpdate(
     (meta: ParticipantMeta) => void channel.send({ __r: 'p-meta', meta }).catch(() => {}),
   )

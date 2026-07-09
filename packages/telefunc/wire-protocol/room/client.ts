@@ -118,7 +118,13 @@ class ClientRoom implements Room {
     return this._state.listRemotes() // kept fresh by the event stream from there on
   }
 
-  getParticipant(id: string): RemoteParticipant | null {
+  async getParticipant(id: string): Promise<RemoteParticipant | null> {
+    if (!this._state.rosterKnown) await this._rosterReady
+    return this._state.getRemote(id)
+  }
+
+  /** @internal — sync view read for sender resolution (delivery must not wait on I/O). */
+  _getRemote(id: string): RemoteParticipant | null {
     return this._state.getRemote(id)
   }
 
@@ -303,7 +309,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
   }
 
   protected override _resolveSender(id: string): Sender | null {
-    return this._room.getParticipant(id)
+    return this._room._getRemote(id)
   }
 
   async publish(data: unknown): Promise<ChannelPublishAck> {

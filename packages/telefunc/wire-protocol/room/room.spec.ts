@@ -192,7 +192,7 @@ describe('Room entry point', () => {
       stringify({ __r: 'p-meta', id: me.id, meta: { v: 1 }, prev: { v: 0 }, seq: 1 }),
     )
 
-    expect(lobby.getParticipant(me.id)!.meta).toEqual({ v: 2 })
+    expect((await lobby.getParticipant(me.id))!.meta).toEqual({ v: 2 })
   })
 
   it('close() fires onClose on observers, removes the room, and fails later joins', async () => {
@@ -254,7 +254,7 @@ describe('presence', () => {
     expect(joinsB).toEqual([{ name: 'Alice' }]) // sibling: applied via the event
     expect(a.count).toBe(1)
     expect(b.count).toBe(1)
-    expect(b.getParticipant(me.id)!.joinedAt).toBeGreaterThan(0)
+    expect((await b.getParticipant(me.id))!.joinedAt).toBeGreaterThan(0)
   })
 
   it('leave() removes the member everywhere and fires onLeave + onEmpty', async () => {
@@ -306,7 +306,7 @@ describe('presence', () => {
 
     const me = await a.join({ name: 'Alice', score: 0 })
     const seenOnA: unknown[] = []
-    a.getParticipant(me.id)!.onUpdate((meta, prev) => seenOnA.push([meta, prev]))
+    ;(await a.getParticipant(me.id))!.onUpdate((meta, prev) => seenOnA.push([meta, prev]))
 
     await me.setMeta({ name: 'Alice', score: 42 })
 
@@ -319,7 +319,7 @@ describe('presence', () => {
     expect(seenOnA).toEqual(expected) // origin: local apply, echo deduped by eid
     expect(seenOnB).toEqual(expected)
     expect(me.meta).toEqual({ name: 'Alice', score: 42 })
-    expect(b.getParticipant(me.id)!.meta).toEqual({ name: 'Alice', score: 42 })
+    expect((await b.getParticipant(me.id))!.meta).toEqual({ name: 'Alice', score: 42 })
   })
 })
 
@@ -349,7 +349,7 @@ describe('data pub/sub', () => {
     const bob = await lobby.join({ name: 'Bob' })
 
     const fromAlice: unknown[] = []
-    lobby.getParticipant(alice.id)!.subscribe((data) => fromAlice.push(data))
+    ;(await lobby.getParticipant(alice.id))!.subscribe((data) => fromAlice.push(data))
 
     await alice.publish('a1')
     await bob.publish('b1')
@@ -408,7 +408,7 @@ describe('data pub/sub', () => {
     const subscribed = vi.spyOn(getBroadcastAdapter(), 'subscribeBinary')
 
     const frames: number[][] = []
-    b.getParticipant(cam1.id)!.subscribeBinary((data) => frames.push([...data]))
+    ;(await b.getParticipant(cam1.id))!.subscribeBinary((data) => frames.push([...data]))
 
     expect(subscribed.mock.calls.map((c) => c[0])).toEqual([roomMemberDataKey('per-pub', cam1.id)])
     await cam1.publishBinary(new Uint8Array([1]))
@@ -431,7 +431,7 @@ describe('data pub/sub', () => {
     )
 
     expect(received).toEqual([{ data: 'first!', id: ghost, meta: { name: 'Zoe' } }])
-    expect(room.getParticipant(ghost)).toBe(null) // presence stays event-driven — no ghost member
+    expect(await room.getParticipant(ghost)).toBe(null) // presence stays event-driven — no ghost member
   })
 
   it('binary round-trips with the 16-byte member ID frame, preserving high-bit bytes', async () => {
@@ -462,7 +462,7 @@ describe('selective binary delivery', () => {
     await b.getParticipants() // materialize the lazy roster
 
     const frames: string[] = []
-    b.getParticipant(cam1.id)!.subscribeBinary((data) => frames.push(`cam1:${data[0]}`))
+    ;(await b.getParticipant(cam1.id))!.subscribeBinary((data) => frames.push(`cam1:${data[0]}`))
     await cam1.publishBinary(new Uint8Array([1]))
     await cam2.publishBinary(new Uint8Array([2])) // nobody wants cam2 — b never subscribed its key
 
@@ -476,8 +476,8 @@ describe('selective binary delivery', () => {
     await b.getParticipants() // materialize the lazy roster
 
     // The documented pattern: subscribe on join, close the decoder on leave — no unsubscribe.
-    b.getParticipant(cam.id)!.subscribeBinary(() => {})
-    expect(b.getParticipant(cam.id)).not.toBe(null)
+    ;(await b.getParticipant(cam.id))!.subscribeBinary(() => {})
+    expect(await b.getParticipant(cam.id)).not.toBe(null)
 
     await cam.leave()
 
@@ -507,7 +507,7 @@ describe('direct messages', () => {
     a.subscribe((data) => roomStream.push(data))
     b.subscribe((data) => roomStream.push(data))
 
-    await alice.send(a.getParticipant(bob.id)!, 'psst') // target as object — or pass the ID
+    await alice.send((await a.getParticipant(bob.id))!, 'psst') // target as object — or pass the ID
 
     expect(bobInbox).toEqual([['psst', alice.id, { name: 'Alice' }]]) // live RemoteParticipant sender
     expect(aliceInbox).toEqual([]) // not echoed to the sender
@@ -726,7 +726,7 @@ describe('room stub channel', () => {
 
     expect(ack.ok).toBe(true)
     expect(serverRoom.count).toBe(1)
-    expect(serverRoom.getParticipant(ack.id)!.meta).toEqual({ name: 'Remote' })
+    expect((await serverRoom.getParticipant(ack.id))!.meta).toEqual({ name: 'Remote' })
   })
 
   it('room events are relayed to the client as PUBLISH frames, behind the streamed roster', async () => {
@@ -1072,7 +1072,7 @@ describe('ClientRoom', () => {
     })
   })
 
-  it('declares its binary wants to the server — member-selective, sent synchronously, deduped', () => {
+  it('declares its binary wants to the server — member-selective, sent synchronously, deduped', async () => {
     const cam1 = crypto.randomUUID()
     const cam2 = crypto.randomUUID()
     const fake = createFakeStub()
@@ -1088,9 +1088,9 @@ describe('ClientRoom', () => {
 
     // Each widening is declared synchronously — a publish right after subscribing must be
     // preceded by its declaration on the wire (same-connection FIFO).
-    const unsub1 = clientRoom.getParticipant(cam1)!.subscribeBinary(() => {})
+    const unsub1 = (await clientRoom.getParticipant(cam1))!.subscribeBinary(() => {})
     expect(subBinaryMsgs()).toEqual([{ __r: 'sub-binary', all: false, members: [cam1] }])
-    clientRoom.getParticipant(cam2)!.subscribeBinary(() => {})
+    ;(await clientRoom.getParticipant(cam2))!.subscribeBinary(() => {})
     expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: false, members: [cam1, cam2] })
 
     // A room-level listener upgrades the declaration to `all`; listener changes that leave the
@@ -1098,7 +1098,7 @@ describe('ClientRoom', () => {
     const unsubAll = clientRoom.subscribeBinary(() => {})
     expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: true, members: [] })
     const sentCount = subBinaryMsgs().length
-    const unsubDup = clientRoom.getParticipant(cam1)!.subscribeBinary(() => {})
+    const unsubDup = (await clientRoom.getParticipant(cam1))!.subscribeBinary(() => {})
     expect(subBinaryMsgs().length).toBe(sentCount)
 
     // Dropping back to one member narrows it again.
@@ -1108,12 +1108,12 @@ describe('ClientRoom', () => {
     expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: false, members: [cam2] })
   })
 
-  it("a member leaving releases its listeners — the client's declaration narrows without an unsubscribe", () => {
+  it("a member leaving releases its listeners — the client's declaration narrows without an unsubscribe", async () => {
     const cam = crypto.randomUUID()
     const fake = createFakeStub()
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('wants-release', { count: 1 }))
     fake.emit({ __r: 'roster', members: [{ id: cam, meta: {}, joinedAt: 1 }] })
-    clientRoom.getParticipant(cam)!.subscribeBinary(() => {}) // never unsubscribed
+    ;(await clientRoom.getParticipant(cam))!.subscribeBinary(() => {}) // never unsubscribed
     expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
       __r: 'sub-binary',
       all: false,
