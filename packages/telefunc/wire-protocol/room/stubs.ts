@@ -6,7 +6,7 @@ import { isObject } from '../../utils/isObject.js'
 import type { ChannelPublishAck } from '../channel.js'
 import type { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
-import { ACK_STATUS } from '../shared-ws.js'
+import { ACK_STATUS, encodePublishText } from '../shared-ws.js'
 import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from './server.js'
 import type { ParticipantMeta } from './types.js'
 import {
@@ -14,9 +14,11 @@ import {
   hasRoomTag,
   roomCtrlKey,
   unframeMemberId,
+  type MemberSnapshot,
   type ParticipantStubRequest,
   type ReqOkAck,
   type ReqPublishAck,
+  type RoomRosterEvent,
 } from './shared.js'
 assertIsNotBrowser()
 
@@ -83,6 +85,12 @@ class RoomStubChannel extends ServerBroadcast {
     if (binary) return
     this._wantsText = false
     this._room._syncSubs()
+  }
+
+  /** @internal — push the authoritative roster to this client (see `RoomRosterEvent`). */
+  _relayRoster(members: MemberSnapshot[]): void {
+    const event: RoomRosterEvent = { __r: 'roster', members }
+    this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
   }
 
   /** @internal */

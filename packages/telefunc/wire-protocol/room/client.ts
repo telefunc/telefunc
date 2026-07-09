@@ -23,6 +23,7 @@ import {
   type RoomDataPublish,
   type RoomDmEnvelope,
   type RoomEnvelope,
+  type RoomRosterEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './shared.js'
@@ -52,6 +53,9 @@ class ClientRoom implements Room {
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   private _lastBinaryWantsSent = ''
+  private _rosterArrived!: () => void
+  /** Settled by the first streamed roster (or wire death) — gates `getParticipants()`. */
+  private readonly _rosterReady = new Promise<void>((resolve) => (this._rosterArrived = resolve))
 
   constructor(stub: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
     this._stub = stub
@@ -59,11 +63,12 @@ class ClientRoom implements Room {
       roomId: snapshot.roomId,
       meta: snapshot.meta,
       size: sizeFromWire(snapshot.size),
-      members: snapshot.members,
+      seed: { count: snapshot.count }, // the roster itself streams right behind the response
       closed: snapshot.closed,
       onListenersChanged: () => this._syncWants(),
       onCallbackError: reportRoomError,
     })
+    if (snapshot.closed) this._rosterArrived()
 
     // Delivery handlers are local-only — what the server relays is driven by the declared
     // wants: control always arrives, text while subscribed, binary per `sub-binary`.
@@ -108,7 +113,8 @@ class ClientRoom implements Room {
   }
 
   async getParticipants(): Promise<RemoteParticipant[]> {
-    return this._state.listRemotes() // kept fresh by the event stream
+    if (!this._state.rosterKnown) await this._rosterReady
+    return this._state.listRemotes() // kept fresh by the event stream from there on
   }
 
   getParticipant(id: string): RemoteParticipant | null {
@@ -173,8 +179,15 @@ class ClientRoom implements Room {
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     if (!hasRoomTag(envelope)) return
-    const event = envelope as RoomEnvelope | RoomDmEnvelope
+    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent
     switch (event.__r) {
+      case 'roster':
+        // The authoritative member list, positioned in the relay stream: everything relayed
+        // before it is reflected in it, later events apply incrementally on top.
+        this._state.reconcile(event.members)
+        this._syncWants() // per-member binary wants may reference the members just learned
+        this._rosterArrived()
+        return
       case 'data':
         this._state.applyData(
           event.from,
@@ -231,6 +244,7 @@ class ClientRoom implements Room {
   private _applyClosed(): void {
     if (this._state.closed) return
     this._state.applyClosed()
+    this._rosterArrived() // unblock any getParticipants() waiting on a wire that just died
     // After onClose, like on the server: the room-level signal fires before per-handle cleanup.
     for (const local of this._localParticipants.values()) local._onLeft()
     this._localParticipants.clear()

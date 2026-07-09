@@ -81,19 +81,34 @@ describe('Room entry point', () => {
     await expect(Room.join('nope')).rejects.toThrow('Room not found: nope')
   })
 
-  it('Room.join() skips the roster scan Room.get() pays for — a joiner needs no view', async () => {
+  it('Room.get() never reads member records up front — one scan for the count, roster lazy', async () => {
     await Room.create('scan')
     await Room.join('scan', { n: 1 })
     await Room.join('scan', { n: 2 })
     await settle()
 
+    const reads = vi.spyOn(getBroadcastAdapter(), 'get')
     const scans = vi.spyOn(getBroadcastAdapter(), 'keys')
-    await Room.join('scan', { n: 3 })
-    await settle()
+    const room = await Room.get('scan')
 
-    // Construction no longer scans the roster (was: construction scan + observe resync = 2).
-    expect(scans.mock.calls.length).toBeLessThanOrEqual(1)
+    expect(room.count).toBe(2) // exact, from the scan
+    expect(scans.mock.calls.length).toBe(1)
+    expect(reads.mock.calls.filter((c) => String(c[0]).includes(':m:'))).toEqual([]) // no member reads
+    expect((await room.getParticipants()).length).toBe(2) // the roster loads on first need
+    reads.mockRestore()
     scans.mockRestore()
+  })
+
+  it('Room.join() pays not even the count scan — a pure joiner loads no roster, ever', async () => {
+    await Room.create('scan2')
+    const scans = vi.spyOn(getBroadcastAdapter(), 'keys')
+    const reads = vi.spyOn(getBroadcastAdapter(), 'get')
+    await Room.join('scan2', { n: 1 })
+    await settle()
+    expect(scans.mock.calls.length).toBe(0) // roster loads are need-driven; a joiner has no need
+    expect(reads.mock.calls.filter((c) => String(c[0]).includes(':m:'))).toEqual([])
+    scans.mockRestore()
+    reads.mockRestore()
   })
 
   it('list() reflects rooms and their live member counts', async () => {
@@ -344,6 +359,7 @@ describe('data pub/sub', () => {
     const cam1 = await a.join({ name: 'cam1' })
     const cam2 = await a.join({ name: 'cam2' })
     const b = await Room.get('per-pub')
+    await b.getParticipants() // materialize the lazy roster
     const subscribed = vi.spyOn(getBroadcastAdapter(), 'subscribeBinary')
 
     const frames: number[][] = []
@@ -398,6 +414,7 @@ describe('selective binary delivery', () => {
     const cam1 = await a.join({ name: 'cam1' })
     const cam2 = await a.join({ name: 'cam2' })
     const b = await Room.get('sel')
+    await b.getParticipants() // materialize the lazy roster
 
     const frames: string[] = []
     b.getParticipant(cam1.id)!.subscribeBinary((data) => frames.push(`cam1:${data[0]}`))
@@ -411,6 +428,7 @@ describe('selective binary delivery', () => {
     const a = await Room.create('release', { isolated: true })
     const cam = await a.join({ name: 'cam' })
     const b = await Room.get('release')
+    await b.getParticipants() // materialize the lazy roster
 
     // The documented pattern: subscribe on join, close the decoder on leave — no unsubscribe.
     b.getParticipant(cam.id)!.subscribeBinary(() => {})
@@ -623,12 +641,16 @@ describe('room stub channel', () => {
     expect(serverRoom.getParticipant(ack.id)!.meta).toEqual({ name: 'Remote' })
   })
 
-  it('room events are relayed to the client as PUBLISH frames', async () => {
+  it('room events are relayed to the client as PUBLISH frames, behind the streamed roster', async () => {
     const { serverRoom, peer } = await createServedRoom('relay')
+    await settle() // the roster streams once the peer attaches
     await serverRoom.join({ name: 'Alice' })
 
-    const relayed = peer.decoded().filter((f) => f.tag === TAG.PUBLISH)
-    expect(relayed.length).toBe(1) // the join event
+    const relayed = peer
+      .decoded()
+      .filter((f) => f.tag === TAG.PUBLISH)
+      .map((f) => (JSON.parse(f.text) as { __r: string }).__r)
+    expect(relayed).toEqual(['roster', 'join']) // roster first — join applies on top of it
   })
 
   it('client publishes are validated: own member passes, impersonation is rejected', async () => {
@@ -743,6 +765,7 @@ describe('room stub channel', () => {
         .decoded()
         .filter((f) => f.tag === TAG.PUBLISH)
         .map((f) => (JSON.parse(f.text) as { __r: string }).__r)
+        .filter((tag) => tag !== 'roster')
     expect(relayedTags()).toEqual(['join']) // control flowed, the data frame didn't cross the wire
 
     stub._onPeerBroadcastSubscribe(false) // the client's `subscribe()` signal
@@ -827,22 +850,25 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
 }
 
 function createSnapshot(roomId: string, partial?: Partial<RoomSnapshotMetadata>): RoomSnapshotMetadata {
-  return { channelId: 'ch1', roomId, meta: {}, size: null, isolated: false, closed: false, members: [], ...partial }
+  return { channelId: 'ch1', roomId, meta: {}, size: null, isolated: false, closed: false, count: 0, ...partial }
 }
 
 describe('ClientRoom', () => {
-  it('seeds membership from the snapshot, then follows the event stream idempotently', () => {
+  it('seeds the count from the snapshot; the streamed roster then makes the view authoritative', async () => {
     const fake = createFakeStub()
     const alice = crypto.randomUUID()
-    const clientRoom = new ClientRoom(
-      fake.stub,
-      createSnapshot('snap', { members: [{ id: alice, meta: { name: 'Alice' }, joinedAt: 1 }] }),
-    )
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('snap', { count: 1 }))
     const joins: string[] = []
     clientRoom.onJoin((m) => joins.push(m.id))
 
-    expect(clientRoom.count).toBe(1)
-    fake.emit({ __r: 'join', id: alice, meta: { name: 'Alice' }, joinedAt: 1 }) // overlap with snapshot
+    expect(clientRoom.count).toBe(1) // scalar seed — exact before the roster even arrives
+    const membersPending = clientRoom.getParticipants() // parks until the roster streams in
+
+    fake.emit({ __r: 'roster', members: [{ id: alice, meta: { name: 'Alice' }, joinedAt: 1 }] })
+    expect((await membersPending).map((m) => m.id)).toEqual([alice])
+    expect(joins).toEqual([]) // the roster seeds silently — it is not a join event
+
+    fake.emit({ __r: 'join', id: alice, meta: { name: 'Alice' }, joinedAt: 1 }) // echo overlap
     expect(joins).toEqual([]) // absorbed
     const bob = crypto.randomUUID()
     fake.emit({ __r: 'join', id: bob, meta: { name: 'Bob' }, joinedAt: 2 })
@@ -952,15 +978,14 @@ describe('ClientRoom', () => {
     const cam1 = crypto.randomUUID()
     const cam2 = crypto.randomUUID()
     const fake = createFakeStub()
-    const clientRoom = new ClientRoom(
-      fake.stub,
-      createSnapshot('wants', {
-        members: [
-          { id: cam1, meta: {}, joinedAt: 1 },
-          { id: cam2, meta: {}, joinedAt: 2 },
-        ],
-      }),
-    )
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('wants', { count: 2 }))
+    fake.emit({
+      __r: 'roster',
+      members: [
+        { id: cam1, meta: {}, joinedAt: 1 },
+        { id: cam2, meta: {}, joinedAt: 2 },
+      ],
+    })
     const subBinaryMsgs = () => fake.sent.filter((m) => m.__r === 'sub-binary')
 
     // Each widening is declared synchronously — a publish right after subscribing must be
@@ -988,10 +1013,8 @@ describe('ClientRoom', () => {
   it("a member leaving releases its listeners — the client's declaration narrows without an unsubscribe", () => {
     const cam = crypto.randomUUID()
     const fake = createFakeStub()
-    const clientRoom = new ClientRoom(
-      fake.stub,
-      createSnapshot('wants-release', { members: [{ id: cam, meta: {}, joinedAt: 1 }] }),
-    )
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('wants-release', { count: 1 }))
+    fake.emit({ __r: 'roster', members: [{ id: cam, meta: {}, joinedAt: 1 }] })
     clientRoom.getParticipant(cam)!.subscribeBinary(() => {}) // never unsubscribed
     expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
       __r: 'sub-binary',
@@ -1063,9 +1086,12 @@ describe('liveness', () => {
     const observer = await Room.get('crashed')
     const leaves: string[] = []
     observer.onLeave((m) => leaves.push(m.id))
+    await observer.getParticipants() // materialize the roster — leave events need the member view
 
     await backdate('crashed', me.id) // simulate: the owning node died 2 minutes ago
 
+    const reader = await Room.get('crashed')
+    expect(await reader.getParticipants()).toEqual([]) // reap-on-read: record deleted, leave announced
     expect(await Room.list()).toMatchObject([{ id: 'crashed', count: 0 }])
     expect(leaves).toEqual([me.id])
     expect(observer.count).toBe(0)

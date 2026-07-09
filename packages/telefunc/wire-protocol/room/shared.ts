@@ -27,6 +27,7 @@ export type {
   RoomSnapshotMetadata,
   ParticipantStubMetadata,
   RoomEnvelope,
+  RoomRosterEvent,
   RoomCtrlEnvelope,
   RoomDataEnvelope,
   RoomDataPublish,
@@ -123,7 +124,9 @@ type MemberSnapshot = {
   joinedAt: number
 }
 
-/** Serializer metadata of a `Room` crossing the wire. */
+/** Serializer metadata of a `Room` crossing the wire. Carries only scalars — the roster itself
+ *  streams as a `RoomRosterEvent` once the stub's peer attaches, so serialization stays O(1)
+ *  no matter how many members the room has. */
 type RoomSnapshotMetadata = {
   channelId: string
   roomId: string
@@ -131,7 +134,7 @@ type RoomSnapshotMetadata = {
   size: number | null
   isolated: boolean
   closed: boolean
-  members: MemberSnapshot[]
+  count: number
 }
 
 /** Serializer metadata of a `LocalParticipant` crossing the wire. */
@@ -169,6 +172,11 @@ type RoomDataPublish = { __r: 'data'; from: string; data: unknown }
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
+
+/** The authoritative roster, pushed once per stub after its peer attaches — never published on
+ *  the adapter. Position-in-stream consistency: every event relayed before it is already
+ *  reflected in it; later events apply incrementally on top. */
+type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] }
 
 /** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
  *  privacy: only the target's owning node subscribes, only its holder receives the relay.
@@ -294,7 +302,9 @@ type RoomStateOptions = {
   roomId: string
   meta: RoomMeta
   size: number
-  members: MemberSnapshot[]
+  /** Either the authoritative roster, or just its size — a lazy view seeds with `{ count }`
+   *  and learns the members from its first `reconcile()` (KV read / streamed roster). */
+  seed: { members: MemberSnapshot[] } | { count: number }
   closed?: boolean
   /** Fired whenever the number of attached listeners changes — lets the owner
    *  (de)activate its event source (adapter subscription, wire subscription). */
@@ -339,6 +349,8 @@ class RoomState {
   private _binaryListenerCount = 0
   private _wasFull: boolean
   private _lastUpdateEid: string | null = null
+  private _rosterKnown: boolean
+  private _seedCount = 0
 
   constructor(opts: RoomStateOptions) {
     this.roomId = opts.roomId
@@ -347,18 +359,31 @@ class RoomState {
     this.closed = opts.closed === true
     this._onListenersChanged = opts.onListenersChanged
     this._onCallbackError = opts.onCallbackError
-    for (const member of opts.members) this._createEntry(member)
+    if ('members' in opts.seed) {
+      this._rosterKnown = true
+      for (const member of opts.seed.members) this._createEntry(member)
+    } else {
+      this._rosterKnown = false
+      this._seedCount = opts.seed.count
+    }
     this._wasFull = this.isFull
   }
 
   // ── Reads ──
 
+  /** Exact once the roster is known (seeded or reconciled); before that, the seeded count
+   *  adjusted by the events this view applied since. */
   get count(): number {
-    return this._members.size
+    return this._rosterKnown ? this._members.size : this._seedCount
+  }
+
+  /** Whether this view holds the authoritative member list (vs just a count). */
+  get rosterKnown(): boolean {
+    return this._rosterKnown
   }
 
   get isFull(): boolean {
-    return this._members.size >= this.size
+    return this.count >= this.size
   }
 
   /** Listeners needing the control stream (presence, lifecycle). */
@@ -444,6 +469,7 @@ class RoomState {
       return
     }
     const entry = this._createEntry({ id, meta, joinedAt })
+    this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
     this.membershipVersion++
     this._fireAll(this._joinCbs, entry.remote)
     this._checkFull()
@@ -451,8 +477,9 @@ class RoomState {
 
   applyLeave(id: string): void {
     const entry = this._members.get(id)
-    if (!entry) return
+    if (!entry) return // unknown here: absorbed (pre-reconcile misses correct at reconcile)
     this._members.delete(id)
+    this._seedCount = Math.max(0, this._seedCount - 1)
     this.membershipVersion++
     this._fireAll(entry.leaveCbs)
     this._fireAll(this._leaveCbs, entry.remote)
@@ -483,6 +510,7 @@ class RoomState {
   applyClosed(): void {
     if (this.closed) return
     this.closed = true
+    this._rosterKnown = true // authoritatively empty
     this.membershipVersion++
     for (const entry of this._members.values()) {
       this._fireAll(entry.leaveCbs)
@@ -519,6 +547,7 @@ class RoomState {
   /** Silent resync against an authoritative membership snapshot. Only for unobserved rooms —
    *  once observed, the event stream is authoritative and the only thing firing callbacks. */
   reconcile(members: MemberSnapshot[]): void {
+    this._rosterKnown = true
     this.membershipVersion++
     const seen = new Set<string>()
     for (const member of members) {

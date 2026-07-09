@@ -123,7 +123,7 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   if ((await readConfig(kv, id)) !== null) throw new Error(`Room already exists: ${id}`)
   const config: RoomConfigRecord = { meta, size: sizeToWire(size), isolated: options?.isolated === true }
   await kv.set(roomConfigKvKey(id), stringify(config))
-  return new ServerRoom(id, config, [])
+  return new ServerRoom(id, config, { members: [] }) // fresh room — the roster is known: empty
 }
 
 async function getRoom(id: string, options?: { onSend?: SendGuard }): Promise<Room> {
@@ -132,15 +132,17 @@ async function getRoom(id: string, options?: { onSend?: SendGuard }): Promise<Ro
     'Room.get() options.onSend should be a function',
   )
   const { kv, config } = await requireRoom(id)
-  return new ServerRoom(id, config, await readMembers(kv, id), options?.onSend ?? null)
+  // One keys scan for the count — `isFull` capacity gates stay correct — but no per-member
+  // reads: the roster itself loads lazily, on the first observation that needs it.
+  const count = (await listMemberKeys(kv, id)).length
+  return new ServerRoom(id, config, { count }, options?.onSend ?? null)
 }
 
 async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant> {
-  // A pure joiner only wants its own participant handle — it never reads the roster. Skip the
-  // member scan `Room.get()` runs to populate its `count`/`getParticipants` view and join a
-  // freshly-seeded room directly: an O(members) saving per join, which is what large rooms feel.
+  // A pure joiner only wants its own participant handle — it never reads the roster, so it
+  // skips even the count scan `Room.get()` pays: config read, join, done.
   const { config } = await requireRoom(id)
-  return await new ServerRoom(id, config, []).join(meta, options)
+  return await new ServerRoom(id, config, { count: 0 }).join(meta, options)
 }
 
 async function listRooms(): Promise<RoomInfo[]> {
@@ -151,7 +153,7 @@ async function listRooms(): Promise<RoomInfo[]> {
     if (id === null) continue
     const config = await readConfig(kv, id)
     if (config === null) continue // closed concurrently
-    const count = (await readMembers(kv, id)).length
+    const count = (await listMemberKeys(kv, id)).length // scan only — no per-member reads
     const size = sizeFromWire(config.size)
     rooms.push({ id, meta: config.meta, size, count, isEmpty: count === 0, isFull: count >= size })
   }
@@ -240,15 +242,21 @@ class ServerRoom implements Room {
   private readonly _dmUnsubs = new Map<string, () => void>()
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _heartbeatBusy = false
+  private _pendingRefresh: Promise<void> | null = null
 
-  constructor(roomId: string, config: RoomConfigRecord, members: MemberSnapshot[], onSend: SendGuard | null = null) {
+  constructor(
+    roomId: string,
+    config: RoomConfigRecord,
+    seed: { members: MemberSnapshot[] } | { count: number },
+    onSend: SendGuard | null = null,
+  ) {
     this._guard = onSend
     this._isolated = config.isolated
     this._state = new RoomState({
       roomId,
       meta: config.meta,
       size: sizeFromWire(config.size),
-      members,
+      seed,
       onListenersChanged: () => this._syncSubs(),
       onCallbackError: reportRoomError,
     })
@@ -293,9 +301,7 @@ class ServerRoom implements Room {
   }
 
   async getParticipants(): Promise<RemoteParticipant[]> {
-    // While observed, the event stream keeps the local view fresh. While unobserved,
-    // no listeners exist that a change could notify — resync silently from KV.
-    if (!this._state.closed && !this._ctrlSub.active) await this._refreshMembers()
+    await this._ensureRoster()
     return this._state.listRemotes()
   }
 
@@ -590,6 +596,16 @@ class ServerRoom implements Room {
   /** @internal — called by `roomReplacer` when this room is serialized into a response. */
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
+    // The snapshot carries only scalars; the roster streams once the peer is attached (never
+    // buffered — a byte-capped pre-peer buffer must not be able to evict it). Everything
+    // relayed before it is already reflected in it; later events apply incrementally.
+    stub.onOpen(() => {
+      void this._ensureRoster()
+        .then(() => {
+          if (this._stubs.has(stub) && !this._state.closed) stub._relayRoster(this._state.snapshotMembers())
+        })
+        .catch(reportRoomError)
+    })
     stub.onClose(() => {
       this._stubs.delete(stub)
       // The client is gone — presence says its members leave.
@@ -684,13 +700,27 @@ class ServerRoom implements Room {
     this._ctrlSub.sync(open && observed, () =>
       adapter.subscribe(roomCtrlKey(this.id), (serialized, info) => this._onCtrlMessage(serialized, info)),
     )
-    // Events between construction (KV snapshot) and this subscription were missed — resync.
-    if (becomesObserved) void this._refreshMembers().catch(reportRoomError)
 
     // Text: its own lane, brought up only for holders that actually consume messages —
     // presence-only observers never receive the room's chatter.
     const wantText = open && (state.dataListenerCount > 0 || this._stubsWantText())
     const memberIds = open ? state.listMemberIds() : []
+
+    // Roster loads are need-driven: a resident roster refreshes on the observe transition
+    // (events between its KV read and this subscription were missed); a lazy one loads once
+    // something actually needs the member view — room-level listeners (onLeave/onEmpty/onFull
+    // and live senders are only correct against it) or a member-keyed lane. A holder that only
+    // joins attaches neither, so `Room.join()` never loads a roster at all —
+    // `getParticipants()`/serialization go through `_ensureRoster` on their own.
+    const binaryWants = this._aggregateBinaryWants()
+    const wantAnyBinary = open && (binaryWants.all || binaryWants.members.size > 0)
+    const needsRoster =
+      state.eventListenerCount + state.dataListenerCount + state.binaryListenerCount > 0 ||
+      (this._isolated && wantText) ||
+      wantAnyBinary
+    if ((becomesObserved && state.rosterKnown) || (open && !state.rosterKnown && needsRoster)) {
+      void this._refreshMembers().catch(reportRoomError)
+    }
     if (this._isolated) {
       this._syncMemberSubs(this._memberTextUnsubs, wantText ? memberIds : [], (memberId) =>
         adapter.subscribe(roomMemberDataKey(this.id, memberId), (serialized, info) =>
@@ -705,8 +735,6 @@ class ServerRoom implements Room {
 
     // Binary: per-publisher keys in every mode — subscribing member-selectively at the source
     // makes upstream delivery pay-per-want, not filter-after-receive.
-    const binaryWants = this._aggregateBinaryWants()
-    const wantAnyBinary = open && (binaryWants.all || binaryWants.members.size > 0)
     const binaryIds = !wantAnyBinary
       ? []
       : binaryWants.all
@@ -760,11 +788,32 @@ class ServerRoom implements Room {
     }
   }
 
-  private async _refreshMembers(): Promise<void> {
-    const version = this._state.membershipVersion
-    const members = await readMembers(getRoomKV(), this.id)
-    // An event that applied while we were reading is fresher than the snapshot — drop it.
-    if (this._state.membershipVersion === version) this._state.reconcile(members)
+  /** Resolves once the local roster is authoritative: immediately while the live view holds it
+   *  (roster known and the event stream attached), else via a KV read. */
+  private _ensureRoster(): Promise<void> {
+    if (this._state.closed || (this._state.rosterKnown && this._ctrlSub.active)) return Promise.resolve()
+    return this._refreshMembers()
+  }
+
+  /** Single-flight roster refresh. A membership event landing mid-read makes the snapshot
+   *  ambiguous (its KV write may or may not be in it) — re-read: joins/leaves write KV before
+   *  publishing, so the next read includes the event that dirtied this one. */
+  private _refreshMembers(): Promise<void> {
+    this._pendingRefresh ??= (async () => {
+      try {
+        while (!this._state.closed) {
+          const version = this._state.membershipVersion
+          const members = await readMembers(getRoomKV(), this.id)
+          if (this._state.membershipVersion !== version) continue
+          this._state.reconcile(members)
+          this._syncSubs() // per-member lanes may need subscriptions for the members just learned
+          return
+        }
+      } finally {
+        this._pendingRefresh = null
+      }
+    })()
+    return this._pendingRefresh
   }
 
   // ── Liveness heartbeat ──

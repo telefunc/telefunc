@@ -27,7 +27,9 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
         size: sizeToWire(serverRoom.size),
         isolated: serverRoom._isolated,
         closed: serverRoom.isClosed,
-        members: serverRoom._state.snapshotMembers(),
+        // Scalars only — the roster streams over the stub once its peer attaches, so
+        // serialization is O(1) in member count.
+        count: serverRoom.count,
       },
       async close() {
         await stub.close()
