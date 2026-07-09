@@ -245,7 +245,7 @@ lobby.onJoin((member) => {
 
 Both receive from the same stream — a `publish()` reaches room-level subscribers (with `from`) and that member's subscribers.
 
-> Per-member binary subscriptions also drive **wire delivery**: a client receives a member's binary stream only while it subscribes to that member (or to the whole room). Text messages always flow — they carry presence.
+> Per-member binary subscriptions also drive **wire delivery**: a client receives a member's binary stream only while it subscribes to that member (or to the whole room). Text isn't filtered: it shares its stream with the control events (join/leave/metadata) that keep every holder's `count`, `getParticipants()`, and events live — and text payloads are the light ones, so filtering them would save little.
 
 ### Private messages
 

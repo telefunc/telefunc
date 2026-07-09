@@ -27,7 +27,8 @@ assertIsNotBrowser()
 /**
  * The channel registered with a response when a `Room` crosses the wire.
  * - server→client: room events & data relayed as PUBLISH frames (pre-peer buffered,
- *   replayed on reconnect). Text always flows — it carries presence; binary is opt-in.
+ *   replayed on reconnect). Text always flows — its stream carries the control events;
+ *   binary is member-selective.
  * - client→server: join/leave/set-meta as ack-bearing channel messages; publishes as
  *   PUBLISH(_BINARY)_ACK_REQ frames, validated against the members joined through this stub.
  */
@@ -67,8 +68,9 @@ class RoomStubChannel extends ServerBroadcast {
     )
   }
 
-  // Text always flows (it carries presence); binary delivery is member-selective, declared
-  // by the client's `sub-binary` request — the coarse BROADCAST_(UN)SUB ctrls are ignored.
+  // Text always flows — its stream carries the control events every holder needs live (and
+  // text payloads are light). Binary is member-selective, declared by the client's
+  // `sub-binary` request — the coarse BROADCAST_(UN)SUB ctrls are ignored.
   override _onPeerBroadcastSubscribe(): void {}
   override _onPeerBroadcastUnsubscribe(): void {}
 
