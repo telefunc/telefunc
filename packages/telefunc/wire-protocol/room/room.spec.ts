@@ -434,10 +434,12 @@ describe('data pub/sub', () => {
     expect(await room.getParticipant(ghost)).toBe(null) // presence stays event-driven — no ghost member
   })
 
-  it('an unknown sender heals the drifted view — and re-syncs clients seeded from it', async () => {
+  it('an unknown sender heals the drifted view — narrated, and re-synced to clients', async () => {
     const a = await Room.create('drift')
     const observer = await Room.get('drift')
     observer.subscribe(() => {}) // materialize + observe the roster (currently empty)
+    const joins: string[] = []
+    observer.onJoin((m) => joins.push(String(m.meta.name)))
     await settle()
 
     // Simulate a dropped join event: the member exists in KV, but its ctrl event never arrived.
@@ -465,9 +467,11 @@ describe('data pub/sub', () => {
     await ghostly.publish('boo')
     expect(seen).toEqual([{ data: 'boo', id: ghostly.id, meta: { name: 'Casper' } }])
 
-    // …and acts as the drift signal: the view heals, live object included.
+    // …and acts as the drift signal: the view heals, live object included, and the discovery
+    // is narrated — onJoin fires from the authoritative KV read (never from the message).
     await settle()
     expect((await observer.getParticipant(ghostly.id))?.meta).toEqual({ name: 'Casper' })
+    expect(joins).toEqual(['Casper'])
   })
 
   it('binary round-trips with the 16-byte member ID frame, preserving high-bit bytes', async () => {

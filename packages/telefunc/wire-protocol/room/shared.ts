@@ -564,34 +564,47 @@ class RoomState {
     if (entry) this._fireAll(entry.binaryCbs, payload, info)
   }
 
-  /** Silent resync against an authoritative membership snapshot (no callbacks fire — the event
-   *  stream is the only thing that narrates changes). Returns whether anything drifted, so the
-   *  owner can re-sync downstream views (client stubs) that were seeded from the stale state. */
+  /** Resync against an authoritative membership snapshot. The first reconcile is the roster
+   *  *load* and is silent (the documented pattern reads `getParticipants()` and then follows
+   *  events — narrating the load would double-render it). Every later reconcile is discovered
+   *  *drift*, and an observed view never mutates silently: the diff replays through the normal
+   *  appliers, so `onJoin`/`onLeave`/`onUpdate` fire exactly once per real change — whichever
+   *  path (event or reconcile) learns of it first, the other is absorbed as an echo. Returns
+   *  whether anything drifted, so the owner can re-sync downstream views (client stubs). */
   reconcile(members: MemberSnapshot[]): boolean {
-    this._rosterKnown = true
+    if (!this._rosterKnown) {
+      this._rosterKnown = true
+      this.membershipVersion++
+      for (const member of members) this._createEntry(member)
+      this._wasFull = this.isFull
+      return false
+    }
+
     this.membershipVersion++
     let drifted = false
     const seen = new Set<string>()
     for (const member of members) {
       seen.add(member.id)
       const entry = this._members.get(member.id)
-      if (entry) {
-        if (entry.metaSeq !== member.metaSeq || entry.joinedAt !== member.joinedAt) drifted = true
-        entry.meta = member.meta
-        entry.joinedAt = member.joinedAt
-        entry.metaSeq = member.metaSeq
-      } else {
-        this._createEntry(member)
+      if (!entry) {
+        this.applyJoin(member.id, member.meta, member.joinedAt)
+        const created = this._members.get(member.id)
+        if (created) created.metaSeq = member.metaSeq
         drifted = true
+      } else {
+        if (member.metaSeq > entry.metaSeq) {
+          this.applyParticipantMeta(member.id, member.meta, entry.meta, member.metaSeq)
+          drifted = true
+        }
+        entry.joinedAt = member.joinedAt
       }
     }
     for (const id of [...this._members.keys()]) {
       if (!seen.has(id)) {
-        this._members.delete(id)
+        this.applyLeave(id)
         drifted = true
       }
     }
-    this._wasFull = this.isFull
     return drifted
   }
 

@@ -97,6 +97,8 @@ function addToList(member) {
 
 Your own metadata: `me.setMeta({ name: 'Alice', score: 42 })` — a full replace that propagates to every observer in real time.
 
+> Metadata is for durable, low-frequency identity state (name, avatar, score) — each `setMeta()` writes the member's record in the key-value store. High-frequency ephemeral state — cursors, typing indicators — belongs on `publish()` (throttled to your frame budget), which touches no storage.
+
 Presence is all a lurker costs: a connection that only observes membership never receives the room's messages — the message stream flows to a client only while it's subscribed (see <Link href="#delivery-and-cost">delivery & cost</Link>).
 
 ### Chat
