@@ -26,7 +26,7 @@ import { TelefuncStreamBeta } from '../../components'
 Three objects:
 
 - **`Room`** — the shared space. Created and managed on the server (the <Link href="#rooms">`Room.*` statics</Link>), but anyone holding the room object — the server, or a client it was handed to — can observe its live membership, events, and message streams.
-- **`LocalParticipant`** — *you*, returned by `join()`. Your identity in the room: you publish, whisper, and update your metadata through it.
+- **`LocalParticipant`** — the current user, returned by `join()`. Your identity in the room: you publish, send private messages, and update your metadata through it.
 - **`RemoteParticipant`** — *everyone else*, as seen through a room: subscribe to one member's messages, watch their metadata, notice when they leave.
 
 And three message lanes:
@@ -34,7 +34,7 @@ And three message lanes:
 | Lane | Send | Receive | Typical use |
 |---|---|---|---|
 | <Link href="#room-wide-messages">Room-wide</Link> | `me.publish(data)` | `room.subscribe(cb)`, `member.subscribe(cb)` | Chat, game state, video frames |
-| <Link href="#private-messages">Private</Link> | `me.send(to, data)` | `me.listen(cb)` | Whispers, invites, game moves |
+| <Link href="#private-messages">Private</Link> | `me.send(to, data)` | `me.listen(cb)` | DMs, invites, game moves |
 | <Link href="#room-authored-messages">Room-authored</Link> | `Room.announce()`, `Room.send()` | `room.onAnnounce(cb)`, `me.listen(cb)` | System notices, moderation |
 
 Each object is a single type, identical on server and client — a `Room` or `LocalParticipant` can be returned from a telefunction and used on the client as-is. Everything below works identically on both sides unless marked otherwise.
@@ -250,12 +250,12 @@ Both receive from the same stream — a member's `publish()` reaches room-level 
 
 ### Private messages
 
-`send()` delivers to exactly one participant — a whisper, an invite, a game move. Privacy is transport-level: the message travels over the target's private inbox key, so no other participant's connection ever receives it (it also never appears on `subscribe()` streams).
+`send()` delivers to exactly one participant — a DM, an invite, a game move. Privacy is transport-level: the message travels over the target's private inbox key, so no other participant's connection ever receives it (it also never appears on `subscribe()` streams).
 
 ```ts
 // Alice's client
 const me = await lobby.join({ name: 'Alice' })
-me.listen((data, from) => console.log(`whisper from ${from.meta.name}:`, data))
+me.listen((data, from) => console.log(`DM from ${from.meta.name}:`, data))
 
 // Bob's client
 const bob = await lobby.join({ name: 'Bob' })
@@ -265,12 +265,12 @@ lobby.onJoin(async (member) => {
 ```
 
 - `send()` accepts a `RemoteParticipant` or a participant ID. Sending to an unknown or departed participant throws.
-- `from` is the **verified** sender — the live `RemoteParticipant` if your side is watching the room, or an `{ id, meta }` snapshot if not. Telefunc rejects sends from non-members, so the sender identity can't be spoofed; `null` is reserved for <Link href="#room-authored-messages">room-authored whispers</Link> (`Room.send()`).
-- To authorize whispers, add an `onSend` guard to the `Room.get()` that hands the room to a client: `Room.get(id, { onSend })` — see <Link href="#policy-gated-private-messages">the recipe</Link>.
+- `from` is the **verified** sender — the live `RemoteParticipant` if your side is watching the room, or an `{ id, meta }` snapshot if not. Telefunc rejects sends from non-members, so the sender identity can't be spoofed; `null` is reserved for <Link href="#room-authored-messages">room-authored private messages</Link> (`Room.send()`).
+- To authorize member-to-member private messages, add an `onSend` guard to the `Room.get()` that hands the room to a client: `Room.get(id, { onSend })` — see <Link href="#policy-gated-private-messages">the recipe</Link>.
 
 ### Room-authored messages
 
-Messages don't have to come from a participant — the room itself can speak. `Room.announce()` broadcasts to everyone; `Room.send()` whispers to one participant. Neither requires the caller to join, and receivers can't confuse them with participant messages:
+Messages don't have to come from a participant — the room itself can speak. `Room.announce()` broadcasts to everyone; `Room.send()` sends privately to one participant. Neither requires the caller to join, and receivers can't confuse them with participant messages:
 
 ```ts
 // Server
@@ -282,8 +282,8 @@ await Room.send('lobby', winnerId, { type: 'achievement', badge: 'first-blood' }
 // Client
 lobby.onAnnounce((data) => showSystemBanner(data))  // room-authored announcements
 me.listen((data, from) => {
-  if (from === null) showSystemNotice(data)         // room-authored whisper (Room.send())
-  else showWhisper(from.meta.name, data)            // participant whisper (send())
+  if (from === null) showSystemNotice(data)         // room-authored private message (Room.send())
+  else showDm(from.meta.name, data)                 // participant private message (send())
 })
 ```
 
@@ -354,7 +354,7 @@ export async function onModerate(roomId: string) {
 
 ### Policy-gated private messages
 
-To authorize whispers (e.g. friends-only DMs), pass an `onSend` guard to the `Room.get()` call that grants the room. It's declared inside the telefunction, so it has access to the request context — e.g. the authenticated user from `getContext()`. It runs before Telefunc delivers any private message sent by someone who joined through this room object. If the guard throws, that `send()` rejects with the error:
+To authorize the private messages members send each other (e.g. friends-only DMs), pass an `onSend` guard to the `Room.get()` call that grants the room. It's declared inside the telefunction, so it has access to the request context — e.g. the authenticated user from `getContext()`. It runs before Telefunc delivers any private message sent by someone who joined through this room object. If the guard throws, that `send()` rejects with the error:
 
 ```ts
 // Chat.telefunc.ts
