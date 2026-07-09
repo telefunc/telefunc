@@ -61,8 +61,14 @@ import type {
 } from './types.js'
 assertIsNotBrowser()
 
-/** This process's identity as an LWW writer — breaks `Room.update()` timestamp ties. */
-const WRITER_ID = crypto.randomUUID()
+/** This process's identity as an LWW writer — breaks `Room.update()` timestamp ties.
+ *  Minted lazily: Cloudflare Workers forbid crypto RNG in module scope (this module loads at
+ *  worker startup via the serializer registry), and inside a request it's always available. */
+let _writerId: string | undefined
+function writerId(): string {
+  _writerId ??= crypto.randomUUID()
+  return _writerId
+}
 
 /** `Room` is one identifier with two meanings, like the built-in `Date`: the statics object
  *  below (value) and the instance type from ./types.js — re-established locally so the two
@@ -136,7 +142,7 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
     size: sizeToWire(size),
     isolated: options?.isolated === true,
     at: Date.now(),
-    by: WRITER_ID,
+    by: writerId(),
   }
   await kv.set(roomConfigKvKey(id), stringify(config))
   return new ServerRoom(id, config, { members: [] }) // fresh room — the roster is known: empty
@@ -197,7 +203,7 @@ async function updateRoom(id: string, options: RoomOptions): Promise<void> {
   // Strictly after the config we read (hybrid-clock style): back-to-back updates from one
   // writer always order, and cross-writer ordering stays wall-clock last-writer-wins.
   const at = Math.max(Date.now(), config.at + 1)
-  const next: RoomConfigRecord = { meta, size: sizeWire, isolated: config.isolated, at, by: WRITER_ID }
+  const next: RoomConfigRecord = { meta, size: sizeWire, isolated: config.isolated, at, by: writerId() }
   await kv.set(roomConfigKvKey(id), stringify(next))
   await publishCtrl(id, { __r: 'update', meta, prev: config.meta, size: sizeWire, at: next.at, by: next.by })
   // Concurrent updates converge by the (at, by) stamp everywhere events reach — but the last KV
