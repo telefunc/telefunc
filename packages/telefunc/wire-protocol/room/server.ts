@@ -55,6 +55,7 @@ import type {
   RoomInfo,
   RoomMeta,
   RoomOptions,
+  PublishGuard,
   SendGuard,
   Sender,
 } from './types.js'
@@ -72,9 +73,14 @@ type Room = RoomInstance
 type RoomStatic = {
   /** Create a new room. Throws if it already exists. */
   create(id: string, options?: RoomOptions): Promise<Room>
-  /** Get an existing room. Throws if it doesn't exist. `onSend` guards every membership
-   *  granted through the returned instance — including client-side `join()`s on it. */
-  get(id: string, options?: { onSend?: SendGuard }): Promise<Room>
+  /** Get an existing room. Throws if it doesn't exist. */
+  get(id: string): Promise<Room>
+  /** Guard the messages of every membership granted through `room` — server-side and
+   *  client-side `join()`s alike. `onSend` runs before each private `send()`, `onPublish`
+   *  before each `publish()`/`publishBinary()`; throwing rejects the sender's call with the
+   *  error. Declared in the granting telefunction (close over `getContext()`); one
+   *  `Room.guard()` per instance — declare all guards together. */
+  guard(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard }): void
   /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
   join(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant>
   /** List all rooms. */
@@ -107,6 +113,7 @@ type RoomStatic = {
 const Room: RoomStatic = {
   create: createRoom,
   get: getRoom,
+  guard: guardRoom,
   join: joinRoom,
   list: listRooms,
   update: updateRoom,
@@ -126,16 +133,26 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   return new ServerRoom(id, config, { members: [] }) // fresh room — the roster is known: empty
 }
 
-async function getRoom(id: string, options?: { onSend?: SendGuard }): Promise<Room> {
-  assertUsage(
-    options?.onSend === undefined || typeof options.onSend === 'function',
-    'Room.get() options.onSend should be a function',
-  )
+async function getRoom(id: string): Promise<Room> {
   const { kv, config } = await requireRoom(id)
   // One keys scan for the count — `isFull` capacity gates stay correct — but no per-member
   // reads: the roster itself loads lazily, on the first observation that needs it.
   const count = (await listMemberKeys(kv, id)).length
-  return new ServerRoom(id, config, { count }, options?.onSend ?? null)
+  return new ServerRoom(id, config, { count })
+}
+
+function guardRoom(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard }): void {
+  assertUsage(ServerRoom.isServerRoom(room), 'Room.guard() expects a room obtained from Room.get()/Room.create()')
+  assertUsage(isObject(guards), 'Room.guard() guards should be an object')
+  assertUsage(
+    guards.onSend === undefined || typeof guards.onSend === 'function',
+    'Room.guard() onSend should be a function',
+  )
+  assertUsage(
+    guards.onPublish === undefined || typeof guards.onPublish === 'function',
+    'Room.guard() onPublish should be a function',
+  )
+  room._setGuards({ onSend: guards.onSend ?? null, onPublish: guards.onPublish ?? null })
 }
 
 async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant> {
@@ -230,7 +247,7 @@ class ServerRoom implements Room {
   readonly [SERVER_ROOM_BRAND] = true
 
   /** @internal */ readonly _isolated: boolean
-  private readonly _guard: SendGuard | null
+  private _guards: { onSend: SendGuard | null; onPublish: PublishGuard | null } | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
@@ -244,13 +261,7 @@ class ServerRoom implements Room {
   private _heartbeatBusy = false
   private _pendingRefresh: Promise<void> | null = null
 
-  constructor(
-    roomId: string,
-    config: RoomConfigRecord,
-    seed: { members: MemberSnapshot[] } | { count: number },
-    onSend: SendGuard | null = null,
-  ) {
-    this._guard = onSend
+  constructor(roomId: string, config: RoomConfigRecord, seed: { members: MemberSnapshot[] } | { count: number }) {
     this._isolated = config.isolated
     this._state = new RoomState({
       roomId,
@@ -264,6 +275,15 @@ class ServerRoom implements Room {
 
   static isServerRoom(value: unknown): value is ServerRoom {
     return value !== null && typeof value === 'object' && SERVER_ROOM_BRAND in value
+  }
+
+  /** @internal — see `Room.guard()`. One declaration per instance keeps the grant declarative. */
+  _setGuards(guards: { onSend: SendGuard | null; onPublish: PublishGuard | null }): void {
+    assertUsage(
+      this._guards === null,
+      'Room.guard() was already called for this room instance — declare all guards in one call',
+    )
+    this._guards = guards
   }
 
   // ── Room API ──
@@ -400,6 +420,15 @@ class ServerRoom implements Room {
    *  lane's key. `framed` is pre-framed `[16-byte member ID][payload]`. */
   async _publishData(from: string, payload: { data: unknown } | { framed: Uint8Array }): Promise<ChannelPublishAck> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
+    const onPublish = this._guards?.onPublish
+    if (onPublish) {
+      // The guard sees exactly what a subscriber would: the payload, without the wire frame.
+      // (Every framed payload was validated at its entry point — the unframe cannot fail.)
+      await onPublish(
+        { id: from, meta: this._memberMeta(from) },
+        'data' in payload ? payload.data : unframeMemberId(payload.framed)!.payload,
+      )
+    }
     const adapter = getBroadcastAdapter()
     const result =
       'data' in payload
@@ -432,7 +461,8 @@ class ServerRoom implements Room {
     const target = await this._resolveMember(to)
     if (!target) throw new Error(`Participant not found: ${to}`)
     const fromMeta = this._memberMeta(from)
-    if (this._guard) await this._guard({ id: from, meta: fromMeta }, target, data)
+    const onSend = this._guards?.onSend
+    if (onSend) await onSend({ id: from, meta: fromMeta }, target, data)
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, fromMeta, data }
     await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
   }

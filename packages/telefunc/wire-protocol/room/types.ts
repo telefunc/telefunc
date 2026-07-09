@@ -9,6 +9,7 @@ export type {
   RemoteParticipant,
   Sender,
   SendGuard,
+  PublishGuard,
   RoomListener,
   RoomBinaryListener,
   ParticipantListener,
@@ -29,10 +30,15 @@ type ParticipantMeta = Record<string, unknown>
  *  snapshot to the live handle once the roster catches up. */
 type Sender = { readonly id: string; readonly meta: ParticipantMeta }
 
-/** Guards private messages (`Room.get(id, { onSend })`): called before every `send()` from a
+/** Guards private messages (`Room.guard(room, { onSend })`): runs before every `send()` from a
  *  membership granted through that room instance — including client-side `join()`s on it.
  *  Throw to reject (the sender's promise rejects with the error). */
 type SendGuard = (from: Sender, to: Sender, data: unknown) => void | Promise<void>
+
+/** Guards room-wide messages (`Room.guard(room, { onPublish })`): runs before every `publish()`
+ *  and `publishBinary()` from a membership granted through that room instance — `data` is the
+ *  payload a subscriber would receive. Throw to reject (the sender's promise rejects). */
+type PublishGuard = (from: Sender, data: unknown) => void | Promise<void>
 
 type RoomOptions = {
   /** Room metadata, visible to all observers. Default: `{}`. */

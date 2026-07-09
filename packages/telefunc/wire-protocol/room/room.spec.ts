@@ -479,9 +479,10 @@ describe('direct messages', () => {
     await expect(alice.send(bob.id, 'x')).rejects.toThrow('Participant has left')
   })
 
-  it('Room.get({ onSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
+  it('Room.guard({ onSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
     await Room.create('guarded')
-    const lobby = await Room.get('guarded', {
+    const lobby = await Room.get('guarded')
+    Room.guard(lobby, {
       onSend: (from, to, data) => {
         if (data === 'blocked') throw new Error('not friends')
         expect(from.meta).toEqual({ name: 'Alice' }) // resolved sender, meta included
@@ -499,13 +500,14 @@ describe('direct messages', () => {
     expect(inbox).toEqual([['hi', alice.id, { name: 'Alice' }]])
   })
 
-  it('Room.get({ onSend }) guards client-side joins made through that instance', async () => {
+  it('Room.guard({ onSend }) guards client-side joins made through that instance', async () => {
     await Room.create('gated')
-    const served = (await Room.get('gated', {
+    const served = (await Room.get('gated')) as ServerRoom
+    Room.guard(served, {
       onSend: (from, _to, data) => {
-        if (data === 'blocked') throw new Error(`no whispers from ${from.meta.name}`)
+        if (data === 'blocked') throw new Error(`no messages from ${from.meta.name}`)
       },
-    })) as ServerRoom
+    })
     const stub = new RoomStubChannel(served)
     stub._registerChannel()
     served._attachStub(stub)
@@ -519,6 +521,47 @@ describe('direct messages', () => {
     await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-dm', id: memberId, to: target.id, data: 'hi' }), 3)
 
     expect(inbox).toEqual(['hi']) // the guarded send never delivered
+  })
+
+  it('Room.guard({ onPublish }) gates room-wide messages — text and binary, server and client joins', async () => {
+    await Room.create('moderated')
+    const served = (await Room.get('moderated')) as ServerRoom
+    Room.guard(served, {
+      onPublish: (from, data) => {
+        if (data === 'slur' || (data instanceof Uint8Array && data[0] === 0xff)) {
+          throw new Error(`blocked: ${from.meta.name}`)
+        }
+      },
+    })
+    const observer = await Room.get('moderated')
+    const seen: unknown[] = []
+    observer.subscribe((data) => seen.push(data))
+    const me = await served.join({ name: 'Mallory' })
+
+    await expect(me.publish('slur')).rejects.toThrow('blocked: Mallory')
+    await expect(me.publishBinary(new Uint8Array([0xff, 1]))).rejects.toThrow('blocked: Mallory')
+    await me.publish('fine')
+    expect(seen).toEqual(['fine'])
+
+    // Client-side joins through the same instance hit the same guard, and the rejection
+    // travels back through the publish ack.
+    const stub = new RoomStubChannel(served)
+    stub._registerChannel()
+    served._attachStub(stub)
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: { name: 'C' } }), 1)
+    const memberId = [...stub._stubMembers.keys()][0]!
+    await stub._onPeerPublishAckReqMessage(stringify({ __r: 'data', from: memberId, data: 'slur' }), 2)
+    expect(seen).toEqual(['fine']) // never published
+  })
+
+  it('Room.guard() is one-shot and validates its arguments', async () => {
+    await Room.create('strict')
+    const room = await Room.get('strict')
+    Room.guard(room, { onSend: () => {} })
+    expect(() => Room.guard(room, { onSend: () => {} })).toThrow('already called')
+    // @ts-expect-error — runtime validation
+    expect(() => Room.guard(room, { onPublish: 'nope' })).toThrow('should be a function')
+    expect(() => Room.guard({} as never, {})).toThrow('expects a room')
   })
 
   it("delivers to a member the sender's stale local view doesn't know yet (KV fallback)", async () => {
