@@ -473,7 +473,7 @@ concept defined elsewhere; fixing that concept lifts them without touching their
 
 **R‑PM‑6** (7 → **8**; C 8 · A 8 · N 8) — first appearance of "grant"
 - Before: "To authorize whispers, attach a guard when granting the room: `Room.get(id, { onSend })` — see the recipe."
-- After: "To authorize whispers, add an `onSend` guard to the `Room.get()` that hands the room to a client: `Room.get(id, { onSend })` — see the recipe."
+- After: "To authorize member-to-member private messages, add an `onSend` guard to the `Room.get()` that hands the room to a client: `Room.get(id, { onSend })` — see the recipe." *(wording finalized in the post-#440 follow-up — "whisper" removed; see the end.)*
 - Why: "granting the room" (undefined here) → "the `Room.get()` that hands the room to a client"; keeps the inline example and the recipe link.
 
 ### room · Recipes — Video chat
@@ -572,3 +572,33 @@ their wording would be churn.
 criterion-2 weakness is resolved at its roots — "observed", "hold", ".client variant",
 "granted through the room", and the stacked infra nouns are each defined in plain words
 where first needed, so the sentences that used to lean on them now stand on their own.
+
+---
+
+## Follow-up — author feedback (post-#440)
+
+Two refinements requested after Round 2 merged:
+
+1. **"whisper" removed entirely.** The author found the term confusing — and it was: it
+   doubled as flavor for *both* participant private messages (`send()`) and room-authored
+   ones (`Room.send()`), and "To authorize whispers" over-scoped the `onSend` guard, which
+   fires only on participant `send()` (verified: `_sendDm` calls the guard, while
+   `Room.send()`'s `sendToParticipant` bypasses it). Replaced throughout with the canonical
+   **"private message"**, keeping **"DM"** for the punchy example lists/logs (matching the
+   already-present "friends-only DMs"):
+
+   | Where | Before → After |
+   |---|---|
+   | `LocalParticipant` bullet | "you publish, **whisper**, and update…" → "you publish, **send private messages**, and update…" |
+   | message-lanes table | "**Whispers**, invites, game moves" → "**DMs**, invites, game moves" |
+   | Private-messages intro | "a **whisper**, an invite, a game move" → "a **DM**, an invite, a game move" |
+   | code log | `` `whisper from …` `` → `` `DM from …` `` |
+   | `from`/`null` note | "room-authored **whispers**" → "room-authored **private messages**" |
+   | guard bullet (R‑PM‑6) | "To authorize **whispers**" → "To authorize **member-to-member private messages**" (also tightens the scope) |
+   | room-authored line (R‑RA‑2) | "`Room.send()` **whispers to** one participant" → "`Room.send()` **sends privately to** one participant" |
+   | client example | `showWhisper` → `showDm` (matches the recipe's existing `showDm`); comments de-whispered |
+   | recipe intro (R‑PGP‑1) | "To authorize **whispers** (e.g. friends-only DMs)" → "To authorize **the private messages members send each other** (e.g. friends-only DMs)" |
+
+2. **`LocalParticipant` gloss:** "*you*, returned by `join()`" → "**the current user**, returned
+   by `join()`" — less second-person, more precise. (`RemoteParticipant` still reads
+   "*everyone else*", which still contrasts cleanly against "the current user".)
