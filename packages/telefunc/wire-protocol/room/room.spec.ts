@@ -639,6 +639,49 @@ describe('direct messages', () => {
     expect(seen).toEqual(['fine']) // never published
   })
 
+  it('Room.guard({ onJoin }) gates admission — server and client joins, a rejected join writes nothing', async () => {
+    await Room.create('door')
+    const served = (await Room.get('door')) as ServerRoom
+    const seen: { id: string; meta: Record<string, unknown> }[] = []
+    Room.guard(served, {
+      onJoin: (member) => {
+        seen.push(member)
+        if (member.meta.name === 'Banned') throw new Error(`no entry for ${member.meta.name}`)
+      },
+    })
+
+    await expect(served.join({ name: 'Banned' })).rejects.toThrow('no entry for Banned')
+    // The guard runs before any state is written — a rejected join leaves no trace.
+    expect(served.count).toBe(0)
+    expect(await (await Room.get('door')).getParticipants()).toEqual([])
+
+    const alice = await served.join({ name: 'Alice' })
+    expect(seen.map((m) => m.meta)).toEqual([{ name: 'Banned' }, { name: 'Alice' }])
+    expect(seen[1]!.id).toBe(alice.id) // the guard saw the definitive member ID
+
+    // Client-side joins through the same instance hit the same guard; the rejection rides the ack.
+    const stub = new RoomStubChannel(served)
+    stub._registerChannel()
+    served._attachStub(stub)
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: { name: 'Banned' } }), 1)
+    expect(stub._stubMembers.size).toBe(0) // rejected — nothing admitted
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: { name: 'Casey' } }), 2)
+    expect(stub._stubMembers.size).toBe(1)
+  })
+
+  it('guards ride the granted instance — the Room.join() static is server-authored and unguarded', async () => {
+    await Room.create('velvet')
+    const granted = await Room.get('velvet')
+    Room.guard(granted, {
+      onJoin: () => {
+        throw new Error('nobody enters')
+      },
+    })
+    await expect(granted.join()).rejects.toThrow('nobody enters')
+    const me = await Room.join('velvet', { name: 'Direct' }) // no grant involved — like Room.announce() vs onPublish
+    expect(me.meta).toEqual({ name: 'Direct' })
+  })
+
   it('Room.guard() is one-shot and validates its arguments', async () => {
     await Room.create('strict')
     const room = await Room.get('strict')
@@ -646,6 +689,8 @@ describe('direct messages', () => {
     expect(() => Room.guard(room, { onSend: () => {} })).toThrow('already called')
     // @ts-expect-error — runtime validation
     expect(() => Room.guard(room, { onPublish: 'nope' })).toThrow('should be a function')
+    // @ts-expect-error — runtime validation
+    expect(() => Room.guard(room, { onJoin: 'nope' })).toThrow('should be a function')
     expect(() => Room.guard({} as never, {})).toThrow('expects a room')
   })
 

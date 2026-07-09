@@ -10,6 +10,7 @@ export type {
   Sender,
   SendGuard,
   PublishGuard,
+  JoinGuard,
   RoomListener,
   RoomBinaryListener,
   ParticipantListener,
@@ -39,6 +40,12 @@ type SendGuard = (from: Sender, to: Sender, data: unknown) => void | Promise<voi
  *  and `publishBinary()` from a membership granted through that room instance — `data` is the
  *  payload a subscriber would receive. Throw to reject (the sender's promise rejects). */
 type PublishGuard = (from: Sender, data: unknown) => void | Promise<void>
+
+/** Guards admission (`Room.guard(room, { onJoin })`): runs before every `join()` through that
+ *  room instance — server-side and client-side alike. `member` is the joiner: the ID it will
+ *  receive and the metadata it requested. Throw to reject (the joiner's `join()` rejects with
+ *  the error, before any membership state is written). */
+type JoinGuard = (member: Sender) => void | Promise<void>
 
 type RoomOptions = {
   /** Room metadata, visible to all observers. Default: `{}`. */

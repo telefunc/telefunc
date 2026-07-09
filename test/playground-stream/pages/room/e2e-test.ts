@@ -25,6 +25,7 @@ type BinaryResult = {
 }
 
 type GuardResult = {
+  joinError: string | null
   publishError: string | null
   sendError: string | null
   received: string[]
@@ -103,6 +104,7 @@ function testRoom() {
       const result = await getResult<GuardResult>('#room-result')
 
       // The rejection carries the guard's error back through the wire ack.
+      expect(result.joinError).toBe('blocked join of Banned')
       expect(result.publishError).toBe('blocked publish from Mallory')
       expect(result.sendError).toBe('blocked send from Mallory')
       // Guarded-out messages never delivered; allowed ones flow.

@@ -169,6 +169,11 @@ function Room() {
 
           const received: unknown[] = []
           room.subscribe((data) => received.push(data))
+          // Admission is guarded too — the rejection reaches the joiner's promise over the wire.
+          const joinError = await room.join({ name: 'Banned' }).then(
+            () => null,
+            (err: Error) => err.message,
+          )
           const me = await room.join({ name: 'Mallory' })
           const peer = await room.join({ name: 'Peer' })
           const inbox: unknown[] = []
@@ -187,7 +192,7 @@ function Room() {
           await me.send(peer.id, 'psst')
 
           await pollUntil(() => {
-            setResult(JSON.stringify({ publishError, sendError, received, inbox }))
+            setResult(JSON.stringify({ joinError, publishError, sendError, received, inbox }))
             return { done: received.length >= 1 && inbox.length >= 1 }
           })
         }}

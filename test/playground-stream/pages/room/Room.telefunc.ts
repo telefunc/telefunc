@@ -16,6 +16,9 @@ async function onGetRoom(roomId: string) {
 async function onGetGuardedRoom(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
+    onJoin: (member) => {
+      if (member.meta.name === 'Banned') throw new Error(`blocked join of ${member.meta.name}`)
+    },
     onPublish: (from, data) => {
       if (data === 'forbidden') throw new Error(`blocked publish from ${from.meta.name}`)
     },

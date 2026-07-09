@@ -55,6 +55,7 @@ import type {
   RoomInfo,
   RoomMeta,
   RoomOptions,
+  JoinGuard,
   PublishGuard,
   SendGuard,
   Sender,
@@ -84,12 +85,12 @@ type RoomStatic = {
   create(id: string, options?: RoomOptions): Promise<Room>
   /** Get an existing room. Throws if it doesn't exist. */
   get(id: string): Promise<Room>
-  /** Guard the messages of every membership granted through `room` — server-side and
-   *  client-side `join()`s alike. `onSend` runs before each private `send()`, `onPublish`
-   *  before each `publish()`/`publishBinary()`; throwing rejects the sender's call with the
-   *  error. Declared in the granting telefunction (close over `getContext()`); one
-   *  `Room.guard()` per instance — declare all guards together. */
-  guard(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard }): void
+  /** Guard every membership granted through `room` — server-side and client-side `join()`s
+   *  alike. `onJoin` runs before each `join()` (admission), `onSend` before each private
+   *  `send()`, `onPublish` before each `publish()`/`publishBinary()`; throwing rejects the
+   *  caller's promise with the error. Declared in the granting telefunction (close over
+   *  `getContext()`); one `Room.guard()` per instance — declare all guards together. */
+  guard(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard; onJoin?: JoinGuard }): void
   /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
   join(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant>
   /** List all rooms. */
@@ -156,7 +157,7 @@ async function getRoom(id: string): Promise<Room> {
   return new ServerRoom(id, config, { count })
 }
 
-function guardRoom(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard }): void {
+function guardRoom(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard; onJoin?: JoinGuard }): void {
   assertUsage(ServerRoom.isServerRoom(room), 'Room.guard() expects a room obtained from Room.get()/Room.create()')
   assertUsage(isObject(guards), 'Room.guard() guards should be an object')
   assertUsage(
@@ -167,7 +168,11 @@ function guardRoom(room: Room, guards: { onSend?: SendGuard; onPublish?: Publish
     guards.onPublish === undefined || typeof guards.onPublish === 'function',
     'Room.guard() onPublish should be a function',
   )
-  room._setGuards({ onSend: guards.onSend ?? null, onPublish: guards.onPublish ?? null })
+  assertUsage(
+    guards.onJoin === undefined || typeof guards.onJoin === 'function',
+    'Room.guard() onJoin should be a function',
+  )
+  room._setGuards({ onSend: guards.onSend ?? null, onPublish: guards.onPublish ?? null, onJoin: guards.onJoin ?? null })
 }
 
 async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant> {
@@ -271,7 +276,7 @@ class ServerRoom implements Room {
   readonly [SERVER_ROOM_BRAND] = true
 
   /** @internal */ readonly _isolated: boolean
-  private _guards: { onSend: SendGuard | null; onPublish: PublishGuard | null } | null = null
+  private _guards: { onSend: SendGuard | null; onPublish: PublishGuard | null; onJoin: JoinGuard | null } | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
@@ -303,7 +308,7 @@ class ServerRoom implements Room {
   }
 
   /** @internal — see `Room.guard()`. One declaration per instance keeps the grant declarative. */
-  _setGuards(guards: { onSend: SendGuard | null; onPublish: PublishGuard | null }): void {
+  _setGuards(guards: { onSend: SendGuard | null; onPublish: PublishGuard | null; onJoin: JoinGuard | null }): void {
     assertUsage(
       this._guards === null,
       'Room.guard() was already called for this room instance — declare all guards in one call',
@@ -392,7 +397,11 @@ class ServerRoom implements Room {
     meta: ParticipantMeta,
     track: (id: string, joinedAt: number) => void,
   ): Promise<{ id: string; joinedAt: number }> {
-    const { id, joinedAt } = await this._createMember(meta)
+    const id = crypto.randomUUID()
+    // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
+    const onJoin = this._guards?.onJoin
+    if (onJoin) await onJoin({ id, meta })
+    const joinedAt = await this._createMember(id, meta)
     track(id, joinedAt)
     this._syncSubs()
     this._state.applyJoin(id, meta, joinedAt)
@@ -401,10 +410,9 @@ class ServerRoom implements Room {
   }
 
   /** KV half of a join, guarding against a concurrent `Room.close()`. */
-  private async _createMember(meta: ParticipantMeta): Promise<{ id: string; joinedAt: number }> {
+  private async _createMember(id: string, meta: ParticipantMeta): Promise<number> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
-    const id = crypto.randomUUID()
     const joinedAt = Date.now()
     const record: RoomMemberRecord = { meta, joinedAt, seenAt: joinedAt, metaSeq: 0 }
     await kv.set(roomMemberKvKey(this.id, id), stringify(record), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
@@ -413,7 +421,7 @@ class ServerRoom implements Room {
       await kv.delete(roomMemberKvKey(this.id, id))
       throw new Error(`Room is closed: ${this.id}`)
     }
-    return { id, joinedAt }
+    return joinedAt
   }
 
   /** @internal */

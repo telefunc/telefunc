@@ -150,6 +150,10 @@ export async function onJoinChat(roomId: string) {
   const { user } = getContext()
   const room = await Room.get(roomId)
   Room.guard(room, {
+    // Gate admission:
+    onJoin: (member) => {
+      if (db.isBanned(user.id)) throw new Error('banned')
+    },
     // Gate room-wide messages (publish & publishBinary):
     onPublish: (from, data) => {
       if (isSpam(data)) throw new Error('blocked')
@@ -163,7 +167,7 @@ export async function onJoinChat(roomId: string) {
 }
 ```
 
-When a guard throws, the sender's `publish()`/`send()` rejects with that error — on the client too, through the wire. Guards run on the server by construction (the statics don't exist in the browser build): authorization code never runs on the machines it polices.
+When a guard throws, the caller's `join()`/`publish()`/`send()` rejects with that error — on the client too, through the wire. A rejected join writes nothing: the member never existed. Guards run on the server by construction (the statics don't exist in the browser build): authorization code never runs on the machines it polices.
 
 The other moderation tools: observe without joining (`room.subscribe()` on the server), kick (`Room.removeParticipant()`), close (`Room.close()`) — see <Link href="#authorization">authorization</Link> for wiring those to admin users.
 
@@ -302,7 +306,7 @@ The server-side entry point — like <Link href="/channel#broadcast">`Broadcast.
 |---|---|---|
 | `Room.create(id, options?)` | `Room` | If the room already exists |
 | `Room.get(id)` | `Room` | If the room doesn't exist |
-| `Room.guard(room, { onSend?, onPublish? })` | `void` | If called twice for one instance |
+| `Room.guard(room, { onSend?, onPublish?, onJoin? })` | `void` | If called twice for one instance |
 | `Room.join(id, meta?, options?)` | `LocalParticipant` | If the room doesn't exist |
 | `Room.list()` | `RoomInfo[]` | - |
 | `Room.update(id, options)` | `void` | If the room doesn't exist |
