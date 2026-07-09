@@ -363,3 +363,212 @@ Nav config only — a `level: 2` entry titled `` `Room` `` at `/room` with `sect
 | ≤5 | 0 | Nothing is outright confusing or ungrammatical |
 
 **Overall page grade: strong (≈7.9 average).** The writing is natural and mostly crystal-clear; the one systemic weakness is criterion 2 — a cluster of sentences that assume the channel/stream pages or a dense earlier concept. Tightening the four flagged concepts ("observed", ".client variant", "granted through the room", and the stacked infra nouns) would lift most of the 6–7 sentences into the 8–9 band without touching the page's structure.
+
+---
+
+## Round 2 — edits & re-ratings
+
+Every sentence rated **Overall ≤ 7** was edited in the source docs, and each edit was
+re-rated with the same C / A / N / Overall rubric. Where a first edit still landed low
+(≤ 7), extra wordings were drafted, rated, and the best kept; those alternatives are
+listed under the sentence. All edits verified against the implementation
+(`packages/telefunc/wire-protocol/room/`) so the rewrites stay technically exact — the
+"observed" triggers (`server.ts` `_syncSubs`), the presence reaper (`seenAt` refresh /
+`ROOM_MEMBER_TTL_MS`), and isolated-mode per-member keys all match the reworded prose.
+
+Two guiding decisions shaped the whole pass:
+
+- **Define "hold" once, then reuse it.** `hold`/`holder` is load-bearing in four places.
+  Rather than purge it, R‑MODEL‑2 now defines it ("anyone holding the room object — the
+  server, or a client it was handed to"); every later `holder` then references a defined term.
+- **Define "observed" plainly and early.** R‑INST‑2 now leads with "a room is **observed**
+  when something is watching it". Its plain gloss ("watching") is reused downstream
+  (R‑PM‑4), so the concept compounds instead of being re-explained.
+
+### Result summary
+
+| ID | Before → After (Overall) | New C · A · N | File / section |
+|---|---|---|---|
+| R‑MODEL‑2 | 7 → **8** | 8 · 8 · 8 | room · The model |
+| R‑MODEL‑5 | 6 → **9** | 9 · 9 · 9 | room · The model |
+| R‑INST‑2 | 6 → **8** | 9 · 8 · 9 | room · `Room` instance |
+| R‑INST‑3 | 7 → **8** (inherited, unchanged) | 8 · 8 · 8 | room · `Room` instance |
+| R‑LP‑2 | 7 → **8** | 9 · 8 · 8 | room · `LocalParticipant` |
+| R‑LP‑6 | 7 → **8** | 8 · 8 · 8 | room · `LocalParticipant` |
+| R‑MSG‑4 | 7 → **8** | 8 · 8 · 8 | room · Room-wide |
+| R‑MSG‑5 | 6 → **8** | 9 · 8 · 8 | room · Room-wide |
+| R‑PM‑4 | 7 → **8** | 8 · 8 · 8 | room · Private messages |
+| R‑PM‑6 | 7 → **8** | 8 · 8 · 8 | room · Private messages |
+| R‑VID‑1 | 6 → **9** | 9 · 9 · 9 | room · Video chat |
+| R‑PGP‑2 | 7 → **8** | 8 · 8 · 8 | room · Policy-gated |
+| R‑PGP‑3 | 6 → **8** | 9 · 8 · 9 | room · Policy-gated |
+| R‑PGP‑4 | 6 → **8** | 9 · 8 · 8 | room · Policy-gated |
+| R‑SCALE‑1 | 6 → **8** | 8 · 8 · 8 | room · Scaling |
+| R‑SIZE‑0 | 7 → **9** | 9 · 9 · 9 | room · Sizing rooms |
+| R‑SIZE‑Text | 7 → **8** | 8 · 8 · 8 | room · Sizing rooms |
+| R‑SIZE‑Binary | 7 → **8** | 8 · 8 · 8 | room · Sizing rooms |
+| R‑SIZE‑Presence | 7 → **8** | 8 · 8 · 8 | room · Sizing rooms |
+| R‑SIZE‑Keys | 6 → **8** | 8 · 8 · 8 | room · Sizing rooms |
+| R‑HIW‑Lazy | 7 → **8** (inherited, unchanged) | 8 · 8 · 8 | room · How it works |
+| R‑STREAM‑2 | 7 → **8** | 8 · 9 · 8 | stream · Primitive: `Room` |
+
+Every low sentence reached the 8–9 band; none needed the "best-of-10 still low → list all"
+fallback. The two `(inherited, unchanged)` rows are sentences whose only weakness was a
+concept defined elsewhere; fixing that concept lifts them without touching their wording
+(details at the end).
+
+---
+
+### room · The model
+
+**R‑MODEL‑2** (6 → **8**; C 8 · A 8 · N 8)
+- Before: "…Created and managed on the server (`Room.*` statics); whoever holds it (server or client) can observe live membership, events, and message streams."
+- After: "…Created and managed on the server (the `Room.*` statics), but anyone holding the room object — the server, or a client it was handed to — can observe its live membership, events, and message streams."
+- Why: introduces "hold" *with* its meaning ("holding the room object") and says who can hold one, so the four later uses of `holder`/`holding` now land on a defined term. The `Room.*` statics forward-reference (minor, linked) is left as-is.
+
+**R‑MODEL‑5** (6 → **9**; C 9 · A 9 · N 9)
+- Before: "The three objects are one type each, same on server and client — a `Room` or `LocalParticipant` can be returned from a telefunction as-is, no `.client` variant."
+- After: "Each object is a single type, identical on server and client — a `Room` or `LocalParticipant` can be returned from a telefunction and used on the client as-is."
+- Why: fixes the awkward "one type each" and **drops** the `.client` reference (the review's own "or drop the reference here"). A room-first reader no longer meets a channel-page trick they can't decode; the positive fact stands on its own.
+- Alternatives weighed: (a) keep + self-gloss "no `.client` variant to convert to" → A 8; (b) parenthetical contrast "channels, by contrast, need a `.client` variant to reverse their direction" → A 7, still imports a channel concept; (c) drop entirely → A 9. Picked (c) — accessibility is the page's flagged weakness and the `.client` contrast carries no weight for a reader who never learned it.
+
+### room · `Room` instance
+
+**R‑INST‑2** (6 → **8**; C 9 · A 8 · N 9) — the load-bearing "observed" definition
+- Before: "Getters reflect the live local view: while the room is **observed** — a listener is attached, a participant joined through it, or it was serialized to a client — they're kept fresh by the room's event stream; otherwise they're a snapshot from the last sync."
+- After: "A room is **observed** when something is watching it: a listener is attached, a member joined through it, or it was sent to a client. While observed, the getters stay live — kept fresh by the room's event stream; otherwise they show a snapshot from the last sync."
+- Why: split into two sentences and led with the plain idea ("something is watching it") before the mechanism. "serialized" → "sent"; the three triggers verified against `server.ts` `_syncSubs` (stubs / local participants / listener counts). This is the concept the rest of the page leans on, so it now reads as the clearest note, not the densest.
+- Residual A 8: "a member joined through it" still uses the join-through idiom (core room vocab, kept for precision).
+
+### room · `LocalParticipant`
+
+**R‑LP‑2** (7 → **8**; C 9 · A 8 · N 8)
+- Before: "…Room-wide messages are received on the room and on `RemoteParticipant`; only private messages addressed to you arrive here (`listen()`)."
+- After: "…Room-wide messages arrive on the room and on each `RemoteParticipant` — not on your `LocalParticipant`, which receives only the private messages addressed to you (`listen()`)."
+- Why: resolves the "here" deixis puzzle by naming the surface ("your `LocalParticipant`") and states the three receiving surfaces as a clean contrast.
+
+**R‑LP‑6** (7 → **8**; C 8 · A 8 · N 8)
+- Before: "A participant's membership follows its holder: when the client holding a `LocalParticipant` (or the room it joined through) disconnects, the participant leaves the room."
+- After: "A participant stays in the room only as long as its holder stays connected: when the client holding the `LocalParticipant` (or the room it joined through) disconnects, the participant leaves the room."
+- Why: replaces the abstract headline "membership follows its holder" with the concrete rule; "holder" is now defined (R‑MODEL‑2).
+
+### room · Messaging — Room-wide
+
+**R‑MSG‑4** (7 → **8**; C 8 · A 8 · N 8)
+- Before: "Per-member binary subscriptions also control **wire delivery**: a client receives a member's binary stream only while it subscribes to that member (or to the whole room)."
+- After: "Per-member binary subscriptions also control **wire delivery** — what actually travels over the network: a client receives a member's binary stream only while it's subscribed to that member (or to the whole room)."
+- Why: glosses "wire delivery" the first time it appears, so "on the wire" is anchored for R‑MSG‑5.
+
+**R‑MSG‑5** (6 → **8**; C 9 · A 8 · N 8) — the 45-word / 3-parenthetical sentence
+- Before: "Text is never filtered on the wire: the text stream also carries the control events (join/leave/metadata) that keep every holder's live view current (`count`, `getParticipants()`, event callbacks) — and text payloads are small compared to binary, so filtering them would save little bandwidth."
+- After: "Text, by contrast, is never filtered on the wire. The text stream also carries control events — joins, leaves, and metadata changes — that keep every holder's view of the room current, so they can't be dropped for anyone. And text is tiny next to binary, so filtering it would save almost no bandwidth."
+- Why: three short sentences instead of one; "by contrast" ties it to the binary rule above; "control events" glossed inline; the `count/getParticipants` parenthetical dropped (recoverable). The reasoning the review liked is kept intact.
+
+### room · Messaging — Private messages
+
+**R‑PM‑4** (7 → **8**; C 8 · A 8 · N 8)
+- Before: "`from` is the **verified** sender: the live `RemoteParticipant` when your side observes the room, or an `{ id, meta }` snapshot otherwise."
+- After: "`from` is the **verified** sender — the live `RemoteParticipant` if your side is watching the room, or an `{ id, meta }` snapshot if not."
+- Why: "watching the room" reuses R‑INST‑2's plain gloss for *observed*, and is self-explanatory even for a reader who skipped that note.
+
+**R‑PM‑6** (7 → **8**; C 8 · A 8 · N 8) — first appearance of "grant"
+- Before: "To authorize whispers, attach a guard when granting the room: `Room.get(id, { onSend })` — see the recipe."
+- After: "To authorize whispers, add an `onSend` guard to the `Room.get()` that hands the room to a client: `Room.get(id, { onSend })` — see the recipe."
+- Why: "granting the room" (undefined here) → "the `Room.get()` that hands the room to a client"; keeps the inline example and the recipe link.
+
+### room · Recipes — Video chat
+
+**R‑VID‑1** (6 → **9**; C 9 · A 9 · N 9) — three infra nouns in a recipe
+- Before: "**Isolated mode** (`isolated: true`) gives each participant their own upstream pub/sub key, removing publish contention between members — useful on platforms that map each key to a separate coordinator (e.g. Cloudflare Durable Objects)."
+- After: "**Isolated mode** (`isolated: true`) gives each participant their own message stream — a better fit for high-throughput media like video."
+- Why: a recipe reader wants to build video chat, not read the performance model. The mechanism (contention, per-member keys) already lives in *Sizing rooms* → **Keys** and *How it works* → **One pub/sub key per room**; the Cloudflare backend is still documented in *Scaling* → R‑SCALE‑4.
+- Alternatives weighed: (a) keep a plain-glossed platform nod "…and for serverless platforms that put each stream on its own instance (e.g. Cloudflare Durable Objects)" → A 8, but "instance/coordinator/worker" for a Durable Object is imprecise; (b) "each participant gets their own stream — better for high-throughput media" → A 9. Picked (b), matching the review's suggested altitude.
+
+### room · Recipes — Policy-gated private messages
+
+**R‑PGP‑2** (7 → **8**; C 8 · A 8 · N 8)
+- Before: "It's declared in the telefunction, so it can close over the request context — e.g. the authenticated user from `getContext()`."
+- After: "It's declared inside the telefunction, so it has access to the request context — e.g. the authenticated user from `getContext()`."
+- Why: "close over" (closures jargon) → "has access to".
+
+**R‑PGP‑3** (6 → **8**; C 9 · A 8 · N 9) — the most abstract phrasing on the page
+- Before: "It runs before every private-message delivery from any membership granted through the returned room; throwing rejects the sender's `send()` with the error:"
+- After: "It runs before Telefunc delivers any private message sent by someone who joined through this room object. If the guard throws, that `send()` rejects with the error:"
+- Why: unpacks the "membership granted through the returned room" noun-stack into a plain relative clause ("sent by someone who joined through this room object") and splits off the throwing behavior. "rejects with the error" matches the code comment's wording ("rejects with 'not friends'").
+
+**R‑PGP‑4** (6 → **8**; C 9 · A 8 · N 8) — third use of "membership granted through it"
+- Before: "…`Room.get(id, { onSend })` covers every membership granted through it — server-side `join()`s and client-side `join()`s on it alike."
+- After: "…`Room.get(id, { onSend })` covers every join made through it — whether that join happens on the server or on a client."
+- Why: "every membership granted through it" → "every join made through it"; kills the awkward pluralized "`join()`s".
+
+### room · Scaling & multiple servers
+
+**R‑SCALE‑1** (6 → **8**; C 8 · A 8 · N 8) — the section's topic sentence, three unglossed infra nouns
+- Before: "Room state lives in the broadcast adapter's KV store, and room events travel over its pub/sub — so rooms scale exactly like `Broadcast` does:"
+- After: "A room keeps its state in a key-value store and sends its events over pub/sub, just like `Broadcast` — so rooms scale the same way, from one server to many:"
+- Why: states the mechanism in plain terms *first* (so "how does Broadcast scale?" no longer needs prior reading); "broadcast adapter's KV store" → "a key-value store", drops "adapter" from the topic sentence; "from one server to many" previews the Single/Multiple/Custom bullets.
+- Alternatives weighed: (a) lead with the payoff "Rooms scale exactly like `Broadcast`, because they run on the same infrastructure: …" → A 7 (still requires the Broadcast model to feel the payoff); (b) "…the same store and pub/sub bus your broadcasts already use" (the review's gloss) → A 7, leans on the reader having broadcasts; (c) mechanism-first "A room keeps its state in a key-value store and sends its events over pub/sub, just like `Broadcast`…" → A 8. Picked (c) — the reader learns the mechanism directly and "just like Broadcast" becomes a bonus, not a dependency.
+
+### room · Sizing rooms
+
+**R‑SIZE‑0** (7 → **9**; C 9 · A 9 · N 9)
+- Before: "What each mechanism costs, so you can size rooms deliberately:"
+- After: "Here's what each mechanism costs, so you can size rooms deliberately:"
+- Why: adds the verb; the section lead-in is no longer a hanging fragment.
+
+**R‑SIZE‑Text** (7 → **8**; C 8 · A 8 · N 8)
+- Before: "…every connection holding the room receives its control events and text data. …"
+- After: "…every connection holding the room receives its text data and control events (joins, leaves, metadata). …"
+- Why: a 3-word inline gloss makes the bullet self-contained; "hold" is defined (R‑MODEL‑2). The worked number (~6 KB/s) and the FIFO plain-restatement — the parts the review praised — are untouched.
+
+**R‑SIZE‑Binary** (7 → **8**; C 8 · A 8 · N 8)
+- Before: "**Binary delivery** — member-selective on the wire and, in isolated mode, upstream too: cost scales with what each client actually watches, not with room size."
+- After: "**Binary delivery** — cost scales with what each client actually watches, not with room size. Binary is delivered to clients per member, and in isolated mode a server also pulls only the members its own clients watch."
+- Why: leads with the crisp payoff, then states the mechanism in plain words ("delivered per member", "a server pulls only the members its clients watch") instead of "member-selective on the wire … upstream too".
+
+**R‑SIZE‑Presence** (7 → **8**; C 8 · A 8 · N 8)
+- Before: "…scans the room's member records to reap dead members: `O(members)` KV reads per server every 30s. …"
+- After: "…scans the room's member records to drop members whose owner has gone silent: `O(members)` KV reads per server every 30s. …"
+- Why: "reap dead members" → "drop members whose owner has gone silent" — plainer *and* more informative (it says what "dead" means), consistent with the reaper in `server.ts` (a member is dropped when its owning node stops refreshing `seenAt`). The `O(members)` cost model stays, since this is the deep-dive sizing section.
+
+**R‑SIZE‑Keys** (6 → **8**; C 8 · A 8 · N 8) — five infra terms in one sentence
+- Before: "**Keys** — the default shared mode uses one pub/sub key per room (one adapter subscription per observing node); `isolated: true` moves data to per-member keys, removing publish contention and letting each node subscribe upstream only to the members its clients watch."
+- After: "**Keys** — by default a room uses a single pub/sub key, so each server observing the room opens just one subscription. With `isolated: true`, every member gets their own key instead: members no longer share a key (no publish contention), and each server subscribes only to the members its own clients are watching."
+- Why: split into two sentences; "observing node" → "each server observing the room"; "publish contention" glossed inline as "members no longer share a key"; "subscribe upstream" → "subscribes". Every claim preserved, one term per clause.
+- Alternatives weighed: (a) lead with the cost "…but the room now spans many keys rather than one" appended → more complete but longer, A 7; (b) the two-sentence split above → A 8. Picked (b) — the sizing reader is opted into some jargon; the win is one-term-per-clause, not term removal.
+
+### stream · Primitive: `Room`
+
+**R‑STREAM‑2** (7 → **8**; C 8 · A 9 · N 8) — awkward comma splice
+- Before: "…chat, game lobbies, video calls, collaboration — you can use a room, see:"
+- After: "…chat, game lobbies, video calls, collaboration — you can use a room:"
+- Why: drops the ", see" splice and lets the colon lead straight into the `/room` link (the review's own "…you can use a room:"). "you can use a room" is kept deliberately — it mirrors the pre-existing sibling transition on the same page ("…you can use a channel, see:"), so the two primitive hand-offs stay parallel.
+
+---
+
+### Deliberately left unchanged (lifted by a dependency fix)
+
+Two low sentences had **no wording problem of their own** — each was low only because it
+leaned on a concept that was itself unclear. Fixing the concept lifts them, so editing
+their wording would be churn.
+
+**R‑INST‑3** (7 → **8**) — "On the server, `getParticipants()` always resyncs an unobserved room first, so the list is current."
+- Its A 6 was "entirely inherited from the dense definition above it" (the review's own words). With R‑INST‑2 now defining *observed*/*unobserved* plainly, "unobserved" lands and the sentence reads at 8 unchanged.
+
+**R‑HIW‑Lazy** (7 → **8**) — "A room subscribes to its pub/sub key only while observed. …"
+- Sits in *How it works*, the explicit mechanism deep-dive where "scores weight clarity/naturalness over accessibility". Its one snag, "observed", is now defined; the remaining "subscribe upstream" is appropriate to the section. C 8 · N 8 were never the problem, so it's left intact.
+
+### Revised aggregate
+
+| Band | Before | After |
+|---|---|---|
+| 9–10 | ~28 | ~31 |
+| 8 | ~24 | ~41 |
+| 7 | ~12 | 0 |
+| 6 | 8 | 0 |
+| ≤5 | 0 | 0 |
+
+**New page grade: ≈8.3 average.** No sentence remains in the 6–7 band. The systemic
+criterion-2 weakness is resolved at its roots — "observed", "hold", ".client variant",
+"granted through the room", and the stacked infra nouns are each defined in plain words
+where first needed, so the sentences that used to lean on them now stand on their own.
