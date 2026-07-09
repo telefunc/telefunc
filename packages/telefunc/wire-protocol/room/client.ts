@@ -401,9 +401,21 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 // selfDelivery registry — links participants to separately revived rooms
 // ---------------------------------------------------------------------------
 
-// A telefunction typically returns `{ room, participant }` — two independent wire values. When
-// the participant sets `selfDelivery = false`, the sibling `ClientRoom` (same page, different
-// wire object) must suppress that member's echoed messages. This registry is their only link.
+// A telefunction typically returns `{ room, participant }` — two independent wire values, often
+// from *different responses*. When the participant sets `selfDelivery = false`, the sibling
+// `ClientRoom` (same page, different wire object) must suppress that member's echoed messages.
+//
+// A module-global map looks avoidable; it is not — this page is the only place the link can
+// exist. The server can't suppress it: room stub and participant stub may ride different
+// responses, and "same browser across responses" is not a server-side concept (the stub-member
+// relay skip covers only members joined through the *room's own* stub). Nor can the objects
+// find each other at revival: they revive independently, so any rendezvous keyed by room ID is
+// this registry under another name. Member IDs are UUIDs (no cross-room collisions) and
+// entries are removed on leave — the registry cannot leak or misfire.
+//
+// (Storing `selfDelivery` in the member's KV record wouldn't help: every view would know every
+// member's flag, but a room still couldn't tell which members are *its own page's* — locality
+// is exactly the information only this registry has.)
 const globalObject = getGlobalObject('wire-protocol/room/client.ts', {
   suppressed: new Map<string, Set<string>>(), // roomId → members with selfDelivery off
 })
