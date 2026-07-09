@@ -10,7 +10,7 @@ import {
 } from '../server/broadcast.js'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { RoomStubChannel } from './stubs.js'
@@ -1195,6 +1195,25 @@ describe('liveness', () => {
     expect(observer.count).toBe(0)
     expect(a.count).toBe(0) // the (supposed) owner learned via the reaper's event too
     await expect(me.publish('boo')).rejects.toThrow('Participant has left')
+  })
+
+  it("native KV expiry bounds a crashed node's leftovers even when nothing ever reads the room", async () => {
+    vi.useFakeTimers()
+    try {
+      const a = await Room.create('abandoned')
+      const me = await a.join({ name: 'Ghost' })
+      const key = roomMemberKvKey('abandoned', me.id)
+      const adapter = getBroadcastAdapter()
+      expect(await adapter.get!(key)).not.toBe(null)
+
+      // The owning node dies (no heartbeats), and no reader ever touches the room again.
+      vi.setSystemTime(Date.now() + ROOM_MEMBER_KV_TTL_MS + 1)
+
+      expect(await adapter.get!(key)).toBe(null) // the store expired it on its own
+      expect(await adapter.keys!('telefunc:room:abandoned:m:')).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('owners refresh their members every heartbeat interval', async () => {

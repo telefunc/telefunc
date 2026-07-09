@@ -231,6 +231,11 @@ export const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
  *  heartbeat plus eventually-consistent KV backends (Workers KV propagates within ~60s).
  *  Graceful departures (leave, disconnect, close) are immediate — this is crash recovery. */
 export const ROOM_MEMBER_TTL_MS = 120_000
+/** Native KV expiry on member records — the backstop that bounds a crashed node's leftovers
+ *  even when no reader or heartbeat ever touches the room again. Sized past the reap threshold
+ *  (plus heartbeat slack) so the event-driven fast path always wins when anything is alive,
+ *  and comfortably above Workers KV's 60s minimum expiration. */
+export const ROOM_MEMBER_KV_TTL_MS = ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS
 
 // ===== Session routing =====
 

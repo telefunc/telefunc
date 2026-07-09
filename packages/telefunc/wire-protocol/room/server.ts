@@ -8,7 +8,7 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { getBroadcastAdapter, type BroadcastAdapter } from '../server/broadcast.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
@@ -400,7 +400,7 @@ class ServerRoom implements Room {
     const id = crypto.randomUUID()
     const joinedAt = Date.now()
     const record: RoomMemberRecord = { meta, joinedAt, seenAt: joinedAt, metaSeq: 0 }
-    await kv.set(roomMemberKvKey(this.id, id), stringify(record))
+    await kv.set(roomMemberKvKey(this.id, id), stringify(record), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
     // The room may have been closed between the check and the write — roll back.
     if ((await readConfig(kv, this.id)) === null) {
       await kv.delete(roomMemberKvKey(this.id, id))
@@ -430,7 +430,7 @@ class ServerRoom implements Room {
     // The member's single owner serializes its setMeta() calls, so the KV record doubles as
     // the revision counter — no separate sequencer needed.
     const next: RoomMemberRecord = { ...record, meta, metaSeq: record.metaSeq + 1, seenAt: Date.now() }
-    await kv.set(memberKey, stringify(next))
+    await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
     this._state.applyParticipantMeta(id, meta, prev, next.metaSeq)
     await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, seq: next.metaSeq })
   }
@@ -905,7 +905,9 @@ class ServerRoom implements Room {
           continue
         }
         const record = parse(raw) as RoomMemberRecord
-        await kv.set(memberKey, stringify({ ...record, seenAt: Date.now() } satisfies RoomMemberRecord))
+        await kv.set(memberKey, stringify({ ...record, seenAt: Date.now() } satisfies RoomMemberRecord), {
+          ttlMs: ROOM_MEMBER_KV_TTL_MS,
+        })
       }
       await readMembers(kv, this.id)
     } finally {

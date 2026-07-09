@@ -134,8 +134,9 @@ class RedisTransport implements BroadcastTransport {
     return await this.publisher.get(this.kvKey(key))
   }
 
-  async set(key: string, value: string): Promise<void> {
-    await this.publisher.set(this.kvKey(key), value)
+  async set(key: string, value: string, options?: { ttlMs?: number }): Promise<void> {
+    if (options?.ttlMs === undefined) await this.publisher.set(this.kvKey(key), value)
+    else await this.publisher.set(this.kvKey(key), value, 'PX', options.ttlMs)
   }
 
   async delete(key: string): Promise<void> {

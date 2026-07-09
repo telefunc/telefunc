@@ -30,8 +30,10 @@ type BroadcastAdapter = {
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
   /** KV — required by `Room`. Reads the value stored at `key`, or `null` if absent. */
   get?(key: string): string | null | Promise<string | null>
-  /** KV — required by `Room`. Stores `value` at `key` (upsert). */
-  set?(key: string, value: string): void | Promise<void>
+  /** KV — required by `Room`. Stores `value` at `key` (upsert). `ttlMs` asks the store to
+   *  expire the record on its own — the backstop that bounds crash leftovers even when no
+   *  reader ever runs. Best-effort: stores without native expiry may ignore it. */
+  set?(key: string, value: string, options?: { ttlMs?: number }): void | Promise<void>
   /** KV — required by `Room`. Removes the value stored at `key` (no-op if absent). */
   delete?(key: string): void | Promise<void>
   /** KV — required by `Room`. Lists all stored keys starting with `prefix`. */
@@ -61,8 +63,9 @@ type BroadcastTransport = {
   ): () => void
   /** Optional KV — required by `Room` when a transport is installed. Reads the value at `key`, or `null`. */
   get?(key: string): string | null | Promise<string | null>
-  /** Optional KV — required by `Room` when a transport is installed. Stores `value` at `key` (upsert). */
-  set?(key: string, value: string): void | Promise<void>
+  /** Optional KV — required by `Room` when a transport is installed. Stores `value` at `key`
+   *  (upsert), expiring it after `ttlMs` when the backing store supports native expiry. */
+  set?(key: string, value: string, options?: { ttlMs?: number }): void | Promise<void>
   /** Optional KV — required by `Room` when a transport is installed. Removes the value at `key`. */
   delete?(key: string): void | Promise<void>
   /** Optional KV — required by `Room` when a transport is installed. Lists stored keys starting with `prefix`. */
@@ -81,8 +84,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private readonly transportBinaryUnsubs = new Map<string, () => void>()
   /** Per-key seq counter for in-memory mode. */
   private readonly keySeqs = new Map<string, number>()
-  /** In-memory KV store, used when no transport is installed. */
-  private readonly kvStore = new Map<string, string>()
+  /** In-memory KV store, used when no transport is installed. Entries expire lazily on read. */
+  private readonly kvStore = new Map<string, { value: string; expiresAt: number | null }>()
 
   constructor(transport?: BroadcastTransport) {
     this.transport = transport ?? null
@@ -172,13 +175,19 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   get(key: string): string | null | Promise<string | null> {
     const transport = this.kvTransport('get')
     if (transport) return transport.get!(key)
-    return this.kvStore.get(key) ?? null
+    const entry = this.kvStore.get(key)
+    if (!entry) return null
+    if (entry.expiresAt !== null && entry.expiresAt <= Date.now()) {
+      this.kvStore.delete(key)
+      return null
+    }
+    return entry.value
   }
 
-  set(key: string, value: string): void | Promise<void> {
+  set(key: string, value: string, options?: { ttlMs?: number }): void | Promise<void> {
     const transport = this.kvTransport('set')
-    if (transport) return transport.set!(key, value)
-    this.kvStore.set(key, value)
+    if (transport) return transport.set!(key, value, options)
+    this.kvStore.set(key, { value, expiresAt: options?.ttlMs === undefined ? null : Date.now() + options.ttlMs })
   }
 
   delete(key: string): void | Promise<void> {
@@ -190,8 +199,13 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   keys(prefix: string): string[] | Promise<string[]> {
     const transport = this.kvTransport('keys')
     if (transport) return transport.keys!(prefix)
+    const now = Date.now()
     const result: string[] = []
-    for (const key of this.kvStore.keys()) {
+    for (const [key, entry] of this.kvStore) {
+      if (entry.expiresAt !== null && entry.expiresAt <= now) {
+        this.kvStore.delete(key)
+        continue
+      }
       if (key.startsWith(prefix)) result.push(key)
     }
     return result

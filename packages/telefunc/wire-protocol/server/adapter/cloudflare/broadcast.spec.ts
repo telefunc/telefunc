@@ -57,6 +57,9 @@ function createMockKV(): KVNamespace {
     async put(key: string, value: string, options?: { expirationTtl?: number }) {
       store.set(key, { value, expirationTtl: options?.expirationTtl })
     },
+    _ttl(key: string) {
+      return store.get(key)?.expirationTtl
+    },
     async delete(key: string) {
       store.delete(key)
     },
@@ -717,6 +720,20 @@ describe('cloudflare KV store (backs `Room` state)', () => {
 
     await transport.delete('telefunc:room:lobby:config')
     expect(await transport.get('telefunc:room:lobby:config')).toBeNull()
+  })
+
+  it('passes TTLs through as expirationTtl, rounding up to the 60s Workers KV floor', async () => {
+    const { transport, kv } = createTransportWithKV()
+    const ttlOf = (key: string) => (kv as unknown as { _ttl(k: string): number | undefined })._ttl(key)
+
+    await transport.set('telefunc:room:r:m:x', '{}', { ttlMs: 180_000 })
+    expect(ttlOf('tfkv:telefunc:room:r:m:x')).toBe(180)
+
+    await transport.set('telefunc:room:r:m:y', '{}', { ttlMs: 1_500 }) // below the floor: up, never down
+    expect(ttlOf('tfkv:telefunc:room:r:m:y')).toBe(60)
+
+    await transport.set('telefunc:room:r:config', '{}') // no TTL — config records persist
+    expect(ttlOf('tfkv:telefunc:room:r:config')).toBe(undefined)
   })
 
   it('does not leak broadcast presence records into the KV keyspace', async () => {

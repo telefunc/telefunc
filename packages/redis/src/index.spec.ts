@@ -23,8 +23,11 @@ class FakeIoredis {
     return this.store.get(key) ?? null
   }
 
-  async set(key: string, value: string): Promise<'OK'> {
+  readonly ttls = new Map<string, number>()
+
+  async set(key: string, value: string, px?: 'PX', ttlMs?: number): Promise<'OK'> {
     this.store.set(key, value)
+    if (px === 'PX' && typeof ttlMs === 'number') this.ttls.set(key, ttlMs)
     return 'OK'
   }
 
@@ -186,6 +189,14 @@ describe('Redis adapter — KV (backs `Room` state)', () => {
 
     await adapter.delete('telefunc:room:lobby:config')
     expect(await adapter.get('telefunc:room:lobby:config')).toBe(null)
+  })
+
+  it('passes the TTL through as Redis PX — native expiry backs the crash reaper', async () => {
+    const { fake, adapter } = newAdapter()
+    await adapter.set!('telefunc:room:r:m:x', '{"seenAt":1}', { ttlMs: 180_000 })
+    expect(fake.ttls.get('tf:kv:telefunc:room:r:m:x')).toBe(180_000)
+    await adapter.set!('telefunc:room:r:config', '{}') // no TTL — config records persist
+    expect(fake.ttls.has('tf:kv:telefunc:room:r:config')).toBe(false)
   })
 
   it('matches glob metacharacters in room IDs literally, not as patterns', async () => {

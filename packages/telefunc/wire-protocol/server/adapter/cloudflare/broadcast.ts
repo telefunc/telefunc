@@ -364,8 +364,15 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return await this.requireKV().get(KV_STORE_PREFIX + key)
   }
 
-  async set(key: string, value: string): Promise<void> {
-    await this.requireKV().put(KV_STORE_PREFIX + key, value)
+  async set(key: string, value: string, options?: { ttlMs?: number }): Promise<void> {
+    if (options?.ttlMs === undefined) {
+      await this.requireKV().put(KV_STORE_PREFIX + key, value)
+      return
+    }
+    // Workers KV expirations are seconds with a 60s floor — round up, never down, so a
+    // record can only outlive the requested TTL, not vanish early.
+    const expirationTtl = Math.max(60, Math.ceil(options.ttlMs / 1000))
+    await this.requireKV().put(KV_STORE_PREFIX + key, value, { expirationTtl })
   }
 
   async delete(key: string): Promise<void> {
