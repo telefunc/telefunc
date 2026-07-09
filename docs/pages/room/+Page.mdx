@@ -222,7 +222,9 @@ Render only 9 of 500 cameras? Subscribe to those 9 members — the other 491 str
 
 ### Load history, then go live
 
-Rooms deliver **live** messages; history belongs in your database (retention, search, pagination — your rules). Store on publish, and on join replay history *after* subscribing, deduplicating the overlap with the receipt's `seq`:
+Rooms deliver **live** messages; history belongs in your database (retention, search, pagination — your rules). Two pieces: store every message as it's published, and on page load stitch history and the live stream together without losing anything.
+
+**Store.** Give each message an ID at the sender, and persist in the `onPublish` guard — it runs exactly once per message, on the server, with the verified sender:
 
 ```ts
 // Chat.telefunc.ts
@@ -231,26 +233,40 @@ Rooms deliver **live** messages; history belongs in your database (retention, se
 export async function onJoinChat(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
-    onPublish: async (from, data) => {
-      // The guard runs before delivery on every publish — a natural persistence hook.
-      await db.messages.insert({ roomId, authorId: from.id, author: from.meta.name, data })
+    onPublish: async (from, message) => {
+      await db.messages.insert({ id: message.id, roomId, authorId: from.id, author: from.meta.name, ...message })
     },
   })
-  return { room, history: await db.messages.latest(roomId, 50) }
+  return { room, me: await room.join({ name: getContext().user.name }) }
+}
+
+export async function onChatHistory(roomId: string) {
+  return await db.messages.latest(roomId, 50)
 }
 ```
+
+**Replay.** Subscribe first, fetch history second — that exact order is what makes the seam lossless:
 
 ```ts
 // Chat.tsx
 // Environment: client
 
-const { room, history } = await onJoinChat('lobby')
+const { room, me } = await onJoinChat('lobby')
 
-// Subscribe FIRST, then render history — messages published in between arrive live,
-// so nothing can fall into a gap. Deduplicate by your own message IDs if needed.
-room.subscribe((data, info, from) => appendMessage(from.meta, data, info.seq))
-for (const message of history) appendMessage({ name: message.author }, message.data, null)
+const seen = new Set<string>()
+const show = (message) => {
+  if (seen.has(message.id)) return // the overlap — a message that made it into both
+  seen.add(message.id)
+  renderMessage(message)
+}
+
+room.subscribe((message) => show(message))                          // 1. live, from this instant on
+for (const message of await onChatHistory('lobby')) show(message)   // 2. the past, read after step 1
+
+await me.publish({ id: crypto.randomUUID(), text: 'hi' })           // sender mints the ID
 ```
+
+Why this order: the history read happens *after* the subscription is live, so every message falls in at least one of the two sources — a message published between the two steps lands in **both**, and the ID check drops the duplicate. The reverse order (fetch, then subscribe) opens a gap instead: a message published in between lands in **neither**, and no dedup can recover it.
 
 ### Enforce capacity
 
@@ -306,7 +322,7 @@ type RoomOptions = {
 |---|---|
 | `join(meta?, options?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. Options: `{ selfDelivery?: boolean }`. |
 | `getParticipants()` | All current participants — `Promise<RemoteParticipant[]>` (loads the member list on first need). |
-| `getParticipant(id)` | A single participant from the live local view, or `null` — synchronous. |
+| `getParticipant(id)` | A single participant — a synchronous lookup into the loaded member view (see the note below). |
 | `subscribe(cb)` | Receive all participant messages: `(data, info, from)`. Returns an unsubscribe function. |
 | `subscribeBinary(cb)` | Same, for binary messages. |
 | `onJoin(cb)` / `onLeave(cb)` | A participant joined / left (or was removed): `(member)`. |
@@ -317,7 +333,7 @@ type RoomOptions = {
 
 State getters: `id`, `meta`, `size`, `count`, `isEmpty`, `isFull`, `isClosed`.
 
-> A room is **observed** when something is watching it: a listener is attached, a member joined through it, or it was sent to a client. While observed, the getters and the member view stay live, fed by the room's event stream. Attaching a room-level listener (or calling `getParticipants()`) loads the member list; until then a fresh `Room.get()` knows the exact `count` but not yet the members — `getParticipant()` returns `null` for members it hasn't loaded.
+> **The member view loads once, on first need.** `Room.get()` is deliberately cheap: it knows the exact `count` immediately but doesn't read the member records. The first thing that needs them — `await getParticipants()`, or attaching a room-level listener — loads the view, and from then on the room's event stream keeps it live. That's the whole contract behind the two lookups: `getParticipants()` is async because it may perform that first load; `getParticipant(id)` is a synchronous O(1) read of the loaded view (so it's free to call in render loops and message handlers), returning `null` for a member the view doesn't hold — before the first load, or after that member left. Need a single member on a freshly fetched room? Call `await getParticipants()` once, then look up freely.
 
 ### `LocalParticipant`
 
@@ -336,7 +352,7 @@ Your own handle, returned by `join()`. Room-wide messages arrive on the room and
 Read-only properties: `id`, `meta`, and `selfDelivery`.
 
 - `selfDelivery` (default: `true`, set at `join()`): whether the messages you publish are delivered back to the room object on your side. Turn it off e.g. for video, where you don't want your own frames back.
-- A participant stays in the room only as long as its holder stays connected: when the client holding the `LocalParticipant` (or the room it joined through) disconnects, the participant leaves the room.
+- A participant lives exactly as long as its holder's connection: when the browser tab that holds it closes, navigates away, or loses its connection for good, the participant leaves the room automatically — observers see a normal leave.
 
 ### `RemoteParticipant`
 
@@ -353,7 +369,14 @@ Read-only properties: `id`, `meta`, and `joinedAt` (Unix epoch ms). A member's l
 
 ### Senders
 
-Every message callback receives its verified sender as `from: Sender` — `{ id, meta }`, stamped server-side, spoof-proof. It's the live `RemoteParticipant` whenever your room view knows the sender (the normal case, so `room.getParticipant(from.id) === from`), or a plain `{ id, meta }` snapshot when your view doesn't (a standalone participant without a room, or a message arriving ahead of its sender's join event). Either way `from.id`/`from.meta` are always correct — messages are never delayed or dropped waiting for presence.
+Every message callback receives its verified sender as `from: Sender` — `{ id, meta }`, stamped by the server, impossible for a client to fake. Normally `from` *is* the live `RemoteParticipant` (the same object `room.getParticipant(from.id)` returns), so you can use it directly.
+
+In two situations there's no live object to hand you, and `from` is a plain `{ id, meta }` snapshot instead — same fields, same correct values:
+
+- **You hold a participant but no room.** A telefunction can return just the participant — `return await Room.join(roomId, meta)` — without the room. Its `me.listen()` still tells you exactly who sent each private message; there's simply no room object around to look the sender up in.
+- **A message outruns its sender's join.** Presence events and messages travel on separate streams, and on some multi-server backends a message can arrive a few milliseconds before the join event announcing its sender. Rather than delaying or dropping the message, Telefunc delivers it immediately — the sender's identity is carried inside the message itself, and the live object takes over as soon as the join lands.
+
+Either way your code reads `from.id` and `from.meta` and never branches.
 
 ### Authorization
 
