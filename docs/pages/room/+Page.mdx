@@ -384,6 +384,16 @@ Room state lives in the broadcast adapter's KV, and room events travel over its 
   <Link href="/redis">`@telefunc/redis`</Link> supports rooms out-of-the-box (state in Redis keys, events over Redis pub/sub, Cluster included), and so does the <Link href="/stream/cloudflare">Cloudflare integration</Link> (state in Workers KV, events over Durable Objects).
 - **Custom transports**: implement the KV methods (`get()`, `set()`, `delete()`, `keys()`) on your `BroadcastTransport`, backed by a store all server instances can reach. Rooms fail with a clear error until they're implemented.
 
+### Scale envelope
+
+What each mechanism costs, so you can size rooms deliberately:
+
+- **Text lane** — every connection holding the room receives its control events and text data. Per-connection cost is `messages/s × message size`; a busy chat room (20 msg/s × 300 B) is ~6 KB/s per viewer. Relay buffers are byte-capped with FIFO eviction, so a slow client degrades by losing oldest messages — it can't grow server memory.
+- **Binary lane** — member-selective on the wire and (in isolated mode) upstream: cost scales with what each client actually watches, not with room size.
+- **Membership snapshot** — serializing a room ships the full member list. That's the right trade up to a few thousand members (live video/game/collab rooms); Discord-scale rosters belong in your database, with the room carrying only live participants.
+- **Presence upkeep** — each server refreshes its own members' liveness every 30s and scans the room's member records for reaping: `O(members)` KV reads per node per 30s. Comfortable to thousands of members per room on Redis or Workers KV.
+- **Keys** — shared mode uses one pub/sub key per room (one adapter subscription per observing node); `isolated: true` moves data to per-member keys, removing publish contention and letting nodes subscribe only to wanted members.
+
 See also:
 - <Link href="/stream/scale" />
 
