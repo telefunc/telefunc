@@ -1,6 +1,7 @@
 export {
   ROOM_KEY_NAMESPACE,
-  roomMainKey,
+  roomCtrlKey,
+  roomTextKey,
   roomMemberDataKey,
   roomDmKey,
   roomConfigKvKey,
@@ -52,11 +53,18 @@ import type { JoinOptions, LocalParticipant, ParticipantMeta, RemoteParticipant,
 /** Reserved pub/sub + KV namespace for rooms. Don't use it for `BroadcastChannel` keys. */
 const ROOM_KEY_NAMESPACE = 'telefunc:room:'
 
-/** Pub/sub key carrying a room's control events (and, in shared mode, its data). */
-function roomMainKey(roomId: string): string {
+/** Pub/sub key carrying a room's control lane: presence & lifecycle events plus room-authored
+ *  announcements. Low-rate, subscribed by every observer — never carries participant data. */
+function roomCtrlKey(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}`
 }
-/** Pub/sub key carrying one member's data in isolated mode. */
+/** Pub/sub key carrying the room's text data in shared mode — its own lane, so holders that
+ *  only observe presence never receive it. */
+function roomTextKey(roomId: string): string {
+  return `${ROOM_KEY_NAMESPACE}${roomId}:t`
+}
+/** Pub/sub key carrying one member's data: binary always (per-publisher keys make delivery
+ *  member-selective at the source), text too in isolated mode. */
 function roomMemberDataKey(roomId: string, memberId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:m:${memberId}`
 }
@@ -136,7 +144,7 @@ type ParticipantStubMetadata = {
   selfDelivery: boolean
 }
 
-/** Presence & lifecycle events, published on the room's main key by whichever node caused them.
+/** Presence & lifecycle events, published on the room's control key by whichever node caused them.
  *
  *  The origin applies its own event locally (for deterministic same-node semantics) and then
  *  receives it back via the pub/sub echo. `join`/`leave`/`closed` are naturally idempotent;
@@ -148,10 +156,10 @@ type RoomCtrlEnvelope =
   | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; eid: string }
   | { __r: 'closed' }
 
-/** A participant's message. Published on the room's main key (shared mode) or the member's own key
- *  (isolated mode). `fromMeta` is the sender's meta as verified by the sender's own node — never
- *  client-supplied — so any receiver can surface a correct sender even before its roster view
- *  catches up (see `RoomState.applyData`). */
+/** A participant's message. Published on the room's text key (shared mode) or the member's own
+ *  key (isolated mode). `fromMeta` is the sender's meta as verified by the sender's own node —
+ *  never client-supplied — so any receiver can surface a correct sender even before its roster
+ *  view catches up (see `RoomState.applyData`). */
 type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; data: unknown }
 
 /** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */

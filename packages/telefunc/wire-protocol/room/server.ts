@@ -23,7 +23,8 @@ import {
   roomConfigKvKey,
   roomDmKey,
   roomIdFromConfigKey,
-  roomMainKey,
+  roomCtrlKey,
+  roomTextKey,
   roomMemberDataKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
@@ -192,7 +193,7 @@ async function removeParticipant(id: string, participantId: string): Promise<voi
 
 async function announceToRoom(id: string, data: unknown): Promise<void> {
   await requireRoom(id)
-  await getBroadcastAdapter().publish(roomMainKey(id), stringify({ __r: 'announce', data } satisfies RoomEnvelope))
+  await getBroadcastAdapter().publish(roomCtrlKey(id), stringify({ __r: 'announce', data } satisfies RoomEnvelope))
 }
 
 async function sendToParticipant(id: string, participantId: string, data: unknown): Promise<void> {
@@ -232,8 +233,8 @@ class ServerRoom implements Room {
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
 
-  private readonly _mainSub = new SubSlot()
-  private readonly _mainBinarySub = new SubSlot()
+  private readonly _ctrlSub = new SubSlot()
+  private readonly _textSub = new SubSlot()
   private readonly _memberTextUnsubs = new Map<string, () => void>()
   private readonly _memberBinaryUnsubs = new Map<string, () => void>()
   private readonly _dmUnsubs = new Map<string, () => void>()
@@ -294,7 +295,7 @@ class ServerRoom implements Room {
   async getParticipants(): Promise<RemoteParticipant[]> {
     // While observed, the event stream keeps the local view fresh. While unobserved,
     // no listeners exist that a change could notify — resync silently from KV.
-    if (!this._state.closed && !this._mainSub.active) await this._refreshMembers()
+    if (!this._state.closed && !this._ctrlSub.active) await this._refreshMembers()
     return this._state.listRemotes()
   }
 
@@ -394,11 +395,11 @@ class ServerRoom implements Room {
   async _publishData(from: string, payload: { data: unknown } | { framed: Uint8Array }): Promise<ChannelPublishAck> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
     const adapter = getBroadcastAdapter()
-    const key = this._isolated ? roomMemberDataKey(this.id, from) : roomMainKey(this.id)
     const result =
       'data' in payload
         ? await adapter.publish(
-            key,
+            // Text rides the room's text key — the member's own key in isolated mode.
+            this._isolated ? roomMemberDataKey(this.id, from) : roomTextKey(this.id),
             stringify({
               __r: 'data',
               from,
@@ -406,7 +407,9 @@ class ServerRoom implements Room {
               data: payload.data,
             } satisfies RoomDataEnvelope),
           )
-        : await adapter.publishBinary(key, payload.framed)
+        : // Binary always rides the member's own key: per-publisher streams are what make
+          // delivery member-selective at the source (and contention-free on every platform).
+          await adapter.publishBinary(roomMemberDataKey(this.id, from), payload.framed)
     return Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), { meta: result.meta })
   }
 
@@ -446,7 +449,9 @@ class ServerRoom implements Room {
 
   // ── Event stream (adapter subscription callbacks) ──
 
-  private _onText(serialized: string, rawInfo: WirePublishInfo): void {
+  /** The control lane: presence & lifecycle events plus announcements — relayed to every stub
+   *  unconditionally, since a client's live view is only correct if it sees every one. */
+  private _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
     let envelope: unknown
     try {
       envelope = parse(serialized)
@@ -455,27 +460,43 @@ class ServerRoom implements Room {
     }
     if (!hasRoomTag(envelope)) return
     const event = envelope as RoomEnvelope
+    if (event.__r === 'data') return // data never travels on the control key
     const wasClosed = this._state.closed
 
-    if (event.__r === 'data') {
-      const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-      this._state.applyData(event.from, event.fromMeta, event.data, info, this._suppress(event.from))
-    } else if (event.__r === 'announce') {
+    if (event.__r === 'announce') {
       this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
     } else {
       this._applyCtrl(event)
     }
 
     if (this._stubs.size > 0) {
-      const from = event.__r === 'data' ? event.from : null
       const wireText = encodePublishText(serialized, rawInfo)
-      for (const stub of this._stubs) {
-        if (from !== null && stub._stubMembers.get(from)?.selfDelivery === false) continue
-        stub._relayPublishText(wireText)
-      }
+      for (const stub of this._stubs) stub._relayPublishText(wireText)
     }
 
     if (this._state.closed && !wasClosed) this._teardown()
+  }
+
+  /** The text data lane — relayed per stub, skipping the sender's own holder when it opted out. */
+  private _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
+    let envelope: unknown
+    try {
+      envelope = parse(serialized)
+    } catch {
+      return // junk on the reserved key
+    }
+    if (!hasRoomTag(envelope) || envelope.__r !== 'data') return
+    const event = envelope as RoomDataEnvelope
+    const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
+    this._state.applyData(event.from, event.fromMeta, event.data, info, this._suppress(event.from))
+
+    if (this._stubs.size > 0) {
+      const wireText = encodePublishText(serialized, rawInfo)
+      for (const stub of this._stubs) {
+        if (stub._stubMembers.get(event.from)?.selfDelivery === false) continue
+        stub._relayPublishText(wireText)
+      }
+    }
   }
 
   private _onBinary(framed: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -520,7 +541,7 @@ class ServerRoom implements Room {
     switch (event.__r) {
       case 'join':
         this._state.applyJoin(event.id, event.meta, event.joinedAt)
-        if (this._isolated) this._syncSubs() // a new member means a new data key
+        this._syncSubs() // a new member means a new per-member key candidate
         return
       case 'leave':
         this._applyLeave(event.id)
@@ -657,36 +678,42 @@ class ServerRoom implements Room {
       this._localParticipants.size > 0 ||
       state.eventListenerCount + state.dataListenerCount + state.binaryListenerCount > 0
 
-    const becomesObserved = open && observed && !this._mainSub.active
-    this._mainSub.sync(open && observed, () =>
-      adapter.subscribe(roomMainKey(this.id), (serialized, info) => this._onText(serialized, info)),
+    // Control: one low-rate lane every observer holds — it's what keeps the live view correct.
+    const becomesObserved = open && observed && !this._ctrlSub.active
+    this._ctrlSub.sync(open && observed, () =>
+      adapter.subscribe(roomCtrlKey(this.id), (serialized, info) => this._onCtrlMessage(serialized, info)),
     )
     // Events between construction (KV snapshot) and this subscription were missed — resync.
     if (becomesObserved) void this._refreshMembers().catch(reportRoomError)
 
-    const binaryWants = this._aggregateBinaryWants()
-    const wantAnyBinary = open && (binaryWants.all || binaryWants.members.size > 0)
+    // Text: its own lane, brought up only for holders that actually consume messages —
+    // presence-only observers never receive the room's chatter.
+    const wantText = open && (state.dataListenerCount > 0 || this._stubsWantText())
+    const memberIds = open ? state.listMemberIds() : []
     if (this._isolated) {
-      // Isolated mode: data flows on per-member keys, one subscription per member —
-      // and only the members whose binary someone actually wants.
-      const wantText = open && (this._stubs.size > 0 || state.dataListenerCount > 0)
-      const memberIds = open ? state.listMemberIds() : []
-      const binaryIds = !wantAnyBinary
-        ? []
-        : binaryWants.all
-          ? memberIds
-          : memberIds.filter((id) => binaryWants.members.has(id))
       this._syncMemberSubs(this._memberTextUnsubs, wantText ? memberIds : [], (memberId) =>
-        adapter.subscribe(roomMemberDataKey(this.id, memberId), (serialized, info) => this._onText(serialized, info)),
-      )
-      this._syncMemberSubs(this._memberBinaryUnsubs, binaryIds, (memberId) =>
-        adapter.subscribeBinary(roomMemberDataKey(this.id, memberId), (framed, info) => this._onBinary(framed, info)),
+        adapter.subscribe(roomMemberDataKey(this.id, memberId), (serialized, info) =>
+          this._onTextData(serialized, info),
+        ),
       )
     } else {
-      this._mainBinarySub.sync(wantAnyBinary, () =>
-        adapter.subscribeBinary(roomMainKey(this.id), (framed, info) => this._onBinary(framed, info)),
+      this._textSub.sync(wantText, () =>
+        adapter.subscribe(roomTextKey(this.id), (serialized, info) => this._onTextData(serialized, info)),
       )
     }
+
+    // Binary: per-publisher keys in every mode — subscribing member-selectively at the source
+    // makes upstream delivery pay-per-want, not filter-after-receive.
+    const binaryWants = this._aggregateBinaryWants()
+    const wantAnyBinary = open && (binaryWants.all || binaryWants.members.size > 0)
+    const binaryIds = !wantAnyBinary
+      ? []
+      : binaryWants.all
+        ? memberIds
+        : memberIds.filter((id) => binaryWants.members.has(id))
+    this._syncMemberSubs(this._memberBinaryUnsubs, binaryIds, (memberId) =>
+      adapter.subscribeBinary(roomMemberDataKey(this.id, memberId), (framed, info) => this._onBinary(framed, info)),
+    )
 
     // Inbox subscriptions follow ownership, not listeners — a holder must always be
     // able to receive direct messages addressed to its members.
@@ -695,6 +722,11 @@ class ServerRoom implements Room {
     )
 
     this._syncHeartbeat()
+  }
+
+  /** Whether any client stub needs the text lane relayed. */
+  private _stubsWantText(): boolean {
+    return this._stubs.size > 0
   }
 
   /** Union of this holder's own binary listeners and every client stub's declared wants. */
@@ -930,7 +962,7 @@ class SubSlot {
 }
 
 async function publishCtrl(roomId: string, event: RoomCtrlEnvelope): Promise<void> {
-  await getBroadcastAdapter().publish(roomMainKey(roomId), stringify(event))
+  await getBroadcastAdapter().publish(roomCtrlKey(roomId), stringify(event))
 }
 
 function assertRoomId(id: unknown): asserts id is string {

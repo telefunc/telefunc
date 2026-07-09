@@ -12,7 +12,7 @@ import type { ParticipantMeta } from './types.js'
 import {
   errorMessage,
   hasRoomTag,
-  roomMainKey,
+  roomCtrlKey,
   unframeMemberId,
   type ParticipantStubRequest,
   type ReqOkAck,
@@ -45,7 +45,7 @@ class RoomStubChannel extends ServerBroadcast {
   }
 
   constructor(serverRoom: ServerRoom) {
-    super({ key: roomMainKey(serverRoom.id) })
+    super({ key: roomCtrlKey(serverRoom.id) })
     this._room = serverRoom
     // Stub requests (join/leave/set-meta/dm/sub-binary) arrive as channel messages.
     this._listen((msg: unknown) => this._room._handleStubRequest(this, msg))

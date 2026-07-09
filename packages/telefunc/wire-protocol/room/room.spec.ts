@@ -17,7 +17,9 @@ import { RoomStubChannel } from './stubs.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import {
   frameWithMemberId,
-  roomMainKey,
+  roomCtrlKey,
+  roomTextKey,
+  roomMemberDataKey,
   roomMemberKvKey,
   unframeMemberId,
   type RoomMemberRecord,
@@ -322,6 +324,38 @@ describe('data pub/sub', () => {
     expect(() => me._publishFramed(frameWithMemberId(me.id, new Uint8Array([1])))).toThrow('Participant has left')
   })
 
+  it('text rides its own lane — the control key never carries data', async () => {
+    const room = await Room.create('lanes')
+    const ctrlTraffic: string[] = []
+    const textTraffic: string[] = []
+    Broadcast.subscribe<{ __r: string }>(roomCtrlKey('lanes'), (msg) => ctrlTraffic.push(msg.__r))
+    Broadcast.subscribe<{ __r: string }>(roomTextKey('lanes'), (msg) => textTraffic.push(msg.__r))
+
+    const me = await room.join({ name: 'Alice' })
+    await me.publish('hello')
+    await Room.announce('lanes', 'notice')
+
+    expect(ctrlTraffic).toEqual(['join', 'announce'])
+    expect(textTraffic).toEqual(['data'])
+  })
+
+  it('binary rides per-publisher keys in shared mode too — upstream subscriptions are member-selective', async () => {
+    const a = await Room.create('per-pub')
+    const cam1 = await a.join({ name: 'cam1' })
+    const cam2 = await a.join({ name: 'cam2' })
+    const b = await Room.get('per-pub')
+    const subscribed = vi.spyOn(getBroadcastAdapter(), 'subscribeBinary')
+
+    const frames: number[][] = []
+    b.getParticipant(cam1.id)!.subscribeBinary((data) => frames.push([...data]))
+
+    expect(subscribed.mock.calls.map((c) => c[0])).toEqual([roomMemberDataKey('per-pub', cam1.id)])
+    await cam1.publishBinary(new Uint8Array([1]))
+    await cam2.publishBinary(new Uint8Array([2]))
+    expect(frames).toEqual([[1]])
+    subscribed.mockRestore()
+  })
+
   it("a message racing ahead of its sender's join delivers with the envelope's verified identity", async () => {
     const room = await Room.create('race')
     const received: Array<{ data: unknown; id: string; meta: unknown }> = []
@@ -331,7 +365,7 @@ describe('data pub/sub', () => {
     // the envelope's node-stamped identity makes delivery immediate and correct anyway.
     const ghost = crypto.randomUUID()
     await getBroadcastAdapter().publish(
-      roomMainKey('race'),
+      roomTextKey('race'),
       stringify({ __r: 'data', from: ghost, fromMeta: { name: 'Zoe' }, data: 'first!' }),
     )
 
@@ -530,20 +564,23 @@ describe('room-authored messages', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('isolated mode', () => {
-  it('routes data over per-member keys while control stays on the main key', async () => {
+  it('routes text over per-member keys while control stays on the control key', async () => {
     const a = await Room.create('vid', { isolated: true })
     const b = await Room.get('vid')
     const received: unknown[] = []
     b.subscribe((data, _info, from) => received.push([data, from.meta]))
 
-    const mainKeyTraffic: string[] = []
-    Broadcast.subscribe<{ __r: string }>(roomMainKey('vid'), (msg) => mainKeyTraffic.push(msg.__r))
+    const ctrlTraffic: string[] = []
+    const textTraffic: string[] = []
+    Broadcast.subscribe<{ __r: string }>(roomCtrlKey('vid'), (msg) => ctrlTraffic.push(msg.__r))
+    Broadcast.subscribe<{ __r: string }>(roomTextKey('vid'), (msg) => textTraffic.push(msg.__r))
 
     const me = await a.join({ name: 'Alice' })
     await me.publish('frame-1')
 
     expect(received).toEqual([['frame-1', { name: 'Alice' }]]) // delivered via the member key
-    expect(mainKeyTraffic).toEqual(['join']) // the main key carried only control
+    expect(ctrlTraffic).toEqual(['join']) // the control key carried only control
+    expect(textTraffic).toEqual([]) // isolated: not even the shared text key is touched
   })
 })
 
