@@ -7,6 +7,8 @@ export type {
   ParticipantMeta,
   LocalParticipant,
   RemoteParticipant,
+  Sender,
+  SendGuard,
   RoomListener,
   RoomBinaryListener,
   ParticipantListener,
@@ -19,6 +21,14 @@ import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
 type RoomMeta = Record<string, unknown>
 /** Participant metadata (e.g. name, score). Must be serializable. */
 type ParticipantMeta = Record<string, unknown>
+
+/** A private message's verified sender: the live `RemoteParticipant` when the holder observes
+ *  the room, or an `{ id, meta }` snapshot otherwise (e.g. a standalone participant). */
+type Sender = { readonly id: string; readonly meta: ParticipantMeta }
+
+/** Guards one participant's private messages (`join(meta, { onSend })`) — called before every
+ *  `send()` delivery; throw to reject (the sender's promise rejects with the error). */
+type SendGuard = (to: Sender, data: unknown) => void | Promise<void>
 
 type RoomOptions = {
   /** Room metadata, visible to all observers. Default: `{}`. */
@@ -36,6 +46,10 @@ type JoinOptions = {
   /** Whether your own publishes are delivered back to your side's room (default: `true`).
    *  Turn off for e.g. video, where you don't want your own frames back. */
   selfDelivery?: boolean
+  /** Server-side joins only: authorization guard over this participant's `send()` calls.
+   *  Defined next to the join that grants membership, it closes over your request context
+   *  (e.g. the authenticated user) — no global registry. */
+  onSend?: SendGuard
 }
 
 /** Lightweight room snapshot returned by `Room.list()`. */
@@ -113,10 +127,10 @@ type LocalParticipant = {
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
 
   /** Send a private message to one participant (or their ID) — nobody else receives it. */
-  send(to: string | RemoteParticipant, data: unknown): Promise<void>
-  /** Receive private messages addressed to you. `fromId` is the sender's participant ID —
-   *  empty for server-authored messages (`Room.send()`). Returns an unlisten function. */
-  listen(callback: (data: unknown, fromId: string) => void): () => void
+  send(to: string | Sender, data: unknown): Promise<void>
+  /** Receive private messages addressed to you. `from` is the verified sender —
+   *  `null` for room-authored messages (`Room.send()`). Returns an unlisten function. */
+  listen(callback: (data: unknown, from: Sender | null) => void): () => void
 
   /** Replace your metadata. Propagates to all observers in real time. */
   setMeta(meta: ParticipantMeta): Promise<void>

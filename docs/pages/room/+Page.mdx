@@ -117,7 +117,7 @@ export async function onJoinLobby(name: string) {
 
 | Method | Description |
 |---|---|
-| `join(meta?, options?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. Options: `{ selfDelivery?: boolean }`. |
+| `join(meta?, options?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. Options: `{ selfDelivery?, onSend? }`. |
 | `getParticipants()` | All current participants (<Link href="#remoteparticipant">`RemoteParticipant[]`</Link>). |
 | `getParticipant(id)` | A single participant, or `null`. |
 | `subscribe(cb)` | Receive all participant messages: `(data, info, from)`. Returns an unsubscribe function. |
@@ -183,7 +183,7 @@ Your own handle, returned by `join()`. Room-wide messages are received on the ro
 | `publish(data)` | Publish a message to the whole room. Returns a receipt (`{ key, seq, timestamp }`). |
 | `publishBinary(data)` | Publish raw binary to the whole room. Returns a receipt. |
 | `send(to, data)` | Send a private message to one participant (or their ID) — nobody else receives it. |
-| `listen(cb)` | Receive private messages addressed to you: `(data, fromId)`. Returns an unlisten function. |
+| `listen(cb)` | Receive private messages addressed to you: `(data, from)` — `from` is the verified sender, `null` for room-authored messages. Returns an unlisten function. |
 | `setMeta(meta)` | Replace your metadata — propagates to all observers in real time. |
 | `leave()` | Leave the room. |
 | `onLeave(cb)` | You left — voluntarily, kicked, room closed, or disconnected. |
@@ -254,7 +254,7 @@ Both receive from the same stream — a `publish()` reaches room-level subscribe
 ```ts
 // Alice's client
 const me = await lobby.join({ name: 'Alice' })
-me.listen((data, fromId) => console.log(`whisper from ${fromId}:`, data))
+me.listen((data, from) => console.log(`whisper from ${from.meta.name}:`, data))
 
 // Bob's client
 const bob = await lobby.join({ name: 'Bob' })
@@ -264,7 +264,8 @@ lobby.onJoin(async (member) => {
 ```
 
 - `send()` accepts a `RemoteParticipant` or a participant ID. Sending to an unknown or departed participant throws.
-- `fromId` is the **verified** sender — Telefunc rejects sends from non-members, so it can't be spoofed. The empty string is reserved for <Link href="#room-authored-messages">room-authored whispers</Link> (`Room.send()`).
+- `from` is the **verified** sender (`{ id, meta }` — the live `RemoteParticipant` whenever your side observes the room). Telefunc rejects sends from non-members, so it can't be spoofed; `null` is reserved for <Link href="#room-authored-messages">room-authored whispers</Link> (`Room.send()`).
+- To authorize whispers, attach a guard to the join that grants membership: `join(meta, { onSend })` — see <Link href="#policy-gated-private-messages">the recipe</Link>.
 
 ### Room-authored messages
 
@@ -278,10 +279,10 @@ await Room.send('lobby', winnerId, { type: 'achievement', badge: 'first-blood' }
 
 ```ts
 // Client
-lobby.onAnnounce((data) => showSystemBanner(data))       // room-authored broadcasts
-me.listen((data, fromId) => {
-  if (fromId === '') showSystemNotice(data)              // room-authored whisper (Room.send())
-  else showWhisper(lobby.getParticipant(fromId), data)   // participant whisper (send())
+lobby.onAnnounce((data) => showSystemBanner(data))  // room-authored broadcasts
+me.listen((data, from) => {
+  if (from === null) showSystemNotice(data)         // room-authored whisper (Room.send())
+  else showWhisper(from.meta.name, data)            // participant whisper (send())
 })
 ```
 
@@ -349,27 +350,29 @@ export async function onModerate(roomId: string) {
 
 ### Policy-gated private messages
 
-To enforce app policy on whispers (e.g. friends-only DMs), route them through a telefunction — or a <Link href="/stream#callback">returned callback</Link> — that checks your database and delivers via `Room.send()`. Receivers then accept only the room-authored lane, which `fromId === ''` makes unforgeable:
+To authorize whispers (e.g. friends-only DMs), attach an `onSend` guard to the join that grants membership. It's defined next to your authentication — closing over the request context — and runs before every delivery; throwing rejects the sender's `send()` with the error:
 
 ```ts
-// Server: the policy runs where your data lives
+// Chat.telefunc.ts
+// Environment: server
+
 export async function onJoinChat(roomId: string) {
   const { user } = getContext()
-  const me = await Room.join(roomId, { name: user.name })
-  const sendDm = async (to: string, text: string) => {
-    if (!(await db.areFriends(user.id, await db.ownerOf(roomId, to)))) throw new Error('not friends')
-    await Room.send(roomId, to, { fromUserId: user.id, text })
-  }
-  return { me, sendDm }
+  return await Room.join(roomId, { name: user.name, userId: user.id }, {
+    onSend: async (to) => {
+      if (!(await db.areFriends(user.id, to.meta.userId))) throw new Error('not friends')
+    },
+  })
 }
 ```
 
 ```ts
-// Client: only policy-checked whispers are rendered
-me.listen((data, fromId) => {
-  if (fromId === '') showDm(data.fromUserId, data.text)
-})
+// Client — nothing changes: send and receive as usual
+await me.send(bob, 'hi')                // rejects with 'not friends' when the guard says no
+me.listen((data, from) => showDm(from.meta.name, data))
 ```
+
+The guard travels with the membership: sends from this participant — from the server or from the client holding it — pass through it, while `Room.send()` (room-authored) doesn't. Since the guard requires a server-side join, hand out participants (not the room) when memberships must be policed.
 
 
 ## Scaling & multiple servers

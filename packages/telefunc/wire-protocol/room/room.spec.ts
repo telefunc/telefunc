@@ -373,14 +373,14 @@ describe('direct messages', () => {
     const bobInbox: unknown[] = []
     const aliceInbox: unknown[] = []
     const roomStream: unknown[] = []
-    bob.listen((data, from) => bobInbox.push([data, from]))
+    bob.listen((data, from) => bobInbox.push([data, from?.id, from?.meta]))
     alice.listen((data) => aliceInbox.push(data))
     a.subscribe((data) => roomStream.push(data))
     b.subscribe((data) => roomStream.push(data))
 
     await alice.send(a.getParticipant(bob.id)!, 'psst') // target as object — or pass the ID
 
-    expect(bobInbox).toEqual([['psst', alice.id]])
+    expect(bobInbox).toEqual([['psst', alice.id, { name: 'Alice' }]]) // live RemoteParticipant sender
     expect(aliceInbox).toEqual([]) // not echoed to the sender
     expect(roomStream).toEqual([]) // never on the room stream
   })
@@ -395,16 +395,38 @@ describe('direct messages', () => {
     await expect(alice.send(bob.id, 'x')).rejects.toThrow('Participant has left')
   })
 
+  it('join({ onSend }) guards sends: rejections reach the sender, deliveries carry rich identity', async () => {
+    const lobby = await Room.create('guarded')
+    const bob = await lobby.join({ name: 'Bob' })
+    const inbox: unknown[] = []
+    bob.listen((data, from) => inbox.push([data, from?.id, from?.meta]))
+    const alice = await lobby.join(
+      { name: 'Alice' },
+      {
+        onSend: (to, data) => {
+          if (data === 'blocked') throw new Error('not friends')
+          expect(to.id).toBe(bob.id) // the guard sees the resolved target, meta included
+          expect(to.meta).toEqual({ name: 'Bob' })
+        },
+      },
+    )
+
+    await expect(alice.send(bob.id, 'blocked')).rejects.toThrow('not friends')
+    await alice.send(bob.id, 'hi')
+
+    expect(inbox).toEqual([['hi', alice.id, { name: 'Alice' }]])
+  })
+
   it("delivers to a member the sender's stale local view doesn't know yet (KV fallback)", async () => {
     const a = await Room.create('dm-lag')
     const alice = await a.join({ name: 'Alice' })
     const b = await Room.get('dm-lag') // snapshot: alice only
     const bob = await a.join({ name: 'Bob' }) // b is unobserved — it missed this join
     const bobInbox: unknown[] = []
-    bob.listen((data, fromId) => bobInbox.push([data, fromId]))
+    bob.listen((data, from) => bobInbox.push([data, from?.id]))
 
     // b's local view lags; the KV member record is authoritative.
-    await (b as ServerRoom)._sendDm(alice.id, bob.id, 'catch-up')
+    await (b as ServerRoom)._sendDm(alice.id, bob.id, 'catch-up', null)
 
     expect(bobInbox).toEqual([['catch-up', alice.id]])
   })
@@ -433,18 +455,18 @@ describe('room-authored messages', () => {
     await expect(Room.announce('gone', 'x')).rejects.toThrow('Room not found: gone')
   })
 
-  it('Room.send() whispers to one participant with an empty fromId', async () => {
+  it('Room.send() whispers to one participant — from is null (room-authored)', async () => {
     const lobby = await Room.create('automod')
     const alice = await lobby.join({ name: 'Alice' })
     const bob = await lobby.join({ name: 'Bob' })
     const aliceInbox: unknown[] = []
     const bobInbox: unknown[] = []
-    alice.listen((data, fromId) => aliceInbox.push([data, fromId]))
+    alice.listen((data, from) => aliceInbox.push([data, from]))
     bob.listen((data) => bobInbox.push(data))
 
     await Room.send('automod', alice.id, { warning: 'watch the language' })
 
-    expect(aliceInbox).toEqual([[{ warning: 'watch the language' }, '']]) // '' = server-authored
+    expect(aliceInbox).toEqual([[{ warning: 'watch the language' }, null]]) // null = room-authored
     expect(bobInbox).toEqual([])
     await expect(Room.send('automod', crypto.randomUUID(), 'x')).rejects.toThrow('Participant not found')
   })
@@ -594,7 +616,7 @@ describe('room stub channel', () => {
     const { serverRoom, stub, peer } = await createServedRoom('dm-stub-send')
     const target = await serverRoom.join({ name: 'Srv' })
     const inbox: unknown[] = []
-    target.listen((data, from) => inbox.push([data, from]))
+    target.listen((data, from) => inbox.push([data, from?.id]))
     const { id } = await joinViaStub(stub, peer, 1)
 
     await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-dm', id, to: target.id, data: 'hi' }), 2)
@@ -729,9 +751,9 @@ describe('ClientRoom', () => {
     expect(fake.sent).toContainEqual({ __r: 'req-dm', id: memberId, to: peer, data: 'psst' })
     expect(fake.sent).toContainEqual({ __r: 'req-join', meta: {}, selfDelivery: false })
 
-    fake.emit({ __r: 'dm', to: memberId, from: peer, data: 'reply' })
+    fake.emit({ __r: 'dm', to: memberId, from: peer, fromMeta: { name: 'Peer' }, data: 'reply' })
     fake.emit({ __r: 'dm', to: crypto.randomUUID(), from: peer, data: 'not-mine' })
-    expect(inbox).toEqual([['reply', peer]])
+    expect(inbox).toEqual([['reply', { id: peer, meta: { name: 'Peer' } }]]) // snapshot sender — peer isn't in the local view
   })
 
   it('applies leave/p-meta/update/closed events to state and local participants', async () => {

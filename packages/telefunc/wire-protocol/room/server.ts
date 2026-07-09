@@ -53,6 +53,8 @@ import type {
   RoomInfo,
   RoomMeta,
   RoomOptions,
+  SendGuard,
+  Sender,
 } from './types.js'
 assertIsNotBrowser()
 
@@ -82,7 +84,7 @@ type RoomStatic = {
   removeParticipant(id: string, participantId: string): Promise<void>
   /** Publish a room-authored message — no sender, delivered to `onAnnounce()` (e.g. system notices). */
   announce(id: string, data: unknown): Promise<void>
-  /** Send a server-authored private message to one participant — arrives on `listen()` with an empty `fromId`. */
+  /** Send a server-authored private message to one participant — arrives on `listen()` with `from: null`. */
   send(id: string, participantId: string, data: unknown): Promise<void>
 }
 
@@ -190,7 +192,7 @@ async function sendToParticipant(id: string, participantId: string, data: unknow
   }
   // An empty `from` marks the message as server-authored — clients can't spoof it, their
   // DMs are validated against the members joined through their own stub.
-  const envelope: RoomDmEnvelope = { __r: 'dm', to: participantId, from: '', data }
+  const envelope: RoomDmEnvelope = { __r: 'dm', to: participantId, from: '', fromMeta: null, data }
   await getBroadcastAdapter().publish(roomDmKey(id, participantId), stringify(envelope))
 }
 
@@ -268,10 +270,10 @@ class ServerRoom implements Room {
   }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
-    const selfDelivery = normalizeJoinOptions(meta, options)
+    const { selfDelivery, onSend } = normalizeJoinOptions(meta, options)
     let participant!: ServerLocalParticipant
     await this._admitMember(meta, (id, joinedAt) => {
-      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery)
+      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, onSend)
       this._localParticipants.set(id, participant)
     })
     return participant
@@ -387,16 +389,26 @@ class ServerRoom implements Room {
   }
 
   /** @internal — send a private message: published on the target's inbox key, which only
-   *  the target's owning node subscribes to (see `_onDm`). */
-  async _sendDm(from: string, to: string, data: unknown): Promise<void> {
+   *  the target's owning node subscribes to (see `_onDm`). The sender's verified meta rides
+   *  the envelope so every receiver can surface a rich sender. */
+  async _sendDm(from: string, to: string, data: unknown, guard: SendGuard | null): Promise<void> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
-    // The local view lags while unobserved (and briefly right after the observe transition,
-    // until the KV resync lands) — consult the authoritative record before rejecting.
-    if (!this._state.getRemote(to) && (await getRoomKV().get(roomMemberKvKey(this.id, to))) === null) {
-      throw new Error(`Participant not found: ${to}`)
-    }
-    const envelope: RoomDmEnvelope = { __r: 'dm', to, from, data }
+    const target = await this._resolveMember(to)
+    if (!target) throw new Error(`Participant not found: ${to}`)
+    if (guard) await guard(target, data)
+    const fromMeta = this._state.getRemote(from)?.meta ?? this._localParticipants.get(from)?.meta ?? {}
+    const envelope: RoomDmEnvelope = { __r: 'dm', to, from, fromMeta, data }
     await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+  }
+
+  /** The member's live view — falling back to the authoritative KV record, since the local
+   *  view lags while unobserved (and briefly after the observe transition, until the KV
+   *  resync lands). */
+  private async _resolveMember(id: string): Promise<Sender | null> {
+    const remote = this._state.getRemote(id)
+    if (remote) return remote
+    const raw = await getRoomKV().get(roomMemberKvKey(this.id, id))
+    return raw === null ? null : { id, meta: (parse(raw) as RoomMemberRecord).meta }
   }
 
   private async _assertOpen(kv: RoomKV): Promise<void> {
@@ -468,7 +480,7 @@ class ServerRoom implements Room {
     const dm = envelope as RoomDmEnvelope
     const local = this._localParticipants.get(dm.to)
     if (local) {
-      local._deliverMessage(dm.from, dm.data)
+      local._deliverMessage(dm.from, dm.fromMeta, dm.data)
       return
     }
     const wireText = encodePublishText(serialized, rawInfo)
@@ -563,7 +575,7 @@ class ServerRoom implements Room {
           return { ok: true }
         case 'req-dm':
           this._assertStubMember(stub, req.id)
-          await this._sendDm(req.id, req.to, req.data)
+          await this._sendDm(req.id, req.to, req.data, null)
           return { ok: true }
         case 'sub-binary': {
           const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
@@ -751,11 +763,20 @@ class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
   /** @internal */ readonly _room: ServerRoom
   /** @internal */ readonly _joinedAt: number
+  private readonly _onSend: SendGuard | null
 
-  constructor(serverRoom: ServerRoom, id: string, meta: ParticipantMeta, joinedAt: number, selfDelivery: boolean) {
+  constructor(
+    serverRoom: ServerRoom,
+    id: string,
+    meta: ParticipantMeta,
+    joinedAt: number,
+    selfDelivery: boolean,
+    onSend: SendGuard | null,
+  ) {
     super(id, meta, selfDelivery)
     this._room = serverRoom
     this._joinedAt = joinedAt
+    this._onSend = onSend
   }
 
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
@@ -779,9 +800,9 @@ class ServerLocalParticipant extends ParticipantBase {
     return this._room._publishData(this.id, { binary: framed })
   }
 
-  async send(to: string | RemoteParticipant, data: unknown): Promise<void> {
+  async send(to: string | Sender, data: unknown): Promise<void> {
     this._assertActive()
-    await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
+    await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data, this._onSend)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -795,6 +816,10 @@ class ServerLocalParticipant extends ParticipantBase {
     this._left = true
     await this._room._removeMember(this.id)
     this._onLeft() // fires even when the room wasn't observing (no echo applied)
+  }
+
+  protected override _resolveSender(id: string): Sender | null {
+    return this._room.getParticipant(id)
   }
 
   protected _reportError(err: unknown): void {

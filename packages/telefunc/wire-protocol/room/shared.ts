@@ -42,7 +42,15 @@ export type {
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
-import type { JoinOptions, LocalParticipant, ParticipantMeta, RemoteParticipant, RoomMeta } from './types.js'
+import type {
+  JoinOptions,
+  LocalParticipant,
+  ParticipantMeta,
+  RemoteParticipant,
+  RoomMeta,
+  SendGuard,
+  Sender,
+} from './types.js'
 
 // ---------------------------------------------------------------------------
 // Keys & records
@@ -158,7 +166,7 @@ type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
 /** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
  *  privacy: only the target's owning node subscribes, only its holder receives the relay.
  *  `to` lets a holder of several participants route the message to the right one. */
-type RoomDmEnvelope = { __r: 'dm'; to: string; from: string; data: unknown }
+type RoomDmEnvelope = { __r: 'dm'; to: string; from: string; fromMeta: ParticipantMeta | null; data: unknown }
 
 /** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
  *  `sub-binary` declares which members' binary streams the client wants relayed (full replace). */
@@ -180,7 +188,7 @@ type ParticipantStubRequest =
 type ParticipantStubNotice =
   | { __r: 'left' }
   | { __r: 'p-meta'; meta: ParticipantMeta }
-  | { __r: 'dm'; from: string; data: unknown }
+  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; data: unknown }
 
 /** Which members' binary streams a holder wants — `all` (room-level listeners) or a specific set. */
 type BinaryWants = { all: boolean; members: string[] }
@@ -194,11 +202,18 @@ function hasRoomTag(value: unknown): value is { __r: string } {
   return isObject(value) && typeof value.__r === 'string'
 }
 
-/** Validates `join(meta, options)` arguments; returns the resolved `selfDelivery`. */
-function normalizeJoinOptions(meta: unknown, options: JoinOptions | undefined): boolean {
+/** Validates `join(meta, options)` arguments; returns the resolved options. */
+function normalizeJoinOptions(
+  meta: unknown,
+  options: JoinOptions | undefined,
+): { selfDelivery: boolean; onSend: SendGuard | null } {
   assertUsage(isObject(meta), 'join() meta should be an object')
   assertUsage(options === undefined || isObject(options), 'join() options should be an object')
-  return options?.selfDelivery !== false
+  assertUsage(
+    options?.onSend === undefined || typeof options.onSend === 'function',
+    'join() options.onSend should be a function',
+  )
+  return { selfDelivery: options?.selfDelivery !== false, onSend: options?.onSend ?? null }
 }
 
 /** Event ID for `p-meta`/`update` envelopes — only needs to make the origin's own echo
@@ -617,7 +632,7 @@ abstract class ParticipantBase implements LocalParticipant {
   protected _left = false
   private _leftFired = false
   private _leaveCbs: Array<() => void> = []
-  private readonly _messageCbs: Array<(data: unknown, fromId: string) => void> = []
+  private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => void> = []
 
   constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean) {
     this.id = id
@@ -631,13 +646,13 @@ abstract class ParticipantBase implements LocalParticipant {
 
   abstract publish(data: unknown): Promise<ChannelPublishAck>
   abstract publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
-  abstract send(to: string | RemoteParticipant, data: unknown): Promise<void>
+  abstract send(to: string | Sender, data: unknown): Promise<void>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
   /** A user callback threw — each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
 
-  listen(callback: (data: unknown, fromId: string) => void): () => void {
+  listen(callback: (data: unknown, from: Sender | null) => void): () => void {
     this._messageCbs.push(callback)
     return () => {
       const i = this._messageCbs.indexOf(callback)
@@ -645,15 +660,23 @@ abstract class ParticipantBase implements LocalParticipant {
     }
   }
 
-  /** @internal — a direct message arrived on this member's inbox. */
-  _deliverMessage(fromId: string, data: unknown): void {
+  /** @internal — a direct message arrived on this member's inbox. `from`/`fromMeta` come from
+   *  the wire envelope; `resolve` upgrades to the live `RemoteParticipant` when a room view
+   *  exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
+  _deliverMessage(from: string, fromMeta: ParticipantMeta | null, data: unknown): void {
+    const sender = from === '' ? null : (this._resolveSender(from) ?? { id: from, meta: fromMeta ?? {} })
     for (const cb of [...this._messageCbs]) {
       try {
-        cb(data, fromId)
+        cb(data, sender)
       } catch (err) {
         this._reportError(err)
       }
     }
+  }
+
+  /** The live room-backed sender, when this flavor has a room view. */
+  protected _resolveSender(_id: string): Sender | null {
+    return null
   }
 
   onLeave(callback: () => void): () => void {

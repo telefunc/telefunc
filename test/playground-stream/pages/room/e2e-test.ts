@@ -26,7 +26,7 @@ type BinaryResult = {
 
 type AdminResult = {
   announcements: string[]
-  system: Array<{ data: string; fromId: string }>
+  system: Array<{ data: string; fromRoom: boolean }>
   kicked: boolean
   closed: boolean
   isClosed: boolean
@@ -95,9 +95,9 @@ function testRoom() {
     await autoRetry(async () => {
       const result = await getResult<AdminResult>('#room-result')
 
-      // Room-authored: Room.announce() landed on onAnnounce, Room.send() on listen with fromId ''.
+      // Room-authored: Room.announce() landed on onAnnounce, Room.send() on listen with from null.
       expect(result.announcements).deep.equal(['maintenance'])
-      expect(result.system).deep.equal([{ data: 'welcome', fromId: '' }])
+      expect(result.system).deep.equal([{ data: 'welcome', fromRoom: true }])
 
       expect(result.kicked).toBe(true) // LocalParticipant.onLeave fired on removeParticipant()
       expect(result.closed).toBe(true) // Room.onClose fired on close()

@@ -87,7 +87,7 @@ function Room() {
           // Privacy: it must reach Bob's inbox and never the room stream.
           const ally = await observer.join({ name: 'Ally' })
           const dms: Array<{ data: unknown; fromAlly: boolean }> = []
-          me.listen((data, from) => dms.push({ data, fromAlly: from === ally.id }))
+          me.listen((data, from) => dms.push({ data, fromAlly: from?.id === ally.id }))
           await ally.send(me.id, 'psst')
 
           await pollUntil(() => {
@@ -156,8 +156,8 @@ function Room() {
           // Room-authored messages: a broadcast to everyone, and a whisper (fromId === '').
           const announcements: unknown[] = []
           lobby.onAnnounce((data) => announcements.push(data))
-          const system: Array<{ data: unknown; fromId: string }> = []
-          me.listen((data, fromId) => system.push({ data, fromId }))
+          const system: Array<{ data: unknown; fromRoom: boolean }> = []
+          me.listen((data, from) => system.push({ data, fromRoom: from === null }))
 
           let kicked = false
           let closed = false

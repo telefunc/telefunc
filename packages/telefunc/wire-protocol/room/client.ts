@@ -1,6 +1,6 @@
 export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant }
 
-import { assert } from '../../utils/assert.js'
+import { assert, assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isObject } from '../../utils/isObject.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
@@ -25,7 +25,15 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './shared.js'
-import type { JoinOptions, LocalParticipant, ParticipantMeta, RemoteParticipant, Room, RoomMeta } from './types.js'
+import type {
+  JoinOptions,
+  LocalParticipant,
+  ParticipantMeta,
+  RemoteParticipant,
+  Room,
+  RoomMeta,
+  Sender,
+} from './types.js'
 
 // ---------------------------------------------------------------------------
 // ClientRoom
@@ -88,7 +96,8 @@ class ClientRoom implements Room {
   }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
-    const selfDelivery = normalizeJoinOptions(meta, options)
+    const { selfDelivery, onSend } = normalizeJoinOptions(meta, options)
+    assertUsage(onSend === null, 'join() options.onSend requires a server-side join — see https://telefunc.com/room')
     const ack = (await this._request({ __r: 'req-join', meta, selfDelivery })) as ReqJoinAck
     if (!ack.ok) throw new Error(ack.err)
     const participant = new ClientRoomParticipant(this, ack.id, meta, selfDelivery)
@@ -203,7 +212,7 @@ class ClientRoom implements Room {
         return
       case 'dm':
         // Relayed from this member's private inbox — only its own stub ever receives it.
-        this._localParticipants.get(event.to)?._deliverMessage(event.from, event.data)
+        this._localParticipants.get(event.to)?._deliverMessage(event.from, event.fromMeta, event.data)
     }
   }
 
@@ -284,6 +293,10 @@ class ClientRoomParticipant extends ClientParticipantBase {
     this._room = clientRoom
   }
 
+  protected override _resolveSender(id: string): Sender | null {
+    return this._room.getParticipant(id)
+  }
+
   async publish(data: unknown): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._publishData(this.id, data)
@@ -294,7 +307,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return await this._room._publishBinaryData(frameWithMemberId(this.id, data))
   }
 
-  async send(to: string | RemoteParticipant, data: unknown): Promise<void> {
+  async send(to: string | Sender, data: unknown): Promise<void> {
     this._assertActive()
     const toId = typeof to === 'string' ? to : to.id
     unwrapOkAck(await this._room._request({ __r: 'req-dm', id: this.id, to: toId, data }))
@@ -331,7 +344,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       if (!hasRoomTag(notice)) return
       const msg = notice as ParticipantStubNotice
       if (msg.__r === 'p-meta') this._meta = msg.meta
-      else if (msg.__r === 'dm') this._deliverMessage(msg.from, msg.data)
+      else if (msg.__r === 'dm') this._deliverMessage(msg.from, msg.fromMeta, msg.data)
       else this._onLeft()
     })
     channel.onClose(() => this._onLeft())
@@ -347,7 +360,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return unwrapPublishAck(await this._channel.sendBinary(frameWithMemberId(this.id, data), { ack: true }))
   }
 
-  async send(to: string | RemoteParticipant, data: unknown): Promise<void> {
+  async send(to: string | Sender, data: unknown): Promise<void> {
     this._assertActive()
     unwrapOkAck(await this._request({ __r: 'req-dm', to: typeof to === 'string' ? to : to.id, data }))
   }

@@ -8,6 +8,7 @@ import type { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { ACK_STATUS } from '../shared-ws.js'
 import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from './server.js'
+import type { ParticipantMeta } from './types.js'
 import {
   errorMessage,
   hasRoomTag,
@@ -129,11 +130,13 @@ function bindParticipantStubChannel(
   // Keep the client-side `participant.meta` fresh. Serializing a participant that already left
   // is possible (leave raced the response) — then there's no remote view left to observe.
   const remote = participant._room.getParticipant(participant.id)
-  const unlistenMeta = remote?.onUpdate((meta) => void channel.send({ __r: 'p-meta', meta }).catch(() => {}))
+  const unlistenMeta = remote?.onUpdate(
+    (meta: ParticipantMeta) => void channel.send({ __r: 'p-meta', meta }).catch(() => {}),
+  )
 
   // The participant's holder is the client — forward inbox deliveries to it.
   const unlistenDm = participant.listen((data, from) => {
-    void channel.send({ __r: 'dm', from, data }).catch(() => {})
+    void channel.send({ __r: 'dm', from: from?.id ?? '', fromMeta: from?.meta ?? null, data }).catch(() => {})
   })
 
   const unlistenLeave = participant.onLeave(() => {
