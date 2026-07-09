@@ -116,7 +116,10 @@ services:
   playground-a: &playground
     image: node:24-alpine
     working_dir: /repo/test/playground-stream
-    command: node dist/nested/server/index.mjs
+    # `--expose-gc` powers the `/api/gc` endpoint (see `+server.ts`) that the close/GC e2e test
+    # uses to make GC-driven cleanup deterministic. The `dev` and `preview` npm scripts already
+    # pass it; the docker suite must too, otherwise `/api/gc` 500s and the GC test flakes.
+    command: node --expose-gc dist/nested/server/index.mjs
     volumes:
       - ../..:/repo
     environment:
