@@ -118,8 +118,8 @@ export async function onJoinLobby(name: string) {
 | Method | Description |
 |---|---|
 | `join(meta?, options?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. Options: `{ selfDelivery?, onSend? }`. |
-| `getParticipants()` | All current participants (<Link href="#remoteparticipant">`RemoteParticipant[]`</Link>). |
-| `getParticipant(id)` | A single participant, or `null`. |
+| `getParticipants()` | All current participants — `Promise<RemoteParticipant[]>` (resyncs an unobserved server room). |
+| `getParticipant(id)` | A single participant, or `null` — synchronous, reads the live local view. |
 | `subscribe(cb)` | Receive all participant messages: `(data, info, from)`. Returns an unsubscribe function. |
 | `subscribeBinary(cb)` | Same, for binary messages. |
 | `onJoin(cb)` / `onLeave(cb)` | A participant joined / left (or was removed). |
