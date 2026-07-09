@@ -28,6 +28,7 @@ export type {
   RoomEnvelope,
   RoomCtrlEnvelope,
   RoomDataEnvelope,
+  RoomDataPublish,
   RoomAnnounceEnvelope,
   RoomDmEnvelope,
   RoomStubRequest,
@@ -147,8 +148,14 @@ type RoomCtrlEnvelope =
   | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; eid: string }
   | { __r: 'closed' }
 
-/** A participant's message. Published on the room's main key (shared mode) or the member's own key (isolated mode). */
-type RoomDataEnvelope = { __r: 'data'; from: string; data: unknown }
+/** A participant's message. Published on the room's main key (shared mode) or the member's own key
+ *  (isolated mode). `fromMeta` is the sender's meta as verified by the sender's own node — never
+ *  client-supplied — so any receiver can surface a correct sender even before its roster view
+ *  catches up (see `RoomState.applyData`). */
+type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; data: unknown }
+
+/** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
+type RoomDataPublish = { __r: 'data'; from: string; data: unknown }
 
 /** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
@@ -309,11 +316,8 @@ class RoomState {
   private readonly _onListenersChanged: () => void
   private readonly _onCallbackError: (err: unknown) => void
 
-  private readonly _roomDataCbs: Array<(data: unknown, info: ChannelPublishInfo, from: RemoteParticipant) => unknown> =
-    []
-  private readonly _roomBinaryCbs: Array<
-    (data: Uint8Array, info: ChannelPublishInfo, from: RemoteParticipant) => unknown
-  > = []
+  private readonly _roomDataCbs: Array<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> = []
+  private readonly _roomBinaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown> = []
   private readonly _joinCbs: Array<(member: RemoteParticipant) => void> = []
   private readonly _leaveCbs: Array<(member: RemoteParticipant) => void> = []
   private readonly _updateCbs: Array<(meta: RoomMeta, prev: RoomMeta) => void> = []
@@ -392,10 +396,10 @@ class RoomState {
 
   // ── Listener registration (all return an unlisten function) ──
 
-  subscribe(cb: (data: unknown, info: ChannelPublishInfo, from: RemoteParticipant) => unknown): () => void {
+  subscribe(cb: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._register(this._roomDataCbs, cb, 'data')
   }
-  subscribeBinary(cb: (data: Uint8Array, info: ChannelPublishInfo, from: RemoteParticipant) => unknown): () => void {
+  subscribeBinary(cb: (data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._register(this._roomBinaryCbs, cb, 'binary')
   }
   onJoin(cb: (member: RemoteParticipant) => void): () => void {
@@ -484,21 +488,24 @@ class RoomState {
     this._fireAll(this._announceCbs, data, info)
   }
 
-  applyData(from: string, data: unknown, info: ChannelPublishInfo, suppress: boolean): void {
+  /** Messages never wait on the roster: `from` is the live `RemoteParticipant` when this view
+   *  knows the sender, else the `{ id, meta }` snapshot the sender's node stamped into the
+   *  envelope. Control and data travel on separate lanes, so a message can beat its sender's
+   *  join — identity is in the message, delivery is immediate, and nothing drops. */
+  applyData(from: string, fromMeta: ParticipantMeta, data: unknown, info: ChannelPublishInfo, suppress: boolean): void {
+    if (suppress) return
     const entry = this._members.get(from)
-    // Unknown sender: joins are always applied before that member's data can arrive (members
-    // are announced before their first publish, delivery is ordered per key, and isolated-mode
-    // member keys are only subscribed once the join is known) — this is noise, not a race.
-    if (!entry || suppress) return
-    this._fireAll(this._roomDataCbs, data, info, entry.remote)
-    this._fireAll(entry.dataCbs, data, info)
+    this._fireAll(this._roomDataCbs, data, info, entry?.remote ?? { id: from, meta: fromMeta })
+    if (entry) this._fireAll(entry.dataCbs, data, info)
   }
 
+  /** Binary frames carry only the sender's ID — a pre-join frame surfaces as `{ id, meta: {} }`
+   *  (rare: binary pipelines attach per member via `onJoin`, so the roster is normally ahead). */
   applyBinary(from: string, payload: Uint8Array, info: ChannelPublishInfo, suppress: boolean): void {
+    if (suppress) return
     const entry = this._members.get(from)
-    if (!entry || suppress) return // see applyData
-    this._fireAll(this._roomBinaryCbs, payload, info, entry.remote)
-    this._fireAll(entry.binaryCbs, payload, info)
+    this._fireAll(this._roomBinaryCbs, payload, info, entry?.remote ?? { id: from, meta: {} })
+    if (entry) this._fireAll(entry.binaryCbs, payload, info)
   }
 
   /** Silent resync against an authoritative membership snapshot. Only for unobserved rooms —

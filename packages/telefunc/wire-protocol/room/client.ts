@@ -20,6 +20,7 @@ import {
   type ReqJoinAck,
   type ReqOkAck,
   type ReqPublishAck,
+  type RoomDataPublish,
   type RoomDmEnvelope,
   type RoomEnvelope,
   type RoomSnapshotMetadata,
@@ -113,12 +114,10 @@ class ClientRoom implements Room {
     return this._state.getRemote(id)
   }
 
-  subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: RemoteParticipant) => unknown): () => void {
+  subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._state.subscribe(callback)
   }
-  subscribeBinary(
-    callback: (data: Uint8Array, info: ChannelPublishInfo, from: RemoteParticipant) => unknown,
-  ): () => void {
+  subscribeBinary(callback: (data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._state.subscribeBinary(callback)
   }
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
@@ -152,9 +151,10 @@ class ClientRoom implements Room {
     return ack as ReqJoinAck | ReqOkAck
   }
 
-  /** @internal */
+  /** @internal — the envelope sent upward is a claim: the server validates `from` against this
+   *  stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
   async _publishData(from: string, data: unknown): Promise<ChannelPublishAck> {
-    return await this._stub.publish({ __r: 'data', from, data } satisfies RoomEnvelope)
+    return await this._stub.publish({ __r: 'data', from, data } satisfies RoomDataPublish)
   }
 
   /** @internal */
@@ -177,6 +177,7 @@ class ClientRoom implements Room {
       case 'data':
         this._state.applyData(
           event.from,
+          event.fromMeta,
           event.data,
           makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
           isSuppressed(this.id, event.from),

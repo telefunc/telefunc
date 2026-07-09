@@ -322,6 +322,23 @@ describe('data pub/sub', () => {
     expect(() => me._publishFramed(frameWithMemberId(me.id, new Uint8Array([1])))).toThrow('Participant has left')
   })
 
+  it("a message racing ahead of its sender's join delivers with the envelope's verified identity", async () => {
+    const room = await Room.create('race')
+    const received: Array<{ data: unknown; id: string; meta: unknown }> = []
+    room.subscribe((data, _info, from) => received.push({ data, id: from.id, meta: from.meta }))
+
+    // Control and data travel on separate lanes, so a message can beat its sender's join —
+    // the envelope's node-stamped identity makes delivery immediate and correct anyway.
+    const ghost = crypto.randomUUID()
+    await getBroadcastAdapter().publish(
+      roomMainKey('race'),
+      stringify({ __r: 'data', from: ghost, fromMeta: { name: 'Zoe' }, data: 'first!' }),
+    )
+
+    expect(received).toEqual([{ data: 'first!', id: ghost, meta: { name: 'Zoe' } }])
+    expect(room.getParticipant(ghost)).toBe(null) // presence stays event-driven — no ghost member
+  })
+
   it('binary round-trips with the 16-byte member ID frame, preserving high-bit bytes', async () => {
     const a = await Room.create('bin')
     const b = await Room.get('bin')
@@ -592,6 +609,21 @@ describe('room stub channel', () => {
     expect(acks.find((f) => f.ackedSeq === 2).status).toBe(ACK_STATUS.OK)
     expect(acks.find((f) => f.ackedSeq === 3).status).toBe(ACK_STATUS.ERROR)
     expect(serverRoom.count).toBe(1)
+  })
+
+  it('a client-forged `fromMeta` never reaches the room — the server stamps the verified one', async () => {
+    const { stub, peer } = await createServedRoom('stamp')
+    const observer = await Room.get('stamp')
+    const metas: unknown[] = []
+    observer.subscribe((_data, _info, from) => metas.push(from.meta))
+    const { id } = await joinViaStub(stub, peer, 1) // joins as { name: 'Remote' }
+
+    await stub._onPeerPublishAckReqMessage(
+      stringify({ __r: 'data', from: id, fromMeta: { name: 'Admin' }, data: 'hi' }),
+      2,
+    )
+
+    expect(metas).toEqual([{ name: 'Remote' }])
   })
 
   it("binary frames are relayed member-selectively, per the client's declared wants", async () => {

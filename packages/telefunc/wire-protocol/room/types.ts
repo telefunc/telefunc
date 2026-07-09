@@ -22,8 +22,11 @@ type RoomMeta = Record<string, unknown>
 /** Participant metadata (e.g. name, score). Must be serializable. */
 type ParticipantMeta = Record<string, unknown>
 
-/** A private message's verified sender: the live `RemoteParticipant` when the holder observes
- *  the room, or an `{ id, meta }` snapshot otherwise (e.g. a standalone participant). */
+/** A message's verified sender — one concept across every lane (`subscribe()`, `listen()`):
+ *  the live `RemoteParticipant` whenever the holder's room view knows the sender, or an
+ *  `{ id, meta }` snapshot stamped by the sender's own node otherwise (a standalone participant,
+ *  or a message racing ahead of its sender's join). `room.getParticipant(from.id)` upgrades a
+ *  snapshot to the live handle once the roster catches up. */
 type Sender = { readonly id: string; readonly meta: ParticipantMeta }
 
 /** Guards private messages (`Room.get(id, { onSend })`): called before every `send()` from a
@@ -59,9 +62,9 @@ type RoomInfo = {
   readonly isFull: boolean
 }
 
-/** Receives all participant messages, with sender identity. */
-type RoomListener = (data: unknown, info: ChannelPublishInfo, from: RemoteParticipant) => unknown
-type RoomBinaryListener = (data: Uint8Array, info: ChannelPublishInfo, from: RemoteParticipant) => unknown
+/** Receives all participant messages, with the verified sender (see `Sender`). */
+type RoomListener = (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown
+type RoomBinaryListener = (data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown
 /** Receives a single participant's messages. */
 type ParticipantListener = (data: unknown, info: ChannelPublishInfo) => unknown
 type ParticipantBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown
