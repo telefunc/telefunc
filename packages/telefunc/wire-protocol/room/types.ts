@@ -44,8 +44,8 @@ type RoomOptions = {
 }
 
 type JoinOptions = {
-  /** Whether your own publishes are delivered back to your side's room (default: `true`).
-   *  Turn off for e.g. video, where you don't want your own frames back. */
+  /** Whether the messages you publish are delivered back to the room object on your side
+   *  (default: `true`). Turn off e.g. for video, where you don't want your own frames back. */
   selfDelivery?: boolean
 }
 
@@ -116,7 +116,7 @@ type Room = {
 type LocalParticipant = {
   readonly id: string
   readonly meta: ParticipantMeta
-  /** Whether your own publishes are delivered back to your side's room. Set at `join()`. */
+  /** Whether the messages you publish are delivered back to the room object on your side. Set at `join()`. */
   readonly selfDelivery: boolean
 
   /** Publish a message to the whole room. */

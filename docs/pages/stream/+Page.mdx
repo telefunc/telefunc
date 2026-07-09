@@ -435,10 +435,10 @@ channel.listen((metrics) => updateCharts(metrics))
 
 ## Primitive: `Room` {#room}
 
-For multi-party use cases — chat, game lobbies, video calls, collaboration — where *who is connected* matters, use a room, see:
+For multi-party use cases where *who is connected* matters — chat, game lobbies, video calls, collaboration — you can use a room, see:
 - <Link href="/room" />
 
-> Built on top of channels: a `Room` adds presence, participant metadata, private messages, and admin controls to keyed pub/sub.
+> Built on top of channels: a `Room` adds presence, participant metadata, private messages, and admin controls.
 
 ```ts
 // Lobby.telefunc.ts
@@ -452,7 +452,7 @@ export async function onGetLobby() {
 ```
 
 ```ts
-// Lobby.jsx
+// Lobby.tsx
 // Environment: client
 
 import { onGetLobby } from './Lobby.telefunc'
