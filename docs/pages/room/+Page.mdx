@@ -17,14 +17,15 @@ import { TelefuncStreamBeta } from '../../components'
 | Join/leave events | - | - | ✓ |
 | Participant & room metadata | - | - | ✓ |
 | Admin controls (kick, close) | - | - | ✓ |
-| Per-member subscribe | - | - | ✓ |
+| Per-member subscriptions | - | - | ✓ |
+| Private messages (member-to-member) | - | - | ✓ |
 
 
 ## The model
 
 Three objects:
 
-- **`Room`** — the shared space. Created and managed on the server (<Link href="#rooms">`Room.*` statics</Link>), observed by whoever holds it (server or client): live membership, events, message streams.
+- **`Room`** — the shared space. Created and managed on the server (<Link href="#rooms">`Room.*` statics</Link>); whoever holds it (server or client) can observe live membership, events, and message streams.
 - **`LocalParticipant`** — *you*, returned by `join()`. Your identity in the room: you publish, whisper, and update your metadata through it.
 - **`RemoteParticipant`** — *everyone else*, as seen through a room: subscribe to one member's messages, watch their metadata, notice when they leave.
 
@@ -36,7 +37,7 @@ And three message lanes:
 | <Link href="#private-messages">Private</Link> | `me.send(to, data)` | `me.listen(cb)` | Whispers, invites, game moves |
 | <Link href="#room-authored-messages">Room-authored</Link> | `Room.announce()`, `Room.send()` | `room.onAnnounce(cb)`, `me.listen(cb)` | System notices, moderation |
 
-One type each, same on server and client — a `Room` or `LocalParticipant` can be returned from a telefunction as-is, no `.client` variant. Everything below works identically on both sides unless marked otherwise.
+The three objects are one type each, same on server and client — a `Room` or `LocalParticipant` can be returned from a telefunction as-is, no <Link href="/channel#new-channel">`.client`</Link> variant. Everything below works identically on both sides unless marked otherwise.
 
 
 ## Quick start
@@ -71,12 +72,12 @@ const me = await lobby.join({ name: 'Alice' })
 await me.publish({ text: 'hello' })
 ```
 
-> `Room` is one identifier with two meanings, like the built-in `Date`: the statics (`Room.get()`) and the instance type (`const lobby: Room`).
+> Like the built-in `Date`, `Room` is both a value and a type: the statics (`Room.get()`) and the instance type (`const lobby: Room`).
 
 
 ## Rooms
 
-`Room.*` statics are the server-side entry point — like <Link href="/channel#broadcast">`Broadcast.*`</Link>. Clients get a room by receiving it from a telefunction.
+`Room.*` statics are the server-side entry point — like <Link href="/channel#broadcast">`Broadcast.*`</Link>. Clients get a room when a telefunction returns it.
 
 | Method | Returns | Throws |
 |---|---|---|
@@ -101,7 +102,7 @@ type RoomOptions = {
 ```
 
 - `Room.join(id, meta?, options?)` is a shorthand for `(await Room.get(id)).join(meta, options)` — for telefunctions that only need the participant, not the room.
-- `Room.update()` does a **full replace**: omitted options reset to their defaults (e.g. omitting `size` resets it to `Infinity`). Merging metadata is your job.
+- `Room.update()` does a **full replace**: omitted options reset to their defaults (e.g. omitting `size` resets it to `Infinity`) — except `isolated`, which is fixed at creation. Merging metadata is your job.
 - `Room.close()` disconnects all participants, fires `onClose()` on every observer, and removes the room. Afterwards `Room.get(id)` throws.
 - `size` is a **hint**: Telefunc tracks it (`count`, `isFull`, `onFull()`) but never rejects a join — you decide:
 
@@ -113,28 +114,28 @@ export async function onJoinLobby(name: string) {
 }
 ```
 
-### Room instance
+### `Room` instance
 
 | Method | Description |
 |---|---|
-| `join(meta?, options?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. Options: `{ selfDelivery?: boolean }`. |
-| `getParticipants()` | All current participants — `Promise<RemoteParticipant[]>` (resyncs an unobserved server room). |
-| `getParticipant(id)` | A single participant, or `null` — synchronous, reads the live local view. |
+| `join(meta?, options?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. Options: `{ selfDelivery?: boolean }` — see <Link href="#localparticipant">`selfDelivery`</Link>. |
+| `getParticipants()` | All current participants — `Promise<RemoteParticipant[]>` (on the server, resyncs an unobserved room first — see the note below). |
+| `getParticipant(id)` | A single participant, or `null` if not found — synchronous, reads the live local view. |
 | `subscribe(cb)` | Receive all participant messages: `(data, info, from)`. Returns an unsubscribe function. |
 | `subscribeBinary(cb)` | Same, for binary messages. |
-| `onJoin(cb)` / `onLeave(cb)` | A participant joined / left (or was removed). |
+| `onJoin(cb)` / `onLeave(cb)` | A participant joined / left (or was removed): `(member)`. |
 | `onUpdate(cb)` | The room was reconfigured via `Room.update()`: `(meta, prev)`. |
-| `onAnnounce(cb)` | A <Link href="#room-authored-messages">room-authored message</Link> arrived (`Room.announce()`): `(data, info)`. |
+| `onAnnounce(cb)` | A <Link href="#room-authored-messages">room-authored announcement</Link> (`Room.announce()`) arrived: `(data, info)`. |
 | `onEmpty(cb)` / `onFull(cb)` | The last participant left / the room reached capacity. |
-| `onClose(cb)` | The room was closed. |
+| `onClose(cb)` | The room was closed — or, on the client, the connection is gone. |
 
 State getters: `id`, `meta`, `size`, `count`, `isEmpty`, `isFull`, `isClosed`.
 
-> Getters reflect the live local view: they're kept fresh by the room's event stream while the room is observed (a listener attached, a participant joined through it, or the room serialized to a client), and are a snapshot otherwise. `getParticipants()` on the server always resyncs an unobserved room.
+> Getters reflect the live local view: while the room is **observed** — a listener is attached, a participant joined through it, or it was serialized to a client — they're kept fresh by the room's event stream; otherwise they're a snapshot from the last sync. On the server, `getParticipants()` always resyncs an unobserved room first, so the list is current.
 
 ### Authorization
 
-Admin operations live on the `Room.*` statics — not on the instance — so a room handed to clients carries no privileged methods. Authorize admin operations in their own telefunctions:
+Admin operations live on the `Room.*` statics — not on the instance — so a room handed to clients carries no privileged methods. Wrap each admin operation in its own telefunction that authorizes the caller:
 
 ```ts
 // RoomAdmin.telefunc.ts
@@ -157,7 +158,7 @@ export async function onKick(roomId: string, participantId: string) {
 
 <Warning>
 
-**Room IDs are capabilities** — a telefunction that returns `await Room.get(roomId)` gives the caller full membership of that room. Derive room IDs from **authorized server-side context**, or verify access before returning the room:
+**Room IDs are capabilities** — a telefunction that returns `await Room.get(roomId)` hands the caller the full room API: join, subscribe to all messages, read the member list. Derive room IDs from **authorized server-side context** (e.g. the user ID from <Link href="/getContext">`getContext()`</Link>), or verify access before returning the room:
 
 ```ts
 export async function onJoinRoom(roomId: string, token: string) {
@@ -176,22 +177,22 @@ See also:
 
 ### `LocalParticipant`
 
-Your own handle, returned by `join()`. Room-wide messages are received on the room and on `RemoteParticipant`; only <Link href="#private-messages">private messages</Link> addressed to you arrive here.
+Your own handle, returned by `join()`. Room-wide messages are received on the room and on `RemoteParticipant`; only <Link href="#private-messages">private messages</Link> addressed to you arrive here (`listen()`).
 
 | Method | Description |
 |---|---|
 | `publish(data)` | Publish a message to the whole room. Returns a receipt (`{ key, seq, timestamp }`). |
 | `publishBinary(data)` | Publish raw binary to the whole room. Returns a receipt. |
 | `send(to, data)` | Send a private message to one participant (or their ID) — nobody else receives it. |
-| `listen(cb)` | Receive private messages addressed to you: `(data, from)` — `from` is the verified sender, `null` for room-authored messages. Returns an unlisten function. |
+| `listen(cb)` | Receive private messages addressed to you: `(data, from)` — `from` is the verified sender, `null` for room-authored messages (`Room.send()`). Returns an unlisten function. |
 | `setMeta(meta)` | Replace your metadata — propagates to all observers in real time. |
 | `leave()` | Leave the room. |
 | `onLeave(cb)` | You left — voluntarily, kicked, room closed, or disconnected. |
 
 Read-only properties: `id`, `meta`, and `selfDelivery`.
 
-- `selfDelivery` (default: `true`, set at `join()`): whether your own publishes are delivered back to your side's room. Turn it off for e.g. video, where you don't want your own frames back: `join({ name }, { selfDelivery: false })`.
-- A participant's membership follows its holder: when the client that received a `LocalParticipant` (or the room it joined through) disconnects, the participant leaves the room.
+- `selfDelivery` (default: `true`, set at `join()`): whether the messages you publish are delivered back to the room object on your side (e.g. your own `room.subscribe()` callback receiving your own messages). Turn it off e.g. for video, where you don't want your own frames back: `join({ name }, { selfDelivery: false })`.
+- A participant's membership follows its holder: when the client holding a `LocalParticipant` (or the room it joined through) disconnects, the participant leaves the room.
 
 ```ts
 // Client
@@ -208,9 +209,9 @@ Another room member, as seen through a room.
 | `subscribe(cb)` | Receive only this member's messages: `(data, info)`. Returns an unsubscribe function. |
 | `subscribeBinary(cb)` | Same, for binary messages. |
 | `onUpdate(cb)` | This member's metadata changed: `(meta, prev)`. |
-| `onLeave(cb)` | This member left the room. |
+| `onLeave(cb)` | This member left the room (or was removed). |
 
-Read-only properties: `id`, `meta`, `joinedAt`.
+Read-only properties: `id`, `meta`, and `joinedAt` (Unix epoch ms).
 
 ```ts
 gameRoom.onJoin((member) => {
@@ -225,7 +226,7 @@ gameRoom.onJoin((member) => {
 
 ### Room-wide messages
 
-**Room-level** — `subscribe()` receives every participant's messages with sender identity. Use it when all messages are processed the same way (chat, notifications):
+**Room-level** — `room.subscribe()` receives every participant's messages, with sender identity. Use it when all messages are processed the same way (chat, notifications):
 
 ```ts
 lobby.subscribe((data, info, from) => {
@@ -233,7 +234,7 @@ lobby.subscribe((data, info, from) => {
 })
 ```
 
-**Per-member** — `member.subscribe()` receives only that member's messages. Use it when each participant needs separate processing (e.g. one decoder per member):
+**Per-member** — `member.subscribe()` receives only that member's messages. Use it when each member's messages need separate processing (e.g. one decoder per member):
 
 ```ts
 lobby.onJoin((member) => {
@@ -243,9 +244,9 @@ lobby.onJoin((member) => {
 })
 ```
 
-Both receive from the same stream — a `publish()` reaches room-level subscribers (with `from`) and that member's subscribers.
+Both receive from the same stream — a member's `publish()` reaches room-level subscribers (with `from`) and that member's subscribers.
 
-> Per-member binary subscriptions also drive **wire delivery**: a client receives a member's binary stream only while it subscribes to that member (or to the whole room). Text isn't filtered: it shares its stream with the control events (join/leave/metadata) that keep every holder's `count`, `getParticipants()`, and events live — and text payloads are the light ones, so filtering them would save little.
+> Per-member binary subscriptions also control **wire delivery**: a client receives a member's binary stream only while it subscribes to that member (or to the whole room). Text is never filtered on the wire: the text stream also carries the control events (join/leave/metadata) that keep every holder's live view current (`count`, `getParticipants()`, event callbacks) — and text payloads are small compared to binary, so filtering them would save little bandwidth.
 
 ### Private messages
 
@@ -264,12 +265,12 @@ lobby.onJoin(async (member) => {
 ```
 
 - `send()` accepts a `RemoteParticipant` or a participant ID. Sending to an unknown or departed participant throws.
-- `from` is the **verified** sender (`{ id, meta }` — the live `RemoteParticipant` whenever your side observes the room). Telefunc rejects sends from non-members, so it can't be spoofed; `null` is reserved for <Link href="#room-authored-messages">room-authored whispers</Link> (`Room.send()`).
-- To authorize whispers, attach a guard to the room grant: `Room.get(id, { onSend })` — see <Link href="#policy-gated-private-messages">the recipe</Link>.
+- `from` is the **verified** sender: the live `RemoteParticipant` when your side observes the room, or an `{ id, meta }` snapshot otherwise. Telefunc rejects sends from non-members, so the sender identity can't be spoofed; `null` is reserved for <Link href="#room-authored-messages">room-authored whispers</Link> (`Room.send()`).
+- To authorize whispers, attach a guard when granting the room: `Room.get(id, { onSend })` — see <Link href="#policy-gated-private-messages">the recipe</Link>.
 
 ### Room-authored messages
 
-Messages don't have to come from a participant — the room itself can speak. `Room.announce()` broadcasts to everyone, `Room.send()` whispers to one participant; neither requires joining, and receivers can't confuse them with participant messages:
+Messages don't have to come from a participant — the room itself can speak. `Room.announce()` broadcasts to everyone; `Room.send()` whispers to one participant. Neither requires the caller to join, and receivers can't confuse them with participant messages:
 
 ```ts
 // Server
@@ -279,7 +280,7 @@ await Room.send('lobby', winnerId, { type: 'achievement', badge: 'first-blood' }
 
 ```ts
 // Client
-lobby.onAnnounce((data) => showSystemBanner(data))  // room-authored broadcasts
+lobby.onAnnounce((data) => showSystemBanner(data))  // room-authored announcements
 me.listen((data, from) => {
   if (from === null) showSystemNotice(data)         // room-authored whisper (Room.send())
   else showWhisper(from.meta.name, data)            // participant whisper (send())
@@ -293,7 +294,7 @@ Announcements arrive only on `onAnnounce()` — never on `subscribe()` streams, 
 
 ### Video chat
 
-Isolated mode gives each participant their own upstream pub/sub key, removing publish contention between members — useful on platforms that map each key to a separate coordinator (e.g. Cloudflare Durable Objects). Clients don't see the difference.
+**Isolated mode** (`isolated: true`) gives each participant their own upstream pub/sub key, removing publish contention between members — useful on platforms that map each key to a separate coordinator (e.g. Cloudflare Durable Objects). Clients don't see the difference.
 
 ```ts
 // VideoChat.telefunc.ts
@@ -340,6 +341,9 @@ function startDecoding(member) {
 The server can observe without joining:
 
 ```ts
+// Moderation.telefunc.ts
+// Environment: server
+
 export async function onModerate(roomId: string) {
   const room = await Room.get(roomId)
   room.subscribe((data, info, from) => {
@@ -350,7 +354,7 @@ export async function onModerate(roomId: string) {
 
 ### Policy-gated private messages
 
-To authorize whispers (e.g. friends-only DMs), attach an `onSend` guard to the room grant. It's defined next to your authentication — closing over the request context — and runs before every delivery from any membership granted through that instance; throwing rejects the sender's `send()` with the error:
+To authorize whispers (e.g. friends-only DMs), pass an `onSend` guard to the `Room.get()` call that grants the room. It's declared in the telefunction, so it can close over the request context — e.g. the authenticated user from `getContext()`. It runs before every private-message delivery from any membership granted through the returned room; throwing rejects the sender's `send()` with the error:
 
 ```ts
 // Chat.telefunc.ts
@@ -369,31 +373,31 @@ export async function onJoinChat(roomId: string) {
 
 ```ts
 // Client — nothing changes: send and receive as usual
-await me.send(bob, 'hi')                // rejects with 'not friends' when the guard says no
+await me.send(bob, 'hi')                // rejects with 'not friends' when the guard throws
 me.listen((data, from) => showDm(from.meta.name, data))
 ```
 
-The guard rides the **room grant**: `Room.get(id, { onSend })` covers every membership granted through the returned instance — server-side `join()`s and client-side `join()`s on it alike. `Room.send()` (room-authored) is never guarded. Guards live on the statics, so they're server-declared by construction — authorization code can't run on the machine it polices.
+The guard is scoped to the **returned room instance**: `Room.get(id, { onSend })` covers every membership granted through it — server-side `join()`s and client-side `join()`s on it alike. `Room.send()` (room-authored) is never guarded. Guards live on the statics, so they're necessarily server-declared — authorization code can't run on the clients it polices.
 
 
 ## Scaling & multiple servers
 
-Room state lives in the broadcast adapter's KV, and room events travel over its pub/sub — so rooms scale exactly like <Link href="/channel#broadcast">`Broadcast`</Link> does:
+Room state lives in the broadcast adapter's KV store, and room events travel over its pub/sub — so rooms scale exactly like <Link href="/channel#broadcast">`Broadcast`</Link> does:
 
 - **Single server**: the default in-memory adapter works out-of-the-box.
 - **Multiple servers**: install a cross-instance transport and every server sees the same rooms.
-  <Link href="/redis">`@telefunc/redis`</Link> supports rooms out-of-the-box (state in Redis keys, events over Redis pub/sub, Cluster included), and so does the <Link href="/stream/cloudflare">Cloudflare integration</Link> (state in Workers KV, events over Durable Objects).
-- **Custom transports**: implement the KV methods (`get()`, `set()`, `delete()`, `keys()`) on your `BroadcastTransport`, backed by a store all server instances can reach. Rooms fail with a clear error until they're implemented.
+  <Link href="/redis">`@telefunc/redis`</Link> supports rooms out-of-the-box (state in Redis keys, events over Redis Pub/Sub, Cluster included), and so does the <Link href="/stream/cloudflare">Cloudflare integration</Link> (state in Workers KV, events over Durable Objects).
+- **Custom transports**: implement the KV methods (`get()`, `set()`, `delete()`, `keys()`) on your `BroadcastTransport`, backed by a store all server instances can reach. Until then, room operations fail with a clear error.
 
-### Scale envelope
+### Sizing rooms
 
 What each mechanism costs, so you can size rooms deliberately:
 
-- **Text lane** — every connection holding the room receives its control events and text data. Per-connection cost is `messages/s × message size`; a busy chat room (20 msg/s × 300 B) is ~6 KB/s per viewer. Relay buffers are byte-capped with FIFO eviction, so a slow client degrades by losing oldest messages — it can't grow server memory.
-- **Binary lane** — member-selective on the wire and (in isolated mode) upstream: cost scales with what each client actually watches, not with room size.
-- **Membership snapshot** — serializing a room ships the full member list. That's the right trade up to a few thousand members (live video/game/collab rooms); Discord-scale rosters belong in your database, with the room carrying only live participants.
-- **Presence upkeep** — each server refreshes its own members' liveness every 30s and scans the room's member records for reaping: `O(members)` KV reads per node per 30s. Comfortable to thousands of members per room on Redis or Workers KV.
-- **Keys** — shared mode uses one pub/sub key per room (one adapter subscription per observing node); `isolated: true` moves data to per-member keys, removing publish contention and letting nodes subscribe only to wanted members.
+- **Text delivery** — every connection holding the room receives its control events and text data. Per-connection cost is `messages/s × message size`; a busy chat room (20 messages/s × 300 B) comes to ~6 KB/s per connection. Server-side relay buffers are byte-capped with FIFO eviction: a client that falls behind loses the oldest buffered messages first, and server memory stays bounded.
+- **Binary delivery** — member-selective on the wire and, in isolated mode, upstream too: cost scales with what each client actually watches, not with room size.
+- **Membership snapshot** — serializing a room to a client ships the full member list. That's fine up to a few thousand members (live video, game, and collaboration rooms); Discord-scale member lists belong in your database, with the room tracking only live participants.
+- **Presence upkeep** — each server refreshes its own members' liveness timestamps and scans the room's member records to reap dead members: `O(members)` KV reads per server every 30s. That scales comfortably to thousands of members per room on Redis or Workers KV.
+- **Keys** — the default shared mode uses one pub/sub key per room (one adapter subscription per observing node); `isolated: true` moves data to per-member keys, removing publish contention and letting each node subscribe upstream only to the members its clients watch.
 
 See also:
 - <Link href="/stream/scale" />
@@ -403,5 +407,5 @@ See also:
 
 - **One pub/sub key per room.** Presence events and data flow through the room's `Broadcast` key. In isolated mode, data moves to per-member keys while presence stays on the room key.
 - **Binary framing.** Binary messages are prefixed with the sender's 16-byte participant ID — fixed-size, so no length field is needed.
-- **Crash-safe presence.** Graceful departures (leave, kick, close, disconnect) propagate instantly as events. Against hard crashes, the server owning a participant refreshes a liveness timestamp on its member record every 30 seconds; members whose owner stops refreshing are reaped — and their leave announced — after 2 minutes.
-- **Lazy subscriptions.** A room subscribes to its pub/sub key only while observed, and binary delivery is member-selective: clients declare which members they're listening to, and the server relays only those members' binary streams (in isolated mode, it doesn't even subscribe upstream to the rest).
+- **Crash-safe presence.** Graceful departures (leave, kick, close, disconnect) propagate instantly as events. To guard against hard crashes, the server owning a participant refreshes a liveness timestamp on the participant's member record every 30 seconds; members whose owner stops refreshing are reaped — and their leave announced — after 2 minutes.
+- **Lazy subscriptions.** A room subscribes to its pub/sub key only while observed. Binary delivery is member-selective: clients declare which members they're listening to, and the server relays only those members' binary streams (in isolated mode, it doesn't even subscribe upstream to the rest).
