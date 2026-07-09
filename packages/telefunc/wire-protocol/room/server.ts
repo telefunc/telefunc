@@ -53,7 +53,6 @@ import type {
   RoomInfo,
   RoomMeta,
   RoomOptions,
-  RoomSendGuard,
   SendGuard,
   Sender,
 } from './types.js'
@@ -73,7 +72,7 @@ type RoomStatic = {
   create(id: string, options?: RoomOptions): Promise<Room>
   /** Get an existing room. Throws if it doesn't exist. `onSend` guards every membership
    *  granted through the returned instance — including client-side `join()`s on it. */
-  get(id: string, options?: { onSend?: RoomSendGuard }): Promise<Room>
+  get(id: string, options?: { onSend?: SendGuard }): Promise<Room>
   /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
   join(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant>
   /** List all rooms. */
@@ -125,7 +124,7 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   return new ServerRoom(id, config, [])
 }
 
-async function getRoom(id: string, options?: { onSend?: RoomSendGuard }): Promise<Room> {
+async function getRoom(id: string, options?: { onSend?: SendGuard }): Promise<Room> {
   assertUsage(
     options?.onSend === undefined || typeof options.onSend === 'function',
     'Room.get() options.onSend should be a function',
@@ -223,7 +222,7 @@ class ServerRoom implements Room {
   readonly [SERVER_ROOM_BRAND] = true
 
   /** @internal */ readonly _isolated: boolean
-  private readonly _instanceGuard: RoomSendGuard | null
+  private readonly _guard: SendGuard | null
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
@@ -236,13 +235,8 @@ class ServerRoom implements Room {
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _heartbeatBusy = false
 
-  constructor(
-    roomId: string,
-    config: RoomConfigRecord,
-    members: MemberSnapshot[],
-    onSend: RoomSendGuard | null = null,
-  ) {
-    this._instanceGuard = onSend
+  constructor(roomId: string, config: RoomConfigRecord, members: MemberSnapshot[], onSend: SendGuard | null = null) {
+    this._guard = onSend
     this._isolated = config.isolated
     this._state = new RoomState({
       roomId,
@@ -283,11 +277,10 @@ class ServerRoom implements Room {
   }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
-    const { selfDelivery, onSend } = normalizeJoinOptions(meta, options)
-    const guard = onSend ?? this._memberGuard()
+    const selfDelivery = normalizeJoinOptions(meta, options)
     let participant!: ServerLocalParticipant
     await this._admitMember(meta, (id, joinedAt) => {
-      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, guard)
+      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery)
       this._localParticipants.set(id, participant)
     })
     return participant
@@ -405,12 +398,12 @@ class ServerRoom implements Room {
   /** @internal — send a private message: published on the target's inbox key, which only
    *  the target's owning node subscribes to (see `_onDm`). The sender's verified meta rides
    *  the envelope so every receiver can surface a rich sender. */
-  async _sendDm(from: string, to: string, data: unknown, guard: SendGuard | null): Promise<void> {
+  async _sendDm(from: string, to: string, data: unknown): Promise<void> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
     const target = await this._resolveMember(to)
     if (!target) throw new Error(`Participant not found: ${to}`)
-    if (guard) await guard(target, data)
     const fromMeta = this._state.getRemote(from)?.meta ?? this._localParticipants.get(from)?.meta ?? {}
+    if (this._guard) await this._guard({ id: from, meta: fromMeta }, target, data)
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, fromMeta, data }
     await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
   }
@@ -423,16 +416,6 @@ class ServerRoom implements Room {
     if (remote) return remote
     const raw = await getRoomKV().get(roomMemberKvKey(this.id, id))
     return raw === null ? null : { id, meta: (parse(raw) as RoomMemberRecord).meta }
-  }
-
-  /** The instance guard, scoped to one sender — `null` when no guard is installed. */
-  private _memberGuard(from?: string): SendGuard | null {
-    const guard = this._instanceGuard
-    if (!guard) return null
-    return (to, data) => {
-      const sender: Sender = (from && this._state.getRemote(from)) || { id: from ?? '', meta: {} }
-      return guard(sender, to, data)
-    }
   }
 
   private async _assertOpen(kv: RoomKV): Promise<void> {
@@ -599,7 +582,7 @@ class ServerRoom implements Room {
           return { ok: true }
         case 'req-dm':
           this._assertStubMember(stub, req.id)
-          await this._sendDm(req.id, req.to, req.data, this._memberGuard(req.id))
+          await this._sendDm(req.id, req.to, req.data)
           return { ok: true }
         case 'sub-binary': {
           const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
@@ -787,20 +770,10 @@ class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
   /** @internal */ readonly _room: ServerRoom
   /** @internal */ readonly _joinedAt: number
-  private readonly _onSend: SendGuard | null
-
-  constructor(
-    serverRoom: ServerRoom,
-    id: string,
-    meta: ParticipantMeta,
-    joinedAt: number,
-    selfDelivery: boolean,
-    onSend: SendGuard | null,
-  ) {
+  constructor(serverRoom: ServerRoom, id: string, meta: ParticipantMeta, joinedAt: number, selfDelivery: boolean) {
     super(id, meta, selfDelivery)
     this._room = serverRoom
     this._joinedAt = joinedAt
-    this._onSend = onSend
   }
 
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
@@ -826,7 +799,7 @@ class ServerLocalParticipant extends ParticipantBase {
 
   async send(to: string | Sender, data: unknown): Promise<void> {
     this._assertActive()
-    await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data, this._onSend)
+    await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {

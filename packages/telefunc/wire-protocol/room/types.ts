@@ -9,7 +9,6 @@ export type {
   RemoteParticipant,
   Sender,
   SendGuard,
-  RoomSendGuard,
   RoomListener,
   RoomBinaryListener,
   ParticipantListener,
@@ -27,13 +26,10 @@ type ParticipantMeta = Record<string, unknown>
  *  the room, or an `{ id, meta }` snapshot otherwise (e.g. a standalone participant). */
 type Sender = { readonly id: string; readonly meta: ParticipantMeta }
 
-/** Guards one participant's private messages (`join(meta, { onSend })`) — called before every
- *  `send()` delivery; throw to reject (the sender's promise rejects with the error). */
-type SendGuard = (to: Sender, data: unknown) => void | Promise<void>
-
-/** Room-instance flavor of `SendGuard` (`Room.get(id, { onSend })`): guards every membership
- *  granted through that instance — including client-side `join()`s on it. */
-type RoomSendGuard = (from: Sender, to: Sender, data: unknown) => void | Promise<void>
+/** Guards private messages (`Room.get(id, { onSend })`): called before every `send()` from a
+ *  membership granted through that room instance — including client-side `join()`s on it.
+ *  Throw to reject (the sender's promise rejects with the error). */
+type SendGuard = (from: Sender, to: Sender, data: unknown) => void | Promise<void>
 
 type RoomOptions = {
   /** Room metadata, visible to all observers. Default: `{}`. */
@@ -51,10 +47,6 @@ type JoinOptions = {
   /** Whether your own publishes are delivered back to your side's room (default: `true`).
    *  Turn off for e.g. video, where you don't want your own frames back. */
   selfDelivery?: boolean
-  /** Server-side joins only: authorization guard over this participant's `send()` calls.
-   *  Defined next to the join that grants membership, it closes over your request context
-   *  (e.g. the authenticated user) — no global registry. */
-  onSend?: SendGuard
 }
 
 /** Lightweight room snapshot returned by `Room.list()`. */

@@ -1,6 +1,6 @@
 export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant }
 
-import { assert, assertUsage } from '../../utils/assert.js'
+import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isObject } from '../../utils/isObject.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
@@ -96,8 +96,7 @@ class ClientRoom implements Room {
   }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
-    const { selfDelivery, onSend } = normalizeJoinOptions(meta, options)
-    assertUsage(onSend === null, 'join() options.onSend requires a server-side join — see https://telefunc.com/room')
+    const selfDelivery = normalizeJoinOptions(meta, options)
     const ack = (await this._request({ __r: 'req-join', meta, selfDelivery })) as ReqJoinAck
     if (!ack.ok) throw new Error(ack.err)
     const participant = new ClientRoomParticipant(this, ack.id, meta, selfDelivery)

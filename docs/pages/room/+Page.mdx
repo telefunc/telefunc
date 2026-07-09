@@ -117,7 +117,7 @@ export async function onJoinLobby(name: string) {
 
 | Method | Description |
 |---|---|
-| `join(meta?, options?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. Options: `{ selfDelivery?, onSend? }`. |
+| `join(meta?, options?)` | Join the room. Returns your own <Link href="#localparticipant">`LocalParticipant`</Link>. Options: `{ selfDelivery?: boolean }`. |
 | `getParticipants()` | All current participants — `Promise<RemoteParticipant[]>` (resyncs an unobserved server room). |
 | `getParticipant(id)` | A single participant, or `null` — synchronous, reads the live local view. |
 | `subscribe(cb)` | Receive all participant messages: `(data, info, from)`. Returns an unsubscribe function. |
@@ -265,7 +265,7 @@ lobby.onJoin(async (member) => {
 
 - `send()` accepts a `RemoteParticipant` or a participant ID. Sending to an unknown or departed participant throws.
 - `from` is the **verified** sender (`{ id, meta }` — the live `RemoteParticipant` whenever your side observes the room). Telefunc rejects sends from non-members, so it can't be spoofed; `null` is reserved for <Link href="#room-authored-messages">room-authored whispers</Link> (`Room.send()`).
-- To authorize whispers, attach a guard to the join that grants membership: `join(meta, { onSend })` — see <Link href="#policy-gated-private-messages">the recipe</Link>.
+- To authorize whispers, attach a guard to the room grant: `Room.get(id, { onSend })` — see <Link href="#policy-gated-private-messages">the recipe</Link>.
 
 ### Room-authored messages
 
@@ -350,7 +350,7 @@ export async function onModerate(roomId: string) {
 
 ### Policy-gated private messages
 
-To authorize whispers (e.g. friends-only DMs), attach an `onSend` guard to the join that grants membership. It's defined next to your authentication — closing over the request context — and runs before every delivery; throwing rejects the sender's `send()` with the error:
+To authorize whispers (e.g. friends-only DMs), attach an `onSend` guard to the room grant. It's defined next to your authentication — closing over the request context — and runs before every delivery from any membership granted through that instance; throwing rejects the sender's `send()` with the error:
 
 ```ts
 // Chat.telefunc.ts
@@ -358,11 +358,12 @@ To authorize whispers (e.g. friends-only DMs), attach an `onSend` guard to the j
 
 export async function onJoinChat(roomId: string) {
   const { user } = getContext()
-  return await Room.join(roomId, { name: user.name, userId: user.id }, {
-    onSend: async (to) => {
-      if (!(await db.areFriends(user.id, to.meta.userId))) throw new Error('not friends')
+  const room = await Room.get(roomId, {
+    onSend: async (from, to) => {
+      if (!(await db.areFriends(from.meta.userId, to.meta.userId))) throw new Error('not friends')
     },
   })
+  return await room.join({ name: user.name, userId: user.id })
 }
 ```
 
@@ -372,7 +373,7 @@ await me.send(bob, 'hi')                // rejects with 'not friends' when the g
 me.listen((data, from) => showDm(from.meta.name, data))
 ```
 
-Guards ride the **grant**: `join(meta, { onSend })` guards that membership, and `Room.get(id, { onSend: (from, to, data) => ... })` guards every membership granted through the returned room instance — including client-side `join()`s on it (a membership's own `onSend` takes precedence). `Room.send()` (room-authored) is never guarded. Guards are declared server-side by construction — authorization code can't run on the machine it polices.
+The guard rides the **room grant**: `Room.get(id, { onSend })` covers every membership granted through the returned instance — server-side `join()`s and client-side `join()`s on it alike. `Room.send()` (room-authored) is never guarded. Guards live on the statics, so they're server-declared by construction — authorization code can't run on the machine it polices.
 
 
 ## Scaling & multiple servers

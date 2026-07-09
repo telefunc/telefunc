@@ -42,15 +42,7 @@ export type {
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
-import type {
-  JoinOptions,
-  LocalParticipant,
-  ParticipantMeta,
-  RemoteParticipant,
-  RoomMeta,
-  SendGuard,
-  Sender,
-} from './types.js'
+import type { JoinOptions, LocalParticipant, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from './types.js'
 
 // ---------------------------------------------------------------------------
 // Keys & records
@@ -202,18 +194,11 @@ function hasRoomTag(value: unknown): value is { __r: string } {
   return isObject(value) && typeof value.__r === 'string'
 }
 
-/** Validates `join(meta, options)` arguments; returns the resolved options. */
-function normalizeJoinOptions(
-  meta: unknown,
-  options: JoinOptions | undefined,
-): { selfDelivery: boolean; onSend: SendGuard | null } {
+/** Validates `join(meta, options)` arguments; returns the resolved `selfDelivery`. */
+function normalizeJoinOptions(meta: unknown, options: JoinOptions | undefined): boolean {
   assertUsage(isObject(meta), 'join() meta should be an object')
   assertUsage(options === undefined || isObject(options), 'join() options should be an object')
-  assertUsage(
-    options?.onSend === undefined || typeof options.onSend === 'function',
-    'join() options.onSend should be a function',
-  )
-  return { selfDelivery: options?.selfDelivery !== false, onSend: options?.onSend ?? null }
+  return options?.selfDelivery !== false
 }
 
 /** Event ID for `p-meta`/`update` envelopes — only needs to make the origin's own echo

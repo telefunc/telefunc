@@ -395,21 +395,19 @@ describe('direct messages', () => {
     await expect(alice.send(bob.id, 'x')).rejects.toThrow('Participant has left')
   })
 
-  it('join({ onSend }) guards sends: rejections reach the sender, deliveries carry rich identity', async () => {
-    const lobby = await Room.create('guarded')
+  it('Room.get({ onSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
+    await Room.create('guarded')
+    const lobby = await Room.get('guarded', {
+      onSend: (from, to, data) => {
+        if (data === 'blocked') throw new Error('not friends')
+        expect(from.meta).toEqual({ name: 'Alice' }) // resolved sender, meta included
+        expect(to.meta).toEqual({ name: 'Bob' }) // resolved target, meta included
+      },
+    })
     const bob = await lobby.join({ name: 'Bob' })
     const inbox: unknown[] = []
     bob.listen((data, from) => inbox.push([data, from?.id, from?.meta]))
-    const alice = await lobby.join(
-      { name: 'Alice' },
-      {
-        onSend: (to, data) => {
-          if (data === 'blocked') throw new Error('not friends')
-          expect(to.id).toBe(bob.id) // the guard sees the resolved target, meta included
-          expect(to.meta).toEqual({ name: 'Bob' })
-        },
-      },
-    )
+    const alice = await lobby.join({ name: 'Alice' })
 
     await expect(alice.send(bob.id, 'blocked')).rejects.toThrow('not friends')
     await alice.send(bob.id, 'hi')
@@ -448,7 +446,7 @@ describe('direct messages', () => {
     bob.listen((data, from) => bobInbox.push([data, from?.id]))
 
     // b's local view lags; the KV member record is authoritative.
-    await (b as ServerRoom)._sendDm(alice.id, bob.id, 'catch-up', null)
+    await (b as ServerRoom)._sendDm(alice.id, bob.id, 'catch-up')
 
     expect(bobInbox).toEqual([['catch-up', alice.id]])
   })
