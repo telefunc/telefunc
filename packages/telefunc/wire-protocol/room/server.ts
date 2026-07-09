@@ -134,7 +134,11 @@ async function getRoom(id: string, options?: { onSend?: SendGuard }): Promise<Ro
 }
 
 async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant> {
-  return await (await getRoom(id)).join(meta, options)
+  // A pure joiner only wants its own participant handle — it never reads the roster. Skip the
+  // member scan `Room.get()` runs to populate its `count`/`getParticipants` view and join a
+  // freshly-seeded room directly: an O(members) saving per join, which is what large rooms feel.
+  const { config } = await requireRoom(id)
+  return await new ServerRoom(id, config, []).join(meta, options)
 }
 
 async function listRooms(): Promise<RoomInfo[]> {

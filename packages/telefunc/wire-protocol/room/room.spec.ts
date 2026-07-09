@@ -79,6 +79,21 @@ describe('Room entry point', () => {
     await expect(Room.join('nope')).rejects.toThrow('Room not found: nope')
   })
 
+  it('Room.join() skips the roster scan Room.get() pays for — a joiner needs no view', async () => {
+    await Room.create('scan')
+    await Room.join('scan', { n: 1 })
+    await Room.join('scan', { n: 2 })
+    await settle()
+
+    const scans = vi.spyOn(getBroadcastAdapter(), 'keys')
+    await Room.join('scan', { n: 3 })
+    await settle()
+
+    // Construction no longer scans the roster (was: construction scan + observe resync = 2).
+    expect(scans.mock.calls.length).toBeLessThanOrEqual(1)
+    scans.mockRestore()
+  })
+
   it('list() reflects rooms and their live member counts', async () => {
     await Room.create('a')
     const b = await Room.create('b', { meta: { topic: 'x' }, size: 2 })
