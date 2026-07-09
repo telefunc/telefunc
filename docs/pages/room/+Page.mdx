@@ -372,7 +372,7 @@ await me.send(bob, 'hi')                // rejects with 'not friends' when the g
 me.listen((data, from) => showDm(from.meta.name, data))
 ```
 
-The guard travels with the membership: sends from this participant — from the server or from the client holding it — pass through it, while `Room.send()` (room-authored) doesn't. Since the guard requires a server-side join, hand out participants (not the room) when memberships must be policed.
+Guards ride the **grant**: `join(meta, { onSend })` guards that membership, and `Room.get(id, { onSend: (from, to, data) => ... })` guards every membership granted through the returned room instance — including client-side `join()`s on it (a membership's own `onSend` takes precedence). `Room.send()` (room-authored) is never guarded. Guards are declared server-side by construction — authorization code can't run on the machine it polices.
 
 
 ## Scaling & multiple servers

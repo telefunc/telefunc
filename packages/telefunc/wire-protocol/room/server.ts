@@ -53,6 +53,7 @@ import type {
   RoomInfo,
   RoomMeta,
   RoomOptions,
+  RoomSendGuard,
   SendGuard,
   Sender,
 } from './types.js'
@@ -70,8 +71,9 @@ type Room = RoomInstance
 type RoomStatic = {
   /** Create a new room. Throws if it already exists. */
   create(id: string, options?: RoomOptions): Promise<Room>
-  /** Get an existing room. Throws if it doesn't exist. */
-  get(id: string): Promise<Room>
+  /** Get an existing room. Throws if it doesn't exist. `onSend` guards every membership
+   *  granted through the returned instance — including client-side `join()`s on it. */
+  get(id: string, options?: { onSend?: RoomSendGuard }): Promise<Room>
   /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
   join(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant>
   /** List all rooms. */
@@ -123,9 +125,13 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   return new ServerRoom(id, config, [])
 }
 
-async function getRoom(id: string): Promise<Room> {
+async function getRoom(id: string, options?: { onSend?: RoomSendGuard }): Promise<Room> {
+  assertUsage(
+    options?.onSend === undefined || typeof options.onSend === 'function',
+    'Room.get() options.onSend should be a function',
+  )
   const { kv, config } = await requireRoom(id)
-  return new ServerRoom(id, config, await readMembers(kv, id))
+  return new ServerRoom(id, config, await readMembers(kv, id), options?.onSend ?? null)
 }
 
 async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant> {
@@ -217,6 +223,7 @@ class ServerRoom implements Room {
   readonly [SERVER_ROOM_BRAND] = true
 
   /** @internal */ readonly _isolated: boolean
+  private readonly _instanceGuard: RoomSendGuard | null
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
@@ -229,7 +236,13 @@ class ServerRoom implements Room {
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _heartbeatBusy = false
 
-  constructor(roomId: string, config: RoomConfigRecord, members: MemberSnapshot[]) {
+  constructor(
+    roomId: string,
+    config: RoomConfigRecord,
+    members: MemberSnapshot[],
+    onSend: RoomSendGuard | null = null,
+  ) {
+    this._instanceGuard = onSend
     this._isolated = config.isolated
     this._state = new RoomState({
       roomId,
@@ -271,9 +284,10 @@ class ServerRoom implements Room {
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     const { selfDelivery, onSend } = normalizeJoinOptions(meta, options)
+    const guard = onSend ?? this._memberGuard()
     let participant!: ServerLocalParticipant
     await this._admitMember(meta, (id, joinedAt) => {
-      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, onSend)
+      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, guard)
       this._localParticipants.set(id, participant)
     })
     return participant
@@ -409,6 +423,16 @@ class ServerRoom implements Room {
     if (remote) return remote
     const raw = await getRoomKV().get(roomMemberKvKey(this.id, id))
     return raw === null ? null : { id, meta: (parse(raw) as RoomMemberRecord).meta }
+  }
+
+  /** The instance guard, scoped to one sender — `null` when no guard is installed. */
+  private _memberGuard(from?: string): SendGuard | null {
+    const guard = this._instanceGuard
+    if (!guard) return null
+    return (to, data) => {
+      const sender: Sender = (from && this._state.getRemote(from)) || { id: from ?? '', meta: {} }
+      return guard(sender, to, data)
+    }
   }
 
   private async _assertOpen(kv: RoomKV): Promise<void> {
@@ -575,7 +599,7 @@ class ServerRoom implements Room {
           return { ok: true }
         case 'req-dm':
           this._assertStubMember(stub, req.id)
-          await this._sendDm(req.id, req.to, req.data, null)
+          await this._sendDm(req.id, req.to, req.data, this._memberGuard(req.id))
           return { ok: true }
         case 'sub-binary': {
           const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []

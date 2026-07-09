@@ -417,6 +417,28 @@ describe('direct messages', () => {
     expect(inbox).toEqual([['hi', alice.id, { name: 'Alice' }]])
   })
 
+  it('Room.get({ onSend }) guards client-side joins made through that instance', async () => {
+    await Room.create('gated')
+    const served = (await Room.get('gated', {
+      onSend: (from, _to, data) => {
+        if (data === 'blocked') throw new Error(`no whispers from ${from.meta.name}`)
+      },
+    })) as ServerRoom
+    const stub = new RoomStubChannel(served)
+    stub._registerChannel()
+    served._attachStub(stub)
+    const target = await served.join({ name: 'T' })
+    const inbox: unknown[] = []
+    target.listen((data) => inbox.push(data))
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: { name: 'C' } }), 1)
+
+    const memberId = [...stub._stubMembers.keys()][0]!
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-dm', id: memberId, to: target.id, data: 'blocked' }), 2)
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-dm', id: memberId, to: target.id, data: 'hi' }), 3)
+
+    expect(inbox).toEqual(['hi']) // the guarded send never delivered
+  })
+
   it("delivers to a member the sender's stale local view doesn't know yet (KV fallback)", async () => {
     const a = await Room.create('dm-lag')
     const alice = await a.join({ name: 'Alice' })

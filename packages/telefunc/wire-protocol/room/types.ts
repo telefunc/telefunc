@@ -9,6 +9,7 @@ export type {
   RemoteParticipant,
   Sender,
   SendGuard,
+  RoomSendGuard,
   RoomListener,
   RoomBinaryListener,
   ParticipantListener,
@@ -29,6 +30,10 @@ type Sender = { readonly id: string; readonly meta: ParticipantMeta }
 /** Guards one participant's private messages (`join(meta, { onSend })`) — called before every
  *  `send()` delivery; throw to reject (the sender's promise rejects with the error). */
 type SendGuard = (to: Sender, data: unknown) => void | Promise<void>
+
+/** Room-instance flavor of `SendGuard` (`Room.get(id, { onSend })`): guards every membership
+ *  granted through that instance — including client-side `join()`s on it. */
+type RoomSendGuard = (from: Sender, to: Sender, data: unknown) => void | Promise<void>
 
 type RoomOptions = {
   /** Room metadata, visible to all observers. Default: `{}`. */
