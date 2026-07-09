@@ -733,8 +733,30 @@ describe('room stub channel', () => {
     expect(JSON.parse(acks.find((f) => f.ackedSeq === 3).text).ok).toBe(false)
   })
 
+  it('text is relayed only after the client subscribes; control always flows', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('lazy-text-stub')
+    const me = await serverRoom.join({ name: 'Alice' })
+
+    await me.publish('before-subscribe')
+    const relayedTags = () =>
+      peer
+        .decoded()
+        .filter((f) => f.tag === TAG.PUBLISH)
+        .map((f) => (JSON.parse(f.text) as { __r: string }).__r)
+    expect(relayedTags()).toEqual(['join']) // control flowed, the data frame didn't cross the wire
+
+    stub._onPeerBroadcastSubscribe(false) // the client's `subscribe()` signal
+    await me.publish('after-subscribe')
+    expect(relayedTags()).toEqual(['join', 'data'])
+
+    stub._onPeerBroadcastUnsubscribe(false)
+    await me.publish('after-unsubscribe')
+    expect(relayedTags()).toEqual(['join', 'data'])
+  })
+
   it('a stub member joined with selfDelivery=false gets no echo of its own publishes', async () => {
     const { stub, peer } = await createServedRoom('quiet-stub')
+    stub._onPeerBroadcastSubscribe(false) // the client listens for data — the echo skip must still hold
     await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: {}, selfDelivery: false }), 1)
     const ack = peer.decoded().find((f) => f.tag === TAG.ACK_RES && f.ackedSeq === 1)
     const { id } = JSON.parse(ack.text) as { id: string }
@@ -759,7 +781,7 @@ type FakeStub = {
   emitBinary: (framed: Uint8Array) => void
   published: unknown[]
   sent: Array<{ __r: string }>
-  binarySubscribed: () => boolean
+  textSubscribed: () => boolean
   stub: ClientBroadcast
 }
 
@@ -768,16 +790,20 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
   const binaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
   const published: unknown[] = []
   const sent: Array<{ __r: string }> = []
+  let wireTextSubscribed = false
   let seq = 0
   const info = () => ({ key: 'fake', seq: ++seq, timestamp: 1 })
   const stub = {
-    subscribe: (cb: (data: unknown, info: ChannelPublishInfo) => void) => {
+    _subscribeLocal: (cb: (data: unknown, info: ChannelPublishInfo) => void) => {
       textCbs.push(cb)
       return () => textCbs.splice(textCbs.indexOf(cb), 1)
     },
-    subscribeBinary: (cb: (data: Uint8Array, info: ChannelPublishInfo) => void) => {
+    _subscribeBinaryLocal: (cb: (data: Uint8Array, info: ChannelPublishInfo) => void) => {
       binaryCbs.push(cb)
       return () => binaryCbs.splice(binaryCbs.indexOf(cb), 1)
+    },
+    _setWireTextSubscribed: (on: boolean) => {
+      wireTextSubscribed = on
     },
     send: async (msg: { __r: string }) => {
       sent.push(msg)
@@ -795,7 +821,7 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
     emitBinary: (framed) => [...binaryCbs].forEach((cb) => cb(framed, info())),
     published,
     sent,
-    binarySubscribed: () => binaryCbs.length > 0,
+    textSubscribed: () => wireTextSubscribed,
     stub: stub as unknown as ClientBroadcast,
   }
 }
@@ -883,14 +909,31 @@ describe('ClientRoom', () => {
     await expect(me.publish('x')).rejects.toThrow('Participant has left')
   })
 
-  it('subscribes the wire binary stream only while binary listeners exist', () => {
+  it('declares the text want only while data listeners exist — presence stays wire-free of chatter', () => {
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('lazy-text'))
+    clientRoom.onJoin(() => {}) // presence listeners alone declare nothing
+    expect(fake.textSubscribed()).toBe(false)
+
+    const unsubscribe = clientRoom.subscribe(() => {})
+    expect(fake.textSubscribed()).toBe(true) // declared synchronously — FIFO-safe with a publish right after
+
+    unsubscribe()
+    expect(fake.textSubscribed()).toBe(false)
+  })
+
+  it('binary delivery follows the declared wants; frames route to listeners', () => {
     const fake = createFakeStub()
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('bin'))
-    expect(fake.binarySubscribed()).toBe(false)
+    expect(fake.sent.filter((m) => m.__r === 'sub-binary')).toEqual([])
 
     const bytes: number[][] = []
     const unsubscribe = clientRoom.subscribeBinary((data) => bytes.push([...data]))
-    expect(fake.binarySubscribed()).toBe(true)
+    expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
+      __r: 'sub-binary',
+      all: true,
+      members: [],
+    })
 
     const sender = crypto.randomUUID()
     fake.emit({ __r: 'join', id: sender, meta: {}, joinedAt: 1 })
@@ -898,7 +941,11 @@ describe('ClientRoom', () => {
     expect(bytes).toEqual([[9, 8]])
 
     unsubscribe()
-    expect(fake.binarySubscribed()).toBe(false)
+    expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
+      __r: 'sub-binary',
+      all: false,
+      members: [],
+    })
   })
 
   it('declares its binary wants to the server — member-selective, sent synchronously, deduped', () => {
@@ -946,11 +993,14 @@ describe('ClientRoom', () => {
       createSnapshot('wants-release', { members: [{ id: cam, meta: {}, joinedAt: 1 }] }),
     )
     clientRoom.getParticipant(cam)!.subscribeBinary(() => {}) // never unsubscribed
-    expect(fake.binarySubscribed()).toBe(true)
+    expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
+      __r: 'sub-binary',
+      all: false,
+      members: [cam],
+    })
 
     fake.emit({ __r: 'leave', id: cam })
 
-    expect(fake.binarySubscribed()).toBe(false) // wire stream released
     expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
       __r: 'sub-binary',
       all: false,

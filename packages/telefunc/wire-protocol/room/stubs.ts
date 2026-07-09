@@ -27,8 +27,8 @@ assertIsNotBrowser()
 /**
  * The channel registered with a response when a `Room` crosses the wire.
  * - server→client: room events & data relayed as PUBLISH frames (pre-peer buffered,
- *   replayed on reconnect). Text always flows — its stream carries the control events;
- *   binary is member-selective.
+ *   replayed on reconnect). Control always flows; text is gated by the client's broadcast
+ *   subscription; binary is member-selective (`sub-binary`).
  * - client→server: join/leave/set-meta as ack-bearing channel messages; publishes as
  *   PUBLISH(_BINARY)_ACK_REQ frames, validated against the members joined through this stub.
  */
@@ -38,6 +38,8 @@ class RoomStubChannel extends ServerBroadcast {
   readonly _stubMembers = new Map<string, { selfDelivery: boolean }>()
   /** @internal — which members' binary streams the client declared it wants (`sub-binary`). */
   _binaryWants: { all: boolean; members: Set<string> } = { all: false, members: new Set() }
+  /** @internal — whether the client currently subscribes to the text data lane. */
+  _wantsText = false
 
   /** @internal */
   _wantsBinaryFrom(memberId: string): boolean {
@@ -68,11 +70,20 @@ class RoomStubChannel extends ServerBroadcast {
     )
   }
 
-  // Text always flows — its stream carries the control events every holder needs live (and
-  // text payloads are light). Binary is member-selective, declared by the client's
-  // `sub-binary` request — the coarse BROADCAST_(UN)SUB ctrls are ignored.
-  override _onPeerBroadcastSubscribe(): void {}
-  override _onPeerBroadcastUnsubscribe(): void {}
+  // The standard broadcast-subscription ctrl is the text-lane gate: control events always flow
+  // (a client's live view is only correct if it sees every one), text data flows only while the
+  // client holds a subscription — presence-only holders never receive the room's chatter. The
+  // binary flavor is ignored: binary wants ride the richer member-selective `sub-binary`.
+  override _onPeerBroadcastSubscribe(binary: boolean): void {
+    if (binary) return
+    this._wantsText = true
+    this._room._syncSubs()
+  }
+  override _onPeerBroadcastUnsubscribe(binary: boolean): void {
+    if (binary) return
+    this._wantsText = false
+    this._room._syncSubs()
+  }
 
   /** @internal */
   _relayPublishText(wireText: string): void {

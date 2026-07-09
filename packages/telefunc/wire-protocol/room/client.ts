@@ -51,7 +51,6 @@ class ClientRoom implements Room {
   private readonly _stub: ClientBroadcast
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
-  private _binaryUnsub: (() => void) | null = null
   private _lastBinaryWantsSent = ''
 
   constructor(stub: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
@@ -62,12 +61,14 @@ class ClientRoom implements Room {
       size: sizeFromWire(snapshot.size),
       members: snapshot.members,
       closed: snapshot.closed,
-      onListenersChanged: () => this._syncBinarySub(),
+      onListenersChanged: () => this._syncWants(),
       onCallbackError: reportRoomError,
     })
 
-    // Text events always flow (they carry presence); binary is subscribed on demand.
-    stub.subscribe((envelope, info) => this._onEnvelope(envelope, info))
+    // Delivery handlers are local-only — what the server relays is driven by the declared
+    // wants: control always arrives, text while subscribed, binary per `sub-binary`.
+    stub._subscribeLocal((envelope, info) => this._onEnvelope(envelope, info))
+    stub._subscribeBinaryLocal((framed, info) => this._onBinaryFrame(framed, info))
     // Wire death — server closed the room, network gave up, or the stub was GC'd.
     stub.onClose(() => this._applyClosed())
   }
@@ -235,23 +236,16 @@ class ClientRoom implements Room {
     this._localParticipants.clear()
   }
 
-  /** Binary delivery is member-selective: the wanted set (all / specific members) is declared
-   *  to the server, which relays only those members' frames. Declared synchronously — like
-   *  `subscribe()` — so same-connection FIFO guarantees a publish right after subscribing gets
-   *  its own frame back. Listener changes that leave the set unchanged send nothing. */
-  private _syncBinarySub(): void {
-    const wants: BinaryWants = this._state.closed ? { all: false, members: [] } : this._state.binaryWants()
-    const wantAny = wants.all || wants.members.length > 0
+  /** Declare this holder's wants to the server — synchronously, like `subscribe()`, so
+   *  same-connection FIFO guarantees a publish right after subscribing gets its own frame back.
+   *  Text is the standard broadcast subscription (on while data listeners exist); binary is the
+   *  member-selective `sub-binary` set (all / specific members), re-sent only when it changes. */
+  private _syncWants(): void {
+    const state = this._state
+    this._stub._setWireTextSubscribed(!state.closed && state.dataListenerCount > 0)
 
-    if (wantAny && !this._binaryUnsub) {
-      this._binaryUnsub = this._stub.subscribeBinary((framed, info) => this._onBinaryFrame(framed, info))
-    } else if (!wantAny && this._binaryUnsub) {
-      const unsub = this._binaryUnsub
-      this._binaryUnsub = null
-      unsub()
-    }
-
-    if (this._state.closed) return // stub is dead — nothing to declare
+    if (state.closed) return // stub is dead — nothing to declare
+    const wants: BinaryWants = state.binaryWants()
     const encoded = wants.all ? 'all' : [...wants.members].sort().join(',')
     if (encoded === this._lastBinaryWantsSent) return
     this._lastBinaryWantsSent = encoded

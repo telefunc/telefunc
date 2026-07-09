@@ -608,9 +608,43 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
   private _broadcastListeners: Array<BroadcastListener<T>> = []
   private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
+  private _wireTextSubscribed = false
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
+  }
+
+  // ── Composition seam (@internal) ──
+  //
+  // `Room` composes over a broadcast stub: it registers its delivery handlers locally and
+  // drives the wire subscription itself, because what arrives on the stub is two lanes —
+  // control events every holder needs (relayed unconditionally by the server) and the text
+  // data stream (relayed only while subscribed, standard broadcast semantics).
+
+  /** @internal — deliver text publishes locally without signaling the server. */
+  _subscribeLocal(callback: BroadcastListener<T>): () => void {
+    this._broadcastListeners.push(callback)
+    return () => {
+      const index = this._broadcastListeners.indexOf(callback)
+      if (index >= 0) this._broadcastListeners.splice(index, 1)
+    }
+  }
+
+  /** @internal — deliver binary publishes locally without signaling the server. */
+  _subscribeBinaryLocal(callback: BroadcastBinaryListener): () => void {
+    this._broadcastBinaryListeners.push(callback)
+    return () => {
+      const index = this._broadcastBinaryListeners.indexOf(callback)
+      if (index >= 0) this._broadcastBinaryListeners.splice(index, 1)
+    }
+  }
+
+  /** @internal — declare/withdraw interest in the peer's text publish stream (deduplicated). */
+  _setWireTextSubscribed(on: boolean): void {
+    if (on === this._wireTextSubscribed || this._isClosed) return
+    this._wireTextSubscribed = on
+    if (on) this._connection.sendBroadcastSubscribe(this, false)
+    else this._connection.sendBroadcastUnsubscribe(this, false)
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {

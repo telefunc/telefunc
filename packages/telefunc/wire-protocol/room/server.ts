@@ -493,6 +493,7 @@ class ServerRoom implements Room {
     if (this._stubs.size > 0) {
       const wireText = encodePublishText(serialized, rawInfo)
       for (const stub of this._stubs) {
+        if (!stub._wantsText) continue
         if (stub._stubMembers.get(event.from)?.selfDelivery === false) continue
         stub._relayPublishText(wireText)
       }
@@ -726,7 +727,8 @@ class ServerRoom implements Room {
 
   /** Whether any client stub needs the text lane relayed. */
   private _stubsWantText(): boolean {
-    return this._stubs.size > 0
+    for (const stub of this._stubs) if (stub._wantsText) return true
+    return false
   }
 
   /** Union of this holder's own binary listeners and every client stub's declared wants. */
