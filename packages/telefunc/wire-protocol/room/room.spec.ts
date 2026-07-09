@@ -434,6 +434,42 @@ describe('data pub/sub', () => {
     expect(await room.getParticipant(ghost)).toBe(null) // presence stays event-driven — no ghost member
   })
 
+  it('an unknown sender heals the drifted view — and re-syncs clients seeded from it', async () => {
+    const a = await Room.create('drift')
+    const observer = await Room.get('drift')
+    observer.subscribe(() => {}) // materialize + observe the roster (currently empty)
+    await settle()
+
+    // Simulate a dropped join event: the member exists in KV, but its ctrl event never arrived.
+    const adapter = getBroadcastAdapter()
+    const realPublish = adapter.publish.bind(adapter)
+    const drop = vi
+      .spyOn(adapter, 'publish')
+      .mockImplementation((key, payload) =>
+        key === roomCtrlKey('drift') && payload.includes('"join"')
+          ? { seq: 0, timestamp: 0 }
+          : realPublish(key, payload),
+      )
+    const ghostly = await a.join({ name: 'Casper' })
+    drop.mockRestore()
+    expect(await observer.getParticipant(ghostly.id)).toBe(null) // the view drifted
+
+    // A client stub seeded from the drifted view must be re-synced too.
+    const stub = new RoomStubChannel(observer as ServerRoom)
+    stub._registerChannel()
+    ;(observer as ServerRoom)._attachStub(stub)
+
+    // The ghost's message delivers immediately (identity rides the envelope)…
+    const seen: Array<{ data: unknown; id: string; meta: unknown }> = []
+    observer.subscribe((data, _info, from) => seen.push({ data, id: from.id, meta: from.meta }))
+    await ghostly.publish('boo')
+    expect(seen).toEqual([{ data: 'boo', id: ghostly.id, meta: { name: 'Casper' } }])
+
+    // …and acts as the drift signal: the view heals, live object included.
+    await settle()
+    expect((await observer.getParticipant(ghostly.id))?.meta).toEqual({ name: 'Casper' })
+  })
+
   it('binary round-trips with the 16-byte member ID frame, preserving high-bit bytes', async () => {
     const a = await Room.create('bin')
     const b = await Room.get('bin')

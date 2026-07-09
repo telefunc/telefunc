@@ -552,6 +552,7 @@ class ServerRoom implements Room {
     const event = envelope as RoomDataEnvelope
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
     this._state.applyData(event.from, event.fromMeta, event.data, info, this._suppress(event.from))
+    this._healUnknownSender(event.from)
 
     if (this._stubs.size > 0) {
       const wireText = encodePublishText(serialized, rawInfo)
@@ -568,6 +569,7 @@ class ServerRoom implements Room {
     if (!unframed) return // junk on the reserved key
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
     this._state.applyBinary(unframed.from, unframed.payload, info, this._suppress(unframed.from))
+    this._healUnknownSender(unframed.from)
 
     if (this._stubs.size > 0) {
       const wireData = encodePublishBinary(framed, rawInfo)
@@ -852,6 +854,16 @@ class ServerRoom implements Room {
     return this._refreshMembers()
   }
 
+  /** A message from a sender the loaded roster doesn't know is a drift signal — its join event
+   *  was dropped or reordered away (pub/sub is at-most-once between nodes). The message itself
+   *  already delivered correctly (identity rides the envelope); this heals the *view*, so the
+   *  live participant materializes and long-lived observers can't stay stale forever.
+   *  Single-flight, so a burst from the same unknown sender costs one KV read. */
+  private _healUnknownSender(from: string): void {
+    if (!this._state.rosterKnown || this._state.getRemote(from) !== null) return
+    void this._refreshMembers().catch(reportRoomError)
+  }
+
   /** Single-flight roster refresh. A membership event landing mid-read makes the snapshot
    *  ambiguous (its KV write may or may not be in it) — re-read: joins/leaves write KV before
    *  publishing, so the next read includes the event that dirtied this one. */
@@ -862,8 +874,13 @@ class ServerRoom implements Room {
           const version = this._state.membershipVersion
           const members = await readMembers(getRoomKV(), this.id)
           if (this._state.membershipVersion !== version) continue
-          this._state.reconcile(members)
+          const drifted = this._state.reconcile(members)
           this._syncSubs() // per-member lanes may need subscriptions for the members just learned
+          // Clients seeded from the pre-drift state must be re-synced the same way they were
+          // seeded — the streamed roster (position-in-stream consistent, replace semantics).
+          if (drifted) {
+            for (const stub of this._stubs) stub._relayRoster(this._state.snapshotMembers())
+          }
           return
         }
       } finally {

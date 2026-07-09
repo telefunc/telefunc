@@ -564,27 +564,35 @@ class RoomState {
     if (entry) this._fireAll(entry.binaryCbs, payload, info)
   }
 
-  /** Silent resync against an authoritative membership snapshot. Only for unobserved rooms —
-   *  once observed, the event stream is authoritative and the only thing firing callbacks. */
-  reconcile(members: MemberSnapshot[]): void {
+  /** Silent resync against an authoritative membership snapshot (no callbacks fire — the event
+   *  stream is the only thing that narrates changes). Returns whether anything drifted, so the
+   *  owner can re-sync downstream views (client stubs) that were seeded from the stale state. */
+  reconcile(members: MemberSnapshot[]): boolean {
     this._rosterKnown = true
     this.membershipVersion++
+    let drifted = false
     const seen = new Set<string>()
     for (const member of members) {
       seen.add(member.id)
       const entry = this._members.get(member.id)
       if (entry) {
+        if (entry.metaSeq !== member.metaSeq || entry.joinedAt !== member.joinedAt) drifted = true
         entry.meta = member.meta
         entry.joinedAt = member.joinedAt
         entry.metaSeq = member.metaSeq
       } else {
         this._createEntry(member)
+        drifted = true
       }
     }
     for (const id of [...this._members.keys()]) {
-      if (!seen.has(id)) this._members.delete(id)
+      if (!seen.has(id)) {
+        this._members.delete(id)
+        drifted = true
+      }
     }
     this._wasFull = this.isFull
+    return drifted
   }
 
   // ── Private ──
