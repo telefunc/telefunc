@@ -24,6 +24,13 @@ type BinaryResult = {
   frames: Array<{ size: number; firstByte: number; fromSelf: boolean }>
 }
 
+type GuardResult = {
+  publishError: string | null
+  sendError: string | null
+  received: string[]
+  inbox: string[]
+}
+
 type AdminResult = {
   announcements: string[]
   system: Array<{ data: string; fromRoom: boolean }>
@@ -85,6 +92,22 @@ function testRoom() {
       expect(result.frames.map((f) => f.size)).deep.equal([64, 64, 64])
       expect(result.frames.map((f) => f.firstByte)).deep.equal([1, 2, 3])
       for (const frame of result.frames) expect(frame.fromSelf).toBe(true)
+    })
+  })
+
+  test('room: guards reject over the wire; allowed messages flow', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-guard')
+
+    await autoRetry(async () => {
+      const result = await getResult<GuardResult>('#room-result')
+
+      // The rejection carries the guard's error back through the wire ack.
+      expect(result.publishError).toBe('blocked publish from Mallory')
+      expect(result.sendError).toBe('blocked send from Mallory')
+      // Guarded-out messages never delivered; allowed ones flow.
+      expect(result.received).deep.equal(['fine'])
+      expect(result.inbox).deep.equal(['psst'])
     })
   })
 

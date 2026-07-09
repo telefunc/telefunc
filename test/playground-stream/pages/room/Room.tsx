@@ -1,7 +1,16 @@
 export { Room }
 
 import React, { useEffect, useState } from 'react'
-import { onCreateRoom, onGetRoom, onJoinAsServer, onAnnounce, onSystemSend, onKick, onCloseRoom } from './Room.telefunc'
+import {
+  onCreateRoom,
+  onGetRoom,
+  onGetGuardedRoom,
+  onJoinAsServer,
+  onAnnounce,
+  onSystemSend,
+  onKick,
+  onCloseRoom,
+} from './Room.telefunc'
 
 /** Render every poll so the e2e autoRetry sees fresh data on each iteration (see Publish.tsx). */
 async function pollUntil(render: () => { done: boolean }) {
@@ -140,6 +149,44 @@ function Room() {
         }}
       >
         Publish 3 binary frames
+      </button>
+
+      <h2>Guards</h2>
+
+      <button
+        id="test-room-guard"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-guard:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const room = await onGetGuardedRoom(roomId)
+
+          const received: unknown[] = []
+          room.subscribe((data) => received.push(data))
+          const me = await room.join({ name: 'Mallory' })
+          const peer = await room.join({ name: 'Peer' })
+          const inbox: unknown[] = []
+          peer.listen((data) => inbox.push(data))
+
+          // Guard rejections travel back over the wire to the caller's promise.
+          const publishError = await me.publish('forbidden').then(
+            () => null,
+            (err: Error) => err.message,
+          )
+          const sendError = await me.send(peer.id, 'forbidden').then(
+            () => null,
+            (err: Error) => err.message,
+          )
+          await me.publish('fine')
+          await me.send(peer.id, 'psst')
+
+          await pollUntil(() => {
+            setResult(JSON.stringify({ publishError, sendError, received, inbox }))
+            return { done: received.length >= 1 && inbox.length >= 1 }
+          })
+        }}
+      >
+        Guarded publish & send
       </button>
 
       <h2>Admin (announce, system send, kick & close)</h2>

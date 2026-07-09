@@ -1,4 +1,4 @@
-export { onCreateRoom, onGetRoom, onJoinAsServer, onAnnounce, onSystemSend, onKick, onCloseRoom }
+export { onCreateRoom, onGetRoom, onGetGuardedRoom, onJoinAsServer, onAnnounce, onSystemSend, onKick, onCloseRoom }
 
 import { Room } from 'telefunc'
 
@@ -10,6 +10,20 @@ async function onCreateRoom(roomId: string, opts?: { size?: number; isolated?: b
 
 async function onGetRoom(roomId: string) {
   return await Room.get(roomId)
+}
+
+/** Guarded grant — every membership through this instance is policed server-side. */
+async function onGetGuardedRoom(roomId: string) {
+  const room = await Room.get(roomId)
+  Room.guard(room, {
+    onPublish: (from, data) => {
+      if (data === 'forbidden') throw new Error(`blocked publish from ${from.meta.name}`)
+    },
+    onSend: (from, _to, data) => {
+      if (data === 'forbidden') throw new Error(`blocked send from ${from.meta.name}`)
+    },
+  })
+  return room
 }
 
 /** Server-side join returning a standalone `LocalParticipant` — exercises the participant
