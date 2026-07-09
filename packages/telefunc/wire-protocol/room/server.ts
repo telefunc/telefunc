@@ -15,7 +15,7 @@ import {
   ParticipantBase,
   ROOM_KEY_NAMESPACE,
   errorMessage,
-  makeEid,
+  stampNewer,
   RoomState,
   frameWithMemberId,
   hasRoomTag,
@@ -60,6 +60,9 @@ import type {
   Sender,
 } from './types.js'
 assertIsNotBrowser()
+
+/** This process's identity as an LWW writer — breaks `Room.update()` timestamp ties. */
+const WRITER_ID = crypto.randomUUID()
 
 /** `Room` is one identifier with two meanings, like the built-in `Date`: the statics object
  *  below (value) and the instance type from ./types.js — re-established locally so the two
@@ -128,7 +131,13 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   const { meta, size } = normalizeOptions(options)
   const kv = getRoomKV()
   if ((await readConfig(kv, id)) !== null) throw new Error(`Room already exists: ${id}`)
-  const config: RoomConfigRecord = { meta, size: sizeToWire(size), isolated: options?.isolated === true }
+  const config: RoomConfigRecord = {
+    meta,
+    size: sizeToWire(size),
+    isolated: options?.isolated === true,
+    at: Date.now(),
+    by: WRITER_ID,
+  }
   await kv.set(roomConfigKvKey(id), stringify(config))
   return new ServerRoom(id, config, { members: [] }) // fresh room — the roster is known: empty
 }
@@ -185,8 +194,17 @@ async function updateRoom(id: string, options: RoomOptions): Promise<void> {
     "A room's `isolated` mode is fixed at creation — room.update() cannot change it",
   )
   const sizeWire = sizeToWire(size)
-  await kv.set(roomConfigKvKey(id), stringify({ meta, size: sizeWire, isolated: config.isolated }))
-  await publishCtrl(id, { __r: 'update', meta, prev: config.meta, size: sizeWire, eid: makeEid() })
+  // Strictly after the config we read (hybrid-clock style): back-to-back updates from one
+  // writer always order, and cross-writer ordering stays wall-clock last-writer-wins.
+  const at = Math.max(Date.now(), config.at + 1)
+  const next: RoomConfigRecord = { meta, size: sizeWire, isolated: config.isolated, at, by: WRITER_ID }
+  await kv.set(roomConfigKvKey(id), stringify(next))
+  await publishCtrl(id, { __r: 'update', meta, prev: config.meta, size: sizeWire, at: next.at, by: next.by })
+  // Concurrent updates converge by the (at, by) stamp everywhere events reach — but the last KV
+  // *write* wins arbitrarily. Read back: if a stamp-losing write landed on top, re-assert the
+  // winner (only the winner rewrites, so the exchange terminates).
+  const readBack = await readConfig(kv, id)
+  if (readBack !== null && stampNewer(next, readBack)) await kv.set(roomConfigKvKey(id), stringify(next))
 }
 
 async function closeRoom(id: string): Promise<void> {
@@ -268,6 +286,7 @@ class ServerRoom implements Room {
       meta: config.meta,
       size: sizeFromWire(config.size),
       seed,
+      updateStamp: { at: config.at, by: config.by },
       onListenersChanged: () => this._syncSubs(),
       onCallbackError: reportRoomError,
     })
@@ -380,7 +399,7 @@ class ServerRoom implements Room {
     await this._assertOpen(kv)
     const id = crypto.randomUUID()
     const joinedAt = Date.now()
-    const record: RoomMemberRecord = { meta, joinedAt, seenAt: joinedAt }
+    const record: RoomMemberRecord = { meta, joinedAt, seenAt: joinedAt, metaSeq: 0 }
     await kv.set(roomMemberKvKey(this.id, id), stringify(record))
     // The room may have been closed between the check and the write — roll back.
     if ((await readConfig(kv, this.id)) === null) {
@@ -408,11 +427,12 @@ class ServerRoom implements Room {
     if (raw === null) throw new Error(`Participant not found (left?): ${id}`)
     const record = parse(raw) as RoomMemberRecord
     const prev = this._state.getRemote(id)?.meta ?? record.meta
-    const next: RoomMemberRecord = { ...record, meta, seenAt: Date.now() }
+    // The member's single owner serializes its setMeta() calls, so the KV record doubles as
+    // the revision counter — no separate sequencer needed.
+    const next: RoomMemberRecord = { ...record, meta, metaSeq: record.metaSeq + 1, seenAt: Date.now() }
     await kv.set(memberKey, stringify(next))
-    const eid = makeEid()
-    this._state.applyParticipantMeta(id, meta, prev, eid)
-    await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, eid })
+    this._state.applyParticipantMeta(id, meta, prev, next.metaSeq)
+    await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, seq: next.metaSeq })
   }
 
   /** @internal — publish a member's message: the single choke point where the sender's verified
@@ -584,13 +604,13 @@ class ServerRoom implements Room {
         this._applyLeave(event.id)
         return
       case 'p-meta': {
-        this._state.applyParticipantMeta(event.id, event.meta, event.prev, event.eid)
+        this._state.applyParticipantMeta(event.id, event.meta, event.prev, event.seq)
         const local = this._localParticipants.get(event.id)
         if (local) local._meta = event.meta
         return
       }
       case 'update':
-        this._state.applyRoomUpdate(event.meta, event.prev, sizeFromWire(event.size), event.eid)
+        this._state.applyRoomUpdate(event.meta, event.prev, sizeFromWire(event.size), event.at, event.by)
         return
       case 'closed':
         this._state.applyClosed()
@@ -1002,7 +1022,7 @@ async function readMembers(kv: RoomKV, roomId: string): Promise<MemberSnapshot[]
       await publishCtrl(roomId, { __r: 'leave', id })
       continue
     }
-    members.push({ id, meta: record.meta, joinedAt: record.joinedAt })
+    members.push({ id, meta: record.meta, joinedAt: record.joinedAt, metaSeq: record.metaSeq })
   }
   return members
 }

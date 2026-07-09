@@ -15,7 +15,7 @@ export {
   unframeMemberId,
   hasRoomTag,
   normalizeJoinOptions,
-  makeEid,
+  stampNewer,
   errorMessage,
   RoomState,
   ParticipantBase,
@@ -92,11 +92,19 @@ function roomMemberKvPrefix(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:m:`
 }
 
-/** Stored at `roomConfigKvKey`. `size: null` encodes `Infinity` (not JSON-safe). */
+/** Stored at `roomConfigKvKey`. `size: null` encodes `Infinity` (not JSON-safe). `at`/`by` is
+ *  the last-writer-wins stamp of the latest `Room.update()` (see `applyRoomUpdate`). */
 type RoomConfigRecord = {
   meta: RoomMeta
   size: number | null
   isolated: boolean
+  at: number
+  by: string
+}
+
+/** Later timestamp wins; equal timestamps break deterministically by writer ID. */
+function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }): boolean {
+  return a.at > b.at || (a.at === b.at && a.by > b.by)
 }
 
 /** Stored at `roomMemberKvKey`. `seenAt` is the liveness timestamp: the owning node refreshes
@@ -105,6 +113,8 @@ type RoomMemberRecord = {
   meta: ParticipantMeta
   joinedAt: number
   seenAt: number
+  /** Monotonic meta revision, issued by the member's single owner — orders `p-meta` events. */
+  metaSeq: number
 }
 
 function sizeToWire(size: number): number | null {
@@ -122,6 +132,7 @@ type MemberSnapshot = {
   id: string
   meta: ParticipantMeta
   joinedAt: number
+  metaSeq: number
 }
 
 /** Serializer metadata of a `Room` crossing the wire. Carries only scalars — the roster itself
@@ -135,6 +146,8 @@ type RoomSnapshotMetadata = {
   isolated: boolean
   closed: boolean
   count: number
+  /** LWW stamp of the config the snapshot reflects — seeds `applyRoomUpdate` ordering. */
+  stamp: { at: number; by: string }
 }
 
 /** Serializer metadata of a `LocalParticipant` crossing the wire. */
@@ -151,12 +164,13 @@ type ParticipantStubMetadata = {
  *
  *  The origin applies its own event locally (for deterministic same-node semantics) and then
  *  receives it back via the pub/sub echo. `join`/`leave`/`closed` are naturally idempotent;
- *  `p-meta`/`update` carry an event ID (`eid`) so the echo is absorbed instead of double-firing. */
+ *  `p-meta` orders by the owner-issued `seq`, `update` by its `at`/`by` stamp — echoes and
+ *  concurrent writers converge to the same winner on every node, whatever the arrival order. */
 type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number }
   | { __r: 'leave'; id: string }
-  | { __r: 'p-meta'; id: string; meta: ParticipantMeta; prev: ParticipantMeta; eid: string }
-  | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; eid: string }
+  | { __r: 'p-meta'; id: string; meta: ParticipantMeta; prev: ParticipantMeta; seq: number }
+  | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; at: number; by: string }
   | { __r: 'closed' }
 
 /** A participant's message. Published on the room's text key (shared mode) or the member's own
@@ -224,12 +238,6 @@ function normalizeJoinOptions(meta: unknown, options: JoinOptions | undefined): 
   return options?.selfDelivery !== false
 }
 
-/** Event ID for `p-meta`/`update` envelopes — only needs to make the origin's own echo
- *  recognizable, not to be globally unique. */
-function makeEid(): string {
-  return Math.random().toString(36).slice(2, 10)
-}
-
 /** How errors travel inside `ok: false` acks. */
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -289,8 +297,8 @@ type MemberEntry = {
   id: string
   meta: ParticipantMeta
   joinedAt: number
-  /** Last applied `p-meta` event ID — absorbs the origin's own echo. */
-  lastMetaEid: string | null
+  /** Latest applied meta revision — stale and echoed `p-meta` events are absorbed. */
+  metaSeq: number
   remote: RemoteParticipant
   dataCbs: Array<(data: unknown, info: ChannelPublishInfo) => unknown>
   binaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo) => unknown>
@@ -305,6 +313,8 @@ type RoomStateOptions = {
   /** Either the authoritative roster, or just its size — a lazy view seeds with `{ count }`
    *  and learns the members from its first `reconcile()` (KV read / streamed roster). */
   seed: { members: MemberSnapshot[] } | { count: number }
+  /** The LWW stamp of the config `meta`/`size` were read from (see `applyRoomUpdate`). */
+  updateStamp: { at: number; by: string }
   closed?: boolean
   /** Fired whenever the number of attached listeners changes — lets the owner
    *  (de)activate its event source (adapter subscription, wire subscription). */
@@ -348,7 +358,7 @@ class RoomState {
   private _dataListenerCount = 0
   private _binaryListenerCount = 0
   private _wasFull: boolean
-  private _lastUpdateEid: string | null = null
+  private _updateStamp: { at: number; by: string }
   private _rosterKnown: boolean
   private _seedCount = 0
 
@@ -357,6 +367,7 @@ class RoomState {
     this.meta = opts.meta
     this.size = opts.size
     this.closed = opts.closed === true
+    this._updateStamp = opts.updateStamp
     this._onListenersChanged = opts.onListenersChanged
     this._onCallbackError = opts.onCallbackError
     if ('members' in opts.seed) {
@@ -424,7 +435,7 @@ class RoomState {
   }
 
   snapshotMembers(): MemberSnapshot[] {
-    return [...this._members.values()].map(({ id, meta, joinedAt }) => ({ id, meta, joinedAt }))
+    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq }) => ({ id, meta, joinedAt, metaSeq }))
   }
 
   // ── Listener registration (all return an unlisten function) ──
@@ -468,7 +479,7 @@ class RoomState {
       existing.joinedAt = joinedAt
       return
     }
-    const entry = this._createEntry({ id, meta, joinedAt })
+    const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0 })
     this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
     this.membershipVersion++
     this._fireAll(this._joinCbs, entry.remote)
@@ -488,21 +499,30 @@ class RoomState {
     if (this._members.size === 0) this._fireAll(this._emptyCbs)
   }
 
-  applyParticipantMeta(id: string, meta: ParticipantMeta, prev: ParticipantMeta, eid: string): void {
+  /** Applies only revisions newer than the entry's — the origin's echo (same seq) and events
+   *  arriving behind a fresher reconcile are absorbed. */
+  applyParticipantMeta(id: string, meta: ParticipantMeta, prev: ParticipantMeta, seq: number): void {
     const entry = this._members.get(id)
-    if (!entry || entry.lastMetaEid === eid) return
-    entry.lastMetaEid = eid
+    if (!entry || seq <= entry.metaSeq) return
+    entry.metaSeq = seq
     entry.meta = meta
     this._fireAll(entry.updateCbs, meta, prev)
   }
 
-  applyRoomUpdate(meta: RoomMeta, prev: RoomMeta, size: number, eid: string): void {
-    if (this._lastUpdateEid === eid) return
-    this._lastUpdateEid = eid
+  /** Last-writer-wins by `(at, by)`: concurrent `Room.update()`s converge to the same winner on
+   *  every node regardless of arrival order, and the origin's echo (same stamp) is absorbed. */
+  applyRoomUpdate(meta: RoomMeta, prev: RoomMeta, size: number, at: number, by: string): void {
+    if (!stampNewer({ at, by }, this._updateStamp)) return
+    this._updateStamp = { at, by }
     this.meta = meta
     this.size = size
     this._fireAll(this._updateCbs, meta, prev)
     this._checkFull()
+  }
+
+  /** The stamp of the config this view currently reflects (serialized into room snapshots). */
+  get updateStamp(): { at: number; by: string } {
+    return this._updateStamp
   }
 
   /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`.
@@ -556,6 +576,7 @@ class RoomState {
       if (entry) {
         entry.meta = member.meta
         entry.joinedAt = member.joinedAt
+        entry.metaSeq = member.metaSeq
       } else {
         this._createEntry(member)
       }
@@ -574,12 +595,13 @@ class RoomState {
     this._wasFull = full
   }
 
-  private _createEntry({ id, meta, joinedAt }: MemberSnapshot): MemberEntry {
+  private _createEntry(entrySeed: MemberSnapshot): MemberEntry {
+    const { id, meta, joinedAt } = entrySeed
     const entry: MemberEntry = {
       id,
       meta,
       joinedAt,
-      lastMetaEid: null,
+      metaSeq: entrySeed.metaSeq,
       remote: {
         id,
         get meta() {

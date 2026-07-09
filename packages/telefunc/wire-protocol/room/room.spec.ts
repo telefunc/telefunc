@@ -16,6 +16,7 @@ import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { RoomStubChannel } from './stubs.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import {
+  RoomState,
   frameWithMemberId,
   roomCtrlKey,
   roomTextKey,
@@ -148,6 +149,50 @@ describe('Room entry point', () => {
     expect(lobby.size).toBe(Infinity)
     await expect(Room.update('conf', { isolated: true })).rejects.toThrow('fixed at creation')
     await expect(Room.update('gone', {})).rejects.toThrow('Room not found: gone')
+  })
+
+  it('concurrent updates converge to the same winner on every node, whatever the arrival order', () => {
+    const view = (events: Array<{ at: number; by: string; topic: string }>) => {
+      const state = new RoomState({
+        roomId: 'lww',
+        meta: { topic: 'seed' },
+        size: Infinity,
+        seed: { members: [] },
+        updateStamp: { at: 0, by: '' },
+        onListenersChanged: () => {},
+        onCallbackError: () => {},
+      })
+      for (const e of events) state.applyRoomUpdate({ topic: e.topic }, {}, Infinity, e.at, e.by)
+      return state.meta
+    }
+    const a = { at: 5, by: 'writer-a', topic: 'from-a' }
+    const b = { at: 5, by: 'writer-b', topic: 'from-b' } // same instant — the tie breaks by writer
+    expect(view([a, b])).toEqual({ topic: 'from-b' })
+    expect(view([b, a])).toEqual({ topic: 'from-b' }) // arrival order is irrelevant
+    expect(view([a, b, a])).toEqual({ topic: 'from-b' }) // replays and echoes are absorbed
+  })
+
+  it('back-to-back updates from one writer always order — the stamp outruns a frozen clock', async () => {
+    const lobby = await Room.create('rapid', { meta: { v: 0 } })
+    lobby.onUpdate(() => {}) // observe — an unobserved room doesn't follow events
+    await Room.update('rapid', { meta: { v: 1 } })
+    await Room.update('rapid', { meta: { v: 2 } }) // same millisecond as v1 — must still win
+    expect(lobby.meta).toEqual({ v: 2 })
+  })
+
+  it('a stale p-meta revision never overwrites a newer one', async () => {
+    const lobby = await Room.create('rev')
+    const me = await lobby.join({ v: 0 })
+    await me.setMeta({ v: 1 })
+    await me.setMeta({ v: 2 })
+
+    // A duplicate delivery of the older event (broker redelivery, echo) arrives late.
+    await getBroadcastAdapter().publish(
+      roomCtrlKey('rev'),
+      stringify({ __r: 'p-meta', id: me.id, meta: { v: 1 }, prev: { v: 0 }, seq: 1 }),
+    )
+
+    expect(lobby.getParticipant(me.id)!.meta).toEqual({ v: 2 })
   })
 
   it('close() fires onClose on observers, removes the room, and fails later joins', async () => {
@@ -893,7 +938,17 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
 }
 
 function createSnapshot(roomId: string, partial?: Partial<RoomSnapshotMetadata>): RoomSnapshotMetadata {
-  return { channelId: 'ch1', roomId, meta: {}, size: null, isolated: false, closed: false, count: 0, ...partial }
+  return {
+    channelId: 'ch1',
+    roomId,
+    meta: {},
+    size: null,
+    isolated: false,
+    closed: false,
+    count: 0,
+    stamp: { at: 0, by: '' },
+    ...partial,
+  }
 }
 
 describe('ClientRoom', () => {
@@ -964,10 +1019,10 @@ describe('ClientRoom', () => {
     clientRoom.onClose(() => log.push('closed'))
     me.onLeave(() => log.push('me-left'))
 
-    fake.emit({ __r: 'p-meta', id: me.id, meta: { mood: 'happy' }, prev: {}, eid: 'e1' })
+    fake.emit({ __r: 'p-meta', id: me.id, meta: { mood: 'happy' }, prev: {}, seq: 1 })
     expect(me.meta).toEqual({ mood: 'happy' })
 
-    fake.emit({ __r: 'update', meta: { topic: 'b' }, prev: { topic: 'a' }, size: null, eid: 'e2' })
+    fake.emit({ __r: 'update', meta: { topic: 'b' }, prev: { topic: 'a' }, size: null, at: 9, by: 'w1' })
     expect(clientRoom.size).toBe(Infinity)
 
     fake.emit({ __r: 'leave', id: me.id }) // kicked

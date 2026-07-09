@@ -64,6 +64,7 @@ class ClientRoom implements Room {
       meta: snapshot.meta,
       size: sizeFromWire(snapshot.size),
       seed: { count: snapshot.count }, // the roster itself streams right behind the response
+      updateStamp: snapshot.stamp,
       closed: snapshot.closed,
       onListenersChanged: () => this._syncWants(),
       onCallbackError: reportRoomError,
@@ -210,13 +211,13 @@ class ClientRoom implements Room {
         return
       }
       case 'p-meta': {
-        this._state.applyParticipantMeta(event.id, event.meta, event.prev, event.eid)
+        this._state.applyParticipantMeta(event.id, event.meta, event.prev, event.seq)
         const local = this._localParticipants.get(event.id)
         if (local) local._meta = event.meta
         return
       }
       case 'update':
-        this._state.applyRoomUpdate(event.meta, event.prev, sizeFromWire(event.size), event.eid)
+        this._state.applyRoomUpdate(event.meta, event.prev, sizeFromWire(event.size), event.at, event.by)
         return
       case 'closed':
         this._applyClosed()
