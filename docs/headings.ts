@@ -323,7 +323,7 @@ const headings = [
     level: 2,
     title: '`Room`',
     url: '/room',
-    sectionTitles: ['Rooms', 'Participants', 'Messaging', 'Recipes'],
+    sectionTitles: ['Quick start', 'Guides', 'Reference', 'Production'],
   },
   {
     level: 2,
