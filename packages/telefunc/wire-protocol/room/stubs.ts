@@ -30,7 +30,8 @@ assertIsNotBrowser()
  * The channel registered with a response when a `Room` crosses the wire.
  * - server→client: room events & data relayed as PUBLISH frames (pre-peer buffered,
  *   replayed on reconnect). Control always flows; text is gated by the client's broadcast
- *   subscription; binary is member-selective (`sub-binary`).
+ *   subscription (all) or its member-selective `sub-text` set; binary is member-selective
+ *   (`sub-binary`).
  * - client→server: join/leave/set-meta as ack-bearing channel messages; publishes as
  *   PUBLISH(_BINARY)_ACK_REQ frames, validated against the members joined through this stub.
  */
@@ -40,18 +41,27 @@ class RoomStubChannel extends ServerBroadcast {
   readonly _stubMembers = new Map<string, { selfDelivery: boolean }>()
   /** @internal — which members' binary streams the client declared it wants (`sub-binary`). */
   _binaryWants: { all: boolean; members: Set<string> } = { all: false, members: new Set() }
-  /** @internal — whether the client currently subscribes to the text data lane. */
+  /** @internal — whether the client subscribes to the whole text lane (the broadcast-sub ctrl). */
   _wantsText = false
+  /** @internal — which members' text the client wants without a room-level subscription (`sub-text`). */
+  _textMemberWants: Set<string> = new Set()
+  /** @internal — whether the client holds `onActivity` listeners (`sub-activity`). */
+  _wantsActivity = false
 
   /** @internal */
   _wantsBinaryFrom(memberId: string): boolean {
     return this._binaryWants.all || this._binaryWants.members.has(memberId)
   }
 
+  /** @internal */
+  _wantsTextFrom(memberId: string): boolean {
+    return this._wantsText || this._textMemberWants.has(memberId)
+  }
+
   constructor(serverRoom: ServerRoom) {
     super({ key: roomCtrlKey(serverRoom.id) })
     this._room = serverRoom
-    // Stub requests (join/leave/set-meta/dm/sub-binary) arrive as channel messages.
+    // Stub requests (join/leave/set-meta/dm/sub-binary/sub-text) arrive as channel messages.
     this._listen((msg: unknown) => this._room._handleStubRequest(this, msg))
   }
 
@@ -157,11 +167,23 @@ function bindParticipantStubChannel(
 
   // The participant's holder is the client — forward inbox deliveries to it.
   const unlistenDm = participant.listen((data, from) => {
-    void channel.send({ __r: 'dm', from: from?.id ?? '', fromMeta: from?.meta ?? null, data }).catch(() => {})
+    void channel
+      .send({
+        __r: 'dm',
+        from: from?.id ?? '',
+        fromMeta: from?.meta ?? null,
+        ...(from?.identity == null ? {} : { fromIdentity: from.identity }),
+        data,
+      })
+      .catch(() => {})
   })
 
-  const unlistenLeave = participant.onLeave(() => {
-    void channel.send({ __r: 'left' }).catch(() => {})
+  const unlistenLeave = participant.onLeave((cause) => {
+    const notice =
+      cause.type === 'left'
+        ? { __r: 'left' as const }
+        : { __r: 'left' as const, cause: cause.type, ...(cause.reason === undefined ? {} : { reason: cause.reason }) }
+    void channel.send(notice).catch(() => {})
     void channel.close().catch(() => {})
   })
 

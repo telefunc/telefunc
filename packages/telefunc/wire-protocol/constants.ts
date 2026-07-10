@@ -10,6 +10,7 @@ export const SERIALIZER_PREFIX_FUNCTION = '!TelefuncFunction:'
 export const SERIALIZER_PREFIX_BROADCAST = '!TelefuncBroadcast:'
 export const SERIALIZER_PREFIX_ROOM = '!TelefuncRoom:'
 export const SERIALIZER_PREFIX_ROOM_PARTICIPANT = '!TelefuncRoomParticipant:'
+export const SERIALIZER_PREFIX_ROOM_REMOTE = '!TelefuncRoomRemoteParticipant:'
 
 /** Marker key used on the ack payload of a server-returned function when its arg shield
  *  rejects the incoming args. The client-side reviver detects this and throws on the
@@ -130,6 +131,15 @@ export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
+/**
+ * Maximum size of a single inbound client→server message (any wire frame: channel sends,
+ * publishes, DMs, telefunction envelopes). A hostile client declaring a gigabyte message is
+ * cut off at this bound — SSE rejects the declared length before buffering the body, WS
+ * terminates the connection — while honest clients get a clear client-side error first.
+ * Large payloads belong on streams (`File`/`Blob`/`ReadableStream`), which move as bounded
+ * transport chunks and are not subject to this per-message cap.
+ */
+export const CHANNEL_MESSAGE_LIMIT_BYTES = 16 * 1024 * 1024
 
 /** How long a channel waits for a peer to connect after the server→client
  *  HTTP response carrying `channel.client` has been serialized. */
@@ -236,6 +246,10 @@ export const ROOM_MEMBER_TTL_MS = 120_000
  *  (plus heartbeat slack) so the event-driven fast path always wins when anything is alive,
  *  and comfortably above Workers KV's 60s minimum expiration. */
 export const ROOM_MEMBER_KV_TTL_MS = ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS
+
+/** At most one activity signal per room per publishing node in this window — badge freshness
+ *  at control-lane cost, leading-edge throttled (no timers). */
+export const ROOM_ACTIVITY_THROTTLE_MS = 3_000
 
 // ===== Session routing =====
 

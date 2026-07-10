@@ -154,6 +154,9 @@ async function reviveResponse(
   const reviver = createStreamingReviver(
     context,
     function onRevived(revived) {
+      // Subordinate values (gcTrack: false) live and die with a parent revived in this payload —
+      // no GC wrapper (it would break `===` with the parent's own views), no own close/abort.
+      if (revived.gcTrack === false) return
       {
         const { value, close } = revived
         assert(isObjectOrFunction(value))

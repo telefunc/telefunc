@@ -45,6 +45,7 @@ type RunContext = {
   serverConfig: {
     telefuncUrl: string
     stream: { transport: StreamTransport }
+    channel: { messageLimit: number }
     extensionRequestTypes: ReviverType<TypeContract, ServerReviverContext>[]
     log: { shieldErrors: ShieldLogConfig }
   }
@@ -86,7 +87,16 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     channel.onClose(requestContext.trackPending())
     return channel
   }
-  const { text, registerFile, consumeFile } = await readBody(request, readable, requestKind)
+  // A hostile body (oversized declared metadata) or a mid-read disconnect is the requester's
+  // fault, not a server bug — answer 400 instead of feeding the bug-handling path.
+  let body: Awaited<ReturnType<typeof readBody>>
+  try {
+    body = await readBody(request, readable, requestKind, serverConfig.channel.messageLimit)
+  } catch (err) {
+    logParseError(String(err), runContext)
+    return { isMalformedRequest: true }
+  }
+  const { text, registerFile, consumeFile } = body
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
     registerFile,
     consumeFile,
@@ -151,6 +161,7 @@ async function readBody(
   request: Request,
   readable: Readable | undefined,
   requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT | null,
+  messageLimit: number,
 ): Promise<{
   text: string
   registerFile: ServerReviverContext['registerFile']
@@ -159,7 +170,8 @@ async function readBody(
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     assert(source)
-    const reader = new StreamReader(source)
+    // The metadata (call envelope) is size-capped; the file bytes behind it stream unbounded.
+    const reader = new StreamReader(source, messageLimit)
     return {
       text: await reader.readMetadata(),
       registerFile: (i, s) => reader.registerFile(i, s),

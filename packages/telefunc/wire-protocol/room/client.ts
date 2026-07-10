@@ -6,6 +6,7 @@ import { isObject } from '../../utils/isObject.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import {
+  leaveCauseFromWire,
   ParticipantBase,
   RoomState,
   frameWithMemberId,
@@ -13,7 +14,8 @@ import {
   normalizeJoinOptions,
   sizeFromWire,
   unframeMemberId,
-  type BinaryWants,
+  type InboxMessage,
+  type MemberWants,
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
   type ParticipantStubRequest,
@@ -24,16 +26,21 @@ import {
   type RoomDmEnvelope,
   type RoomEnvelope,
   type RoomRosterEvent,
+  type RoomActivityEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './shared.js'
 import type {
+  BinaryPublishOptions,
+  RoomBinaryListener,
   JoinOptions,
+  LeaveCause,
   LocalParticipant,
   ParticipantMeta,
   RemoteParticipant,
   Room,
   RoomMeta,
+  RoomSnapshotView,
   Sender,
 } from './types.js'
 
@@ -53,6 +60,11 @@ class ClientRoom implements Room {
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   private _lastBinaryWantsSent = ''
+  private _lastTextWantsSent = ''
+  private _lastActivityWantSent = false
+  /** DMs relayed before their participant's join ack resolved (a reactive send racing the
+   *  join round-trip) — held bounded (count-capped, drop-oldest), flushed on registration. */
+  private _pendingDms: Array<InboxMessage & { to: string }> | null = null
   private _rosterArrived!: () => void
   /** Settled by the first streamed roster (or wire death) — gates `getParticipants()`. */
   private readonly _rosterReady = new Promise<void>((resolve) => (this._rosterArrived = resolve))
@@ -69,14 +81,16 @@ class ClientRoom implements Room {
       onListenersChanged: () => this._syncWants(),
       onCallbackError: reportRoomError,
     })
+    this._state._owner = this
     if (snapshot.closed) this._rosterArrived()
 
     // Delivery handlers are local-only — what the server relays is driven by the declared
     // wants: control always arrives, text while subscribed, binary per `sub-binary`.
     stub._subscribeLocal((envelope, info) => this._onEnvelope(envelope, info))
     stub._subscribeBinaryLocal((framed, info) => this._onBinaryFrame(framed, info))
-    // Wire death — server closed the room, network gave up, or the stub was GC'd.
-    stub.onClose(() => this._applyClosed())
+    // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives
+    // as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
+    stub.onClose(() => this._applyClosed('disconnected'))
   }
 
   // ── Room API ──
@@ -104,12 +118,18 @@ class ClientRoom implements Room {
   }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
+    if (options?.identity !== undefined) {
+      throw new Error(
+        'join() options.identity is server-assigned: identity is trusted, so set it where trust lives — in the granting telefunction (server-side join()), not on the client.',
+      )
+    }
     const selfDelivery = normalizeJoinOptions(meta, options)
     const ack = (await this._request({ __r: 'req-join', meta, selfDelivery })) as ReqJoinAck
     if (!ack.ok) throw new Error(ack.err)
     const participant = new ClientRoomParticipant(this, ack.id, meta, selfDelivery)
     this._localParticipants.set(ack.id, participant)
     this._state.applyJoin(ack.id, meta, ack.joinedAt) // the relayed event is absorbed
+    this._flushPendingDms(ack.id, participant)
     return participant
   }
 
@@ -128,16 +148,31 @@ class ClientRoom implements Room {
     return this._state.getRemote(id)
   }
 
+  /** DMs held for this participant while its join ack was in flight — deliver in order. */
+  private _flushPendingDms(id: string, participant: ClientRoomParticipant): void {
+    if (!this._pendingDms) return
+    const held = this._pendingDms.filter((msg) => msg.to === id)
+    if (held.length === 0) return
+    const rest = this._pendingDms.filter((msg) => msg.to !== id)
+    this._pendingDms = rest.length > 0 ? rest : null
+    for (const msg of held) participant._deliverMessage(msg)
+  }
+
+  /** @internal — revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
+  _reviveRemote(snap: { id: string; meta: ParticipantMeta; joinedAt: number; metaSeq: number }): RemoteParticipant {
+    return this._state.ensureRemoteFromSnapshot(snap)
+  }
+
   subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._state.subscribe(callback)
   }
-  subscribeBinary(callback: (data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this._state.subscribeBinary(callback)
+  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string }): () => void {
+    return this._state.subscribeBinary(callback, options)
   }
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
     return this._state.onJoin(callback)
   }
-  onLeave(callback: (member: RemoteParticipant) => void): () => void {
+  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
     return this._state.onLeave(callback)
   }
   onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
@@ -154,6 +189,19 @@ class ClientRoom implements Room {
   }
   onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
     return this._state.onAnnounce(callback)
+  }
+
+  onChange(callback: () => void): () => void {
+    return this._state.onChange(callback)
+  }
+
+  onActivity(callback: (info: { timestamp: number }) => void): () => void {
+    return this._state.onActivity(callback)
+  }
+
+  snapshot(): RoomSnapshotView {
+    // The roster streams in right behind the response — its arrival is an onChange.
+    return this._state.snapshot()
   }
 
   // ── Requests & publishes (used by ClientRoomParticipant) ──
@@ -186,7 +234,7 @@ class ClientRoom implements Room {
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     if (!hasRoomTag(envelope)) return
-    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent
+    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomActivityEvent
     switch (event.__r) {
       case 'roster':
         // The authoritative member list, positioned in the relay stream: everything relayed
@@ -199,20 +247,22 @@ class ClientRoom implements Room {
         this._state.applyData(
           event.from,
           event.fromMeta,
+          event.fromIdentity ?? null,
           event.data,
           makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
           isSuppressed(this.id, event.from),
         )
         return
       case 'join':
-        this._state.applyJoin(event.id, event.meta, event.joinedAt)
+        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null)
         return
       case 'leave': {
-        this._state.applyLeave(event.id)
+        const cause = leaveCauseFromWire(event)
+        this._state.applyLeave(event.id, cause)
         const local = this._localParticipants.get(event.id)
         if (local) {
           this._localParticipants.delete(event.id)
-          local._onLeft() // kicked, or left through another handle
+          local._onLeft(cause) // kicked (with the kick's reason), or left through another handle
         }
         return
       }
@@ -226,14 +276,34 @@ class ClientRoom implements Room {
         this._state.applyRoomUpdate(event.meta, event.prev, sizeFromWire(event.size), event.at, event.by)
         return
       case 'closed':
-        this._applyClosed()
+        this._applyClosed('closed')
         return
       case 'announce':
         this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
         return
-      case 'dm':
+      case 'activity':
+        this._state.applyActivity(event.at)
+        return
+      case 'dm': {
         // Relayed from this member's private inbox — only its own stub ever receives it.
-        this._localParticipants.get(event.to)?._deliverMessage(event.from, event.fromMeta, event.data)
+        const msg: InboxMessage = {
+          from: event.from,
+          fromMeta: event.fromMeta,
+          fromIdentity: event.fromIdentity ?? null,
+          data: event.data,
+        }
+        const local = this._localParticipants.get(event.to)
+        if (local) {
+          local._deliverMessage(msg)
+          return
+        }
+        // The DM beat its target's join ack (same connection, different request) — hold it.
+        if (this._state.closed) return
+        const pending = (this._pendingDms ??= [])
+        pending.push({ ...msg, to: event.to })
+        if (pending.length > 64) pending.shift()
+        return
+      }
     }
   }
 
@@ -243,30 +313,50 @@ class ClientRoom implements Room {
     this._state.applyBinary(
       unframed.from,
       unframed.payload,
+      unframed.track,
+      unframed.keyFrame,
       makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
       isSuppressed(this.id, unframed.from),
     )
   }
 
-  private _applyClosed(): void {
+  private _applyClosed(causeType: 'closed' | 'disconnected'): void {
     if (this._state.closed) return
-    this._state.applyClosed()
+    this._pendingDms = null
+    const cause: LeaveCause = { type: causeType }
+    this._state.applyClosed(cause)
     this._rosterArrived() // unblock any getParticipants() waiting on a wire that just died
     // After onClose, like on the server: the room-level signal fires before per-handle cleanup.
-    for (const local of this._localParticipants.values()) local._onLeft()
+    for (const local of this._localParticipants.values()) local._onLeft(cause)
     this._localParticipants.clear()
   }
 
-  /** Declare this holder's wants to the server — synchronously, like `subscribe()`, so
-   *  same-connection FIFO guarantees a publish right after subscribing gets its own frame back.
-   *  Text is the standard broadcast subscription (on while data listeners exist); binary is the
-   *  member-selective `sub-binary` set (all / specific members), re-sent only when it changes. */
+  /** Declare this holder's wants to the server. Both data lanes are member-selective:
+   *  room-level text listeners ride the standard broadcast subscription — declared
+   *  synchronously, like `subscribe()`, so same-connection FIFO guarantees a publish right
+   *  after subscribing gets its own frame back — while participant-scoped text listeners
+   *  declare a `sub-text` member set and binary listeners a `sub-binary` one, each re-sent
+   *  only when it changes. */
   private _syncWants(): void {
     const state = this._state
-    this._stub._setWireTextSubscribed(!state.closed && state.dataListenerCount > 0)
+    const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
+    this._stub._setWireTextSubscribed(text.all)
 
     if (state.closed) return // stub is dead — nothing to declare
-    const wants: BinaryWants = state.binaryWants()
+    const textEncoded = text.all ? '' : [...text.members].sort().join(',')
+    if (textEncoded !== this._lastTextWantsSent) {
+      this._lastTextWantsSent = textEncoded
+      // A room-level subscription supersedes the member set — clear it server-side.
+      void this._stub.send({ __r: 'sub-text', members: text.all ? [] : text.members }, { ack: false }).catch(() => {})
+    }
+
+    const wantActivity = state.activityListenerCount > 0
+    if (wantActivity !== this._lastActivityWantSent) {
+      this._lastActivityWantSent = wantActivity
+      void this._stub.send({ __r: 'sub-activity', on: wantActivity }, { ack: false }).catch(() => {})
+    }
+
+    const wants: MemberWants = state.binaryWants()
     const encoded = wants.all ? 'all' : [...wants.members].sort().join(',')
     if (encoded === this._lastBinaryWantsSent) return
     this._lastBinaryWantsSent = encoded
@@ -283,15 +373,15 @@ class ClientRoom implements Room {
 abstract class ClientParticipantBase extends ParticipantBase {
   protected readonly _roomId: string
 
-  constructor(roomId: string, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
-    super(id, meta, selfDelivery)
+  constructor(roomId: string, id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
+    super(id, meta, selfDelivery, identity)
     this._roomId = roomId
     if (!selfDelivery) setSuppressed(roomId, id, true)
   }
 
-  override _onLeft(): void {
+  override _onLeft(cause: LeaveCause): void {
     setSuppressed(this._roomId, this.id, false)
-    super._onLeft()
+    super._onLeft(cause)
   }
 
   protected _reportError(err: unknown): void {
@@ -304,7 +394,8 @@ class ClientRoomParticipant extends ClientParticipantBase {
   private readonly _room: ClientRoom
 
   constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
-    super(clientRoom.id, id, meta, selfDelivery)
+    // Client-side joins carry no identity — it's server-assigned (see JoinOptions.identity).
+    super(clientRoom.id, id, meta, selfDelivery, null)
     this._room = clientRoom
   }
 
@@ -317,9 +408,9 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return await this._room._publishData(this.id, data)
   }
 
-  async publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
+  async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishBinaryData(frameWithMemberId(this.id, data))
+    return await this._room._publishBinaryData(frameWithMemberId(this.id, data, options))
   }
 
   async send(to: string | Sender, data: unknown): Promise<void> {
@@ -342,7 +433,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
     } finally {
       // Local cleanup even when the wire is gone — the server reaps the member on stub death.
       this._room._dropParticipant(this.id)
-      this._onLeft()
+      this._onLeft({ type: 'left' })
     }
   }
 }
@@ -352,17 +443,23 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
 
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
-    super(metadata.roomId, metadata.id, metadata.meta, metadata.selfDelivery)
+    super(metadata.roomId, metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null)
     this._channel = channel
 
     channel.listen((notice: unknown) => {
       if (!hasRoomTag(notice)) return
       const msg = notice as ParticipantStubNotice
       if (msg.__r === 'p-meta') this._meta = msg.meta
-      else if (msg.__r === 'dm') this._deliverMessage(msg.from, msg.fromMeta, msg.data)
-      else this._onLeft()
+      else if (msg.__r === 'dm')
+        this._deliverMessage({
+          from: msg.from,
+          fromMeta: msg.fromMeta,
+          fromIdentity: msg.fromIdentity ?? null,
+          data: msg.data,
+        })
+      else if (msg.__r === 'left') this._onLeft(standaloneLeftCause(msg))
     })
-    channel.onClose(() => this._onLeft())
+    channel.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
 
   async publish(data: unknown): Promise<ChannelPublishAck> {
@@ -370,9 +467,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return unwrapPublishAck(await this._request({ __r: 'req-publish', data }))
   }
 
-  async publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
+  async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return unwrapPublishAck(await this._channel.sendBinary(frameWithMemberId(this.id, data), { ack: true }))
+    return unwrapPublishAck(await this._channel.sendBinary(frameWithMemberId(this.id, data, options), { ack: true }))
   }
 
   async send(to: string | Sender, data: unknown): Promise<void> {
@@ -393,7 +490,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       unwrapOkAck(await this._request({ __r: 'req-leave' }))
     } finally {
       // Local cleanup even when the wire is gone — the server reaps the member on stub death.
-      this._onLeft()
+      this._onLeft({ type: 'left' })
       void this._channel.close().catch(() => {})
     }
   }
@@ -456,6 +553,12 @@ function unwrapPublishAck(ack: unknown): ChannelPublishAck {
   const res = ack as ReqPublishAck
   if (!res.ok) throw new Error(res.err)
   return res.ack
+}
+
+/** A standalone participant's `left` notice carries the server-side cause verbatim. */
+function standaloneLeftCause(msg: { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }): LeaveCause {
+  const type = msg.cause ?? 'left'
+  return msg.reason === undefined ? { type } : { type, reason: msg.reason }
 }
 
 function reportRoomError(err: unknown): void {

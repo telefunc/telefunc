@@ -50,7 +50,13 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   Req,
   Res
 > {
-  const ws = crossws({ hooks: getTelefuncChannelHooks() })
+  // `maxPayload` kills an oversized WS frame from its declared length, before the body is
+  // buffered; the mux's `messageLimit` check stays the exact semantic gate (small headroom
+  // here covers frame headers so `ws` never rejects a frame the mux would accept).
+  const ws = crossws({
+    hooks: getTelefuncChannelHooks(),
+    serverOptions: { maxPayload: getServerConfig().channel.messageLimit + 1024 },
+  })
 
   function installWebSocket(server: HttpServerOrWrapper): void {
     enableChannelTransports([CHANNEL_TRANSPORT.WS])

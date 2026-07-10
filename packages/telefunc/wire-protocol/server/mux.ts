@@ -46,6 +46,7 @@ type MuxServerOptions = {
   connectTtl: number
   bufferLimit: number
   bufferLimitBinary: number
+  messageLimit: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
@@ -104,6 +105,12 @@ class ChannelMux {
   /** Exposed for transport-level race timers (SSE's `waitForConnection`). */
   get connectTtl(): number {
     return this.options.connectTtl
+  }
+
+  /** Exposed so transports can reject oversized frames at the earliest point — SSE checks the
+   *  declared length before buffering the body (`StreamReader`). */
+  get messageLimit(): number {
+    return this.options.messageLimit
   }
 
   // ── ServerChannel registry ──────────────────────────────────────────
@@ -167,6 +174,7 @@ class ChannelMux {
         pingInterval: this.options.pingInterval,
         clientReplayBuffer: this.options.clientReplayBuffer,
         clientReplayBufferBinary: this.options.clientReplayBufferBinary,
+        messageLimit: this.options.messageLimit,
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
         transports: this.options.transports,
@@ -214,6 +222,13 @@ class ChannelMux {
   private dispatchInbound(connection: unknown, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
+    // The hostile-input bound: a client shipping more than `messageLimit` in one message is
+    // cut off like any protocol violation — before the frame is decoded or dispatched.
+    if (rawFrame.byteLength > this.options.messageLimit) {
+      entry.state.terminatePermanently = true
+      entry.transport.terminateConnection(connection)
+      return Promise.resolve(null)
+    }
     const exec = async (): Promise<ReconcileOutcome | null> => {
       try {
         const pending = this.handleFrame(entry, connection, rawFrame)
@@ -522,6 +537,7 @@ function resolveMuxServerOptions(): MuxServerOptions {
     connectTtl: c.connectTtl,
     bufferLimit: c.bufferLimit,
     bufferLimitBinary: c.bufferLimitBinary,
+    messageLimit: c.messageLimit,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
     transports: c.transports,

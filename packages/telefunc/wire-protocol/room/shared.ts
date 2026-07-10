@@ -3,6 +3,7 @@ export {
   roomCtrlKey,
   roomTextKey,
   roomMemberDataKey,
+  roomActivityKey,
   roomDmKey,
   roomConfigKvKey,
   roomIdFromConfigKey,
@@ -17,6 +18,9 @@ export {
   normalizeJoinOptions,
   stampNewer,
   errorMessage,
+  leaveCauseFromWire,
+  leaveCauseToWire,
+  remoteBacking,
   RoomState,
   ParticipantBase,
 }
@@ -39,13 +43,26 @@ export type {
   ReqOkAck,
   ReqJoinAck,
   ReqPublishAck,
-  BinaryWants,
+  MemberWants,
+  RoomActivityEvent,
+  InboxMessage,
 }
 
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
-import type { JoinOptions, LocalParticipant, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from './types.js'
+import type {
+  BinaryFrameInfo,
+  BinaryPublishOptions,
+  RoomSnapshotView,
+  JoinOptions,
+  LeaveCause,
+  LocalParticipant,
+  ParticipantMeta,
+  RemoteParticipant,
+  RoomMeta,
+  Sender,
+} from './types.js'
 
 // ---------------------------------------------------------------------------
 // Keys & records
@@ -68,6 +85,11 @@ function roomTextKey(roomId: string): string {
  *  member-selective at the source), text too in isolated mode. */
 function roomMemberDataKey(roomId: string, memberId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:m:${memberId}`
+}
+/** Pub/sub key carrying the room's throttled activity signal — subscribed only by holders with
+ *  `onActivity` listeners (badge consumers), so nobody else pays even that trickle. */
+function roomActivityKey(roomId: string): string {
+  return `${ROOM_KEY_NAMESPACE}${roomId}:a`
 }
 /** Pub/sub key carrying one member's private inbox — only the member's owning node subscribes. */
 function roomDmKey(roomId: string, memberId: string): string {
@@ -115,6 +137,8 @@ type RoomMemberRecord = {
   seenAt: number
   /** Monotonic meta revision, issued by the member's single owner — orders `p-meta` events. */
   metaSeq: number
+  /** App identity stamped at (server-side) join — absent: none. Immutable per member. */
+  identity?: string
 }
 
 function sizeToWire(size: number): number | null {
@@ -133,6 +157,8 @@ type MemberSnapshot = {
   meta: ParticipantMeta
   joinedAt: number
   metaSeq: number
+  /** App identity stamped at (server-side) join — `null`/absent: none. Immutable per member. */
+  identity?: string | null
 }
 
 /** Serializer metadata of a `Room` crossing the wire. Carries only scalars — the roster itself
@@ -158,6 +184,7 @@ type ParticipantStubMetadata = {
   meta: ParticipantMeta
   joinedAt: number
   selfDelivery: boolean
+  identity: string | null
 }
 
 /** Presence & lifecycle events, published on the room's control key by whichever node caused them.
@@ -167,8 +194,8 @@ type ParticipantStubMetadata = {
  *  `p-meta` orders by the owner-issued `seq`, `update` by its `at`/`by` stamp — echoes and
  *  concurrent writers converge to the same winner on every node, whatever the arrival order. */
 type RoomCtrlEnvelope =
-  | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number }
-  | { __r: 'leave'; id: string }
+  | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string }
+  | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected'; reason?: unknown }
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; prev: ParticipantMeta; seq: number }
   | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; at: number; by: string }
   | { __r: 'closed' }
@@ -177,10 +204,14 @@ type RoomCtrlEnvelope =
  *  key (isolated mode). `fromMeta` is the sender's meta as verified by the sender's own node —
  *  never client-supplied — so any receiver can surface a correct sender even before its roster
  *  view catches up (see `RoomState.applyData`). */
-type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; data: unknown }
+type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; fromIdentity?: string; data: unknown }
 
 /** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown }
+
+/** The activity trickle (own key `:a`): "something was published around `at`" — throttled at
+ *  the publisher, consumed by badge-style listeners that don't want message bodies. */
+type RoomActivityEvent = { __r: 'activity'; at: number }
 
 /** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
@@ -195,16 +226,27 @@ type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] }
 /** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
  *  privacy: only the target's owning node subscribes, only its holder receives the relay.
  *  `to` lets a holder of several participants route the message to the right one. */
-type RoomDmEnvelope = { __r: 'dm'; to: string; from: string; fromMeta: ParticipantMeta | null; data: unknown }
+type RoomDmEnvelope = {
+  __r: 'dm'
+  to: string
+  from: string
+  fromMeta: ParticipantMeta | null
+  fromIdentity?: string
+  data: unknown
+}
 
 /** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
- *  `sub-binary` declares which members' binary streams the client wants relayed (full replace). */
+ *  `sub-binary` declares which members' binary streams the client wants relayed (full replace);
+ *  `sub-text` does the same for member-scoped text — the room-level (all) text want rides the
+ *  standard broadcast-subscription ctrl instead, keeping its synchronous-declaration fence. */
 type RoomStubRequest =
   | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown }
   | { __r: 'sub-binary'; all: boolean; members: string[] }
+  | { __r: 'sub-text'; members: string[] }
+  | { __r: 'sub-activity'; on: boolean }
 
 /** Client→server requests on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubRequest =
@@ -215,16 +257,33 @@ type ParticipantStubRequest =
 
 /** Server→client notices on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubNotice =
-  | { __r: 'left' }
+  | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
   | { __r: 'p-meta'; meta: ParticipantMeta }
-  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; data: unknown }
+  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown }
 
-/** Which members' binary streams a holder wants — `all` (room-level listeners) or a specific set. */
-type BinaryWants = { all: boolean; members: string[] }
+/** Which members' streams a holder wants on a data lane (text or binary) — `all` for
+ *  room-level listeners, or a specific member set for participant-scoped ones. */
+type MemberWants = { all: boolean; members: string[] }
 
 type ReqOkAck = { ok: true } | { ok: false; err: string }
 type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }
 type ReqPublishAck = { ok: true; ack: ChannelPublishInfo } | { ok: false; err: string }
+
+/** Decode a leave event's cause — an absent wire cause means a voluntary leave. */
+function leaveCauseFromWire(event: { cause?: 'removed' | 'disconnected'; reason?: unknown }): LeaveCause {
+  if (event.cause === 'removed') {
+    return event.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: event.reason }
+  }
+  return { type: event.cause === 'disconnected' ? 'disconnected' : 'left' }
+}
+
+/** Encode a cause into leave-event fields — `'left'` is the wire default and travels as nothing. */
+function leaveCauseToWire(cause: LeaveCause): { cause?: 'removed' | 'disconnected'; reason?: unknown } {
+  if (cause.type === 'removed')
+    return cause.reason === undefined ? { cause: 'removed' } : { cause: 'removed', reason: cause.reason }
+  if (cause.type === 'disconnected') return { cause: 'disconnected' }
+  return {}
+}
 
 /** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {
@@ -271,39 +330,81 @@ function bytesToUuid(bytes: Uint8Array): string {
   return uuid
 }
 
-/** Binary relay format: `[16-byte member UUID][payload]`. Fixed-size prefix — no length field needed. */
-function frameWithMemberId(memberId: string, payload: Uint8Array): Uint8Array {
+/** Binary frame flags (one byte after the member ID). */
+const FRAME_FLAG_KEY = 0b0000_0001
+const FRAME_FLAG_TRACK = 0b0000_0010
+/** Track names stay tiny — they ride every frame. */
+const TRACK_MAX_BYTES = 64
+const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
+const frameTextDecoder = /* @__PURE__ */ new TextDecoder()
+
+/** Binary relay format: `[16-byte member UUID][1-byte flags][?1-byte track length + track][payload]`.
+ *  A plain publish costs one flag byte; named tracks (mic/camera/screen on one member lane) and
+ *  the keyframe bit make media multiplexing first-class — no hand-rolled envelopes. */
+function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
   const idBytes = uuidToBytes(memberId)
   assert(idBytes, 'room member IDs are UUIDs')
-  const framed = new Uint8Array(MEMBER_ID_BYTE_LENGTH + payload.byteLength)
+  let flags = opts?.keyFrame === true ? FRAME_FLAG_KEY : 0
+  let trackBytes: Uint8Array | null = null
+  if (opts?.track !== undefined) {
+    assertUsage(typeof opts.track === 'string' && opts.track.length > 0, 'track should be a non-empty string')
+    trackBytes = frameTextEncoder.encode(opts.track)
+    assertUsage(trackBytes.byteLength <= TRACK_MAX_BYTES, `track should be at most ${TRACK_MAX_BYTES} bytes`)
+    flags |= FRAME_FLAG_TRACK
+  }
+  const headerLength = MEMBER_ID_BYTE_LENGTH + 1 + (trackBytes ? 1 + trackBytes.byteLength : 0)
+  const framed = new Uint8Array(headerLength + payload.byteLength)
   framed.set(idBytes, 0)
-  framed.set(payload, MEMBER_ID_BYTE_LENGTH)
+  framed[MEMBER_ID_BYTE_LENGTH] = flags
+  if (trackBytes) {
+    framed[MEMBER_ID_BYTE_LENGTH + 1] = trackBytes.byteLength
+    framed.set(trackBytes, MEMBER_ID_BYTE_LENGTH + 2)
+  }
+  framed.set(payload, headerLength)
   return framed
 }
 
-/** Split a binary relay frame into sender ID and payload. Returns `null` on truncated frames. */
-function unframeMemberId(data: Uint8Array): { from: string; payload: Uint8Array } | null {
-  if (data.byteLength < MEMBER_ID_BYTE_LENGTH) return null
-  return { from: bytesToUuid(data), payload: data.subarray(MEMBER_ID_BYTE_LENGTH) }
+/** Split a binary relay frame into sender, track, keyframe bit, and payload. `null` on truncation. */
+function unframeMemberId(
+  data: Uint8Array,
+): { from: string; payload: Uint8Array; track: string | null; keyFrame: boolean } | null {
+  if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
+  const flags = data[MEMBER_ID_BYTE_LENGTH]!
+  const keyFrame = (flags & FRAME_FLAG_KEY) !== 0
+  let track: string | null = null
+  let offset = MEMBER_ID_BYTE_LENGTH + 1
+  if (flags & FRAME_FLAG_TRACK) {
+    if (data.byteLength < offset + 1) return null
+    const trackLength = data[offset]!
+    offset += 1
+    if (data.byteLength < offset + trackLength) return null
+    track = frameTextDecoder.decode(data.subarray(offset, offset + trackLength))
+    offset += trackLength
+  }
+  return { from: bytesToUuid(data), payload: data.subarray(offset), track, keyFrame }
 }
 
 // ---------------------------------------------------------------------------
 // RoomState — the local view of a room, driven by the event stream
 // ---------------------------------------------------------------------------
 
-type ListenerKind = 'data' | 'binary' | 'event'
+type ListenerKind = 'data' | 'binary' | 'event' | 'activity'
 
 type MemberEntry = {
   id: string
   meta: ParticipantMeta
   joinedAt: number
+  identity: string | null
   /** Latest applied meta revision — stale and echoed `p-meta` events are absorbed. */
   metaSeq: number
   remote: RemoteParticipant
   dataCbs: Array<(data: unknown, info: ChannelPublishInfo) => unknown>
-  binaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo) => unknown>
+  binaryCbs: Array<{
+    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
+    track: string | undefined
+  }>
   updateCbs: Array<(meta: ParticipantMeta, prev: ParticipantMeta) => void>
-  leaveCbs: Array<() => void>
+  leaveCbs: Array<(cause?: LeaveCause) => void>
 }
 
 type RoomStateOptions = {
@@ -332,31 +433,56 @@ type RoomStateOptions = {
  * is absorbed silently. This lets owners seed state from a snapshot and apply a concurrently
  * produced event stream without double-firing.
  */
+/** Stamped (non-enumerably) on every `RemoteParticipant` a `RoomState` mints — the backing
+ *  that lets the serializer turn a view object back into (room, member) without a registry. */
+const ROOM_REMOTE_BRAND: unique symbol = Symbol.for('telefunc.RoomRemoteParticipant')
+
+type RemoteBacking = { state: RoomState; entry: MemberEntry }
+
+/** The `RoomState` backing of a minted `RemoteParticipant` — `null` for anything else. */
+function remoteBacking(value: unknown): RemoteBacking | null {
+  return typeof value === 'object' && value !== null && ROOM_REMOTE_BRAND in value
+    ? ((value as Record<typeof ROOM_REMOTE_BRAND, RemoteBacking>)[ROOM_REMOTE_BRAND] as RemoteBacking)
+    : null
+}
+
 class RoomState {
+  /** @internal — the owning `ServerRoom`/`ClientRoom`, for serialization backing. */
+  _owner: unknown = null
   readonly roomId: string
   meta: RoomMeta
   size: number
   closed: boolean
   /** Bumped on every membership change — guards async KV reconciles against going stale. */
   membershipVersion = 0
+  /** Bumped on every observable change (membership, participant meta, room config, closure) —
+   *  drives `onChange`/`snapshot()` cache invalidation. */
+  private _stateVersion = 0
+  private _snapshotCache: { version: number; value: RoomSnapshotView } | null = null
+  private readonly _changeCbs: Array<() => void> = []
 
   private readonly _members = new Map<string, MemberEntry>()
   private readonly _onListenersChanged: () => void
   private readonly _onCallbackError: (err: unknown) => void
 
   private readonly _roomDataCbs: Array<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> = []
-  private readonly _roomBinaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown> = []
+  private readonly _roomBinaryCbs: Array<{
+    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown
+    track: string | undefined
+  }> = []
   private readonly _joinCbs: Array<(member: RemoteParticipant) => void> = []
-  private readonly _leaveCbs: Array<(member: RemoteParticipant) => void> = []
+  private readonly _leaveCbs: Array<(member: RemoteParticipant, cause?: LeaveCause) => void> = []
   private readonly _updateCbs: Array<(meta: RoomMeta, prev: RoomMeta) => void> = []
   private readonly _emptyCbs: Array<() => void> = []
   private readonly _fullCbs: Array<() => void> = []
   private readonly _closeCbs: Array<() => void> = []
   private readonly _announceCbs: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
+  private readonly _activityCbs: Array<(info: { timestamp: number }) => void> = []
 
   private _eventListenerCount = 0
   private _dataListenerCount = 0
   private _binaryListenerCount = 0
+  private _activityListenerCount = 0
   private _wasFull: boolean
   private _updateStamp: { at: number; by: string }
   private _rosterKnown: boolean
@@ -409,14 +535,29 @@ class RoomState {
   get binaryListenerCount(): number {
     return this._binaryListenerCount
   }
+  /** Listeners needing the activity trickle. */
+  get activityListenerCount(): number {
+    return this._activityListenerCount
+  }
 
   /** Which members' binary streams this holder needs delivered — drives the wire/adapter
    *  subscriptions on both sides (client declares it, server aggregates it per stub). */
-  binaryWants(): BinaryWants {
+  binaryWants(): MemberWants {
     if (this._roomBinaryCbs.length > 0) return { all: true, members: [] }
     const members: string[] = []
     for (const entry of this._members.values()) {
       if (entry.binaryCbs.length > 0) members.push(entry.id)
+    }
+    return { all: false, members }
+  }
+
+  /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist,
+   *  otherwise exactly the members with participant-scoped listeners. */
+  textWants(): MemberWants {
+    if (this._roomDataCbs.length > 0) return { all: true, members: [] }
+    const members: string[] = []
+    for (const entry of this._members.values()) {
+      if (entry.dataCbs.length > 0) members.push(entry.id)
     }
     return { all: false, members }
   }
@@ -435,7 +576,25 @@ class RoomState {
   }
 
   snapshotMembers(): MemberSnapshot[] {
-    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq }) => ({ id, meta, joinedAt, metaSeq }))
+    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq, identity }) => ({
+      id,
+      meta,
+      joinedAt,
+      metaSeq,
+      identity,
+    }))
+  }
+
+  /** Revival side of a serialized `RemoteParticipant`: the live view wins when it already knows
+   *  the member; otherwise the entry is seeded silently from the snapshot — no events fire, no
+   *  count adjustment (the seed count already included the member), and the streamed roster
+   *  reconciles it like any other pre-roster knowledge. */
+  ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
+    const existing = this._members.get(snap.id)
+    if (existing) return existing.remote
+    const remote = this._createEntry(snap).remote
+    this._bumpState()
+    return remote
   }
 
   // ── Listener registration (all return an unlisten function) ──
@@ -443,13 +602,16 @@ class RoomState {
   subscribe(cb: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._register(this._roomDataCbs, cb, 'data')
   }
-  subscribeBinary(cb: (data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this._register(this._roomBinaryCbs, cb, 'binary')
+  subscribeBinary(
+    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
+    opts?: { track?: string },
+  ): () => void {
+    return this._register(this._roomBinaryCbs, { cb, track: opts?.track }, 'binary')
   }
   onJoin(cb: (member: RemoteParticipant) => void): () => void {
     return this._register(this._joinCbs, cb, 'event')
   }
-  onLeave(cb: (member: RemoteParticipant) => void): () => void {
+  onLeave(cb: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
     return this._register(this._leaveCbs, cb, 'event')
   }
   onUpdate(cb: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
@@ -464,13 +626,52 @@ class RoomState {
   onClose(cb: () => void): () => void {
     return this._register(this._closeCbs, cb, 'event')
   }
+
+  onChange(cb: () => void): () => void {
+    return this._register(this._changeCbs, cb, 'event')
+  }
+
+  onActivity(cb: (info: { timestamp: number }) => void): () => void {
+    return this._register(this._activityCbs, cb, 'activity')
+  }
+
+  applyActivity(at: number): void {
+    this._fireAll(this._activityCbs, { timestamp: at })
+  }
+
+  /** Immutable view of the whole room — cached by state version, so the reference is stable
+   *  until something actually changes (the `useSyncExternalStore` contract). */
+  snapshot(): RoomSnapshotView {
+    if (this._snapshotCache?.version === this._stateVersion) return this._snapshotCache.value
+    const participants = Object.freeze(
+      [...this._members.values()].map(({ id, identity, meta, joinedAt }) =>
+        Object.freeze({ id, identity, meta, joinedAt }),
+      ),
+    )
+    const value = Object.freeze({
+      id: this.roomId,
+      meta: this.meta,
+      size: this.size,
+      count: this.count,
+      isClosed: this.closed,
+      participants,
+    })
+    this._snapshotCache = { version: this._stateVersion, value }
+    return value
+  }
+
+  /** State changed observably — invalidate the snapshot and tell `onChange` subscribers. */
+  private _bumpState(): void {
+    this._stateVersion++
+    this._fireAll(this._changeCbs)
+  }
   onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
     return this._register(this._announceCbs, cb, 'event')
   }
 
   // ── Event application ──
 
-  applyJoin(id: string, meta: ParticipantMeta, joinedAt: number): void {
+  applyJoin(id: string, meta: ParticipantMeta, joinedAt: number, identity?: string | null): void {
     if (this.closed) return
     const existing = this._members.get(id)
     if (existing) {
@@ -479,21 +680,23 @@ class RoomState {
       existing.joinedAt = joinedAt
       return
     }
-    const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0 })
+    const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity })
     this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
     this.membershipVersion++
+    this._bumpState()
     this._fireAll(this._joinCbs, entry.remote)
     this._checkFull()
   }
 
-  applyLeave(id: string): void {
+  applyLeave(id: string, cause?: LeaveCause): void {
     const entry = this._members.get(id)
     if (!entry) return // unknown here: absorbed (pre-reconcile misses correct at reconcile)
     this._members.delete(id)
     this._seedCount = Math.max(0, this._seedCount - 1)
     this.membershipVersion++
-    this._fireAll(entry.leaveCbs)
-    this._fireAll(this._leaveCbs, entry.remote)
+    this._bumpState()
+    this._fireAll(entry.leaveCbs, cause)
+    this._fireAll(this._leaveCbs, entry.remote, cause)
     this._releaseEntryListeners(entry)
     this._wasFull = this.isFull
     if (this._members.size === 0) this._fireAll(this._emptyCbs)
@@ -506,6 +709,7 @@ class RoomState {
     if (!entry || seq <= entry.metaSeq) return
     entry.metaSeq = seq
     entry.meta = meta
+    this._bumpState()
     this._fireAll(entry.updateCbs, meta, prev)
   }
 
@@ -516,6 +720,7 @@ class RoomState {
     this._updateStamp = { at, by }
     this.meta = meta
     this.size = size
+    this._bumpState()
     this._fireAll(this._updateCbs, meta, prev)
     this._checkFull()
   }
@@ -527,13 +732,14 @@ class RoomState {
 
   /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`.
    *  Room-level `onLeave`/`onEmpty` intentionally don't fire — `onClose` is the signal. */
-  applyClosed(): void {
+  applyClosed(cause: LeaveCause = { type: 'closed' }): void {
     if (this.closed) return
     this.closed = true
     this._rosterKnown = true // authoritatively empty
     this.membershipVersion++
+    this._bumpState()
     for (const entry of this._members.values()) {
-      this._fireAll(entry.leaveCbs)
+      this._fireAll(entry.leaveCbs, cause)
       this._releaseEntryListeners(entry)
     }
     this._members.clear()
@@ -548,20 +754,53 @@ class RoomState {
    *  knows the sender, else the `{ id, meta }` snapshot the sender's node stamped into the
    *  envelope. Control and data travel on separate lanes, so a message can beat its sender's
    *  join — identity is in the message, delivery is immediate, and nothing drops. */
-  applyData(from: string, fromMeta: ParticipantMeta, data: unknown, info: ChannelPublishInfo, suppress: boolean): void {
+  applyData(
+    from: string,
+    fromMeta: ParticipantMeta,
+    fromIdentity: string | null,
+    data: unknown,
+    info: ChannelPublishInfo,
+    suppress: boolean,
+  ): void {
     if (suppress) return
     const entry = this._members.get(from)
-    this._fireAll(this._roomDataCbs, data, info, entry?.remote ?? { id: from, meta: fromMeta })
+    this._fireAll(this._roomDataCbs, data, info, entry?.remote ?? { id: from, meta: fromMeta, identity: fromIdentity })
     if (entry) this._fireAll(entry.dataCbs, data, info)
   }
 
   /** Binary frames carry only the sender's ID — a pre-join frame surfaces as `{ id, meta: {} }`
-   *  (rare: binary pipelines attach per member via `onJoin`, so the roster is normally ahead). */
-  applyBinary(from: string, payload: Uint8Array, info: ChannelPublishInfo, suppress: boolean): void {
+   *  (rare: binary pipelines attach per member via `onJoin`, so the roster is normally ahead).
+   *  `track`/`key` come from the frame header; listeners with a `track` filter receive only
+   *  that track's frames. */
+  applyBinary(
+    from: string,
+    payload: Uint8Array,
+    track: string | null,
+    keyFrame: boolean,
+    info: ChannelPublishInfo,
+    suppress: boolean,
+  ): void {
     if (suppress) return
+    const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, keyFrame }
     const entry = this._members.get(from)
-    this._fireAll(this._roomBinaryCbs, payload, info, entry?.remote ?? { id: from, meta: {} })
-    if (entry) this._fireAll(entry.binaryCbs, payload, info)
+    const sender = entry?.remote ?? { id: from, meta: {}, identity: null }
+    for (const { cb, track: want } of [...this._roomBinaryCbs]) {
+      if (want !== undefined && want !== track) continue
+      try {
+        cb(payload, frameInfo, sender)
+      } catch (err) {
+        this._onCallbackError(err)
+      }
+    }
+    if (!entry) return
+    for (const { cb, track: want } of [...entry.binaryCbs]) {
+      if (want !== undefined && want !== track) continue
+      try {
+        cb(payload, frameInfo)
+      } catch (err) {
+        this._onCallbackError(err)
+      }
+    }
   }
 
   /** Resync against an authoritative membership snapshot. The first reconcile is the roster
@@ -573,14 +812,36 @@ class RoomState {
    *  whether anything drifted, so the owner can re-sync downstream views (client stubs). */
   reconcile(members: MemberSnapshot[]): boolean {
     if (!this._rosterKnown) {
+      // First load: silent — but entries can already exist (pre-roster join events, revived
+      // views). Those objects must survive: listeners hang off them and revived handles must
+      // stay `===` with the view. Keep the object, refresh the facts; entries the authoritative
+      // roster doesn't know left before the load — their leave is narrated like any other.
       this._rosterKnown = true
       this.membershipVersion++
-      for (const member of members) this._createEntry(member)
+      this._bumpState()
+      const seen = new Set<string>()
+      for (const member of members) {
+        seen.add(member.id)
+        const existing = this._members.get(member.id)
+        if (!existing) {
+          this._createEntry(member)
+          continue
+        }
+        if (member.metaSeq > existing.metaSeq) {
+          existing.meta = member.meta
+          existing.metaSeq = member.metaSeq
+        }
+        existing.joinedAt = member.joinedAt
+      }
+      for (const id of [...this._members.keys()]) {
+        if (!seen.has(id)) this.applyLeave(id)
+      }
       this._wasFull = this.isFull
       return false
     }
 
     this.membershipVersion++
+    this._bumpState()
     let drifted = false
     const seen = new Set<string>()
     for (const member of members) {
@@ -622,6 +883,7 @@ class RoomState {
       id,
       meta,
       joinedAt,
+      identity: entrySeed.identity ?? null,
       metaSeq: entrySeed.metaSeq,
       remote: {
         id,
@@ -631,16 +893,21 @@ class RoomState {
         get joinedAt() {
           return entry.joinedAt
         },
+        get identity() {
+          return entry.identity
+        },
         subscribe: (cb) => this._register(entry.dataCbs, cb, 'data'),
-        subscribeBinary: (cb) => this._register(entry.binaryCbs, cb, 'binary'),
+        subscribeBinary: (cb, opts) => this._register(entry.binaryCbs, { cb, track: opts?.track }, 'binary'),
         onUpdate: (cb) => this._register(entry.updateCbs, cb, 'event'),
-        onLeave: (cb) => this._register(entry.leaveCbs, cb, 'event'),
+        onLeave: (cb: (cause?: LeaveCause) => void) => this._register(entry.leaveCbs, cb, 'event'),
       },
       dataCbs: [],
       binaryCbs: [],
       updateCbs: [],
       leaveCbs: [],
     }
+    // Non-enumerable: never serialized as data, invisible to user iteration.
+    Object.defineProperty(entry.remote, ROOM_REMOTE_BRAND, { value: { state: this, entry } satisfies RemoteBacking })
     this._members.set(id, entry)
     return entry
   }
@@ -674,6 +941,7 @@ class RoomState {
   private _bumpListenerCount(kind: ListenerKind, delta: number): void {
     if (kind === 'data') this._dataListenerCount += delta
     else if (kind === 'binary') this._binaryListenerCount += delta
+    else if (kind === 'activity') this._activityListenerCount += delta
     else this._eventListenerCount += delta
     this._onListenersChanged()
   }
@@ -697,19 +965,39 @@ class RoomState {
  * The private-message inbox and the leave lifecycle, identical on server and client.
  * Flavors supply the transport through the abstract operations and their own error pipeline.
  */
+/** A delivered private message, as stamped by the sender's node. */
+type InboxMessage = {
+  from: string
+  fromMeta: ParticipantMeta | null
+  fromIdentity: string | null
+  data: unknown
+}
+
+/** Pre-listen inbox hold: count-capped, drop-oldest. The DM lane is the only
+ *  unconditionally-delivered lane (addressed — there are no wants to gate it on), so it's the
+ *  only lane with a client-side attach window to bridge; every room lane is want-gated at the
+ *  server and has nothing to hold. Message size is bounded upstream by the wire-protocol
+ *  `messageLimit`, which bounds the hold's memory too. */
+const PENDING_INBOX_MAX_COUNT = 64
+
 abstract class ParticipantBase implements LocalParticipant {
   readonly id: string
+  readonly identity: string | null
   readonly selfDelivery: boolean
   /** @internal */ _meta: ParticipantMeta
   protected _left = false
-  private _leftFired = false
-  private _leaveCbs: Array<() => void> = []
+  private _leftCause: LeaveCause | null = null
+  private _leaveCbs: Array<(cause: LeaveCause) => void> = []
   private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => void> = []
+  /** DMs delivered before the first `listen()` — held bounded, flushed on attach, then never
+   *  allocated again (`null` = flushed or empty; zero steady-state cost). */
+  private _pendingInbox: InboxMessage[] | null = null
 
-  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean) {
+  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
     this.id = id
     this._meta = meta
     this.selfDelivery = selfDelivery
+    this.identity = identity
   }
 
   get meta(): ParticipantMeta {
@@ -717,7 +1005,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   abstract publish(data: unknown): Promise<ChannelPublishAck>
-  abstract publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
+  abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
   abstract send(to: string | Sender, data: unknown): Promise<void>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
@@ -726,6 +1014,11 @@ abstract class ParticipantBase implements LocalParticipant {
 
   listen(callback: (data: unknown, from: Sender | null) => void): () => void {
     this._messageCbs.push(callback)
+    if (this._pendingInbox) {
+      const held = this._pendingInbox
+      this._pendingInbox = null
+      for (const msg of held) this._deliverMessage(msg)
+    }
     return () => {
       const i = this._messageCbs.indexOf(callback)
       if (i >= 0) this._messageCbs.splice(i, 1)
@@ -735,8 +1028,19 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal — a direct message arrived on this member's inbox. `from`/`fromMeta` come from
    *  the wire envelope; `resolve` upgrades to the live `RemoteParticipant` when a room view
    *  exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
-  _deliverMessage(from: string, fromMeta: ParticipantMeta | null, data: unknown): void {
-    const sender = from === '' ? null : (this._resolveSender(from) ?? { id: from, meta: fromMeta ?? {} })
+  _deliverMessage(msg: InboxMessage): void {
+    if (this._messageCbs.length === 0) {
+      // A reactive send can beat the app's `listen()` by a tick — hold it (bounded) instead of
+      // dropping it. A departed participant will never flush: drop.
+      if (this._left) return
+      const pending = (this._pendingInbox ??= [])
+      pending.push(msg)
+      if (pending.length > PENDING_INBOX_MAX_COUNT) pending.shift()
+      return
+    }
+    const { from, fromMeta, fromIdentity, data } = msg
+    const sender =
+      from === '' ? null : (this._resolveSender(from) ?? { id: from, meta: fromMeta ?? {}, identity: fromIdentity })
     for (const cb of [...this._messageCbs]) {
       try {
         cb(data, sender)
@@ -751,9 +1055,9 @@ abstract class ParticipantBase implements LocalParticipant {
     return null
   }
 
-  onLeave(callback: () => void): () => void {
-    if (this._leftFired) {
-      this._invoke(callback)
+  onLeave(callback: (cause: LeaveCause) => void): () => void {
+    if (this._leftCause) {
+      this._invoke(callback, this._leftCause)
       return () => {}
     }
     this._leaveCbs.push(callback)
@@ -763,23 +1067,25 @@ abstract class ParticipantBase implements LocalParticipant {
     }
   }
 
-  /** @internal — the member is gone (left, kicked, room closed, or holder disconnected). */
-  _onLeft(): void {
+  /** @internal — the member is gone; `cause` says how. A local participant always knows its
+   *  cause: its holder either initiated the leave or witnessed the event/closure that caused it. */
+  _onLeft(cause: LeaveCause): void {
     this._left = true
-    if (this._leftFired) return
-    this._leftFired = true
+    if (this._leftCause) return
+    this._leftCause = cause
+    this._pendingInbox = null
     const cbs = this._leaveCbs
     this._leaveCbs = []
-    for (const cb of cbs) this._invoke(cb)
+    for (const cb of cbs) this._invoke(cb, cause)
   }
 
   protected _assertActive(): void {
     if (this._left) throw new Error('Participant has left the room')
   }
 
-  private _invoke(cb: () => void): void {
+  private _invoke(cb: (cause: LeaveCause) => void, cause: LeaveCause): void {
     try {
-      cb()
+      cb(cause)
     } catch (err) {
       this._reportError(err)
     }

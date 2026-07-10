@@ -6,6 +6,7 @@ import {
   onGetRoom,
   onGetGuardedRoom,
   onJoinAsServer,
+  onGetRoomWithMember,
   onAnnounce,
   onSystemSend,
   onKick,
@@ -47,6 +48,12 @@ function Room() {
             received.push({ text: (data as { text: string }).text, from: from.meta.name })
           })
 
+          const snapBefore = lobby.snapshot()
+          let changes = 0
+          lobby.onChange(() => changes++)
+          let activity = 0
+          lobby.onActivity(() => activity++)
+
           const me = await lobby.join({ name: 'Alice' })
           const countAfterJoin = lobby.count
           const updates: unknown[] = []
@@ -64,9 +71,15 @@ function Room() {
               countAfterJoin,
               count: lobby.count,
               ack: { key: ack.key, seq: ack.seq },
+              snapshotChanged: lobby.snapshot() !== snapBefore,
+              snapshotStable: lobby.snapshot() === lobby.snapshot(),
+              changes,
+              activity,
             }
             setResult(JSON.stringify(state))
-            return { done: events.length >= 2 && received.length >= 1 && updates.length >= 1 }
+            return {
+              done: events.length >= 2 && received.length >= 1 && updates.length >= 1 && activity >= 1 && changes >= 1,
+            }
           })
         }}
       >
@@ -111,6 +124,8 @@ function Room() {
               count: observer.count,
               remoteMetaName: remoteMe?.meta.name ?? null,
               localMetaName: me.meta.name ?? null,
+              localIdentity: me.identity,
+              remoteIdentity: remoteMe?.identity ?? null,
               dms,
             }
             setResult(JSON.stringify(state))
@@ -138,19 +153,35 @@ function Room() {
           const videoRoom = await onGetRoom(roomId)
           const me = await videoRoom.join({ name: 'Cam' })
 
-          const frames: Array<{ size: number; firstByte: number; fromSelf: boolean }> = []
-          videoRoom.subscribeBinary((data, _info, from) => {
-            frames.push({ size: data.byteLength, firstByte: data[0]!, fromSelf: from.id === me.id })
+          const frames: Array<{
+            size: number
+            firstByte: number
+            fromSelf: boolean
+            track: string | null
+            keyFrame: boolean
+          }> = []
+          videoRoom.subscribeBinary((data, info, from) => {
+            frames.push({
+              size: data.byteLength,
+              firstByte: data[0]!,
+              fromSelf: from.id === me.id,
+              track: info.track,
+              keyFrame: info.keyFrame,
+            })
           })
+          const cameraOnly: number[] = []
+          videoRoom.subscribeBinary((data) => cameraOnly.push(data[0]!), { track: 'camera' })
 
           // selfDelivery defaults to true — our own frames come back to us.
           for (let i = 0; i < 3; i++) {
             await me.publishBinary(new Uint8Array(64).fill(i + 1))
           }
+          // Named track + keyframe bit — mic/camera/screen multiplex over one member lane.
+          await me.publishBinary(new Uint8Array(32).fill(9), { track: 'camera', keyFrame: true })
 
           await pollUntil(() => {
-            setResult(JSON.stringify({ frames }))
-            return { done: frames.length >= 3 }
+            setResult(JSON.stringify({ frames, cameraOnly }))
+            return { done: frames.length >= 4 && cameraOnly.length >= 1 }
           })
         }}
       >
@@ -169,6 +200,11 @@ function Room() {
 
           const received: unknown[] = []
           room.subscribe((data) => received.push(data))
+          // Admission is guarded too — the rejection reaches the joiner's promise over the wire.
+          const joinError = await room.join({ name: 'Banned' }).then(
+            () => null,
+            (err: Error) => err.message,
+          )
           const me = await room.join({ name: 'Mallory' })
           const peer = await room.join({ name: 'Peer' })
           const inbox: unknown[] = []
@@ -187,12 +223,37 @@ function Room() {
           await me.send(peer.id, 'psst')
 
           await pollUntil(() => {
-            setResult(JSON.stringify({ publishError, sendError, received, inbox }))
+            setResult(JSON.stringify({ joinError, publishError, sendError, received, inbox }))
             return { done: received.length >= 1 && inbox.length >= 1 }
           })
         }}
       >
         Guarded publish & send
+      </button>
+
+      <h2>Returnable member view</h2>
+
+      <button
+        id="test-room-member"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-member:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const lobby = await onGetRoom(roomId)
+          const me = await lobby.join({ name: 'Viewed' })
+
+          // A telefunction returns { room, member } — ref-identity binds the view to the room.
+          const out = await onGetRoomWithMember(roomId, me.id)
+          const viaRoom = await out.room.getParticipant(me.id)
+          const state = {
+            hasMember: out.member !== null,
+            memberName: out.member?.meta.name ?? null,
+            sameObject: out.member !== null && viaRoom === out.member,
+          }
+          setResult(JSON.stringify(state))
+        }}
+      >
+        Return room + member view
       </button>
 
       <h2>Admin (announce, system send, kick & close)</h2>
@@ -213,8 +274,12 @@ function Room() {
           me.listen((data, from) => system.push({ data, fromRoom: from === null }))
 
           let kicked = false
+          let kickCause: unknown = null
           let closed = false
-          me.onLeave(() => (kicked = true))
+          me.onLeave((cause) => {
+            kicked = true
+            kickCause = cause
+          })
           lobby.onClose(() => (closed = true))
 
           await onAnnounce(roomId, 'maintenance')
@@ -227,7 +292,15 @@ function Room() {
           await onKick(roomId, me.id)
           await onCloseRoom(roomId)
           await pollUntil(() => {
-            const state = { announcements, system, kicked, closed, isClosed: lobby.isClosed, count: lobby.count }
+            const state = {
+              announcements,
+              system,
+              kicked,
+              kickCause,
+              closed,
+              isClosed: lobby.isClosed,
+              count: lobby.count,
+            }
             setResult(JSON.stringify(state))
             return { done: kicked && closed && lobby.isClosed }
           })

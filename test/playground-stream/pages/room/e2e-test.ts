@@ -10,6 +10,10 @@ type ChatResult = {
   countAfterJoin: number
   count: number
   ack: { key: string; seq: number }
+  snapshotChanged: boolean
+  snapshotStable: boolean
+  changes: number
+  activity: number
 }
 
 type ParticipantResult = {
@@ -17,14 +21,18 @@ type ParticipantResult = {
   count: number
   remoteMetaName: string | null
   localMetaName: string | null
+  localIdentity: string | null
+  remoteIdentity: string | null
   dms: Array<{ data: string; fromAlly: boolean }>
 }
 
 type BinaryResult = {
-  frames: Array<{ size: number; firstByte: number; fromSelf: boolean }>
+  frames: Array<{ size: number; firstByte: number; fromSelf: boolean; track: string | null; keyFrame: boolean }>
+  cameraOnly: number[]
 }
 
 type GuardResult = {
+  joinError: string | null
   publishError: string | null
   sendError: string | null
   received: string[]
@@ -35,9 +43,16 @@ type AdminResult = {
   announcements: string[]
   system: Array<{ data: string; fromRoom: boolean }>
   kicked: boolean
+  kickCause: { type: string; reason?: string } | null
   closed: boolean
   isClosed: boolean
   count: number
+}
+
+type MemberResult = {
+  hasMember: boolean
+  memberName: string | null
+  sameObject: boolean
 }
 
 function testRoom() {
@@ -60,6 +75,13 @@ function testRoom() {
 
       // Metadata: the remote view saw the score change (undefined -> 42).
       expect(result.updates).deep.equal([[42, null]])
+
+      // snapshot()/onChange: reference-stable until change; every change signaled.
+      expect(result.snapshotChanged).toBe(true)
+      expect(result.snapshotStable).toBe(true)
+      expect(result.changes).greaterThan(0)
+      // Activity trickle fired for the publish — without a separate subscription.
+      expect(result.activity).greaterThan(0)
     })
   })
 
@@ -72,6 +94,9 @@ function testRoom() {
 
       expect(result.received).deep.equal([{ text: 'from-bob', from: 'Bob' }]) // the DM never hit the room stream
       expect(result.count).toBe(2) // Bob + Ally
+      // Identity: stamped at the server-side join, visible locally and on the remote view.
+      expect(result.localIdentity).toBe('user:Bob')
+      expect(result.remoteIdentity).toBe('user:Bob')
       // setMeta propagated both to the room's remote view and back to the participant stub.
       expect(result.remoteMetaName).toBe('Bobby')
       expect(result.localMetaName).toBe('Bobby')
@@ -87,11 +112,27 @@ function testRoom() {
     await autoRetry(async () => {
       const result = await getResult<BinaryResult>('#room-result')
 
-      // 3 frames, 64 bytes each, filled with 1..3 — all attributed to the publisher.
-      expect(result.frames.length).toBe(3)
-      expect(result.frames.map((f) => f.size)).deep.equal([64, 64, 64])
-      expect(result.frames.map((f) => f.firstByte)).deep.equal([1, 2, 3])
+      // 3 default-track frames + 1 named camera keyframe — all attributed to the publisher.
+      expect(result.frames.length).toBe(4)
+      expect(result.frames.map((f) => f.size)).deep.equal([64, 64, 64, 32])
+      expect(result.frames.map((f) => f.firstByte)).deep.equal([1, 2, 3, 9])
       for (const frame of result.frames) expect(frame.fromSelf).toBe(true)
+      expect(result.frames.map((f) => f.track)).deep.equal([null, null, null, 'camera'])
+      expect(result.frames.map((f) => f.keyFrame)).deep.equal([false, false, false, true])
+      // The track-filtered subscription saw only its stream.
+      expect(result.cameraOnly).deep.equal([9])
+    })
+  })
+
+  test('room: a returned RemoteParticipant is the same object as the room view', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-member')
+
+    await autoRetry(async () => {
+      const result = await getResult<MemberResult>('#room-result')
+      expect(result.hasMember).toBe(true)
+      expect(result.memberName).toBe('Viewed')
+      expect(result.sameObject).toBe(true) // ref-identity binds the view to its room
     })
   })
 
@@ -103,6 +144,7 @@ function testRoom() {
       const result = await getResult<GuardResult>('#room-result')
 
       // The rejection carries the guard's error back through the wire ack.
+      expect(result.joinError).toBe('blocked join of Banned')
       expect(result.publishError).toBe('blocked publish from Mallory')
       expect(result.sendError).toBe('blocked send from Mallory')
       // Guarded-out messages never delivered; allowed ones flow.
@@ -123,6 +165,7 @@ function testRoom() {
       expect(result.system).deep.equal([{ data: 'welcome', fromRoom: true }])
 
       expect(result.kicked).toBe(true) // LocalParticipant.onLeave fired on removeParticipant()
+      expect(result.kickCause).deep.equal({ type: 'removed', reason: 'be nice' }) // the reason rode the removal
       expect(result.closed).toBe(true) // Room.onClose fired on close()
       expect(result.isClosed).toBe(true)
       expect(result.count).toBe(0)

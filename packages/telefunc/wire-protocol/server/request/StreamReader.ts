@@ -33,8 +33,10 @@ class StreamReader {
   private nextFileIndex = 0
   private queue: Promise<void> = Promise.resolve()
   private disconnected = false
+  private maxFrameBytes: number
 
-  constructor(source: ReadableStream<Uint8Array> | Readable) {
+  constructor(source: ReadableStream<Uint8Array> | Readable, maxFrameBytes = Infinity) {
+    this.maxFrameBytes = maxFrameBytes
     // Both shapes expose `Symbol.asyncIterator` directly: Web `ReadableStream` does
     // since Node 18 / Bun / Deno, and Node `Readable` does natively. The latter
     // bypasses Node's webstreams `dequeueValue` overhead, which is why we accept
@@ -46,6 +48,7 @@ class StreamReader {
   /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. */
   async readMetadata() {
     const length = await this.readU32()
+    this.assertDeclaredLength(length)
     return new TextDecoder().decode(await this.readExact(length))
   }
 
@@ -53,7 +56,15 @@ class StreamReader {
   async readLengthPrefixedBytesOrNull() {
     const lengthBytes = await this.readExactOrNull(4)
     if (!lengthBytes) return null
-    return this.readExact(decodeU32(lengthBytes))
+    const length = decodeU32(lengthBytes)
+    this.assertDeclaredLength(length)
+    return this.readExact(length)
+  }
+
+  /** The hostile-input bound: reject a declared frame length over `maxFrameBytes` before a
+   *  single body byte is buffered — a declared gigabyte costs 4 bytes, not a gigabyte. */
+  private assertDeclaredLength(length: number): void {
+    if (length > this.maxFrameBytes) throw new Error(`Frame of ${length} bytes exceeds the per-message limit`)
   }
 
   /** Ensure no trailing bytes remain. */

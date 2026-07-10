@@ -10,11 +10,20 @@ import {
 } from '../server/broadcast.js'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
+import {
+  ROOM_ACTIVITY_THROTTLE_MS,
+  ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_MEMBER_KV_TTL_MS,
+  ROOM_MEMBER_TTL_MS,
+} from '../constants.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { RoomStubChannel } from './stubs.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
+import { createStreamingReplacer } from '../server/response/registry.js'
+import { createStreamingReviver } from '../client/response/registry.js'
+import type { ClientReviverContext, ServerReplacerContext } from '../types.js'
+import type { RemoteParticipant } from './types.js'
 import {
   RoomState,
   frameWithMemberId,
@@ -57,6 +66,47 @@ describe('Room entry point', () => {
     await Room.create('dup')
     await expect(Room.create('dup')).rejects.toThrow('Room already exists: dup')
     await expect(Room.get('nope')).rejects.toThrow('Room not found: nope')
+  })
+
+  it('getOrCreate creates once and converges — concurrent callers, existing rooms, later options ignored', async () => {
+    // Two concurrent boots: both read "missing", one wins the create, the loser gets.
+    const [a, b] = await Promise.all([
+      Room.getOrCreate('boot', { meta: { topic: 'first' }, size: 3 }),
+      Room.getOrCreate('boot', { meta: { topic: 'first' }, size: 3 }),
+    ])
+    expect(a.meta).toEqual({ topic: 'first' })
+    expect(b.meta).toEqual({ topic: 'first' })
+    expect(a.size).toBe(3)
+
+    // Already exists: returned as-is, options don't overwrite.
+    const again = await Room.getOrCreate('boot', { meta: { topic: 'second' }, size: 99 })
+    expect(again.meta).toEqual({ topic: 'first' })
+    expect(again.size).toBe(3)
+  })
+
+  it('update replaces provided fields only — updating the topic never resets the capacity', async () => {
+    await Room.create('cfg', { meta: { topic: 'general' }, size: 5 })
+    const observer = await Room.get('cfg')
+    observer.onUpdate(() => {}) // observing — receives update events
+
+    await Room.update('cfg', { meta: { topic: 'renamed' } })
+    expect((await Room.get('cfg')).size).toBe(5) // omitted — kept, not reset to Infinity
+    expect((await Room.get('cfg')).meta).toEqual({ topic: 'renamed' })
+
+    await Room.update('cfg', { size: 10 })
+    const after = await Room.get('cfg')
+    expect(after.meta).toEqual({ topic: 'renamed' }) // omitted — kept
+    expect(after.size).toBe(10)
+    expect(observer.size).toBe(10) // the update event carried the effective config
+    expect(observer.meta).toEqual({ topic: 'renamed' })
+  })
+
+  it('list({ prefix }) filters by room-ID prefix', async () => {
+    await Room.create('chat:a')
+    await Room.create('chat:b')
+    await Room.create('voice:c')
+    expect((await Room.list({ prefix: 'chat:' })).map((r) => r.id).sort()).toEqual(['chat:a', 'chat:b'])
+    expect((await Room.list()).length).toBe(3)
   })
 
   it('size defaults to Infinity and is a hint — joins beyond capacity are not rejected', async () => {
@@ -137,7 +187,7 @@ describe('Room entry point', () => {
     expect(rooms.find((r) => r.id === 'a:m:b')!.count).toBe(0)
   })
 
-  it('update() is a full replace — omitted size resets to Infinity — and fires onUpdate', async () => {
+  it('update() replaces provided fields, keeps the rest, and fires onUpdate', async () => {
     const lobby = await Room.create('conf', { meta: { topic: 'a' }, size: 2 })
     const updates: Array<[unknown, unknown]> = []
     lobby.onUpdate((meta, prev) => updates.push([meta, prev]))
@@ -146,7 +196,7 @@ describe('Room entry point', () => {
 
     expect(updates).toEqual([[{ topic: 'b' }, { topic: 'a' }]])
     expect(lobby.meta).toEqual({ topic: 'b' })
-    expect(lobby.size).toBe(Infinity)
+    expect(lobby.size).toBe(2) // omitted — kept
     await expect(Room.update('conf', { isolated: true })).rejects.toThrow('fixed at creation')
     await expect(Room.update('gone', {})).rejects.toThrow('Room not found: gone')
   })
@@ -231,6 +281,44 @@ describe('Room entry point', () => {
     expect(lobby.count).toBe(0)
     await expect(me.publish({ text: 'too late' })).rejects.toThrow('Participant has left')
     await expect(Room.removeParticipant('kick', me.id)).rejects.toThrow('Participant not found')
+  })
+
+  it('every leave carries its cause — kick reasons travel with the removal, nothing to race', async () => {
+    const lobby = await Room.create('causes')
+    const observer = await Room.get('causes')
+    const observed: Array<[string, unknown]> = []
+    observer.onLeave((m, cause) => observed.push([String(m.meta.name), cause]))
+
+    // Voluntary leave.
+    const alice = await lobby.join({ name: 'Alice' })
+    const aliceCauses: unknown[] = []
+    alice.onLeave((cause) => aliceCauses.push(cause))
+    await alice.leave()
+    expect(aliceCauses).toEqual([{ type: 'left' }])
+
+    // Kick, with the reason riding the removal event itself.
+    const bob = await lobby.join({ name: 'Bob' })
+    const bobCauses: unknown[] = []
+    bob.onLeave((cause) => bobCauses.push(cause))
+    await Room.removeParticipant('causes', bob.id, { reason: { rule: 'spam' } })
+    expect(bobCauses).toEqual([{ type: 'removed', reason: { rule: 'spam' } }])
+
+    expect(observed).toEqual([
+      ['Alice', { type: 'left' }],
+      ['Bob', { type: 'removed', reason: { rule: 'spam' } }],
+    ])
+
+    // Room closure.
+    const carol = await lobby.join({ name: 'Carol' })
+    const carolCauses: unknown[] = []
+    carol.onLeave((cause) => carolCauses.push(cause))
+    await Room.close('causes')
+    expect(carolCauses).toEqual([{ type: 'closed' }])
+
+    // Late subscribers still learn the cause.
+    const late: unknown[] = []
+    carol.onLeave((cause) => late.push(cause))
+    expect(late).toEqual([{ type: 'closed' }])
   })
 })
 
@@ -509,6 +597,87 @@ describe('selective binary delivery', () => {
     expect(frames).toEqual(['cam1:1'])
   })
 
+  it('named tracks multiplex one member lane — filters, keyframe bits, zero-cost default', async () => {
+    const a = await Room.create('media', { isolated: true })
+    const cam = await a.join({ name: 'Cam' })
+    const b = await Room.get('media')
+    await b.getParticipants() // materialize the lazy roster
+
+    const all: Array<[string | null, boolean, number]> = []
+    const mics: number[] = []
+    const remote = (await b.getParticipant(cam.id))!
+    remote.subscribeBinary((data, info) => all.push([info.track, info.keyFrame, data[0]!]))
+    remote.subscribeBinary((data) => mics.push(data[0]!), { track: 'mic' })
+
+    await cam.publishBinary(new Uint8Array([1])) // default track
+    await cam.publishBinary(new Uint8Array([2]), { track: 'mic' })
+    await cam.publishBinary(new Uint8Array([3]), { track: 'camera', keyFrame: true })
+
+    expect(all).toEqual([
+      [null, false, 1],
+      ['mic', false, 2],
+      ['camera', true, 3],
+    ])
+    expect(mics).toEqual([2]) // the filter saw only its track
+
+    // Room-level subscription filters the same way, with the verified sender.
+    const cams: Array<[number, string]> = []
+    b.subscribeBinary((data, _info, from) => cams.push([data[0]!, String(from.meta.name)]), { track: 'camera' })
+    await cam.publishBinary(new Uint8Array([9]), { track: 'camera' })
+    expect(cams).toEqual([[9, 'Cam']])
+  })
+
+  it('track framing round-trips exactly — default publishes cost one flag byte', () => {
+    const id = crypto.randomUUID()
+    const plain = frameWithMemberId(id, new Uint8Array([7, 8]))
+    expect(plain.byteLength).toBe(16 + 1 + 2) // member + flags + payload
+    expect(unframeMemberId(plain)).toMatchObject({ from: id, track: null, keyFrame: false })
+    expect([...unframeMemberId(plain)!.payload]).toEqual([7, 8])
+
+    const tracked = frameWithMemberId(id, new Uint8Array([9]), { track: 'screen', keyFrame: true })
+    const out = unframeMemberId(tracked)!
+    expect(out.track).toBe('screen')
+    expect(out.keyFrame).toBe(true)
+    expect([...out.payload]).toEqual([9])
+  })
+
+  it('isolated mode narrows the upstream text keys to the wanted members too', async () => {
+    const a = await Room.create('sel-text', { isolated: true })
+    const alice = await a.join({ name: 'alice' })
+    const bob = await a.join({ name: 'bob' })
+    const b = await Room.get('sel-text')
+    await b.getParticipants() // materialize the lazy roster
+
+    const subscribed = vi.spyOn(getBroadcastAdapter(), 'subscribe')
+    const heard: unknown[] = []
+    ;(await b.getParticipant(alice.id))!.subscribe((data) => heard.push(data))
+    const keys = () => subscribed.mock.calls.map(([key]) => key)
+    expect(keys()).toContain(roomMemberDataKey('sel-text', alice.id))
+    expect(keys()).not.toContain(roomMemberDataKey('sel-text', bob.id))
+
+    await alice.publish('a1')
+    await bob.publish('b1') // b never subscribed bob's key — nothing arrives, nothing to filter
+    expect(heard).toEqual(['a1'])
+
+    // A room-level subscription widens upstream to every member's key.
+    b.subscribe(() => {})
+    expect(keys()).toContain(roomMemberDataKey('sel-text', bob.id))
+  })
+
+  it('a shared-mode member-scoped listener still brings up the room text lane', async () => {
+    const a = await Room.create('sel-shared')
+    const alice = await a.join({ name: 'alice' })
+    const bob = await a.join({ name: 'bob' })
+    const b = await Room.get('sel-shared')
+    await b.getParticipants() // materialize the lazy roster
+
+    const heard: unknown[] = []
+    ;(await b.getParticipant(alice.id))!.subscribe((data) => heard.push(data))
+    await alice.publish('a1')
+    await bob.publish('b1') // one shared key — it reaches the node; the view filters it out
+    expect(heard).toEqual(['a1'])
+  })
+
   it("releases a departed member's listeners — the decoder pattern must not pin subscriptions", async () => {
     const a = await Room.create('release', { isolated: true })
     const cam = await a.join({ name: 'cam' })
@@ -562,6 +731,108 @@ describe('direct messages', () => {
     const bob = await lobby.join()
     await alice.leave()
     await expect(alice.send(bob.id, 'x')).rejects.toThrow('Participant has left')
+  })
+
+  it("a reactive DM beating the target's listen() is held and flushed — never dropped", async () => {
+    const room = await Room.create('reactive')
+    const greeter = await room.join({ name: 'Bot' })
+    // The bot greets on join — before the joiner had any chance to attach listen().
+    room.onJoin((member) => void greeter.send(member.id, 'welcome!').catch(() => {}))
+
+    const newcomer = await (await Room.get('reactive')).join({ name: 'New' })
+    await settle() // let the greet round-trip land — nobody is listening yet
+
+    const inbox: unknown[] = []
+    newcomer.listen((data, from) => inbox.push([data, from?.meta.name]))
+    expect(inbox).toEqual([['welcome!', 'Bot']]) // flushed on attach
+  })
+
+  it('the pre-listen hold is bounded (drop-oldest) and released on leave', async () => {
+    const room = await Room.create('hold-cap')
+    const sender = await room.join({ name: 'S' })
+    const target = await (await Room.get('hold-cap')).join({ name: 'T' })
+    for (let i = 0; i < 70; i++) await sender.send(target.id, i)
+
+    const inbox: number[] = []
+    target.listen((data) => inbox.push(data as number))
+    expect(inbox.length).toBe(64) // capped
+    expect(inbox[0]).toBe(6) // oldest dropped first
+    expect(inbox[63]).toBe(69)
+
+    // Held messages die with the membership.
+    const gone = await (await Room.get('hold-cap')).join({ name: 'G' })
+    await sender.send(gone.id, 'never-read')
+    await gone.leave()
+    const late: unknown[] = []
+    gone.listen((data) => late.push(data))
+    expect(late).toEqual([])
+  })
+
+  it('identity is stamped at server-side join and travels everywhere, spoof-proof', async () => {
+    const a = await Room.create('who')
+    const alice = await a.join({ name: 'Alice' }, { identity: 'user-1' })
+    expect(alice.identity).toBe('user-1')
+
+    // Roster: another instance sees the identity.
+    const b = await Room.get('who')
+    expect((await b.getParticipant(alice.id))?.identity).toBe('user-1')
+
+    // Messages: the envelope carries the server-stamped identity — even to a view that
+    // doesn't know the sender yet (snapshot sender).
+    const c = await Room.get('who')
+    const senders: Array<[string | null, string | null]> = []
+    c.subscribe((_data, _info, from) => senders.push([String(from.meta.name), from.identity]))
+    await alice.publish('hi')
+    expect(senders).toEqual([['Alice', 'user-1']])
+
+    // DMs: the inbox sender carries it too.
+    const bob = await a.join({ name: 'Bob' })
+    expect(bob.identity).toBe(null) // identity is opt-in
+    const inbox: Array<string | null> = []
+    bob.listen((_data, from) => inbox.push(from?.identity ?? null))
+    await alice.send(bob.id, 'psst')
+    expect(inbox).toEqual(['user-1'])
+
+    // Guards see it — bans by identity are one comparison.
+    const guarded = await Room.get('who')
+    const guardSaw: Array<string | null> = []
+    Room.guard(guarded, { onJoin: (member) => void guardSaw.push(member.identity) })
+    await guarded.join({ name: 'Tab2' }, { identity: 'user-1' })
+    expect(guardSaw).toEqual(['user-1'])
+  })
+
+  it('a client-side join cannot claim an identity — it is assigned where trust lives', async () => {
+    await Room.create('trusted')
+    const served = (await Room.get('trusted')) as ServerRoom
+    const stub = new RoomStubChannel(served)
+    stub._registerChannel()
+    served._attachStub(stub)
+    // The wire request has no identity field at all; a crafted one is simply never read.
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: {}, identity: 'admin' }), 1)
+    const memberId = [...stub._stubMembers.keys()][0]!
+    expect((await served.getParticipant(memberId))?.identity).toBe(null)
+  })
+
+  it('removeParticipant({ identity }) sweeps every membership of that identity, with the reason', async () => {
+    const room = await Room.create('sweep')
+    const tab1 = await room.join({ name: 'T1' }, { identity: 'user-9' })
+    const tab2 = await room.join({ name: 'T2' }, { identity: 'user-9' })
+    const other = await room.join({ name: 'Other' }, { identity: 'user-8' })
+    const causes: unknown[] = []
+    tab1.onLeave((cause) => causes.push(cause))
+    tab2.onLeave((cause) => causes.push(cause))
+
+    await Room.removeParticipant('sweep', { identity: 'user-9' }, { reason: 'banned' })
+
+    expect(causes).toEqual([
+      { type: 'removed', reason: 'banned' },
+      { type: 'removed', reason: 'banned' },
+    ])
+    expect(room.count).toBe(1)
+    expect((await room.getParticipant(other.id))?.identity).toBe('user-8')
+
+    // Idempotent: sweeping an identity with no memberships is a no-op, not an error.
+    await Room.removeParticipant('sweep', { identity: 'user-9' })
   })
 
   it('Room.guard({ onSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
@@ -639,6 +910,49 @@ describe('direct messages', () => {
     expect(seen).toEqual(['fine']) // never published
   })
 
+  it('Room.guard({ onJoin }) gates admission — server and client joins, a rejected join writes nothing', async () => {
+    await Room.create('door')
+    const served = (await Room.get('door')) as ServerRoom
+    const seen: { id: string; meta: Record<string, unknown> }[] = []
+    Room.guard(served, {
+      onJoin: (member) => {
+        seen.push(member)
+        if (member.meta.name === 'Banned') throw new Error(`no entry for ${member.meta.name}`)
+      },
+    })
+
+    await expect(served.join({ name: 'Banned' })).rejects.toThrow('no entry for Banned')
+    // The guard runs before any state is written — a rejected join leaves no trace.
+    expect(served.count).toBe(0)
+    expect(await (await Room.get('door')).getParticipants()).toEqual([])
+
+    const alice = await served.join({ name: 'Alice' })
+    expect(seen.map((m) => m.meta)).toEqual([{ name: 'Banned' }, { name: 'Alice' }])
+    expect(seen[1]!.id).toBe(alice.id) // the guard saw the definitive member ID
+
+    // Client-side joins through the same instance hit the same guard; the rejection rides the ack.
+    const stub = new RoomStubChannel(served)
+    stub._registerChannel()
+    served._attachStub(stub)
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: { name: 'Banned' } }), 1)
+    expect(stub._stubMembers.size).toBe(0) // rejected — nothing admitted
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: { name: 'Casey' } }), 2)
+    expect(stub._stubMembers.size).toBe(1)
+  })
+
+  it('guards ride the granted instance — the Room.join() static is server-authored and unguarded', async () => {
+    await Room.create('velvet')
+    const granted = await Room.get('velvet')
+    Room.guard(granted, {
+      onJoin: () => {
+        throw new Error('nobody enters')
+      },
+    })
+    await expect(granted.join()).rejects.toThrow('nobody enters')
+    const me = await Room.join('velvet', { name: 'Direct' }) // no grant involved — like Room.announce() vs onPublish
+    expect(me.meta).toEqual({ name: 'Direct' })
+  })
+
   it('Room.guard() is one-shot and validates its arguments', async () => {
     await Room.create('strict')
     const room = await Room.get('strict')
@@ -646,6 +960,8 @@ describe('direct messages', () => {
     expect(() => Room.guard(room, { onSend: () => {} })).toThrow('already called')
     // @ts-expect-error — runtime validation
     expect(() => Room.guard(room, { onPublish: 'nope' })).toThrow('should be a function')
+    // @ts-expect-error — runtime validation
+    expect(() => Room.guard(room, { onJoin: 'nope' })).toThrow('should be a function')
     expect(() => Room.guard({} as never, {})).toThrow('expects a room')
   })
 
@@ -905,6 +1221,34 @@ describe('room stub channel', () => {
     expect(relayedTags()).toEqual(['join', 'data'])
   })
 
+  it('sub-text relays only the wanted members; a room-level subscription supersedes the set', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('member-text-stub')
+    const alice = await serverRoom.join({ name: 'Alice' })
+    const bob = await serverRoom.join({ name: 'Bob' })
+
+    const relayedData = () =>
+      peer
+        .decoded()
+        .filter((f) => f.tag === TAG.PUBLISH)
+        .map((f) => JSON.parse(f.text) as { __r: string; data?: unknown })
+        .filter((m) => m.__r === 'data')
+        .map((m) => m.data)
+
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [alice.id] }), 50)
+    await alice.publish('from-alice')
+    await bob.publish('from-bob') // not in the want set — never crosses the wire
+    expect(relayedData()).toEqual(['from-alice'])
+
+    stub._onPeerBroadcastSubscribe(false) // room-level subscription — everything flows
+    await bob.publish('bob-now-flows')
+    expect(relayedData()).toEqual(['from-alice', 'bob-now-flows'])
+
+    stub._onPeerBroadcastUnsubscribe(false) // back to the member set
+    await bob.publish('bob-dropped')
+    await alice.publish('alice-still-flows')
+    expect(relayedData()).toEqual(['from-alice', 'bob-now-flows', 'alice-still-flows'])
+  })
+
   it('a stub member joined with selfDelivery=false gets no echo of its own publishes', async () => {
     const { stub, peer } = await createServedRoom('quiet-stub')
     stub._onPeerBroadcastSubscribe(false) // the client listens for data — the echo skip must still hold
@@ -930,6 +1274,7 @@ describe('room stub channel', () => {
 type FakeStub = {
   emit: (envelope: unknown) => void
   emitBinary: (framed: Uint8Array) => void
+  close: () => void
   published: unknown[]
   sent: Array<{ __r: string }>
   textSubscribed: () => boolean
@@ -941,6 +1286,7 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
   const binaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
   const published: unknown[] = []
   const sent: Array<{ __r: string }> = []
+  const closeCbs: Array<() => void> = []
   let wireTextSubscribed = false
   let seq = 0
   const info = () => ({ key: 'fake', seq: ++seq, timestamp: 1 })
@@ -965,11 +1311,12 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
       return info()
     },
     publishBinary: async () => info(),
-    onClose: () => {},
+    onClose: (cb: () => void) => closeCbs.push(cb),
   }
   return {
     emit: (envelope) => [...textCbs].forEach((cb) => cb(envelope, info())),
     emitBinary: (framed) => [...binaryCbs].forEach((cb) => cb(framed, info())),
+    close: () => [...closeCbs].forEach((cb) => cb()),
     published,
     sent,
     textSubscribed: () => wireTextSubscribed,
@@ -1047,7 +1394,7 @@ describe('ClientRoom', () => {
 
     fake.emit({ __r: 'dm', to: memberId, from: peer, fromMeta: { name: 'Peer' }, data: 'reply' })
     fake.emit({ __r: 'dm', to: crypto.randomUUID(), from: peer, data: 'not-mine' })
-    expect(inbox).toEqual([['reply', { id: peer, meta: { name: 'Peer' } }]]) // snapshot sender — peer isn't in the local view
+    expect(inbox).toEqual([['reply', { id: peer, meta: { name: 'Peer' }, identity: null }]]) // snapshot sender — peer isn't in the local view
   })
 
   it('applies leave/p-meta/update/closed events to state and local participants', async () => {
@@ -1057,7 +1404,7 @@ describe('ClientRoom', () => {
     const log: string[] = []
     clientRoom.onUpdate((meta) => log.push(`update:${JSON.stringify(meta)}`))
     clientRoom.onClose(() => log.push('closed'))
-    me.onLeave(() => log.push('me-left'))
+    me.onLeave((cause) => log.push(`me-left:${JSON.stringify(cause)}`))
 
     fake.emit({ __r: 'p-meta', id: me.id, meta: { mood: 'happy' }, prev: {}, seq: 1 })
     expect(me.meta).toEqual({ mood: 'happy' })
@@ -1065,12 +1412,25 @@ describe('ClientRoom', () => {
     fake.emit({ __r: 'update', meta: { topic: 'b' }, prev: { topic: 'a' }, size: null, at: 9, by: 'w1' })
     expect(clientRoom.size).toBe(Infinity)
 
-    fake.emit({ __r: 'leave', id: me.id }) // kicked
+    fake.emit({ __r: 'leave', id: me.id, cause: 'removed', reason: 'be nice' }) // kicked, told why
     fake.emit({ __r: 'closed' })
 
-    expect(log).toEqual(['update:{"topic":"b"}', 'me-left', 'closed'])
+    expect(log).toEqual(['update:{"topic":"b"}', 'me-left:{"type":"removed","reason":"be nice"}', 'closed'])
     expect(clientRoom.isClosed).toBe(true)
     await expect(me.publish('x')).rejects.toThrow('Participant has left')
+  })
+
+  it("wire death surfaces as cause 'disconnected' on the client's own participants", async () => {
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('wire-death'))
+    const me = await clientRoom.join()
+    const causes: unknown[] = []
+    me.onLeave((cause) => causes.push(cause))
+
+    fake.close() // the connection died — no `closed` event preceded it
+
+    expect(causes).toEqual([{ type: 'disconnected' }])
+    expect(clientRoom.isClosed).toBe(true)
   })
 
   it('declares the text want only while data listeners exist — presence stays wire-free of chatter', () => {
@@ -1148,6 +1508,47 @@ describe('ClientRoom', () => {
     expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: false, members: [cam2] })
   })
 
+  it('declares member-scoped text wants — sub-text rides beside the broadcast subscription', async () => {
+    const alice = crypto.randomUUID()
+    const bob = crypto.randomUUID()
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('text-wants', { count: 2 }))
+    fake.emit({
+      __r: 'roster',
+      members: [
+        { id: alice, meta: {}, joinedAt: 1 },
+        { id: bob, meta: {}, joinedAt: 2 },
+      ],
+    })
+    const subTextMsgs = () => fake.sent.filter((m) => m.__r === 'sub-text')
+
+    // Participant-scoped listeners declare a member set — no room-level broadcast subscription.
+    const unsubAlice = (await clientRoom.getParticipant(alice))!.subscribe(() => {})
+    expect(fake.textSubscribed()).toBe(false)
+    expect(subTextMsgs()).toEqual([{ __r: 'sub-text', members: [alice] }])
+    const unsubBob = (await clientRoom.getParticipant(bob))!.subscribe(() => {})
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice, bob] })
+
+    // A room-level subscribe() upgrades to the broadcast subscription and clears the member
+    // set; listener changes that leave the effective want unchanged send nothing.
+    const unsubAll = clientRoom.subscribe(() => {})
+    expect(fake.textSubscribed()).toBe(true)
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [] })
+    const sentCount = subTextMsgs().length
+    const unsubDup = (await clientRoom.getParticipant(alice))!.subscribe(() => {})
+    expect(subTextMsgs().length).toBe(sentCount)
+
+    // Narrowing back re-declares the member set.
+    unsubDup()
+    unsubAll()
+    expect(fake.textSubscribed()).toBe(false)
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice, bob] })
+    unsubBob()
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice] })
+    unsubAlice()
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [] })
+  })
+
   it("a member leaving releases its listeners — the client's declaration narrows without an unsubscribe", async () => {
     const cam = crypto.randomUUID()
     const fake = createFakeStub()
@@ -1167,6 +1568,21 @@ describe('ClientRoom', () => {
       all: false,
       members: [],
     })
+  })
+
+  it('a DM relayed before the join ack resolves is held and delivered — the reactive-send race', async () => {
+    const memberId = crypto.randomUUID()
+    const fake = createFakeStub({ id: memberId })
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('dm-race'))
+    const peer = crypto.randomUUID()
+
+    // The DM arrives on the stub before join() has resolved (different request, same connection).
+    fake.emit({ __r: 'dm', to: memberId, from: peer, fromMeta: { name: 'Bot' }, data: 'welcome!' })
+
+    const me = await clientRoom.join()
+    const inbox: unknown[] = []
+    me.listen((data, from) => inbox.push([data, from?.meta.name]))
+    expect(inbox).toEqual([['welcome!', 'Bot']])
   })
 
   it('a standalone participant joined with selfDelivery=false suppresses its echo in a sibling room', async () => {
@@ -1222,8 +1638,8 @@ describe('liveness', () => {
     const a = await Room.create('crashed')
     const me = await a.join({ name: 'Ghost' })
     const observer = await Room.get('crashed')
-    const leaves: string[] = []
-    observer.onLeave((m) => leaves.push(m.id))
+    const leaves: Array<[string, unknown]> = []
+    observer.onLeave((m, cause) => leaves.push([m.id, cause]))
     await observer.getParticipants() // materialize the roster — leave events need the member view
 
     await backdate('crashed', me.id) // simulate: the owning node died 2 minutes ago
@@ -1231,7 +1647,7 @@ describe('liveness', () => {
     const reader = await Room.get('crashed')
     expect(await reader.getParticipants()).toEqual([]) // reap-on-read: record deleted, leave announced
     expect(await Room.list()).toMatchObject([{ id: 'crashed', count: 0 }])
-    expect(leaves).toEqual([me.id])
+    expect(leaves).toEqual([[me.id, { type: 'disconnected' }]]) // the reaper knows it's a crash death
     expect(observer.count).toBe(0)
     expect(a.count).toBe(0) // the (supposed) owner learned via the reaper's event too
     await expect(me.publish('boo')).rejects.toThrow('Participant has left')
@@ -1308,5 +1724,257 @@ describe('adapter KV requirement', () => {
     }
     _resetBroadcastAdapterForTesting(pubSubOnly)
     await expect(Room.create('kv-less')).rejects.toThrow(/KV methods required by `Room`/)
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// Typed metadata — compile-time contract (tsc runs over this spec): the type
+// parameters flow from the statics through every surface.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('typed metadata', () => {
+  it('meta type parameters flow end-to-end', async () => {
+    type ChatMeta = { topic: string }
+    type MemberMeta = { name: string }
+    const room = await Room.create<ChatMeta, MemberMeta>('typed', { meta: { topic: 'general' } })
+    const topic: string = room.meta.topic
+
+    const me = await room.join({ name: 'Alice' })
+    const myName: string = me.meta.name
+    room.subscribe((_data, _info, from) => {
+      const _senderName: string = from.meta.name
+    })
+    Room.guard(room, {
+      onJoin: (member) => {
+        const _joinerName: string = member.meta.name
+      },
+    })
+    const member = await room.getParticipant(me.id)
+    if (member) {
+      const _memberName: string = member.meta.name
+    }
+    const snap = room.snapshot()
+    const first = snap.participants[0]
+    if (first) {
+      const _snapName: string = first.meta.name
+    }
+    const direct = await Room.join<MemberMeta>('typed', { name: 'Bob' })
+    const _directName: string = direct.meta.name
+
+    expect(topic).toBe('general')
+    expect(myName).toBe('Alice')
+    expect(_directName).toBe('Bob')
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// Activity lane — the badge trickle: throttled at the publisher, subscribed
+// only by listeners, delivered without message bodies.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('activity lane', () => {
+  it('publishes trigger a throttled signal; badge consumers never receive the text lane', async () => {
+    vi.useFakeTimers()
+    try {
+      const a = await Room.create('badges')
+      const me = await a.join({ name: 'Chatty' })
+
+      const observer = await Room.get('badges')
+      const subscribedKeys: string[] = []
+      const spy = vi.spyOn(getBroadcastAdapter(), 'subscribe')
+      const pings: number[] = []
+      observer.onActivity(({ timestamp }) => pings.push(timestamp))
+      for (const [key] of spy.mock.calls) subscribedKeys.push(key)
+      expect(subscribedKeys.some((k) => k.endsWith(':a'))).toBe(true)
+      expect(subscribedKeys.some((k) => k.endsWith(':t'))).toBe(false) // no bodies — that's the point
+
+      await me.publish('one')
+      await me.publish('two') // same throttle window — coalesced
+      expect(pings.length).toBe(1)
+
+      vi.advanceTimersByTime(ROOM_ACTIVITY_THROTTLE_MS + 1)
+      await me.publish('three')
+      expect(pings.length).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('client stubs receive activity only after declaring the want, deduped', async () => {
+    const memberId = crypto.randomUUID()
+    const fake = createFakeStub({ id: memberId })
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('badge-client'))
+    const subActivity = () => fake.sent.filter((m) => m.__r === 'sub-activity')
+    expect(subActivity()).toEqual([]) // nothing declared while nobody listens
+
+    const pings: number[] = []
+    const unsub = clientRoom.onActivity(({ timestamp }) => pings.push(timestamp))
+    expect(subActivity()).toEqual([{ __r: 'sub-activity', on: true }])
+    clientRoom.onActivity(() => {}) // second listener — no re-send
+    expect(subActivity().length).toBe(1)
+
+    fake.emit({ __r: 'activity', at: 1234 })
+    expect(pings).toEqual([1234])
+
+    unsub()
+    // One listener remains — the want stays on; dropping to zero would send { on: false }.
+    expect(subActivity().length).toBe(1)
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// snapshot()/onChange — the UI-store contract: reference-stable immutable
+// views, one change signal for everything observable.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('snapshot() and onChange()', () => {
+  it('the reference is stable until something changes, then every change class invalidates it', async () => {
+    const room = await Room.create('viewstore', { meta: { topic: 'a' }, size: 5 })
+    const changes: number[] = []
+    room.onChange(() => changes.push(1))
+
+    const s0 = room.snapshot()
+    expect(room.snapshot()).toBe(s0) // cached — uSES contract
+    expect(s0).toMatchObject({ id: 'viewstore', meta: { topic: 'a' }, size: 5, count: 0, isClosed: false })
+    expect(Object.isFrozen(s0)).toBe(true)
+
+    const me = await room.join({ name: 'Alice' }, { identity: 'u1' })
+    const s1 = room.snapshot()
+    expect(s1).not.toBe(s0)
+    expect(s1.participants).toMatchObject([{ id: me.id, identity: 'u1', meta: { name: 'Alice' } }])
+
+    await me.setMeta({ name: 'Alicia' })
+    const s2 = room.snapshot()
+    expect(s2).not.toBe(s1)
+    expect(s2.participants[0]!.meta).toEqual({ name: 'Alicia' })
+    expect(s1.participants[0]!.meta).toEqual({ name: 'Alice' }) // old snapshots stay immutable
+
+    await Room.update('viewstore', { meta: { topic: 'b' } })
+    const s3 = room.snapshot()
+    expect(s3.meta).toEqual({ topic: 'b' })
+
+    await me.leave()
+    const s4 = room.snapshot()
+    expect(s4.participants).toEqual([])
+
+    await Room.close('viewstore')
+    expect(room.snapshot().isClosed).toBe(true)
+    expect(changes.length).toBeGreaterThanOrEqual(5) // join, meta, update, leave, close all signaled
+  })
+
+  it('a client view starts from the count seed and completes when the roster streams in', () => {
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('viewlazy', { count: 2 }))
+    const changes: number[] = []
+    clientRoom.onChange(() => changes.push(1))
+
+    const before = clientRoom.snapshot()
+    expect(before.count).toBe(2) // seeded — capacity gates correct before the roster lands
+    expect(before.participants).toEqual([])
+
+    const alice = crypto.randomUUID()
+    const bob = crypto.randomUUID()
+    fake.emit({
+      __r: 'roster',
+      members: [
+        { id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0, identity: 'u1' },
+        { id: bob, meta: { name: 'B' }, joinedAt: 2, metaSeq: 0, identity: null },
+      ],
+    })
+    expect(changes.length).toBeGreaterThanOrEqual(1)
+    const after = clientRoom.snapshot()
+    expect(after).not.toBe(before)
+    expect(after.participants.map((p) => [p.id, p.identity])).toEqual([
+      [alice, 'u1'],
+      [bob, null],
+    ])
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// Returnable RemoteParticipant — a view crosses the wire as (room, snapshot);
+// ref-identity dedup binds it to the co-returned room's live view.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('returnable RemoteParticipant', () => {
+  function makeRoundTrip() {
+    const registeredChannels: unknown[] = []
+    const serverCtx = {
+      createChannel: () => {
+        throw new Error('unused')
+      },
+      registerChannel: (ch: unknown) => registeredChannels.push(ch),
+      sendStream: () => {
+        throw new Error('unused')
+      },
+      validators: new Map(),
+    } as unknown as ServerReplacerContext
+    const replacer = createStreamingReplacer(
+      () => serverCtx,
+      () => {},
+      [],
+    )
+    const serialize = (v: unknown) => stringify(v, { replacer })
+
+    const fakes: FakeStub[] = []
+    const clientCtx = {
+      createBroadcast: () => {
+        const f = createFakeStub()
+        fakes.push(f)
+        return f.stub
+      },
+      createChannel: () => {
+        throw new Error('unused')
+      },
+      receiveStream: () => {
+        throw new Error('unused')
+      },
+      waitFor: () => {},
+    } as unknown as ClientReviverContext
+    const reviver = createStreamingReviver(clientCtx, () => {}, [])
+    const parseBody = (b: string) => parse(b, { reviver })
+    return { serialize, parseBody, fakes, registeredChannels }
+  }
+
+  it('returns alongside its room — one stub, duplicates ===, bound to the live view', async () => {
+    const server = await Room.create('viewable')
+    const alice = await server.join({ name: 'Alice' })
+    const member = (await server.getParticipant(alice.id))!
+
+    const { serialize, parseBody, fakes, registeredChannels } = makeRoundTrip()
+    const body = serialize({ room: server, member, memberDupe: member })
+    expect(registeredChannels.length).toBe(1) // one room stub — the view rides it
+
+    const out = parseBody(body) as { room: ClientRoom; member: RemoteParticipant; memberDupe: RemoteParticipant }
+    expect(out.memberDupe).toBe(out.member)
+    expect(out.member.id).toBe(alice.id)
+    expect(out.member.meta).toEqual({ name: 'Alice' })
+
+    // Bound to the same live view: the room's own lookup returns the very same object.
+    fakes[0]!.emit({
+      __r: 'roster',
+      members: [{ id: alice.id, meta: { name: 'Alice' }, joinedAt: 1, metaSeq: 0 }],
+    })
+    expect(await out.room.getParticipant(alice.id)).toBe(out.member)
+  })
+
+  it('returns on its own — the backing room rides along and keeps the view live', async () => {
+    const server = await Room.create('solo-view')
+    const bob = await server.join({ name: 'Bob' })
+    const member = (await server.getParticipant(bob.id))!
+
+    const { serialize, parseBody, fakes } = makeRoundTrip()
+    const out = parseBody(serialize({ solo: member })) as { solo: RemoteParticipant }
+    expect(fakes.length).toBe(1) // the embedded room minted its (one) client stub
+    expect(out.solo.id).toBe(bob.id)
+    expect(out.solo.meta).toEqual({ name: 'Bob' })
+
+    // Live: the member's events flow through the embedded room's stub into the view.
+    fakes[0]!.emit({ __r: 'p-meta', id: bob.id, meta: { name: 'Bobby' }, prev: { name: 'Bob' }, seq: 1 })
+    expect(out.solo.meta).toEqual({ name: 'Bobby' })
+    const causes: unknown[] = []
+    out.solo.onLeave((cause) => causes.push(cause))
+    fakes[0]!.emit({ __r: 'leave', id: bob.id, cause: 'removed', reason: 'bye' })
+    expect(causes).toEqual([{ type: 'removed', reason: 'bye' }])
   })
 })

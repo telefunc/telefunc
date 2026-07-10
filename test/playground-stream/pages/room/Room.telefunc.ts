@@ -1,4 +1,14 @@
-export { onCreateRoom, onGetRoom, onGetGuardedRoom, onJoinAsServer, onAnnounce, onSystemSend, onKick, onCloseRoom }
+export {
+  onCreateRoom,
+  onGetRoom,
+  onGetGuardedRoom,
+  onJoinAsServer,
+  onGetRoomWithMember,
+  onAnnounce,
+  onSystemSend,
+  onKick,
+  onCloseRoom,
+}
 
 import { Room } from 'telefunc'
 
@@ -16,6 +26,9 @@ async function onGetRoom(roomId: string) {
 async function onGetGuardedRoom(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
+    onJoin: (member) => {
+      if (member.meta.name === 'Banned') throw new Error(`blocked join of ${member.meta.name}`)
+    },
     onPublish: (from, data) => {
       if (data === 'forbidden') throw new Error(`blocked publish from ${from.meta.name}`)
     },
@@ -27,9 +40,18 @@ async function onGetGuardedRoom(roomId: string) {
 }
 
 /** Server-side join returning a standalone `LocalParticipant` — exercises the participant
- *  stub (its own channel), unlike client-side `room.join()` which rides the room's stub. */
+ *  stub (its own channel), unlike client-side `room.join()` which rides the room's stub.
+ *  Identity is stamped here, where trust lives. */
 async function onJoinAsServer(roomId: string, name: string) {
-  return await Room.join(roomId, { name })
+  return await Room.join(roomId, { name }, { identity: `user:${name}` })
+}
+
+/** A `RemoteParticipant` view returned alongside its room — ref-identity binds them:
+ *  on the client, `room.getParticipant(member.id)` is the very same object as `member`. */
+async function onGetRoomWithMember(roomId: string, memberId: string) {
+  const room = await Room.get(roomId)
+  const member = await room.getParticipant(memberId)
+  return { room, member }
 }
 
 async function onAnnounce(roomId: string, data: unknown) {
@@ -41,7 +63,7 @@ async function onSystemSend(roomId: string, participantId: string, data: unknown
 }
 
 async function onKick(roomId: string, participantId: string) {
-  await Room.removeParticipant(roomId, participantId)
+  await Room.removeParticipant(roomId, participantId, { reason: 'be nice' })
 }
 
 async function onCloseRoom(roomId: string) {

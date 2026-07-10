@@ -36,6 +36,7 @@ export type {
   BroadcastContract,
   RoomContract,
   RoomParticipantContract,
+  RoomRemoteContract,
   FunctionContract,
   FileDownload,
   BlobDownload,
@@ -46,7 +47,7 @@ import type { ServerChannel } from './server/channel.js'
 import type { ServerBroadcast } from './server/server-broadcast.js'
 import type { ClientChannel, ClientBroadcast } from './client/channel.js'
 import type { ServerRoom, ServerLocalParticipant } from './room/server.js'
-import type { Room, LocalParticipant } from './room/types.js'
+import type { Room, LocalParticipant, RemoteParticipant } from './room/types.js'
 import type { RoomSnapshotMetadata, ParticipantStubMetadata } from './room/shared.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
@@ -65,7 +66,11 @@ type TypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = 
  *  `replace` is the primary verb of the Replacer API — it runs once per serialized value and may
  *  perform side effects (register channels, install listeners, wire lifecycle). The returned
  *  `metadata` is what crosses the wire; `close` / `abort` are lifecycle hooks tracked by the
- *  registry and invoked when the carrier message completes or is aborted. */
+ *  registry and invoked when the carrier message completes or is aborted.
+ *
+ *  Duplicated references run `replace` once and revive as one client object (see
+ *  createStreamingReplacer), so metadata must identify the value uniquely within the
+ *  payload: mint a fresh id per `replace` call, the way every built-in does. */
 type ReplacerType<C extends TypeContract = TypeContract, Context = unknown> = {
   prefix: string
   detect(value: unknown): value is C['value']
@@ -83,13 +88,25 @@ type StreamingReplacerType<C extends TypeContract = TypeContract, Context = unkn
 /** Reviver: reconstruct a live value from prefix+metadata during deserialization.
  *  `revive` is the primary verb of the Reviver API — it runs once per deserialized value and may
  *  perform side effects (create channels, start readers, attach validators). Mirrors `replace`
- *  on the Replacer side. */
+ *  on the Replacer side.
+ *
+ *  Duplicated references (equal wire strings) run `revive` once and resolve to the object the
+ *  first occurrence revived — server-side `===` holds on the client (see createStreamingReviver). */
 type ReviverType<C extends TypeContract = TypeContract, Context = unknown> = {
   prefix: string
   revive(
     metadata: C['metadata'],
     context: Context,
-  ): { value: C['result']; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }
+  ): {
+    value: C['result']
+    close: () => Promise<void> | void
+    abort: (abortError: AbortError) => void
+    /** `false` for values whose lifetime rides a parent revived in the same payload (e.g. a
+     *  `RemoteParticipant` view of a revived room): no GC proxy, no own close/abort wiring —
+     *  the parent's lifecycle covers them, and wrapping would break `===` with the parent's
+     *  own view objects. Default: `true`. */
+    gcTrack?: boolean
+  }
 }
 
 // ===== Producer =====
@@ -243,6 +260,15 @@ type BroadcastContract = TypeContract<ServerBroadcast, ClientBroadcast, { channe
 type RoomContract = TypeContract<ServerRoom, Room, RoomSnapshotMetadata>
 
 type RoomParticipantContract = TypeContract<ServerLocalParticipant, LocalParticipant, ParticipantStubMetadata>
+
+/** A `RemoteParticipant` view crossing the wire: (backing room, member snapshot). The room rides
+ *  inside the metadata — the ref-identity registries dedupe it against any co-returned occurrence,
+ *  so `room.getParticipant(m.id) === m` holds on the client. */
+type RoomRemoteContract = TypeContract<
+  RemoteParticipant,
+  RemoteParticipant,
+  { room: unknown; id: string; meta: Record<string, unknown>; joinedAt: number; metaSeq: number }
+>
 
 type FunctionContract = TypeContract<
   (...args: readonly unknown[]) => unknown,
