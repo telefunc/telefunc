@@ -6,12 +6,14 @@ fights the API. The app is real — accounts, SQLite persistence, offline-capabl
 channels with camera and screen share — and every place the Room API forced complexity into app
 code is called out inline and collected in [Findings](#findings-room-pr-436-pain-points).
 
-The stress test has run **two rounds**. Round 1 produced findings 1–13; the Room PR then adopted
+The stress test runs in **rounds**. Round 1 produced findings 1–13; the Room PR then adopted
 most of them (identity, join guards, named binary tracks, `snapshot()`/`onChange()`,
 `onActivity`, per-field `update`, leave causes, `getOrCreate`, typed metadata, …). Round 2
 migrated this app onto those APIs — each finding below records what the adoption deleted — and
 produced findings 14–16, including one real bug in the new `snapshot()` cache that the migration
-flushed out (finding 15, fixed in this PR).
+flushed out (finding 15, fixed in this PR). Round 3 followed the next base update: tracks became
+source-selective (`receivers` on the publish ack — adopted in `app/call.ts`, finding 6), and the
+room module split required re-porting the finding-15 fix (still pending upstream).
 
 **Features**
 
@@ -162,6 +164,10 @@ demux, and keyframe bookkeeping.
 - Round 2 receipts: the envelope, demux switch, and flag bits are deleted from `app/call.ts`;
   what's left is pure WebCodecs. Subscribing per track also means a peer that never shares its
   screen costs nothing on the screen track.
+- Round 3: tracks became selective **at the source** — the publish ack's `receivers` reports the
+  track's live subscription count. Receipt: `receiverGate` in `app/call.ts` pauses the encoder
+  after an ack says `0` and probes with a keyframe every couple of seconds — alone in a voice
+  channel, nothing is encoded or uploaded.
 
 ### 7. Expected-rejection ergonomics differ by lane — partially adopted
 
@@ -278,13 +284,17 @@ everyone.
   clearing members (leave callbacks run user code between the bumps — same hazard). Regression
   tests: `room.spec.ts` › "a subscriber that snapshots synchronously inside onChange cannot
   poison the cache" (roster load + close).
+- Round 3 note: the upstream module split (`shared.ts` → `state.ts`) did not carry the fix, so
+  it's re-ported onto the new layout here — the regression tests were re-verified to fail
+  against the unfixed split and pass with the port. Still pending in #436 itself.
 
-### 16. The new surface's types aren't all exported
+### 16. The new surface's types aren't all exported — partially adopted
 
-`LeaveCause`, `ParticipantSnapshotView`, `RoomSnapshotView`, and `BinaryFrameInfo` are declared
-in the Room types module but not re-exported from the package entry — an app can't name the
-things the new APIs hand it. Receipt: `app/store.ts` derives the participant-snapshot type
-structurally (`ReturnType<GuildRoom['snapshot']>['participants'][number]`).
+`Sender` and the guard types (`SendGuard`/`PublishGuard`/`JoinGuard`) are exported now. Still
+missing from the package entry: `LeaveCause`, `ParticipantSnapshotView`, `RoomSnapshotView`,
+`BinaryFrameInfo` — an app can't name the things `onLeave`, `snapshot()`, and `subscribeBinary`
+hand it. Receipt: `app/store.ts` derives the participant-snapshot type structurally
+(`ReturnType<GuildRoom['snapshot']>['participants'][number]`).
 
 ## Room API coverage
 
@@ -298,7 +308,7 @@ structurally (`ReturnType<GuildRoom['snapshot']>['participants'][number]`).
 | `room.onActivity` | ✔ | unread dots without message traffic (`app/store.ts`) |
 | guards: `onPublish` / `onSend` / `onJoin` | ✔ | moderation + persistence, closing the DM lane, voice capacity (`server/guards.ts`) |
 | `room.getParticipant` / `onEmpty` / `onFull` / `isEmpty` / `isClosed` | ✖ | roster filtering + live getters covered every need |
-| `me.publish` / `publishBinary({ track, keyFrame })` / `listen` / `setMeta` / `leave` / `onLeave` (with `LeaveCause`) / `selfDelivery: false` | ✔ | chat + typing, media tracks, DM notices, status & mute, channel switching, kick screen |
+| `me.publish` / `publishBinary({ track, keyFrame })` + ack `receivers` / `listen` / `setMeta` / `leave` / `onLeave` (with `LeaveCause`) / `selfDelivery: false` | ✔ | chat + typing, media tracks with pause-when-unwatched, DM notices, status & mute, channel switching, kick screen |
 | `me.send` | ✖ | deliberately closed by guard — see finding 2 |
 | `member.subscribeBinary(cb, { track })` / `onUpdate` / `onLeave` / `joinedAt` / `meta` / `identity` | ✔ | per-track media, live rosters, decoder lifecycle, tab dedupe |
 | `member.subscribe` | ✖ | room-level `subscribe` + the verified `from` covered per-member needs |

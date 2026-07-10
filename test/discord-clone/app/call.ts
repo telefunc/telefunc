@@ -7,6 +7,10 @@ export { joinCall, leaveCall, toggleMute, toggleCamera, toggleScreenShare, regis
 // { track })`, `info.keyFrame`), which deleted this app's hand-rolled `[kind][flags]` frame
 // envelope and demux switch (README finding 6, fixed upstream).
 //
+// Round 3: tracks are source-selective — the publish ack's `receivers` reports the track's live
+// subscription count, so an unwatched stream pauses its encoder and probes for returning
+// viewers (`receiverGate` below). Alone in a voice channel, nothing is encoded or uploaded.
+//
 // The Room-relevant shape:
 // - The voice join is a telefunction (`onJoinVoice`): the membership carries my trusted
 //   `identity`, and the room's `onJoin` guard enforces capacity server-side (finding 11).
@@ -80,9 +84,12 @@ async function joinCall(channelId: string): Promise<void> {
       })
       const micHandle = captureHandle(mic)
       current.cleanups.push(micHandle.stop)
+      // Every Opus frame decodes on its own, so the paused-stream probe needs no keyframe
+      // handling — any frame that gets through doubles as the probe.
+      const gate = receiverGate(1000)
       const encoder = encodeOpus(resampledTrack(mic, current.cleanups), (frame) => {
-        if (session !== current || current.muted) return
-        void current.membership.publishBinary(frame, { track: 'mic' }).catch(() => {})
+        if (session !== current || current.muted || gate.skip()) return
+        void current.membership.publishBinary(frame, { track: 'mic' }).then(gate.onAck, () => {})
       })
       current.cleanups.push(encoder.stop)
     } catch {
@@ -347,12 +354,13 @@ function videoPipeline(
   track: 'camera' | 'screen',
   opts: { keyframeEvery: number; bitrate: number },
 ): CaptureHandle {
+  const gate = receiverGate(2000)
   const encoder = new VideoEncoder({
     output(chunk) {
       if (session !== current) return
       const bytes = new Uint8Array(chunk.byteLength)
       chunk.copyTo(bytes)
-      void current.membership.publishBinary(bytes, { track, keyFrame: chunk.type === 'key' }).catch(() => {})
+      void current.membership.publishBinary(bytes, { track, keyFrame: chunk.type === 'key' }).then(gate.onAck, () => {})
     },
     error(err) {
       console.error('[discord:call] video encode error', err)
@@ -363,6 +371,11 @@ function videoPipeline(
   let count = 0
   const stopReading = readFrames(stream.getVideoTracks()[0]!, (data) => {
     const frame = data as VideoFrame
+    const probing = gate.paused // a probe must decode on its own — make it a keyframe
+    if (gate.skip()) {
+      frame.close()
+      return
+    }
     const w = frame.displayWidth - (frame.displayWidth % 2)
     const h = frame.displayHeight - (frame.displayHeight % 2)
     if (w !== width || h !== height) {
@@ -371,6 +384,7 @@ function videoPipeline(
       count = 0
       encoder.configure({ codec: 'vp8', width, height, bitrate: opts.bitrate })
     }
+    if (probing) count = 0
     encoder.encode(frame, { keyFrame: count++ % opts.keyframeEvery === 0 })
     frame.close()
   })
@@ -411,6 +425,34 @@ function decodeVp8(draw: (frame: VideoFrame) => void): {
     },
     close() {
       if (decoder.state !== 'closed') decoder.close()
+    },
+  }
+}
+
+/** Pause-when-unwatched: publish acks carry the track's live `receivers` count. After an ack
+ *  reports 0, frames are dropped at the source — except one probe every `probeMs`, whose ack
+ *  detects returning receivers and reopens the stream. */
+function receiverGate(probeMs: number): {
+  readonly paused: boolean
+  skip(): boolean
+  onAck(ack: { receivers?: number }): void
+} {
+  let paused = false
+  let lastProbeAt = 0
+  return {
+    get paused() {
+      return paused
+    },
+    /** Drop this frame? While paused, everything but the periodic probe. */
+    skip() {
+      if (!paused) return false
+      const now = Date.now()
+      if (now - lastProbeAt < probeMs) return true
+      lastProbeAt = now
+      return false
+    },
+    onAck(ack) {
+      if (typeof ack.receivers === 'number') paused = ack.receivers === 0
     },
   }
 }
