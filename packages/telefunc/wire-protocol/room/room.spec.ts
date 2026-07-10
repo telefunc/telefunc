@@ -59,6 +59,47 @@ describe('Room entry point', () => {
     await expect(Room.get('nope')).rejects.toThrow('Room not found: nope')
   })
 
+  it('getOrCreate creates once and converges — concurrent callers, existing rooms, later options ignored', async () => {
+    // Two concurrent boots: both read "missing", one wins the create, the loser gets.
+    const [a, b] = await Promise.all([
+      Room.getOrCreate('boot', { meta: { topic: 'first' }, size: 3 }),
+      Room.getOrCreate('boot', { meta: { topic: 'first' }, size: 3 }),
+    ])
+    expect(a.meta).toEqual({ topic: 'first' })
+    expect(b.meta).toEqual({ topic: 'first' })
+    expect(a.size).toBe(3)
+
+    // Already exists: returned as-is, options don't overwrite.
+    const again = await Room.getOrCreate('boot', { meta: { topic: 'second' }, size: 99 })
+    expect(again.meta).toEqual({ topic: 'first' })
+    expect(again.size).toBe(3)
+  })
+
+  it('update replaces provided fields only — updating the topic never resets the capacity', async () => {
+    await Room.create('cfg', { meta: { topic: 'general' }, size: 5 })
+    const observer = await Room.get('cfg')
+    observer.onUpdate(() => {}) // observing — receives update events
+
+    await Room.update('cfg', { meta: { topic: 'renamed' } })
+    expect((await Room.get('cfg')).size).toBe(5) // omitted — kept, not reset to Infinity
+    expect((await Room.get('cfg')).meta).toEqual({ topic: 'renamed' })
+
+    await Room.update('cfg', { size: 10 })
+    const after = await Room.get('cfg')
+    expect(after.meta).toEqual({ topic: 'renamed' }) // omitted — kept
+    expect(after.size).toBe(10)
+    expect(observer.size).toBe(10) // the update event carried the effective config
+    expect(observer.meta).toEqual({ topic: 'renamed' })
+  })
+
+  it('list({ prefix }) filters by room-ID prefix', async () => {
+    await Room.create('chat:a')
+    await Room.create('chat:b')
+    await Room.create('voice:c')
+    expect((await Room.list({ prefix: 'chat:' })).map((r) => r.id).sort()).toEqual(['chat:a', 'chat:b'])
+    expect((await Room.list()).length).toBe(3)
+  })
+
   it('size defaults to Infinity and is a hint — joins beyond capacity are not rejected', async () => {
     const lobby = await Room.create('unbounded')
     expect(lobby.size).toBe(Infinity)
@@ -137,7 +178,7 @@ describe('Room entry point', () => {
     expect(rooms.find((r) => r.id === 'a:m:b')!.count).toBe(0)
   })
 
-  it('update() is a full replace — omitted size resets to Infinity — and fires onUpdate', async () => {
+  it('update() replaces provided fields, keeps the rest, and fires onUpdate', async () => {
     const lobby = await Room.create('conf', { meta: { topic: 'a' }, size: 2 })
     const updates: Array<[unknown, unknown]> = []
     lobby.onUpdate((meta, prev) => updates.push([meta, prev]))
@@ -146,7 +187,7 @@ describe('Room entry point', () => {
 
     expect(updates).toEqual([[{ topic: 'b' }, { topic: 'a' }]])
     expect(lobby.meta).toEqual({ topic: 'b' })
-    expect(lobby.size).toBe(Infinity)
+    expect(lobby.size).toBe(2) // omitted — kept
     await expect(Room.update('conf', { isolated: true })).rejects.toThrow('fixed at creation')
     await expect(Room.update('gone', {})).rejects.toThrow('Room not found: gone')
   })

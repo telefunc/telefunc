@@ -20,6 +20,7 @@ export type {
   ParticipantMeta,
   LocalParticipant,
   RemoteParticipant,
+  Sender,
 } from '../wire-protocol/room/types.js'
 
 export type { TelefuncClientExtension } from './extensions.js'

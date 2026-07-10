@@ -26,6 +26,10 @@ export type {
   ParticipantMeta,
   LocalParticipant,
   RemoteParticipant,
+  Sender,
+  SendGuard,
+  PublishGuard,
+  JoinGuard,
 } from '../../wire-protocol/room/types.js'
 export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'

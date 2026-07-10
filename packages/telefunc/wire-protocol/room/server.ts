@@ -85,6 +85,9 @@ type RoomStatic = {
   create(id: string, options?: RoomOptions): Promise<Room>
   /** Get an existing room. Throws if it doesn't exist. */
   get(id: string): Promise<Room>
+  /** Get the room, creating it if it doesn't exist. Concurrent callers converge: one creates,
+   *  the others get. `options` apply only when this call is the one that creates. */
+  getOrCreate(id: string, options?: RoomOptions): Promise<Room>
   /** Guard every membership granted through `room` — server-side and client-side `join()`s
    *  alike. `onJoin` runs before each `join()` (admission), `onSend` before each private
    *  `send()`, `onPublish` before each `publish()`/`publishBinary()`; throwing rejects the
@@ -93,9 +96,10 @@ type RoomStatic = {
   guard(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard; onJoin?: JoinGuard }): void
   /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
   join(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant>
-  /** List all rooms. */
-  list(): Promise<RoomInfo[]>
-  /** Admin: replace the room's configuration — omitted options reset to their defaults. */
+  /** List all rooms — optionally only those whose ID starts with `prefix`. */
+  list(options?: { prefix?: string }): Promise<RoomInfo[]>
+  /** Admin: update the room's configuration — provided fields replace, omitted fields keep
+   *  their current value (`isolated` is fixed at creation). */
   update(id: string, options: RoomOptions): Promise<void>
   /** Admin: close the room — disconnects all participants and removes the room. */
   close(id: string): Promise<void>
@@ -123,6 +127,7 @@ type RoomStatic = {
 const Room: RoomStatic = {
   create: createRoom,
   get: getRoom,
+  getOrCreate: getOrCreateRoom,
   guard: guardRoom,
   join: joinRoom,
   list: listRooms,
@@ -157,6 +162,18 @@ async function getRoom(id: string): Promise<Room> {
   return new ServerRoom(id, config, { count })
 }
 
+async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
+  assertRoomId(id)
+  if ((await readConfig(getRoomKV(), id)) !== null) return await getRoom(id)
+  try {
+    return await createRoom(id, options)
+  } catch (err) {
+    // Lost the create race — the room exists now. Anything else (KV failure) rethrows.
+    if ((await readConfig(getRoomKV(), id)) === null) throw err
+    return await getRoom(id)
+  }
+}
+
 function guardRoom(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard; onJoin?: JoinGuard }): void {
   assertUsage(ServerRoom.isServerRoom(room), 'Room.guard() expects a room obtained from Room.get()/Room.create()')
   assertUsage(isObject(guards), 'Room.guard() guards should be an object')
@@ -182,10 +199,14 @@ async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOption
   return await new ServerRoom(id, config, { count: 0 }).join(meta, options)
 }
 
-async function listRooms(): Promise<RoomInfo[]> {
+async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
+  assertUsage(
+    options === undefined || (isObject(options) && (options.prefix === undefined || typeof options.prefix === 'string')),
+    'Room.list() options.prefix should be a string',
+  )
   const kv = getRoomKV()
   const rooms: RoomInfo[] = []
-  for (const key of await kv.keys(ROOM_KEY_NAMESPACE)) {
+  for (const key of await kv.keys(ROOM_KEY_NAMESPACE + (options?.prefix ?? ''))) {
     const id = roomIdFromConfigKey(key)
     if (id === null) continue
     const config = await readConfig(kv, id)
@@ -198,13 +219,24 @@ async function listRooms(): Promise<RoomInfo[]> {
 }
 
 async function updateRoom(id: string, options: RoomOptions): Promise<void> {
-  const { meta, size } = normalizeOptions(options)
+  assertUsage(isObject(options), 'Room.update() options should be an object')
   const { kv, config } = await requireRoom(id)
   assertUsage(
-    options?.isolated === undefined || options.isolated === config.isolated,
+    options.isolated === undefined || options.isolated === config.isolated,
     "A room's `isolated` mode is fixed at creation — room.update() cannot change it",
   )
-  const sizeWire = sizeToWire(size)
+  // Per-field replace — an omitted field keeps its current value, so updating the topic can
+  // never silently reset a capacity (and vice versa).
+  const meta = options.meta === undefined ? config.meta : options.meta
+  assertUsage(isObject(meta), 'options.meta should be an object')
+  let sizeWire = config.size
+  if (options.size !== undefined) {
+    assertUsage(
+      typeof options.size === 'number' && options.size > 0 && !Number.isNaN(options.size),
+      'options.size should be a positive number',
+    )
+    sizeWire = sizeToWire(options.size)
+  }
   // Strictly after the config we read (hybrid-clock style): back-to-back updates from one
   // writer always order, and cross-writer ordering stays wall-clock last-writer-wins.
   const at = Math.max(Date.now(), config.at + 1)
