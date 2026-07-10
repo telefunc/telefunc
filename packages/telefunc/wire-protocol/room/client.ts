@@ -1,6 +1,7 @@
 export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant }
 
 import { assert } from '../../utils/assert.js'
+import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isObject } from '../../utils/isObject.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
@@ -14,6 +15,7 @@ import {
   normalizeJoinOptions,
   sizeFromWire,
   unframeMemberId,
+  type InboxMessage,
   type MemberWants,
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
@@ -62,14 +64,9 @@ class ClientRoom implements Room {
   private _lastTextWantsSent = ''
   private _lastActivityWantSent = false
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
-   *  join round-trip) — held bounded FIFO, flushed into the participant on registration. */
-  private _pendingDms: Array<{
-    to: string
-    from: string
-    fromMeta: ParticipantMeta | null
-    fromIdentity: string | null
-    data: unknown
-  }> | null = null
+   *  join round-trip) — held bounded (bytes + count, drop-oldest), flushed on registration. */
+  private _pendingDms: Array<InboxMessage & { to: string }> | null = null
+  private _pendingDmBytes = 0
   private _rosterArrived!: () => void
   /** Settled by the first streamed roster (or wire death) — gates `getParticipants()`. */
   private readonly _rosterReady = new Promise<void>((resolve) => (this._rosterArrived = resolve))
@@ -91,7 +88,7 @@ class ClientRoom implements Room {
 
     // Delivery handlers are local-only — what the server relays is driven by the declared
     // wants: control always arrives, text while subscribed, binary per `sub-binary`.
-    stub._subscribeLocal((envelope, info) => this._onEnvelope(envelope, info))
+    stub._subscribeLocal((envelope, info, serialized) => this._onEnvelope(envelope, info, serialized))
     stub._subscribeBinaryLocal((framed, info) => this._onBinaryFrame(framed, info))
     // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives
     // as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
@@ -157,9 +154,11 @@ class ClientRoom implements Room {
   private _flushPendingDms(id: string, participant: ClientRoomParticipant): void {
     if (!this._pendingDms) return
     const held = this._pendingDms.filter((msg) => msg.to === id)
-    if (held.length === this._pendingDms.length) this._pendingDms = null
-    else if (held.length > 0) this._pendingDms = this._pendingDms.filter((msg) => msg.to !== id)
-    for (const msg of held) participant._deliverMessage(msg.from, msg.fromMeta, msg.fromIdentity, msg.data)
+    if (held.length === 0) return
+    const rest = this._pendingDms.filter((msg) => msg.to !== id)
+    this._pendingDms = rest.length > 0 ? rest : null
+    this._pendingDmBytes = rest.reduce((sum, msg) => sum + msg.bytes, 0)
+    for (const msg of held) participant._deliverMessage(msg)
   }
 
   /** @internal — revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
@@ -236,7 +235,7 @@ class ClientRoom implements Room {
 
   // ── Event stream (relayed broadcast messages) ──
 
-  private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
+  private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo, serialized: string): void {
     if (!hasRoomTag(envelope)) return
     const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomActivityEvent
     switch (event.__r) {
@@ -290,22 +289,29 @@ class ClientRoom implements Room {
         return
       case 'dm': {
         // Relayed from this member's private inbox — only its own stub ever receives it.
-        const local = this._localParticipants.get(event.to)
-        if (local) {
-          local._deliverMessage(event.from, event.fromMeta, event.fromIdentity ?? null, event.data)
-          return
-        }
-        // The DM beat its target's join ack (same connection, different request) — hold it.
-        if (this._state.closed) return
-        const pending = (this._pendingDms ??= [])
-        pending.push({
-          to: event.to,
+        const msg: InboxMessage = {
           from: event.from,
           fromMeta: event.fromMeta,
           fromIdentity: event.fromIdentity ?? null,
           data: event.data,
-        })
-        if (pending.length > 64) pending.shift()
+          bytes: utf8ByteLength(serialized),
+        }
+        const local = this._localParticipants.get(event.to)
+        if (local) {
+          local._deliverMessage(msg)
+          return
+        }
+        // The DM beat its target's join ack (same connection, different request) — hold it,
+        // priced by the wire bytes already in hand (the ServerChannelBuffer discipline).
+        if (this._state.closed) return
+        const pending = (this._pendingDms ??= [])
+        pending.push({ ...msg, to: event.to })
+        this._pendingDmBytes += msg.bytes
+        while (pending.length > 64 || this._pendingDmBytes > 256 * 1024) {
+          const dropped = pending.shift()
+          if (!dropped) break
+          this._pendingDmBytes -= dropped.bytes
+        }
         return
       }
     }
@@ -327,6 +333,7 @@ class ClientRoom implements Room {
   private _applyClosed(causeType: 'closed' | 'disconnected'): void {
     if (this._state.closed) return
     this._pendingDms = null
+    this._pendingDmBytes = 0
     const cause: LeaveCause = { type: causeType }
     this._state.applyClosed(cause)
     this._rosterArrived() // unblock any getParticipants() waiting on a wire that just died
@@ -454,7 +461,14 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       if (!hasRoomTag(notice)) return
       const msg = notice as ParticipantStubNotice
       if (msg.__r === 'p-meta') this._meta = msg.meta
-      else if (msg.__r === 'dm') this._deliverMessage(msg.from, msg.fromMeta, msg.fromIdentity ?? null, msg.data)
+      else if (msg.__r === 'dm')
+        this._deliverMessage({
+          from: msg.from,
+          fromMeta: msg.fromMeta,
+          fromIdentity: msg.fromIdentity ?? null,
+          data: msg.data,
+          bytes: msg.bytes,
+        })
       else if (msg.__r === 'left') this._onLeft(standaloneLeftCause(msg))
     })
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))

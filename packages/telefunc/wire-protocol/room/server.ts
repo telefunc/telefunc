@@ -7,6 +7,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
+import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import {
   ROOM_ACTIVITY_THROTTLE_MS,
@@ -767,7 +768,13 @@ class ServerRoom implements Room {
     const dm = envelope as RoomDmEnvelope
     const local = this._localParticipants.get(dm.to)
     if (local) {
-      local._deliverMessage(dm.from, dm.fromMeta, dm.fromIdentity ?? null, dm.data)
+      local._deliverMessage({
+        from: dm.from,
+        fromMeta: dm.fromMeta,
+        fromIdentity: dm.fromIdentity ?? null,
+        data: dm.data,
+        bytes: utf8ByteLength(serialized),
+      })
       return
     }
     const wireText = encodePublishText(serialized, rawInfo)

@@ -45,6 +45,7 @@ export type {
   ReqPublishAck,
   MemberWants,
   RoomActivityEvent,
+  InboxMessage,
 }
 
 import { assert, assertUsage } from '../../utils/assert.js'
@@ -258,7 +259,7 @@ type ParticipantStubRequest =
 type ParticipantStubNotice =
   | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
   | { __r: 'p-meta'; meta: ParticipantMeta }
-  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown }
+  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; bytes: number }
 
 /** Which members' streams a holder wants on a data lane (text or binary) — `all` for
  *  room-level listeners, or a specific member set for participant-scoped ones. */
@@ -964,10 +965,23 @@ class RoomState {
  * The private-message inbox and the leave lifecycle, identical on server and client.
  * Flavors supply the transport through the abstract operations and their own error pipeline.
  */
-/** Pre-listen inbox hold, count-capped: payloads arrive parsed, so byte-accounting would cost
- *  a re-serialization per message — the wire-side buffers (`ServerChannelBuffer`) already cap
- *  the bytes that can reach us. Drop-oldest beyond the cap. */
-const PENDING_INBOX_CAP = 64
+/** A delivered private message, with its wire-measured size — the honest price of holding it.
+ *  Sizes are taken where the wire string exists (never re-serialized), the same discipline as
+ *  `ServerChannelBuffer`. */
+type InboxMessage = {
+  from: string
+  fromMeta: ParticipantMeta | null
+  fromIdentity: string | null
+  data: unknown
+  bytes: number
+}
+
+/** Pre-listen inbox hold: byte-budgeted and count-capped, drop-oldest. The DM lane is the only
+ *  unconditionally-delivered lane (addressed — there are no wants to gate it on), so it's the
+ *  only lane with a client-side attach window to bridge; every room lane is want-gated at the
+ *  server and has nothing to hold. */
+const PENDING_INBOX_MAX_COUNT = 64
+const PENDING_INBOX_MAX_BYTES = 256 * 1024
 
 abstract class ParticipantBase implements LocalParticipant {
   readonly id: string
@@ -977,15 +991,11 @@ abstract class ParticipantBase implements LocalParticipant {
   protected _left = false
   private _leftCause: LeaveCause | null = null
   private _leaveCbs: Array<(cause: LeaveCause) => void> = []
-  private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => void> = []
+  private readonly _messageCbs: Array<(data: unknown, from: Sender | null, bytes: number) => void> = []
   /** DMs delivered before the first `listen()` — held bounded, flushed on attach, then never
    *  allocated again (`null` = flushed or empty; zero steady-state cost). */
-  private _pendingInbox: Array<{
-    from: string
-    fromMeta: ParticipantMeta | null
-    fromIdentity: string | null
-    data: unknown
-  }> | null = null
+  private _pendingInbox: InboxMessage[] | null = null
+  private _pendingInboxBytes = 0
 
   constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
     this.id = id
@@ -1007,11 +1017,18 @@ abstract class ParticipantBase implements LocalParticipant {
   protected abstract _reportError(err: unknown): void
 
   listen(callback: (data: unknown, from: Sender | null) => void): () => void {
+    return this._listenWithBytes((data, from) => callback(data, from))
+  }
+
+  /** @internal — `listen()` plus each message's wire-measured size: the participant stub's
+   *  forwarder ships the size to the client so the client-side hold prices by real bytes. */
+  _listenWithBytes(callback: (data: unknown, from: Sender | null, bytes: number) => void): () => void {
     this._messageCbs.push(callback)
     if (this._pendingInbox) {
       const held = this._pendingInbox
       this._pendingInbox = null
-      for (const msg of held) this._deliverMessage(msg.from, msg.fromMeta, msg.fromIdentity, msg.data)
+      this._pendingInboxBytes = 0
+      for (const msg of held) this._deliverMessage(msg)
     }
     return () => {
       const i = this._messageCbs.indexOf(callback)
@@ -1022,21 +1039,27 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal — a direct message arrived on this member's inbox. `from`/`fromMeta` come from
    *  the wire envelope; `resolve` upgrades to the live `RemoteParticipant` when a room view
    *  exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
-  _deliverMessage(from: string, fromMeta: ParticipantMeta | null, fromIdentity: string | null, data: unknown): void {
+  _deliverMessage(msg: InboxMessage): void {
     if (this._messageCbs.length === 0) {
       // A reactive send can beat the app's `listen()` by a tick — hold it (bounded) instead of
       // dropping it. A departed participant will never flush: drop.
       if (this._left) return
       const pending = (this._pendingInbox ??= [])
-      pending.push({ from, fromMeta, fromIdentity, data })
-      if (pending.length > PENDING_INBOX_CAP) pending.shift()
+      pending.push(msg)
+      this._pendingInboxBytes += msg.bytes
+      while (pending.length > PENDING_INBOX_MAX_COUNT || this._pendingInboxBytes > PENDING_INBOX_MAX_BYTES) {
+        const dropped = pending.shift()
+        if (!dropped) break
+        this._pendingInboxBytes -= dropped.bytes
+      }
       return
     }
+    const { from, fromMeta, fromIdentity, data } = msg
     const sender =
       from === '' ? null : (this._resolveSender(from) ?? { id: from, meta: fromMeta ?? {}, identity: fromIdentity })
     for (const cb of [...this._messageCbs]) {
       try {
-        cb(data, sender)
+        cb(data, sender, msg.bytes)
       } catch (err) {
         this._reportError(err)
       }
@@ -1067,6 +1090,7 @@ abstract class ParticipantBase implements LocalParticipant {
     if (this._leftCause) return
     this._leftCause = cause
     this._pendingInbox = null
+    this._pendingInboxBytes = 0
     const cbs = this._leaveCbs
     this._leaveCbs = []
     for (const cb of cbs) this._invoke(cb, cause)

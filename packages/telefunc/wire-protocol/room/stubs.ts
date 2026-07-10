@@ -165,8 +165,9 @@ function bindParticipantStubChannel(
     (meta: ParticipantMeta) => void channel.send({ __r: 'p-meta', meta }).catch(() => {}),
   )
 
-  // The participant's holder is the client — forward inbox deliveries to it.
-  const unlistenDm = participant.listen((data, from) => {
+  // The participant's holder is the client — forward inbox deliveries to it, with the
+  // wire-measured size so the client-side hold prices by real bytes.
+  const unlistenDm = participant._listenWithBytes((data, from, bytes) => {
     void channel
       .send({
         __r: 'dm',
@@ -174,6 +175,7 @@ function bindParticipantStubChannel(
         fromMeta: from?.meta ?? null,
         ...(from?.identity == null ? {} : { fromIdentity: from.identity }),
         data,
+        bytes,
       })
       .catch(() => {})
   })
