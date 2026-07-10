@@ -49,6 +49,8 @@ import {
 } from './shared.js'
 import type { RoomStubChannel } from './stubs.js'
 import type {
+  BinaryPublishOptions,
+  RoomBinaryListener,
   JoinOptions,
   LeaveCause,
   LocalParticipant,
@@ -425,8 +427,8 @@ class ServerRoom implements Room {
   subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._state.subscribe(callback)
   }
-  subscribeBinary(callback: (data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this._state.subscribeBinary(callback)
+  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string }): () => void {
+    return this._state.subscribeBinary(callback, options)
   }
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
     return this._state.onJoin(callback)
@@ -674,7 +676,14 @@ class ServerRoom implements Room {
     const unframed = unframeMemberId(framed)
     if (!unframed) return // junk on the reserved key
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-    this._state.applyBinary(unframed.from, unframed.payload, info, this._suppress(unframed.from))
+    this._state.applyBinary(
+      unframed.from,
+      unframed.payload,
+      unframed.track,
+      unframed.keyFrame,
+      info,
+      this._suppress(unframed.from),
+    )
     this._healUnknownSender(unframed.from)
 
     if (this._stubs.size > 0) {
@@ -1107,9 +1116,9 @@ class ServerLocalParticipant extends ParticipantBase {
     return await this._room._publishData(this.id, { data })
   }
 
-  async publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
+  async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishData(this.id, { framed: frameWithMemberId(this.id, data) })
+    return await this._room._publishData(this.id, { framed: frameWithMemberId(this.id, data, options) })
   }
 
   /** @internal — publish a client-framed payload (the frame already carries this member's ID). */

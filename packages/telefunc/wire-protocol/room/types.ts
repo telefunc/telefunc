@@ -12,6 +12,8 @@ export type {
   PublishGuard,
   JoinGuard,
   LeaveCause,
+  BinaryFrameInfo,
+  BinaryPublishOptions,
   RoomListener,
   RoomBinaryListener,
   ParticipantListener,
@@ -93,12 +95,29 @@ type RoomInfo = {
   readonly isFull: boolean
 }
 
+/** Per-frame binary metadata, straight from the frame header. */
+type BinaryFrameInfo = {
+  /** The named substream this frame belongs to (`publishBinary(data, { track })`) — `null` for
+   *  the default track. Mic/camera/screen multiplex over one member lane by name. */
+  track: string | null
+  /** The keyframe bit (`publishBinary(data, { keyFrame: true })`) — decoders resync on these. */
+  keyFrame: boolean
+}
+
+/** Publish-side binary options. */
+type BinaryPublishOptions = {
+  /** Named substream (≤ 64 bytes) — subscribers can filter by it. Default: the default track. */
+  track?: string
+  /** Mark the frame as a keyframe — surfaced as `info.keyFrame` on every subscriber. */
+  keyFrame?: boolean
+}
+
 /** Receives all participant messages, with the verified sender (see `Sender`). */
 type RoomListener = (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown
-type RoomBinaryListener = (data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown
+type RoomBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown
 /** Receives a single participant's messages. */
 type ParticipantListener = (data: unknown, info: ChannelPublishInfo) => unknown
-type ParticipantBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown
+type ParticipantBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
 
 /**
  * A multi-party room with presence, membership, and events. One type, same on server and
@@ -126,7 +145,8 @@ type Room = {
 
   /** Receive all participant messages. Returns an unsubscribe function. */
   subscribe(callback: RoomListener): () => void
-  subscribeBinary(callback: RoomBinaryListener): () => void
+  /** Receive all members' binary frames — or only one named track's (`{ track }`). */
+  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string }): () => void
 
   /** A participant joined. */
   onJoin(callback: (member: RemoteParticipant) => void): () => void
@@ -160,7 +180,8 @@ type LocalParticipant = {
 
   /** Publish a message to the whole room. */
   publish(data: unknown): Promise<ChannelPublishAck>
-  publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
+  /** Publish binary to the whole room — optionally on a named track and/or keyframe-flagged. */
+  publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
 
   /** Send a private message to one participant (or their ID) — nobody else receives it. */
   send(to: string | Sender, data: unknown): Promise<void>
@@ -191,7 +212,8 @@ type RemoteParticipant = {
 
   /** Receive only this member's messages. Returns an unsubscribe function. */
   subscribe(callback: ParticipantListener): () => void
-  subscribeBinary(callback: ParticipantBinaryListener): () => void
+  /** Receive only this member's binary frames — or only one named track's (`{ track }`). */
+  subscribeBinary(callback: ParticipantBinaryListener, options?: { track?: string }): () => void
 
   /** This member's metadata changed. */
   onUpdate(callback: (meta: ParticipantMeta, prev: ParticipantMeta) => void): () => void

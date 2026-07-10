@@ -592,6 +592,50 @@ describe('selective binary delivery', () => {
     expect(frames).toEqual(['cam1:1'])
   })
 
+  it('named tracks multiplex one member lane — filters, keyframe bits, zero-cost default', async () => {
+    const a = await Room.create('media', { isolated: true })
+    const cam = await a.join({ name: 'Cam' })
+    const b = await Room.get('media')
+    await b.getParticipants() // materialize the lazy roster
+
+    const all: Array<[string | null, boolean, number]> = []
+    const mics: number[] = []
+    const remote = (await b.getParticipant(cam.id))!
+    remote.subscribeBinary((data, info) => all.push([info.track, info.keyFrame, data[0]!]))
+    remote.subscribeBinary((data) => mics.push(data[0]!), { track: 'mic' })
+
+    await cam.publishBinary(new Uint8Array([1])) // default track
+    await cam.publishBinary(new Uint8Array([2]), { track: 'mic' })
+    await cam.publishBinary(new Uint8Array([3]), { track: 'camera', keyFrame: true })
+
+    expect(all).toEqual([
+      [null, false, 1],
+      ['mic', false, 2],
+      ['camera', true, 3],
+    ])
+    expect(mics).toEqual([2]) // the filter saw only its track
+
+    // Room-level subscription filters the same way, with the verified sender.
+    const cams: Array<[number, string]> = []
+    b.subscribeBinary((data, _info, from) => cams.push([data[0]!, String(from.meta.name)]), { track: 'camera' })
+    await cam.publishBinary(new Uint8Array([9]), { track: 'camera' })
+    expect(cams).toEqual([[9, 'Cam']])
+  })
+
+  it('track framing round-trips exactly — default publishes cost one flag byte', () => {
+    const id = crypto.randomUUID()
+    const plain = frameWithMemberId(id, new Uint8Array([7, 8]))
+    expect(plain.byteLength).toBe(16 + 1 + 2) // member + flags + payload
+    expect(unframeMemberId(plain)).toMatchObject({ from: id, track: null, keyFrame: false })
+    expect([...unframeMemberId(plain)!.payload]).toEqual([7, 8])
+
+    const tracked = frameWithMemberId(id, new Uint8Array([9]), { track: 'screen', keyFrame: true })
+    const out = unframeMemberId(tracked)!
+    expect(out.track).toBe('screen')
+    expect(out.keyFrame).toBe(true)
+    expect([...out.payload]).toEqual([9])
+  })
+
   it('isolated mode narrows the upstream text keys to the wanted members too', async () => {
     const a = await Room.create('sel-text', { isolated: true })
     const alice = await a.join({ name: 'alice' })

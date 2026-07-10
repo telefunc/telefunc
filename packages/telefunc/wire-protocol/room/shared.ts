@@ -49,6 +49,8 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
 import type {
+  BinaryFrameInfo,
+  BinaryPublishOptions,
   JoinOptions,
   LeaveCause,
   LocalParticipant,
@@ -314,20 +316,58 @@ function bytesToUuid(bytes: Uint8Array): string {
   return uuid
 }
 
-/** Binary relay format: `[16-byte member UUID][payload]`. Fixed-size prefix — no length field needed. */
-function frameWithMemberId(memberId: string, payload: Uint8Array): Uint8Array {
+/** Binary frame flags (one byte after the member ID). */
+const FRAME_FLAG_KEY = 0b0000_0001
+const FRAME_FLAG_TRACK = 0b0000_0010
+/** Track names stay tiny — they ride every frame. */
+const TRACK_MAX_BYTES = 64
+const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
+const frameTextDecoder = /* @__PURE__ */ new TextDecoder()
+
+/** Binary relay format: `[16-byte member UUID][1-byte flags][?1-byte track length + track][payload]`.
+ *  A plain publish costs one flag byte; named tracks (mic/camera/screen on one member lane) and
+ *  the keyframe bit make media multiplexing first-class — no hand-rolled envelopes. */
+function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
   const idBytes = uuidToBytes(memberId)
   assert(idBytes, 'room member IDs are UUIDs')
-  const framed = new Uint8Array(MEMBER_ID_BYTE_LENGTH + payload.byteLength)
+  let flags = opts?.keyFrame === true ? FRAME_FLAG_KEY : 0
+  let trackBytes: Uint8Array | null = null
+  if (opts?.track !== undefined) {
+    assertUsage(typeof opts.track === 'string' && opts.track.length > 0, 'track should be a non-empty string')
+    trackBytes = frameTextEncoder.encode(opts.track)
+    assertUsage(trackBytes.byteLength <= TRACK_MAX_BYTES, `track should be at most ${TRACK_MAX_BYTES} bytes`)
+    flags |= FRAME_FLAG_TRACK
+  }
+  const headerLength = MEMBER_ID_BYTE_LENGTH + 1 + (trackBytes ? 1 + trackBytes.byteLength : 0)
+  const framed = new Uint8Array(headerLength + payload.byteLength)
   framed.set(idBytes, 0)
-  framed.set(payload, MEMBER_ID_BYTE_LENGTH)
+  framed[MEMBER_ID_BYTE_LENGTH] = flags
+  if (trackBytes) {
+    framed[MEMBER_ID_BYTE_LENGTH + 1] = trackBytes.byteLength
+    framed.set(trackBytes, MEMBER_ID_BYTE_LENGTH + 2)
+  }
+  framed.set(payload, headerLength)
   return framed
 }
 
-/** Split a binary relay frame into sender ID and payload. Returns `null` on truncated frames. */
-function unframeMemberId(data: Uint8Array): { from: string; payload: Uint8Array } | null {
-  if (data.byteLength < MEMBER_ID_BYTE_LENGTH) return null
-  return { from: bytesToUuid(data), payload: data.subarray(MEMBER_ID_BYTE_LENGTH) }
+/** Split a binary relay frame into sender, track, keyframe bit, and payload. `null` on truncation. */
+function unframeMemberId(
+  data: Uint8Array,
+): { from: string; payload: Uint8Array; track: string | null; keyFrame: boolean } | null {
+  if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
+  const flags = data[MEMBER_ID_BYTE_LENGTH]!
+  const keyFrame = (flags & FRAME_FLAG_KEY) !== 0
+  let track: string | null = null
+  let offset = MEMBER_ID_BYTE_LENGTH + 1
+  if (flags & FRAME_FLAG_TRACK) {
+    if (data.byteLength < offset + 1) return null
+    const trackLength = data[offset]!
+    offset += 1
+    if (data.byteLength < offset + trackLength) return null
+    track = frameTextDecoder.decode(data.subarray(offset, offset + trackLength))
+    offset += trackLength
+  }
+  return { from: bytesToUuid(data), payload: data.subarray(offset), track, keyFrame }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +385,10 @@ type MemberEntry = {
   metaSeq: number
   remote: RemoteParticipant
   dataCbs: Array<(data: unknown, info: ChannelPublishInfo) => unknown>
-  binaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo) => unknown>
+  binaryCbs: Array<{
+    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
+    track: string | undefined
+  }>
   updateCbs: Array<(meta: ParticipantMeta, prev: ParticipantMeta) => void>
   leaveCbs: Array<(cause?: LeaveCause) => void>
 }
@@ -404,7 +447,10 @@ class RoomState {
   private readonly _onCallbackError: (err: unknown) => void
 
   private readonly _roomDataCbs: Array<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> = []
-  private readonly _roomBinaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown> = []
+  private readonly _roomBinaryCbs: Array<{
+    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown
+    track: string | undefined
+  }> = []
   private readonly _joinCbs: Array<(member: RemoteParticipant) => void> = []
   private readonly _leaveCbs: Array<(member: RemoteParticipant, cause?: LeaveCause) => void> = []
   private readonly _updateCbs: Array<(meta: RoomMeta, prev: RoomMeta) => void> = []
@@ -529,8 +575,11 @@ class RoomState {
   subscribe(cb: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._register(this._roomDataCbs, cb, 'data')
   }
-  subscribeBinary(cb: (data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this._register(this._roomBinaryCbs, cb, 'binary')
+  subscribeBinary(
+    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
+    opts?: { track?: string },
+  ): () => void {
+    return this._register(this._roomBinaryCbs, { cb, track: opts?.track }, 'binary')
   }
   onJoin(cb: (member: RemoteParticipant) => void): () => void {
     return this._register(this._joinCbs, cb, 'event')
@@ -649,12 +698,38 @@ class RoomState {
   }
 
   /** Binary frames carry only the sender's ID — a pre-join frame surfaces as `{ id, meta: {} }`
-   *  (rare: binary pipelines attach per member via `onJoin`, so the roster is normally ahead). */
-  applyBinary(from: string, payload: Uint8Array, info: ChannelPublishInfo, suppress: boolean): void {
+   *  (rare: binary pipelines attach per member via `onJoin`, so the roster is normally ahead).
+   *  `track`/`key` come from the frame header; listeners with a `track` filter receive only
+   *  that track's frames. */
+  applyBinary(
+    from: string,
+    payload: Uint8Array,
+    track: string | null,
+    keyFrame: boolean,
+    info: ChannelPublishInfo,
+    suppress: boolean,
+  ): void {
     if (suppress) return
+    const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, keyFrame }
     const entry = this._members.get(from)
-    this._fireAll(this._roomBinaryCbs, payload, info, entry?.remote ?? { id: from, meta: {}, identity: null })
-    if (entry) this._fireAll(entry.binaryCbs, payload, info)
+    const sender = entry?.remote ?? { id: from, meta: {}, identity: null }
+    for (const { cb, track: want } of [...this._roomBinaryCbs]) {
+      if (want !== undefined && want !== track) continue
+      try {
+        cb(payload, frameInfo, sender)
+      } catch (err) {
+        this._onCallbackError(err)
+      }
+    }
+    if (!entry) return
+    for (const { cb, track: want } of [...entry.binaryCbs]) {
+      if (want !== undefined && want !== track) continue
+      try {
+        cb(payload, frameInfo)
+      } catch (err) {
+        this._onCallbackError(err)
+      }
+    }
   }
 
   /** Resync against an authoritative membership snapshot. The first reconcile is the roster
@@ -749,7 +824,7 @@ class RoomState {
           return entry.identity
         },
         subscribe: (cb) => this._register(entry.dataCbs, cb, 'data'),
-        subscribeBinary: (cb) => this._register(entry.binaryCbs, cb, 'binary'),
+        subscribeBinary: (cb, opts) => this._register(entry.binaryCbs, { cb, track: opts?.track }, 'binary'),
         onUpdate: (cb) => this._register(entry.updateCbs, cb, 'event'),
         onLeave: (cb: (cause?: LeaveCause) => void) => this._register(entry.leaveCbs, cb, 'event'),
       },
@@ -851,7 +926,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   abstract publish(data: unknown): Promise<ChannelPublishAck>
-  abstract publishBinary(data: Uint8Array): Promise<ChannelPublishAck>
+  abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
   abstract send(to: string | Sender, data: unknown): Promise<void>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>

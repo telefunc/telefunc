@@ -29,6 +29,8 @@ import {
   type RoomStubRequest,
 } from './shared.js'
 import type {
+  BinaryPublishOptions,
+  RoomBinaryListener,
   JoinOptions,
   LeaveCause,
   LocalParticipant,
@@ -165,8 +167,8 @@ class ClientRoom implements Room {
   subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._state.subscribe(callback)
   }
-  subscribeBinary(callback: (data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
-    return this._state.subscribeBinary(callback)
+  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string }): () => void {
+    return this._state.subscribeBinary(callback, options)
   }
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
     return this._state.onJoin(callback)
@@ -296,6 +298,8 @@ class ClientRoom implements Room {
     this._state.applyBinary(
       unframed.from,
       unframed.payload,
+      unframed.track,
+      unframed.keyFrame,
       makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
       isSuppressed(this.id, unframed.from),
     )
@@ -383,9 +387,9 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return await this._room._publishData(this.id, data)
   }
 
-  async publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
+  async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishBinaryData(frameWithMemberId(this.id, data))
+    return await this._room._publishBinaryData(frameWithMemberId(this.id, data, options))
   }
 
   async send(to: string | Sender, data: unknown): Promise<void> {
@@ -436,9 +440,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return unwrapPublishAck(await this._request({ __r: 'req-publish', data }))
   }
 
-  async publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
+  async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return unwrapPublishAck(await this._channel.sendBinary(frameWithMemberId(this.id, data), { ack: true }))
+    return unwrapPublishAck(await this._channel.sendBinary(frameWithMemberId(this.id, data, options), { ack: true }))
   }
 
   async send(to: string | Sender, data: unknown): Promise<void> {
