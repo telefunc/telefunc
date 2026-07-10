@@ -684,6 +684,41 @@ describe('direct messages', () => {
     await expect(alice.send(bob.id, 'x')).rejects.toThrow('Participant has left')
   })
 
+  it("a reactive DM beating the target's listen() is held and flushed — never dropped", async () => {
+    const room = await Room.create('reactive')
+    const greeter = await room.join({ name: 'Bot' })
+    // The bot greets on join — before the joiner had any chance to attach listen().
+    room.onJoin((member) => void greeter.send(member.id, 'welcome!').catch(() => {}))
+
+    const newcomer = await (await Room.get('reactive')).join({ name: 'New' })
+    await settle() // let the greet round-trip land — nobody is listening yet
+
+    const inbox: unknown[] = []
+    newcomer.listen((data, from) => inbox.push([data, from?.meta.name]))
+    expect(inbox).toEqual([['welcome!', 'Bot']]) // flushed on attach
+  })
+
+  it('the pre-listen hold is bounded (drop-oldest) and released on leave', async () => {
+    const room = await Room.create('hold-cap')
+    const sender = await room.join({ name: 'S' })
+    const target = await (await Room.get('hold-cap')).join({ name: 'T' })
+    for (let i = 0; i < 70; i++) await sender.send(target.id, i)
+
+    const inbox: number[] = []
+    target.listen((data) => inbox.push(data as number))
+    expect(inbox.length).toBe(64) // capped
+    expect(inbox[0]).toBe(6) // oldest dropped first
+    expect(inbox[63]).toBe(69)
+
+    // Held messages die with the membership.
+    const gone = await (await Room.get('hold-cap')).join({ name: 'G' })
+    await sender.send(gone.id, 'never-read')
+    await gone.leave()
+    const late: unknown[] = []
+    gone.listen((data) => late.push(data))
+    expect(late).toEqual([])
+  })
+
   it('Room.guard({ onSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
     await Room.create('guarded')
     const lobby = await Room.get('guarded')
@@ -1417,6 +1452,21 @@ describe('ClientRoom', () => {
       all: false,
       members: [],
     })
+  })
+
+  it('a DM relayed before the join ack resolves is held and delivered — the reactive-send race', async () => {
+    const memberId = crypto.randomUUID()
+    const fake = createFakeStub({ id: memberId })
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('dm-race'))
+    const peer = crypto.randomUUID()
+
+    // The DM arrives on the stub before join() has resolved (different request, same connection).
+    fake.emit({ __r: 'dm', to: memberId, from: peer, fromMeta: { name: 'Bot' }, data: 'welcome!' })
+
+    const me = await clientRoom.join()
+    const inbox: unknown[] = []
+    me.listen((data, from) => inbox.push([data, from?.meta.name]))
+    expect(inbox).toEqual([['welcome!', 'Bot']])
   })
 
   it('a standalone participant joined with selfDelivery=false suppresses its echo in a sibling room', async () => {

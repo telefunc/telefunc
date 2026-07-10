@@ -786,6 +786,11 @@ class RoomState {
  * The private-message inbox and the leave lifecycle, identical on server and client.
  * Flavors supply the transport through the abstract operations and their own error pipeline.
  */
+/** Pre-listen inbox hold, count-capped: payloads arrive parsed, so byte-accounting would cost
+ *  a re-serialization per message — the wire-side buffers (`ServerChannelBuffer`) already cap
+ *  the bytes that can reach us. Drop-oldest beyond the cap. */
+const PENDING_INBOX_CAP = 64
+
 abstract class ParticipantBase implements LocalParticipant {
   readonly id: string
   readonly selfDelivery: boolean
@@ -794,6 +799,9 @@ abstract class ParticipantBase implements LocalParticipant {
   private _leftCause: LeaveCause | null = null
   private _leaveCbs: Array<(cause: LeaveCause) => void> = []
   private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => void> = []
+  /** DMs delivered before the first `listen()` — held bounded, flushed on attach, then never
+   *  allocated again (`null` = flushed or empty; zero steady-state cost). */
+  private _pendingInbox: Array<{ from: string; fromMeta: ParticipantMeta | null; data: unknown }> | null = null
 
   constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean) {
     this.id = id
@@ -815,6 +823,11 @@ abstract class ParticipantBase implements LocalParticipant {
 
   listen(callback: (data: unknown, from: Sender | null) => void): () => void {
     this._messageCbs.push(callback)
+    if (this._pendingInbox) {
+      const held = this._pendingInbox
+      this._pendingInbox = null
+      for (const msg of held) this._deliverMessage(msg.from, msg.fromMeta, msg.data)
+    }
     return () => {
       const i = this._messageCbs.indexOf(callback)
       if (i >= 0) this._messageCbs.splice(i, 1)
@@ -825,6 +838,15 @@ abstract class ParticipantBase implements LocalParticipant {
    *  the wire envelope; `resolve` upgrades to the live `RemoteParticipant` when a room view
    *  exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
   _deliverMessage(from: string, fromMeta: ParticipantMeta | null, data: unknown): void {
+    if (this._messageCbs.length === 0) {
+      // A reactive send can beat the app's `listen()` by a tick — hold it (bounded) instead of
+      // dropping it. A departed participant will never flush: drop.
+      if (this._left) return
+      const pending = (this._pendingInbox ??= [])
+      pending.push({ from, fromMeta, data })
+      if (pending.length > PENDING_INBOX_CAP) pending.shift()
+      return
+    }
     const sender = from === '' ? null : (this._resolveSender(from) ?? { id: from, meta: fromMeta ?? {} })
     for (const cb of [...this._messageCbs]) {
       try {
@@ -858,6 +880,7 @@ abstract class ParticipantBase implements LocalParticipant {
     this._left = true
     if (this._leftCause) return
     this._leftCause = cause
+    this._pendingInbox = null
     const cbs = this._leaveCbs
     this._leaveCbs = []
     for (const cb of cbs) this._invoke(cb, cause)

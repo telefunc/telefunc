@@ -56,6 +56,10 @@ class ClientRoom implements Room {
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   private _lastBinaryWantsSent = ''
   private _lastTextWantsSent = ''
+  /** DMs relayed before their participant's join ack resolved (a reactive send racing the
+   *  join round-trip) — held bounded FIFO, flushed into the participant on registration. */
+  private _pendingDms: Array<{ to: string; from: string; fromMeta: ParticipantMeta | null; data: unknown }> | null =
+    null
   private _rosterArrived!: () => void
   /** Settled by the first streamed roster (or wire death) — gates `getParticipants()`. */
   private readonly _rosterReady = new Promise<void>((resolve) => (this._rosterArrived = resolve))
@@ -115,6 +119,7 @@ class ClientRoom implements Room {
     const participant = new ClientRoomParticipant(this, ack.id, meta, selfDelivery)
     this._localParticipants.set(ack.id, participant)
     this._state.applyJoin(ack.id, meta, ack.joinedAt) // the relayed event is absorbed
+    this._flushPendingDms(ack.id, participant)
     return participant
   }
 
@@ -133,6 +138,15 @@ class ClientRoom implements Room {
     return this._state.getRemote(id)
   }
 
+  /** DMs held for this participant while its join ack was in flight — deliver in order. */
+  private _flushPendingDms(id: string, participant: ClientRoomParticipant): void {
+    if (!this._pendingDms) return
+    const held = this._pendingDms.filter((msg) => msg.to === id)
+    if (held.length === this._pendingDms.length) this._pendingDms = null
+    else if (held.length > 0) this._pendingDms = this._pendingDms.filter((msg) => msg.to !== id)
+    for (const msg of held) participant._deliverMessage(msg.from, msg.fromMeta, msg.data)
+  }
+
   /** @internal — revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
   _reviveRemote(snap: { id: string; meta: ParticipantMeta; joinedAt: number; metaSeq: number }): RemoteParticipant {
     return this._state.ensureRemoteFromSnapshot(snap)
@@ -147,7 +161,7 @@ class ClientRoom implements Room {
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
     return this._state.onJoin(callback)
   }
-  onLeave(callback: (member: RemoteParticipant) => void): () => void {
+  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
     return this._state.onLeave(callback)
   }
   onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
@@ -242,9 +256,20 @@ class ClientRoom implements Room {
       case 'announce':
         this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
         return
-      case 'dm':
+      case 'dm': {
         // Relayed from this member's private inbox — only its own stub ever receives it.
-        this._localParticipants.get(event.to)?._deliverMessage(event.from, event.fromMeta, event.data)
+        const local = this._localParticipants.get(event.to)
+        if (local) {
+          local._deliverMessage(event.from, event.fromMeta, event.data)
+          return
+        }
+        // The DM beat its target's join ack (same connection, different request) — hold it.
+        if (this._state.closed) return
+        const pending = (this._pendingDms ??= [])
+        pending.push({ to: event.to, from: event.from, fromMeta: event.fromMeta, data: event.data })
+        if (pending.length > 64) pending.shift()
+        return
+      }
     }
   }
 
@@ -261,6 +286,7 @@ class ClientRoom implements Room {
 
   private _applyClosed(causeType: 'closed' | 'disconnected'): void {
     if (this._state.closed) return
+    this._pendingDms = null
     const cause: LeaveCause = { type: causeType }
     this._state.applyClosed(cause)
     this._rosterArrived() // unblock any getParticipants() waiting on a wire that just died

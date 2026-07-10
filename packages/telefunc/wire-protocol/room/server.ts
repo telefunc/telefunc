@@ -409,7 +409,7 @@ class ServerRoom implements Room {
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
     return this._state.onJoin(callback)
   }
-  onLeave(callback: (member: RemoteParticipant) => void): () => void {
+  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
     return this._state.onLeave(callback)
   }
   onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
