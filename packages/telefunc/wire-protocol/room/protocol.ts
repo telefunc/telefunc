@@ -42,6 +42,7 @@ export type {
   ParticipantStubMetadata,
   RoomEnvelope,
   RoomRosterEvent,
+  RoomDemandEvent,
   RoomCtrlEnvelope,
   RoomDataEnvelope,
   RoomDataPublish,
@@ -209,6 +210,11 @@ type RoomCtrlEnvelope =
   // A member's first publish on a new named track — announced before the frame, so live
   // all-track subscribers bring up the track-key subscription (idempotent, like join).
   | { __r: 'track'; id: string; track: string }
+  // Track-demand gossip (`onDemand`): a node announces that its local demand for one member's
+  // (member, track) stream turned on/off, tagged with its instance id. The member's owning node
+  // aggregates these across nodes into a global demand count — node-to-node only, never relayed
+  // to clients. `track` is `DEFAULT_TRACK` for the plain `publishBinary()` lane.
+  | { __r: 'want'; member: string; track: string; node: string; on: boolean }
   | { __r: 'closed' }
 
 /** A participant's message. Published on the room's text key (shared mode) or the member's own
@@ -229,6 +235,11 @@ type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
  *  the adapter. Position-in-stream consistency: every event relayed before it is already
  *  reflected in it; later events apply incrementally on top. */
 type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] }
+
+/** Global demand for one of a member's own published tracks, pushed to that member's stub
+ *  (`onDemand`) whenever the owning node's aggregate count changes. `track` is `null` for the
+ *  default `publishBinary()` lane. `count` is the approximate number of interested subscribers. */
+type RoomDemandEvent = { __r: 'demand'; member: string; track: string | null; count: number }
 
 /** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
  *  privacy: only the target's owning node subscribes, only its holder receives the relay.
@@ -267,6 +278,7 @@ type ParticipantStubNotice =
   | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
   | { __r: 'p-meta'; meta: ParticipantMeta }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown }
+  | { __r: 'demand'; track: string | null; count: number }
 
 type ReqOkAck = { ok: true } | { ok: false; err: string }
 type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }

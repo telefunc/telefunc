@@ -87,6 +87,13 @@ function writerId(): string {
   return _writerId
 }
 
+/** Composite key for the demand aggregation maps — `member` + a separator + `track` (the track
+ *  name, or `DEFAULT_TRACK` for the plain `publishBinary()` lane). */
+const DEMAND_SEP = '\u0000'
+function demandKey(member: string, track: string): string {
+  return member + DEMAND_SEP + track
+}
+
 /** `Room` is one identifier with two meanings, like the built-in `Date`: the statics object
  *  below (value) and the instance type from ./types.js — re-established locally so the two
  *  merge into a single export. */
@@ -390,6 +397,16 @@ class ServerRoom implements Room {
   /** (member, track) pairs this instance has already announced — first publish pays the
    *  KV append + ctrl event, every further frame is a Set lookup. */
   private readonly _announcedTracks = new Map<string, Set<string>>()
+  /** Unique id tagging this instance's demand gossip, so a member's owning instance can dedupe
+   *  demand reports across instances and nodes (see `onDemand`). */
+  private readonly _instanceId = crypto.randomUUID()
+  /** Composite key → [member, track] for the streams this instance currently has local binary
+   *  demand for — diffed each `_syncSubs` to gossip 0↔>0 transitions on the control lane. */
+  private _localDemand = new Map<string, [string, string]>()
+  /** Owner-side demand aggregation: composite key → the OTHER instance ids reporting demand. */
+  private readonly _remoteDemand = new Map<string, Set<string>>()
+  /** Owner-side: composite key → the demand count last pushed to the member (change detection). */
+  private readonly _pushedDemand = new Map<string, number>()
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _heartbeatBusy = false
   private _pendingRefresh: Promise<void> | null = null
@@ -745,6 +762,10 @@ class ServerRoom implements Room {
     if (!hasRoomTag(envelope)) return
     const event = envelope as RoomEnvelope
     if (event.__r === 'data') return // data never travels on the control key
+    if (event.__r === 'want') {
+      this._applyWant(event) // demand gossip — node-to-node only, never relayed to clients
+      return
+    }
     const wasClosed = this._state.closed
 
     if (event.__r === 'announce') {
@@ -1062,6 +1083,10 @@ class ServerRoom implements Room {
       adapter.subscribeBinary(key, (framed, info) => this._onBinary(framed, info)),
     )
 
+    // Demand (`onDemand`): gossip this node's local binary-demand transitions and push the
+    // aggregated global count to any of our own members whose demand changed.
+    this._syncDemand(binaryWants, memberIds, open)
+
     // Inbox subscriptions follow ownership, not listeners — a holder must always be
     // able to receive direct messages addressed to its members.
     this._syncKeyedSubs(this._dmUnsubs, open ? this._ownedMemberIds() : [], (memberId) =>
@@ -1102,6 +1127,91 @@ class ServerRoom implements Room {
       }
     }
     return keys
+  }
+
+  /** The (member, track) pairs this instance has local binary demand for — the demand twin of
+   *  `_binaryKeys`, kept in member/track terms so it can be gossiped and aggregated. */
+  private _localDemandPairs(wants: BinaryWants, memberIds: string[]): Array<[string, string]> {
+    const pairs: Array<[string, string]> = []
+    for (const memberId of memberIds) {
+      const memberWants = wants.members[memberId]
+      const eff = memberWants ? mergeTrackWants(wants.everyMember, memberWants) : wants.everyMember
+      const tracks = eff.all ? [DEFAULT_TRACK, ...this._state.memberTracks(memberId)] : eff.tracks
+      for (const track of tracks) pairs.push([memberId, track])
+    }
+    return pairs
+  }
+
+  /** Diff this instance's local binary demand, gossiping each 0↔>0 transition on the control lane
+   *  (so a member's owning instance can aggregate global demand), and refresh the pushed count for
+   *  any of our own members whose local contribution changed. */
+  private _syncDemand(binaryWants: BinaryWants, memberIds: string[], open: boolean): void {
+    const prev = this._localDemand
+    const next = new Map<string, [string, string]>()
+    if (open) {
+      for (const [member, track] of this._localDemandPairs(binaryWants, memberIds)) {
+        next.set(demandKey(member, track), [member, track])
+      }
+    }
+    this._localDemand = next
+    for (const [k, [member, track]] of next) {
+      if (!prev.has(k)) this._onDemandTransition(member, track, true)
+    }
+    for (const [k, [member, track]] of prev) {
+      if (!next.has(k)) this._onDemandTransition(member, track, false)
+    }
+  }
+
+  private _onDemandTransition(member: string, track: string, on: boolean): void {
+    void publishCtrl(this.id, { __r: 'want', member, track, node: this._instanceId, on }).catch(reportRoomError)
+    if (this._ownsMember(member)) this._recomputeDemand(member, track)
+  }
+
+  /** A demand gossip from another instance/node. Recorded regardless of ownership (ownership can
+   *  arrive later); only a member's owning instance pushes the resulting count to it. */
+  private _applyWant(event: { member: string; track: string; node: string; on: boolean }): void {
+    if (event.node === this._instanceId) return // our own gossip echoed back
+    const k = demandKey(event.member, event.track)
+    if (event.on) {
+      let set = this._remoteDemand.get(k)
+      if (!set) this._remoteDemand.set(k, (set = new Set()))
+      set.add(event.node)
+    } else {
+      const set = this._remoteDemand.get(k)
+      set?.delete(event.node)
+      if (set && set.size === 0) this._remoteDemand.delete(k)
+    }
+    if (this._ownsMember(event.member)) this._recomputeDemand(event.member, event.track)
+  }
+
+  /** Whether one of this instance's own members is `id` — the instance that must aggregate and
+   *  deliver `id`'s demand. */
+  private _ownsMember(id: string): boolean {
+    if (this._localParticipants.has(id)) return true
+    for (const stub of this._stubs) if (stub._stubMembers.has(id)) return true
+    return false
+  }
+
+  /** Global demand for one of our members' tracks = this instance's own local contribution plus
+   *  the distinct other instances reporting demand. Push it to the member only when it changed. */
+  private _recomputeDemand(member: string, track: string): void {
+    const k = demandKey(member, track)
+    const count = (this._remoteDemand.get(k)?.size ?? 0) + (this._localDemand.has(k) ? 1 : 0)
+    if (this._pushedDemand.get(k) === count || (count === 0 && !this._pushedDemand.has(k))) return
+    if (count === 0) this._pushedDemand.delete(k)
+    else this._pushedDemand.set(k, count)
+    const trackOut = track === DEFAULT_TRACK ? null : track
+    const local = this._localParticipants.get(member)
+    if (local) {
+      local._onDemand(trackOut, count)
+      return
+    }
+    for (const stub of this._stubs) {
+      if (stub._stubMembers.has(member)) {
+        stub._relayDemand({ __r: 'demand', member, track: trackOut, count })
+        return
+      }
+    }
   }
 
   /** Whether this node needs the room's text lane at all — any local text listener, or any

@@ -21,6 +21,7 @@ import {
   type ParticipantStubRequest,
   type ReqOkAck,
   type ReqPublishAck,
+  type RoomDemandEvent,
   type RoomRosterEvent,
 } from './protocol.js'
 assertIsNotBrowser()
@@ -97,6 +98,11 @@ class RoomStubChannel extends ServerBroadcast {
   /** @internal — push the authoritative roster to this client (see `RoomRosterEvent`). */
   _relayRoster(members: MemberSnapshot[]): void {
     const event: RoomRosterEvent = { __r: 'roster', members }
+    this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
+  }
+
+  /** @internal — push a demand update for one of this client's members (see `onDemand`). */
+  _relayDemand(event: RoomDemandEvent): void {
     this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
   }
 
@@ -178,6 +184,11 @@ function bindParticipantStubChannel(
       .catch(() => {})
   })
 
+  // Demand updates for this member's own tracks (onDemand) — forwarded to the client holder.
+  const unlistenDemand = participant.onDemand((track, count) => {
+    void channel.send({ __r: 'demand', track, count }).catch(() => {})
+  })
+
   const unlistenLeave = participant.onLeave((cause) => {
     const notice =
       cause.type === 'left'
@@ -190,6 +201,7 @@ function bindParticipantStubChannel(
   channel.onClose(() => {
     unlistenMeta?.()
     unlistenDm()
+    unlistenDemand()
     unlistenLeave()
     // The client is gone (page closed, GC, network death) — presence says the member leaves.
     void participant.leave().catch(reportRoomError)

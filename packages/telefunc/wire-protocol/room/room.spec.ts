@@ -1731,6 +1731,24 @@ describe('ClientRoom', () => {
     expect(seen).toEqual([{ text: 'm1' }, { text: 'm2' }, { text: 'm3' }]) // then live, straight through
   })
 
+  it('onDemand fires when demand for a member track turns on, then off', async () => {
+    const room = await Room.create('demand')
+    const alice = await room.join({ name: 'A' })
+    const demand: Array<[string | null, number]> = []
+    alice.onDemand((track, count) => demand.push([track, count]))
+
+    // A second view of the room subscribes to alice's screen track — demand goes 0 → 1.
+    const observer = await Room.get('demand')
+    await observer.getParticipants() // materialize the roster so alice is known
+    const unsub = (await observer.getParticipant(alice.id))!.subscribeBinary(() => {}, { track: 'screen' })
+    await new Promise((r) => setTimeout(r, 30)) // the want gossips over the control lane
+    expect(demand).toContainEqual(['screen', 1])
+
+    unsub() // nobody watching the screen track — demand goes 1 → 0 (pause the encoder)
+    await new Promise((r) => setTimeout(r, 30))
+    expect(demand).toContainEqual(['screen', 0])
+  })
+
   it("a member leaving releases its listeners — the client's declaration narrows without an unsubscribe", async () => {
     const cam = crypto.randomUUID()
     const fake = createFakeStub()

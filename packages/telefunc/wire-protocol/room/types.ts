@@ -263,6 +263,12 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta> = {
    *  `null` for room-authored messages (`Room.send()`). Returns an unlisten function. */
   listen(callback: (data: unknown, from: Sender<P> | null) => void): () => void
 
+  /** Watch the live demand for your own published tracks: `(track, count)` fires when the number
+   *  of subscribers to one of your streams changes (`track` is `null` for the default
+   *  `publishBinary()` lane). `count === 0` means nobody is watching — the event-driven signal to
+   *  pause the encoder; a later non-zero fires when a viewer returns, so you can resume without
+   *  polling. Aggregated across all server nodes. Returns an unsubscribe function. */
+  onDemand(callback: (track: string | null, count: number) => void): () => void
   /** Replace your metadata wholesale. Propagates to all observers in real time. */
   setMeta(meta: P): Promise<void>
   /** Merge into your metadata per key — other keys keep their value, a key set to `undefined`
