@@ -8,12 +8,7 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
-import {
-  ROOM_ACTIVITY_THROTTLE_MS,
-  ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_MEMBER_KV_TTL_MS,
-  ROOM_MEMBER_TTL_MS,
-} from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { getBroadcastAdapter, type BroadcastAdapter, type BroadcastPublishResult } from '../server/broadcast.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
@@ -32,7 +27,6 @@ import {
   roomTextKey,
   roomMemberDataKey,
   roomMemberTrackKey,
-  roomActivityKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
   sizeFromWire,
@@ -58,7 +52,6 @@ import {
   type RoomEnvelope,
   type RoomMemberRecord,
   type RoomStubRequest,
-  type RoomActivityEvent,
 } from './protocol.js'
 import { RoomState } from './state.js'
 import { ParticipantBase } from './participant.js'
@@ -378,8 +371,6 @@ class ServerRoom implements Room {
 
   private readonly _ctrlSub = new SubSlot()
   private readonly _textSub = new SubSlot()
-  private readonly _activitySub = new SubSlot()
-  private _lastActivityAt = 0
   private readonly _memberTextUnsubs = new Map<string, () => void>()
   /** Upstream binary subscriptions, keyed by the full adapter key — one per wanted (member, track). */
   private readonly _binaryKeyUnsubs = new Map<string, () => void>()
@@ -493,10 +484,6 @@ class ServerRoom implements Room {
 
   onChange(callback: () => void): () => void {
     return this._state.onChange(callback)
-  }
-
-  onActivity(callback: (info: { timestamp: number }) => void): () => void {
-    return this._state.onActivity(callback)
   }
 
   snapshot(): RoomSnapshotView {
@@ -627,12 +614,11 @@ class ServerRoom implements Room {
     return sender
   }
 
-  /** Shared publish epilogue: the activity trickle, then the receipt (with `receivers`). */
+  /** Shared publish epilogue: the receipt (with `receivers`). */
   private async _finishPublish(
     publishing: BroadcastPublishResult | Promise<BroadcastPublishResult>,
   ): Promise<ChannelPublishAck> {
     const result = await publishing
-    this._announceActivity()
     return Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), {
       meta: result.meta,
       ...(result.receivers === undefined ? {} : { receivers: result.receivers }),
@@ -669,21 +655,6 @@ class ServerRoom implements Room {
     }
     this._state.applyTrack(from, track)
     announced.add(track)
-  }
-
-  /** Leading-edge throttle, no timers: at most one activity signal per window per instance.
-   *  Badge consumers conflate by nature (a timestamp), so multi-node rooms just mean a couple
-   *  of trickles per window — still control-lane cost. */
-  private _announceActivity(): void {
-    const now = Date.now()
-    if (now - this._lastActivityAt < ROOM_ACTIVITY_THROTTLE_MS) return
-    this._lastActivityAt = now
-    void Promise.resolve(
-      getBroadcastAdapter().publish(
-        roomActivityKey(this.id),
-        stringify({ __r: 'activity', at: now } satisfies RoomActivityEvent),
-      ),
-    ).catch(reportRoomError)
   }
 
   /** The verified sender as this node knows it — own participants first (freshest), then the
@@ -967,11 +938,6 @@ class ServerRoom implements Room {
           this._syncSubs()
           return { ok: true }
         }
-        case 'sub-activity': {
-          stub._wantsActivity = req.on === true
-          this._syncSubs()
-          return { ok: true }
-        }
         default:
           return undefined
       }
@@ -1067,12 +1033,6 @@ class ServerRoom implements Room {
       )
     }
 
-    // Activity: the badge trickle — subscribed only for holders that actually listen.
-    const wantActivity = open && (state.activityListenerCount > 0 || this._stubsWantActivity())
-    this._activitySub.sync(wantActivity, () =>
-      adapter.subscribe(roomActivityKey(this.id), (serialized) => this._onActivity(serialized)),
-    )
-
     // Binary: per-(publisher, track) keys in every mode — subscribing want-selectively at the
     // source makes upstream delivery pay-per-want, not filter-after-receive: dropping the last
     // want for a track drops its key, and the publisher's `receivers` hits 0.
@@ -1087,30 +1047,6 @@ class ServerRoom implements Room {
     )
 
     this._syncHeartbeat()
-  }
-
-  /** Whether any client stub declared an activity want (`sub-activity`). */
-  private _stubsWantActivity(): boolean {
-    for (const stub of this._stubs) if (stub._wantsActivity) return true
-    return false
-  }
-
-  private _onActivity(serialized: string): void {
-    let event: unknown
-    try {
-      event = parse(serialized)
-    } catch {
-      return // junk on the reserved key
-    }
-    if (!hasRoomTag(event) || event.__r !== 'activity') return
-    const activity = event as RoomActivityEvent
-    this._state.applyActivity(activity.at)
-    if (this._stubs.size > 0) {
-      const wireText = encodePublishText(serialized, { seq: 0, timestamp: activity.at })
-      for (const stub of this._stubs) {
-        if (stub._wantsActivity) stub._relayPublishText(wireText)
-      }
-    }
   }
 
   /** Union of this holder's own binary listeners and every client stub's declared wants. */

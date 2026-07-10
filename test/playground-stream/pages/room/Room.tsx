@@ -51,8 +51,6 @@ function Room() {
           const snapBefore = lobby.snapshot()
           let changes = 0
           lobby.onChange(() => changes++)
-          let activity = 0
-          lobby.onActivity(() => activity++)
 
           const me = await lobby.join({ name: 'Alice' })
           const countAfterJoin = lobby.count
@@ -74,11 +72,10 @@ function Room() {
               snapshotChanged: lobby.snapshot() !== snapBefore,
               snapshotStable: lobby.snapshot() === lobby.snapshot(),
               changes,
-              activity,
             }
             setResult(JSON.stringify(state))
             return {
-              done: events.length >= 2 && received.length >= 1 && updates.length >= 1 && activity >= 1 && changes >= 1,
+              done: events.length >= 2 && received.length >= 1 && updates.length >= 1 && changes >= 1,
             }
           })
         }}

@@ -10,12 +10,7 @@ import {
 } from '../server/broadcast.js'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import {
-  ROOM_ACTIVITY_THROTTLE_MS,
-  ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_MEMBER_KV_TTL_MS,
-  ROOM_MEMBER_TTL_MS,
-} from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { RoomStubChannel } from './stubs.js'
@@ -1875,61 +1870,6 @@ describe('typed metadata', () => {
     expect(topic).toBe('general')
     expect(myName).toBe('Alice')
     expect(_directName).toBe('Bob')
-  })
-})
-
-// ───────────────────────────────────────────────────────────────────────────
-// Activity lane — the badge trickle: throttled at the publisher, subscribed
-// only by listeners, delivered without message bodies.
-// ───────────────────────────────────────────────────────────────────────────
-
-describe('activity lane', () => {
-  it('publishes trigger a throttled signal; badge consumers never receive the text lane', async () => {
-    vi.useFakeTimers()
-    try {
-      const a = await Room.create('badges')
-      const me = await a.join({ name: 'Chatty' })
-
-      const observer = await Room.get('badges')
-      const subscribedKeys: string[] = []
-      const spy = vi.spyOn(getBroadcastAdapter(), 'subscribe')
-      const pings: number[] = []
-      observer.onActivity(({ timestamp }) => pings.push(timestamp))
-      for (const [key] of spy.mock.calls) subscribedKeys.push(key)
-      expect(subscribedKeys.some((k) => k.endsWith(':a'))).toBe(true)
-      expect(subscribedKeys.some((k) => k.endsWith(':t'))).toBe(false) // no bodies — that's the point
-
-      await me.publish('one')
-      await me.publish('two') // same throttle window — coalesced
-      expect(pings.length).toBe(1)
-
-      vi.advanceTimersByTime(ROOM_ACTIVITY_THROTTLE_MS + 1)
-      await me.publish('three')
-      expect(pings.length).toBe(2)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('client stubs receive activity only after declaring the want, deduped', async () => {
-    const memberId = crypto.randomUUID()
-    const fake = createFakeStub({ id: memberId })
-    const clientRoom = new ClientRoom(fake.stub, createSnapshot('badge-client'))
-    const subActivity = () => fake.sent.filter((m) => m.__r === 'sub-activity')
-    expect(subActivity()).toEqual([]) // nothing declared while nobody listens
-
-    const pings: number[] = []
-    const unsub = clientRoom.onActivity(({ timestamp }) => pings.push(timestamp))
-    expect(subActivity()).toEqual([{ __r: 'sub-activity', on: true }])
-    clientRoom.onActivity(() => {}) // second listener — no re-send
-    expect(subActivity().length).toBe(1)
-
-    fake.emit({ __r: 'activity', at: 1234 })
-    expect(pings).toEqual([1234])
-
-    unsub()
-    // One listener remains — the want stays on; dropping to zero would send { on: false }.
-    expect(subActivity().length).toBe(1)
   })
 })
 

@@ -13,7 +13,6 @@ type ChatResult = {
   snapshotChanged: boolean
   snapshotStable: boolean
   changes: number
-  activity: number
 }
 
 type ParticipantResult = {
@@ -82,8 +81,6 @@ function testRoom() {
       expect(result.snapshotChanged).toBe(true)
       expect(result.snapshotStable).toBe(true)
       expect(result.changes).greaterThan(0)
-      // Activity trickle fired for the publish — without a separate subscription.
-      expect(result.activity).greaterThan(0)
     })
   })
 

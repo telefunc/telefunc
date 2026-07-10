@@ -24,7 +24,6 @@ import {
   type RoomDmEnvelope,
   type RoomEnvelope,
   type RoomRosterEvent,
-  type RoomActivityEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './protocol.js'
@@ -196,10 +195,6 @@ class ClientRoom implements Room {
     return this._state.onChange(callback)
   }
 
-  onActivity(callback: (info: { timestamp: number }) => void): () => void {
-    return this._state.onActivity(callback)
-  }
-
   snapshot(): RoomSnapshotView {
     // The roster streams in right behind the response — its arrival is an onChange.
     return this._state.snapshot()
@@ -235,7 +230,7 @@ class ClientRoom implements Room {
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     if (!hasRoomTag(envelope)) return
-    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomActivityEvent
+    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent
     switch (event.__r) {
       case 'roster':
         // The authoritative member list, positioned in the relay stream: everything relayed
@@ -281,9 +276,6 @@ class ClientRoom implements Room {
         return
       case 'announce':
         this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
-        return
-      case 'activity':
-        this._state.applyActivity(event.at)
         return
       case 'dm': {
         // Relayed from this member's private inbox — only its own stub ever receives it.
@@ -347,8 +339,6 @@ class ClientRoom implements Room {
       __r: 'sub-text',
       members: text.all ? [] : text.members,
     })
-    const wantActivity = state.activityListenerCount > 0
-    this._declareWant('activity', wantActivity ? 'on' : '', { __r: 'sub-activity', on: wantActivity })
     const binary = state.binaryWants()
     this._declareWant('binary', encodeBinaryWants(binary), { __r: 'sub-binary', wants: binary })
   }

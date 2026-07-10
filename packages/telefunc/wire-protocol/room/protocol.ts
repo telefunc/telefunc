@@ -8,7 +8,6 @@ export {
   roomTextKey,
   roomMemberDataKey,
   roomMemberTrackKey,
-  roomActivityKey,
   roomDmKey,
   roomConfigKvKey,
   roomIdFromConfigKey,
@@ -56,7 +55,6 @@ export type {
   MemberWants,
   TrackWants,
   BinaryWants,
-  RoomActivityEvent,
 }
 
 import { assert, assertUsage } from '../../utils/assert.js'
@@ -92,11 +90,6 @@ function roomMemberDataKey(roomId: string, memberId: string): string {
  *  every hop, not just at delivery. */
 function roomMemberTrackKey(roomId: string, memberId: string, track: string): string {
   return `${roomMemberDataKey(roomId, memberId)}:t:${track}`
-}
-/** Pub/sub key carrying the room's throttled activity signal — subscribed only by holders with
- *  `onActivity` listeners (badge consumers), so nobody else pays even that trickle. */
-function roomActivityKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:a`
 }
 /** Pub/sub key carrying one member's private inbox — only the member's owning node subscribes. */
 function roomDmKey(roomId: string, memberId: string): string {
@@ -224,10 +217,6 @@ type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; 
 /** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown }
 
-/** The activity trickle (own key `:a`): "something was published around `at`" — throttled at
- *  the publisher, consumed by badge-style listeners that don't want message bodies. */
-type RoomActivityEvent = { __r: 'activity'; at: number }
-
 /** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 
@@ -261,7 +250,6 @@ type RoomStubRequest =
   | { __r: 'req-dm'; id: string; to: string; data: unknown }
   | { __r: 'sub-binary'; wants: BinaryWants }
   | { __r: 'sub-text'; members: string[] }
-  | { __r: 'sub-activity'; on: boolean }
 
 /** Client→server requests on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubRequest =
