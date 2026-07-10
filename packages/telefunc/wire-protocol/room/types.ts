@@ -4,6 +4,7 @@ export type {
   RoomOptions,
   RoomMeta,
   JoinOptions,
+  PublishOptions,
   ParticipantMeta,
   LocalParticipant,
   RemoteParticipant,
@@ -136,6 +137,15 @@ type BinaryFrameInfo = {
   keyFrame: boolean
 }
 
+/** Publish-side options for text messages. */
+type PublishOptions = {
+  /** Conflate high-frequency updates by key (e.g. `'cursor'`): while a publish with this key is
+   *  still in flight, newer publishes with the same key collapse into a single pending send — only
+   *  the latest value goes out. Bounds the uplink to one message per key under a burst (cursors,
+   *  live reactions), at the cost of dropping intermediate values. Omit for lossless delivery. */
+  coalesce?: string
+}
+
 /** Publish-side binary options. */
 type BinaryPublishOptions = {
   /** Named substream (≤ 64 bytes) — subscribers can filter by it. Default: the default track. */
@@ -229,8 +239,9 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta> = {
   /** Whether the messages you publish are delivered back to the room object on your side. Set at `join()`. */
   readonly selfDelivery: boolean
 
-  /** Publish a message to the whole room. */
-  publish(data: unknown): Promise<ChannelPublishAck>
+  /** Publish a message to the whole room. Pass `{ coalesce: key }` to conflate high-frequency
+   *  updates — see `PublishOptions`. */
+  publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck>
   /** Publish binary to the whole room — optionally on a named track and/or keyframe-flagged.
    *  The ack's `receivers` reports the track's live subscription count: `0` means nobody
    *  anywhere wants it right now — the signal to pause the encoder until someone subscribes. */

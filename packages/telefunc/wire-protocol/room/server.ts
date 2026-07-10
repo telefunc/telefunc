@@ -63,6 +63,7 @@ import type {
   LeaveCause,
   LocalParticipant,
   ParticipantMeta,
+  PublishOptions,
   RemoteParticipant,
   Room as RoomInstance,
   RoomInfo,
@@ -1230,7 +1231,9 @@ class ServerLocalParticipant extends ParticipantBase {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
   }
 
-  async publish(data: unknown): Promise<ChannelPublishAck> {
+  async publish(data: unknown, _options?: PublishOptions): Promise<ChannelPublishAck> {
+    // `coalesce` bounds a client's uplink under a burst; a server-side publisher has no uplink
+    // queue to conflate, so the option is accepted for signature parity and otherwise a no-op.
     this._assertActive()
     return await this._room._publishText(this.id, data)
   }

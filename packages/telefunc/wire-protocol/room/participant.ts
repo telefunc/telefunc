@@ -2,7 +2,14 @@ export { ParticipantBase }
 export type { InboxMessage }
 
 import type { ChannelPublishAck } from '../channel.js'
-import type { BinaryPublishOptions, LeaveCause, LocalParticipant, ParticipantMeta, Sender } from './types.js'
+import type {
+  BinaryPublishOptions,
+  LeaveCause,
+  LocalParticipant,
+  ParticipantMeta,
+  PublishOptions,
+  Sender,
+} from './types.js'
 
 // ---------------------------------------------------------------------------
 // ParticipantBase — the shared half of every LocalParticipant
@@ -51,7 +58,7 @@ abstract class ParticipantBase implements LocalParticipant {
     return this._meta
   }
 
-  abstract publish(data: unknown): Promise<ChannelPublishAck>
+  abstract publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck>
   abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
   abstract send(to: string | Sender, data: unknown): Promise<void>
   abstract setMeta(meta: ParticipantMeta): Promise<void>

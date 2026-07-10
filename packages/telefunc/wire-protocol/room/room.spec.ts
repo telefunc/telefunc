@@ -1656,6 +1656,44 @@ describe('ClientRoom', () => {
     expect(fake.textSubscribed()).toBe(false)
   })
 
+  it('publish({ coalesce }) conflates a burst to one in-flight send plus the latest pending value', async () => {
+    const published: unknown[] = []
+    const gates: Array<() => void> = []
+    let seq = 0
+    const info = () => ({ key: 'fake', seq: ++seq, timestamp: 1 })
+    const stub = {
+      _subscribeLocal: () => () => {},
+      _subscribeBinaryLocal: () => () => {},
+      _setWireTextSubscribed: () => {},
+      send: async (msg: { __r: string }) =>
+        msg.__r === 'req-join' ? { ok: true, id: crypto.randomUUID(), joinedAt: 1 } : { ok: true },
+      publish: (envelope: { data: unknown }) => {
+        published.push(envelope.data)
+        return new Promise((resolve) => gates.push(() => resolve(info())))
+      },
+      publishBinary: async () => info(),
+      onClose: () => {},
+    }
+    const clientRoom = new ClientRoom(stub as unknown as ClientBroadcast, createSnapshot('coalesce'))
+    const me = await clientRoom.join({ name: 'cursor' })
+
+    const pA = me.publish({ x: 1 }, { coalesce: 'pos' }) // sent immediately, now in flight (gated)
+    const pB = me.publish({ x: 2 }, { coalesce: 'pos' }) // conflates while A is in flight…
+    const pC = me.publish({ x: 3 }, { coalesce: 'pos' }) // …superseded by the newest value
+    await Promise.resolve()
+    expect(published).toEqual([{ x: 1 }]) // only the first send actually left
+
+    gates.shift()!() // A's send completes → the pending latest value drains next
+    await pA
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(published).toEqual([{ x: 1 }, { x: 3 }]) // { x: 2 } was dropped by conflation
+
+    gates.shift()!() // release the second send; B and C resolve with its receipt
+    await Promise.all([pB, pC])
+    expect(published).toEqual([{ x: 1 }, { x: 3 }])
+  })
+
   it("a member leaving releases its listeners — the client's declaration narrows without an unsubscribe", async () => {
     const cam = crypto.randomUUID()
     const fake = createFakeStub()

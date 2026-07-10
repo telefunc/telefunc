@@ -36,12 +36,16 @@ import type {
   LeaveCause,
   LocalParticipant,
   ParticipantMeta,
+  PublishOptions,
   RemoteParticipant,
   Room,
   RoomMeta,
   RoomSnapshotView,
   Sender,
 } from './types.js'
+
+/** One awaiter of a conflated publish — resolved with the winning send's receipt (see `_drainCoalesce`). */
+type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
 
 // ---------------------------------------------------------------------------
 // ClientRoom
@@ -354,11 +358,53 @@ class ClientRoom implements Room {
  *  to the sibling room via the registry below. */
 abstract class ClientParticipantBase extends ParticipantBase {
   protected readonly _roomId: string
+  /** Per-key conflation state for `publish(data, { coalesce })` — at most one in-flight send per
+   *  key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
+  private readonly _coalescers = new Map<
+    string,
+    { sending: boolean; pending: { data: unknown; waiters: CoalesceWaiter[] } | null }
+  >()
 
   constructor(roomId: string, id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
     super(id, meta, selfDelivery, identity)
     this._roomId = roomId
     if (!selfDelivery) setSuppressed(roomId, id, true)
+  }
+
+  /** The actual wire publish — each flavor supplies it; `publish()` wraps it with conflation. */
+  protected abstract _sendPublish(data: unknown): Promise<ChannelPublishAck>
+
+  publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
+    const key = options?.coalesce
+    if (key === undefined) return this._sendPublish(data)
+    return new Promise<ChannelPublishAck>((resolve, reject) => {
+      let slot = this._coalescers.get(key)
+      if (!slot) {
+        slot = { sending: false, pending: null }
+        this._coalescers.set(key, slot)
+      }
+      // Supersede any queued value; its waiters ride along and all resolve with the winning send.
+      slot.pending = { data, waiters: [...(slot.pending?.waiters ?? []), { resolve, reject }] }
+      this._drainCoalesce(key)
+    })
+  }
+
+  private _drainCoalesce(key: string): void {
+    const slot = this._coalescers.get(key)
+    if (!slot || slot.sending || !slot.pending) return
+    const { data, waiters } = slot.pending
+    slot.pending = null
+    slot.sending = true
+    this._sendPublish(data)
+      .then(
+        (ack) => waiters.forEach((w) => w.resolve(ack)),
+        (err) => waiters.forEach((w) => w.reject(err)),
+      )
+      .finally(() => {
+        slot.sending = false
+        if (slot.pending) this._drainCoalesce(key)
+        else this._coalescers.delete(key)
+      })
   }
 
   override _onLeft(cause: LeaveCause): void {
@@ -385,7 +431,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return this._room._getRemote(id)
   }
 
-  async publish(data: unknown): Promise<ChannelPublishAck> {
+  protected async _sendPublish(data: unknown): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._publishText(this.id, data)
   }
@@ -450,7 +496,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
 
-  async publish(data: unknown): Promise<ChannelPublishAck> {
+  protected async _sendPublish(data: unknown): Promise<ChannelPublishAck> {
     this._assertActive()
     return unwrapPublishAck(await this._request({ __r: 'req-publish', data }))
   }
