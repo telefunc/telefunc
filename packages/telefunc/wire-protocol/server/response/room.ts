@@ -59,7 +59,9 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
 const roomRemoteReplacer: ReplacerType<RoomRemoteContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   detect(value): value is RoomRemoteContract['value'] {
-    return remoteBacking(value)?.state._owner instanceof ServerRoom
+    // Brand check, not instanceof — dev servers load two SSR module graphs, and a class from
+    // one graph never instanceof-matches the other's. Brands (Symbol.for) span graphs.
+    return ServerRoom.isServerRoom(remoteBacking(value)?.state._owner)
   },
   replace(remote, _context) {
     const { state, entry } = remoteBacking(remote)!
