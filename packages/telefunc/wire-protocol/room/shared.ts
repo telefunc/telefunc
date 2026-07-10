@@ -51,6 +51,7 @@ import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
 import type {
   BinaryFrameInfo,
   BinaryPublishOptions,
+  RoomSnapshotView,
   JoinOptions,
   LeaveCause,
   LocalParticipant,
@@ -441,6 +442,11 @@ class RoomState {
   closed: boolean
   /** Bumped on every membership change — guards async KV reconciles against going stale. */
   membershipVersion = 0
+  /** Bumped on every observable change (membership, participant meta, room config, closure) —
+   *  drives `onChange`/`snapshot()` cache invalidation. */
+  private _stateVersion = 0
+  private _snapshotCache: { version: number; value: RoomSnapshotView } | null = null
+  private readonly _changeCbs: Array<() => void> = []
 
   private readonly _members = new Map<string, MemberEntry>()
   private readonly _onListenersChanged: () => void
@@ -567,7 +573,9 @@ class RoomState {
   ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
     const existing = this._members.get(snap.id)
     if (existing) return existing.remote
-    return this._createEntry(snap).remote
+    const remote = this._createEntry(snap).remote
+    this._bumpState()
+    return remote
   }
 
   // ── Listener registration (all return an unlisten function) ──
@@ -599,6 +607,37 @@ class RoomState {
   onClose(cb: () => void): () => void {
     return this._register(this._closeCbs, cb, 'event')
   }
+
+  onChange(cb: () => void): () => void {
+    return this._register(this._changeCbs, cb, 'event')
+  }
+
+  /** Immutable view of the whole room — cached by state version, so the reference is stable
+   *  until something actually changes (the `useSyncExternalStore` contract). */
+  snapshot(): RoomSnapshotView {
+    if (this._snapshotCache?.version === this._stateVersion) return this._snapshotCache.value
+    const participants = Object.freeze(
+      [...this._members.values()].map(({ id, identity, meta, joinedAt }) =>
+        Object.freeze({ id, identity, meta, joinedAt }),
+      ),
+    )
+    const value = Object.freeze({
+      id: this.roomId,
+      meta: this.meta,
+      size: this.size,
+      count: this.count,
+      isClosed: this.closed,
+      participants,
+    })
+    this._snapshotCache = { version: this._stateVersion, value }
+    return value
+  }
+
+  /** State changed observably — invalidate the snapshot and tell `onChange` subscribers. */
+  private _bumpState(): void {
+    this._stateVersion++
+    this._fireAll(this._changeCbs)
+  }
   onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
     return this._register(this._announceCbs, cb, 'event')
   }
@@ -617,6 +656,7 @@ class RoomState {
     const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity })
     this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
     this.membershipVersion++
+    this._bumpState()
     this._fireAll(this._joinCbs, entry.remote)
     this._checkFull()
   }
@@ -627,6 +667,7 @@ class RoomState {
     this._members.delete(id)
     this._seedCount = Math.max(0, this._seedCount - 1)
     this.membershipVersion++
+    this._bumpState()
     this._fireAll(entry.leaveCbs, cause)
     this._fireAll(this._leaveCbs, entry.remote, cause)
     this._releaseEntryListeners(entry)
@@ -641,6 +682,7 @@ class RoomState {
     if (!entry || seq <= entry.metaSeq) return
     entry.metaSeq = seq
     entry.meta = meta
+    this._bumpState()
     this._fireAll(entry.updateCbs, meta, prev)
   }
 
@@ -651,6 +693,7 @@ class RoomState {
     this._updateStamp = { at, by }
     this.meta = meta
     this.size = size
+    this._bumpState()
     this._fireAll(this._updateCbs, meta, prev)
     this._checkFull()
   }
@@ -667,6 +710,7 @@ class RoomState {
     this.closed = true
     this._rosterKnown = true // authoritatively empty
     this.membershipVersion++
+    this._bumpState()
     for (const entry of this._members.values()) {
       this._fireAll(entry.leaveCbs, cause)
       this._releaseEntryListeners(entry)
@@ -747,6 +791,7 @@ class RoomState {
       // roster doesn't know left before the load — their leave is narrated like any other.
       this._rosterKnown = true
       this.membershipVersion++
+      this._bumpState()
       const seen = new Set<string>()
       for (const member of members) {
         seen.add(member.id)
@@ -769,6 +814,7 @@ class RoomState {
     }
 
     this.membershipVersion++
+    this._bumpState()
     let drifted = false
     const seen = new Set<string>()
     for (const member of members) {

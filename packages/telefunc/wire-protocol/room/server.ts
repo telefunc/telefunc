@@ -60,6 +60,7 @@ import type {
   RoomInfo,
   RoomMeta,
   RoomOptions,
+  RoomSnapshotView,
   JoinGuard,
   PublishGuard,
   SendGuard,
@@ -450,6 +451,17 @@ class ServerRoom implements Room {
   }
   onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
     return this._state.onAnnounce(callback)
+  }
+
+  onChange(callback: () => void): () => void {
+    return this._state.onChange(callback)
+  }
+
+  snapshot(): RoomSnapshotView {
+    // Snapshot consumers want the member view — load it (need-driven, single-flight); the
+    // arrival lands as an onChange, and the next snapshot() is complete.
+    if (!this._state.rosterKnown) void this._ensureRoster().catch(reportRoomError)
+    return this._state.snapshot()
   }
 
   // ── Membership operations (shared by local participants and stub requests) ──

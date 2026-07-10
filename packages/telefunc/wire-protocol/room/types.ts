@@ -14,6 +14,8 @@ export type {
   LeaveCause,
   BinaryFrameInfo,
   BinaryPublishOptions,
+  RoomSnapshotView,
+  ParticipantSnapshotView,
   RoomListener,
   RoomBinaryListener,
   ParticipantListener,
@@ -83,6 +85,25 @@ type JoinOptions = {
    *  trusted, so it's assigned where trust lives: in the granting telefunction. A client-side
    *  `join()` rejects it. Immutable for the membership's lifetime. */
   identity?: string
+}
+
+/** One participant inside `room.snapshot()`. */
+type ParticipantSnapshotView = {
+  readonly id: string
+  readonly identity: string | null
+  readonly meta: ParticipantMeta
+  readonly joinedAt: number
+}
+
+/** Immutable view returned by `room.snapshot()` — the same reference until the room actually
+ *  changes, so it plugs straight into `useSyncExternalStore(room.onChange, room.snapshot)`. */
+type RoomSnapshotView = {
+  readonly id: string
+  readonly meta: RoomMeta
+  readonly size: number
+  readonly count: number
+  readonly isClosed: boolean
+  readonly participants: readonly ParticipantSnapshotView[]
 }
 
 /** Lightweight room snapshot returned by `Room.list()`. */
@@ -163,6 +184,14 @@ type Room = {
   onFull(callback: () => void): () => void
   /** The room was closed via `Room.close()` (on the client, also: the connection is gone). */
   onClose(callback: () => void): () => void
+
+  /** Anything observable changed — membership, participant metadata, room config, closure.
+   *  One subscription for UI stores; pairs with `snapshot()`. */
+  onChange(callback: () => void): () => void
+  /** Immutable whole-room view, reference-stable until the next change:
+   *  `useSyncExternalStore(room.onChange, room.snapshot)` is the entire React adapter.
+   *  Participants appear once the member view loads (subscribing `onChange` loads it). */
+  snapshot(): RoomSnapshotView
 }
 
 /**

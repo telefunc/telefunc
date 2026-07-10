@@ -38,6 +38,7 @@ import type {
   RemoteParticipant,
   Room,
   RoomMeta,
+  RoomSnapshotView,
   Sender,
 } from './types.js'
 
@@ -190,6 +191,15 @@ class ClientRoom implements Room {
   }
   onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void {
     return this._state.onAnnounce(callback)
+  }
+
+  onChange(callback: () => void): () => void {
+    return this._state.onChange(callback)
+  }
+
+  snapshot(): RoomSnapshotView {
+    // The roster streams in right behind the response — its arrival is an onChange.
+    return this._state.snapshot()
   }
 
   // ── Requests & publishes (used by ClientRoomParticipant) ──

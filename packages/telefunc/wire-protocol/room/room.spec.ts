@@ -1723,6 +1723,75 @@ describe('adapter KV requirement', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
+// snapshot()/onChange — the UI-store contract: reference-stable immutable
+// views, one change signal for everything observable.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('snapshot() and onChange()', () => {
+  it('the reference is stable until something changes, then every change class invalidates it', async () => {
+    const room = await Room.create('viewstore', { meta: { topic: 'a' }, size: 5 })
+    const changes: number[] = []
+    room.onChange(() => changes.push(1))
+
+    const s0 = room.snapshot()
+    expect(room.snapshot()).toBe(s0) // cached — uSES contract
+    expect(s0).toMatchObject({ id: 'viewstore', meta: { topic: 'a' }, size: 5, count: 0, isClosed: false })
+    expect(Object.isFrozen(s0)).toBe(true)
+
+    const me = await room.join({ name: 'Alice' }, { identity: 'u1' })
+    const s1 = room.snapshot()
+    expect(s1).not.toBe(s0)
+    expect(s1.participants).toMatchObject([{ id: me.id, identity: 'u1', meta: { name: 'Alice' } }])
+
+    await me.setMeta({ name: 'Alicia' })
+    const s2 = room.snapshot()
+    expect(s2).not.toBe(s1)
+    expect(s2.participants[0]!.meta).toEqual({ name: 'Alicia' })
+    expect(s1.participants[0]!.meta).toEqual({ name: 'Alice' }) // old snapshots stay immutable
+
+    await Room.update('viewstore', { meta: { topic: 'b' } })
+    const s3 = room.snapshot()
+    expect(s3.meta).toEqual({ topic: 'b' })
+
+    await me.leave()
+    const s4 = room.snapshot()
+    expect(s4.participants).toEqual([])
+
+    await Room.close('viewstore')
+    expect(room.snapshot().isClosed).toBe(true)
+    expect(changes.length).toBeGreaterThanOrEqual(5) // join, meta, update, leave, close all signaled
+  })
+
+  it('a client view starts from the count seed and completes when the roster streams in', () => {
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('viewlazy', { count: 2 }))
+    const changes: number[] = []
+    clientRoom.onChange(() => changes.push(1))
+
+    const before = clientRoom.snapshot()
+    expect(before.count).toBe(2) // seeded — capacity gates correct before the roster lands
+    expect(before.participants).toEqual([])
+
+    const alice = crypto.randomUUID()
+    const bob = crypto.randomUUID()
+    fake.emit({
+      __r: 'roster',
+      members: [
+        { id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0, identity: 'u1' },
+        { id: bob, meta: { name: 'B' }, joinedAt: 2, metaSeq: 0, identity: null },
+      ],
+    })
+    expect(changes.length).toBeGreaterThanOrEqual(1)
+    const after = clientRoom.snapshot()
+    expect(after).not.toBe(before)
+    expect(after.participants.map((p) => [p.id, p.identity])).toEqual([
+      [alice, 'u1'],
+      [bob, null],
+    ])
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
 // Returnable RemoteParticipant — a view crosses the wire as (room, snapshot);
 // ref-identity dedup binds it to the co-returned room's live view.
 // ───────────────────────────────────────────────────────────────────────────
