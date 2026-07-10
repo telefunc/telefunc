@@ -52,13 +52,9 @@ async function getCleanupState(): Promise<Record<string, string>> {
 /** Forces a full GC on the server (via `/api/gc`) so GC-driven cleanup is deterministic in tests. */
 async function forceServerGc() {
   const resp = await fetch(`${getServerUrl()}/api/gc`, { method: 'POST' })
-  // `/api/gc` 500s when the server wasn't started with `--expose-gc`, in which case it forced
-  // nothing. Fail loudly and immediately instead of letting the GC test flake on incidental GC
-  // pressure and time out ~90 s later with an inscrutable 'not-fired'.
-  if (!resp.ok) {
-    const reason = await resp.text().catch(() => '')
-    throw new Error(`forceServerGc: /api/gc returned ${resp.status} — server GC not forced. ${reason}`)
-  }
+  // Fail loudly on `gc not exposed` (server missing `--expose-gc`): silently ignoring it
+  // degrades GC tests into waiting for natural GC, which times out with a misleading assertion.
+  if (!resp.ok) throw new Error(`forceServerGc() failed: ${await resp.text()}`)
 }
 
 /**
