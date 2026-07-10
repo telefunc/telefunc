@@ -774,6 +774,12 @@ class RoomState {
     this._stateVersion++
     this._fireAll(this._changeCbs)
   }
+
+  /** Membership changed: guard async KV reconciles against going stale, and narrate the change. */
+  private _bumpMembership(): void {
+    this.membershipVersion++
+    this._bumpState()
+  }
   onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
     return this._register(this._announceCbs, cb, 'event')
   }
@@ -791,8 +797,7 @@ class RoomState {
     }
     const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity })
     this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
-    this.membershipVersion++
-    this._bumpState()
+    this._bumpMembership()
     this._fireAll(this._joinCbs, entry.remote)
     this._checkFull()
   }
@@ -802,8 +807,7 @@ class RoomState {
     if (!entry) return // unknown here: absorbed (pre-reconcile misses correct at reconcile)
     this._members.delete(id)
     this._seedCount = Math.max(0, this._seedCount - 1)
-    this.membershipVersion++
-    this._bumpState()
+    this._bumpMembership()
     this._fireAll(entry.leaveCbs, cause)
     this._fireAll(this._leaveCbs, entry.remote, cause)
     this._releaseEntryListeners(entry)
@@ -845,8 +849,7 @@ class RoomState {
     if (this.closed) return
     this.closed = true
     this._rosterKnown = true // authoritatively empty
-    this.membershipVersion++
-    this._bumpState()
+    this._bumpMembership()
     for (const entry of this._members.values()) {
       this._fireAll(entry.leaveCbs, cause)
       this._releaseEntryListeners(entry)
@@ -893,19 +896,20 @@ class RoomState {
     const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, keyFrame }
     const entry = this._members.get(from)
     const sender = entry?.remote ?? { id: from, meta: {}, identity: null }
-    for (const { cb, track: want } of [...this._roomBinaryCbs]) {
+    this._fireTrackFiltered(this._roomBinaryCbs, track, (cb) => cb(payload, frameInfo, sender))
+    if (entry) this._fireTrackFiltered(entry.binaryCbs, track, (cb) => cb(payload, frameInfo))
+  }
+
+  /** Fire the listeners whose track filter admits `track` (`undefined` = every track). */
+  private _fireTrackFiltered<CB>(
+    cbs: Array<{ cb: CB; track: TrackFilter }>,
+    track: string | null,
+    invoke: (cb: CB) => unknown,
+  ): void {
+    for (const { cb, track: want } of [...cbs]) {
       if (want !== undefined && want !== track) continue
       try {
-        cb(payload, frameInfo, sender)
-      } catch (err) {
-        this._onCallbackError(err)
-      }
-    }
-    if (!entry) return
-    for (const { cb, track: want } of [...entry.binaryCbs]) {
-      if (want !== undefined && want !== track) continue
-      try {
-        cb(payload, frameInfo)
+        invoke(cb)
       } catch (err) {
         this._onCallbackError(err)
       }
@@ -926,8 +930,7 @@ class RoomState {
       // stay `===` with the view. Keep the object, refresh the facts; entries the authoritative
       // roster doesn't know left before the load — their leave is narrated like any other.
       this._rosterKnown = true
-      this.membershipVersion++
-      this._bumpState()
+      this._bumpMembership()
       const seen = new Set<string>()
       for (const member of members) {
         seen.add(member.id)
@@ -950,8 +953,7 @@ class RoomState {
       return false
     }
 
-    this.membershipVersion++
-    this._bumpState()
+    this._bumpMembership()
     let drifted = false
     const seen = new Set<string>()
     for (const member of members) {
