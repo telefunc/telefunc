@@ -9,6 +9,7 @@ allowBuilds:
   '@biomejs/biome': true
   '@brillout/test-types': true
   '@swc/core': true
+  better-sqlite3: true
   esbuild: true
   playwright-chromium: true
   sharp: true
