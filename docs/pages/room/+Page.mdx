@@ -244,7 +244,7 @@ captureAndEncode(camera, (frame, isKey) => me.publishBinary(frame, { track: 'cam
 member.subscribeBinary((data, info) => video.decode(data, { key: info.keyFrame }), { track: 'camera' })
 ```
 
-<Warning>Rooms move binary over the same reliable, ordered transport as everything else (WebSocket / SSE). That's ideal for binary *data* and small or controlled-network A/V — but it has no congestion control, simulcast, or jitter buffering. For production multi-party video, pair rooms (presence, chat, signaling) with a WebRTC SFU such as [LiveKit](https://livekit.io) for the media.</Warning>
+<Warning>Rooms move binary over the same reliable, ordered transport as everything else (WebSocket / SSE). That's ideal for binary *data* and small or controlled-network A/V — but it has no congestion control, simulcast, or jitter buffering. For production multi-party video, pair rooms (presence, chat, signaling) with a WebRTC SFU such as [LiveKit](https://livekit.io) for the media. An unreliable WebTransport datagram lane that would lift this ceiling is being explored in [telefunc#449](https://github.com/telefunc/telefunc/issues/449).</Warning>
 
 **Render only 9 of 500 cameras?** Subscribe to those 9 members — the other 491 streams never cross the wire to you, and your server never pulls them upstream. The same holds per track: stop watching a screen share, and its bytes stop flowing to you.
 
