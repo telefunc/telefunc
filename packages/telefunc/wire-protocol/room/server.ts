@@ -19,6 +19,7 @@ import {
   stampNewer,
   frameWithMemberId,
   hasRoomTag,
+  mergeAttributes,
   normalizeJoinOptions,
   roomConfigKvKey,
   roomDmKey,
@@ -549,9 +550,22 @@ class ServerRoom implements Room {
     await publishCtrl(this.id, { __r: 'leave', id, ...leaveCauseToWire(cause) })
   }
 
-  /** @internal */
+  /** @internal — full replace (`setMeta`). */
   async _setMemberMeta(id: string, meta: ParticipantMeta): Promise<void> {
     assertUsage(isObject(meta), 'setMeta() meta should be an object')
+    await this._writeMemberMeta(id, () => meta)
+  }
+
+  /** @internal — per-key merge (`setAttributes`); an `undefined` value deletes the key. */
+  async _mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<void> {
+    assertUsage(isObject(attrs), 'setAttributes() attributes should be an object')
+    await this._writeMemberMeta(id, (current) => mergeAttributes(current, attrs))
+  }
+
+  private async _writeMemberMeta(
+    id: string,
+    computeMeta: (current: ParticipantMeta) => ParticipantMeta,
+  ): Promise<void> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
     const memberKey = roomMemberKvKey(this.id, id)
@@ -559,7 +573,8 @@ class ServerRoom implements Room {
     if (raw === null) throw new Error(`Participant not found (left?): ${id}`)
     const record = parse(raw) as RoomMemberRecord
     const prev = this._state.getRemote(id)?.meta ?? record.meta
-    // The member's single owner serializes its setMeta() calls, so the KV record doubles as
+    const meta = computeMeta(record.meta)
+    // The member's single owner serializes its meta writes, so the KV record doubles as
     // the revision counter — no separate sequencer needed.
     const next: RoomMemberRecord = { ...record, meta, metaSeq: record.metaSeq + 1, seenAt: Date.now() }
     await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
@@ -919,6 +934,10 @@ class ServerRoom implements Room {
           this._assertStubMember(stub, req.id)
           await this._setMemberMeta(req.id, isObject(req.meta) ? req.meta : {})
           return { ok: true }
+        case 'req-set-attrs':
+          this._assertStubMember(stub, req.id)
+          await this._mergeMemberMeta(req.id, isObject(req.attrs) ? req.attrs : {})
+          return { ok: true }
         case 'req-dm':
           this._assertStubMember(stub, req.id)
           await this._sendDm(req.id, req.to, req.data)
@@ -1236,6 +1255,12 @@ class ServerLocalParticipant extends ParticipantBase {
     this._assertActive()
     await this._room._setMemberMeta(this.id, meta)
     this._meta = meta
+  }
+
+  async setAttributes(attrs: ParticipantMeta): Promise<void> {
+    this._assertActive()
+    await this._room._mergeMemberMeta(this.id, attrs)
+    this._meta = mergeAttributes(this._meta, attrs)
   }
 
   async leave(): Promise<void> {

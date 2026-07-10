@@ -132,6 +132,9 @@ function bindParticipantStubChannel(
         case 'req-set-meta':
           await participant.setMeta(isObject(req.meta) ? req.meta : {})
           return { ok: true } satisfies ReqOkAck
+        case 'req-set-attrs':
+          await participant.setAttributes(isObject(req.attrs) ? req.attrs : {})
+          return { ok: true } satisfies ReqOkAck
         case 'req-dm':
           await participant.send(req.to, req.data)
           return { ok: true } satisfies ReqOkAck

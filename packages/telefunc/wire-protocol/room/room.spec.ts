@@ -405,6 +405,20 @@ describe('presence', () => {
     expect(me.meta).toEqual({ name: 'Alice', score: 42 })
     expect((await b.getParticipant(me.id))!.meta).toEqual({ name: 'Alice', score: 42 })
   })
+
+  it('setAttributes() merges per key and deletes on undefined — other keys survive', async () => {
+    const a = await Room.create('attrs')
+    const b = await Room.get('attrs')
+    const me = await a.join({ name: 'Alice', score: 0, away: true })
+
+    await me.setAttributes({ score: 42 }) // only score changes; name & away untouched
+    expect(me.meta).toEqual({ name: 'Alice', score: 42, away: true })
+    expect((await b.getParticipant(me.id))!.meta).toEqual({ name: 'Alice', score: 42, away: true })
+
+    await me.setAttributes({ away: undefined, score: 43 }) // delete a key while setting another
+    expect(me.meta).toEqual({ name: 'Alice', score: 43 })
+    expect((await b.getParticipant(me.id))!.meta).toEqual({ name: 'Alice', score: 43 })
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -9,6 +9,7 @@ import {
   leaveCauseFromWire,
   frameWithMemberId,
   hasRoomTag,
+  mergeAttributes,
   normalizeJoinOptions,
   sizeFromWire,
   unframeMemberId,
@@ -406,6 +407,12 @@ class ClientRoomParticipant extends ClientParticipantBase {
     this._meta = meta
   }
 
+  async setAttributes(attrs: ParticipantMeta): Promise<void> {
+    this._assertActive()
+    unwrapOkAck(await this._room._request({ __r: 'req-set-attrs', id: this.id, attrs }))
+    this._meta = mergeAttributes(this._meta, attrs)
+  }
+
   async leave(): Promise<void> {
     if (this._left) return
     this._left = true
@@ -462,6 +469,12 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     this._assertActive()
     unwrapOkAck(await this._request({ __r: 'req-set-meta', meta }))
     this._meta = meta
+  }
+
+  async setAttributes(attrs: ParticipantMeta): Promise<void> {
+    this._assertActive()
+    unwrapOkAck(await this._request({ __r: 'req-set-attrs', attrs }))
+    this._meta = mergeAttributes(this._meta, attrs)
   }
 
   async leave(): Promise<void> {

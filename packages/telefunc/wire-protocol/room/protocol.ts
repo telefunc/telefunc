@@ -21,6 +21,7 @@ export {
   unframeMemberId,
   hasRoomTag,
   normalizeJoinOptions,
+  mergeAttributes,
   errorMessage,
   leaveCauseFromWire,
   leaveCauseToWire,
@@ -246,6 +247,7 @@ type RoomStubRequest =
   | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
+  | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown }
   | { __r: 'sub-binary'; wants: BinaryWants }
 
@@ -253,6 +255,7 @@ type RoomStubRequest =
 type ParticipantStubRequest =
   | { __r: 'req-publish'; data: unknown }
   | { __r: 'req-set-meta'; meta: ParticipantMeta }
+  | { __r: 'req-set-attrs'; attrs: ParticipantMeta }
   | { __r: 'req-dm'; to: string; data: unknown }
   | { __r: 'req-leave' }
 
@@ -285,6 +288,17 @@ function leaveCauseToWire(cause: LeaveCause): { cause?: 'removed' | 'disconnecte
 /** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {
   return isObject(value) && typeof value.__r === 'string'
+}
+
+/** Merge `attrs` into `meta` per key, returning a new object — the `setAttributes()` semantics.
+ *  A value of `undefined` deletes its key (the serializer preserves `undefined` on the wire). */
+function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): ParticipantMeta {
+  const next: ParticipantMeta = { ...meta }
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === undefined) delete next[key]
+    else next[key] = value
+  }
+  return next
 }
 
 /** Validates `join(meta, options)` arguments; returns the resolved `selfDelivery`. */

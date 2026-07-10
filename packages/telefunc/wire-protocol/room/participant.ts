@@ -55,6 +55,7 @@ abstract class ParticipantBase implements LocalParticipant {
   abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
   abstract send(to: string | Sender, data: unknown): Promise<void>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
+  abstract setAttributes(attributes: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
   /** A user callback threw — each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void

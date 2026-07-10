@@ -242,8 +242,12 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta> = {
    *  `null` for room-authored messages (`Room.send()`). Returns an unlisten function. */
   listen(callback: (data: unknown, from: Sender<P> | null) => void): () => void
 
-  /** Replace your metadata. Propagates to all observers in real time. */
+  /** Replace your metadata wholesale. Propagates to all observers in real time. */
   setMeta(meta: P): Promise<void>
+  /** Merge into your metadata per key — other keys keep their value, a key set to `undefined`
+   *  is removed. The server applies the merge, so one changed field is one small update instead
+   *  of resending the whole object. Propagates to all observers. */
+  setAttributes(attributes: Partial<P>): Promise<void>
 
   leave(): Promise<void>
   /** You left. `cause.type` says how — `'left'` (you), `'removed'` (kicked, with the kick's
