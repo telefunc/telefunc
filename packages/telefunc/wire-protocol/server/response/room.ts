@@ -95,6 +95,7 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantContract, ServerRepla
         meta: participant.meta,
         joinedAt: participant._joinedAt,
         selfDelivery: participant.selfDelivery,
+        identity: participant.identity,
       },
       async close() {
         await channel.close()

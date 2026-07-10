@@ -165,7 +165,15 @@ function bindParticipantStubChannel(
 
   // The participant's holder is the client — forward inbox deliveries to it.
   const unlistenDm = participant.listen((data, from) => {
-    void channel.send({ __r: 'dm', from: from?.id ?? '', fromMeta: from?.meta ?? null, data }).catch(() => {})
+    void channel
+      .send({
+        __r: 'dm',
+        from: from?.id ?? '',
+        fromMeta: from?.meta ?? null,
+        ...(from?.identity == null ? {} : { fromIdentity: from.identity }),
+        data,
+      })
+      .catch(() => {})
   })
 
   const unlistenLeave = participant.onLeave((cause) => {

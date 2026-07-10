@@ -26,11 +26,12 @@ type RoomMeta = Record<string, unknown>
 type ParticipantMeta = Record<string, unknown>
 
 /** A message's verified sender — one concept across every lane (`subscribe()`, `listen()`):
- *  the live `RemoteParticipant` whenever the holder's room view knows the sender, or an
- *  `{ id, meta }` snapshot stamped by the sender's own node otherwise (a standalone participant,
- *  or a message racing ahead of its sender's join). `await room.getParticipant(from.id)`
- *  upgrades a snapshot to the live handle. */
-type Sender = { readonly id: string; readonly meta: ParticipantMeta }
+ *  the live `RemoteParticipant` whenever the holder's room view knows the sender, or a
+ *  server-stamped snapshot otherwise (a standalone participant, or a message racing ahead of
+ *  its sender's join). `identity` is the app identity stamped at (server-side) join — `null`
+ *  when none was set. `await room.getParticipant(from.id)` upgrades a snapshot to the live
+ *  handle. */
+type Sender = { readonly id: string; readonly meta: ParticipantMeta; readonly identity: string | null }
 
 /** Guards private messages (`Room.guard(room, { onSend })`): runs before every `send()` from a
  *  membership granted through that room instance — including client-side `join()`s on it.
@@ -74,6 +75,12 @@ type JoinOptions = {
   /** Whether the messages you publish are delivered back to the room object on your side
    *  (default: `true`). Turn off e.g. for video, where you don't want your own frames back. */
   selfDelivery?: boolean
+  /** App identity (e.g. your user ID), stamped spoof-proof into everything the member does:
+   *  `Sender.identity`, `RemoteParticipant.identity`, guards, and
+   *  `Room.removeParticipant(id, { identity })` sweeps. Server-side `join()` only — identity is
+   *  trusted, so it's assigned where trust lives: in the granting telefunction. A client-side
+   *  `join()` rejects it. Immutable for the membership's lifetime. */
+  identity?: string
 }
 
 /** Lightweight room snapshot returned by `Room.list()`. */
@@ -146,6 +153,8 @@ type Room = {
 type LocalParticipant = {
   readonly id: string
   readonly meta: ParticipantMeta
+  /** The app identity this membership was joined with — `null` when none was set. */
+  readonly identity: string | null
   /** Whether the messages you publish are delivered back to the room object on your side. Set at `join()`. */
   readonly selfDelivery: boolean
 
@@ -174,6 +183,9 @@ type LocalParticipant = {
 type RemoteParticipant = {
   readonly id: string
   readonly meta: ParticipantMeta
+  /** The app identity stamped at join — `null` when none was set. Correlate the same human
+   *  across rooms, connections, and tabs by this, never by participant ID. */
+  readonly identity: string | null
   /** Unix epoch milliseconds. */
   readonly joinedAt: number
 

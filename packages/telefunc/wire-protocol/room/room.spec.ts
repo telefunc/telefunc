@@ -719,6 +719,73 @@ describe('direct messages', () => {
     expect(late).toEqual([])
   })
 
+  it('identity is stamped at server-side join and travels everywhere, spoof-proof', async () => {
+    const a = await Room.create('who')
+    const alice = await a.join({ name: 'Alice' }, { identity: 'user-1' })
+    expect(alice.identity).toBe('user-1')
+
+    // Roster: another instance sees the identity.
+    const b = await Room.get('who')
+    expect((await b.getParticipant(alice.id))?.identity).toBe('user-1')
+
+    // Messages: the envelope carries the server-stamped identity — even to a view that
+    // doesn't know the sender yet (snapshot sender).
+    const c = await Room.get('who')
+    const senders: Array<[string | null, string | null]> = []
+    c.subscribe((_data, _info, from) => senders.push([String(from.meta.name), from.identity]))
+    await alice.publish('hi')
+    expect(senders).toEqual([['Alice', 'user-1']])
+
+    // DMs: the inbox sender carries it too.
+    const bob = await a.join({ name: 'Bob' })
+    expect(bob.identity).toBe(null) // identity is opt-in
+    const inbox: Array<string | null> = []
+    bob.listen((_data, from) => inbox.push(from?.identity ?? null))
+    await alice.send(bob.id, 'psst')
+    expect(inbox).toEqual(['user-1'])
+
+    // Guards see it — bans by identity are one comparison.
+    const guarded = await Room.get('who')
+    const guardSaw: Array<string | null> = []
+    Room.guard(guarded, { onJoin: (member) => void guardSaw.push(member.identity) })
+    await guarded.join({ name: 'Tab2' }, { identity: 'user-1' })
+    expect(guardSaw).toEqual(['user-1'])
+  })
+
+  it('a client-side join cannot claim an identity — it is assigned where trust lives', async () => {
+    await Room.create('trusted')
+    const served = (await Room.get('trusted')) as ServerRoom
+    const stub = new RoomStubChannel(served)
+    stub._registerChannel()
+    served._attachStub(stub)
+    // The wire request has no identity field at all; a crafted one is simply never read.
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: {}, identity: 'admin' }), 1)
+    const memberId = [...stub._stubMembers.keys()][0]!
+    expect((await served.getParticipant(memberId))?.identity).toBe(null)
+  })
+
+  it('removeParticipant({ identity }) sweeps every membership of that identity, with the reason', async () => {
+    const room = await Room.create('sweep')
+    const tab1 = await room.join({ name: 'T1' }, { identity: 'user-9' })
+    const tab2 = await room.join({ name: 'T2' }, { identity: 'user-9' })
+    const other = await room.join({ name: 'Other' }, { identity: 'user-8' })
+    const causes: unknown[] = []
+    tab1.onLeave((cause) => causes.push(cause))
+    tab2.onLeave((cause) => causes.push(cause))
+
+    await Room.removeParticipant('sweep', { identity: 'user-9' }, { reason: 'banned' })
+
+    expect(causes).toEqual([
+      { type: 'removed', reason: 'banned' },
+      { type: 'removed', reason: 'banned' },
+    ])
+    expect(room.count).toBe(1)
+    expect((await room.getParticipant(other.id))?.identity).toBe('user-8')
+
+    // Idempotent: sweeping an identity with no memberships is a no-op, not an error.
+    await Room.removeParticipant('sweep', { identity: 'user-9' })
+  })
+
   it('Room.guard({ onSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
     await Room.create('guarded')
     const lobby = await Room.get('guarded')
@@ -1278,7 +1345,7 @@ describe('ClientRoom', () => {
 
     fake.emit({ __r: 'dm', to: memberId, from: peer, fromMeta: { name: 'Peer' }, data: 'reply' })
     fake.emit({ __r: 'dm', to: crypto.randomUUID(), from: peer, data: 'not-mine' })
-    expect(inbox).toEqual([['reply', { id: peer, meta: { name: 'Peer' } }]]) // snapshot sender — peer isn't in the local view
+    expect(inbox).toEqual([['reply', { id: peer, meta: { name: 'Peer' }, identity: null }]]) // snapshot sender — peer isn't in the local view
   })
 
   it('applies leave/p-meta/update/closed events to state and local participants', async () => {

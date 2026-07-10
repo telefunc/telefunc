@@ -126,6 +126,8 @@ type RoomMemberRecord = {
   seenAt: number
   /** Monotonic meta revision, issued by the member's single owner — orders `p-meta` events. */
   metaSeq: number
+  /** App identity stamped at (server-side) join — absent: none. Immutable per member. */
+  identity?: string
 }
 
 function sizeToWire(size: number): number | null {
@@ -144,6 +146,8 @@ type MemberSnapshot = {
   meta: ParticipantMeta
   joinedAt: number
   metaSeq: number
+  /** App identity stamped at (server-side) join — `null`/absent: none. Immutable per member. */
+  identity?: string | null
 }
 
 /** Serializer metadata of a `Room` crossing the wire. Carries only scalars — the roster itself
@@ -169,6 +173,7 @@ type ParticipantStubMetadata = {
   meta: ParticipantMeta
   joinedAt: number
   selfDelivery: boolean
+  identity: string | null
 }
 
 /** Presence & lifecycle events, published on the room's control key by whichever node caused them.
@@ -178,7 +183,7 @@ type ParticipantStubMetadata = {
  *  `p-meta` orders by the owner-issued `seq`, `update` by its `at`/`by` stamp — echoes and
  *  concurrent writers converge to the same winner on every node, whatever the arrival order. */
 type RoomCtrlEnvelope =
-  | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number }
+  | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string }
   | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected'; reason?: unknown }
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; prev: ParticipantMeta; seq: number }
   | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; at: number; by: string }
@@ -188,7 +193,7 @@ type RoomCtrlEnvelope =
  *  key (isolated mode). `fromMeta` is the sender's meta as verified by the sender's own node —
  *  never client-supplied — so any receiver can surface a correct sender even before its roster
  *  view catches up (see `RoomState.applyData`). */
-type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; data: unknown }
+type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; fromIdentity?: string; data: unknown }
 
 /** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown }
@@ -206,7 +211,14 @@ type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] }
 /** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
  *  privacy: only the target's owning node subscribes, only its holder receives the relay.
  *  `to` lets a holder of several participants route the message to the right one. */
-type RoomDmEnvelope = { __r: 'dm'; to: string; from: string; fromMeta: ParticipantMeta | null; data: unknown }
+type RoomDmEnvelope = {
+  __r: 'dm'
+  to: string
+  from: string
+  fromMeta: ParticipantMeta | null
+  fromIdentity?: string
+  data: unknown
+}
 
 /** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
  *  `sub-binary` declares which members' binary streams the client wants relayed (full replace);
@@ -231,7 +243,7 @@ type ParticipantStubRequest =
 type ParticipantStubNotice =
   | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
   | { __r: 'p-meta'; meta: ParticipantMeta }
-  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; data: unknown }
+  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown }
 
 /** Which members' streams a holder wants on a data lane (text or binary) — `all` for
  *  room-level listeners, or a specific member set for participant-scoped ones. */
@@ -328,6 +340,7 @@ type MemberEntry = {
   id: string
   meta: ParticipantMeta
   joinedAt: number
+  identity: string | null
   /** Latest applied meta revision — stale and echoed `p-meta` events are absorbed. */
   metaSeq: number
   remote: RemoteParticipant
@@ -492,7 +505,13 @@ class RoomState {
   }
 
   snapshotMembers(): MemberSnapshot[] {
-    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq }) => ({ id, meta, joinedAt, metaSeq }))
+    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq, identity }) => ({
+      id,
+      meta,
+      joinedAt,
+      metaSeq,
+      identity,
+    }))
   }
 
   /** Revival side of a serialized `RemoteParticipant`: the live view wins when it already knows
@@ -537,7 +556,7 @@ class RoomState {
 
   // ── Event application ──
 
-  applyJoin(id: string, meta: ParticipantMeta, joinedAt: number): void {
+  applyJoin(id: string, meta: ParticipantMeta, joinedAt: number, identity?: string | null): void {
     if (this.closed) return
     const existing = this._members.get(id)
     if (existing) {
@@ -546,7 +565,7 @@ class RoomState {
       existing.joinedAt = joinedAt
       return
     }
-    const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0 })
+    const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity })
     this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
     this.membershipVersion++
     this._fireAll(this._joinCbs, entry.remote)
@@ -615,10 +634,17 @@ class RoomState {
    *  knows the sender, else the `{ id, meta }` snapshot the sender's node stamped into the
    *  envelope. Control and data travel on separate lanes, so a message can beat its sender's
    *  join — identity is in the message, delivery is immediate, and nothing drops. */
-  applyData(from: string, fromMeta: ParticipantMeta, data: unknown, info: ChannelPublishInfo, suppress: boolean): void {
+  applyData(
+    from: string,
+    fromMeta: ParticipantMeta,
+    fromIdentity: string | null,
+    data: unknown,
+    info: ChannelPublishInfo,
+    suppress: boolean,
+  ): void {
     if (suppress) return
     const entry = this._members.get(from)
-    this._fireAll(this._roomDataCbs, data, info, entry?.remote ?? { id: from, meta: fromMeta })
+    this._fireAll(this._roomDataCbs, data, info, entry?.remote ?? { id: from, meta: fromMeta, identity: fromIdentity })
     if (entry) this._fireAll(entry.dataCbs, data, info)
   }
 
@@ -627,7 +653,7 @@ class RoomState {
   applyBinary(from: string, payload: Uint8Array, info: ChannelPublishInfo, suppress: boolean): void {
     if (suppress) return
     const entry = this._members.get(from)
-    this._fireAll(this._roomBinaryCbs, payload, info, entry?.remote ?? { id: from, meta: {} })
+    this._fireAll(this._roomBinaryCbs, payload, info, entry?.remote ?? { id: from, meta: {}, identity: null })
     if (entry) this._fireAll(entry.binaryCbs, payload, info)
   }
 
@@ -709,6 +735,7 @@ class RoomState {
       id,
       meta,
       joinedAt,
+      identity: entrySeed.identity ?? null,
       metaSeq: entrySeed.metaSeq,
       remote: {
         id,
@@ -717,6 +744,9 @@ class RoomState {
         },
         get joinedAt() {
           return entry.joinedAt
+        },
+        get identity() {
+          return entry.identity
         },
         subscribe: (cb) => this._register(entry.dataCbs, cb, 'data'),
         subscribeBinary: (cb) => this._register(entry.binaryCbs, cb, 'binary'),
@@ -793,6 +823,7 @@ const PENDING_INBOX_CAP = 64
 
 abstract class ParticipantBase implements LocalParticipant {
   readonly id: string
+  readonly identity: string | null
   readonly selfDelivery: boolean
   /** @internal */ _meta: ParticipantMeta
   protected _left = false
@@ -801,12 +832,18 @@ abstract class ParticipantBase implements LocalParticipant {
   private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => void> = []
   /** DMs delivered before the first `listen()` — held bounded, flushed on attach, then never
    *  allocated again (`null` = flushed or empty; zero steady-state cost). */
-  private _pendingInbox: Array<{ from: string; fromMeta: ParticipantMeta | null; data: unknown }> | null = null
+  private _pendingInbox: Array<{
+    from: string
+    fromMeta: ParticipantMeta | null
+    fromIdentity: string | null
+    data: unknown
+  }> | null = null
 
-  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean) {
+  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
     this.id = id
     this._meta = meta
     this.selfDelivery = selfDelivery
+    this.identity = identity
   }
 
   get meta(): ParticipantMeta {
@@ -826,7 +863,7 @@ abstract class ParticipantBase implements LocalParticipant {
     if (this._pendingInbox) {
       const held = this._pendingInbox
       this._pendingInbox = null
-      for (const msg of held) this._deliverMessage(msg.from, msg.fromMeta, msg.data)
+      for (const msg of held) this._deliverMessage(msg.from, msg.fromMeta, msg.fromIdentity, msg.data)
     }
     return () => {
       const i = this._messageCbs.indexOf(callback)
@@ -837,17 +874,18 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal — a direct message arrived on this member's inbox. `from`/`fromMeta` come from
    *  the wire envelope; `resolve` upgrades to the live `RemoteParticipant` when a room view
    *  exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
-  _deliverMessage(from: string, fromMeta: ParticipantMeta | null, data: unknown): void {
+  _deliverMessage(from: string, fromMeta: ParticipantMeta | null, fromIdentity: string | null, data: unknown): void {
     if (this._messageCbs.length === 0) {
       // A reactive send can beat the app's `listen()` by a tick — hold it (bounded) instead of
       // dropping it. A departed participant will never flush: drop.
       if (this._left) return
       const pending = (this._pendingInbox ??= [])
-      pending.push({ from, fromMeta, data })
+      pending.push({ from, fromMeta, fromIdentity, data })
       if (pending.length > PENDING_INBOX_CAP) pending.shift()
       return
     }
-    const sender = from === '' ? null : (this._resolveSender(from) ?? { id: from, meta: fromMeta ?? {} })
+    const sender =
+      from === '' ? null : (this._resolveSender(from) ?? { id: from, meta: fromMeta ?? {}, identity: fromIdentity })
     for (const cb of [...this._messageCbs]) {
       try {
         cb(data, sender)

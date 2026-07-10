@@ -58,8 +58,13 @@ class ClientRoom implements Room {
   private _lastTextWantsSent = ''
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
    *  join round-trip) — held bounded FIFO, flushed into the participant on registration. */
-  private _pendingDms: Array<{ to: string; from: string; fromMeta: ParticipantMeta | null; data: unknown }> | null =
-    null
+  private _pendingDms: Array<{
+    to: string
+    from: string
+    fromMeta: ParticipantMeta | null
+    fromIdentity: string | null
+    data: unknown
+  }> | null = null
   private _rosterArrived!: () => void
   /** Settled by the first streamed roster (or wire death) — gates `getParticipants()`. */
   private readonly _rosterReady = new Promise<void>((resolve) => (this._rosterArrived = resolve))
@@ -113,6 +118,11 @@ class ClientRoom implements Room {
   }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
+    if (options?.identity !== undefined) {
+      throw new Error(
+        'join() options.identity is server-assigned: identity is trusted, so set it where trust lives — in the granting telefunction (server-side join()), not on the client.',
+      )
+    }
     const selfDelivery = normalizeJoinOptions(meta, options)
     const ack = (await this._request({ __r: 'req-join', meta, selfDelivery })) as ReqJoinAck
     if (!ack.ok) throw new Error(ack.err)
@@ -144,7 +154,7 @@ class ClientRoom implements Room {
     const held = this._pendingDms.filter((msg) => msg.to === id)
     if (held.length === this._pendingDms.length) this._pendingDms = null
     else if (held.length > 0) this._pendingDms = this._pendingDms.filter((msg) => msg.to !== id)
-    for (const msg of held) participant._deliverMessage(msg.from, msg.fromMeta, msg.data)
+    for (const msg of held) participant._deliverMessage(msg.from, msg.fromMeta, msg.fromIdentity, msg.data)
   }
 
   /** @internal — revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
@@ -223,13 +233,14 @@ class ClientRoom implements Room {
         this._state.applyData(
           event.from,
           event.fromMeta,
+          event.fromIdentity ?? null,
           event.data,
           makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
           isSuppressed(this.id, event.from),
         )
         return
       case 'join':
-        this._state.applyJoin(event.id, event.meta, event.joinedAt)
+        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null)
         return
       case 'leave': {
         const cause = leaveCauseFromWire(event)
@@ -260,13 +271,19 @@ class ClientRoom implements Room {
         // Relayed from this member's private inbox — only its own stub ever receives it.
         const local = this._localParticipants.get(event.to)
         if (local) {
-          local._deliverMessage(event.from, event.fromMeta, event.data)
+          local._deliverMessage(event.from, event.fromMeta, event.fromIdentity ?? null, event.data)
           return
         }
         // The DM beat its target's join ack (same connection, different request) — hold it.
         if (this._state.closed) return
         const pending = (this._pendingDms ??= [])
-        pending.push({ to: event.to, from: event.from, fromMeta: event.fromMeta, data: event.data })
+        pending.push({
+          to: event.to,
+          from: event.from,
+          fromMeta: event.fromMeta,
+          fromIdentity: event.fromIdentity ?? null,
+          data: event.data,
+        })
         if (pending.length > 64) pending.shift()
         return
       }
@@ -331,8 +348,8 @@ class ClientRoom implements Room {
 abstract class ClientParticipantBase extends ParticipantBase {
   protected readonly _roomId: string
 
-  constructor(roomId: string, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
-    super(id, meta, selfDelivery)
+  constructor(roomId: string, id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
+    super(id, meta, selfDelivery, identity)
     this._roomId = roomId
     if (!selfDelivery) setSuppressed(roomId, id, true)
   }
@@ -352,7 +369,8 @@ class ClientRoomParticipant extends ClientParticipantBase {
   private readonly _room: ClientRoom
 
   constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
-    super(clientRoom.id, id, meta, selfDelivery)
+    // Client-side joins carry no identity — it's server-assigned (see JoinOptions.identity).
+    super(clientRoom.id, id, meta, selfDelivery, null)
     this._room = clientRoom
   }
 
@@ -400,14 +418,14 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
 
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
-    super(metadata.roomId, metadata.id, metadata.meta, metadata.selfDelivery)
+    super(metadata.roomId, metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null)
     this._channel = channel
 
     channel.listen((notice: unknown) => {
       if (!hasRoomTag(notice)) return
       const msg = notice as ParticipantStubNotice
       if (msg.__r === 'p-meta') this._meta = msg.meta
-      else if (msg.__r === 'dm') this._deliverMessage(msg.from, msg.fromMeta, msg.data)
+      else if (msg.__r === 'dm') this._deliverMessage(msg.from, msg.fromMeta, msg.fromIdentity ?? null, msg.data)
       else if (msg.__r === 'left') this._onLeft(standaloneLeftCause(msg))
     })
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))

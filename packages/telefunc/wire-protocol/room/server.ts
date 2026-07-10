@@ -106,9 +106,12 @@ type RoomStatic = {
   update(id: string, options: RoomOptions): Promise<void>
   /** Admin: close the room — disconnects all participants and removes the room. */
   close(id: string): Promise<void>
-  /** Admin: remove a participant. `reason` travels with the removal — the kicked participant's
-   *  `onLeave` receives `{ type: 'removed', reason }`, so "why" never races the removal. */
-  removeParticipant(id: string, participantId: string, options?: { reason?: unknown }): Promise<void>
+  /** Admin: remove a participant — by participant ID (throws when unknown), or every membership
+   *  of an app identity at once (`{ identity }`, an idempotent sweep: kicking a user removes all
+   *  their tabs/connections, and 0 matches is fine). `reason` travels with the removal — the
+   *  kicked participant's `onLeave` receives `{ type: 'removed', reason }`, so "why" never races
+   *  the removal. */
+  removeParticipant(id: string, target: string | { identity: string }, options?: { reason?: unknown }): Promise<void>
   /** Publish a room-authored message — no sender, delivered to `onAnnounce()` (e.g. system notices). */
   announce(id: string, data: unknown): Promise<void>
   /** Send a server-authored private message to one participant — arrives on `listen()` with `from: null`. */
@@ -264,18 +267,36 @@ async function closeRoom(id: string): Promise<void> {
   await kv.delete(roomConfigKvKey(id))
 }
 
-async function removeParticipant(id: string, participantId: string, options?: { reason?: unknown }): Promise<void> {
-  assertUsage(
-    typeof participantId === 'string' && participantId.length > 0,
-    'The participant ID should be a non-empty string',
-  )
-  const { kv } = await requireRoom(id)
-  const memberKey = roomMemberKvKey(id, participantId)
-  if ((await kv.get(memberKey)) === null) throw new Error(`Participant not found: ${participantId}`)
-  await kv.delete(memberKey)
+async function removeParticipant(
+  id: string,
+  target: string | { identity: string },
+  options?: { reason?: unknown },
+): Promise<void> {
   const cause: LeaveCause =
     options?.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: options.reason }
-  await publishCtrl(id, { __r: 'leave', id: participantId, ...leaveCauseToWire(cause) })
+  const { kv } = await requireRoom(id)
+
+  if (typeof target === 'string') {
+    assertUsage(target.length > 0, 'The participant ID should be a non-empty string')
+    const memberKey = roomMemberKvKey(id, target)
+    if ((await kv.get(memberKey)) === null) throw new Error(`Participant not found: ${target}`)
+    await kv.delete(memberKey)
+    await publishCtrl(id, { __r: 'leave', id: target, ...leaveCauseToWire(cause) })
+    return
+  }
+
+  assertUsage(
+    isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
+    'removeParticipant() target should be a participant ID or { identity }',
+  )
+  // Identity sweep: every membership of that identity, across tabs and connections.
+  for (const { key, id: memberId } of await listMemberKeys(kv, id)) {
+    const raw = await kv.get(key)
+    if (raw === null) continue
+    if ((parse(raw) as RoomMemberRecord).identity !== target.identity) continue
+    await kv.delete(key)
+    await publishCtrl(id, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
+  }
 }
 
 async function announceToRoom(id: string, data: unknown): Promise<void> {
@@ -382,9 +403,10 @@ class ServerRoom implements Room {
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     const selfDelivery = normalizeJoinOptions(meta, options)
+    const identity = normalizeIdentity(options)
     let participant!: ServerLocalParticipant
-    await this._admitMember(meta, (id, joinedAt) => {
-      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery)
+    await this._admitMember(meta, identity, (id, joinedAt) => {
+      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, identity)
       this._localParticipants.set(id, participant)
     })
     return participant
@@ -435,26 +457,39 @@ class ServerRoom implements Room {
    *  subscription and heartbeat, and before its join is announced. */
   private async _admitMember(
     meta: ParticipantMeta,
+    identity: string | null,
     track: (id: string, joinedAt: number) => void,
   ): Promise<{ id: string; joinedAt: number }> {
     const id = crypto.randomUUID()
     // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
     const onJoin = this._guards?.onJoin
-    if (onJoin) await onJoin({ id, meta })
-    const joinedAt = await this._createMember(id, meta)
+    if (onJoin) await onJoin({ id, meta, identity })
+    const joinedAt = await this._createMember(id, meta, identity)
     track(id, joinedAt)
     this._syncSubs()
-    this._state.applyJoin(id, meta, joinedAt)
-    await publishCtrl(this.id, { __r: 'join', id, meta, joinedAt })
+    this._state.applyJoin(id, meta, joinedAt, identity)
+    await publishCtrl(this.id, {
+      __r: 'join',
+      id,
+      meta,
+      joinedAt,
+      ...(identity === null ? {} : { identity }),
+    })
     return { id, joinedAt }
   }
 
   /** KV half of a join, guarding against a concurrent `Room.close()`. */
-  private async _createMember(id: string, meta: ParticipantMeta): Promise<number> {
+  private async _createMember(id: string, meta: ParticipantMeta, identity: string | null): Promise<number> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
     const joinedAt = Date.now()
-    const record: RoomMemberRecord = { meta, joinedAt, seenAt: joinedAt, metaSeq: 0 }
+    const record: RoomMemberRecord = {
+      meta,
+      joinedAt,
+      seenAt: joinedAt,
+      metaSeq: 0,
+      ...(identity === null ? {} : { identity }),
+    }
     await kv.set(roomMemberKvKey(this.id, id), stringify(record), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
     // The room may have been closed between the check and the write — roll back.
     if ((await readConfig(kv, this.id)) === null) {
@@ -500,7 +535,7 @@ class ServerRoom implements Room {
       // The guard sees exactly what a subscriber would: the payload, without the wire frame.
       // (Every framed payload was validated at its entry point — the unframe cannot fail.)
       await onPublish(
-        { id: from, meta: this._memberMeta(from) },
+        { id: from, meta: this._memberMeta(from), identity: this._memberIdentity(from) },
         'data' in payload ? payload.data : unframeMemberId(payload.framed)!.payload,
       )
     }
@@ -514,6 +549,7 @@ class ServerRoom implements Room {
               __r: 'data',
               from,
               fromMeta: this._memberMeta(from),
+              ...(this._memberIdentity(from) === null ? {} : { fromIdentity: this._memberIdentity(from)! }),
               data: payload.data,
             } satisfies RoomDataEnvelope),
           )
@@ -528,6 +564,11 @@ class ServerRoom implements Room {
     return this._localParticipants.get(from)?.meta ?? this._state.getRemote(from)?.meta ?? {}
   }
 
+  /** The sender's identity as this node knows it — set at join, immutable, so any source works. */
+  private _memberIdentity(from: string): string | null {
+    return this._localParticipants.get(from)?.identity ?? this._state.getRemote(from)?.identity ?? null
+  }
+
   /** @internal — send a private message: published on the target's inbox key, which only
    *  the target's owning node subscribes to (see `_onDm`). The sender's verified meta rides
    *  the envelope so every receiver can surface a rich sender. */
@@ -536,9 +577,17 @@ class ServerRoom implements Room {
     const target = await this._resolveMember(to)
     if (!target) throw new Error(`Participant not found: ${to}`)
     const fromMeta = this._memberMeta(from)
+    const fromIdentity = this._memberIdentity(from)
     const onSend = this._guards?.onSend
-    if (onSend) await onSend({ id: from, meta: fromMeta }, target, data)
-    const envelope: RoomDmEnvelope = { __r: 'dm', to, from, fromMeta, data }
+    if (onSend) await onSend({ id: from, meta: fromMeta, identity: fromIdentity }, target, data)
+    const envelope: RoomDmEnvelope = {
+      __r: 'dm',
+      to,
+      from,
+      fromMeta,
+      ...(fromIdentity === null ? {} : { fromIdentity }),
+      data,
+    }
     await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
   }
 
@@ -549,7 +598,9 @@ class ServerRoom implements Room {
     const remote = this._state.getRemote(id)
     if (remote) return remote
     const raw = await getRoomKV().get(roomMemberKvKey(this.id, id))
-    return raw === null ? null : { id, meta: (parse(raw) as RoomMemberRecord).meta }
+    if (raw === null) return null
+    const record = parse(raw) as RoomMemberRecord
+    return { id, meta: record.meta, identity: record.identity ?? null }
   }
 
   private async _assertOpen(kv: RoomKV): Promise<void> {
@@ -599,7 +650,14 @@ class ServerRoom implements Room {
     if (!hasRoomTag(envelope) || envelope.__r !== 'data') return
     const event = envelope as RoomDataEnvelope
     const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
-    this._state.applyData(event.from, event.fromMeta, event.data, info, this._suppress(event.from))
+    this._state.applyData(
+      event.from,
+      event.fromMeta,
+      event.fromIdentity ?? null,
+      event.data,
+      info,
+      this._suppress(event.from),
+    )
     this._healUnknownSender(event.from)
 
     if (this._stubs.size > 0) {
@@ -642,7 +700,7 @@ class ServerRoom implements Room {
     const dm = envelope as RoomDmEnvelope
     const local = this._localParticipants.get(dm.to)
     if (local) {
-      local._deliverMessage(dm.from, dm.fromMeta, dm.data)
+      local._deliverMessage(dm.from, dm.fromMeta, dm.fromIdentity ?? null, dm.data)
       return
     }
     const wireText = encodePublishText(serialized, rawInfo)
@@ -654,7 +712,7 @@ class ServerRoom implements Room {
   private _applyCtrl(event: RoomCtrlEnvelope): void {
     switch (event.__r) {
       case 'join':
-        this._state.applyJoin(event.id, event.meta, event.joinedAt)
+        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null)
         this._syncSubs() // a new member means a new per-member key candidate
         return
       case 'leave':
@@ -734,7 +792,8 @@ class ServerRoom implements Room {
       switch (req.__r) {
         case 'req-join': {
           const meta = isObject(req.meta) ? req.meta : {}
-          const { id, joinedAt } = await this._admitMember(meta, (id) =>
+          // Identity is trusted and therefore server-assigned — a client join never carries one.
+          const { id, joinedAt } = await this._admitMember(meta, null, (id) =>
             stub._stubMembers.set(id, { selfDelivery: req.selfDelivery !== false }),
           )
           return { ok: true, id, joinedAt }
@@ -1026,8 +1085,15 @@ class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
   /** @internal */ readonly _room: ServerRoom
   /** @internal */ readonly _joinedAt: number
-  constructor(serverRoom: ServerRoom, id: string, meta: ParticipantMeta, joinedAt: number, selfDelivery: boolean) {
-    super(id, meta, selfDelivery)
+  constructor(
+    serverRoom: ServerRoom,
+    id: string,
+    meta: ParticipantMeta,
+    joinedAt: number,
+    selfDelivery: boolean,
+    identity: string | null,
+  ) {
+    super(id, meta, selfDelivery, identity)
     this._room = serverRoom
     this._joinedAt = joinedAt
   }
@@ -1123,7 +1189,13 @@ async function readMembers(kv: RoomKV, roomId: string): Promise<MemberSnapshot[]
       await publishCtrl(roomId, { __r: 'leave', id, cause: 'disconnected' })
       continue
     }
-    members.push({ id, meta: record.meta, joinedAt: record.joinedAt, metaSeq: record.metaSeq })
+    members.push({
+      id,
+      meta: record.meta,
+      joinedAt: record.joinedAt,
+      metaSeq: record.metaSeq,
+      identity: record.identity ?? null,
+    })
   }
   return members
 }
@@ -1169,6 +1241,16 @@ async function publishCtrl(roomId: string, event: RoomCtrlEnvelope): Promise<voi
 
 function assertRoomId(id: unknown): asserts id is string {
   assertUsage(typeof id === 'string' && id.length > 0, 'The room ID should be a non-empty string')
+}
+
+/** Identity is trusted — validate the server-side join option. */
+function normalizeIdentity(options: JoinOptions | undefined): string | null {
+  if (options?.identity === undefined) return null
+  assertUsage(
+    typeof options.identity === 'string' && options.identity.length > 0,
+    'join() options.identity should be a non-empty string',
+  )
+  return options.identity
 }
 
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta; size: number } {
