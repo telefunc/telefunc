@@ -30,6 +30,7 @@ import {
   roomCtrlKey,
   roomTextKey,
   roomMemberDataKey,
+  roomMemberTrackKey,
   roomMemberKvKey,
   unframeMemberId,
   type RoomMemberRecord,
@@ -691,8 +692,83 @@ describe('selective binary delivery', () => {
     await cam.leave()
 
     const bState = (b as ServerRoom)._state
-    expect(bState.binaryWants()).toEqual({ all: false, members: [] })
+    expect(bState.binaryWants()).toEqual({ everyMember: { all: false, tracks: [] }, members: {} })
     expect(bState.binaryListenerCount).toBe(0)
+  })
+
+  it("the screen-share flow: unsubscribing a track stops its bytes at the source — the publisher's ack says so", async () => {
+    const a = await Room.create('share')
+    const sharer = await a.join({ name: 'Sharer' }, { selfDelivery: false })
+    const viewer = await Room.get('share')
+    await viewer.getParticipants()
+
+    // Nobody watches yet: the frame reaches no subscription anywhere — pause-the-encoder signal.
+    expect((await sharer.publishBinary(new Uint8Array([1]), { track: 'screen' })).receivers).toBe(0)
+
+    // A viewer starts watching (named subscribers attach eagerly — no frame is ever missed) …
+    const seen: number[] = []
+    const stopWatching = viewer.subscribeBinary((data) => seen.push(data[0]!), { track: 'screen' })
+    expect((await sharer.publishBinary(new Uint8Array([2]), { track: 'screen' })).receivers).toBe(1)
+    expect(seen).toEqual([2])
+
+    // … keeps the call audio while dropping the screen: mic flows, screen bytes stop upstream.
+    const mics: number[] = []
+    viewer.subscribeBinary((data) => mics.push(data[0]!), { track: 'mic' })
+    stopWatching()
+    expect((await sharer.publishBinary(new Uint8Array([3]), { track: 'screen' })).receivers).toBe(0)
+    expect((await sharer.publishBinary(new Uint8Array([4]), { track: 'mic' })).receivers).toBe(1)
+    expect(seen).toEqual([2])
+    expect(mics).toEqual([4])
+  })
+
+  it('named tracks ride per-(member, track) keys; the default lane stays on the member key', async () => {
+    const a = await Room.create('track-keys')
+    const cam = await a.join({ name: 'Cam' })
+    const b = await Room.get('track-keys')
+    b.subscribeBinary(() => {}) // all tracks — forces the upstream keys up as tracks appear
+
+    const published = vi.spyOn(getBroadcastAdapter(), 'publishBinary')
+    await cam.publishBinary(new Uint8Array([1]))
+    await cam.publishBinary(new Uint8Array([2]), { track: 'camera' })
+    expect(published.mock.calls.map(([key]) => key)).toEqual([
+      roomMemberDataKey('track-keys', cam.id),
+      roomMemberTrackKey('track-keys', cam.id, 'camera'),
+    ])
+
+    // The KV record now names the track — late observers can subscribe streams they can't name.
+    const record = parse((await getBroadcastAdapter().get!(roomMemberKvKey('track-keys', cam.id)))!)
+    expect((record as RoomMemberRecord).tracks).toEqual(['camera'])
+  })
+
+  it('an all-track observer arriving after the track exists discovers it from the roster', async () => {
+    const a = await Room.create('discover')
+    const cam = await a.join({ name: 'Cam' })
+    await cam.publishBinary(new Uint8Array([1]), { track: 'screen' }) // track born before any observer
+
+    const late = await Room.get('discover')
+    const frames: Array<[string | null, number]> = []
+    late.subscribeBinary((data, info) => frames.push([info.track, data[0]!]))
+    await settle() // roster load (KV) brings the track key subscription up
+
+    await cam.publishBinary(new Uint8Array([2]), { track: 'screen' })
+    expect(frames).toEqual([['screen', 2]])
+  })
+
+  it('`track: null` selects the default lane only — named tracks never reach it', async () => {
+    const a = await Room.create('default-only')
+    const cam = await a.join({ name: 'Cam' })
+    const b = await Room.get('default-only')
+    await b.getParticipants()
+
+    const defaults: number[] = []
+    b.subscribeBinary((data) => defaults.push(data[0]!), { track: null })
+    await cam.publishBinary(new Uint8Array([1]))
+    await cam.publishBinary(new Uint8Array([2]), { track: 'screen' })
+    expect(defaults).toEqual([1])
+    // And the narrowing holds upstream: with only the default lane wanted, the named frame
+    // found no subscriber at all.
+    expect((await cam.publishBinary(new Uint8Array([3]), { track: 'screen' })).receivers).toBe(0)
+    expect((await cam.publishBinary(new Uint8Array([4]))).receivers).toBe(1)
   })
 })
 
@@ -1129,25 +1205,39 @@ describe('room stub channel', () => {
     expect(metas).toEqual([{ name: 'Remote' }])
   })
 
-  it("binary frames are relayed member-selectively, per the client's declared wants", async () => {
+  it("binary frames are relayed selectively, per the client's declared (member, track) wants", async () => {
     const { serverRoom, stub, peer } = await createServedRoom('lazy-bin')
     const wanted = await serverRoom.join({ name: 'wanted' })
     const unwanted = await serverRoom.join({ name: 'unwanted' })
+    const subBinary = (wants: unknown, seq: number) =>
+      stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants }), seq)
+    const relayed = () => peer.decoded().filter((f: any) => f.tag === TAG.PUBLISH_BINARY)
 
     await wanted.publishBinary(new Uint8Array([1]))
-    expect(peer.decoded().filter((f) => f.tag === TAG.PUBLISH_BINARY)).toEqual([]) // nothing declared yet
+    expect(relayed()).toEqual([]) // nothing declared yet
 
-    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', all: false, members: [wanted.id] }), 60)
+    subBinary({ everyMember: { all: false, tracks: [] }, members: { [wanted.id]: { all: true, tracks: [] } } }, 60)
     await wanted.publishBinary(new Uint8Array([2]))
     await unwanted.publishBinary(new Uint8Array([3]))
-    let relayed = peer.decoded().filter((f) => f.tag === TAG.PUBLISH_BINARY)
-    expect(relayed.length).toBe(1) // only the wanted member's frame crossed the wire
-    expect(unframeMemberId(relayed[0]!.data)!.from).toBe(wanted.id)
+    expect(relayed().length).toBe(1) // only the wanted member's frame crossed the wire
+    expect(unframeMemberId(relayed()[0]!.data)!.from).toBe(wanted.id)
 
-    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', all: true, members: [] }), 61)
-    await unwanted.publishBinary(new Uint8Array([4]))
-    relayed = peer.decoded().filter((f) => f.tag === TAG.PUBLISH_BINARY)
-    expect(relayed.length).toBe(2)
+    // Track-selective: only 'cam' of every member — the default lane and other tracks stay put.
+    subBinary({ everyMember: { all: false, tracks: ['cam'] }, members: {} }, 61)
+    await wanted.publishBinary(new Uint8Array([4]))
+    await wanted.publishBinary(new Uint8Array([5]), { track: 'cam' })
+    await unwanted.publishBinary(new Uint8Array([6]), { track: 'mic' })
+    expect(relayed().length).toBe(2)
+    expect(unframeMemberId(relayed()[1]!.data)!.track).toBe('cam')
+
+    subBinary({ everyMember: { all: true, tracks: [] }, members: {} }, 62)
+    await unwanted.publishBinary(new Uint8Array([7]))
+    expect(relayed().length).toBe(3)
+
+    // A malformed declaration is rejected — the previous wants stay in force.
+    subBinary({ everyMember: { all: 'yes' }, members: {} }, 63)
+    await settle()
+    expect(stub._binaryWants.everyMember.all).toBe(true)
   })
 
   it('the client vanishing (channel shutdown) makes its members leave the room', async () => {
@@ -1455,8 +1545,7 @@ describe('ClientRoom', () => {
     const unsubscribe = clientRoom.subscribeBinary((data) => bytes.push([...data]))
     expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
       __r: 'sub-binary',
-      all: true,
-      members: [],
+      wants: { everyMember: { all: true, tracks: [] }, members: {} },
     })
 
     const sender = crypto.randomUUID()
@@ -1467,8 +1556,7 @@ describe('ClientRoom', () => {
     unsubscribe()
     expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
       __r: 'sub-binary',
-      all: false,
-      members: [],
+      wants: { everyMember: { all: false, tracks: [] }, members: {} },
     })
   })
 
@@ -1486,17 +1574,26 @@ describe('ClientRoom', () => {
     })
     const subBinaryMsgs = () => fake.sent.filter((m) => m.__r === 'sub-binary')
 
+    const none = { all: false, tracks: [] }
+    const every = { all: true, tracks: [] }
+
     // Each widening is declared synchronously — a publish right after subscribing must be
     // preceded by its declaration on the wire (same-connection FIFO).
     const unsub1 = (await clientRoom.getParticipant(cam1))!.subscribeBinary(() => {})
-    expect(subBinaryMsgs()).toEqual([{ __r: 'sub-binary', all: false, members: [cam1] }])
+    expect(subBinaryMsgs()).toEqual([{ __r: 'sub-binary', wants: { everyMember: none, members: { [cam1]: every } } }])
     ;(await clientRoom.getParticipant(cam2))!.subscribeBinary(() => {})
-    expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: false, members: [cam1, cam2] })
+    expect(subBinaryMsgs().at(-1)).toEqual({
+      __r: 'sub-binary',
+      wants: { everyMember: none, members: { [cam1]: every, [cam2]: every } },
+    })
 
-    // A room-level listener upgrades the declaration to `all`; listener changes that leave the
-    // effective set unchanged send nothing.
+    // A room-level listener adds the every-member want; listener changes that leave the
+    // effective want unchanged send nothing.
     const unsubAll = clientRoom.subscribeBinary(() => {})
-    expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: true, members: [] })
+    expect(subBinaryMsgs().at(-1)).toEqual({
+      __r: 'sub-binary',
+      wants: { everyMember: every, members: { [cam1]: every, [cam2]: every } },
+    })
     const sentCount = subBinaryMsgs().length
     const unsubDup = (await clientRoom.getParticipant(cam1))!.subscribeBinary(() => {})
     expect(subBinaryMsgs().length).toBe(sentCount)
@@ -1505,7 +1602,23 @@ describe('ClientRoom', () => {
     unsubDup()
     unsubAll()
     unsub1()
-    expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: false, members: [cam2] })
+    expect(subBinaryMsgs().at(-1)).toEqual({
+      __r: 'sub-binary',
+      wants: { everyMember: none, members: { [cam2]: every } },
+    })
+
+    // Track filters declare exactly the wanted tracks — `null` selects the default lane.
+    const unsubScreen = clientRoom.subscribeBinary(() => {}, { track: 'screen' })
+    const unsubDefault = (await clientRoom.getParticipant(cam1))!.subscribeBinary(() => {}, { track: null })
+    expect(subBinaryMsgs().at(-1)).toEqual({
+      __r: 'sub-binary',
+      wants: {
+        everyMember: { all: false, tracks: ['screen'] },
+        members: { [cam2]: every, [cam1]: { all: false, tracks: [''] } },
+      },
+    })
+    unsubScreen()
+    unsubDefault()
   })
 
   it('declares member-scoped text wants — sub-text rides beside the broadcast subscription', async () => {
@@ -1557,16 +1670,14 @@ describe('ClientRoom', () => {
     ;(await clientRoom.getParticipant(cam))!.subscribeBinary(() => {}) // never unsubscribed
     expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
       __r: 'sub-binary',
-      all: false,
-      members: [cam],
+      wants: { everyMember: { all: false, tracks: [] }, members: { [cam]: { all: true, tracks: [] } } },
     })
 
     fake.emit({ __r: 'leave', id: cam })
 
     expect(fake.sent.filter((m) => m.__r === 'sub-binary').at(-1)).toEqual({
       __r: 'sub-binary',
-      all: false,
-      members: [],
+      wants: { everyMember: { all: false, tracks: [] }, members: {} },
     })
   })
 

@@ -3,6 +3,7 @@ export {
   roomCtrlKey,
   roomTextKey,
   roomMemberDataKey,
+  roomMemberTrackKey,
   roomActivityKey,
   roomDmKey,
   roomConfigKvKey,
@@ -21,6 +22,14 @@ export {
   leaveCauseFromWire,
   leaveCauseToWire,
   remoteBacking,
+  DEFAULT_TRACK,
+  SUB_BINARY_MEMBERS_MAX,
+  SUB_BINARY_TRACKS_MAX,
+  emptyTrackWants,
+  mergeTrackWants,
+  wantsTrack,
+  wantsAnyBinary,
+  sanitizeBinaryWants,
   RoomState,
   ParticipantBase,
 }
@@ -44,6 +53,8 @@ export type {
   ReqJoinAck,
   ReqPublishAck,
   MemberWants,
+  TrackWants,
+  BinaryWants,
   RoomActivityEvent,
   InboxMessage,
 }
@@ -81,10 +92,17 @@ function roomCtrlKey(roomId: string): string {
 function roomTextKey(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:t`
 }
-/** Pub/sub key carrying one member's data: binary always (per-publisher keys make delivery
- *  member-selective at the source), text too in isolated mode. */
+/** Pub/sub key carrying one member's data: default-track binary always (per-publisher keys
+ *  make delivery member-selective at the source), text too in isolated mode. */
 function roomMemberDataKey(roomId: string, memberId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:m:${memberId}`
+}
+/** Pub/sub key carrying one member's named binary track. Per-(member, track) keys make delivery
+ *  track-selective at the source: a holder that stops watching a track drops this subscription,
+ *  and the publisher's `receivers` hits 0 when nobody anywhere holds it — bytes stop flowing at
+ *  every hop, not just at delivery. */
+function roomMemberTrackKey(roomId: string, memberId: string, track: string): string {
+  return `${roomMemberDataKey(roomId, memberId)}:t:${track}`
 }
 /** Pub/sub key carrying the room's throttled activity signal — subscribed only by holders with
  *  `onActivity` listeners (badge consumers), so nobody else pays even that trickle. */
@@ -139,6 +157,9 @@ type RoomMemberRecord = {
   metaSeq: number
   /** App identity stamped at (server-side) join — absent: none. Immutable per member. */
   identity?: string
+  /** Named binary tracks this member has published — appended by the owner before the first
+   *  frame of each track, so late observers can subscribe every track they can't name. */
+  tracks?: string[]
 }
 
 function sizeToWire(size: number): number | null {
@@ -159,6 +180,8 @@ type MemberSnapshot = {
   metaSeq: number
   /** App identity stamped at (server-side) join — `null`/absent: none. Immutable per member. */
   identity?: string | null
+  /** Named binary tracks the member has published (see `RoomMemberRecord.tracks`). */
+  tracks?: string[]
 }
 
 /** Serializer metadata of a `Room` crossing the wire. Carries only scalars — the roster itself
@@ -198,6 +221,9 @@ type RoomCtrlEnvelope =
   | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected'; reason?: unknown }
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; prev: ParticipantMeta; seq: number }
   | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; at: number; by: string }
+  // A member's first publish on a new named track — announced before the frame, so live
+  // all-track subscribers bring up the track-key subscription (idempotent, like join).
+  | { __r: 'track'; id: string; track: string }
   | { __r: 'closed' }
 
 /** A participant's message. Published on the room's text key (shared mode) or the member's own
@@ -236,15 +262,15 @@ type RoomDmEnvelope = {
 }
 
 /** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
- *  `sub-binary` declares which members' binary streams the client wants relayed (full replace);
- *  `sub-text` does the same for member-scoped text — the room-level (all) text want rides the
+ *  `sub-binary` declares the client's binary wants (full replace, see `BinaryWants`);
+ *  `sub-text` declares member-scoped text wants — the room-level (all) text want rides the
  *  standard broadcast-subscription ctrl instead, keeping its synchronous-declaration fence. */
 type RoomStubRequest =
   | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown }
-  | { __r: 'sub-binary'; all: boolean; members: string[] }
+  | { __r: 'sub-binary'; wants: BinaryWants }
   | { __r: 'sub-text'; members: string[] }
   | { __r: 'sub-activity'; on: boolean }
 
@@ -261,9 +287,72 @@ type ParticipantStubNotice =
   | { __r: 'p-meta'; meta: ParticipantMeta }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown }
 
-/** Which members' streams a holder wants on a data lane (text or binary) — `all` for
- *  room-level listeners, or a specific member set for participant-scoped ones. */
+/** Which members' streams a holder wants on the text lane — `all` for room-level listeners,
+ *  or a specific member set for participant-scoped ones. */
 type MemberWants = { all: boolean; members: string[] }
+
+// ---------------------------------------------------------------------------
+// Binary wants — per member, per track
+// ---------------------------------------------------------------------------
+
+/** The default (unnamed) track's slot in want sets and key routing — track names are non-empty
+ *  by contract (`frameWithMemberId`), so `''` is unambiguous. */
+const DEFAULT_TRACK = ''
+
+/** Which of a publisher's tracks a holder wants: every track, or an exact set
+ *  (`DEFAULT_TRACK` selects the unnamed lane). */
+type TrackWants = { all: boolean; tracks: string[] }
+
+/** A holder's complete binary wants. `everyMember` comes from room-level listeners and applies
+ *  to all members; `members` adds participant-scoped wants on top. This one shape drives all
+ *  three gates: the client's declaration, the server's upstream key set, and the per-stub relay. */
+type BinaryWants = { everyMember: TrackWants; members: Record<string, TrackWants> }
+
+/** Abuse bounds on a client's `sub-binary` declaration — generous for real apps (a media app
+ *  uses a handful of tracks), fatal for hostile blowups (tracks multiply upstream keys). */
+const SUB_BINARY_MEMBERS_MAX = 4096
+const SUB_BINARY_TRACKS_MAX = 64
+
+function emptyTrackWants(): TrackWants {
+  return { all: false, tracks: [] }
+}
+
+function mergeTrackWants(a: TrackWants, b: TrackWants): TrackWants {
+  if (a.all || b.all) return { all: true, tracks: [] }
+  return { all: false, tracks: [...new Set([...a.tracks, ...b.tracks])] }
+}
+
+function wantsTrack(wants: TrackWants, track: string): boolean {
+  return wants.all || wants.tracks.includes(track)
+}
+
+function wantsAnyBinary(wants: BinaryWants): boolean {
+  return wants.everyMember.all || wants.everyMember.tracks.length > 0 || Object.keys(wants.members).length > 0
+}
+
+/** Validate a client-declared `sub-binary` want (untrusted input) — bounded and well-formed,
+ *  or `null` to reject the declaration. */
+function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
+  if (!isObject(wants)) return null
+  const everyMember = sanitizeTrackWants(wants.everyMember)
+  if (!everyMember || !isObject(wants.members)) return null
+  const members: Record<string, TrackWants> = {}
+  const entries = Object.entries(wants.members)
+  if (entries.length > SUB_BINARY_MEMBERS_MAX) return null
+  for (const [memberId, trackWants] of entries) {
+    const sanitized = sanitizeTrackWants(trackWants)
+    if (!sanitized) return null
+    members[memberId] = sanitized
+  }
+  return { everyMember, members }
+}
+
+function sanitizeTrackWants(wants: unknown): TrackWants | null {
+  if (!isObject(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
+  if (wants.tracks.length > SUB_BINARY_TRACKS_MAX) return null
+  if (!wants.tracks.every((track) => typeof track === 'string' && track.length <= TRACK_MAX_BYTES)) return null
+  return { all: wants.all, tracks: wants.tracks as string[] }
+}
 
 type ReqOkAck = { ok: true } | { ok: false; err: string }
 type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }
@@ -390,6 +479,10 @@ function unframeMemberId(
 
 type ListenerKind = 'data' | 'binary' | 'event' | 'activity'
 
+/** A binary listener's track filter: `undefined` = every track, `null` = the default lane only,
+ *  a name = that track only. */
+type TrackFilter = string | null | undefined
+
 type MemberEntry = {
   id: string
   meta: ParticipantMeta
@@ -397,11 +490,14 @@ type MemberEntry = {
   identity: string | null
   /** Latest applied meta revision — stale and echoed `p-meta` events are absorbed. */
   metaSeq: number
+  /** Named tracks the member is known to publish — grown by `track` events and rosters,
+   *  never shrunk (tracks live as long as the member). Drives all-track key subscriptions. */
+  tracks: Set<string>
   remote: RemoteParticipant
   dataCbs: Array<(data: unknown, info: ChannelPublishInfo) => unknown>
   binaryCbs: Array<{
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
-    track: string | undefined
+    track: TrackFilter
   }>
   updateCbs: Array<(meta: ParticipantMeta, prev: ParticipantMeta) => void>
   leaveCbs: Array<(cause?: LeaveCause) => void>
@@ -468,7 +564,7 @@ class RoomState {
   private readonly _roomDataCbs: Array<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> = []
   private readonly _roomBinaryCbs: Array<{
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown
-    track: string | undefined
+    track: TrackFilter
   }> = []
   private readonly _joinCbs: Array<(member: RemoteParticipant) => void> = []
   private readonly _leaveCbs: Array<(member: RemoteParticipant, cause?: LeaveCause) => void> = []
@@ -540,15 +636,20 @@ class RoomState {
     return this._activityListenerCount
   }
 
-  /** Which members' binary streams this holder needs delivered — drives the wire/adapter
+  /** Which (member, track) binary streams this holder needs delivered — drives the wire/adapter
    *  subscriptions on both sides (client declares it, server aggregates it per stub). */
-  binaryWants(): MemberWants {
-    if (this._roomBinaryCbs.length > 0) return { all: true, members: [] }
-    const members: string[] = []
+  binaryWants(): BinaryWants {
+    const members: Record<string, TrackWants> = {}
     for (const entry of this._members.values()) {
-      if (entry.binaryCbs.length > 0) members.push(entry.id)
+      if (entry.binaryCbs.length > 0) members[entry.id] = trackWantsOf(entry.binaryCbs)
     }
-    return { all: false, members }
+    return { everyMember: trackWantsOf(this._roomBinaryCbs), members }
+  }
+
+  /** Named tracks the member is known to publish — `[]` for unknown members. */
+  memberTracks(id: string): string[] {
+    const entry = this._members.get(id)
+    return entry ? [...entry.tracks] : []
   }
 
   /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist,
@@ -576,12 +677,13 @@ class RoomState {
   }
 
   snapshotMembers(): MemberSnapshot[] {
-    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq, identity }) => ({
+    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq, identity, tracks }) => ({
       id,
       meta,
       joinedAt,
       metaSeq,
       identity,
+      ...(tracks.size === 0 ? {} : { tracks: [...tracks] }),
     }))
   }
 
@@ -604,9 +706,9 @@ class RoomState {
   }
   subscribeBinary(
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
-    opts?: { track?: string },
+    opts?: { track?: string | null },
   ): () => void {
-    return this._register(this._roomBinaryCbs, { cb, track: opts?.track }, 'binary')
+    return this._register(this._roomBinaryCbs, { cb, track: normalizeTrackFilter(opts) }, 'binary')
   }
   onJoin(cb: (member: RemoteParticipant) => void): () => void {
     return this._register(this._joinCbs, cb, 'event')
@@ -637,6 +739,13 @@ class RoomState {
 
   applyActivity(at: number): void {
     this._fireAll(this._activityCbs, { timestamp: at })
+  }
+
+  /** A member published its first frame on a new named track (idempotent — echoes, rosters,
+   *  and the owner's local apply all land here). Unknown members are absorbed like any other
+   *  pre-roster event. */
+  applyTrack(id: string, track: string): void {
+    this._members.get(id)?.tracks.add(track)
   }
 
   /** Immutable view of the whole room — cached by state version, so the reference is stable
@@ -832,6 +941,7 @@ class RoomState {
           existing.metaSeq = member.metaSeq
         }
         existing.joinedAt = member.joinedAt
+        for (const track of member.tracks ?? []) existing.tracks.add(track)
       }
       for (const id of [...this._members.keys()]) {
         if (!seen.has(id)) this.applyLeave(id)
@@ -848,9 +958,12 @@ class RoomState {
       seen.add(member.id)
       const entry = this._members.get(member.id)
       if (!entry) {
-        this.applyJoin(member.id, member.meta, member.joinedAt)
+        this.applyJoin(member.id, member.meta, member.joinedAt, member.identity)
         const created = this._members.get(member.id)
-        if (created) created.metaSeq = member.metaSeq
+        if (created) {
+          created.metaSeq = member.metaSeq
+          for (const track of member.tracks ?? []) created.tracks.add(track)
+        }
         drifted = true
       } else {
         if (member.metaSeq > entry.metaSeq) {
@@ -858,6 +971,7 @@ class RoomState {
           drifted = true
         }
         entry.joinedAt = member.joinedAt
+        for (const track of member.tracks ?? []) entry.tracks.add(track)
       }
     }
     for (const id of [...this._members.keys()]) {
@@ -885,6 +999,7 @@ class RoomState {
       joinedAt,
       identity: entrySeed.identity ?? null,
       metaSeq: entrySeed.metaSeq,
+      tracks: new Set(entrySeed.tracks),
       remote: {
         id,
         get meta() {
@@ -897,7 +1012,8 @@ class RoomState {
           return entry.identity
         },
         subscribe: (cb) => this._register(entry.dataCbs, cb, 'data'),
-        subscribeBinary: (cb, opts) => this._register(entry.binaryCbs, { cb, track: opts?.track }, 'binary'),
+        subscribeBinary: (cb, opts) =>
+          this._register(entry.binaryCbs, { cb, track: normalizeTrackFilter(opts) }, 'binary'),
         onUpdate: (cb) => this._register(entry.updateCbs, cb, 'event'),
         onLeave: (cb: (cause?: LeaveCause) => void) => this._register(entry.leaveCbs, cb, 'event'),
       },
@@ -955,6 +1071,26 @@ class RoomState {
       }
     }
   }
+}
+
+/** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default
+ *  lane, a non-empty name = that track. */
+function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {
+  const track = opts?.track
+  if (track === undefined || track === null) return track
+  assertUsage(typeof track === 'string' && track.length > 0, 'subscribeBinary() track should be a non-empty string')
+  return track
+}
+
+/** Fold a listener list's track filters into the `TrackWants` they add up to. */
+function trackWantsOf(cbs: ReadonlyArray<{ track: TrackFilter }>): TrackWants {
+  const wants = emptyTrackWants()
+  for (const { track } of cbs) {
+    if (track === undefined) return { all: true, tracks: [] }
+    const asTrack = track ?? DEFAULT_TRACK
+    if (!wants.tracks.includes(asTrack)) wants.tracks.push(asTrack)
+  }
+  return wants
 }
 
 // ---------------------------------------------------------------------------

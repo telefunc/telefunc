@@ -185,8 +185,11 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
 
   /** Receive all participant messages. Returns an unsubscribe function. */
   subscribe(callback: RoomListener<P>): () => void
-  /** Receive all members' binary frames — or only one named track's (`{ track }`). */
-  subscribeBinary(callback: RoomBinaryListener<P>, options?: { track?: string }): () => void
+  /** Receive all members' binary frames — or one track's: `{ track: 'screen' }` for a named
+   *  track, `{ track: null }` for the default lane only. Selection is enforced at the source:
+   *  unwanted tracks aren't delivered, relayed, or even subscribed upstream — dropping a
+   *  track's last subscription stops its bytes at every hop. */
+  subscribeBinary(callback: RoomBinaryListener<P>, options?: { track?: string | null }): () => void
 
   /** A participant joined. */
   onJoin(callback: (member: RemoteParticipant<P>) => void): () => void
@@ -233,7 +236,9 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta> = {
 
   /** Publish a message to the whole room. */
   publish(data: unknown): Promise<ChannelPublishAck>
-  /** Publish binary to the whole room — optionally on a named track and/or keyframe-flagged. */
+  /** Publish binary to the whole room — optionally on a named track and/or keyframe-flagged.
+   *  The ack's `receivers` reports the track's live subscription count: `0` means nobody
+   *  anywhere wants it right now — the signal to pause the encoder until someone subscribes. */
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
 
   /** Send a private message to one participant (or their ID) — nobody else receives it. */
@@ -265,8 +270,10 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta> = {
 
   /** Receive only this member's messages. Returns an unsubscribe function. */
   subscribe(callback: ParticipantListener): () => void
-  /** Receive only this member's binary frames — or only one named track's (`{ track }`). */
-  subscribeBinary(callback: ParticipantBinaryListener, options?: { track?: string }): () => void
+  /** Receive only this member's binary frames — or one track's: `{ track: 'screen' }` for a
+   *  named track, `{ track: null }` for the default lane only (source-selective, like the
+   *  room-level `subscribeBinary`). */
+  subscribeBinary(callback: ParticipantBinaryListener, options?: { track?: string | null }): () => void
 
   /** This member's metadata changed. */
   onUpdate(callback: (meta: P, prev: P) => void): () => void

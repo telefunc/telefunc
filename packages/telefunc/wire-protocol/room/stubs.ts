@@ -10,10 +10,13 @@ import { ACK_STATUS, encodePublishText } from '../shared-ws.js'
 import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from './server.js'
 import type { ParticipantMeta } from './types.js'
 import {
+  emptyTrackWants,
   errorMessage,
   hasRoomTag,
   roomCtrlKey,
   unframeMemberId,
+  wantsTrack,
+  type BinaryWants,
   type MemberSnapshot,
   type ParticipantStubRequest,
   type ReqOkAck,
@@ -39,8 +42,8 @@ class RoomStubChannel extends ServerBroadcast {
   private readonly _room: ServerRoom
   /** @internal — members the remote client joined through this stub. */
   readonly _stubMembers = new Map<string, { selfDelivery: boolean }>()
-  /** @internal — which members' binary streams the client declared it wants (`sub-binary`). */
-  _binaryWants: { all: boolean; members: Set<string> } = { all: false, members: new Set() }
+  /** @internal — the client's declared binary wants, per member and track (`sub-binary`). */
+  _binaryWants: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
   /** @internal — whether the client subscribes to the whole text lane (the broadcast-sub ctrl). */
   _wantsText = false
   /** @internal — which members' text the client wants without a room-level subscription (`sub-text`). */
@@ -48,9 +51,11 @@ class RoomStubChannel extends ServerBroadcast {
   /** @internal — whether the client holds `onActivity` listeners (`sub-activity`). */
   _wantsActivity = false
 
-  /** @internal */
-  _wantsBinaryFrom(memberId: string): boolean {
-    return this._binaryWants.all || this._binaryWants.members.has(memberId)
+  /** @internal — relay gate: does this client want the (member, track) the frame belongs to? */
+  _wantsBinary(memberId: string, track: string): boolean {
+    if (wantsTrack(this._binaryWants.everyMember, track)) return true
+    const memberWants = this._binaryWants.members[memberId]
+    return memberWants !== undefined && wantsTrack(memberWants, track)
   }
 
   /** @internal */

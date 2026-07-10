@@ -34,7 +34,8 @@ const DEFAULT_PREFIX = 'tf:'
 const HEADER_BYTES = 12
 const U32_RANGE = 0x1_0000_0000
 
-/** KEYS[1]=seq counter, KEYS[2]=broadcast channel, ARGV[1]=payload bytes; returns [seq,ts]. */
+/** KEYS[1]=seq counter, KEYS[2]=broadcast channel, ARGV[1]=payload bytes; returns
+ *  [seq, ts, receivers] — receivers is PUBLISH's return: how many connections got the message. */
 const PUBLISH_LUA = `
 local seq = redis.call('INCR', KEYS[1])
 local t = redis.call('TIME')
@@ -42,8 +43,8 @@ local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 local ts_hi = math.floor(ts / 4294967296)
 local ts_lo = ts - ts_hi * 4294967296
 local header = struct.pack('>I4I4I4', seq, ts_hi, ts_lo)
-redis.call('PUBLISH', KEYS[2], header .. ARGV[1])
-return {seq, ts}
+local receivers = redis.call('PUBLISH', KEYS[2], header .. ARGV[1])
+return {seq, ts, receivers}
 `.trim()
 
 const PUBLISH_CMD = 'tfPublish'
@@ -63,11 +64,11 @@ class RedisTransport implements BroadcastTransport {
     this.subscriber.on('messageBuffer', this._onMessage)
   }
 
-  async send(key: string, payload: string): Promise<{ seq: number; timestamp: number }> {
+  async send(key: string, payload: string): Promise<{ seq: number; timestamp: number; receivers: number }> {
     return this._publish(this.channelKey(key, 't'), this.seqKey(key), textEncoder.encode(payload))
   }
 
-  async sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; timestamp: number }> {
+  async sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; timestamp: number; receivers: number }> {
     return this._publish(this.channelKey(key, 'b'), this.seqKey(key), payload)
   }
 
@@ -115,17 +116,20 @@ class RedisTransport implements BroadcastTransport {
     channelKey: string,
     seqKey: string,
     payload: Uint8Array,
-  ): Promise<{ seq: number; timestamp: number }> {
+  ): Promise<{ seq: number; timestamp: number; receivers: number }> {
     // ioredis 5.x checks `arg instanceof Buffer` to pick its binary path; a raw
     // `Uint8Array` falls into `String(arg)` and gets serialised as a comma-joined
     // string of byte values, corrupting the bytes. `Buffer.from(buf, off, len)`
     // constructs a zero-copy Buffer view over the same ArrayBuffer.
     const buf = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength)
     const reply = await callDefinedCommand(this.publisher, PUBLISH_CMD, [seqKey, channelKey, buf])
-    assert(Array.isArray(reply) && reply.length === 2, 'Publish script returned an unexpected shape')
-    const [seq, timestamp] = reply
-    assert(typeof seq === 'number' && typeof timestamp === 'number', 'Publish script returned non-numeric seq/ts')
-    return { seq, timestamp }
+    assert(Array.isArray(reply) && reply.length === 3, 'Publish script returned an unexpected shape')
+    const [seq, timestamp, receivers] = reply
+    assert(
+      typeof seq === 'number' && typeof timestamp === 'number' && typeof receivers === 'number',
+      'Publish script returned non-numeric seq/ts/receivers',
+    )
+    return { seq, timestamp, receivers }
   }
 
   // ── KV (backs `Room` state) ───────────────────────────────────────────

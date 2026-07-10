@@ -288,9 +288,24 @@ function startDecoding(member) {
 }
 ```
 
-Mic, camera, and screen share are **named tracks** multiplexed over the member's one stream — publish with `{ track }`, subscribe with `{ track }` to receive only that substream, and the `keyFrame` bit rides each frame (`info.keyFrame`) so decoders resync without any hand-rolled envelope. A plain `publishBinary(data)` is the default track and costs one extra byte on the wire.
+Mic, camera, and screen share are **named tracks** multiplexed over the member's one stream — publish with `{ track }`, subscribe with `{ track }` to receive only that substream (`{ track: null }` selects the default lane), and the `keyFrame` bit rides each frame (`info.keyFrame`) so decoders resync without any hand-rolled envelope. A plain `publishBinary(data)` is the default track and costs one extra byte on the wire.
 
-Render only 9 of 500 cameras? Subscribe to those 9 members — the other 491 streams never cross the wire to you, and your server never even pulls them upstream.
+Render only 9 of 500 cameras? Subscribe to those 9 members — the other 491 streams never cross the wire to you, and your server never even pulls them upstream. The same holds per track: stop watching a screen share while staying in the call, and the screen bytes stop flowing to you — and stop being pulled upstream by your server the moment nobody on it watches.
+
+Selectivity ends at the source: each `publishBinary` receipt reports `receivers`, the track's live subscription count. `0` means nobody anywhere wants the stream right now — the signal to stop encoding entirely, so an unwatched screen share costs nothing but its next keyframe when someone tunes back in:
+
+```ts
+// The sharer's encode loop — pause while nobody watches, resume on demand.
+captureAndEncode(screen, async (frame, isKey) => {
+  const { receivers } = await me.publishBinary(frame, { track: 'screen', keyFrame: isKey })
+  if (receivers === 0) encoder.pause() // nobody is watching
+})
+// A keyframe request (e.g. every few seconds while paused) probes for returning viewers:
+setInterval(async () => {
+  if (encoder.paused && (await me.publishBinary(keyframeProbe(), { track: 'screen', keyFrame: true })).receivers > 0)
+    encoder.resume()
+}, 3000)
+```
 
 ### Load history, then go live
 
@@ -442,7 +457,7 @@ type RoomOptions = {
 | `getParticipants()` | All current participants — `Promise<RemoteParticipant[]>` (loads the member list on first need). |
 | `getParticipant(id)` | One participant, or `null` if they're not a member — `Promise<RemoteParticipant \| null>`. |
 | `subscribe(cb)` | Receive all participant messages: `(data, info, from)`. Returns an unsubscribe function. |
-| `subscribeBinary(cb, { track? }?)` | Same, for binary messages — optionally only one named track's. `info` carries `track` and `keyFrame`. |
+| `subscribeBinary(cb, { track? }?)` | Same, for binary messages — optionally one track's only (`'name'`, or `null` for the default lane). Source-selective: unwanted tracks aren't delivered, relayed, or pulled upstream. `info` carries `track` and `keyFrame`. |
 | `onJoin(cb)` / `onLeave(cb)` | A participant joined / left: `(member)` / `(member, cause?)` — `cause` is `undefined` only when the leave was discovered by a roster resync rather than observed as an event. |
 | `onUpdate(cb)` | The room was reconfigured via `Room.update()`: `(meta, prev)`. |
 | `onAnnounce(cb)` | A room-authored announcement (`Room.announce()`) arrived: `(data, info)`. |
@@ -463,7 +478,7 @@ Your own handle, returned by `join()`. Room-wide messages arrive on the room and
 | Method | Description |
 |---|---|
 | `publish(data)` | Publish a message to the whole room. Returns a receipt (`{ key, seq, timestamp }`). |
-| `publishBinary(data, { track?, keyFrame? }?)` | Publish raw binary — optionally on a named track and/or keyframe-flagged. Returns a receipt. |
+| `publishBinary(data, { track?, keyFrame? }?)` | Publish raw binary — optionally on a named track and/or keyframe-flagged. The receipt's `receivers` is the track's live subscription count: `0` = nobody anywhere wants it — pause the encoder (see <Link href="#video-binary-streams">media</Link>). |
 | `send(to, data)` | Send a private message to one participant (or their ID) — nobody else receives it. |
 | `listen(cb)` | Receive private messages addressed to you: `(data, from)` — `from` is the verified sender, `null` for room-authored messages. Returns an unlisten function. |
 | `setMeta(meta)` | Replace your metadata — propagates to all observers in real time. |
@@ -483,7 +498,7 @@ Another room member, as seen through a room.
 | Method | Description |
 |---|---|
 | `subscribe(cb)` | Receive only this member's messages: `(data, info)`. Returns an unsubscribe function. |
-| `subscribeBinary(cb, { track? }?)` | Same, for binary messages — subscribing also starts that member's binary stream flowing to you; `{ track }` narrows it to one named substream. |
+| `subscribeBinary(cb, { track? }?)` | Same, for binary messages — subscribing also starts that member's binary stream flowing to you; `{ track }` narrows it to one substream (`'name'`, or `null` for the default lane), and unsubscribing the last listener of a track stops its bytes at every hop. |
 | `onUpdate(cb)` | This member's metadata changed: `(meta, prev)`. |
 | `onLeave(cb)` | This member left the room: `(cause?)` — as on `Room`'s `onLeave`. |
 
@@ -546,7 +561,7 @@ Each lane travels on its own pub/sub stream, and every one is pay-for-what-you-c
 |---|---|---|
 | Control (joins, leaves, metadata, announcements) | Every observer | Tiny & low-rate — this is all a presence-only holder pays |
 | Text (`publish`) | Per publisher: only who subscribed — to that member, or to the whole room | `messages/s × size` per consuming connection, counting only subscribed senders — a busy chat (20 msg/s × 300 B) is ~6 KB/s |
-| Binary (`publishBinary`) | Per publisher: only who subscribed to that member | Scales with what each client watches, not with room size |
+| Binary (`publishBinary`) | Per (publisher, track): only who subscribed to that member's track | Scales with what each client watches, not with room size — and `receivers: 0` on the receipt tells an unwatched publisher to stop encoding |
 | Private (`send`) | Only the target | Per message |
 | Activity (`onActivity`) | Only badge consumers | ≤ 1 tiny ping per few seconds per active room |
 

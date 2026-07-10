@@ -29,6 +29,8 @@ type ParticipantResult = {
 type BinaryResult = {
   frames: Array<{ size: number; firstByte: number; fromSelf: boolean; track: string | null; keyFrame: boolean }>
   cameraOnly: number[]
+  defaultOnly: number[]
+  camReceivers: number
 }
 
 type GuardResult = {
@@ -119,8 +121,11 @@ function testRoom() {
       for (const frame of result.frames) expect(frame.fromSelf).toBe(true)
       expect(result.frames.map((f) => f.track)).deep.equal([null, null, null, 'camera'])
       expect(result.frames.map((f) => f.keyFrame)).deep.equal([false, false, false, true])
-      // The track-filtered subscription saw only its stream.
+      // Track-filtered subscriptions saw only their stream — `{ track: null }` is the default lane.
       expect(result.cameraOnly).deep.equal([9])
+      expect(result.defaultOnly).deep.equal([1, 2, 3])
+      // The publish ack reports the track's live subscription count (the pause-at-0 signal).
+      expect(result.camReceivers).greaterThanOrEqual(1)
     })
   })
 

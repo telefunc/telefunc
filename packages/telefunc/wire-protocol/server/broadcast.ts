@@ -13,8 +13,10 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
 import type { WirePublishInfo } from '../shared-ws.js'
 
-/** Transport-level publish result. */
-type BroadcastPublishResult = WirePublishInfo & { meta?: Record<string, unknown> }
+/** Transport-level publish result. `receivers` is the key's live subscription count at the
+ *  transport hop — `0` means nobody anywhere is subscribed (see `ChannelPublishAck.receivers`);
+ *  absent when the transport can't count. */
+type BroadcastPublishResult = WirePublishInfo & { meta?: Record<string, unknown>; receivers?: number }
 
 /** Callback for delivering a broadcast message to a subscriber. */
 type BroadcastOnMessage = (serialized: string, info: WirePublishInfo) => void
@@ -46,16 +48,16 @@ type BroadcastAdapter = {
  * Implement these 4 methods to get a full BroadcastAdapter via `new DefaultBroadcastAdapter(transport)`.
  * Subscriber multiplexing and lifecycle are handled for you.
  */
+type TransportSendResult = { seq: number; timestamp: number; receivers?: number }
+
 type BroadcastTransport = {
-  /** Send a text message. Must return the assigned seq and timestamp. */
-  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  /** Send a text message. Must return the assigned seq and timestamp; report `receivers` (the
+   *  key's subscriber count) when the backend can count — it powers pause-at-0 publishers. */
+  send(key: string, payload: string): TransportSendResult | Promise<TransportSendResult>
   /** Listen for text messages on a key. Called at most once per key. Return an unsubscribe function. */
   listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
-  /** Send a binary message. Must return the assigned seq and timestamp. */
-  sendBinary(
-    key: string,
-    payload: Uint8Array,
-  ): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  /** Send a binary message. Same contract as `send`. */
+  sendBinary(key: string, payload: Uint8Array): TransportSendResult | Promise<TransportSendResult>
   /** Listen for binary messages on a key. Called at most once per key. Return an unsubscribe function. */
   listenBinary(
     key: string,
@@ -232,15 +234,9 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     this.keySeqs.set(key, seq)
     const timestamp = Date.now()
     const info = { seq, timestamp }
-    let delivered = 0
     const set = subs.get(key)
-    if (set) {
-      for (const onMessage of set) {
-        delivered++
-        onMessage(data, info)
-      }
-    }
-    return { seq, timestamp, meta: { delivered, transport: 'in-memory' } }
+    if (set) for (const onMessage of set) onMessage(data, info)
+    return { seq, timestamp, receivers: set?.size ?? 0, meta: { transport: 'in-memory' } }
   }
 
   // ── Shared ──

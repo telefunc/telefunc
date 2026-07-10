@@ -14,6 +14,7 @@ import {
   normalizeJoinOptions,
   sizeFromWire,
   unframeMemberId,
+  type BinaryWants,
   type InboxMessage,
   type MemberWants,
   type ParticipantStubMetadata,
@@ -166,7 +167,7 @@ class ClientRoom implements Room {
   subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._state.subscribe(callback)
   }
-  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string }): () => void {
+  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string | null }): () => void {
     return this._state.subscribeBinary(callback, options)
   }
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
@@ -356,11 +357,11 @@ class ClientRoom implements Room {
       void this._stub.send({ __r: 'sub-activity', on: wantActivity }, { ack: false }).catch(() => {})
     }
 
-    const wants: MemberWants = state.binaryWants()
-    const encoded = wants.all ? 'all' : [...wants.members].sort().join(',')
+    const wants = state.binaryWants()
+    const encoded = encodeBinaryWants(wants)
     if (encoded === this._lastBinaryWantsSent) return
     this._lastBinaryWantsSent = encoded
-    void this._stub.send({ __r: 'sub-binary', all: wants.all, members: wants.members }, { ack: false }).catch(() => {})
+    void this._stub.send({ __r: 'sub-binary', wants }, { ack: false }).catch(() => {})
   }
 }
 
@@ -559,6 +560,16 @@ function unwrapPublishAck(ack: unknown): ChannelPublishAck {
 function standaloneLeftCause(msg: { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }): LeaveCause {
   const type = msg.cause ?? 'left'
   return msg.reason === undefined ? { type } : { type, reason: msg.reason }
+}
+
+/** Canonical (order-independent) form of a binary want — the dedupe key for `sub-binary`.
+ *  The empty want encodes to `''`, matching the nothing-sent-yet initial state. */
+function encodeBinaryWants(wants: BinaryWants): string {
+  const encodeTracks = (w: { all: boolean; tracks: string[] }) => (w.all ? '*' : [...w.tracks].sort().join(','))
+  const members = Object.entries(wants.members)
+    .map(([id, w]) => `${id}=${encodeTracks(w)}`)
+    .sort()
+  return [encodeTracks(wants.everyMember), ...members].join(';')
 }
 
 function reportRoomError(err: unknown): void {

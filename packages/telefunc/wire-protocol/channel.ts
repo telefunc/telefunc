@@ -31,7 +31,14 @@ type ChannelPublishInfo = {
   /** Server timestamp, Unix epoch milliseconds. */
   timestamp: number
 }
-type ChannelPublishAck = ChannelPublishInfo & { meta?: ChannelPublishMeta }
+type ChannelPublishAck = ChannelPublishInfo & {
+  meta?: ChannelPublishMeta
+  /** Live subscriptions on the published key at its transport hop (in-memory subscriber count,
+   *  redis `PUBLISH` receivers, Cloudflare DO presence). Because subscriptions are want-driven,
+   *  `0` truthfully means nobody anywhere wants this stream — the signal to pause an encoder.
+   *  Not a viewer count (one hop can serve many), and absent when a custom transport can't count. */
+  receivers?: number
+}
 
 function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPublishInfo {
   return { key, seq, timestamp }
