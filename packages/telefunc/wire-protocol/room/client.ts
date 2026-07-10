@@ -7,14 +7,12 @@ import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import {
   leaveCauseFromWire,
-  ParticipantBase,
-  RoomState,
   frameWithMemberId,
   hasRoomTag,
   normalizeJoinOptions,
   sizeFromWire,
   unframeMemberId,
-  type InboxMessage,
+  type BinaryWants,
   type MemberWants,
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
@@ -29,7 +27,9 @@ import {
   type RoomActivityEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
-} from './shared.js'
+} from './protocol.js'
+import { RoomState } from './state.js'
+import { ParticipantBase, type InboxMessage } from './participant.js'
 import type {
   BinaryPublishOptions,
   RoomBinaryListener,
@@ -59,9 +59,10 @@ class ClientRoom implements Room {
   private readonly _stub: ClientBroadcast
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
-  private _lastBinaryWantsSent = ''
-  private _lastTextWantsSent = ''
-  private _lastActivityWantSent = false
+  /** Wants already declared to the server, by lane. Every lane's declaration is a full
+   *  replace, re-sent only when its canonical encoding changes — `''` encodes "nothing
+   *  wanted" on every lane, which is also the nothing-declared-yet initial state. */
+  private readonly _declaredWants = new Map<string, string>()
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
    *  join round-trip) — held bounded (count-capped, drop-oldest), flushed on registration. */
   private _pendingDms: Array<InboxMessage & { to: string }> | null = null
@@ -166,7 +167,7 @@ class ClientRoom implements Room {
   subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
     return this._state.subscribe(callback)
   }
-  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string }): () => void {
+  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string | null }): () => void {
     return this._state.subscribeBinary(callback, options)
   }
   onJoin(callback: (member: RemoteParticipant) => void): () => void {
@@ -215,12 +216,12 @@ class ClientRoom implements Room {
 
   /** @internal — the envelope sent upward is a claim: the server validates `from` against this
    *  stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
-  async _publishData(from: string, data: unknown): Promise<ChannelPublishAck> {
+  async _publishText(from: string, data: unknown): Promise<ChannelPublishAck> {
     return await this._stub.publish({ __r: 'data', from, data } satisfies RoomDataPublish)
   }
 
   /** @internal */
-  async _publishBinaryData(framed: Uint8Array): Promise<ChannelPublishAck> {
+  async _publishBinaryFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
     return await this._stub.publishBinary(framed)
   }
 
@@ -331,36 +332,32 @@ class ClientRoom implements Room {
     this._localParticipants.clear()
   }
 
-  /** Declare this holder's wants to the server. Both data lanes are member-selective:
-   *  room-level text listeners ride the standard broadcast subscription — declared
-   *  synchronously, like `subscribe()`, so same-connection FIFO guarantees a publish right
-   *  after subscribing gets its own frame back — while participant-scoped text listeners
-   *  declare a `sub-text` member set and binary listeners a `sub-binary` one, each re-sent
-   *  only when it changes. */
+  /** Declare this holder's wants to the server, one declaration per lane. The room-level text
+   *  want rides the standard broadcast subscription — declared synchronously, like
+   *  `subscribe()`, so same-connection FIFO guarantees a publish right after subscribing gets
+   *  its own frame back; everything else is a keyed `_declareWant`. */
   private _syncWants(): void {
     const state = this._state
     const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
     this._stub._setWireTextSubscribed(text.all)
-
     if (state.closed) return // stub is dead — nothing to declare
-    const textEncoded = text.all ? '' : [...text.members].sort().join(',')
-    if (textEncoded !== this._lastTextWantsSent) {
-      this._lastTextWantsSent = textEncoded
-      // A room-level subscription supersedes the member set — clear it server-side.
-      void this._stub.send({ __r: 'sub-text', members: text.all ? [] : text.members }, { ack: false }).catch(() => {})
-    }
 
+    // A room-level text subscription supersedes the member set — clear it server-side.
+    this._declareWant('text', text.all ? '' : [...text.members].sort().join(','), {
+      __r: 'sub-text',
+      members: text.all ? [] : text.members,
+    })
     const wantActivity = state.activityListenerCount > 0
-    if (wantActivity !== this._lastActivityWantSent) {
-      this._lastActivityWantSent = wantActivity
-      void this._stub.send({ __r: 'sub-activity', on: wantActivity }, { ack: false }).catch(() => {})
-    }
+    this._declareWant('activity', wantActivity ? 'on' : '', { __r: 'sub-activity', on: wantActivity })
+    const binary = state.binaryWants()
+    this._declareWant('binary', encodeBinaryWants(binary), { __r: 'sub-binary', wants: binary })
+  }
 
-    const wants: MemberWants = state.binaryWants()
-    const encoded = wants.all ? 'all' : [...wants.members].sort().join(',')
-    if (encoded === this._lastBinaryWantsSent) return
-    this._lastBinaryWantsSent = encoded
-    void this._stub.send({ __r: 'sub-binary', all: wants.all, members: wants.members }, { ack: false }).catch(() => {})
+  /** Send one lane's declaration iff its canonical encoding changed since last declared. */
+  private _declareWant(lane: string, encoded: string, request: RoomStubRequest): void {
+    if ((this._declaredWants.get(lane) ?? '') === encoded) return
+    this._declaredWants.set(lane, encoded)
+    void this._stub.send(request, { ack: false }).catch(() => {})
   }
 }
 
@@ -405,12 +402,12 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
   async publish(data: unknown): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishData(this.id, data)
+    return await this._room._publishText(this.id, data)
   }
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishBinaryData(frameWithMemberId(this.id, data, options))
+    return await this._room._publishBinaryFramed(frameWithMemberId(this.id, data, options))
   }
 
   async send(to: string | Sender, data: unknown): Promise<void> {
@@ -559,6 +556,16 @@ function unwrapPublishAck(ack: unknown): ChannelPublishAck {
 function standaloneLeftCause(msg: { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }): LeaveCause {
   const type = msg.cause ?? 'left'
   return msg.reason === undefined ? { type } : { type, reason: msg.reason }
+}
+
+/** Canonical (order-independent) form of a binary want — the dedupe key for `sub-binary`.
+ *  The empty want encodes to `''`, matching the nothing-sent-yet initial state. */
+function encodeBinaryWants(wants: BinaryWants): string {
+  const encodeTracks = (w: { all: boolean; tracks: string[] }) => (w.all ? '*' : [...w.tracks].sort().join(','))
+  const members = Object.entries(wants.members)
+    .map(([id, w]) => `${id}=${encodeTracks(w)}`)
+    .sort()
+  return [encodeTracks(wants.everyMember), ...members].join(';')
 }
 
 function reportRoomError(err: unknown): void {

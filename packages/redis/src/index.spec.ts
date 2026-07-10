@@ -60,12 +60,17 @@ class FakeIoredis {
     ): Promise<unknown> => Promise.resolve(this.runPublishScript(args))
   }
 
-  async subscribe(..._channels: string[]): Promise<number> {
-    return _channels.length
+  /** Channels the (shared) subscriber connection is subscribed to — backs PUBLISH's receiver count. */
+  private readonly subscribedChannels = new Set<string>()
+
+  async subscribe(...channels: string[]): Promise<number> {
+    for (const channel of channels) this.subscribedChannels.add(channel)
+    return this.subscribedChannels.size
   }
 
-  async unsubscribe(..._channels: string[]): Promise<number> {
-    return 0
+  async unsubscribe(...channels: string[]): Promise<number> {
+    for (const channel of channels) this.subscribedChannels.delete(channel)
+    return this.subscribedChannels.size
   }
 
   on(_event: 'messageBuffer', listener: (channel: Uint8Array, message: Uint8Array) => void): this {
@@ -79,7 +84,7 @@ class FakeIoredis {
 
   // ── Private: emulate the Lua publish script's effect ─────────────────
 
-  private runPublishScript(args: unknown[]): [number, number] {
+  private runPublishScript(args: unknown[]): [number, number, number] {
     const [seqKey, channelKey, payload] = args as [string, string, Buffer]
     const seq = (this.counters.get(seqKey) ?? 0) + 1
     this.counters.set(seqKey, seq)
@@ -87,7 +92,8 @@ class FakeIoredis {
     const frame = encodeFrame(seq, ts, payload)
     const channelBytes = new TextEncoder().encode(channelKey)
     for (const cb of this.listeners) cb(channelBytes, frame)
-    return [seq, ts]
+    // Like real PUBLISH: how many subscriber connections got it — the fake has one.
+    return [seq, ts, this.subscribedChannels.has(channelKey) ? 1 : 0]
   }
 }
 

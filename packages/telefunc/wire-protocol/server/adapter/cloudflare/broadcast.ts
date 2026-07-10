@@ -527,6 +527,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const timestamp = Date.now()
     const info = { seq, timestamp }
     const activeBuckets = Array.from(presenceByBucket.keys())
+    let receivers = 0
+    for (const doNames of presenceByBucket.values()) receivers += doNames.length
     await Promise.all(
       activeBuckets.map((activeBucket) =>
         this.getBucketCoordinatorStub(key, activeBucket).telefuncBroadcastPublish({
@@ -540,7 +542,9 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
         }),
       ),
     )
-    return { seq, timestamp, meta: { authorityBucket, fanoutBuckets: activeBuckets } }
+    // `receivers` counts subscribed DOs (presence entries) — the same want-driven zero
+    // semantics as the other transports: 0 ⟺ no subscriber anywhere.
+    return { seq, timestamp, receivers, meta: { authorityBucket, fanoutBuckets: activeBuckets } }
   }
 
   /**

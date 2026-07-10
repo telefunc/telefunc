@@ -234,7 +234,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private _publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
     assert(this._adapter)
     const toAck = (r: BroadcastPublishResult): ChannelPublishAck =>
-      Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), { meta: r.meta })
+      Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), {
+        meta: r.meta,
+        ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
+      })
     const result = this._adapter.publish(this.key, serialized)
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)
@@ -243,7 +246,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private _publishBinaryBroadcast(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assert(this._adapter)
     const toAck = (r: BroadcastPublishResult): ChannelPublishAck =>
-      Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), { meta: r.meta })
+      Object.assign(makePublishInfo(this.key, r.seq, r.timestamp), {
+        meta: r.meta,
+        ...(r.receivers === undefined ? {} : { receivers: r.receivers }),
+      })
     const result = this._adapter.publishBinary(this.key, data)
     if (isPromise(result)) return result.then(toAck)
     return toAck(result)

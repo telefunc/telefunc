@@ -13,7 +13,7 @@ import {
   SERIALIZER_PREFIX_ROOM_REMOTE,
 } from '../../constants.js'
 import { ClientRoom, ClientStandaloneParticipant } from '../../room/client.js'
-import { roomCtrlKey } from '../../room/shared.js'
+import { roomCtrlKey } from '../../room/protocol.js'
 
 const roomReviver: ReviverType<RoomContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,

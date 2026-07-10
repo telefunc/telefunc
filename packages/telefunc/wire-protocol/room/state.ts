@@ -1,0 +1,656 @@
+export { RoomState, remoteBacking }
+
+import { assertUsage } from '../../utils/assert.js'
+import type { ChannelPublishInfo } from '../channel.js'
+import {
+  DEFAULT_TRACK,
+  emptyTrackWants,
+  stampNewer,
+  type BinaryWants,
+  type MemberSnapshot,
+  type MemberWants,
+  type TrackWants,
+} from './protocol.js'
+import type {
+  BinaryFrameInfo,
+  LeaveCause,
+  ParticipantMeta,
+  RemoteParticipant,
+  RoomMeta,
+  RoomSnapshotView,
+  Sender,
+} from './types.js'
+
+// ---------------------------------------------------------------------------
+// RoomState — the local view of a room, driven by the event stream
+// ---------------------------------------------------------------------------
+
+type ListenerKind = 'data' | 'binary' | 'event' | 'activity'
+
+/** A binary listener's track filter: `undefined` = every track, `null` = the default lane only,
+ *  a name = that track only. */
+type TrackFilter = string | null | undefined
+
+type MemberEntry = {
+  id: string
+  meta: ParticipantMeta
+  joinedAt: number
+  identity: string | null
+  /** Latest applied meta revision — stale and echoed `p-meta` events are absorbed. */
+  metaSeq: number
+  /** Named tracks the member is known to publish — grown by `track` events and rosters,
+   *  never shrunk (tracks live as long as the member). Drives all-track key subscriptions. */
+  tracks: Set<string>
+  remote: RemoteParticipant
+  dataCbs: Array<(data: unknown, info: ChannelPublishInfo) => unknown>
+  binaryCbs: Array<{
+    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
+    track: TrackFilter
+  }>
+  updateCbs: Array<(meta: ParticipantMeta, prev: ParticipantMeta) => void>
+  leaveCbs: Array<(cause?: LeaveCause) => void>
+}
+
+type RoomStateOptions = {
+  roomId: string
+  meta: RoomMeta
+  size: number
+  /** Either the authoritative roster, or just its size — a lazy view seeds with `{ count }`
+   *  and learns the members from its first `reconcile()` (KV read / streamed roster). */
+  seed: { members: MemberSnapshot[] } | { count: number }
+  /** The LWW stamp of the config `meta`/`size` were read from (see `applyRoomUpdate`). */
+  updateStamp: { at: number; by: string }
+  closed?: boolean
+  /** Fired whenever the number of attached listeners changes — lets the owner
+   *  (de)activate its event source (adapter subscription, wire subscription). */
+  onListenersChanged: () => void
+  /** A user callback threw — the owner decides how to report it. */
+  onCallbackError: (err: unknown) => void
+}
+
+/**
+ * The local, event-driven view of a room: membership, metadata, and every user-facing callback.
+ * Server and client share this class so event semantics are identical on both sides; only the
+ * event *source* differs (adapter subscription vs relayed wire frames).
+ *
+ * Event application is idempotent — a `join` for a known member or a `leave` for an unknown one
+ * is absorbed silently. This lets owners seed state from a snapshot and apply a concurrently
+ * produced event stream without double-firing.
+ */
+/** Stamped (non-enumerably) on every `RemoteParticipant` a `RoomState` mints — the backing
+ *  that lets the serializer turn a view object back into (room, member) without a registry. */
+const ROOM_REMOTE_BRAND: unique symbol = Symbol.for('telefunc.RoomRemoteParticipant')
+
+type RemoteBacking = { state: RoomState; entry: MemberEntry }
+
+/** The `RoomState` backing of a minted `RemoteParticipant` — `null` for anything else. */
+function remoteBacking(value: unknown): RemoteBacking | null {
+  return typeof value === 'object' && value !== null && ROOM_REMOTE_BRAND in value
+    ? ((value as Record<typeof ROOM_REMOTE_BRAND, RemoteBacking>)[ROOM_REMOTE_BRAND] as RemoteBacking)
+    : null
+}
+
+class RoomState {
+  /** @internal — the owning `ServerRoom`/`ClientRoom`, for serialization backing. */
+  _owner: unknown = null
+  readonly roomId: string
+  meta: RoomMeta
+  size: number
+  closed: boolean
+  /** Bumped on every membership change — guards async KV reconciles against going stale. */
+  membershipVersion = 0
+  /** Bumped on every observable change (membership, participant meta, room config, closure) —
+   *  drives `onChange`/`snapshot()` cache invalidation. */
+  private _stateVersion = 0
+  private _snapshotCache: { version: number; value: RoomSnapshotView } | null = null
+  private readonly _changeCbs: Array<() => void> = []
+
+  private readonly _members = new Map<string, MemberEntry>()
+  private readonly _onListenersChanged: () => void
+  private readonly _onCallbackError: (err: unknown) => void
+
+  private readonly _roomDataCbs: Array<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> = []
+  private readonly _roomBinaryCbs: Array<{
+    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown
+    track: TrackFilter
+  }> = []
+  private readonly _joinCbs: Array<(member: RemoteParticipant) => void> = []
+  private readonly _leaveCbs: Array<(member: RemoteParticipant, cause?: LeaveCause) => void> = []
+  private readonly _updateCbs: Array<(meta: RoomMeta, prev: RoomMeta) => void> = []
+  private readonly _emptyCbs: Array<() => void> = []
+  private readonly _fullCbs: Array<() => void> = []
+  private readonly _closeCbs: Array<() => void> = []
+  private readonly _announceCbs: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
+  private readonly _activityCbs: Array<(info: { timestamp: number }) => void> = []
+
+  private _eventListenerCount = 0
+  private _dataListenerCount = 0
+  private _binaryListenerCount = 0
+  private _activityListenerCount = 0
+  private _wasFull: boolean
+  private _updateStamp: { at: number; by: string }
+  private _rosterKnown: boolean
+  private _seedCount = 0
+
+  constructor(opts: RoomStateOptions) {
+    this.roomId = opts.roomId
+    this.meta = opts.meta
+    this.size = opts.size
+    this.closed = opts.closed === true
+    this._updateStamp = opts.updateStamp
+    this._onListenersChanged = opts.onListenersChanged
+    this._onCallbackError = opts.onCallbackError
+    if ('members' in opts.seed) {
+      this._rosterKnown = true
+      for (const member of opts.seed.members) this._createEntry(member)
+    } else {
+      this._rosterKnown = false
+      this._seedCount = opts.seed.count
+    }
+    this._wasFull = this.isFull
+  }
+
+  // ── Reads ──
+
+  /** Exact once the roster is known (seeded or reconciled); before that, the seeded count
+   *  adjusted by the events this view applied since. */
+  get count(): number {
+    return this._rosterKnown ? this._members.size : this._seedCount
+  }
+
+  /** Whether this view holds the authoritative member list (vs just a count). */
+  get rosterKnown(): boolean {
+    return this._rosterKnown
+  }
+
+  get isFull(): boolean {
+    return this.count >= this.size
+  }
+
+  /** Listeners needing the control stream (presence, lifecycle). */
+  get eventListenerCount(): number {
+    return this._eventListenerCount
+  }
+  /** Listeners needing the text data stream. */
+  get dataListenerCount(): number {
+    return this._dataListenerCount
+  }
+  /** Listeners needing the binary data stream. */
+  get binaryListenerCount(): number {
+    return this._binaryListenerCount
+  }
+  /** Listeners needing the activity trickle. */
+  get activityListenerCount(): number {
+    return this._activityListenerCount
+  }
+
+  /** Which (member, track) binary streams this holder needs delivered — drives the wire/adapter
+   *  subscriptions on both sides (client declares it, server aggregates it per stub). */
+  binaryWants(): BinaryWants {
+    const members: Record<string, TrackWants> = {}
+    for (const entry of this._members.values()) {
+      if (entry.binaryCbs.length > 0) members[entry.id] = trackWantsOf(entry.binaryCbs)
+    }
+    return { everyMember: trackWantsOf(this._roomBinaryCbs), members }
+  }
+
+  /** Named tracks the member is known to publish — `[]` for unknown members. */
+  memberTracks(id: string): string[] {
+    const entry = this._members.get(id)
+    return entry ? [...entry.tracks] : []
+  }
+
+  /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist,
+   *  otherwise exactly the members with participant-scoped listeners. */
+  textWants(): MemberWants {
+    if (this._roomDataCbs.length > 0) return { all: true, members: [] }
+    const members: string[] = []
+    for (const entry of this._members.values()) {
+      if (entry.dataCbs.length > 0) members.push(entry.id)
+    }
+    return { all: false, members }
+  }
+
+  getRemote(id: string): RemoteParticipant | null {
+    return this._members.get(id)?.remote ?? null
+  }
+
+  listRemotes(): RemoteParticipant[] {
+    return [...this._members.values()].map((entry) => entry.remote)
+  }
+
+  /** Member IDs currently known — drives isolated-mode per-member key subscriptions. */
+  listMemberIds(): string[] {
+    return [...this._members.keys()]
+  }
+
+  snapshotMembers(): MemberSnapshot[] {
+    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq, identity, tracks }) => ({
+      id,
+      meta,
+      joinedAt,
+      metaSeq,
+      identity,
+      ...(tracks.size === 0 ? {} : { tracks: [...tracks] }),
+    }))
+  }
+
+  /** Revival side of a serialized `RemoteParticipant`: the live view wins when it already knows
+   *  the member; otherwise the entry is seeded silently from the snapshot — no events fire, no
+   *  count adjustment (the seed count already included the member), and the streamed roster
+   *  reconciles it like any other pre-roster knowledge. */
+  ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
+    const existing = this._members.get(snap.id)
+    if (existing) return existing.remote
+    const remote = this._createEntry(snap).remote
+    this._bumpState()
+    return remote
+  }
+
+  // ── Listener registration (all return an unlisten function) ──
+
+  subscribe(cb: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {
+    return this._register(this._roomDataCbs, cb, 'data')
+  }
+  subscribeBinary(
+    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
+    opts?: { track?: string | null },
+  ): () => void {
+    return this._register(this._roomBinaryCbs, { cb, track: normalizeTrackFilter(opts) }, 'binary')
+  }
+  onJoin(cb: (member: RemoteParticipant) => void): () => void {
+    return this._register(this._joinCbs, cb, 'event')
+  }
+  onLeave(cb: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
+    return this._register(this._leaveCbs, cb, 'event')
+  }
+  onUpdate(cb: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
+    return this._register(this._updateCbs, cb, 'event')
+  }
+  onEmpty(cb: () => void): () => void {
+    return this._register(this._emptyCbs, cb, 'event')
+  }
+  onFull(cb: () => void): () => void {
+    return this._register(this._fullCbs, cb, 'event')
+  }
+  onClose(cb: () => void): () => void {
+    return this._register(this._closeCbs, cb, 'event')
+  }
+
+  onChange(cb: () => void): () => void {
+    return this._register(this._changeCbs, cb, 'event')
+  }
+
+  onActivity(cb: (info: { timestamp: number }) => void): () => void {
+    return this._register(this._activityCbs, cb, 'activity')
+  }
+
+  applyActivity(at: number): void {
+    this._fireAll(this._activityCbs, { timestamp: at })
+  }
+
+  /** A member published its first frame on a new named track (idempotent — echoes, rosters,
+   *  and the owner's local apply all land here). Unknown members are absorbed like any other
+   *  pre-roster event. */
+  applyTrack(id: string, track: string): void {
+    this._members.get(id)?.tracks.add(track)
+  }
+
+  /** Immutable view of the whole room — cached by state version, so the reference is stable
+   *  until something actually changes (the `useSyncExternalStore` contract). */
+  snapshot(): RoomSnapshotView {
+    if (this._snapshotCache?.version === this._stateVersion) return this._snapshotCache.value
+    const participants = Object.freeze(
+      [...this._members.values()].map(({ id, identity, meta, joinedAt }) =>
+        Object.freeze({ id, identity, meta, joinedAt }),
+      ),
+    )
+    const value = Object.freeze({
+      id: this.roomId,
+      meta: this.meta,
+      size: this.size,
+      count: this.count,
+      isClosed: this.closed,
+      participants,
+    })
+    this._snapshotCache = { version: this._stateVersion, value }
+    return value
+  }
+
+  /** State changed observably — invalidate the snapshot and tell `onChange` subscribers. */
+  private _bumpState(): void {
+    this._stateVersion++
+    this._fireAll(this._changeCbs)
+  }
+
+  /** Membership changed: guard async KV reconciles against going stale, and narrate the change. */
+  private _bumpMembership(): void {
+    this.membershipVersion++
+    this._bumpState()
+  }
+  onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
+    return this._register(this._announceCbs, cb, 'event')
+  }
+
+  // ── Event application ──
+
+  applyJoin(id: string, meta: ParticipantMeta, joinedAt: number, identity?: string | null): void {
+    if (this.closed) return
+    const existing = this._members.get(id)
+    if (existing) {
+      // Echo of a member this side already applied (or got via snapshot) — absorb.
+      existing.meta = meta
+      existing.joinedAt = joinedAt
+      return
+    }
+    const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity })
+    this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
+    this._bumpMembership()
+    this._fireAll(this._joinCbs, entry.remote)
+    this._checkFull()
+  }
+
+  applyLeave(id: string, cause?: LeaveCause): void {
+    const entry = this._members.get(id)
+    if (!entry) return // unknown here: absorbed (pre-reconcile misses correct at reconcile)
+    this._members.delete(id)
+    this._seedCount = Math.max(0, this._seedCount - 1)
+    this._bumpMembership()
+    this._fireAll(entry.leaveCbs, cause)
+    this._fireAll(this._leaveCbs, entry.remote, cause)
+    this._releaseEntryListeners(entry)
+    this._wasFull = this.isFull
+    if (this._members.size === 0) this._fireAll(this._emptyCbs)
+  }
+
+  /** Applies only revisions newer than the entry's — the origin's echo (same seq) and events
+   *  arriving behind a fresher reconcile are absorbed. */
+  applyParticipantMeta(id: string, meta: ParticipantMeta, prev: ParticipantMeta, seq: number): void {
+    const entry = this._members.get(id)
+    if (!entry || seq <= entry.metaSeq) return
+    entry.metaSeq = seq
+    entry.meta = meta
+    this._bumpState()
+    this._fireAll(entry.updateCbs, meta, prev)
+  }
+
+  /** Last-writer-wins by `(at, by)`: concurrent `Room.update()`s converge to the same winner on
+   *  every node regardless of arrival order, and the origin's echo (same stamp) is absorbed. */
+  applyRoomUpdate(meta: RoomMeta, prev: RoomMeta, size: number, at: number, by: string): void {
+    if (!stampNewer({ at, by }, this._updateStamp)) return
+    this._updateStamp = { at, by }
+    this.meta = meta
+    this.size = size
+    this._bumpState()
+    this._fireAll(this._updateCbs, meta, prev)
+    this._checkFull()
+  }
+
+  /** The stamp of the config this view currently reflects (serialized into room snapshots). */
+  get updateStamp(): { at: number; by: string } {
+    return this._updateStamp
+  }
+
+  /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`.
+   *  Room-level `onLeave`/`onEmpty` intentionally don't fire — `onClose` is the signal. */
+  applyClosed(cause: LeaveCause = { type: 'closed' }): void {
+    if (this.closed) return
+    this.closed = true
+    this._rosterKnown = true // authoritatively empty
+    this._bumpMembership()
+    for (const entry of this._members.values()) {
+      this._fireAll(entry.leaveCbs, cause)
+      this._releaseEntryListeners(entry)
+    }
+    this._members.clear()
+    // Second bump: the clear above is observable too — without it, an `onChange` subscriber
+    // that snapshotted between the bumps (leave callbacks run user code) would keep a cache
+    // that still lists the departed members at the current version.
+    this._bumpState()
+    this._fireAll(this._closeCbs)
+  }
+
+  applyAnnounce(data: unknown, info: ChannelPublishInfo): void {
+    this._fireAll(this._announceCbs, data, info)
+  }
+
+  /** Messages never wait on the roster: `from` is the live `RemoteParticipant` when this view
+   *  knows the sender, else the `{ id, meta }` snapshot the sender's node stamped into the
+   *  envelope. Control and data travel on separate lanes, so a message can beat its sender's
+   *  join — identity is in the message, delivery is immediate, and nothing drops. */
+  applyData(
+    from: string,
+    fromMeta: ParticipantMeta,
+    fromIdentity: string | null,
+    data: unknown,
+    info: ChannelPublishInfo,
+    suppress: boolean,
+  ): void {
+    if (suppress) return
+    const entry = this._members.get(from)
+    this._fireAll(this._roomDataCbs, data, info, entry?.remote ?? { id: from, meta: fromMeta, identity: fromIdentity })
+    if (entry) this._fireAll(entry.dataCbs, data, info)
+  }
+
+  /** Binary frames carry only the sender's ID — a pre-join frame surfaces as `{ id, meta: {} }`
+   *  (rare: binary pipelines attach per member via `onJoin`, so the roster is normally ahead).
+   *  `track`/`key` come from the frame header; listeners with a `track` filter receive only
+   *  that track's frames. */
+  applyBinary(
+    from: string,
+    payload: Uint8Array,
+    track: string | null,
+    keyFrame: boolean,
+    info: ChannelPublishInfo,
+    suppress: boolean,
+  ): void {
+    if (suppress) return
+    const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, keyFrame }
+    const entry = this._members.get(from)
+    const sender = entry?.remote ?? { id: from, meta: {}, identity: null }
+    this._fireTrackFiltered(this._roomBinaryCbs, track, (cb) => cb(payload, frameInfo, sender))
+    if (entry) this._fireTrackFiltered(entry.binaryCbs, track, (cb) => cb(payload, frameInfo))
+  }
+
+  /** Fire the listeners whose track filter admits `track` (`undefined` = every track). */
+  private _fireTrackFiltered<CB>(
+    cbs: Array<{ cb: CB; track: TrackFilter }>,
+    track: string | null,
+    invoke: (cb: CB) => unknown,
+  ): void {
+    for (const { cb, track: want } of [...cbs]) {
+      if (want !== undefined && want !== track) continue
+      try {
+        invoke(cb)
+      } catch (err) {
+        this._onCallbackError(err)
+      }
+    }
+  }
+
+  /** Resync against an authoritative membership snapshot. The first reconcile is the roster
+   *  *load* and is silent (the documented pattern reads `getParticipants()` and then follows
+   *  events — narrating the load would double-render it). Every later reconcile is discovered
+   *  *drift*, and an observed view never mutates silently: the diff replays through the normal
+   *  appliers, so `onJoin`/`onLeave`/`onUpdate` fire exactly once per real change — whichever
+   *  path (event or reconcile) learns of it first, the other is absorbed as an echo. Returns
+   *  whether anything drifted, so the owner can re-sync downstream views (client stubs). */
+  reconcile(members: MemberSnapshot[]): boolean {
+    if (!this._rosterKnown) {
+      // First load: silent — but entries can already exist (pre-roster join events, revived
+      // views). Those objects must survive: listeners hang off them and revived handles must
+      // stay `===` with the view. Keep the object, refresh the facts; entries the authoritative
+      // roster doesn't know left before the load — their leave is narrated like any other.
+      this._rosterKnown = true
+      const seen = new Set<string>()
+      for (const member of members) {
+        seen.add(member.id)
+        const existing = this._members.get(member.id)
+        if (!existing) {
+          this._createEntry(member)
+          continue
+        }
+        if (member.metaSeq > existing.metaSeq) {
+          existing.meta = member.meta
+          existing.metaSeq = member.metaSeq
+        }
+        existing.joinedAt = member.joinedAt
+        for (const track of member.tracks ?? []) existing.tracks.add(track)
+      }
+      for (const id of [...this._members.keys()]) {
+        if (!seen.has(id)) this.applyLeave(id)
+      }
+      this._wasFull = this.isFull
+      // Bump strictly AFTER the mutations: `_bumpState()` fires `onChange` synchronously, and a
+      // subscriber may synchronously call `snapshot()` (the documented `useSyncExternalStore`
+      // pairing) — bumping first would let it cache an empty roster under the new version, and
+      // the silent entry creation above (which never bumps on its own) would leave that cache
+      // stale forever.
+      this._bumpMembership()
+      return false
+    }
+
+    let drifted = false
+    const seen = new Set<string>()
+    for (const member of members) {
+      seen.add(member.id)
+      const entry = this._members.get(member.id)
+      if (!entry) {
+        this.applyJoin(member.id, member.meta, member.joinedAt, member.identity)
+        const created = this._members.get(member.id)
+        if (created) {
+          created.metaSeq = member.metaSeq
+          for (const track of member.tracks ?? []) created.tracks.add(track)
+        }
+        drifted = true
+      } else {
+        if (member.metaSeq > entry.metaSeq) {
+          this.applyParticipantMeta(member.id, member.meta, entry.meta, member.metaSeq)
+          drifted = true
+        }
+        entry.joinedAt = member.joinedAt
+        for (const track of member.tracks ?? []) entry.tracks.add(track)
+      }
+    }
+    for (const id of [...this._members.keys()]) {
+      if (!seen.has(id)) {
+        this.applyLeave(id)
+        drifted = true
+      }
+    }
+    // After the mutations (see the first-load branch): the `joinedAt`/`metaSeq`/track refreshes
+    // above don't bump on their own, and a bump-before-mutations would hand synchronous
+    // `onChange` → `snapshot()` subscribers a stale-forever cache.
+    this._bumpMembership()
+    return drifted
+  }
+
+  // ── Private ──
+
+  private _checkFull(): void {
+    const full = this.isFull
+    if (full && !this._wasFull) this._fireAll(this._fullCbs)
+    this._wasFull = full
+  }
+
+  private _createEntry(entrySeed: MemberSnapshot): MemberEntry {
+    const { id, meta, joinedAt } = entrySeed
+    const entry: MemberEntry = {
+      id,
+      meta,
+      joinedAt,
+      identity: entrySeed.identity ?? null,
+      metaSeq: entrySeed.metaSeq,
+      tracks: new Set(entrySeed.tracks),
+      remote: {
+        id,
+        get meta() {
+          return entry.meta
+        },
+        get joinedAt() {
+          return entry.joinedAt
+        },
+        get identity() {
+          return entry.identity
+        },
+        subscribe: (cb) => this._register(entry.dataCbs, cb, 'data'),
+        subscribeBinary: (cb, opts) =>
+          this._register(entry.binaryCbs, { cb, track: normalizeTrackFilter(opts) }, 'binary'),
+        onUpdate: (cb) => this._register(entry.updateCbs, cb, 'event'),
+        onLeave: (cb: (cause?: LeaveCause) => void) => this._register(entry.leaveCbs, cb, 'event'),
+      },
+      dataCbs: [],
+      binaryCbs: [],
+      updateCbs: [],
+      leaveCbs: [],
+    }
+    // Non-enumerable: never serialized as data, invisible to user iteration.
+    Object.defineProperty(entry.remote, ROOM_REMOTE_BRAND, { value: { state: this, entry } satisfies RemoteBacking })
+    this._members.set(id, entry)
+    return entry
+  }
+
+  private _register<T>(list: T[], cb: T, kind: ListenerKind): () => void {
+    list.push(cb)
+    this._bumpListenerCount(kind, 1)
+    // List membership is the source of truth: `_releaseEntryListeners` may have already
+    // emptied the list, and a second unlisten call must not decrement twice.
+    return () => {
+      const i = list.indexOf(cb)
+      if (i < 0) return
+      list.splice(i, 1)
+      this._bumpListenerCount(kind, -1)
+    }
+  }
+
+  /** A member entry is being discarded — its listeners die with it. Releasing them keeps the
+   *  counters truthful (callers rarely unsubscribe in `onLeave`), which lets the owners drop
+   *  wire/adapter subscriptions the departed member was holding open. */
+  private _releaseEntryListeners(entry: MemberEntry): void {
+    this._bumpListenerCount('data', -entry.dataCbs.length)
+    this._bumpListenerCount('binary', -entry.binaryCbs.length)
+    this._bumpListenerCount('event', -(entry.updateCbs.length + entry.leaveCbs.length))
+    entry.dataCbs.length = 0
+    entry.binaryCbs.length = 0
+    entry.updateCbs.length = 0
+    entry.leaveCbs.length = 0
+  }
+
+  private _bumpListenerCount(kind: ListenerKind, delta: number): void {
+    if (kind === 'data') this._dataListenerCount += delta
+    else if (kind === 'binary') this._binaryListenerCount += delta
+    else if (kind === 'activity') this._activityListenerCount += delta
+    else this._eventListenerCount += delta
+    this._onListenersChanged()
+  }
+
+  private _fireAll<Args extends unknown[]>(cbs: Array<(...args: Args) => unknown>, ...args: Args): void {
+    for (const cb of [...cbs]) {
+      try {
+        cb(...args)
+      } catch (err) {
+        this._onCallbackError(err)
+      }
+    }
+  }
+}
+
+/** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default
+ *  lane, a non-empty name = that track. */
+function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {
+  const track = opts?.track
+  if (track === undefined || track === null) return track
+  assertUsage(typeof track === 'string' && track.length > 0, 'subscribeBinary() track should be a non-empty string')
+  return track
+}
+
+/** Fold a listener list's track filters into the `TrackWants` they add up to. */
+function trackWantsOf(cbs: ReadonlyArray<{ track: TrackFilter }>): TrackWants {
+  const wants = emptyTrackWants()
+  for (const { track } of cbs) {
+    if (track === undefined) return { all: true, tracks: [] }
+    const asTrack = track ?? DEFAULT_TRACK
+    if (!wants.tracks.includes(asTrack)) wants.tracks.push(asTrack)
+  }
+  return wants
+}

@@ -171,17 +171,27 @@ function Room() {
           })
           const cameraOnly: number[] = []
           videoRoom.subscribeBinary((data) => cameraOnly.push(data[0]!), { track: 'camera' })
+          const defaultOnly: number[] = []
+          videoRoom.subscribeBinary((data) => defaultOnly.push(data[0]!), { track: null })
 
           // selfDelivery defaults to true — our own frames come back to us.
           for (let i = 0; i < 3; i++) {
             await me.publishBinary(new Uint8Array(64).fill(i + 1))
           }
-          // Named track + keyframe bit — mic/camera/screen multiplex over one member lane.
-          await me.publishBinary(new Uint8Array(32).fill(9), { track: 'camera', keyFrame: true })
+          // Named track + keyframe bit — mic/camera/screen multiplex over one member lane;
+          // the ack's `receivers` counts the track's live subscriptions (the pause-at-0 signal).
+          const camAck = await me.publishBinary(new Uint8Array(32).fill(9), { track: 'camera', keyFrame: true })
 
           await pollUntil(() => {
-            setResult(JSON.stringify({ frames, cameraOnly }))
-            return { done: frames.length >= 4 && cameraOnly.length >= 1 }
+            setResult(JSON.stringify({ frames, cameraOnly, defaultOnly, camReceivers: camAck.receivers }))
+            return {
+              done:
+                frames.length >= 4 &&
+                cameraOnly.length >= 1 &&
+                defaultOnly.length >= 3 &&
+                typeof camAck.receivers === 'number' &&
+                camAck.receivers >= 1,
+            }
           })
         }}
       >

@@ -264,6 +264,8 @@ info.timestamp  // server timestamp (Unix epoch ms)
 
 `seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
 
+The receipt additionally carries `receivers` — the key's live subscription count (in-memory subscribers, Redis `PUBLISH` receivers, Cloudflare DO presence). `0` truthfully means nobody anywhere is subscribed right now: the signal for a producer to pause expensive work until someone tunes in. It counts subscriptions at the transport hop, not end viewers.
+
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
 > For <Link href="/stream/scale">scaling horizontally</Link>, you must configure `Broadcast` to publish across all server instances — see <Link href="/stream/scale#broadcast" />

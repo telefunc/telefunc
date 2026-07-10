@@ -14,7 +14,8 @@ import {
 } from '../../constants.js'
 import { ServerLocalParticipant, ServerRoom } from '../../room/server.js'
 import { bindParticipantStubChannel, RoomStubChannel } from '../../room/stubs.js'
-import { remoteBacking, sizeToWire } from '../../room/shared.js'
+import { sizeToWire } from '../../room/protocol.js'
+import { remoteBacking } from '../../room/state.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 

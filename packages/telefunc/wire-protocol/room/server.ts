@@ -14,16 +14,14 @@ import {
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
 } from '../constants.js'
-import { getBroadcastAdapter, type BroadcastAdapter } from '../server/broadcast.js'
+import { getBroadcastAdapter, type BroadcastAdapter, type BroadcastPublishResult } from '../server/broadcast.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
-  ParticipantBase,
   ROOM_KEY_NAMESPACE,
   errorMessage,
   leaveCauseFromWire,
   leaveCauseToWire,
   stampNewer,
-  RoomState,
   frameWithMemberId,
   hasRoomTag,
   normalizeJoinOptions,
@@ -33,6 +31,7 @@ import {
   roomCtrlKey,
   roomTextKey,
   roomMemberDataKey,
+  roomMemberTrackKey,
   roomActivityKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
@@ -40,7 +39,14 @@ import {
   sizeToWire,
   unframeMemberId,
   uuidToBytes,
+  DEFAULT_TRACK,
+  emptyTrackWants,
+  mergeTrackWants,
+  sanitizeBinaryWants,
+  wantsAnyBinary,
+  type BinaryWants,
   type MemberWants,
+  type TrackWants,
   type MemberSnapshot,
   type ReqJoinAck,
   type ReqOkAck,
@@ -53,7 +59,9 @@ import {
   type RoomMemberRecord,
   type RoomStubRequest,
   type RoomActivityEvent,
-} from './shared.js'
+} from './protocol.js'
+import { RoomState } from './state.js'
+import { ParticipantBase } from './participant.js'
 import type { RoomStubChannel } from './stubs.js'
 import type {
   BinaryPublishOptions,
@@ -373,8 +381,12 @@ class ServerRoom implements Room {
   private readonly _activitySub = new SubSlot()
   private _lastActivityAt = 0
   private readonly _memberTextUnsubs = new Map<string, () => void>()
-  private readonly _memberBinaryUnsubs = new Map<string, () => void>()
+  /** Upstream binary subscriptions, keyed by the full adapter key — one per wanted (member, track). */
+  private readonly _binaryKeyUnsubs = new Map<string, () => void>()
   private readonly _dmUnsubs = new Map<string, () => void>()
+  /** (member, track) pairs this instance has already announced — first publish pays the
+   *  KV append + ctrl event, every further frame is a Set lookup. */
+  private readonly _announcedTracks = new Map<string, Set<string>>()
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _heartbeatBusy = false
   private _pendingRefresh: Promise<void> | null = null
@@ -569,39 +581,94 @@ class ServerRoom implements Room {
     await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, seq: next.metaSeq })
   }
 
-  /** @internal — publish a member's message: the single choke point where the sender's verified
-   *  meta is stamped into the envelope (never client-supplied) and the payload is routed to its
-   *  lane's key. `framed` is pre-framed `[16-byte member ID][payload]`. */
-  async _publishData(from: string, payload: { data: unknown } | { framed: Uint8Array }): Promise<ChannelPublishAck> {
-    if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
-    const onPublish = this._guards?.onPublish
-    if (onPublish) {
-      // The guard sees exactly what a subscriber would: the payload, without the wire frame.
-      // (Every framed payload was validated at its entry point — the unframe cannot fail.)
-      await onPublish(
-        { id: from, meta: this._memberMeta(from), identity: this._memberIdentity(from) },
-        'data' in payload ? payload.data : unframeMemberId(payload.framed)!.payload,
-      )
+  /** @internal — publish a member's text message. The sender's verified meta/identity are
+   *  stamped into the envelope here — never client-supplied. Text rides the room's text key,
+   *  or the member's own key in isolated mode. */
+  async _publishText(from: string, data: unknown): Promise<ChannelPublishAck> {
+    const sender = await this._admitPublish(from, data)
+    const envelope: RoomDataEnvelope = {
+      __r: 'data',
+      from,
+      fromMeta: sender.meta,
+      ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
+      data,
     }
-    const adapter = getBroadcastAdapter()
-    const result =
-      'data' in payload
-        ? await adapter.publish(
-            // Text rides the room's text key — the member's own key in isolated mode.
-            this._isolated ? roomMemberDataKey(this.id, from) : roomTextKey(this.id),
-            stringify({
-              __r: 'data',
-              from,
-              fromMeta: this._memberMeta(from),
-              ...(this._memberIdentity(from) === null ? {} : { fromIdentity: this._memberIdentity(from)! }),
-              data: payload.data,
-            } satisfies RoomDataEnvelope),
-          )
-        : // Binary always rides the member's own key: per-publisher streams are what make
-          // delivery member-selective at the source (and contention-free on every platform).
-          await adapter.publishBinary(roomMemberDataKey(this.id, from), payload.framed)
+    return this._finishPublish(
+      getBroadcastAdapter().publish(
+        this._isolated ? roomMemberDataKey(this.id, from) : roomTextKey(this.id),
+        stringify(envelope),
+      ),
+    )
+  }
+
+  /** @internal — publish a member's binary frame (`[16-byte member ID][flags][…]`, validated at
+   *  its entry point — the unframe cannot fail). Binary rides per-publisher keys — per
+   *  (publisher, track) for named tracks: that's what makes delivery track-selective at the
+   *  source, so `receivers: 0` on the ack truthfully means "nobody anywhere wants this track". */
+  async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
+    const frame = unframeMemberId(framed)!
+    // The guard sees exactly what a subscriber would: the payload, without the wire frame.
+    await this._admitPublish(from, frame.payload)
+    if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
+    return this._finishPublish(
+      getBroadcastAdapter().publishBinary(
+        frame.track === null ? roomMemberDataKey(this.id, from) : roomMemberTrackKey(this.id, from, frame.track),
+        framed,
+      ),
+    )
+  }
+
+  /** Shared publish prologue: open check + `onPublish` guard, on the verified sender. */
+  private async _admitPublish(from: string, payload: unknown): Promise<Sender> {
+    if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
+    const sender = this._memberSender(from)
+    const onPublish = this._guards?.onPublish
+    if (onPublish) await onPublish(sender, payload)
+    return sender
+  }
+
+  /** Shared publish epilogue: the activity trickle, then the receipt (with `receivers`). */
+  private async _finishPublish(
+    publishing: BroadcastPublishResult | Promise<BroadcastPublishResult>,
+  ): Promise<ChannelPublishAck> {
+    const result = await publishing
     this._announceActivity()
-    return Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), { meta: result.meta })
+    return Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), {
+      meta: result.meta,
+      ...(result.receivers === undefined ? {} : { receivers: result.receivers }),
+    })
+  }
+
+  /** First frame on a new (member, track): record the track on the member's KV record (late
+   *  observers discover it from the roster) and announce it on the control lane (live all-track
+   *  subscribers bring the key subscription up) — both strictly before the frame. Idempotent
+   *  across owner incarnations via the KV record; O(1) per further frame via `_announcedTracks`. */
+  private async _ensureTrackAnnounced(from: string, track: string): Promise<void> {
+    let announced = this._announcedTracks.get(from)
+    if (announced?.has(track)) return
+    if (!announced) {
+      announced = new Set()
+      this._announcedTracks.set(from, announced)
+    }
+    const kv = getRoomKV()
+    const memberKey = roomMemberKvKey(this.id, from)
+    while (true) {
+      const raw = await kv.get(memberKey)
+      if (raw === null) throw new Error(`Participant not found (left?): ${from}`)
+      const record = parse(raw) as RoomMemberRecord
+      if (record.tracks?.includes(track)) break // a previous owner incarnation recorded it
+      const next: RoomMemberRecord = { ...record, tracks: [...(record.tracks ?? []), track], seenAt: Date.now() }
+      await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
+      // Read back: a concurrent record write (setMeta, heartbeat) may have clobbered the
+      // append — loop until it sticks (the `updateRoom` read-back discipline).
+      const readBack = await kv.get(memberKey)
+      if (readBack !== null && (parse(readBack) as RoomMemberRecord).tracks?.includes(track)) {
+        await publishCtrl(this.id, { __r: 'track', id: from, track })
+        break
+      }
+    }
+    this._state.applyTrack(from, track)
+    announced.add(track)
   }
 
   /** Leading-edge throttle, no timers: at most one activity signal per window per instance.
@@ -619,14 +686,13 @@ class ServerRoom implements Room {
     ).catch(reportRoomError)
   }
 
-  /** The sender's meta as this node knows it — own participants first (freshest), then the view. */
-  private _memberMeta(from: string): ParticipantMeta {
-    return this._localParticipants.get(from)?.meta ?? this._state.getRemote(from)?.meta ?? {}
-  }
-
-  /** The sender's identity as this node knows it — set at join, immutable, so any source works. */
-  private _memberIdentity(from: string): string | null {
-    return this._localParticipants.get(from)?.identity ?? this._state.getRemote(from)?.identity ?? null
+  /** The verified sender as this node knows it — own participants first (freshest), then the
+   *  view. The one place sender identity is assembled; guards and envelopes both consume it. */
+  private _memberSender(from: string): Sender {
+    const local = this._localParticipants.get(from)
+    if (local) return { id: from, meta: local.meta, identity: local.identity }
+    const remote = this._state.getRemote(from)
+    return { id: from, meta: remote?.meta ?? {}, identity: remote?.identity ?? null }
   }
 
   /** @internal — send a private message: published on the target's inbox key, which only
@@ -636,16 +702,15 @@ class ServerRoom implements Room {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
     const target = await this._resolveMember(to)
     if (!target) throw new Error(`Participant not found: ${to}`)
-    const fromMeta = this._memberMeta(from)
-    const fromIdentity = this._memberIdentity(from)
+    const sender = this._memberSender(from)
     const onSend = this._guards?.onSend
-    if (onSend) await onSend({ id: from, meta: fromMeta, identity: fromIdentity }, target, data)
+    if (onSend) await onSend(sender, target, data)
     const envelope: RoomDmEnvelope = {
       __r: 'dm',
       to,
       from,
-      fromMeta,
-      ...(fromIdentity === null ? {} : { fromIdentity }),
+      fromMeta: sender.meta,
+      ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
     }
     await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
@@ -747,7 +812,7 @@ class ServerRoom implements Room {
     if (this._stubs.size > 0) {
       const wireData = encodePublishBinary(framed, rawInfo)
       for (const stub of this._stubs) {
-        if (!stub._wantsBinaryFrom(unframed.from)) continue
+        if (!stub._wantsBinary(unframed.from, unframed.track ?? DEFAULT_TRACK)) continue
         if (stub._stubMembers.get(unframed.from)?.selfDelivery === false) continue
         stub._relayPublishBinary(wireData)
       }
@@ -787,6 +852,10 @@ class ServerRoom implements Room {
         this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null)
         this._syncSubs() // a new member means a new per-member key candidate
         return
+      case 'track':
+        this._state.applyTrack(event.id, event.track)
+        this._syncSubs() // all-track subscribers need the new (member, track) key
+        return
       case 'leave':
         this._applyLeave(event.id, leaveCauseFromWire(event))
         return
@@ -806,6 +875,7 @@ class ServerRoom implements Room {
 
   private _applyLeave(id: string, cause?: LeaveCause): void {
     this._state.applyLeave(id, cause)
+    this._announcedTracks.delete(id)
     const local = this._localParticipants.get(id)
     if (local) {
       this._localParticipants.delete(id)
@@ -884,8 +954,9 @@ class ServerRoom implements Room {
           await this._sendDm(req.id, req.to, req.data)
           return { ok: true }
         case 'sub-binary': {
-          const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
-          stub._binaryWants = { all: req.all === true, members: new Set(members) }
+          const wants = sanitizeBinaryWants(req.wants)
+          if (!wants) throw new Error('Malformed sub-binary declaration')
+          stub._binaryWants = wants
           this._syncSubs()
           return { ok: true }
         }
@@ -910,7 +981,7 @@ class ServerRoom implements Room {
   }
 
   /** @internal — a client publish arriving on a room stub. The client's envelope is only a
-   *  claim: membership is validated against this stub, and `_publishData` re-stamps the verified
+   *  claim: membership is validated against this stub, and the publish path re-stamps the verified
    *  `fromMeta` — nothing client-supplied reaches the room stream except the payload itself. */
   async _publishFromStub(
     stub: RoomStubChannel,
@@ -921,11 +992,11 @@ class ServerRoom implements Room {
       if (!hasRoomTag(envelope) || envelope.__r !== 'data') throw new Error('Malformed room publish')
       const publish = envelope as RoomDataPublish
       this._assertStubMember(stub, publish.from)
-      return await this._publishData(publish.from, { data: publish.data })
+      return await this._publishText(publish.from, publish.data)
     }
     const from = unframeMemberId(payload.binary)?.from
     this._assertStubMember(stub, from)
-    return await this._publishData(from, { framed: payload.binary })
+    return await this._publishBinaryFramed(from, payload.binary)
   }
 
   private _assertStubMember(stub: RoomStubChannel, id: unknown): asserts id is string {
@@ -968,7 +1039,7 @@ class ServerRoom implements Room {
     // joins attaches neither, so `Room.join()` never loads a roster at all —
     // `getParticipants()`/serialization go through `_ensureRoster` on their own.
     const binaryWants = this._aggregateBinaryWants()
-    const wantAnyBinary = open && (binaryWants.all || binaryWants.members.size > 0)
+    const wantAnyBinary = open && wantsAnyBinary(binaryWants)
     const needsRoster =
       state.eventListenerCount + state.dataListenerCount + state.binaryListenerCount > 0 ||
       (this._isolated && wantAnyText) ||
@@ -983,7 +1054,7 @@ class ServerRoom implements Room {
         : textWants.all
           ? memberIds
           : memberIds.filter((id) => textWants.members.has(id))
-      this._syncMemberSubs(this._memberTextUnsubs, textIds, (memberId) =>
+      this._syncKeyedSubs(this._memberTextUnsubs, textIds, (memberId) =>
         adapter.subscribe(roomMemberDataKey(this.id, memberId), (serialized, info) =>
           this._onTextData(serialized, info),
         ),
@@ -1002,20 +1073,16 @@ class ServerRoom implements Room {
       adapter.subscribe(roomActivityKey(this.id), (serialized) => this._onActivity(serialized)),
     )
 
-    // Binary: per-publisher keys in every mode — subscribing member-selectively at the source
-    // makes upstream delivery pay-per-want, not filter-after-receive.
-    const binaryIds = !wantAnyBinary
-      ? []
-      : binaryWants.all
-        ? memberIds
-        : memberIds.filter((id) => binaryWants.members.has(id))
-    this._syncMemberSubs(this._memberBinaryUnsubs, binaryIds, (memberId) =>
-      adapter.subscribeBinary(roomMemberDataKey(this.id, memberId), (framed, info) => this._onBinary(framed, info)),
+    // Binary: per-(publisher, track) keys in every mode — subscribing want-selectively at the
+    // source makes upstream delivery pay-per-want, not filter-after-receive: dropping the last
+    // want for a track drops its key, and the publisher's `receivers` hits 0.
+    this._syncKeyedSubs(this._binaryKeyUnsubs, wantAnyBinary ? this._binaryKeys(binaryWants, memberIds) : [], (key) =>
+      adapter.subscribeBinary(key, (framed, info) => this._onBinary(framed, info)),
     )
 
     // Inbox subscriptions follow ownership, not listeners — a holder must always be
     // able to receive direct messages addressed to its members.
-    this._syncMemberSubs(this._dmUnsubs, open ? this._ownedMemberIds() : [], (memberId) =>
+    this._syncKeyedSubs(this._dmUnsubs, open ? this._ownedMemberIds() : [], (memberId) =>
       adapter.subscribe(roomDmKey(this.id, memberId), (serialized, info) => this._onDm(serialized, info)),
     )
 
@@ -1047,15 +1114,36 @@ class ServerRoom implements Room {
   }
 
   /** Union of this holder's own binary listeners and every client stub's declared wants. */
-  private _aggregateBinaryWants(): { all: boolean; members: Set<string> } {
-    const local: MemberWants = this._state.binaryWants()
-    if (local.all) return { all: true, members: new Set() }
-    const members = new Set(local.members)
+  private _aggregateBinaryWants(): BinaryWants {
+    const local = this._state.binaryWants()
+    let everyMember = local.everyMember
+    const members = new Map<string, TrackWants>(Object.entries(local.members))
     for (const stub of this._stubs) {
-      if (stub._binaryWants.all) return { all: true, members: new Set() }
-      for (const id of stub._binaryWants.members) members.add(id)
+      everyMember = mergeTrackWants(everyMember, stub._binaryWants.everyMember)
+      for (const [id, wants] of Object.entries(stub._binaryWants.members)) {
+        members.set(id, mergeTrackWants(members.get(id) ?? emptyTrackWants(), wants))
+      }
     }
-    return { all: false, members }
+    return { everyMember, members: Object.fromEntries(members) }
+  }
+
+  /** The adapter keys the aggregated binary wants resolve to — the exact upstream footprint.
+   *  Per member: every-track wants take the default key plus each *known* track's key (named
+   *  tracks are discovered — see `_ensureTrackAnnounced`); exact wants take exactly their keys,
+   *  eagerly (a pub/sub key needs no existence, so named subscribers never miss a frame). */
+  private _binaryKeys(wants: BinaryWants, memberIds: string[]): string[] {
+    const keys: string[] = []
+    for (const memberId of memberIds) {
+      const memberWants = wants.members[memberId]
+      const eff = memberWants ? mergeTrackWants(wants.everyMember, memberWants) : wants.everyMember
+      const tracks = eff.all ? [DEFAULT_TRACK, ...this._state.memberTracks(memberId)] : eff.tracks
+      for (const track of tracks) {
+        keys.push(
+          track === DEFAULT_TRACK ? roomMemberDataKey(this.id, memberId) : roomMemberTrackKey(this.id, memberId, track),
+        )
+      }
+    }
+    return keys
   }
 
   /** The text-lane twin of `_aggregateBinaryWants()` — a stub's broadcast subscription is its
@@ -1071,20 +1159,17 @@ class ServerRoom implements Room {
     return { all: false, members }
   }
 
-  private _syncMemberSubs(
-    subs: Map<string, () => void>,
-    wantedIds: string[],
-    subscribe: (memberId: string) => () => void,
-  ): void {
-    const wanted = new Set(wantedIds)
-    for (const [memberId, unsub] of [...subs]) {
-      if (!wanted.has(memberId)) {
-        subs.delete(memberId)
+  /** Reconcile a map of keyed subscriptions (member IDs, adapter keys) to the wanted set. */
+  private _syncKeyedSubs(subs: Map<string, () => void>, wantedKeys: string[], subscribe: (key: string) => () => void) {
+    const wanted = new Set(wantedKeys)
+    for (const [key, unsub] of [...subs]) {
+      if (!wanted.has(key)) {
+        subs.delete(key)
         unsub()
       }
     }
-    for (const memberId of wanted) {
-      if (!subs.has(memberId)) subs.set(memberId, subscribe(memberId))
+    for (const key of wanted) {
+      if (!subs.has(key)) subs.set(key, subscribe(key))
     }
   }
 
@@ -1211,18 +1296,18 @@ class ServerLocalParticipant extends ParticipantBase {
 
   async publish(data: unknown): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishData(this.id, { data })
+    return await this._room._publishText(this.id, data)
   }
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishData(this.id, { framed: frameWithMemberId(this.id, data, options) })
+    return await this._room._publishBinaryFramed(this.id, frameWithMemberId(this.id, data, options))
   }
 
   /** @internal — publish a client-framed payload (the frame already carries this member's ID). */
   _publishFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return this._room._publishData(this.id, { framed })
+    return this._room._publishBinaryFramed(this.id, framed)
   }
 
   async send(to: string | Sender, data: unknown): Promise<void> {
@@ -1302,6 +1387,7 @@ async function readMembers(kv: RoomKV, roomId: string): Promise<MemberSnapshot[]
       joinedAt: record.joinedAt,
       metaSeq: record.metaSeq,
       identity: record.identity ?? null,
+      ...(record.tracks === undefined ? {} : { tracks: record.tracks }),
     })
   }
   return members
