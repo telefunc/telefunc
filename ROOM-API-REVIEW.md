@@ -9,6 +9,8 @@ Findings requested in review of PR #436 (`Room` — multi-party rooms, implement
 
 This document contains findings and recommendations only — it changes no code. Where it recommends changes to PR #436, those are listed in §7 for decision.
 
+> **Disposition (executed).** Every recommendation here was acted on in PR #436, with one deliberate override: the direction was to ship *everything now*, with no phasing. So the items this doc scoped as "v1.1" or recommended deferring were built into #436 too — `setAttributes`, `coalesce`, single-call `tail` history, and, notably, **`onDemand`**. §2.1/§5.1 recommended keeping `receivers` and deferring event-driven demand; instead `onDemand` was built for real as the correct multi-node design sketched in §2.1 — control-lane want-gossip, no adapter-interface change — and `receivers` was kept alongside it. The `Room.guard`→getter fold (§2.3) was the one item explicitly excluded. This doc remains the point-in-time analysis; #436 is the executed result.
+
 ---
 
 ## TL;DR
