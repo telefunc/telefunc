@@ -65,7 +65,11 @@ type TypeContract<V = unknown, R = unknown, M extends Record<string, unknown> = 
  *  `replace` is the primary verb of the Replacer API — it runs once per serialized value and may
  *  perform side effects (register channels, install listeners, wire lifecycle). The returned
  *  `metadata` is what crosses the wire; `close` / `abort` are lifecycle hooks tracked by the
- *  registry and invoked when the carrier message completes or is aborted. */
+ *  registry and invoked when the carrier message completes or is aborted.
+ *
+ *  Duplicated references run `replace` once and revive as one client object (see
+ *  createStreamingReplacer), so metadata must identify the value uniquely within the
+ *  payload: mint a fresh id per `replace` call, the way every built-in does. */
 type ReplacerType<C extends TypeContract = TypeContract, Context = unknown> = {
   prefix: string
   detect(value: unknown): value is C['value']
@@ -83,7 +87,10 @@ type StreamingReplacerType<C extends TypeContract = TypeContract, Context = unkn
 /** Reviver: reconstruct a live value from prefix+metadata during deserialization.
  *  `revive` is the primary verb of the Reviver API — it runs once per deserialized value and may
  *  perform side effects (create channels, start readers, attach validators). Mirrors `replace`
- *  on the Replacer side. */
+ *  on the Replacer side.
+ *
+ *  Duplicated references (equal wire strings) run `revive` once and resolve to the object the
+ *  first occurrence revived — server-side `===` holds on the client (see createStreamingReviver). */
 type ReviverType<C extends TypeContract = TypeContract, Context = unknown> = {
   prefix: string
   revive(
