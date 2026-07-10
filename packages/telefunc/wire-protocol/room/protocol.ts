@@ -52,7 +52,6 @@ export type {
   ReqOkAck,
   ReqJoinAck,
   ReqPublishAck,
-  MemberWants,
   TrackWants,
   BinaryWants,
 }
@@ -240,16 +239,15 @@ type RoomDmEnvelope = {
 }
 
 /** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
- *  `sub-binary` declares the client's binary wants (full replace, see `BinaryWants`);
- *  `sub-text` declares member-scoped text wants — the room-level (all) text want rides the
- *  standard broadcast-subscription ctrl instead, keeping its synchronous-declaration fence. */
+ *  `sub-binary` declares the client's binary wants (full replace, see `BinaryWants`); the text
+ *  want rides the standard broadcast-subscription ctrl instead, keeping its
+ *  synchronous-declaration fence. */
 type RoomStubRequest =
   | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown }
   | { __r: 'sub-binary'; wants: BinaryWants }
-  | { __r: 'sub-text'; members: string[] }
 
 /** Client→server requests on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubRequest =
@@ -263,10 +261,6 @@ type ParticipantStubNotice =
   | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
   | { __r: 'p-meta'; meta: ParticipantMeta }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown }
-
-/** Which members' streams a holder wants on the text lane — `all` for room-level listeners,
- *  or a specific member set for participant-scoped ones. */
-type MemberWants = { all: boolean; members: string[] }
 
 type ReqOkAck = { ok: true } | { ok: false; err: string }
 type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }

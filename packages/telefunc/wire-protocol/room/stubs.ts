@@ -33,7 +33,7 @@ assertIsNotBrowser()
  * The channel registered with a response when a `Room` crosses the wire.
  * - server→client: room events & data relayed as PUBLISH frames (pre-peer buffered,
  *   replayed on reconnect). Control always flows; text is gated by the client's broadcast
- *   subscription (all) or its member-selective `sub-text` set; binary is member-selective
+ *   subscription (on whenever it holds any text listener); binary is member-selective
  *   (`sub-binary`).
  * - client→server: join/leave/set-meta as ack-bearing channel messages; publishes as
  *   PUBLISH(_BINARY)_ACK_REQ frames, validated against the members joined through this stub.
@@ -44,10 +44,9 @@ class RoomStubChannel extends ServerBroadcast {
   readonly _stubMembers = new Map<string, { selfDelivery: boolean }>()
   /** @internal — the client's declared binary wants, per member and track (`sub-binary`). */
   _binaryWants: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
-  /** @internal — whether the client subscribes to the whole text lane (the broadcast-sub ctrl). */
+  /** @internal — whether the client subscribes to the text lane (the broadcast-sub ctrl). On
+   *  whenever the client holds any text listener; per-member routing happens client-side. */
   _wantsText = false
-  /** @internal — which members' text the client wants without a room-level subscription (`sub-text`). */
-  _textMemberWants: Set<string> = new Set()
 
   /** @internal — relay gate: does this client want the (member, track) the frame belongs to? */
   _wantsBinary(memberId: string, track: string): boolean {
@@ -56,15 +55,10 @@ class RoomStubChannel extends ServerBroadcast {
     return memberWants !== undefined && wantsTrack(memberWants, track)
   }
 
-  /** @internal */
-  _wantsTextFrom(memberId: string): boolean {
-    return this._wantsText || this._textMemberWants.has(memberId)
-  }
-
   constructor(serverRoom: ServerRoom) {
     super({ key: roomCtrlKey(serverRoom.id) })
     this._room = serverRoom
-    // Stub requests (join/leave/set-meta/dm/sub-binary/sub-text) arrive as channel messages.
+    // Stub requests (join/leave/set-meta/dm/sub-binary) arrive as channel messages.
     this._listen((msg: unknown) => this._room._handleStubRequest(this, msg))
   }
 
