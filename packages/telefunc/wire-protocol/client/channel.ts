@@ -657,7 +657,10 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
         })
       }),
     )
-    ret.catch(reportChannelError)
+    // The caller owns the returned promise — a guard rejection is its control flow, not an
+    // error to log. This no-op branch only keeps a fire-and-forget publish from surfacing as
+    // an unhandled rejection.
+    ret.catch(() => {})
     return ret
   }
 
@@ -684,7 +687,10 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
         })
       }),
     )
-    ret.catch(reportChannelError)
+    // The caller owns the returned promise — a guard rejection is its control flow, not an
+    // error to log. This no-op branch only keeps a fire-and-forget publish from surfacing as
+    // an unhandled rejection.
+    ret.catch(() => {})
     return ret
   }
 
