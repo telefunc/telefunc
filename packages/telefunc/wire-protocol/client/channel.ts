@@ -622,16 +622,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   // control events every holder needs (relayed unconditionally by the server) and the text
   // data stream (relayed only while subscribed, standard broadcast semantics).
 
-  /** @internal — deliver text publishes locally without signaling the server. The third
-   *  argument is the wire text, so composers can price holds by real bytes without
-   *  re-serializing (public subscribers ignore it). */
-  _subscribeLocal(
-    callback: (data: ChannelData<T>, info: ChannelPublishInfo, serialized: string) => unknown,
-  ): () => void {
-    const cb = callback as BroadcastListener<T>
-    this._broadcastListeners.push(cb)
+  /** @internal — deliver text publishes locally without signaling the server. */
+  _subscribeLocal(callback: BroadcastListener<T>): () => void {
+    this._broadcastListeners.push(callback)
     return () => {
-      const index = this._broadcastListeners.indexOf(cb)
+      const index = this._broadcastListeners.indexOf(callback)
       if (index >= 0) this._broadcastListeners.splice(index, 1)
     }
   }
@@ -731,7 +726,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastListeners) {
       try {
-        ;(cb as (d: ChannelData<T>, i: ChannelPublishInfo, s: string) => unknown)(parsed, info, data)
+        cb(parsed, info)
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }

@@ -747,22 +747,6 @@ describe('direct messages', () => {
     expect(inbox).toEqual([['welcome!', 'Bot']]) // flushed on attach
   })
 
-  it('the pre-listen hold is byte-budgeted — big messages evict the oldest by real wire size', async () => {
-    const room = await Room.create('hold-bytes')
-    const sender = await room.join({ name: 'S' })
-    const target = await (await Room.get('hold-bytes')).join({ name: 'T' })
-
-    // Three ~120KB messages against the 256KB budget: only the last two fit.
-    const big = 'x'.repeat(120 * 1024)
-    await sender.send(target.id, `1:${big}`)
-    await sender.send(target.id, `2:${big}`)
-    await sender.send(target.id, `3:${big}`)
-
-    const inbox: string[] = []
-    target.listen((data) => inbox.push((data as string).slice(0, 1)))
-    expect(inbox).toEqual(['2', '3']) // byte budget evicted the oldest — not the count cap
-  })
-
   it('the pre-listen hold is bounded (drop-oldest) and released on leave', async () => {
     const room = await Room.create('hold-cap')
     const sender = await room.join({ name: 'S' })
@@ -1298,7 +1282,7 @@ type FakeStub = {
 }
 
 function createFakeStub(joinAck?: { id: string }): FakeStub {
-  const textCbs: Array<(data: unknown, info: ChannelPublishInfo, serialized: string) => void> = []
+  const textCbs: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
   const binaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
   const published: unknown[] = []
   const sent: Array<{ __r: string }> = []
@@ -1330,7 +1314,7 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
     onClose: (cb: () => void) => closeCbs.push(cb),
   }
   return {
-    emit: (envelope) => [...textCbs].forEach((cb) => cb(envelope, info(), JSON.stringify(envelope))),
+    emit: (envelope) => [...textCbs].forEach((cb) => cb(envelope, info())),
     emitBinary: (framed) => [...binaryCbs].forEach((cb) => cb(framed, info())),
     close: () => [...closeCbs].forEach((cb) => cb()),
     published,
