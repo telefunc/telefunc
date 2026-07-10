@@ -1889,6 +1889,42 @@ describe('snapshot() and onChange()', () => {
       [bob, null],
     ])
   })
+
+  it('a subscriber that snapshots synchronously inside onChange cannot poison the cache (roster load)', () => {
+    // The documented pairing — useSyncExternalStore calls getSnapshot() synchronously from the
+    // change notification. Regression: the first-load reconcile used to bump BEFORE creating the
+    // entries, so this subscriber cached an empty roster under the post-load version, and the
+    // (silent) entry creation never invalidated it — a permanently empty view of a populated room.
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('viewsync', { count: 1 }))
+    const seen: number[] = []
+    clientRoom.onChange(() => seen.push(clientRoom.snapshot().participants.length))
+
+    const alice = crypto.randomUUID()
+    fake.emit({ __r: 'roster', members: [{ id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0, identity: 'u1' }] })
+
+    expect(seen).toEqual([1]) // the in-callback read already sees the loaded roster
+    expect(clientRoom.snapshot().participants.map((p) => p.id)).toEqual([alice]) // …and didn't cache []
+    expect(clientRoom.snapshot().count).toBe(1)
+  })
+
+  it('a subscriber that snapshots synchronously inside onChange cannot poison the cache (close)', () => {
+    // Same hazard on close: the members clear AFTER the first bump (per-member leave callbacks
+    // run user code in between), so a mid-close snapshot() must not pin the departed members
+    // under the current version.
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('viewclose'))
+    const alice = crypto.randomUUID()
+    fake.emit({ __r: 'roster', members: [{ id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0 }] })
+
+    const seen: number[] = []
+    clientRoom.onChange(() => seen.push(clientRoom.snapshot().participants.length))
+
+    fake.emit({ __r: 'closed' })
+    expect(seen.at(-1)).toBe(0) // the last notification already reads the cleared roster
+    expect(clientRoom.snapshot().isClosed).toBe(true)
+    expect(clientRoom.snapshot().participants).toEqual([]) // not pinned to the pre-clear cache
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -743,6 +743,10 @@ class RoomState {
       this._releaseEntryListeners(entry)
     }
     this._members.clear()
+    // Second bump: the clear above is observable too — without it, an `onChange` subscriber
+    // that snapshotted between the bumps (leave callbacks run user code) would keep a cache
+    // that still lists the departed members at the current version.
+    this._bumpState()
     this._fireAll(this._closeCbs)
   }
 
@@ -818,7 +822,6 @@ class RoomState {
       // roster doesn't know left before the load — their leave is narrated like any other.
       this._rosterKnown = true
       this.membershipVersion++
-      this._bumpState()
       const seen = new Set<string>()
       for (const member of members) {
         seen.add(member.id)
@@ -837,11 +840,15 @@ class RoomState {
         if (!seen.has(id)) this.applyLeave(id)
       }
       this._wasFull = this.isFull
+      // Bump strictly AFTER the mutations: `_bumpState()` fires `onChange` synchronously, and a
+      // subscriber may synchronously call `snapshot()` (the documented `useSyncExternalStore`
+      // pairing) — bumping first would let it cache an empty roster under the new version, and
+      // the silent entry creation below would never invalidate it again.
+      this._bumpState()
       return false
     }
 
     this.membershipVersion++
-    this._bumpState()
     let drifted = false
     const seen = new Set<string>()
     for (const member of members) {
@@ -866,6 +873,10 @@ class RoomState {
         drifted = true
       }
     }
+    // After the mutations (see the first-load branch): the `joinedAt`/`metaSeq` refreshes above
+    // don't bump on their own, and a bump-before-mutations would hand synchronous `onChange` →
+    // `snapshot()` subscribers a stale-forever cache.
+    this._bumpState()
     return drifted
   }
 
