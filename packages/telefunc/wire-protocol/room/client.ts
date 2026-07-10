@@ -216,12 +216,12 @@ class ClientRoom implements Room {
 
   /** @internal — the envelope sent upward is a claim: the server validates `from` against this
    *  stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
-  async _publishData(from: string, data: unknown): Promise<ChannelPublishAck> {
+  async _publishText(from: string, data: unknown): Promise<ChannelPublishAck> {
     return await this._stub.publish({ __r: 'data', from, data } satisfies RoomDataPublish)
   }
 
   /** @internal */
-  async _publishBinaryData(framed: Uint8Array): Promise<ChannelPublishAck> {
+  async _publishBinaryFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
     return await this._stub.publishBinary(framed)
   }
 
@@ -406,12 +406,12 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
   async publish(data: unknown): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishData(this.id, data)
+    return await this._room._publishText(this.id, data)
   }
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishBinaryData(frameWithMemberId(this.id, data, options))
+    return await this._room._publishBinaryFramed(frameWithMemberId(this.id, data, options))
   }
 
   async send(to: string | Sender, data: unknown): Promise<void> {

@@ -14,7 +14,7 @@ import {
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
 } from '../constants.js'
-import { getBroadcastAdapter, type BroadcastAdapter } from '../server/broadcast.js'
+import { getBroadcastAdapter, type BroadcastAdapter, type BroadcastPublishResult } from '../server/broadcast.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
   ParticipantBase,
@@ -581,45 +581,57 @@ class ServerRoom implements Room {
     await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, seq: next.metaSeq })
   }
 
-  /** @internal — publish a member's message: the single choke point where the sender's verified
-   *  meta is stamped into the envelope (never client-supplied) and the payload is routed to its
-   *  lane's key. `framed` is pre-framed `[16-byte member ID][payload]` (validated at its entry
-   *  point — the unframe cannot fail). */
-  async _publishData(from: string, payload: { data: unknown } | { framed: Uint8Array }): Promise<ChannelPublishAck> {
-    if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
-    const frame = 'framed' in payload ? unframeMemberId(payload.framed)! : null
-    const onPublish = this._guards?.onPublish
-    if (onPublish) {
-      // The guard sees exactly what a subscriber would: the payload, without the wire frame.
-      await onPublish(
-        { id: from, meta: this._memberMeta(from), identity: this._memberIdentity(from) },
-        frame ? frame.payload : (payload as { data: unknown }).data,
-      )
+  /** @internal — publish a member's text message. The sender's verified meta/identity are
+   *  stamped into the envelope here — never client-supplied. Text rides the room's text key,
+   *  or the member's own key in isolated mode. */
+  async _publishText(from: string, data: unknown): Promise<ChannelPublishAck> {
+    const sender = await this._admitPublish(from, data)
+    const envelope: RoomDataEnvelope = {
+      __r: 'data',
+      from,
+      fromMeta: sender.meta,
+      ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
+      data,
     }
-    const adapter = getBroadcastAdapter()
-    let result
-    if (frame === null) {
-      result = await adapter.publish(
-        // Text rides the room's text key — the member's own key in isolated mode.
+    return this._finishPublish(
+      getBroadcastAdapter().publish(
         this._isolated ? roomMemberDataKey(this.id, from) : roomTextKey(this.id),
-        stringify({
-          __r: 'data',
-          from,
-          fromMeta: this._memberMeta(from),
-          ...(this._memberIdentity(from) === null ? {} : { fromIdentity: this._memberIdentity(from)! }),
-          data: (payload as { data: unknown }).data,
-        } satisfies RoomDataEnvelope),
-      )
-    } else {
-      // Binary rides per-publisher keys — and per-(publisher, track) keys for named tracks:
-      // that's what makes delivery track-selective at the source, so `receivers: 0` on the ack
-      // truthfully means "nobody anywhere wants this track" and the encoder can pause.
-      if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
-      result = await adapter.publishBinary(
+        stringify(envelope),
+      ),
+    )
+  }
+
+  /** @internal — publish a member's binary frame (`[16-byte member ID][flags][…]`, validated at
+   *  its entry point — the unframe cannot fail). Binary rides per-publisher keys — per
+   *  (publisher, track) for named tracks: that's what makes delivery track-selective at the
+   *  source, so `receivers: 0` on the ack truthfully means "nobody anywhere wants this track". */
+  async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
+    const frame = unframeMemberId(framed)!
+    // The guard sees exactly what a subscriber would: the payload, without the wire frame.
+    await this._admitPublish(from, frame.payload)
+    if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
+    return this._finishPublish(
+      getBroadcastAdapter().publishBinary(
         frame.track === null ? roomMemberDataKey(this.id, from) : roomMemberTrackKey(this.id, from, frame.track),
-        (payload as { framed: Uint8Array }).framed,
-      )
-    }
+        framed,
+      ),
+    )
+  }
+
+  /** Shared publish prologue: open check + `onPublish` guard, on the verified sender. */
+  private async _admitPublish(from: string, payload: unknown): Promise<Sender> {
+    if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
+    const sender = this._memberSender(from)
+    const onPublish = this._guards?.onPublish
+    if (onPublish) await onPublish(sender, payload)
+    return sender
+  }
+
+  /** Shared publish epilogue: the activity trickle, then the receipt (with `receivers`). */
+  private async _finishPublish(
+    publishing: BroadcastPublishResult | Promise<BroadcastPublishResult>,
+  ): Promise<ChannelPublishAck> {
+    const result = await publishing
     this._announceActivity()
     return Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), {
       meta: result.meta,
@@ -674,14 +686,13 @@ class ServerRoom implements Room {
     ).catch(reportRoomError)
   }
 
-  /** The sender's meta as this node knows it — own participants first (freshest), then the view. */
-  private _memberMeta(from: string): ParticipantMeta {
-    return this._localParticipants.get(from)?.meta ?? this._state.getRemote(from)?.meta ?? {}
-  }
-
-  /** The sender's identity as this node knows it — set at join, immutable, so any source works. */
-  private _memberIdentity(from: string): string | null {
-    return this._localParticipants.get(from)?.identity ?? this._state.getRemote(from)?.identity ?? null
+  /** The verified sender as this node knows it — own participants first (freshest), then the
+   *  view. The one place sender identity is assembled; guards and envelopes both consume it. */
+  private _memberSender(from: string): Sender {
+    const local = this._localParticipants.get(from)
+    if (local) return { id: from, meta: local.meta, identity: local.identity }
+    const remote = this._state.getRemote(from)
+    return { id: from, meta: remote?.meta ?? {}, identity: remote?.identity ?? null }
   }
 
   /** @internal — send a private message: published on the target's inbox key, which only
@@ -691,16 +702,15 @@ class ServerRoom implements Room {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
     const target = await this._resolveMember(to)
     if (!target) throw new Error(`Participant not found: ${to}`)
-    const fromMeta = this._memberMeta(from)
-    const fromIdentity = this._memberIdentity(from)
+    const sender = this._memberSender(from)
     const onSend = this._guards?.onSend
-    if (onSend) await onSend({ id: from, meta: fromMeta, identity: fromIdentity }, target, data)
+    if (onSend) await onSend(sender, target, data)
     const envelope: RoomDmEnvelope = {
       __r: 'dm',
       to,
       from,
-      fromMeta,
-      ...(fromIdentity === null ? {} : { fromIdentity }),
+      fromMeta: sender.meta,
+      ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
     }
     await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
@@ -971,7 +981,7 @@ class ServerRoom implements Room {
   }
 
   /** @internal — a client publish arriving on a room stub. The client's envelope is only a
-   *  claim: membership is validated against this stub, and `_publishData` re-stamps the verified
+   *  claim: membership is validated against this stub, and the publish path re-stamps the verified
    *  `fromMeta` — nothing client-supplied reaches the room stream except the payload itself. */
   async _publishFromStub(
     stub: RoomStubChannel,
@@ -982,11 +992,11 @@ class ServerRoom implements Room {
       if (!hasRoomTag(envelope) || envelope.__r !== 'data') throw new Error('Malformed room publish')
       const publish = envelope as RoomDataPublish
       this._assertStubMember(stub, publish.from)
-      return await this._publishData(publish.from, { data: publish.data })
+      return await this._publishText(publish.from, publish.data)
     }
     const from = unframeMemberId(payload.binary)?.from
     this._assertStubMember(stub, from)
-    return await this._publishData(from, { framed: payload.binary })
+    return await this._publishBinaryFramed(from, payload.binary)
   }
 
   private _assertStubMember(stub: RoomStubChannel, id: unknown): asserts id is string {
@@ -1286,18 +1296,18 @@ class ServerLocalParticipant extends ParticipantBase {
 
   async publish(data: unknown): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishData(this.id, { data })
+    return await this._room._publishText(this.id, data)
   }
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishData(this.id, { framed: frameWithMemberId(this.id, data, options) })
+    return await this._room._publishBinaryFramed(this.id, frameWithMemberId(this.id, data, options))
   }
 
   /** @internal — publish a client-framed payload (the frame already carries this member's ID). */
   _publishFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return this._room._publishData(this.id, { framed })
+    return this._room._publishBinaryFramed(this.id, framed)
   }
 
   async send(to: string | Sender, data: unknown): Promise<void> {
