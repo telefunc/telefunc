@@ -651,7 +651,7 @@ describe('selective binary delivery', () => {
     expect([...out.payload]).toEqual([9])
   })
 
-  it('isolated mode ingests every member text key while any text is wanted; the view filters', async () => {
+  it('isolated mode narrows the upstream text keys to the wanted members too', async () => {
     const a = await Room.create('sel-text', { isolated: true })
     const alice = await a.join({ name: 'alice' })
     const bob = await a.join({ name: 'bob' })
@@ -661,14 +661,17 @@ describe('selective binary delivery', () => {
     const subscribed = vi.spyOn(getBroadcastAdapter(), 'subscribe')
     const heard: unknown[] = []
     ;(await b.getParticipant(alice.id))!.subscribe((data) => heard.push(data))
-    // A single member-scoped listener takes the whole text lane — every member's key.
     const keys = () => subscribed.mock.calls.map(([key]) => key)
     expect(keys()).toContain(roomMemberDataKey('sel-text', alice.id))
-    expect(keys()).toContain(roomMemberDataKey('sel-text', bob.id))
+    expect(keys()).not.toContain(roomMemberDataKey('sel-text', bob.id))
 
     await alice.publish('a1')
-    await bob.publish('b1') // bob's key is ingested too, but the view routes only alice's here
+    await bob.publish('b1') // b never subscribed bob's key — nothing arrives, nothing to filter
     expect(heard).toEqual(['a1'])
+
+    // A room-level subscription widens upstream to every member's key.
+    b.subscribe(() => {})
+    expect(keys()).toContain(roomMemberDataKey('sel-text', bob.id))
   })
 
   it('a shared-mode member-scoped listener still brings up the room text lane', async () => {
@@ -1317,7 +1320,7 @@ describe('room stub channel', () => {
     expect(relayedTags()).toEqual(['join', 'data'])
   })
 
-  it('text is all-or-nothing, gated by the broadcast subscription; per-member routing is client-side', async () => {
+  it('sub-text relays only the wanted members; a room-level subscription supersedes the set', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('member-text-stub')
     const alice = await serverRoom.join({ name: 'Alice' })
     const bob = await serverRoom.join({ name: 'Bob' })
@@ -1330,18 +1333,19 @@ describe('room stub channel', () => {
         .filter((m) => m.__r === 'data')
         .map((m) => m.data)
 
-    await alice.publish('before-subscribe') // no subscription yet — nothing relayed
-    expect(relayedData()).toEqual([])
-
-    stub._onPeerBroadcastSubscribe(false) // the whole text lane flows; the client filters per member
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [alice.id] }), 50)
     await alice.publish('from-alice')
-    await bob.publish('from-bob')
-    expect(relayedData()).toEqual(['from-alice', 'from-bob'])
+    await bob.publish('from-bob') // not in the want set — never crosses the wire
+    expect(relayedData()).toEqual(['from-alice'])
 
-    stub._onPeerBroadcastUnsubscribe(false) // text stops entirely
+    stub._onPeerBroadcastSubscribe(false) // room-level subscription — everything flows
+    await bob.publish('bob-now-flows')
+    expect(relayedData()).toEqual(['from-alice', 'bob-now-flows'])
+
+    stub._onPeerBroadcastUnsubscribe(false) // back to the member set
     await bob.publish('bob-dropped')
-    await alice.publish('alice-dropped')
-    expect(relayedData()).toEqual(['from-alice', 'from-bob'])
+    await alice.publish('alice-still-flows')
+    expect(relayedData()).toEqual(['from-alice', 'bob-now-flows', 'alice-still-flows'])
   })
 
   it('tail mode relays text from serialization, before any client subscription', async () => {
@@ -1645,7 +1649,7 @@ describe('ClientRoom', () => {
     unsubDefault()
   })
 
-  it('any text listener turns the broadcast text subscription on; it stays on until the last is gone', async () => {
+  it('declares member-scoped text wants — sub-text rides beside the broadcast subscription', async () => {
     const alice = crypto.randomUUID()
     const bob = crypto.randomUUID()
     const fake = createFakeStub()
@@ -1657,22 +1661,33 @@ describe('ClientRoom', () => {
         { id: bob, meta: {}, joinedAt: 2 },
       ],
     })
+    const subTextMsgs = () => fake.sent.filter((m) => m.__r === 'sub-text')
 
-    // A participant-scoped text listener takes the whole text lane — the client routes each
-    // frame to the right member locally; there's no per-member wire declaration.
-    expect(fake.textSubscribed()).toBe(false)
+    // Participant-scoped listeners declare a member set — no room-level broadcast subscription.
     const unsubAlice = (await clientRoom.getParticipant(alice))!.subscribe(() => {})
-    expect(fake.textSubscribed()).toBe(true)
+    expect(fake.textSubscribed()).toBe(false)
+    expect(subTextMsgs()).toEqual([{ __r: 'sub-text', members: [alice] }])
     const unsubBob = (await clientRoom.getParticipant(bob))!.subscribe(() => {})
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice, bob] })
+
+    // A room-level subscribe() upgrades to the broadcast subscription and clears the member
+    // set; listener changes that leave the effective want unchanged send nothing.
     const unsubAll = clientRoom.subscribe(() => {})
     expect(fake.textSubscribed()).toBe(true)
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [] })
+    const sentCount = subTextMsgs().length
+    const unsubDup = (await clientRoom.getParticipant(alice))!.subscribe(() => {})
+    expect(subTextMsgs().length).toBe(sentCount)
 
-    // The lane stays on until the last text listener (room-level or participant-scoped) is gone.
+    // Narrowing back re-declares the member set.
+    unsubDup()
     unsubAll()
-    unsubBob()
-    expect(fake.textSubscribed()).toBe(true)
-    unsubAlice()
     expect(fake.textSubscribed()).toBe(false)
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice, bob] })
+    unsubBob()
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice] })
+    unsubAlice()
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [] })
   })
 
   it('publish({ coalesce }) conflates a burst to one in-flight send plus the latest pending value', async () => {

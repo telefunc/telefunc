@@ -40,6 +40,7 @@ import {
   sanitizeBinaryWants,
   wantsAnyBinary,
   type BinaryWants,
+  type MemberWants,
   type TrackWants,
   type MemberSnapshot,
   type ReqJoinAck,
@@ -806,7 +807,7 @@ class ServerRoom implements Room {
     if (this._stubs.size > 0) {
       const wireText = encodePublishText(serialized, rawInfo)
       for (const stub of this._stubs) {
-        if (!stub._wantsText) continue
+        if (!stub._wantsTextFrom(event.from)) continue
         if (stub._stubMembers.get(event.from)?.selfDelivery === false) continue
         stub._relayPublishText(wireText)
       }
@@ -987,6 +988,13 @@ class ServerRoom implements Room {
           this._syncSubs()
           return { ok: true }
         }
+        case 'sub-text': {
+          // Member-scoped text wants — the room-level (all) want rides the broadcast-sub ctrl.
+          const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
+          stub._textMemberWants = new Set(members)
+          this._syncSubs()
+          return { ok: true }
+        }
         default:
           return undefined
       }
@@ -1041,9 +1049,10 @@ class ServerRoom implements Room {
     )
 
     // Text: its own lane, brought up only for holders that actually consume messages —
-    // presence-only observers never receive the room's chatter. The lane is all-or-nothing:
-    // a holder wanting one member's text takes the whole lane and routes locally.
-    const wantAnyText = open && this._anyTextWanted()
+    // presence-only observers never receive the room's chatter. Wants are member-selective,
+    // like binary: room-level listeners want it all, participant-scoped ones only their member.
+    const textWants = this._aggregateTextWants()
+    const wantAnyText = open && (textWants.all || textWants.members.size > 0)
     const memberIds = open ? state.listMemberIds() : []
 
     // Roster loads are need-driven: a resident roster refreshes on the observe transition
@@ -1062,8 +1071,13 @@ class ServerRoom implements Room {
       void this._refreshMembers().catch(reportRoomError)
     }
     if (this._isolated) {
-      // Isolated text rides per-member keys; ingest every member's while anyone wants text.
-      this._syncKeyedSubs(this._memberTextUnsubs, wantAnyText ? memberIds : [], (memberId) =>
+      // Isolated text rides per-member keys, so upstream delivery narrows to the wanted set.
+      const textIds = !wantAnyText
+        ? []
+        : textWants.all
+          ? memberIds
+          : memberIds.filter((id) => textWants.members.has(id))
+      this._syncKeyedSubs(this._memberTextUnsubs, textIds, (memberId) =>
         adapter.subscribe(roomMemberDataKey(this.id, memberId), (serialized, info) =>
           this._onTextData(serialized, info),
         ),
@@ -1214,12 +1228,17 @@ class ServerRoom implements Room {
     }
   }
 
-  /** Whether this node needs the room's text lane at all — any local text listener, or any
-   *  client stub subscribed to the text lane. All-or-nothing, like each holder's own want. */
-  private _anyTextWanted(): boolean {
-    if (this._state.wantsText()) return true
-    for (const stub of this._stubs) if (stub._wantsText) return true
-    return false
+  /** The text-lane twin of `_aggregateBinaryWants()` — a stub's broadcast subscription is its
+   *  `all`, its `sub-text` set the member-scoped want. */
+  private _aggregateTextWants(): { all: boolean; members: Set<string> } {
+    const local: MemberWants = this._state.textWants()
+    if (local.all) return { all: true, members: new Set() }
+    const members = new Set(local.members)
+    for (const stub of this._stubs) {
+      if (stub._wantsText) return { all: true, members: new Set() }
+      for (const id of stub._textMemberWants) members.add(id)
+    }
+    return { all: false, members }
   }
 
   /** Reconcile a map of keyed subscriptions (member IDs, adapter keys) to the wanted set. */

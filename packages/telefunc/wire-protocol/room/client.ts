@@ -14,6 +14,7 @@ import {
   sizeFromWire,
   unframeMemberId,
   type BinaryWants,
+  type MemberWants,
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
   type ParticipantStubRequest,
@@ -351,15 +352,15 @@ class ClientRoom implements Room {
     this._localParticipants.clear()
   }
 
-  /** Declare this holder's wants to the server. Text rides the standard broadcast subscription
-   *  — on whenever any text listener exists (room-level `subscribe()` or a participant-scoped
-   *  one), declared synchronously like `subscribe()`, so same-connection FIFO guarantees a
-   *  publish right after subscribing gets its own frame back. Binary is a keyed `_declareWant`. */
+  /** Declare this holder's wants to the server, one declaration per lane. The room-level text
+   *  want rides the standard broadcast subscription — declared synchronously, like
+   *  `subscribe()`, so same-connection FIFO guarantees a publish right after subscribing gets
+   *  its own frame back; everything else is a keyed `_declareWant`. */
   private _syncWants(): void {
     const state = this._state
-    const wantsText = !state.closed && state.wantsText()
+    const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
     // Tail mode: the first text listener flushes the held live tail, in order, before going live.
-    if (this._tailHold && wantsText) {
+    if (this._tailHold && (text.all || text.members.length > 0)) {
       const held = this._tailHold
       this._tailHold = null
       for (const { event, info } of held) {
@@ -373,9 +374,14 @@ class ClientRoom implements Room {
         )
       }
     }
-    this._stub._setWireTextSubscribed(wantsText)
+    this._stub._setWireTextSubscribed(text.all)
     if (state.closed) return // stub is dead — nothing to declare
 
+    // A room-level text subscription supersedes the member set — clear it server-side.
+    this._declareWant('text', text.all ? '' : [...text.members].sort().join(','), {
+      __r: 'sub-text',
+      members: text.all ? [] : text.members,
+    })
     const binary = state.binaryWants()
     this._declareWant('binary', encodeBinaryWants(binary), { __r: 'sub-binary', wants: binary })
   }

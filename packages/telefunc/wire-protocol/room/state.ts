@@ -8,6 +8,7 @@ import {
   stampNewer,
   type BinaryWants,
   type MemberSnapshot,
+  type MemberWants,
   type TrackWants,
 } from './protocol.js'
 import type {
@@ -193,13 +194,15 @@ class RoomState {
     return entry ? [...entry.tracks] : []
   }
 
-  /** Whether this holder needs the text lane at all — any room-level `subscribe()` or any
-   *  participant-scoped text listener. The text lane is all-or-nothing per holder: to receive
-   *  one member's text you subscribe to the room's text and route to that member locally. */
-  wantsText(): boolean {
-    if (this._roomDataCbs.length > 0) return true
-    for (const entry of this._members.values()) if (entry.dataCbs.length > 0) return true
-    return false
+  /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist,
+   *  otherwise exactly the members with participant-scoped listeners. */
+  textWants(): MemberWants {
+    if (this._roomDataCbs.length > 0) return { all: true, members: [] }
+    const members: string[] = []
+    for (const entry of this._members.values()) {
+      if (entry.dataCbs.length > 0) members.push(entry.id)
+    }
+    return { all: false, members }
   }
 
   getRemote(id: string): RemoteParticipant | null {
