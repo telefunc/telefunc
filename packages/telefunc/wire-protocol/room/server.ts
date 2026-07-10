@@ -69,6 +69,7 @@ import type {
   RoomInfo,
   RoomMeta,
   RoomOptions,
+  RoomGetOptions,
   RoomSnapshotView,
   JoinGuard,
   PublishGuard,
@@ -103,8 +104,13 @@ type RoomStatic = {
     id: string,
     options?: RoomOptions<M>,
   ): Promise<Room<M, P>>
-  /** Get an existing room. Throws if it doesn't exist. */
-  get<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(id: string): Promise<Room<M, P>>
+  /** Get an existing room. Throws if it doesn't exist. Pass `{ tail: true }` to start relaying
+   *  live messages at serialization time so a history read in the same telefunction misses
+   *  nothing (see `RoomGetOptions`). */
+  get<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
+    id: string,
+    options?: RoomGetOptions,
+  ): Promise<Room<M, P>>
   /** Get the room, creating it if it doesn't exist. Concurrent callers converge: one creates,
    *  the others get. `options` apply only when this call is the one that creates. */
   getOrCreate<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
@@ -190,12 +196,14 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   return new ServerRoom(id, config, { members: [] }) // fresh room — the roster is known: empty
 }
 
-async function getRoom(id: string): Promise<Room> {
+async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   const { kv, config } = await requireRoom(id)
   // One keys scan for the count — `isFull` capacity gates stay correct — but no per-member
   // reads: the roster itself loads lazily, on the first observation that needs it.
   const count = (await listMemberKeys(kv, id)).length
-  return new ServerRoom(id, config, { count })
+  const room = new ServerRoom(id, config, { count })
+  room._tail = options?.tail === true
+  return room
 }
 
 async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
@@ -365,6 +373,9 @@ class ServerRoom implements Room {
   readonly [SERVER_ROOM_BRAND] = true
 
   /** @internal */ readonly _isolated: boolean
+  /** @internal — when true, serializing this room starts relaying text immediately (buffered
+   *  pre-peer), so a history read after `Room.get(id, { tail: true })` misses no live message. */
+  _tail = false
   private _guards: { onSend: SendGuard | null; onPublish: PublishGuard | null; onJoin: JoinGuard | null } | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
@@ -891,6 +902,11 @@ class ServerRoom implements Room {
   /** @internal — called by `roomReplacer` when this room is serialized into a response. */
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
+    // Tail mode (`Room.get(id, { tail: true })`): relay text from now, before the client
+    // declares a subscription, so a history read after this serialization misses nothing. The
+    // frames buffer in the stub's pre-peer buffer and the client holds them until its first
+    // subscribe(). `_syncSubs()` below brings up the upstream text ingestion.
+    if (this._tail) stub._wantsText = true
     // The snapshot carries only scalars; the roster streams once the peer is attached (never
     // buffered — a byte-capped pre-peer buffer must not be able to evict it). Everything
     // relayed before it is already reflected in it; later events apply incrementally.

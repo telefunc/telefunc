@@ -3,6 +3,7 @@ export type {
   RoomInfo,
   RoomOptions,
   RoomMeta,
+  RoomGetOptions,
   JoinOptions,
   PublishOptions,
   ParticipantMeta,
@@ -85,6 +86,15 @@ type RoomOptions<M extends RoomMeta = RoomMeta> = {
    *  contention on platforms that map each key to a separate coordinator (e.g. Cloudflare
    *  Durable Objects). Clients don't see the difference. Fixed at creation. */
   isolated?: boolean
+}
+
+type RoomGetOptions = {
+  /** Start relaying the room's live messages the moment this room is serialized into a response,
+   *  buffered until the client attaches — so a history read done *after* `Room.get(id, { tail:
+   *  true })` in the same telefunction can't miss a message published in between. The client holds
+   *  the buffered tail until its first `subscribe()`, then flushes it. Lets you load history and
+   *  go live in a single call; the client dedupes the small overlap by message ID. */
+  tail?: boolean
 }
 
 type JoinOptions = {

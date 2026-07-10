@@ -1344,6 +1344,25 @@ describe('room stub channel', () => {
     expect(relayedData()).toEqual(['from-alice', 'from-bob'])
   })
 
+  it('tail mode relays text from serialization, before any client subscription', async () => {
+    const serverRoom = (await Room.create('tail-relay')) as ServerRoom
+    const alice = await serverRoom.join({ name: 'A' })
+    serverRoom._tail = true // set by Room.get(id, { tail: true }); read by roomReplacer/_attachStub
+    const stub = new RoomStubChannel(serverRoom)
+    stub._registerChannel()
+    serverRoom._attachStub(stub) // no BROADCAST_SUB sent — tail alone opens the text relay
+    const peer = attachPeer(stub)
+
+    await alice.publish({ text: 'early' })
+    const relayed = peer
+      .decoded()
+      .filter((f) => f.tag === TAG.PUBLISH)
+      .map((f) => JSON.parse(f.text) as { __r: string; data?: unknown })
+      .filter((m) => m.__r === 'data')
+      .map((m) => m.data)
+    expect(relayed).toEqual([{ text: 'early' }])
+  })
+
   it('a stub member joined with selfDelivery=false gets no echo of its own publishes', async () => {
     const { stub, peer } = await createServedRoom('quiet-stub')
     stub._onPeerBroadcastSubscribe(false) // the client listens for data — the echo skip must still hold
@@ -1692,6 +1711,24 @@ describe('ClientRoom', () => {
     gates.shift()!() // release the second send; B and C resolve with its receipt
     await Promise.all([pB, pC])
     expect(published).toEqual([{ x: 1 }, { x: 3 }])
+  })
+
+  it('tail mode holds relayed text until the first subscribe(), then flushes it in order', async () => {
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('tail', { tail: true, count: 1 }))
+    const alice = crypto.randomUUID()
+    fake.emit({ __r: 'roster', members: [{ id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0 }] })
+
+    // Live text arriving before any subscribe() is held, not dropped.
+    fake.emit({ __r: 'data', from: alice, fromMeta: { name: 'A' }, data: { text: 'm1' } })
+    fake.emit({ __r: 'data', from: alice, fromMeta: { name: 'A' }, data: { text: 'm2' } })
+
+    const seen: unknown[] = []
+    clientRoom.subscribe((data) => seen.push(data))
+    expect(seen).toEqual([{ text: 'm1' }, { text: 'm2' }]) // the held tail flushed, in order
+
+    fake.emit({ __r: 'data', from: alice, fromMeta: { name: 'A' }, data: { text: 'm3' } })
+    expect(seen).toEqual([{ text: 'm1' }, { text: 'm2' }, { text: 'm3' }]) // then live, straight through
   })
 
   it("a member leaving releases its listeners — the client's declaration narrows without an unsubscribe", async () => {

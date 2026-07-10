@@ -42,6 +42,8 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
         // Scalars only — the roster streams over the stub once its peer attaches, so
         // serialization is O(1) in member count.
         count: serverRoom.count,
+        // Tail mode: the client holds relayed text until its first subscribe() (see `_tailHold`).
+        ...(serverRoom._tail ? { tail: true } : {}),
       },
       async close() {
         await stub.close()

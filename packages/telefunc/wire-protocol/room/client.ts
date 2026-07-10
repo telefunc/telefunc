@@ -20,6 +20,7 @@ import {
   type ReqJoinAck,
   type ReqOkAck,
   type ReqPublishAck,
+  type RoomDataEnvelope,
   type RoomDataPublish,
   type RoomDmEnvelope,
   type RoomEnvelope,
@@ -47,6 +48,10 @@ import type {
 /** One awaiter of a conflated publish — resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
 
+/** Cap on the tail hold (`Room.get(id, { tail: true })`) — generous, since the contract is that
+ *  the client subscribes promptly after the response; drop-oldest past it, deduped against history. */
+const ROOM_TAIL_HOLD_MAX = 10_000
+
 // ---------------------------------------------------------------------------
 // ClientRoom
 // ---------------------------------------------------------------------------
@@ -69,6 +74,11 @@ class ClientRoom implements Room {
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
    *  join round-trip) — held bounded (count-capped, drop-oldest), flushed on registration. */
   private _pendingDms: Array<InboxMessage & { to: string }> | null = null
+  /** Tail mode (`Room.get(id, { tail: true })`): relayed text held until the first `subscribe()`
+   *  attaches, then flushed in order — so a history-then-go-live read loses no live message.
+   *  `null` once flushed or when tail is off. Count-capped drop-oldest (prompt subscribe is the
+   *  contract; the overlap with history is deduped by the app). */
+  private _tailHold: Array<{ event: RoomDataEnvelope; info: ChannelPublishInfo }> | null = null
   private _rosterArrived!: () => void
   /** Settled by the first streamed roster (or wire death) — gates `getParticipants()`. */
   private readonly _rosterReady = new Promise<void>((resolve) => (this._rosterArrived = resolve))
@@ -86,6 +96,7 @@ class ClientRoom implements Room {
       onCallbackError: reportRoomError,
     })
     this._state._owner = this
+    if (snapshot.tail) this._tailHold = []
     if (snapshot.closed) this._rosterArrived()
 
     // Delivery handlers are local-only — what the server relays is driven by the declared
@@ -244,6 +255,13 @@ class ClientRoom implements Room {
         this._rosterArrived()
         return
       case 'data':
+        // Tail mode: hold relayed text until the first subscribe() attaches (see `_tailHold`),
+        // so nothing published between serialization and that subscribe is lost.
+        if (this._tailHold) {
+          this._tailHold.push({ event, info: makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp) })
+          if (this._tailHold.length > ROOM_TAIL_HOLD_MAX) this._tailHold.shift()
+          return
+        }
         this._state.applyData(
           event.from,
           event.fromMeta,
@@ -335,6 +353,21 @@ class ClientRoom implements Room {
   private _syncWants(): void {
     const state = this._state
     const wantsText = !state.closed && state.wantsText()
+    // Tail mode: the first text listener flushes the held live tail, in order, before going live.
+    if (this._tailHold && wantsText) {
+      const held = this._tailHold
+      this._tailHold = null
+      for (const { event, info } of held) {
+        this._state.applyData(
+          event.from,
+          event.fromMeta,
+          event.fromIdentity ?? null,
+          event.data,
+          info,
+          isSuppressed(this.id, event.from),
+        )
+      }
+    }
     this._stub._setWireTextSubscribed(wantsText)
     if (state.closed) return // stub is dead — nothing to declare
 
