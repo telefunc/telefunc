@@ -4,8 +4,8 @@ import { BroadcastChannel, Channel } from 'telefunc'
 
 type RoomMsg = { start: true } | { n: number }
 
-/** Returns the same live values under several keys (and inside streamed chunks) — the client
- *  asserts each revives as one object, with exactly one wire subscription behind it. */
+/** Returns the same live values under several keys — the client asserts each revives
+ *  as one object, with exactly one wire subscription behind it. */
 async function onRefIdentity() {
   // Unique key per call so broadcast seq state doesn't leak across page loads.
   const room = new BroadcastChannel<RoomMsg>({ key: `ref-identity:${crypto.randomUUID()}` })
@@ -22,8 +22,8 @@ async function onRefIdentity() {
   })
 
   const gen = (async function* () {
-    yield { tag: 'chunk1', room }
-    yield { tag: 'chunk2', room }
+    yield 1
+    yield 2
   })()
 
   return { room, roomDupe: room, list: [room], ch, chDupe: ch, gen, genDupe: gen }

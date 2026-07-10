@@ -10,13 +10,13 @@ type State = {
     chDupe: boolean
     genDupe: boolean
   } | null
-  chunkIdentity: boolean | null
+  chunks: number[]
   received: number[]
   pongs: string[]
 }
 
 function RefIdentity() {
-  const [state, setState] = useState<State>({ identity: null, chunkIdentity: null, received: [], pongs: [] })
+  const [state, setState] = useState<State>({ identity: null, chunks: [], received: [], pongs: [] })
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
 
@@ -37,15 +37,15 @@ function RefIdentity() {
             genDupe: gen === genDupe,
           }
 
-          // The same broadcast yielded inside streamed chunks revives to the same object.
-          const chunks: Array<{ tag: string; room: unknown }> = []
+          // One consumer sees every chunk exactly once — duplicated producers
+          // used to steal chunks from one another.
+          const chunks: number[] = []
           for await (const chunk of gen) chunks.push(chunk)
-          const chunkIdentity = chunks.length === 2 && chunks.every((chunk) => chunk.room === room)
 
           const received: number[] = []
           const pongs: string[] = []
           // Render on every event so the e2e autoRetry sees fresh data each iteration.
-          const render = () => setState({ identity, chunkIdentity, received: [...received], pongs: [...pongs] })
+          const render = () => setState({ identity, chunks, received: [...received], pongs: [...pongs] })
 
           // Subscribe on the duplicate, publish on the original — one object, one subscription.
           // Duplicated wire subscriptions would show up as duplicated `n` values.

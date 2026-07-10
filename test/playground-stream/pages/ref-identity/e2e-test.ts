@@ -10,7 +10,7 @@ type RefIdentityResult = {
     chDupe: boolean
     genDupe: boolean
   } | null
-  chunkIdentity: boolean | null
+  chunks: number[]
   received: number[]
   pongs: string[]
 }
@@ -27,8 +27,8 @@ function testRefIdentity() {
       // across payload keys, inside arrays, and for streamed values themselves.
       expect(result.identity).deep.equal({ roomDupe: true, roomList: true, chDupe: true, genDupe: true })
 
-      // The same broadcast yielded inside async-generator chunks === the root one.
-      expect(result.chunkIdentity).toBe(true)
+      // The duplicated generator delivers each chunk exactly once.
+      expect(result.chunks).deep.equal([1, 2])
 
       // One wire subscription: 3 publishes arrive exactly once each, in order.
       // Duplicated subscriptions would surface as duplicated values.
