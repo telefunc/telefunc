@@ -1728,6 +1728,46 @@ describe('adapter KV requirement', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
+// Typed metadata — compile-time contract (tsc runs over this spec): the type
+// parameters flow from the statics through every surface.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('typed metadata', () => {
+  it('meta type parameters flow end-to-end', async () => {
+    type ChatMeta = { topic: string }
+    type MemberMeta = { name: string }
+    const room = await Room.create<ChatMeta, MemberMeta>('typed', { meta: { topic: 'general' } })
+    const topic: string = room.meta.topic
+
+    const me = await room.join({ name: 'Alice' })
+    const myName: string = me.meta.name
+    room.subscribe((_data, _info, from) => {
+      const _senderName: string = from.meta.name
+    })
+    Room.guard(room, {
+      onJoin: (member) => {
+        const _joinerName: string = member.meta.name
+      },
+    })
+    const member = await room.getParticipant(me.id)
+    if (member) {
+      const _memberName: string = member.meta.name
+    }
+    const snap = room.snapshot()
+    const first = snap.participants[0]
+    if (first) {
+      const _snapName: string = first.meta.name
+    }
+    const direct = await Room.join<MemberMeta>('typed', { name: 'Bob' })
+    const _directName: string = direct.meta.name
+
+    expect(topic).toBe('general')
+    expect(myName).toBe('Alice')
+    expect(_directName).toBe('Bob')
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
 // Activity lane — the badge trickle: throttled at the publisher, subscribed
 // only by listeners, delivered without message bodies.
 // ───────────────────────────────────────────────────────────────────────────

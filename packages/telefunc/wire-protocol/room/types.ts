@@ -35,23 +35,34 @@ type ParticipantMeta = Record<string, unknown>
  *  its sender's join). `identity` is the app identity stamped at (server-side) join — `null`
  *  when none was set. `await room.getParticipant(from.id)` upgrades a snapshot to the live
  *  handle. */
-type Sender = { readonly id: string; readonly meta: ParticipantMeta; readonly identity: string | null }
+type Sender<P extends ParticipantMeta = ParticipantMeta> = {
+  readonly id: string
+  readonly meta: P
+  readonly identity: string | null
+}
 
 /** Guards private messages (`Room.guard(room, { onSend })`): runs before every `send()` from a
  *  membership granted through that room instance — including client-side `join()`s on it.
  *  Throw to reject (the sender's promise rejects with the error). */
-type SendGuard = (from: Sender, to: Sender, data: unknown) => void | Promise<void>
+type SendGuard<P extends ParticipantMeta = ParticipantMeta> = (
+  from: Sender<P>,
+  to: Sender<P>,
+  data: unknown,
+) => void | Promise<void>
 
 /** Guards room-wide messages (`Room.guard(room, { onPublish })`): runs before every `publish()`
  *  and `publishBinary()` from a membership granted through that room instance — `data` is the
  *  payload a subscriber would receive. Throw to reject (the sender's promise rejects). */
-type PublishGuard = (from: Sender, data: unknown) => void | Promise<void>
+type PublishGuard<P extends ParticipantMeta = ParticipantMeta> = (
+  from: Sender<P>,
+  data: unknown,
+) => void | Promise<void>
 
 /** Guards admission (`Room.guard(room, { onJoin })`): runs before every `join()` through that
  *  room instance — server-side and client-side alike. `member` is the joiner: the ID it will
  *  receive and the metadata it requested. Throw to reject (the joiner's `join()` rejects with
  *  the error, before any membership state is written). */
-type JoinGuard = (member: Sender) => void | Promise<void>
+type JoinGuard<P extends ParticipantMeta = ParticipantMeta> = (member: Sender<P>) => void | Promise<void>
 
 /** Why a participant is gone. `reason` is set by `Room.removeParticipant(id, pid, { reason })`
  *  and travels with the removal — a kicked client learns it's kicked (and why) from the leave
@@ -63,9 +74,9 @@ type LeaveCause = {
   reason?: unknown
 }
 
-type RoomOptions = {
+type RoomOptions<M extends RoomMeta = RoomMeta> = {
   /** Room metadata, visible to all observers. Default: `{}`. */
-  meta?: RoomMeta
+  meta?: M
   /** Capacity hint (default: `Infinity`). Tracked (`count`, `isFull`, `onFull`) but not
    *  enforced — reject joins yourself, e.g. `if (room.isFull) throw new Error(...)`. */
   size?: number
@@ -88,22 +99,22 @@ type JoinOptions = {
 }
 
 /** One participant inside `room.snapshot()`. */
-type ParticipantSnapshotView = {
+type ParticipantSnapshotView<P extends ParticipantMeta = ParticipantMeta> = {
   readonly id: string
   readonly identity: string | null
-  readonly meta: ParticipantMeta
+  readonly meta: P
   readonly joinedAt: number
 }
 
 /** Immutable view returned by `room.snapshot()` — the same reference until the room actually
  *  changes, so it plugs straight into `useSyncExternalStore(room.onChange, room.snapshot)`. */
-type RoomSnapshotView = {
+type RoomSnapshotView<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta> = {
   readonly id: string
-  readonly meta: RoomMeta
+  readonly meta: M
   readonly size: number
   readonly count: number
   readonly isClosed: boolean
-  readonly participants: readonly ParticipantSnapshotView[]
+  readonly participants: readonly ParticipantSnapshotView<P>[]
 }
 
 /** Lightweight room snapshot returned by `Room.list()`. */
@@ -134,8 +145,16 @@ type BinaryPublishOptions = {
 }
 
 /** Receives all participant messages, with the verified sender (see `Sender`). */
-type RoomListener = (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown
-type RoomBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown
+type RoomListener<P extends ParticipantMeta = ParticipantMeta> = (
+  data: unknown,
+  info: ChannelPublishInfo,
+  from: Sender<P>,
+) => unknown
+type RoomBinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
+  data: Uint8Array,
+  info: ChannelPublishInfo & BinaryFrameInfo,
+  from: Sender<P>,
+) => unknown
 /** Receives a single participant's messages. */
 type ParticipantListener = (data: unknown, info: ChannelPublishInfo) => unknown
 type ParticipantBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
@@ -145,10 +164,10 @@ type ParticipantBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & B
  * client — a `Room` can be returned from a telefunction as-is. Admin operations live on the
  * server-side `Room.*` statics, not on the instance.
  */
-type Room = {
+type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta> = {
   /** The ID the room was created with. */
   readonly id: string
-  readonly meta: RoomMeta
+  readonly meta: M
   /** Capacity hint — not enforced by Telefunc. `Infinity` when unset. */
   readonly size: number
   readonly count: number
@@ -157,25 +176,25 @@ type Room = {
   readonly isClosed: boolean
 
   /** Join the room. Returns your own participant handle. */
-  join(meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant>
+  join(meta?: P, options?: JoinOptions): Promise<LocalParticipant<P>>
 
-  getParticipants(): Promise<RemoteParticipant[]>
+  getParticipants(): Promise<RemoteParticipant<P>[]>
   /** One participant, or `null` if they're not a member. Like `getParticipants()`, loads the
    *  member view on first need; once the view is loaded it resolves from it without I/O. */
-  getParticipant(id: string): Promise<RemoteParticipant | null>
+  getParticipant(id: string): Promise<RemoteParticipant<P> | null>
 
   /** Receive all participant messages. Returns an unsubscribe function. */
-  subscribe(callback: RoomListener): () => void
+  subscribe(callback: RoomListener<P>): () => void
   /** Receive all members' binary frames — or only one named track's (`{ track }`). */
-  subscribeBinary(callback: RoomBinaryListener, options?: { track?: string }): () => void
+  subscribeBinary(callback: RoomBinaryListener<P>, options?: { track?: string }): () => void
 
   /** A participant joined. */
-  onJoin(callback: (member: RemoteParticipant) => void): () => void
+  onJoin(callback: (member: RemoteParticipant<P>) => void): () => void
   /** A participant left. `cause` says why (kick reasons ride along); it's `undefined` exactly
    *  when the leave was discovered by a roster resync — the event itself wasn't observed. */
-  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void
+  onLeave(callback: (member: RemoteParticipant<P>, cause?: LeaveCause) => void): () => void
   /** The room was reconfigured via `Room.update()`. */
-  onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void
+  onUpdate(callback: (meta: M, prev: M) => void): () => void
   /** A room-authored message arrived (`Room.announce()`) — e.g. system notices. */
   onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void
   /** The last participant left. */
@@ -196,7 +215,7 @@ type Room = {
   /** Immutable whole-room view, reference-stable until the next change:
    *  `useSyncExternalStore(room.onChange, room.snapshot)` is the entire React adapter.
    *  Participants appear once the member view loads (subscribing `onChange` loads it). */
-  snapshot(): RoomSnapshotView
+  snapshot(): RoomSnapshotView<M, P>
 }
 
 /**
@@ -204,9 +223,9 @@ type Room = {
  * can be returned from a telefunction as-is. Room-wide messages are received on `Room` and
  * `RemoteParticipant`; only direct messages addressed to you arrive here (`listen()`).
  */
-type LocalParticipant = {
+type LocalParticipant<P extends ParticipantMeta = ParticipantMeta> = {
   readonly id: string
-  readonly meta: ParticipantMeta
+  readonly meta: P
   /** The app identity this membership was joined with — `null` when none was set. */
   readonly identity: string | null
   /** Whether the messages you publish are delivered back to the room object on your side. Set at `join()`. */
@@ -218,13 +237,13 @@ type LocalParticipant = {
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
 
   /** Send a private message to one participant (or their ID) — nobody else receives it. */
-  send(to: string | Sender, data: unknown): Promise<void>
+  send(to: string | Sender<P>, data: unknown): Promise<void>
   /** Receive private messages addressed to you. `from` is the verified sender —
    *  `null` for room-authored messages (`Room.send()`). Returns an unlisten function. */
-  listen(callback: (data: unknown, from: Sender | null) => void): () => void
+  listen(callback: (data: unknown, from: Sender<P> | null) => void): () => void
 
   /** Replace your metadata. Propagates to all observers in real time. */
-  setMeta(meta: ParticipantMeta): Promise<void>
+  setMeta(meta: P): Promise<void>
 
   leave(): Promise<void>
   /** You left. `cause.type` says how — `'left'` (you), `'removed'` (kicked, with the kick's
@@ -235,9 +254,9 @@ type LocalParticipant = {
 /** Another room member: subscribe to just their messages, observe their metadata and lifecycle.
  *  Returnable from a telefunction — it arrives bound to its room's live view: the backing room
  *  rides along (deduplicated against a co-returned room), so `room.getParticipant(m.id) === m`. */
-type RemoteParticipant = {
+type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta> = {
   readonly id: string
-  readonly meta: ParticipantMeta
+  readonly meta: P
   /** The app identity stamped at join — `null` when none was set. Correlate the same human
    *  across rooms, connections, and tabs by this, never by participant ID. */
   readonly identity: string | null
@@ -250,7 +269,7 @@ type RemoteParticipant = {
   subscribeBinary(callback: ParticipantBinaryListener, options?: { track?: string }): () => void
 
   /** This member's metadata changed. */
-  onUpdate(callback: (meta: ParticipantMeta, prev: ParticipantMeta) => void): () => void
+  onUpdate(callback: (meta: P, prev: P) => void): () => void
   /** This member left the room. `cause` as on `Room`'s `onLeave`. */
   onLeave(callback: (cause?: LeaveCause) => void): () => void
 }

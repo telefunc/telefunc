@@ -87,28 +87,43 @@ function writerId(): string {
 /** `Room` is one identifier with two meanings, like the built-in `Date`: the statics object
  *  below (value) and the instance type from ./types.js — re-established locally so the two
  *  merge into a single export. */
-type Room = RoomInstance
+type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta> = RoomInstance<M, P>
 
 // ---------------------------------------------------------------------------
 // `Room` entry point
 // ---------------------------------------------------------------------------
 
+/** Meta type parameters are caller assertions (like `querySelector<T>`): metadata is data, so
+ *  the types you pass declare what your app stores — nothing re-validates them at runtime. */
 type RoomStatic = {
   /** Create a new room. Throws if it already exists. */
-  create(id: string, options?: RoomOptions): Promise<Room>
+  create<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
+    id: string,
+    options?: RoomOptions<M>,
+  ): Promise<Room<M, P>>
   /** Get an existing room. Throws if it doesn't exist. */
-  get(id: string): Promise<Room>
+  get<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(id: string): Promise<Room<M, P>>
   /** Get the room, creating it if it doesn't exist. Concurrent callers converge: one creates,
    *  the others get. `options` apply only when this call is the one that creates. */
-  getOrCreate(id: string, options?: RoomOptions): Promise<Room>
+  getOrCreate<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
+    id: string,
+    options?: RoomOptions<M>,
+  ): Promise<Room<M, P>>
   /** Guard every membership granted through `room` — server-side and client-side `join()`s
    *  alike. `onJoin` runs before each `join()` (admission), `onSend` before each private
    *  `send()`, `onPublish` before each `publish()`/`publishBinary()`; throwing rejects the
    *  caller's promise with the error. Declared in the granting telefunction (close over
    *  `getContext()`); one `Room.guard()` per instance — declare all guards together. */
-  guard(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard; onJoin?: JoinGuard }): void
+  guard<M extends RoomMeta, P extends ParticipantMeta>(
+    room: Room<M, P>,
+    guards: { onSend?: SendGuard<P>; onPublish?: PublishGuard<P>; onJoin?: JoinGuard<P> },
+  ): void
   /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
-  join(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant>
+  join<P extends ParticipantMeta = ParticipantMeta>(
+    id: string,
+    meta?: P,
+    options?: JoinOptions,
+  ): Promise<LocalParticipant<P>>
   /** List all rooms — optionally only those whose ID starts with `prefix`. */
   list(options?: { prefix?: string }): Promise<RoomInfo[]>
   /** Admin: update the room's configuration — provided fields replace, omitted fields keep
@@ -141,12 +156,14 @@ type RoomStatic = {
  * await me.publish({ text: 'hello' })
  * ```
  */
+// The generic signatures are caller assertions over the runtime-typed implementations —
+// same relationship as `document.querySelector<T>` to its untyped DOM lookup.
 const Room: RoomStatic = {
-  create: createRoom,
-  get: getRoom,
-  getOrCreate: getOrCreateRoom,
-  guard: guardRoom,
-  join: joinRoom,
+  create: createRoom as RoomStatic['create'],
+  get: getRoom as RoomStatic['get'],
+  getOrCreate: getOrCreateRoom as RoomStatic['getOrCreate'],
+  guard: guardRoom as RoomStatic['guard'],
+  join: joinRoom as RoomStatic['join'],
   list: listRooms,
   update: updateRoom,
   close: closeRoom,
