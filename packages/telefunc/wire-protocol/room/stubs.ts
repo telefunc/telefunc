@@ -168,8 +168,12 @@ function bindParticipantStubChannel(
     void channel.send({ __r: 'dm', from: from?.id ?? '', fromMeta: from?.meta ?? null, data }).catch(() => {})
   })
 
-  const unlistenLeave = participant.onLeave(() => {
-    void channel.send({ __r: 'left' }).catch(() => {})
+  const unlistenLeave = participant.onLeave((cause) => {
+    const notice =
+      cause.type === 'left'
+        ? { __r: 'left' as const }
+        : { __r: 'left' as const, cause: cause.type, ...(cause.reason === undefined ? {} : { reason: cause.reason }) }
+    void channel.send(notice).catch(() => {})
     void channel.close().catch(() => {})
   })
 

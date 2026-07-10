@@ -6,6 +6,7 @@ import { isObject } from '../../utils/isObject.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import {
+  leaveCauseFromWire,
   ParticipantBase,
   RoomState,
   frameWithMemberId,
@@ -29,6 +30,7 @@ import {
 } from './shared.js'
 import type {
   JoinOptions,
+  LeaveCause,
   LocalParticipant,
   ParticipantMeta,
   RemoteParticipant,
@@ -76,8 +78,9 @@ class ClientRoom implements Room {
     // wants: control always arrives, text while subscribed, binary per `sub-binary`.
     stub._subscribeLocal((envelope, info) => this._onEnvelope(envelope, info))
     stub._subscribeBinaryLocal((framed, info) => this._onBinaryFrame(framed, info))
-    // Wire death — server closed the room, network gave up, or the stub was GC'd.
-    stub.onClose(() => this._applyClosed())
+    // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives
+    // as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
+    stub.onClose(() => this._applyClosed('disconnected'))
   }
 
   // ── Room API ──
@@ -209,11 +212,12 @@ class ClientRoom implements Room {
         this._state.applyJoin(event.id, event.meta, event.joinedAt)
         return
       case 'leave': {
-        this._state.applyLeave(event.id)
+        const cause = leaveCauseFromWire(event)
+        this._state.applyLeave(event.id, cause)
         const local = this._localParticipants.get(event.id)
         if (local) {
           this._localParticipants.delete(event.id)
-          local._onLeft() // kicked, or left through another handle
+          local._onLeft(cause) // kicked (with the kick's reason), or left through another handle
         }
         return
       }
@@ -227,7 +231,7 @@ class ClientRoom implements Room {
         this._state.applyRoomUpdate(event.meta, event.prev, sizeFromWire(event.size), event.at, event.by)
         return
       case 'closed':
-        this._applyClosed()
+        this._applyClosed('closed')
         return
       case 'announce':
         this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
@@ -249,12 +253,13 @@ class ClientRoom implements Room {
     )
   }
 
-  private _applyClosed(): void {
+  private _applyClosed(causeType: 'closed' | 'disconnected'): void {
     if (this._state.closed) return
-    this._state.applyClosed()
+    const cause: LeaveCause = { type: causeType }
+    this._state.applyClosed(cause)
     this._rosterArrived() // unblock any getParticipants() waiting on a wire that just died
     // After onClose, like on the server: the room-level signal fires before per-handle cleanup.
-    for (const local of this._localParticipants.values()) local._onLeft()
+    for (const local of this._localParticipants.values()) local._onLeft(cause)
     this._localParticipants.clear()
   }
 
@@ -300,9 +305,9 @@ abstract class ClientParticipantBase extends ParticipantBase {
     if (!selfDelivery) setSuppressed(roomId, id, true)
   }
 
-  override _onLeft(): void {
+  override _onLeft(cause: LeaveCause): void {
     setSuppressed(this._roomId, this.id, false)
-    super._onLeft()
+    super._onLeft(cause)
   }
 
   protected _reportError(err: unknown): void {
@@ -353,7 +358,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
     } finally {
       // Local cleanup even when the wire is gone — the server reaps the member on stub death.
       this._room._dropParticipant(this.id)
-      this._onLeft()
+      this._onLeft({ type: 'left' })
     }
   }
 }
@@ -371,9 +376,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       const msg = notice as ParticipantStubNotice
       if (msg.__r === 'p-meta') this._meta = msg.meta
       else if (msg.__r === 'dm') this._deliverMessage(msg.from, msg.fromMeta, msg.data)
-      else this._onLeft()
+      else if (msg.__r === 'left') this._onLeft(standaloneLeftCause(msg))
     })
-    channel.onClose(() => this._onLeft())
+    channel.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
 
   async publish(data: unknown): Promise<ChannelPublishAck> {
@@ -404,7 +409,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       unwrapOkAck(await this._request({ __r: 'req-leave' }))
     } finally {
       // Local cleanup even when the wire is gone — the server reaps the member on stub death.
-      this._onLeft()
+      this._onLeft({ type: 'left' })
       void this._channel.close().catch(() => {})
     }
   }
@@ -467,6 +472,12 @@ function unwrapPublishAck(ack: unknown): ChannelPublishAck {
   const res = ack as ReqPublishAck
   if (!res.ok) throw new Error(res.err)
   return res.ack
+}
+
+/** A standalone participant's `left` notice carries the server-side cause verbatim. */
+function standaloneLeftCause(msg: { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }): LeaveCause {
+  const type = msg.cause ?? 'left'
+  return msg.reason === undefined ? { type } : { type, reason: msg.reason }
 }
 
 function reportRoomError(err: unknown): void {

@@ -273,6 +273,44 @@ describe('Room entry point', () => {
     await expect(me.publish({ text: 'too late' })).rejects.toThrow('Participant has left')
     await expect(Room.removeParticipant('kick', me.id)).rejects.toThrow('Participant not found')
   })
+
+  it('every leave carries its cause — kick reasons travel with the removal, nothing to race', async () => {
+    const lobby = await Room.create('causes')
+    const observer = await Room.get('causes')
+    const observed: Array<[string, unknown]> = []
+    observer.onLeave((m, cause) => observed.push([String(m.meta.name), cause]))
+
+    // Voluntary leave.
+    const alice = await lobby.join({ name: 'Alice' })
+    const aliceCauses: unknown[] = []
+    alice.onLeave((cause) => aliceCauses.push(cause))
+    await alice.leave()
+    expect(aliceCauses).toEqual([{ type: 'left' }])
+
+    // Kick, with the reason riding the removal event itself.
+    const bob = await lobby.join({ name: 'Bob' })
+    const bobCauses: unknown[] = []
+    bob.onLeave((cause) => bobCauses.push(cause))
+    await Room.removeParticipant('causes', bob.id, { reason: { rule: 'spam' } })
+    expect(bobCauses).toEqual([{ type: 'removed', reason: { rule: 'spam' } }])
+
+    expect(observed).toEqual([
+      ['Alice', { type: 'left' }],
+      ['Bob', { type: 'removed', reason: { rule: 'spam' } }],
+    ])
+
+    // Room closure.
+    const carol = await lobby.join({ name: 'Carol' })
+    const carolCauses: unknown[] = []
+    carol.onLeave((cause) => carolCauses.push(cause))
+    await Room.close('causes')
+    expect(carolCauses).toEqual([{ type: 'closed' }])
+
+    // Late subscribers still learn the cause.
+    const late: unknown[] = []
+    carol.onLeave((cause) => late.push(cause))
+    expect(late).toEqual([{ type: 'closed' }])
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1081,6 +1119,7 @@ describe('room stub channel', () => {
 type FakeStub = {
   emit: (envelope: unknown) => void
   emitBinary: (framed: Uint8Array) => void
+  close: () => void
   published: unknown[]
   sent: Array<{ __r: string }>
   textSubscribed: () => boolean
@@ -1092,6 +1131,7 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
   const binaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
   const published: unknown[] = []
   const sent: Array<{ __r: string }> = []
+  const closeCbs: Array<() => void> = []
   let wireTextSubscribed = false
   let seq = 0
   const info = () => ({ key: 'fake', seq: ++seq, timestamp: 1 })
@@ -1116,11 +1156,12 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
       return info()
     },
     publishBinary: async () => info(),
-    onClose: () => {},
+    onClose: (cb: () => void) => closeCbs.push(cb),
   }
   return {
     emit: (envelope) => [...textCbs].forEach((cb) => cb(envelope, info())),
     emitBinary: (framed) => [...binaryCbs].forEach((cb) => cb(framed, info())),
+    close: () => [...closeCbs].forEach((cb) => cb()),
     published,
     sent,
     textSubscribed: () => wireTextSubscribed,
@@ -1208,7 +1249,7 @@ describe('ClientRoom', () => {
     const log: string[] = []
     clientRoom.onUpdate((meta) => log.push(`update:${JSON.stringify(meta)}`))
     clientRoom.onClose(() => log.push('closed'))
-    me.onLeave(() => log.push('me-left'))
+    me.onLeave((cause) => log.push(`me-left:${JSON.stringify(cause)}`))
 
     fake.emit({ __r: 'p-meta', id: me.id, meta: { mood: 'happy' }, prev: {}, seq: 1 })
     expect(me.meta).toEqual({ mood: 'happy' })
@@ -1216,12 +1257,25 @@ describe('ClientRoom', () => {
     fake.emit({ __r: 'update', meta: { topic: 'b' }, prev: { topic: 'a' }, size: null, at: 9, by: 'w1' })
     expect(clientRoom.size).toBe(Infinity)
 
-    fake.emit({ __r: 'leave', id: me.id }) // kicked
+    fake.emit({ __r: 'leave', id: me.id, cause: 'removed', reason: 'be nice' }) // kicked, told why
     fake.emit({ __r: 'closed' })
 
-    expect(log).toEqual(['update:{"topic":"b"}', 'me-left', 'closed'])
+    expect(log).toEqual(['update:{"topic":"b"}', 'me-left:{"type":"removed","reason":"be nice"}', 'closed'])
     expect(clientRoom.isClosed).toBe(true)
     await expect(me.publish('x')).rejects.toThrow('Participant has left')
+  })
+
+  it("wire death surfaces as cause 'disconnected' on the client's own participants", async () => {
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('wire-death'))
+    const me = await clientRoom.join()
+    const causes: unknown[] = []
+    me.onLeave((cause) => causes.push(cause))
+
+    fake.close() // the connection died — no `closed` event preceded it
+
+    expect(causes).toEqual([{ type: 'disconnected' }])
+    expect(clientRoom.isClosed).toBe(true)
   })
 
   it('declares the text want only while data listeners exist — presence stays wire-free of chatter', () => {
@@ -1414,8 +1468,8 @@ describe('liveness', () => {
     const a = await Room.create('crashed')
     const me = await a.join({ name: 'Ghost' })
     const observer = await Room.get('crashed')
-    const leaves: string[] = []
-    observer.onLeave((m) => leaves.push(m.id))
+    const leaves: Array<[string, unknown]> = []
+    observer.onLeave((m, cause) => leaves.push([m.id, cause]))
     await observer.getParticipants() // materialize the roster — leave events need the member view
 
     await backdate('crashed', me.id) // simulate: the owning node died 2 minutes ago
@@ -1423,7 +1477,7 @@ describe('liveness', () => {
     const reader = await Room.get('crashed')
     expect(await reader.getParticipants()).toEqual([]) // reap-on-read: record deleted, leave announced
     expect(await Room.list()).toMatchObject([{ id: 'crashed', count: 0 }])
-    expect(leaves).toEqual([me.id])
+    expect(leaves).toEqual([[me.id, { type: 'disconnected' }]]) // the reaper knows it's a crash death
     expect(observer.count).toBe(0)
     expect(a.count).toBe(0) // the (supposed) owner learned via the reaper's event too
     await expect(me.publish('boo')).rejects.toThrow('Participant has left')

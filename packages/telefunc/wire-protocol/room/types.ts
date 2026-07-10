@@ -11,6 +11,7 @@ export type {
   SendGuard,
   PublishGuard,
   JoinGuard,
+  LeaveCause,
   RoomListener,
   RoomBinaryListener,
   ParticipantListener,
@@ -46,6 +47,16 @@ type PublishGuard = (from: Sender, data: unknown) => void | Promise<void>
  *  receive and the metadata it requested. Throw to reject (the joiner's `join()` rejects with
  *  the error, before any membership state is written). */
 type JoinGuard = (member: Sender) => void | Promise<void>
+
+/** Why a participant is gone. `reason` is set by `Room.removeParticipant(id, pid, { reason })`
+ *  and travels with the removal — a kicked client learns it's kicked (and why) from the leave
+ *  itself, with nothing to race. On `Room`/`RemoteParticipant` leave callbacks the cause is
+ *  `undefined` exactly when the leave was discovered by a roster resync rather than an event —
+ *  the actual cause wasn't observed. Your own `LocalParticipant` always knows its cause. */
+type LeaveCause = {
+  type: 'left' | 'removed' | 'closed' | 'disconnected'
+  reason?: unknown
+}
 
 type RoomOptions = {
   /** Room metadata, visible to all observers. Default: `{}`. */
@@ -112,8 +123,9 @@ type Room = {
 
   /** A participant joined. */
   onJoin(callback: (member: RemoteParticipant) => void): () => void
-  /** A participant left (or was removed). */
-  onLeave(callback: (member: RemoteParticipant) => void): () => void
+  /** A participant left. `cause` says why (kick reasons ride along); it's `undefined` exactly
+   *  when the leave was discovered by a roster resync — the event itself wasn't observed. */
+  onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void
   /** The room was reconfigured via `Room.update()`. */
   onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void
   /** A room-authored message arrived (`Room.announce()`) — e.g. system notices. */
@@ -151,8 +163,9 @@ type LocalParticipant = {
   setMeta(meta: ParticipantMeta): Promise<void>
 
   leave(): Promise<void>
-  /** You left — voluntarily, kicked, room closed, or disconnected. */
-  onLeave(callback: () => void): () => void
+  /** You left. `cause.type` says how — `'left'` (you), `'removed'` (kicked, with the kick's
+   *  `reason`), `'closed'` (the room), `'disconnected'` (the connection died). */
+  onLeave(callback: (cause: LeaveCause) => void): () => void
 }
 
 /** Another room member: subscribe to just their messages, observe their metadata and lifecycle. */
@@ -168,6 +181,6 @@ type RemoteParticipant = {
 
   /** This member's metadata changed. */
   onUpdate(callback: (meta: ParticipantMeta, prev: ParticipantMeta) => void): () => void
-  /** This member left the room. */
-  onLeave(callback: () => void): () => void
+  /** This member left the room. `cause` as on `Room`'s `onLeave`. */
+  onLeave(callback: (cause?: LeaveCause) => void): () => void
 }

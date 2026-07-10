@@ -15,6 +15,8 @@ import {
   ParticipantBase,
   ROOM_KEY_NAMESPACE,
   errorMessage,
+  leaveCauseFromWire,
+  leaveCauseToWire,
   stampNewer,
   RoomState,
   frameWithMemberId,
@@ -48,6 +50,7 @@ import {
 import type { RoomStubChannel } from './stubs.js'
 import type {
   JoinOptions,
+  LeaveCause,
   LocalParticipant,
   ParticipantMeta,
   RemoteParticipant,
@@ -103,8 +106,9 @@ type RoomStatic = {
   update(id: string, options: RoomOptions): Promise<void>
   /** Admin: close the room — disconnects all participants and removes the room. */
   close(id: string): Promise<void>
-  /** Admin: remove a participant from the room. */
-  removeParticipant(id: string, participantId: string): Promise<void>
+  /** Admin: remove a participant. `reason` travels with the removal — the kicked participant's
+   *  `onLeave` receives `{ type: 'removed', reason }`, so "why" never races the removal. */
+  removeParticipant(id: string, participantId: string, options?: { reason?: unknown }): Promise<void>
   /** Publish a room-authored message — no sender, delivered to `onAnnounce()` (e.g. system notices). */
   announce(id: string, data: unknown): Promise<void>
   /** Send a server-authored private message to one participant — arrives on `listen()` with `from: null`. */
@@ -201,7 +205,8 @@ async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOption
 
 async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   assertUsage(
-    options === undefined || (isObject(options) && (options.prefix === undefined || typeof options.prefix === 'string')),
+    options === undefined ||
+      (isObject(options) && (options.prefix === undefined || typeof options.prefix === 'string')),
     'Room.list() options.prefix should be a string',
   )
   const kv = getRoomKV()
@@ -259,7 +264,7 @@ async function closeRoom(id: string): Promise<void> {
   await kv.delete(roomConfigKvKey(id))
 }
 
-async function removeParticipant(id: string, participantId: string): Promise<void> {
+async function removeParticipant(id: string, participantId: string, options?: { reason?: unknown }): Promise<void> {
   assertUsage(
     typeof participantId === 'string' && participantId.length > 0,
     'The participant ID should be a non-empty string',
@@ -268,7 +273,9 @@ async function removeParticipant(id: string, participantId: string): Promise<voi
   const memberKey = roomMemberKvKey(id, participantId)
   if ((await kv.get(memberKey)) === null) throw new Error(`Participant not found: ${participantId}`)
   await kv.delete(memberKey)
-  await publishCtrl(id, { __r: 'leave', id: participantId })
+  const cause: LeaveCause =
+    options?.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: options.reason }
+  await publishCtrl(id, { __r: 'leave', id: participantId, ...leaveCauseToWire(cause) })
 }
 
 async function announceToRoom(id: string, data: unknown): Promise<void> {
@@ -457,11 +464,11 @@ class ServerRoom implements Room {
   }
 
   /** @internal */
-  async _removeMember(id: string): Promise<void> {
+  async _removeMember(id: string, cause: LeaveCause): Promise<void> {
     if (this._state.closed) return // close() already removed everyone
     await getRoomKV().delete(roomMemberKvKey(this.id, id))
-    this._applyLeave(id)
-    await publishCtrl(this.id, { __r: 'leave', id })
+    this._applyLeave(id, cause)
+    await publishCtrl(this.id, { __r: 'leave', id, ...leaveCauseToWire(cause) })
   }
 
   /** @internal */
@@ -650,7 +657,7 @@ class ServerRoom implements Room {
         this._syncSubs() // a new member means a new per-member key candidate
         return
       case 'leave':
-        this._applyLeave(event.id)
+        this._applyLeave(event.id, leaveCauseFromWire(event))
         return
       case 'p-meta': {
         this._state.applyParticipantMeta(event.id, event.meta, event.prev, event.seq)
@@ -666,12 +673,14 @@ class ServerRoom implements Room {
     }
   }
 
-  private _applyLeave(id: string): void {
-    this._state.applyLeave(id)
+  private _applyLeave(id: string, cause?: LeaveCause): void {
+    this._state.applyLeave(id, cause)
     const local = this._localParticipants.get(id)
     if (local) {
       this._localParticipants.delete(id)
-      local._onLeft()
+      // A live-heartbeating owner can't be reaped (heartbeats outpace the TTL by 4x), so a
+      // vanished record with no observed event means the member was removed.
+      local._onLeft(cause ?? { type: 'removed' })
     }
     for (const stub of this._stubs) stub._stubMembers.delete(id)
     this._syncSubs()
@@ -679,7 +688,7 @@ class ServerRoom implements Room {
 
   /** The room closed — runs once, after the `closed` event has been applied and relayed. */
   private _teardown(): void {
-    for (const local of this._localParticipants.values()) local._onLeft()
+    for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
     for (const stub of this._stubs) void stub.close().catch(() => {})
     this._syncSubs()
@@ -708,7 +717,8 @@ class ServerRoom implements Room {
     stub.onClose(() => {
       this._stubs.delete(stub)
       // The client is gone — presence says its members leave.
-      for (const id of [...stub._stubMembers.keys()]) void this._removeMember(id).catch(reportRoomError)
+      for (const id of [...stub._stubMembers.keys()])
+        void this._removeMember(id, { type: 'disconnected' }).catch(reportRoomError)
       stub._stubMembers.clear()
       this._syncSubs()
     })
@@ -731,7 +741,7 @@ class ServerRoom implements Room {
         case 'req-leave':
           this._assertStubMember(stub, req.id)
           stub._stubMembers.delete(req.id)
-          await this._removeMember(req.id)
+          await this._removeMember(req.id, { type: 'left' })
           return { ok: true }
         case 'req-set-meta':
           this._assertStubMember(stub, req.id)
@@ -1055,8 +1065,8 @@ class ServerLocalParticipant extends ParticipantBase {
   async leave(): Promise<void> {
     if (this._left) return
     this._left = true
-    await this._room._removeMember(this.id)
-    this._onLeft() // fires even when the room wasn't observing (no echo applied)
+    await this._room._removeMember(this.id, { type: 'left' })
+    this._onLeft({ type: 'left' }) // fires even when the room wasn't observing (no echo applied)
   }
 
   protected override _resolveSender(id: string): Sender | null {
@@ -1109,7 +1119,7 @@ async function readMembers(kv: RoomKV, roomId: string): Promise<MemberSnapshot[]
     const record = parse(raw) as RoomMemberRecord
     if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
       await kv.delete(key)
-      await publishCtrl(roomId, { __r: 'leave', id })
+      await publishCtrl(roomId, { __r: 'leave', id, cause: 'disconnected' })
       continue
     }
     members.push({ id, meta: record.meta, joinedAt: record.joinedAt, metaSeq: record.metaSeq })

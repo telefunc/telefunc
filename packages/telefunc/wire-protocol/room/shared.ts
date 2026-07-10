@@ -17,6 +17,8 @@ export {
   normalizeJoinOptions,
   stampNewer,
   errorMessage,
+  leaveCauseFromWire,
+  leaveCauseToWire,
   RoomState,
   ParticipantBase,
 }
@@ -45,7 +47,15 @@ export type {
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
-import type { JoinOptions, LocalParticipant, ParticipantMeta, RemoteParticipant, RoomMeta, Sender } from './types.js'
+import type {
+  JoinOptions,
+  LeaveCause,
+  LocalParticipant,
+  ParticipantMeta,
+  RemoteParticipant,
+  RoomMeta,
+  Sender,
+} from './types.js'
 
 // ---------------------------------------------------------------------------
 // Keys & records
@@ -168,7 +178,7 @@ type ParticipantStubMetadata = {
  *  concurrent writers converge to the same winner on every node, whatever the arrival order. */
 type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number }
-  | { __r: 'leave'; id: string }
+  | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected'; reason?: unknown }
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; prev: ParticipantMeta; seq: number }
   | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; at: number; by: string }
   | { __r: 'closed' }
@@ -218,7 +228,7 @@ type ParticipantStubRequest =
 
 /** Server→client notices on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubNotice =
-  | { __r: 'left' }
+  | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
   | { __r: 'p-meta'; meta: ParticipantMeta }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; data: unknown }
 
@@ -229,6 +239,22 @@ type MemberWants = { all: boolean; members: string[] }
 type ReqOkAck = { ok: true } | { ok: false; err: string }
 type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }
 type ReqPublishAck = { ok: true; ack: ChannelPublishInfo } | { ok: false; err: string }
+
+/** Decode a leave event's cause — an absent wire cause means a voluntary leave. */
+function leaveCauseFromWire(event: { cause?: 'removed' | 'disconnected'; reason?: unknown }): LeaveCause {
+  if (event.cause === 'removed') {
+    return event.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: event.reason }
+  }
+  return { type: event.cause === 'disconnected' ? 'disconnected' : 'left' }
+}
+
+/** Encode a cause into leave-event fields — `'left'` is the wire default and travels as nothing. */
+function leaveCauseToWire(cause: LeaveCause): { cause?: 'removed' | 'disconnected'; reason?: unknown } {
+  if (cause.type === 'removed')
+    return cause.reason === undefined ? { cause: 'removed' } : { cause: 'removed', reason: cause.reason }
+  if (cause.type === 'disconnected') return { cause: 'disconnected' }
+  return {}
+}
 
 /** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {
@@ -307,7 +333,7 @@ type MemberEntry = {
   dataCbs: Array<(data: unknown, info: ChannelPublishInfo) => unknown>
   binaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo) => unknown>
   updateCbs: Array<(meta: ParticipantMeta, prev: ParticipantMeta) => void>
-  leaveCbs: Array<() => void>
+  leaveCbs: Array<(cause?: LeaveCause) => void>
 }
 
 type RoomStateOptions = {
@@ -351,7 +377,7 @@ class RoomState {
   private readonly _roomDataCbs: Array<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> = []
   private readonly _roomBinaryCbs: Array<(data: Uint8Array, info: ChannelPublishInfo, from: Sender) => unknown> = []
   private readonly _joinCbs: Array<(member: RemoteParticipant) => void> = []
-  private readonly _leaveCbs: Array<(member: RemoteParticipant) => void> = []
+  private readonly _leaveCbs: Array<(member: RemoteParticipant, cause?: LeaveCause) => void> = []
   private readonly _updateCbs: Array<(meta: RoomMeta, prev: RoomMeta) => void> = []
   private readonly _emptyCbs: Array<() => void> = []
   private readonly _fullCbs: Array<() => void> = []
@@ -464,7 +490,7 @@ class RoomState {
   onJoin(cb: (member: RemoteParticipant) => void): () => void {
     return this._register(this._joinCbs, cb, 'event')
   }
-  onLeave(cb: (member: RemoteParticipant) => void): () => void {
+  onLeave(cb: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
     return this._register(this._leaveCbs, cb, 'event')
   }
   onUpdate(cb: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
@@ -501,14 +527,14 @@ class RoomState {
     this._checkFull()
   }
 
-  applyLeave(id: string): void {
+  applyLeave(id: string, cause?: LeaveCause): void {
     const entry = this._members.get(id)
     if (!entry) return // unknown here: absorbed (pre-reconcile misses correct at reconcile)
     this._members.delete(id)
     this._seedCount = Math.max(0, this._seedCount - 1)
     this.membershipVersion++
-    this._fireAll(entry.leaveCbs)
-    this._fireAll(this._leaveCbs, entry.remote)
+    this._fireAll(entry.leaveCbs, cause)
+    this._fireAll(this._leaveCbs, entry.remote, cause)
     this._releaseEntryListeners(entry)
     this._wasFull = this.isFull
     if (this._members.size === 0) this._fireAll(this._emptyCbs)
@@ -542,13 +568,13 @@ class RoomState {
 
   /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`.
    *  Room-level `onLeave`/`onEmpty` intentionally don't fire — `onClose` is the signal. */
-  applyClosed(): void {
+  applyClosed(cause: LeaveCause = { type: 'closed' }): void {
     if (this.closed) return
     this.closed = true
     this._rosterKnown = true // authoritatively empty
     this.membershipVersion++
     for (const entry of this._members.values()) {
-      this._fireAll(entry.leaveCbs)
+      this._fireAll(entry.leaveCbs, cause)
       this._releaseEntryListeners(entry)
     }
     this._members.clear()
@@ -649,7 +675,7 @@ class RoomState {
         subscribe: (cb) => this._register(entry.dataCbs, cb, 'data'),
         subscribeBinary: (cb) => this._register(entry.binaryCbs, cb, 'binary'),
         onUpdate: (cb) => this._register(entry.updateCbs, cb, 'event'),
-        onLeave: (cb) => this._register(entry.leaveCbs, cb, 'event'),
+        onLeave: (cb: (cause?: LeaveCause) => void) => this._register(entry.leaveCbs, cb, 'event'),
       },
       dataCbs: [],
       binaryCbs: [],
@@ -717,8 +743,8 @@ abstract class ParticipantBase implements LocalParticipant {
   readonly selfDelivery: boolean
   /** @internal */ _meta: ParticipantMeta
   protected _left = false
-  private _leftFired = false
-  private _leaveCbs: Array<() => void> = []
+  private _leftCause: LeaveCause | null = null
+  private _leaveCbs: Array<(cause: LeaveCause) => void> = []
   private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => void> = []
 
   constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean) {
@@ -766,9 +792,9 @@ abstract class ParticipantBase implements LocalParticipant {
     return null
   }
 
-  onLeave(callback: () => void): () => void {
-    if (this._leftFired) {
-      this._invoke(callback)
+  onLeave(callback: (cause: LeaveCause) => void): () => void {
+    if (this._leftCause) {
+      this._invoke(callback, this._leftCause)
       return () => {}
     }
     this._leaveCbs.push(callback)
@@ -778,23 +804,24 @@ abstract class ParticipantBase implements LocalParticipant {
     }
   }
 
-  /** @internal — the member is gone (left, kicked, room closed, or holder disconnected). */
-  _onLeft(): void {
+  /** @internal — the member is gone; `cause` says how. A local participant always knows its
+   *  cause: its holder either initiated the leave or witnessed the event/closure that caused it. */
+  _onLeft(cause: LeaveCause): void {
     this._left = true
-    if (this._leftFired) return
-    this._leftFired = true
+    if (this._leftCause) return
+    this._leftCause = cause
     const cbs = this._leaveCbs
     this._leaveCbs = []
-    for (const cb of cbs) this._invoke(cb)
+    for (const cb of cbs) this._invoke(cb, cause)
   }
 
   protected _assertActive(): void {
     if (this._left) throw new Error('Participant has left the room')
   }
 
-  private _invoke(cb: () => void): void {
+  private _invoke(cb: (cause: LeaveCause) => void, cause: LeaveCause): void {
     try {
-      cb()
+      cb(cause)
     } catch (err) {
       this._reportError(err)
     }
