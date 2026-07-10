@@ -39,7 +39,7 @@ And three message lanes:
 
 Two things hold everywhere:
 
-- **One type, both sides.** A `Room`, `LocalParticipant`, or `RemoteParticipant` can be returned from a telefunction and used on the client as-is. A returned `RemoteParticipant` *is* the object the room hands you — compare it with `===`.
+- **One type, both sides.** A `Room`, `LocalParticipant`, or `RemoteParticipant` can be returned from a telefunction and used on the client exactly as on the server — no wrapper, no client-only variant.
 - **The sender travels with the message.** Every received message carries its verified sender (`from.id`, `from.meta`, `from.identity`), stamped by the server. `from === null` means the room itself spoke.
 
 
@@ -195,7 +195,7 @@ export async function onJoinChat(roomId) {
 }
 ```
 
-Each guard's first argument is the acting member. Throwing rejects the caller's `join()`/`publish()`/`send()` with that error — on the client too, through the wire. A rejected join writes nothing. Guards run on the server (the statics don't exist in the browser build), so authorization never runs on the machines it polices.
+Each guard's first argument is the acting member. Throwing rejects the caller's `join()`/`publish()`/`send()` with that error, on the client too. A rejected join writes nothing. Guards run on the server (the statics don't exist in the browser build), so authorization never runs on the machines it polices.
 
 **Kicks carry their reason.** Every departure says why, and a kick's reason arrives with the removal:
 
@@ -246,7 +246,7 @@ member.subscribeBinary((data, info) => video.decode(data, { key: info.keyFrame }
 
 <Warning>Rooms move binary over the same reliable, ordered transport as everything else (WebSocket / SSE). That's ideal for binary *data* and small or controlled-network A/V — but it has no congestion control, simulcast, or jitter buffering. For production multi-party video, pair rooms (presence, chat, signaling) with a WebRTC SFU such as [LiveKit](https://livekit.io) for the media. An unreliable WebTransport datagram lane that would lift this ceiling is being explored in [telefunc#449](https://github.com/telefunc/telefunc/issues/449).</Warning>
 
-**Render only 9 of 500 cameras?** Subscribe to those 9 members — the other 491 streams never cross the wire to you, and your server never pulls them upstream. The same holds per track: stop watching a screen share, and its bytes stop flowing to you.
+**Render only 9 of 500 cameras?** Subscribe to those 9 members — the other 491 streams never reach you, and your server never fetches them at all. The same holds per track: stop watching a screen share, and its bytes stop flowing to you.
 
 **Pause the encoder when nobody's watching.** `onDemand` fires when the number of subscribers to one of your tracks changes — `0` means nobody is watching, a later non-zero means a viewer returned:
 
@@ -281,7 +281,7 @@ export async function onJoinChat(roomId) {
 }
 ```
 
-`{ tail: true }` starts buffering the room's live messages the moment the room is serialized, and the client holds them until your first `subscribe()`. So the history you read *after* that point can't miss a live message in between — the small overlap is deduped by message ID:
+`{ tail: true }` starts buffering the room's live messages the moment the telefunction returns it, and the client holds them until your first `subscribe()`. So the history you read *after* that point can't miss a live message in between — the small overlap is deduped by message ID:
 
 ```js
 // Chat.js
@@ -355,7 +355,7 @@ type RoomOptions = {
 }
 ```
 
-- `Room.get(id, { tail: true })` starts relaying live messages at serialization time (see <Link href="#load-history-then-go-live">Load history</Link>).
+- `Room.get(id, { tail: true })` starts relaying live messages as soon as the room is returned to a client (see <Link href="#load-history-then-go-live">Load history</Link>).
 - `Room.update()` replaces the fields you provide and keeps the rest (`isolated` is fixed at creation).
 - `Room.removeParticipant(id, target, { reason? })` — `target` is a participant ID, or `{ identity }` to remove every membership of an identity at once (idempotent).
 - Typed metadata: `Room.get<ChatMeta, MemberMeta>(id)` types `room.meta`, `join`/`setMeta`, and `from.meta` everywhere. The parameters are caller assertions (like `querySelector<T>`).
@@ -405,7 +405,7 @@ Read-only: `id`, `meta`, `identity`, `joinedAt`. Cleanup in `onLeave` is enough 
 
 ### Senders
 
-Every message callback receives its verified sender as `from` — `{ id, meta, identity }`, stamped by the server, impossible to spoof. Normally it's the live `RemoteParticipant` (`room.getParticipant(from.id)`); when your view has no live object for it (you hold a participant but no room, or a message briefly outran its sender's join event) it's a plain snapshot with the same fields. Either way you read `from.id` and `from.meta` and never branch. `from === null` only for room-authored messages.
+Every message callback receives its verified sender as `from` — `{ id, meta, identity }`, stamped by the server, impossible to spoof. It's the live `RemoteParticipant` when the room knows the sender, and a plain object with the same fields otherwise — either way you read `from.id` / `from.meta` and never branch. `from === null` only for room-authored messages.
 
 
 ## Production
