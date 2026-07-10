@@ -59,9 +59,10 @@ class ClientRoom implements Room {
   private readonly _stub: ClientBroadcast
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
-  private _lastBinaryWantsSent = ''
-  private _lastTextWantsSent = ''
-  private _lastActivityWantSent = false
+  /** Wants already declared to the server, by lane. Every lane's declaration is a full
+   *  replace, re-sent only when its canonical encoding changes — `''` encodes "nothing
+   *  wanted" on every lane, which is also the nothing-declared-yet initial state. */
+  private readonly _declaredWants = new Map<string, string>()
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
    *  join round-trip) — held bounded (count-capped, drop-oldest), flushed on registration. */
   private _pendingDms: Array<InboxMessage & { to: string }> | null = null
@@ -331,36 +332,32 @@ class ClientRoom implements Room {
     this._localParticipants.clear()
   }
 
-  /** Declare this holder's wants to the server. Both data lanes are member-selective:
-   *  room-level text listeners ride the standard broadcast subscription — declared
-   *  synchronously, like `subscribe()`, so same-connection FIFO guarantees a publish right
-   *  after subscribing gets its own frame back — while participant-scoped text listeners
-   *  declare a `sub-text` member set and binary listeners a `sub-binary` one, each re-sent
-   *  only when it changes. */
+  /** Declare this holder's wants to the server, one declaration per lane. The room-level text
+   *  want rides the standard broadcast subscription — declared synchronously, like
+   *  `subscribe()`, so same-connection FIFO guarantees a publish right after subscribing gets
+   *  its own frame back; everything else is a keyed `_declareWant`. */
   private _syncWants(): void {
     const state = this._state
     const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
     this._stub._setWireTextSubscribed(text.all)
-
     if (state.closed) return // stub is dead — nothing to declare
-    const textEncoded = text.all ? '' : [...text.members].sort().join(',')
-    if (textEncoded !== this._lastTextWantsSent) {
-      this._lastTextWantsSent = textEncoded
-      // A room-level subscription supersedes the member set — clear it server-side.
-      void this._stub.send({ __r: 'sub-text', members: text.all ? [] : text.members }, { ack: false }).catch(() => {})
-    }
 
+    // A room-level text subscription supersedes the member set — clear it server-side.
+    this._declareWant('text', text.all ? '' : [...text.members].sort().join(','), {
+      __r: 'sub-text',
+      members: text.all ? [] : text.members,
+    })
     const wantActivity = state.activityListenerCount > 0
-    if (wantActivity !== this._lastActivityWantSent) {
-      this._lastActivityWantSent = wantActivity
-      void this._stub.send({ __r: 'sub-activity', on: wantActivity }, { ack: false }).catch(() => {})
-    }
+    this._declareWant('activity', wantActivity ? 'on' : '', { __r: 'sub-activity', on: wantActivity })
+    const binary = state.binaryWants()
+    this._declareWant('binary', encodeBinaryWants(binary), { __r: 'sub-binary', wants: binary })
+  }
 
-    const wants = state.binaryWants()
-    const encoded = encodeBinaryWants(wants)
-    if (encoded === this._lastBinaryWantsSent) return
-    this._lastBinaryWantsSent = encoded
-    void this._stub.send({ __r: 'sub-binary', wants }, { ack: false }).catch(() => {})
+  /** Send one lane's declaration iff its canonical encoding changed since last declared. */
+  private _declareWant(lane: string, encoded: string, request: RoomStubRequest): void {
+    if ((this._declaredWants.get(lane) ?? '') === encoded) return
+    this._declaredWants.set(lane, encoded)
+    void this._stub.send(request, { ack: false }).catch(() => {})
   }
 }
 
