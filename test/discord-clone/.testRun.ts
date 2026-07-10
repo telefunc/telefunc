@@ -22,9 +22,6 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
       log.includes('Listening on') || (log.includes('Local:') && log.includes('http://localhost:3000')),
     tolerateError(log) {
       return (
-        // Guard rejections are expected control flow, but the client logs every rejected
-        // publish ack as a channel error (see README finding).
-        log.logText.includes('[telefunc:channel-error]') ||
         // This app keeps telefunctions in telefunc/ (an API layer) instead of collocating.
         log.logText.includes('We recommend to collocate') ||
         log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
@@ -120,8 +117,10 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
     })
     await b.fill('#composer', 'psst')
     await b.press('#composer', 'Enter')
+    // The unread dot rides the room's `onActivity` signal — body-free, so A pays nothing for
+    // messages in channels it isn't reading.
     await autoRetry(async () => {
-      expect(await page.textContent(`[data-unread-for="${CHANNEL}"]`)).toBe('1') // A, sitting in #general
+      expect(await page.$(`[data-unread-for="${CHANNEL}"]`)).not.toBe(null) // A, sitting in #general
     })
 
     // More messages than one page (DISCORD_CLONE_PAGE_SIZE=5) → "Load older" appears.

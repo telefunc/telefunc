@@ -6,6 +6,7 @@ export { BOT_COLOR, BOT_NAME, channelRoomId, dbChannelIdOf, ensureLiveWorld, GUI
 import { randomUUID } from 'node:crypto'
 import { Room } from 'telefunc'
 import * as q from '../database/queries'
+import type { ChannelMeta, MemberMeta } from '../shared/types'
 
 const GUILD_ROOM_ID = 'discord:guild'
 const CHANNEL_ROOM_PREFIX = 'discord:channel:'
@@ -31,15 +32,15 @@ async function ensureLiveWorld(): Promise<void> {
 async function boot(): Promise<void> {
   seedDatabase()
 
-  // `Room.create()` throws if the room exists and there is no upsert — seeding after a server
-  // restart is a create-and-tolerate dance (see README finding).
-  await createIfMissing(GUILD_ROOM_ID, { meta: { name: 'Telefunc HQ' } })
+  // Idempotent seeding — `Room.getOrCreate()` replaced the create-and-swallow-the-exists-error
+  // dance this used to need (README finding 13, fixed upstream).
+  await Room.getOrCreate(GUILD_ROOM_ID, { meta: { name: 'Telefunc HQ' } })
   for (const channel of q.listChannels()) {
-    await createIfMissing(
+    await Room.getOrCreate<ChannelMeta, MemberMeta>(
       channelRoomId(channel.id),
       channel.kind === 'voice'
-        ? // `size` exercises the capacity hint (`isFull`); `isolated` gives each member their own
-          // upstream key (removes publish contention on Cloudflare; invisible on this server).
+        ? // `size` is enforced by the voice rooms' `onJoin` guard (see guards.ts); `isolated`
+          // gives each member their own upstream key (removes publish contention on Cloudflare).
           { meta: { kind: 'voice', name: channel.name }, size: VOICE_CHANNEL_SIZE, isolated: true }
         : { meta: { kind: 'text', name: channel.name, topic: channel.topic } },
     )
@@ -66,13 +67,5 @@ function seedDatabase(): void {
     q.insertChannel({ id: randomUUID(), kind: 'text', name: 'general', topic: 'Anything goes', created_at: now })
     q.insertChannel({ id: randomUUID(), kind: 'text', name: 'help', topic: 'Ask RoomBot: !help', created_at: now })
     q.insertChannel({ id: randomUUID(), kind: 'voice', name: 'lounge', topic: '', created_at: now })
-  }
-}
-
-async function createIfMissing(roomId: string, options: Parameters<typeof Room.create>[1]): Promise<void> {
-  try {
-    await Room.create(roomId, options)
-  } catch {
-    // Already exists (previous boot, another instance) — fine either way.
   }
 }

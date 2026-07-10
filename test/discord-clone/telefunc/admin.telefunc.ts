@@ -3,16 +3,17 @@ export { onAnnounce, onKickUser }
 import { Abort, getContext, Room } from 'telefunc'
 import * as q from '../database/queries'
 import { channelRoomId, GUILD_ROOM_ID } from '../server/rooms'
-import { asMemberMeta, type SystemNotice } from '../shared/types'
 
 /**
  * Kick a user — all of their connections, from every room. Admin operations live on the
  * `Room.*` statics (an instance handed to clients carries no privileged methods), and the actor
  * comes from `getContext()`, not from the request payload.
  *
- * Membership is per-room and participants are per-connection: nothing links "the same user"
- * across the guild, text and voice rooms, so the app sweeps every room and matches on the
- * `userId` it stamped into the metadata at join (see README finding on cross-room identity).
+ * The sweep is one call per room now: `removeParticipant(id, { identity })` removes every
+ * membership of that app identity at once, idempotently — no more listing participants and
+ * matching metadata by hand (README finding 1, fixed upstream). The kick's `reason` travels
+ * with the removal itself, so the kicked client learns "why" from its own `onLeave` — the old
+ * pre-kick notice (and its cross-lane race) is gone (finding 12, fixed upstream).
  */
 async function onKickUser(targetUserId: string): Promise<void> {
   const actor = requireAdmin()
@@ -21,27 +22,12 @@ async function onKickUser(targetUserId: string): Promise<void> {
   if (target.is_bot === 1) throw Abort('The bot stays')
   if (target.id === actor.id) throw Abort("You can't kick yourself")
 
-  // 1. The guild: tell each of their connections why (room-authored — `from === null`), then
-  //    remove it. Sent before the removal — you can't message a participant that's gone.
-  const guild = await Room.get(GUILD_ROOM_ID)
-  const notice: SystemNotice = { kind: 'kicked', by: actor.name }
-  for (const participant of await guild.getParticipants()) {
-    if (asMemberMeta(participant.meta).userId !== target.id) continue
-    await Room.send(GUILD_ROOM_ID, participant.id, notice).catch(() => {})
-    await Room.removeParticipant(GUILD_ROOM_ID, participant.id)
-  }
-
-  // 2. Their other participants (open text channels, voice) — same sweep, per channel room.
+  await Room.removeParticipant(GUILD_ROOM_ID, { identity: target.id }, { reason: actor.name })
   for (const row of q.listChannels()) {
-    const room = await Room.get(channelRoomId(row.id))
-    for (const participant of await room.getParticipants()) {
-      if (asMemberMeta(participant.meta).userId === target.id) {
-        await Room.removeParticipant(room.id, participant.id)
-      }
-    }
+    await Room.removeParticipant(channelRoomId(row.id), { identity: target.id }, { reason: actor.name })
   }
 
-  // 3. Tell everyone (room-authored, on the guild's announce lane).
+  // Tell everyone (room-authored, on the guild's announce lane).
   await Room.announce(GUILD_ROOM_ID, { kind: 'member-kicked', userId: target.id, name: target.name, by: actor.name })
 }
 

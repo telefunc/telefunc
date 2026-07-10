@@ -1,21 +1,28 @@
 // Data shapes shared by server and client.
 //
-// A note on metadata typing: Room/participant metadata is `Record<string, unknown>` on the
-// Telefunc side, so the app declares its own shapes and casts at the boundary (`asMemberMeta`,
-// `asChannelMeta`). See README finding on untyped metadata.
+// Rooms are typed end-to-end now — `Room<ChannelMeta, MemberMeta>` flows through telefunction
+// returns, guards, and snapshots (the `asMemberMeta` casts this file used to export are gone).
 
-export type { ChannelMeta, ChannelPublish, ChatMessage, DmMessage, GuildAnnouncement, MemberMeta, SystemNotice }
-export { asChannelMeta, asMemberMeta }
+export type {
+  ChannelMeta,
+  ChannelPublish,
+  ChannelRoom,
+  ChatMessage,
+  DmMessage,
+  GuildAnnouncement,
+  GuildRoom,
+  MemberMeta,
+  SystemNotice,
+}
 
-import type { ParticipantMeta, RoomMeta } from 'telefunc'
+import type { Room } from 'telefunc'
 
 /**
- * Every room membership carries the user's identity. `userId` is the app's *durable* identity
- * (participant IDs are per-room and per-connection) — kicks, member dedupe across tabs, and DM
- * threads all correlate by it. Stamped server-side from `getContext().user`, never by clients.
+ * A member's display state, carried by participant metadata. The durable identity (`userId`)
+ * does NOT live here anymore: it's the join's `identity` option — server-stamped, spoof-proof,
+ * surfaced as `participant.identity` / `from.identity` everywhere.
  */
 type MemberMeta = {
-  userId: string
   name: string
   color: string
   status: 'online' | 'idle' | 'dnd'
@@ -35,13 +42,10 @@ type ChannelMeta = {
   topic?: string
 }
 
-function asMemberMeta(meta: ParticipantMeta): MemberMeta {
-  return meta as MemberMeta
-}
-
-function asChannelMeta(meta: RoomMeta): ChannelMeta {
-  return meta as ChannelMeta
-}
+/** The one guild room (meta is just a display name). */
+type GuildRoom = Room<{ name: string }, MemberMeta>
+/** A text or voice channel room. */
+type ChannelRoom = Room<ChannelMeta, MemberMeta>
 
 /**
  * Everything published on a text channel's room-wide lane. Chat messages and ephemeral typing
@@ -84,8 +88,9 @@ type GuildAnnouncement =
 
 /**
  * Room-authored private notices (`Room.send` → `me.listen` with `from === null`).
- * DMs arrive this way too: they're server-delivered (DB write first, then live fan-out to the
- * recipient's participants), so they work while the recipient is offline — something the
- * member-to-member `send()` lane can't do (see README finding).
+ * DMs arrive this way: they're server-delivered (DB write first, then live fan-out), so they
+ * work while the recipient is offline — something the member-to-member `send()` lane can't do
+ * (see README finding 2). Kick notices are gone: the removal itself now carries its reason
+ * (`LeaveCause`), so there is nothing to race.
  */
-type SystemNotice = { kind: 'kicked'; by: string } | { kind: 'dm'; message: DmMessage }
+type SystemNotice = { kind: 'dm'; message: DmMessage }

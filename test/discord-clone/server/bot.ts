@@ -5,9 +5,9 @@ export { startBot }
 // answers a few commands in every text channel. (Its DM replies live in dms.telefunc.ts — DMs
 // are server-delivered in this app, they never ride the member-to-member lane.)
 
-import { Room, type LocalParticipant } from 'telefunc'
+import type { LocalParticipant } from 'telefunc'
 import * as q from '../database/queries'
-import { asChannelMeta, asMemberMeta, type ChannelPublish, type GuildAnnouncement } from '../shared/types'
+import type { ChannelPublish, GuildAnnouncement, GuildRoom, MemberMeta } from '../shared/types'
 import { BANNED_WORDS, getGuardedChannel, getGuardedGuild } from './guards'
 import { BOT_COLOR, BOT_NAME, channelRoomId } from './rooms'
 
@@ -16,17 +16,17 @@ const HELP = ['!help', '!ping — pong', '!members — who is online', '!roll �
 async function startBot(): Promise<void> {
   const botUser = q.theBotUser()
   if (botUser === undefined) throw new Error('Bot user missing — seed the database first')
-  const identity = { userId: botUser.id, name: BOT_NAME, color: BOT_COLOR, bot: true }
+  const meta: MemberMeta = { name: BOT_NAME, color: BOT_COLOR, status: 'online', bot: true }
 
   const guild = await getGuardedGuild()
-  await guild.join({ ...identity, status: 'online' })
+  await guild.join(meta, { identity: botUser.id })
 
   // Watch every text channel — current ones now (awaited: the first user's join event must
   // find the bot already able to speak in #general), future ones as the guild announces them.
-  await Promise.all(q.listChannels().map((channel) => watchChannel(channelRoomId(channel.id), guild, identity)))
+  await Promise.all(q.listChannels().map((channel) => watchChannel(channelRoomId(channel.id), guild, botUser.id, meta)))
   guild.onAnnounce((data) => {
     const event = data as GuildAnnouncement
-    if (event.kind === 'channel-created') void watchChannel(event.channelId, guild, identity)
+    if (event.kind === 'channel-created') void watchChannel(event.channelId, guild, botUser.id, meta)
   })
 
   // Greet each user's first appearance — in #general, not by DM: a reactive DM can race the
@@ -35,10 +35,9 @@ async function startBot(): Promise<void> {
   const greeted = new Set<string>()
   const generalId = q.getChannelByName('general')?.id
   guild.onJoin((member) => {
-    const meta = asMemberMeta(member.meta)
-    if (meta.bot || greeted.has(meta.userId)) return
-    greeted.add(meta.userId)
-    if (generalId) void say(channelRoomId(generalId), `Welcome @${meta.name}! Type !help in any channel.`)
+    if (member.meta.bot || member.identity === null || greeted.has(member.identity)) return
+    greeted.add(member.identity)
+    if (generalId) void say(channelRoomId(generalId), `Welcome @${member.meta.name}! Type !help in any channel.`)
   })
 }
 
@@ -46,24 +45,20 @@ async function startBot(): Promise<void> {
 
 const channelBots = new Map<string, LocalParticipant>() // channel room ID → the bot's membership
 
-async function watchChannel(
-  roomId: string,
-  guild: Room,
-  identity: { userId: string; name: string; color: string; bot: boolean },
-): Promise<void> {
+async function watchChannel(roomId: string, guild: GuildRoom, botUserId: string, meta: MemberMeta): Promise<void> {
   if (channelBots.has(roomId)) return
   const channel = await getGuardedChannel(roomId)
-  if (asChannelMeta(channel.meta).kind !== 'text') return
+  if (channel.meta.kind !== 'text') return
 
-  const botMe = await channel.join(identity)
+  const botMe = await channel.join(meta, { identity: botUserId })
   channelBots.set(roomId, botMe)
   channel.onClose(() => channelBots.delete(roomId)) // channel deleted
 
   channel.subscribe((data, _info, from) => {
     const published = data as ChannelPublish
     if (published.kind !== 'chat') return
-    if (asMemberMeta(from.meta).bot) return // never react to bots (that includes myself)
-    void handleCommand(published.text, roomId, guild, asMemberMeta(from.meta).name)
+    if (from.meta.bot) return // never react to bots (that includes myself)
+    void handleCommand(published.text, roomId, guild, from.meta.name)
   })
 }
 
@@ -73,7 +68,7 @@ async function say(roomId: string, text: string): Promise<void> {
   await botMe.publish({ kind: 'chat', id: crypto.randomUUID(), text } satisfies ChannelPublish)
 }
 
-async function handleCommand(text: string, roomId: string, guild: Room, fromName: string): Promise<void> {
+async function handleCommand(text: string, roomId: string, guild: GuildRoom, fromName: string): Promise<void> {
   if (!text.startsWith('!')) return
   const [command = ''] = text.slice(1).split(' ')
   try {

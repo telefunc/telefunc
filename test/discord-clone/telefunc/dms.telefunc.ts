@@ -15,7 +15,7 @@ import { Abort, getContext, Room } from 'telefunc'
 import { dmThreadKey } from '../database/db'
 import * as q from '../database/queries'
 import { ensureLiveWorld, GUILD_ROOM_ID } from '../server/rooms'
-import { asMemberMeta, type DmMessage, type SystemNotice } from '../shared/types'
+import type { DmMessage, GuildRoom, SystemNotice } from '../shared/types'
 
 const PAGE_SIZE = 50
 
@@ -28,12 +28,13 @@ async function onSendDm(toUserId: string, text: string): Promise<DmMessage> {
   if (target.id === user.id) throw Abort("That's you")
 
   await ensureLiveWorld()
-  const guild = await Room.get(GUILD_ROOM_ID)
+  const guild: GuildRoom = await Room.get(GUILD_ROOM_ID)
 
-  // Do-Not-Disturb: live presence state, read from the guild roster.
+  // Do-Not-Disturb: live presence state, read from the guild roster. `identity` is the
+  // server-stamped app identity — the durable way to say "the same user" (finding 1).
   const participants = await guild.getParticipants()
-  const targetParticipants = participants.filter((p) => asMemberMeta(p.meta).userId === target.id)
-  if (targetParticipants.some((p) => asMemberMeta(p.meta).status === 'dnd')) {
+  const targetParticipants = participants.filter((p) => p.identity === target.id)
+  if (targetParticipants.some((p) => p.meta.status === 'dnd')) {
     throw Abort(`${target.name} has Do Not Disturb on`)
   }
 
@@ -108,17 +109,14 @@ function persistDm(dm: { fromId: string; fromName: string; toId: string; toName:
 /** Push to every participant of the two users involved (sender's other tabs included) —
  *  clients dedupe by message ID. A participant racing away mid-send is fine. */
 async function deliverLive(
-  guild: Room,
-  participants: Awaited<ReturnType<Room['getParticipants']>>,
+  _guild: GuildRoom,
+  participants: Awaited<ReturnType<GuildRoom['getParticipants']>>,
   message: DmMessage,
 ): Promise<void> {
   const notice: SystemNotice = { kind: 'dm', message }
   await Promise.all(
     participants
-      .filter((p) => {
-        const userId = asMemberMeta(p.meta).userId
-        return userId === message.toId || userId === message.fromId
-      })
+      .filter((p) => p.identity === message.toId || p.identity === message.fromId)
       .map((p) => Room.send(GUILD_ROOM_ID, p.id, notice).catch(() => {})),
   )
 }

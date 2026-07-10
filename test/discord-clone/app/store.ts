@@ -1,7 +1,12 @@
 // The client store (zustand): all Room wiring on one side, immutable snapshots for React on
-// the other. Rooms and participants are long-lived *mutable* event emitters (`member.meta` is
-// replaced in place), while React wants immutable state — this file is the adapter every
-// React-on-Room app ends up writing (see README finding on the React impedance).
+// the other.
+//
+// Round 2 of the stress test: the hand-rolled ~80-line roster adapter (`watchRoster` + per-
+// member `onUpdate` bookkeeping + immutable copying) is gone — rooms now expose
+// `snapshot()`/`onChange()`, the exact UI-store contract (README finding 9, fixed upstream).
+// Unread badges ride the new `onActivity` control-lane signal instead of subscribing to every
+// channel's full text lane (finding 10, fixed upstream): only the open channel's messages
+// cross the wire.
 //
 // Live handles (rooms, participants) live in module variables, never in the store.
 // All room wiring runs from user events (login, clicks) — none from render — which also keeps
@@ -36,16 +41,17 @@ export {
   patchCall,
 }
 
-import type { LocalParticipant, RemoteParticipant, Room } from 'telefunc'
+import type { LocalParticipant } from 'telefunc'
 import { create } from 'zustand'
-import {
-  asChannelMeta,
-  asMemberMeta,
-  type ChannelPublish,
-  type ChatMessage,
-  type DmMessage,
-  type GuildAnnouncement,
-  type SystemNotice,
+import type {
+  ChannelPublish,
+  ChannelRoom,
+  ChatMessage,
+  DmMessage,
+  GuildAnnouncement,
+  GuildRoom,
+  MemberMeta,
+  SystemNotice,
 } from '../shared/types'
 import { onAnnounce, onKickUser } from '../telefunc/admin.telefunc'
 import {
@@ -53,6 +59,7 @@ import {
   onCreateChannel,
   onDeleteChannel,
   onGetChannel,
+  onOpenChannel,
   onSetTopic,
 } from '../telefunc/channels.telefunc'
 import { onDmThread, onListDmThreads, onSendDm } from '../telefunc/dms.telefunc'
@@ -62,8 +69,9 @@ import { onEnterGuild } from '../telefunc/session.telefunc'
 // State (immutable snapshots — what React renders)
 // ---------------------------------------------------------------------------
 
-/** A room member, snapshotted for rendering. `userId` is the durable identity; `participantId`
- *  identifies one connection in one room (a user with two tabs has two participants). */
+/** A room member, snapshotted for rendering. `userId` is the durable app identity (the join's
+ *  server-stamped `identity`); `participantId` identifies one connection in one room (a user
+ *  with two tabs has two participants). */
 type Member = {
   userId: string
   participantId: string
@@ -126,7 +134,9 @@ type AppState = {
   view: View
   messages: Record<string, ChatMessage[]> // channel room ID → history ∪ live, deduped by ID
   hasOlder: Record<string, boolean>
-  unread: Record<string, number>
+  /** Unread dot per channel — fed by the room's `onActivity` signal (throttled, body-free),
+   *  so it can't be an exact count. Discord shows a dot for plain unread too. */
+  unread: Record<string, boolean>
   typing: Record<string, string[]> // channel room ID → names typing right now
   dmThreads: Record<string, DmThread> // other user's ID → conversation
   dmUnread: Record<string, number>
@@ -164,10 +174,9 @@ const getState = useApp.getState
 // Live handles (mutable Room objects — kept out of the store on purpose)
 // ---------------------------------------------------------------------------
 
-let guild: Room | null = null
+let guild: GuildRoom | null = null
 let identity = { userId: '', name: '', color: '' }
-const channelRooms = new Map<string, Room>()
-const voiceOccupants = new Map<string, Member[]>() // voice channel room ID → live occupants
+const channelRooms = new Map<string, ChannelRoom>()
 const seenMessageIds = new Map<string, Set<string>>() // history/live overlap dedup, per channel
 const seenDmIds = new Set<string>()
 
@@ -175,11 +184,12 @@ const seenDmIds = new Set<string>()
 // a message sent during that window has no membership to publish through — so senders await the
 // in-flight join instead of a resolved handle (our first version dropped fast-typed messages;
 // see README finding on the channel-switch window).
-let viewingJoin: Promise<LocalParticipant | null> = Promise.resolve(null)
-let viewingNow: LocalParticipant | null = null // resolved membership — for fire-and-forget typing
+let viewingJoin: Promise<LocalParticipant<MemberMeta> | null> = Promise.resolve(null)
+let viewingNow: LocalParticipant<MemberMeta> | null = null // resolved membership — for fire-and-forget typing
 let activeSwitch: symbol | null = null // identifies the latest channel switch (stale joins abandon)
+let activeMessagesUnsubscribe: (() => void) | null = null // the open channel's text-lane subscription
 
-function getChannelRoom(channelId: string): Room | undefined {
+function getChannelRoom(channelId: string): ChannelRoom | undefined {
   return channelRooms.get(channelId)
 }
 
@@ -278,36 +288,44 @@ async function logout(): Promise<void> {
 // Guild wiring
 // ---------------------------------------------------------------------------
 
-function wireGuild(guildRoom: Room, myself: LocalParticipant): void {
-  // The member sidebar: presence + status changes, one row per *user* (a user with two tabs
-  // has two participants — dedupe on the durable identity).
-  watchRoster(guildRoom, (participants) => {
+function wireGuild(guildRoom: GuildRoom, myself: LocalParticipant<MemberMeta>): void {
+  // The member sidebar. `snapshot()` is reference-stable and immutable, `onChange()` is one
+  // subscription for everything observable — the entire roster adapter this store used to
+  // hand-roll (finding 9, fixed upstream). One row per *user*: dedupe on `identity`.
+  const pushMembers = () => {
     const byUser = new Map<string, Member>()
-    for (const member of participants) if (!byUser.has(member.userId)) byUser.set(member.userId, member)
+    for (const p of guildRoom.snapshot().participants) {
+      const member = toMember(p)
+      if (!byUser.has(member.userId)) byUser.set(member.userId, member)
+    }
     setState({ members: [...byUser.values()].sort(byName) })
-  })
+  }
+  guildRoom.onChange(pushMembers)
+  pushMembers()
 
-  // My private inbox: server-delivered DMs and kick notices (room-authored, `from === null`).
+  // My private inbox: server-delivered DMs (room-authored, `from === null`).
   myself.listen((data, from) => {
     if (from !== null) return // the member-to-member lane is closed by the guard
     const notice = data as SystemNotice
-    if (notice.kind === 'kicked') setState({ phase: 'kicked', kickedBy: notice.by })
     if (notice.kind === 'dm') receiveDm(notice.message)
   })
 
-  // Kicked, or the connection died. The kick notice (private lane) and the removal (control
-  // lane) are different streams with no cross-lane ordering — give the notice a beat before
-  // concluding it was a plain disconnect (README finding on cross-lane ordering).
-  myself.onLeave(() => {
-    setTimeout(() => {
-      if (getState().phase === 'ready') setState({ phase: 'disconnected' })
-    }, 500)
+  // Every leave carries its cause now — a kick arrives as `removed` with the kicker's name as
+  // `reason`, on the leave itself. The old pre-kick notice and its 500ms cross-lane
+  // disambiguation timer are gone (finding 12, fixed upstream).
+  myself.onLeave((cause) => {
+    if (getState().phase !== 'ready') return
+    if (cause.type === 'removed') {
+      setState({ phase: 'kicked', kickedBy: typeof cause.reason === 'string' ? cause.reason : null })
+    } else if (cause.type !== 'left') {
+      setState({ phase: 'disconnected' })
+    }
   })
   guildRoom.onClose(() => {
     if (getState().phase === 'ready') setState({ phase: 'disconnected' })
   })
 
-  // The guild announce lane: server banners, kick notices — and the channel directory feed.
+  // The guild announce lane: server banners, kick announcements — and the channel directory feed.
   guildRoom.onAnnounce((data) => {
     const event = data as GuildAnnouncement
     if (event.kind === 'announcement') showBanner(event.text, event.by)
@@ -316,9 +334,9 @@ function wireGuild(guildRoom: Room, myself: LocalParticipant): void {
   })
 }
 
-/** My own status changes (setMeta is a full replace — spread the rest; README finding). */
-let myGuildParticipant: LocalParticipant | null = null
-function keepMyStatus(me: LocalParticipant): void {
+/** My own status changes (setMeta is a full replace — spread the rest; README finding 5). */
+let myGuildParticipant: LocalParticipant<MemberMeta> | null = null
+function keepMyStatus(me: LocalParticipant<MemberMeta>): void {
   myGuildParticipant = me
 }
 
@@ -340,43 +358,23 @@ async function adoptChannel(channelId: string): Promise<void> {
   publishChannels()
 }
 
-function wireChannel(room: Room): void {
+function wireChannel(room: ChannelRoom): void {
   if (channelRooms.has(room.id)) return
   channelRooms.set(room.id, room)
 
-  if (asChannelMeta(room.meta).kind === 'text') {
-    // One subscription per channel for the whole session: it feeds both the open conversation
-    // and the unread badges. Discord-style unread means consuming every channel's text lane —
-    // that's the honest cost (README finding on unread counts).
-    room.subscribe((data, info, from) => {
-      const published = data as ChannelPublish
-      const sender = asMemberMeta(from.meta)
-      if (published.kind === 'typing') {
-        markTyping(room.id, sender.name)
-        return
-      }
-      stopTyping(room.id, sender.name)
-      recordMessage(room.id, {
-        id: published.id,
-        authorId: sender.userId,
-        author: { name: sender.name, color: sender.color, bot: sender.bot },
-        text: published.text,
-        at: info.timestamp,
-      })
-    })
-  } else {
-    // Voice occupancy is plain presence — visible to everyone, costs no media: binary flows
-    // only to clients that subscribed to a member's stream (see call.ts).
-    watchRoster(room, (occupants) => {
-      voiceOccupants.set(room.id, occupants)
-      publishChannels()
+  if (room.meta.kind === 'text') {
+    // Unread dots ride `onActivity` — a throttled, body-free control-lane signal. The full text
+    // lane flows only for the channel that's actually open (see openChannel); this store used
+    // to subscribe to every channel just to count unreads (finding 10, fixed upstream).
+    room.onActivity(() => {
+      const state = getState()
+      const isOpen = state.activeChannelId === room.id && state.view.kind === 'channel'
+      if (!isOpen) setState({ unread: { ...state.unread, [room.id]: true } })
     })
   }
 
-  // Live counts, topic edits, deletion:
-  room.onJoin(publishChannels)
-  room.onLeave(publishChannels)
-  room.onUpdate(publishChannels)
+  // Counts, occupant/meta changes, topic edits — one subscription covers them all:
+  room.onChange(publishChannels)
   room.onClose(() => dropChannel(room.id))
 }
 
@@ -389,7 +387,6 @@ function publishChannels(): void {
 /** `room.onClose()` *is* the "channel deleted" signal — no announcement needed. */
 function dropChannel(channelId: string): void {
   channelRooms.delete(channelId)
-  voiceOccupants.delete(channelId)
   seenMessageIds.delete(channelId)
   publishChannels()
   if (getState().activeChannelId === channelId) {
@@ -400,24 +397,48 @@ function dropChannel(channelId: string): void {
 
 async function openChannel(channelId: string): Promise<void> {
   const room = channelRooms.get(channelId)
-  if (room === undefined || asChannelMeta(room.meta).kind !== 'text') return
+  if (room === undefined || room.meta.kind !== 'text') return
   setState({
     activeChannelId: channelId,
     view: { kind: 'channel' },
-    unread: { ...getState().unread, [channelId]: 0 },
+    unread: { ...getState().unread, [channelId]: false },
+  })
+
+  // The open channel is the only one whose text lane flows: swap the message subscription.
+  activeMessagesUnsubscribe?.()
+  activeMessagesUnsubscribe = room.subscribe((data, info, from) => {
+    const published = data as ChannelPublish
+    if (published.kind === 'typing') {
+      markTyping(room.id, from.meta.name)
+      return
+    }
+    stopTyping(room.id, from.meta.name)
+    recordMessage(room.id, {
+      id: published.id,
+      authorId: from.identity ?? from.id,
+      author: { name: from.meta.name, color: from.meta.color, bot: from.meta.bot },
+      text: published.text,
+      at: info.timestamp,
+    })
   })
 
   // Swap my "viewing" membership — publishing (messages, typing) needs membership, and you
-  // publish into the channel you have open. Switches are chained through `viewingJoin` so that
-  // leave/join pairs can't interleave and senders always have a join to await.
+  // publish into the channel you have open. The join is a telefunction (`onOpenChannel`) so the
+  // membership carries my trusted identity. Switches are chained so leave/join pairs can't
+  // interleave and senders always have a join to await.
+  //
+  // Note on the lossless-history recipe: the docs' fence ("the join ack proves the subscription
+  // is active") assumes the join rides the room's own connection. A telefunction join travels
+  // the HTTP lane instead, so the fence here is heuristic — two full round-trips after the
+  // subscribe (see README finding 14).
   const previousJoin = viewingJoin
   viewingNow = null
   const switchToken = Symbol(channelId)
   activeSwitch = switchToken
-  const thisJoin: Promise<LocalParticipant | null> = (async () => {
+  const thisJoin: Promise<LocalParticipant<MemberMeta> | null> = (async () => {
     const previous = await previousJoin.catch(() => null)
     if (previous !== null) void previous.leave().catch(() => {})
-    const membership = await room.join({ ...identity, status: 'online' })
+    const membership = await onOpenChannel(channelId)
     if (activeSwitch !== switchToken) {
       void membership.leave().catch(() => {}) // user moved on while the join was in flight
       return null
@@ -427,14 +448,11 @@ async function openChannel(channelId: string): Promise<void> {
   })()
   viewingJoin = thisJoin
 
-  // The lossless-history recipe (/room docs § Load history, then go live): the subscription
-  // has been live since boot (step 1), the join ack fences it server-side (step 2), and only
-  // then is history read (step 3). Overlap is deduped by message ID; a gap can't happen.
   if ((await thisJoin) === null) return
   const history = await onChannelHistory(channelId)
   for (const message of history.messages) recordMessage(channelId, message)
   setState({
-    unread: { ...getState().unread, [channelId]: 0 },
+    unread: { ...getState().unread, [channelId]: false },
     hasOlder: { ...getState().hasOlder, [channelId]: history.hasMore },
   })
 }
@@ -444,7 +462,7 @@ async function loadOlderMessages(channelId: string): Promise<void> {
   const oldest = getState().messages[channelId]?.[0]
   if (oldest === undefined) return
   const page = await onChannelHistory(channelId, oldest.at)
-  for (const message of page.messages) recordMessage(channelId, message, { silent: true })
+  for (const message of page.messages) recordMessage(channelId, message)
   setState({ hasOlder: { ...getState().hasOlder, [channelId]: page.hasMore } })
 }
 
@@ -488,10 +506,10 @@ async function deleteChannel(channelId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Messages, typing, unread
+// Messages & typing
 // ---------------------------------------------------------------------------
 
-function recordMessage(channelId: string, message: ChatMessage, opts?: { silent?: boolean }): void {
+function recordMessage(channelId: string, message: ChatMessage): void {
   const seen = seenMessageIds.get(channelId) ?? new Set<string>()
   if (seen.has(message.id)) return // the history/live overlap — drop the duplicate
   seen.add(message.id)
@@ -499,15 +517,7 @@ function recordMessage(channelId: string, message: ChatMessage, opts?: { silent?
 
   const state = getState()
   const thread = [...(state.messages[channelId] ?? []), message].sort((a, b) => a.at - b.at)
-  const isOpen = state.activeChannelId === channelId && state.view.kind === 'channel'
-  const isMine = message.authorId === identity.userId
-  setState({
-    messages: { ...state.messages, [channelId]: thread },
-    unread:
-      isOpen || isMine || opts?.silent
-        ? state.unread
-        : { ...state.unread, [channelId]: (state.unread[channelId] ?? 0) + 1 },
-  })
+  setState({ messages: { ...state.messages, [channelId]: thread } })
 }
 
 const typingUntil = new Map<string, Map<string, number>>() // channel room ID → name → expiry
@@ -647,54 +657,36 @@ function patchCall(call: CallState | null): void {
 // Room → snapshot projection
 // ---------------------------------------------------------------------------
 
-function toMember(participant: { id: string; meta: Record<string, unknown> }, joinedAt: number): Member {
-  const meta = asMemberMeta(participant.meta)
+// (`ParticipantSnapshotView` isn't re-exported by the package yet — derive it structurally.)
+type ParticipantSnapshot = ReturnType<GuildRoom['snapshot']>['participants'][number]
+
+function toMember(p: ParticipantSnapshot): Member {
   return {
-    userId: meta.userId,
-    participantId: participant.id,
-    name: meta.name,
-    color: meta.color,
-    status: meta.status ?? 'online',
-    bot: meta.bot === true,
-    admin: meta.admin === true,
-    muted: meta.muted === true,
-    camera: meta.camera === true,
-    screen: meta.screen === true,
-    joinedAt,
+    userId: p.identity ?? p.id, // all app joins are server-side, so identity is always set
+    participantId: p.id,
+    name: p.meta.name,
+    color: p.meta.color,
+    status: p.meta.status ?? 'online',
+    bot: p.meta.bot === true,
+    admin: p.meta.admin === true,
+    muted: p.meta.muted === true,
+    camera: p.meta.camera === true,
+    screen: p.meta.screen === true,
+    joinedAt: p.joinedAt,
   }
 }
 
-function toChannelSnapshot(room: Room): ChannelSnapshot {
-  const meta = asChannelMeta(room.meta)
+function toChannelSnapshot(room: ChannelRoom): ChannelSnapshot {
   return {
     id: room.id,
-    kind: meta.kind,
-    name: meta.name,
-    topic: meta.topic ?? '',
+    kind: room.meta.kind,
+    name: room.meta.name,
+    topic: room.meta.topic ?? '',
     memberCount: room.count, // live — the event stream keeps the getter fresh
-    occupants: voiceOccupants.get(room.id) ?? [],
+    occupants: room.meta.kind === 'voice' ? room.snapshot().participants.map(toMember) : [],
     size: room.size,
     isFull: room.isFull,
   }
-}
-
-/**
- * Project a room's live roster into snapshots — THE recurring Room→React glue. Metadata
- * changes are per-member events (`member.onUpdate`), so each member is watched as it appears;
- * a member's listeners are released when it leaves, so there's no unsubscribe bookkeeping.
- */
-function watchRoster(room: Room, onChange: (members: Member[]) => void): void {
-  const push = () => void room.getParticipants().then((all) => onChange(all.map((m) => toMember(m, m.joinedAt))))
-  const watch = (member: RemoteParticipant) => member.onUpdate(push)
-  void room.getParticipants().then((all) => {
-    for (const member of all) watch(member)
-    push()
-  })
-  room.onJoin((member) => {
-    watch(member)
-    push()
-  })
-  room.onLeave(push)
 }
 
 // ---------------------------------------------------------------------------

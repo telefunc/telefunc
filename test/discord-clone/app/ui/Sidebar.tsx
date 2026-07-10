@@ -141,7 +141,7 @@ function Section({
 function TextChannelRow({ channel, isAdmin }: { channel: ChannelSnapshot; isAdmin: boolean }) {
   const activeChannelId = useApp((s) => s.activeChannelId)
   const view = useApp((s) => s.view)
-  const unread = useApp((s) => s.unread[channel.id] ?? 0)
+  const unread = useApp((s) => s.unread[channel.id] === true)
   const active = view.kind === 'channel' && activeChannelId === channel.id
   return (
     <div
@@ -153,14 +153,10 @@ function TextChannelRow({ channel, isAdmin }: { channel: ChannelSnapshot; isAdmi
       onClick={() => void openChannel(channel.id)}
     >
       <span className="text-[#80848e] shrink-0 font-medium">#</span>
-      <span className="flex-1 truncate">{channel.name}</span>
-      {unread > 0 && (
-        <span
-          data-unread-for={channel.name}
-          className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-[#f23f43] text-white text-[11px] font-semibold flex items-center justify-center"
-        >
-          {unread}
-        </span>
+      <span className={`flex-1 truncate ${unread && !active ? 'text-white font-medium' : ''}`}>{channel.name}</span>
+      {/* Unread dot — fed by the room's body-free activity signal, like Discord's plain-unread pill. */}
+      {unread && (
+        <span data-unread-for={channel.name} className="shrink-0 w-2 h-2 rounded-full bg-[#f2f3f5]" title="unread" />
       )}
       {isAdmin && channel.name !== 'general' && (
         <button

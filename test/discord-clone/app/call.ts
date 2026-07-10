@@ -2,11 +2,14 @@ export { joinCall, leaveCall, toggleMute, toggleCamera, toggleScreenShare, regis
 
 // Voice & video calls, on one Room per voice channel.
 //
+// Round 2 of the stress test: media multiplexing is first-class now — mic/camera/screen ride
+// *named binary tracks* (`publishBinary(data, { track, keyFrame })`, `subscribeBinary(cb,
+// { track })`, `info.keyFrame`), which deleted this app's hand-rolled `[kind][flags]` frame
+// envelope and demux switch (README finding 6, fixed upstream).
+//
 // The Room-relevant shape:
-// - Each member gets ONE binary lane (`publishBinary` / `member.subscribeBinary`), so the app
-//   multiplexes its media substreams by hand: every frame is prefixed with
-//   `[stream kind][flags]` — 0 microphone (Opus), 1 camera (VP8), 2 screen share (VP8).
-//   (See README finding: named per-member binary streams would remove this framing.)
+// - The voice join is a telefunction (`onJoinVoice`): the membership carries my trusted
+//   `identity`, and the room's `onJoin` guard enforces capacity server-side (finding 11).
 // - `selfDelivery: false` at join — my own media must not come back to me.
 // - Mute / camera / screen state rides the member's *metadata* (`setMeta`), so it reaches
 //   every observer — including late joiners, who get it with the roster.
@@ -14,14 +17,9 @@ export { joinCall, leaveCall, toggleMute, toggleCamera, toggleScreenShare, regis
 //   down (a member's listeners are released with it).
 
 import type { LocalParticipant, RemoteParticipant } from 'telefunc'
-import { asMemberMeta } from '../shared/types'
-import { getChannelRoom, getIdentity, getState, patchCall, showToast } from './store'
-
-const STREAM_MIC = 0
-const STREAM_CAMERA = 1
-const STREAM_SCREEN = 2
-type StreamKind = typeof STREAM_MIC | typeof STREAM_CAMERA | typeof STREAM_SCREEN
-const FLAG_KEYFRAME = 1
+import type { MemberMeta } from '../shared/types'
+import { onJoinVoice } from '../telefunc/channels.telefunc'
+import { getChannelRoom, getIdentity, patchCall, showToast } from './store'
 
 // ---------------------------------------------------------------------------
 // Session
@@ -29,7 +27,7 @@ const FLAG_KEYFRAME = 1
 
 type Session = {
   channelId: string
-  membership: LocalParticipant
+  membership: LocalParticipant<MemberMeta>
   muted: boolean
   micAvailable: boolean
   camera: CaptureHandle | null
@@ -48,20 +46,20 @@ async function joinCall(channelId: string): Promise<void> {
   if (room === undefined || session?.channelId === channelId) return
   await leaveCall()
 
-  // `size` is a hint — Telefunc never rejects a join, and a client-side join can't be vetted
-  // server-side (there is no join guard) — so the gate lives here (see README finding).
-  if (room.isFull) {
-    showToast('That voice channel is full')
+  let membership: LocalParticipant<MemberMeta>
+  try {
+    // Server-side join: trusted identity + the voice room's `onJoin` capacity guard — a full
+    // channel rejects here, on the server (this used to be a client-side `isFull` check that
+    // nothing enforced).
+    membership = await onJoinVoice(channelId)
+  } catch (err) {
+    showToast(errorMessage(err))
     return
   }
 
-  const identity = getIdentity()
   const current: Session = {
     channelId,
-    membership: await room.join(
-      { ...identity, status: 'online', muted: false, camera: false, screen: false },
-      { selfDelivery: false },
-    ),
+    membership,
     muted: false,
     micAvailable: true,
     camera: null,
@@ -84,7 +82,7 @@ async function joinCall(channelId: string): Promise<void> {
       current.cleanups.push(micHandle.stop)
       const encoder = encodeOpus(resampledTrack(mic, current.cleanups), (frame) => {
         if (session !== current || current.muted) return
-        void current.membership.publishBinary(tag(STREAM_MIC, 0, frame)).catch(() => {})
+        void current.membership.publishBinary(frame, { track: 'mic' }).catch(() => {})
       })
       current.cleanups.push(encoder.stop)
     } catch {
@@ -94,8 +92,8 @@ async function joinCall(channelId: string): Promise<void> {
       showToast('Microphone unavailable — joined listen-only')
     }
 
-    // Peers: decode every other member's substreams; lifecycle follows presence.
-    const attachPeer = (member: RemoteParticipant) => {
+    // Peers: decode every other member's tracks; lifecycle follows presence.
+    const attachPeer = (member: RemoteParticipant<MemberMeta>) => {
       if (member.id === current.membership.id || current.peers.has(member.id)) return
       const peer = createPeer(member)
       current.peers.set(member.id, peer)
@@ -114,49 +112,35 @@ async function joinCall(channelId: string): Promise<void> {
     syncCallState(current)
   } catch (err) {
     await leaveCall()
-    showToast(`Couldn't join voice: ${err instanceof Error ? err.message : String(err)}`)
+    showToast(`Couldn't join voice: ${errorMessage(err)}`)
   }
 
-  function createPeer(member: RemoteParticipant): Peer {
+  function createPeer(member: RemoteParticipant<MemberMeta>): Peer {
     const audio = playOpus(current.playback)
-    const video = new Map<number, ReturnType<typeof decodeVp8>>()
+    const camera = decodeVp8((frame) => drawToTile(member.id, 'camera', frame))
+    const screen = decodeVp8((frame) => drawToTile(member.id, 'screen', frame))
 
-    const decoderFor = (kind: number) => {
-      let decoder = video.get(kind)
-      if (decoder === undefined) {
-        decoder = decodeVp8((frame) => {
-          const canvas = tiles.get(`${member.id}:${kind}`)
-          if (canvas) drawFrame(canvas, frame)
-          frame.close()
-        })
-        video.set(kind, decoder)
-      }
-      return decoder
-    }
-
-    // Subscribing starts this member's binary flowing to me (and my server pulls it upstream);
-    // unsubscribing on leave stops it. One lane per member — demultiplex by our frame tag.
-    const unsubscribe = member.subscribeBinary((framed) => {
-      const kind = framed[0] as StreamKind
-      const payload = framed.subarray(2)
-      if (kind === STREAM_MIC) audio.push(payload)
-      else decoderFor(kind).push(payload, (framed[1]! & FLAG_KEYFRAME) !== 0)
-    })
+    // Named tracks: subscribing declares exactly which substreams flow to me — the server
+    // relays per (member, track). No frame envelope, no demux switch.
+    const unsubscribes = [
+      member.subscribeBinary((data) => audio.push(data), { track: 'mic' }),
+      member.subscribeBinary((data, info) => camera.push(data, info.keyFrame), { track: 'camera' }),
+      member.subscribeBinary((data, info) => screen.push(data, info.keyFrame), { track: 'screen' }),
+    ]
 
     // A member turning a stream off should blank its decoder (fresh keyframe wait on re-on).
     const unwatch = member.onUpdate((meta) => {
-      const m = asMemberMeta(meta)
-      if (m.camera !== true) video.get(STREAM_CAMERA)?.reset()
-      if (m.screen !== true) video.get(STREAM_SCREEN)?.reset()
+      if (meta.camera !== true) camera.reset()
+      if (meta.screen !== true) screen.reset()
     })
 
     return {
       close() {
-        unsubscribe()
+        for (const unsubscribe of unsubscribes) unsubscribe()
         unwatch()
         audio.close()
-        for (const decoder of video.values()) decoder.close()
-        video.clear()
+        camera.close()
+        screen.close()
       },
     }
   }
@@ -180,7 +164,7 @@ async function toggleMute(): Promise<void> {
   const current = session
   current.muted = !current.muted
   syncCallState(current)
-  // Metadata is a full replace — spread the rest or lose it (README finding).
+  // Metadata is a full replace — spread the rest or lose it (README finding 5).
   await current.membership.setMeta({ ...current.membership.meta, muted: current.muted })
 }
 
@@ -198,7 +182,7 @@ async function toggleCamera(): Promise<void> {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 15 } },
     })
-    current.camera = videoPipeline(current, stream, STREAM_CAMERA, { keyframeEvery: 15, bitrate: 500_000 })
+    current.camera = videoPipeline(current, stream, 'camera', { keyframeEvery: 15, bitrate: 500_000 })
     syncCallState(current)
     await current.membership.setMeta({ ...current.membership.meta, camera: true })
   } catch {
@@ -218,7 +202,7 @@ async function toggleScreenShare(): Promise<void> {
   }
   try {
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 5 } } })
-    current.screen = videoPipeline(current, stream, STREAM_SCREEN, { keyframeEvery: 5, bitrate: 1_200_000 })
+    current.screen = videoPipeline(current, stream, 'screen', { keyframeEvery: 5, bitrate: 1_200_000 })
     // The browser's own "stop sharing" UI ends the track behind our back — mirror it.
     stream.getVideoTracks()[0]?.addEventListener('ended', () => void toggleScreenShare())
     syncCallState(current)
@@ -251,15 +235,21 @@ function getSelfStream(kind: 'camera' | 'screen'): MediaStream | null {
 // Tiles (receive side)
 // ---------------------------------------------------------------------------
 
-// CallView registers a <canvas> per (participant, video substream); decoders draw into whatever
-// is currently registered. Tiles appear from metadata (camera/screen flags), so a canvas
-// usually registers moments before the first keyframe arrives.
-const tiles = new Map<string, HTMLCanvasElement>() // `${participantId}:${kind}` → canvas
+// CallView registers a <canvas> per (participant, video track); decoders draw into whatever is
+// currently registered. Tiles appear from metadata (camera/screen flags), so a canvas usually
+// registers moments before the first keyframe arrives.
+const tiles = new Map<string, HTMLCanvasElement>() // `${participantId}:${track}` → canvas
 
 function registerTile(participantId: string, kind: 'camera' | 'screen', canvas: HTMLCanvasElement | null): void {
-  const key = `${participantId}:${kind === 'camera' ? STREAM_CAMERA : STREAM_SCREEN}`
+  const key = `${participantId}:${kind}`
   if (canvas === null) tiles.delete(key)
   else tiles.set(key, canvas)
+}
+
+function drawToTile(participantId: string, kind: 'camera' | 'screen', frame: VideoFrame): void {
+  const canvas = tiles.get(`${participantId}:${kind}`)
+  if (canvas) drawFrame(canvas, frame)
+  frame.close()
 }
 
 type Peer = { close(): void }
@@ -272,14 +262,6 @@ const OPUS = { codec: 'opus', sampleRate: 48_000, numberOfChannels: 1 } as const
 
 declare const MediaStreamTrackProcessor: {
   new (init: { track: MediaStreamTrack }): { readable: ReadableStream<AudioData | VideoFrame> }
-}
-
-function tag(kind: StreamKind, flags: number, payload: Uint8Array): Uint8Array {
-  const framed = new Uint8Array(2 + payload.byteLength)
-  framed[0] = kind
-  framed[1] = flags
-  framed.set(payload, 2)
-  return framed
 }
 
 function captureHandle(stream: MediaStream): CaptureHandle {
@@ -357,12 +339,12 @@ function playOpus(ctx: AudioContext): { push(frame: Uint8Array): void; close(): 
   }
 }
 
-/** Camera/screen capture → VP8. The encoder is (re)configured from the frames themselves, so
- *  any source size works — including a screen share being resized mid-stream. */
+/** Camera/screen capture → VP8 on a named track. The encoder is (re)configured from the frames
+ *  themselves, so any source size works — including a screen share resized mid-stream. */
 function videoPipeline(
   current: Session,
   stream: MediaStream,
-  kind: StreamKind,
+  track: 'camera' | 'screen',
   opts: { keyframeEvery: number; bitrate: number },
 ): CaptureHandle {
   const encoder = new VideoEncoder({
@@ -370,7 +352,7 @@ function videoPipeline(
       if (session !== current) return
       const bytes = new Uint8Array(chunk.byteLength)
       chunk.copyTo(bytes)
-      void current.membership.publishBinary(tag(kind, chunk.type === 'key' ? FLAG_KEYFRAME : 0, bytes)).catch(() => {})
+      void current.membership.publishBinary(bytes, { track, keyFrame: chunk.type === 'key' }).catch(() => {})
     },
     error(err) {
       console.error('[discord:call] video encode error', err)
@@ -460,4 +442,12 @@ function readFrames(track: MediaStreamTrack, onFrame: (data: AudioData | VideoFr
   return () => {
     stopped = true
   }
+}
+
+function errorMessage(err: unknown): string {
+  if (typeof err === 'object' && err !== null && 'abortValue' in err) {
+    const value = (err as { abortValue: unknown }).abortValue
+    if (typeof value === 'string') return value
+  }
+  return err instanceof Error ? err.message : String(err)
 }
