@@ -39,7 +39,7 @@ And three message lanes:
 
 Two things hold everywhere:
 
-- **One type, both sides.** A `Room`, `LocalParticipant`, or `RemoteParticipant` can be returned from a telefunction and used on the client exactly as on the server — no wrapper, no client-only variant.
+- **One type, both sides.** A `Room`, `LocalParticipant`, or `RemoteParticipant` can be returned from a telefunction and used on the client exactly as on the server.
 - **The sender travels with the message.** Every received message carries its verified sender (`from.id`, `from.meta`, `from.identity`), stamped by the server. `from === null` means the room itself spoke.
 
 
@@ -140,7 +140,7 @@ onCursorMove((pos) => me.publish({ pos }, { coalesce: 'cursor' }))
 
 ### Identify your users
 
-Participant IDs are per-membership: the same person is a different participant in every room, tab, and reconnect. To correlate memberships, stamp an `identity` at join. It's server-assigned (set it in the telefunction, where trust lives — a client `join()` can't claim one) and travels spoof-proof with everything the member does:
+Participant IDs are per-membership: the same person is a different participant in every room, tab, and reconnect. To correlate memberships, stamp an `identity` at join. It's server-assigned in the telefunction (a client `join()` can't claim one), and travels spoof-proof with the member:
 
 ```js
 // Chat.telefunc.js
@@ -162,7 +162,7 @@ await Room.removeParticipant(roomId, { identity: userId }, { reason: 'banned' })
 
 ### Private messages
 
-`send()` delivers to exactly one participant — no other participant's connection receives it, and it never appears on `subscribe()` streams:
+`send()` delivers to exactly one participant — no one else receives it, and it never appears on `subscribe()` streams:
 
 ```js
 // Alice's client
@@ -195,7 +195,7 @@ export async function onJoinChat(roomId) {
 }
 ```
 
-Each guard's first argument is the acting member. Throwing rejects the caller's `join()`/`publish()`/`send()` with that error, on the client too. A rejected join writes nothing. Guards run on the server (the statics don't exist in the browser build), so authorization never runs on the machines it polices.
+Each guard's first argument is the acting member. Throwing rejects the caller's `join()`/`publish()`/`send()` with that error, on the client too. A rejected join writes nothing. Guards run on the server.
 
 **Kicks carry their reason.** Every departure says why, and a kick's reason arrives with the removal:
 
@@ -412,9 +412,9 @@ Every message callback receives its verified sender as `from` — `{ id, meta, i
 
 Rooms work across multiple server nodes out of the box with <Link href="/redis">`@telefunc/redis`</Link> and the <Link href="/stream/cloudflare">Cloudflare</Link> integration.
 
-- **Pay for what you consume.** Presence-only observers never receive the room's messages; binary flows only to members you subscribe to, pulled upstream only while someone wants it.
+- **Pay for what you consume.** Presence-only observers never receive the room's messages; binary flows only to members you subscribe to, and is fetched only while someone wants it.
 - **Crash-safe presence.** Graceful departures propagate instantly; owners heartbeat every 30s and stale members are reaped, with a native store-expiry backstop so a crashed node leaves no ghosts.
 - **Deterministic convergence.** Metadata and config updates converge to the same result on every node, whatever the arrival order.
-- **`isolated: true`** moves text to per-member keys (the Cloudflare Durable-Object publish-contention knob); clients can't tell the difference.
+- **`isolated: true`** moves text to per-member keys — the Cloudflare Durable-Object publish-contention knob.
 
 Every inbound client message is capped by <Link href="/channel-config">`config.channel.messageLimit`</Link> (default 16 MiB); large payloads belong on <Link href="/stream">streams</Link>.
