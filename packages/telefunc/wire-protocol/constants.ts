@@ -238,6 +238,10 @@ export const ROOM_MEMBER_TTL_MS = 120_000
  *  and comfortably above Workers KV's 60s minimum expiration. */
 export const ROOM_MEMBER_KV_TTL_MS = ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS
 
+/** At most one activity signal per room per publishing node in this window — badge freshness
+ *  at control-lane cost, leading-edge throttled (no timers). */
+export const ROOM_ACTIVITY_THROTTLE_MS = 3_000
+
 // ===== Session routing =====
 
 /** User-facing header for sticky session routing (opaque token). */

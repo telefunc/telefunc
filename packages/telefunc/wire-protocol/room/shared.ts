@@ -3,6 +3,7 @@ export {
   roomCtrlKey,
   roomTextKey,
   roomMemberDataKey,
+  roomActivityKey,
   roomDmKey,
   roomConfigKvKey,
   roomIdFromConfigKey,
@@ -43,6 +44,7 @@ export type {
   ReqJoinAck,
   ReqPublishAck,
   MemberWants,
+  RoomActivityEvent,
 }
 
 import { assert, assertUsage } from '../../utils/assert.js'
@@ -82,6 +84,11 @@ function roomTextKey(roomId: string): string {
  *  member-selective at the source), text too in isolated mode. */
 function roomMemberDataKey(roomId: string, memberId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:m:${memberId}`
+}
+/** Pub/sub key carrying the room's throttled activity signal — subscribed only by holders with
+ *  `onActivity` listeners (badge consumers), so nobody else pays even that trickle. */
+function roomActivityKey(roomId: string): string {
+  return `${ROOM_KEY_NAMESPACE}${roomId}:a`
 }
 /** Pub/sub key carrying one member's private inbox — only the member's owning node subscribes. */
 function roomDmKey(roomId: string, memberId: string): string {
@@ -201,6 +208,10 @@ type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; 
 /** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown }
 
+/** The activity trickle (own key `:a`): "something was published around `at`" — throttled at
+ *  the publisher, consumed by badge-style listeners that don't want message bodies. */
+type RoomActivityEvent = { __r: 'activity'; at: number }
+
 /** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 
@@ -234,6 +245,7 @@ type RoomStubRequest =
   | { __r: 'req-dm'; id: string; to: string; data: unknown }
   | { __r: 'sub-binary'; all: boolean; members: string[] }
   | { __r: 'sub-text'; members: string[] }
+  | { __r: 'sub-activity'; on: boolean }
 
 /** Client→server requests on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubRequest =
@@ -375,7 +387,7 @@ function unframeMemberId(
 // RoomState — the local view of a room, driven by the event stream
 // ---------------------------------------------------------------------------
 
-type ListenerKind = 'data' | 'binary' | 'event'
+type ListenerKind = 'data' | 'binary' | 'event' | 'activity'
 
 type MemberEntry = {
   id: string
@@ -464,10 +476,12 @@ class RoomState {
   private readonly _fullCbs: Array<() => void> = []
   private readonly _closeCbs: Array<() => void> = []
   private readonly _announceCbs: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
+  private readonly _activityCbs: Array<(info: { timestamp: number }) => void> = []
 
   private _eventListenerCount = 0
   private _dataListenerCount = 0
   private _binaryListenerCount = 0
+  private _activityListenerCount = 0
   private _wasFull: boolean
   private _updateStamp: { at: number; by: string }
   private _rosterKnown: boolean
@@ -519,6 +533,10 @@ class RoomState {
   /** Listeners needing the binary data stream. */
   get binaryListenerCount(): number {
     return this._binaryListenerCount
+  }
+  /** Listeners needing the activity trickle. */
+  get activityListenerCount(): number {
+    return this._activityListenerCount
   }
 
   /** Which members' binary streams this holder needs delivered — drives the wire/adapter
@@ -610,6 +628,14 @@ class RoomState {
 
   onChange(cb: () => void): () => void {
     return this._register(this._changeCbs, cb, 'event')
+  }
+
+  onActivity(cb: (info: { timestamp: number }) => void): () => void {
+    return this._register(this._activityCbs, cb, 'activity')
+  }
+
+  applyActivity(at: number): void {
+    this._fireAll(this._activityCbs, { timestamp: at })
   }
 
   /** Immutable view of the whole room — cached by state version, so the reference is stable
@@ -914,6 +940,7 @@ class RoomState {
   private _bumpListenerCount(kind: ListenerKind, delta: number): void {
     if (kind === 'data') this._dataListenerCount += delta
     else if (kind === 'binary') this._binaryListenerCount += delta
+    else if (kind === 'activity') this._activityListenerCount += delta
     else this._eventListenerCount += delta
     this._onListenersChanged()
   }

@@ -45,6 +45,8 @@ class RoomStubChannel extends ServerBroadcast {
   _wantsText = false
   /** @internal — which members' text the client wants without a room-level subscription (`sub-text`). */
   _textMemberWants: Set<string> = new Set()
+  /** @internal — whether the client holds `onActivity` listeners (`sub-activity`). */
+  _wantsActivity = false
 
   /** @internal */
   _wantsBinaryFrom(memberId: string): boolean {

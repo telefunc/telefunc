@@ -25,6 +25,7 @@ import {
   type RoomDmEnvelope,
   type RoomEnvelope,
   type RoomRosterEvent,
+  type RoomActivityEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './shared.js'
@@ -59,6 +60,7 @@ class ClientRoom implements Room {
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   private _lastBinaryWantsSent = ''
   private _lastTextWantsSent = ''
+  private _lastActivityWantSent = false
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
    *  join round-trip) — held bounded FIFO, flushed into the participant on registration. */
   private _pendingDms: Array<{
@@ -197,6 +199,10 @@ class ClientRoom implements Room {
     return this._state.onChange(callback)
   }
 
+  onActivity(callback: (info: { timestamp: number }) => void): () => void {
+    return this._state.onActivity(callback)
+  }
+
   snapshot(): RoomSnapshotView {
     // The roster streams in right behind the response — its arrival is an onChange.
     return this._state.snapshot()
@@ -232,7 +238,7 @@ class ClientRoom implements Room {
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     if (!hasRoomTag(envelope)) return
-    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent
+    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomActivityEvent
     switch (event.__r) {
       case 'roster':
         // The authoritative member list, positioned in the relay stream: everything relayed
@@ -278,6 +284,9 @@ class ClientRoom implements Room {
         return
       case 'announce':
         this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+        return
+      case 'activity':
+        this._state.applyActivity(event.at)
         return
       case 'dm': {
         // Relayed from this member's private inbox — only its own stub ever receives it.
@@ -343,6 +352,12 @@ class ClientRoom implements Room {
       this._lastTextWantsSent = textEncoded
       // A room-level subscription supersedes the member set — clear it server-side.
       void this._stub.send({ __r: 'sub-text', members: text.all ? [] : text.members }, { ack: false }).catch(() => {})
+    }
+
+    const wantActivity = state.activityListenerCount > 0
+    if (wantActivity !== this._lastActivityWantSent) {
+      this._lastActivityWantSent = wantActivity
+      void this._stub.send({ __r: 'sub-activity', on: wantActivity }, { ack: false }).catch(() => {})
     }
 
     const wants: MemberWants = state.binaryWants()

@@ -188,6 +188,11 @@ type Room = {
   /** Anything observable changed — membership, participant metadata, room config, closure.
    *  One subscription for UI stores; pairs with `snapshot()`. */
   onChange(callback: () => void): () => void
+  /** Something was published (text or binary) around `timestamp` — throttled to at most one
+   *  signal per few seconds per publishing node, and delivered without the message bodies:
+   *  unread badges for rooms you're not reading, at control-lane cost. Not fired by
+   *  announcements or private messages. */
+  onActivity(callback: (info: { timestamp: number }) => void): () => void
   /** Immutable whole-room view, reference-stable until the next change:
    *  `useSyncExternalStore(room.onChange, room.snapshot)` is the entire React adapter.
    *  Participants appear once the member view loads (subscribing `onChange` loads it). */
