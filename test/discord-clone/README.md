@@ -18,8 +18,11 @@ code is called out inline and collected in [Findings](#findings-room-pr-436-pain
   to the kicked user), crash-safe cleanup
 - RoomBot: a server-side member (`!help`, `!ping`, `!members`, `!roll`, DM replies)
 
-**Stack**: Vike + vike-react · telefunc (remote functions + rooms) · SQLite via better-sqlite3 +
-Drizzle · Zustand · Tailwind v4 · Hono · WebCodecs.
+**Stack**: Vike + vike-react · telefunc (remote functions + rooms) · SQLite via `node:sqlite`
+(Node's built-in driver — a native module would have to compile on every platform installing the
+monorepo, which broke Windows CI; no ORM supports `node:sqlite` yet, so the data layer is
+hand-written prepared statements in `database/queries.ts`) · Zustand · Tailwind v4 · Hono ·
+WebCodecs.
 
 ## Running it
 
@@ -31,7 +34,7 @@ pnpm dev                     # http://localhost:3000
 
 Register a user (the first one becomes the server owner), then open a second browser profile —
 or an incognito window — and register another. The database lives in `.data/` (`DISCORD_CLONE_DB`
-overrides; the e2e suite uses `:memory:`).
+overrides; the e2e suite uses `:memory:`). Node ≥ 22.5 (`node:sqlite`).
 
 ## Architecture
 
@@ -52,10 +55,10 @@ irreplaceable lives in them.
 | Voice/video | One room per voice channel (`size`, `isolated`). Mic/camera/screen multiplexed on the member's one binary lane with a `[kind][flags]` prefix (finding 6); mute/camera/screen state rides `setMeta` |
 | Bot | A server-side member driven by the same Room API |
 
-Module map: `database/` (Drizzle schema + SQLite bootstrap) · `server/` (auth, sessions, room
-bootstrap, guards, bot) · `telefunc/` (the API: enter, channels, DMs, admin) · `app/` (Zustand
-store = the Room→React adapter, `call.ts` = the WebCodecs media engine, `ui/`) · `shared/`
-(types crossing the wire).
+Module map: `database/` (row types + DDL, `node:sqlite` bootstrap, all SQL in `queries.ts`) ·
+`server/` (auth, sessions, room bootstrap, guards, bot) · `telefunc/` (the API: enter, channels,
+DMs, admin) · `app/` (Zustand store = the Room→React adapter, `call.ts` = the WebCodecs media
+engine, `ui/`) · `shared/` (types crossing the wire).
 
 ## Testing
 

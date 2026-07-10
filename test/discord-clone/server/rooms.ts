@@ -4,10 +4,8 @@ export { BOT_COLOR, BOT_NAME, channelRoomId, dbChannelIdOf, ensureLiveWorld, GUI
 // the live layer exists: one guild room, one room per `channels` row, and the bot.
 
 import { randomUUID } from 'node:crypto'
-import { eq } from 'drizzle-orm'
 import { Room } from 'telefunc'
-import { db } from '../database/db'
-import { channels, users } from '../database/schema'
+import * as q from '../database/queries'
 
 const GUILD_ROOM_ID = 'discord:guild'
 const CHANNEL_ROOM_PREFIX = 'discord:channel:'
@@ -36,7 +34,7 @@ async function boot(): Promise<void> {
   // `Room.create()` throws if the room exists and there is no upsert — seeding after a server
   // restart is a create-and-tolerate dance (see README finding).
   await createIfMissing(GUILD_ROOM_ID, { meta: { name: 'Telefunc HQ' } })
-  for (const channel of db.select().from(channels).all()) {
+  for (const channel of q.listChannels()) {
     await createIfMissing(
       channelRoomId(channel.id),
       channel.kind === 'voice'
@@ -52,28 +50,22 @@ async function boot(): Promise<void> {
 }
 
 function seedDatabase(): void {
-  if (db.select().from(users).where(eq(users.isBot, true)).limit(1).all().length === 0) {
-    db.insert(users)
-      .values({
-        id: randomUUID(),
-        name: BOT_NAME,
-        color: BOT_COLOR,
-        passwordHash: '', // never logs in
-        isAdmin: false,
-        isBot: true,
-        createdAt: Date.now(),
-      })
-      .run()
+  if (q.theBotUser() === undefined) {
+    q.insertUser({
+      id: randomUUID(),
+      name: BOT_NAME,
+      color: BOT_COLOR,
+      password_hash: '', // never logs in
+      is_admin: 0,
+      is_bot: 1,
+      created_at: Date.now(),
+    })
   }
-  if (db.select().from(channels).limit(1).all().length === 0) {
+  if (q.listChannels().length === 0) {
     const now = Date.now()
-    db.insert(channels)
-      .values([
-        { id: randomUUID(), kind: 'text', name: 'general', topic: 'Anything goes', createdAt: now },
-        { id: randomUUID(), kind: 'text', name: 'help', topic: 'Ask RoomBot: !help', createdAt: now },
-        { id: randomUUID(), kind: 'voice', name: 'lounge', topic: '', createdAt: now },
-      ])
-      .run()
+    q.insertChannel({ id: randomUUID(), kind: 'text', name: 'general', topic: 'Anything goes', created_at: now })
+    q.insertChannel({ id: randomUUID(), kind: 'text', name: 'help', topic: 'Ask RoomBot: !help', created_at: now })
+    q.insertChannel({ id: randomUUID(), kind: 'voice', name: 'lounge', topic: '', created_at: now })
   }
 }
 

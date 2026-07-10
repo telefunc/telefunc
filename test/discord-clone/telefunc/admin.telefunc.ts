@@ -1,9 +1,7 @@
 export { onAnnounce, onKickUser }
 
-import { eq } from 'drizzle-orm'
 import { Abort, getContext, Room } from 'telefunc'
-import { db } from '../database/db'
-import { channels, users } from '../database/schema'
+import * as q from '../database/queries'
 import { channelRoomId, GUILD_ROOM_ID } from '../server/rooms'
 import { asMemberMeta, type SystemNotice } from '../shared/types'
 
@@ -18,9 +16,9 @@ import { asMemberMeta, type SystemNotice } from '../shared/types'
  */
 async function onKickUser(targetUserId: string): Promise<void> {
   const actor = requireAdmin()
-  const target = db.select().from(users).where(eq(users.id, targetUserId)).limit(1).all()[0]
+  const target = q.getUserById(targetUserId)
   if (target === undefined) throw Abort('No such user')
-  if (target.isBot) throw Abort('The bot stays')
+  if (target.is_bot === 1) throw Abort('The bot stays')
   if (target.id === actor.id) throw Abort("You can't kick yourself")
 
   // 1. The guild: tell each of their connections why (room-authored — `from === null`), then
@@ -34,7 +32,7 @@ async function onKickUser(targetUserId: string): Promise<void> {
   }
 
   // 2. Their other participants (open text channels, voice) — same sweep, per channel room.
-  for (const row of db.select().from(channels).all()) {
+  for (const row of q.listChannels()) {
     const room = await Room.get(channelRoomId(row.id))
     for (const participant of await room.getParticipants()) {
       if (asMemberMeta(participant.meta).userId === target.id) {

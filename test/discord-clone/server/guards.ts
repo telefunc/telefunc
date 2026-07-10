@@ -9,8 +9,7 @@ export { BANNED_WORDS, getGuardedChannel, getGuardedGuild }
 // persistence (see README finding on per-instance guards).
 
 import { Room } from 'telefunc'
-import { db } from '../database/db'
-import { messages } from '../database/schema'
+import * as q from '../database/queries'
 import { asChannelMeta, asMemberMeta, type ChannelPublish } from '../shared/types'
 import { dbChannelIdOf, GUILD_ROOM_ID } from './rooms'
 
@@ -49,18 +48,16 @@ async function getGuardedChannel(channelRoomId: string): Promise<Room> {
         const banned = BANNED_WORDS.find((word) => published.text.toLowerCase().includes(word))
         if (banned) throw new Error(`Watch your language — "${banned}" is not allowed here`)
         const author = asMemberMeta(from.meta)
-        db.insert(messages)
-          .values({
-            id: published.id,
-            channelId: dbChannelId,
-            authorId: author.userId,
-            authorName: author.name,
-            authorColor: author.color,
-            authorIsBot: author.bot === true,
-            text: published.text,
-            at: Date.now(),
-          })
-          .run()
+        q.insertMessage({
+          id: published.id,
+          channel_id: dbChannelId,
+          author_id: author.userId,
+          author_name: author.name,
+          author_color: author.color,
+          author_is_bot: author.bot === true ? 1 : 0,
+          text: published.text,
+          at: Date.now(),
+        })
       },
     })
   }

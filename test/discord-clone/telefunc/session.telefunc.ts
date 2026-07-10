@@ -1,9 +1,7 @@
 export { onEnterGuild }
 
-import { eq } from 'drizzle-orm'
-import { getContext, Room } from 'telefunc'
-import { db } from '../database/db'
-import { channels } from '../database/schema'
+import { getContext } from 'telefunc'
+import * as q from '../database/queries'
 import { getGuardedChannel, getGuardedGuild } from '../server/guards'
 import { channelRoomId, ensureLiveWorld } from '../server/rooms'
 
@@ -29,7 +27,6 @@ async function onEnterGuild() {
     admin: user.isAdmin,
   })
 
-  const rows = db.select().from(channels).all()
-  const channelRooms = await Promise.all(rows.map((row) => getGuardedChannel(channelRoomId(row.id))))
+  const channelRooms = await Promise.all(q.listChannels().map((row) => getGuardedChannel(channelRoomId(row.id))))
   return { ok: true as const, user, guild, me, channels: channelRooms }
 }

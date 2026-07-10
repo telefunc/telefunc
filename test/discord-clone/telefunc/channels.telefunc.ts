@@ -1,10 +1,8 @@
 export { onChannelHistory, onCreateChannel, onDeleteChannel, onGetChannel, onSetTopic }
 
 import { randomUUID } from 'node:crypto'
-import { and, desc, eq, lt } from 'drizzle-orm'
 import { Abort, getContext, Room } from 'telefunc'
-import { db } from '../database/db'
-import { channels, messages } from '../database/schema'
+import * as q from '../database/queries'
 import { getGuardedChannel } from '../server/guards'
 import { channelRoomId, dbChannelIdOf, ensureLiveWorld, GUILD_ROOM_ID, VOICE_CHANNEL_SIZE } from '../server/rooms'
 import { asChannelMeta, type ChatMessage } from '../shared/types'
@@ -16,17 +14,7 @@ const PAGE_SIZE = Number(process.env.DISCORD_CLONE_PAGE_SIZE ?? 50)
 async function onChannelHistory(roomId: string, beforeAt?: number) {
   requireUser()
   const dbChannelId = requireDbChannelId(roomId)
-  const rows = db
-    .select()
-    .from(messages)
-    .where(
-      beforeAt === undefined
-        ? eq(messages.channelId, dbChannelId)
-        : and(eq(messages.channelId, dbChannelId), lt(messages.at, beforeAt)),
-    )
-    .orderBy(desc(messages.at))
-    .limit(PAGE_SIZE + 1)
-    .all()
+  const rows = q.pageMessages(dbChannelId, beforeAt, PAGE_SIZE + 1)
   const hasMore = rows.length > PAGE_SIZE
   const page = rows.slice(0, PAGE_SIZE).reverse()
   return {
@@ -34,8 +22,8 @@ async function onChannelHistory(roomId: string, beforeAt?: number) {
     messages: page.map(
       (row): ChatMessage => ({
         id: row.id,
-        authorId: row.authorId,
-        author: { name: row.authorName, color: row.authorColor, bot: row.authorIsBot },
+        authorId: row.author_id,
+        author: { name: row.author_name, color: row.author_color, bot: row.author_is_bot === 1 },
         text: row.text,
         at: row.at,
       }),
@@ -52,12 +40,12 @@ async function onCreateChannel(kind: 'text' | 'voice', rawName: string) {
     .replace(/^-+|-+$/g, '')
     .slice(0, 32)
   if (name === '') return { ok: false as const, error: 'Pick a name with some letters in it' }
-  if (db.select().from(channels).where(eq(channels.name, name)).limit(1).all().length > 0) {
+  if (q.getChannelByName(name) !== undefined) {
     return { ok: false as const, error: `#${name} already exists` }
   }
 
   const id = randomUUID()
-  db.insert(channels).values({ id, kind, name, topic: '', createdAt: Date.now() }).run()
+  q.insertChannel({ id, kind, name, topic: '', created_at: Date.now() })
   const roomId = channelRoomId(id)
   await Room.create(
     roomId,
@@ -85,7 +73,7 @@ async function onSetTopic(roomId: string, topic: string): Promise<void> {
   const meta = asChannelMeta(channel.meta)
   if (meta.kind !== 'text') throw Abort('Voice channels have no topic')
   topic = topic.trim().slice(0, 120)
-  db.update(channels).set({ topic }).where(eq(channels.id, dbChannelId)).run()
+  q.setChannelTopic(dbChannelId, topic)
   // `Room.update()` is a full replace — omitted options reset to their defaults — so changing
   // one field means read-modify-write of everything else (see README finding).
   await Room.update(roomId, {
@@ -98,12 +86,12 @@ async function onDeleteChannel(roomId: string): Promise<void> {
   const user = requireUser()
   if (!user.isAdmin) throw Abort('Only the server owner can delete channels')
   const dbChannelId = requireDbChannelId(roomId)
-  const row = db.select().from(channels).where(eq(channels.id, dbChannelId)).limit(1).all()[0]
+  const row = q.getChannel(dbChannelId)
   if (row === undefined) throw Abort('No such channel')
   if (row.name === 'general') throw Abort('#general is forever')
   // Every holder's `room.onClose()` fires — that *is* the "channel deleted" signal.
   await Room.close(roomId)
-  db.delete(channels).where(eq(channels.id, dbChannelId)).run() // messages cascade
+  q.deleteChannel(dbChannelId) // messages included
 }
 
 // --- Helpers ---

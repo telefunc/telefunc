@@ -1,70 +1,108 @@
-// The durable truth. Rooms are the *live* layer (presence, delivery, events) — everything
-// that must survive a restart lives here.
+// Row types + DDL — the durable truth. Rooms are the *live* layer (presence, delivery,
+// events); everything that must survive a restart lives here.
+//
+// This app uses Node's built-in SQLite (`node:sqlite`, Node ≥ 22.5) on purpose: a native
+// driver (better-sqlite3) broke `pnpm install` for the whole monorepo on Windows CI runners,
+// and no ORM release supported `node:sqlite` yet — so the queries are hand-written prepared
+// statements in queries.ts.
 
-export { users, sessions, channels, messages, dms }
+export { DDL }
+export type { ChannelRow, DmRow, MessageRow, SessionRow, UserRow }
 
-import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
-
-const users = sqliteTable('users', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull().unique(),
-  color: text('color').notNull(),
+type UserRow = {
+  id: string
+  name: string
+  color: string
   /** `scrypt` as `salt:hash` (hex). Empty for the bot. */
-  passwordHash: text('password_hash').notNull(),
-  /** The first registered human is the server owner. */
-  isAdmin: integer('is_admin', { mode: 'boolean' }).notNull().default(false),
-  isBot: integer('is_bot', { mode: 'boolean' }).notNull().default(false),
-  createdAt: integer('created_at').notNull(),
-})
+  password_hash: string
+  /** The first registered human owns the server. SQLite booleans are 0/1. */
+  is_admin: 0 | 1
+  is_bot: 0 | 1
+  created_at: number
+}
 
-const sessions = sqliteTable('sessions', {
-  token: text('token').primaryKey(),
-  userId: text('user_id')
-    .notNull()
-    .references(() => users.id),
-  expiresAt: integer('expires_at').notNull(),
-})
+type SessionRow = {
+  token: string
+  user_id: string
+  expires_at: number
+}
 
-const channels = sqliteTable('channels', {
+type ChannelRow = {
   /** Also the suffix of the channel's room ID (see server/rooms.ts). */
-  id: text('id').primaryKey(),
-  kind: text('kind', { enum: ['text', 'voice'] }).notNull(),
-  name: text('name').notNull().unique(),
-  topic: text('topic').notNull().default(''),
-  createdAt: integer('created_at').notNull(),
-})
+  id: string
+  kind: 'text' | 'voice'
+  name: string
+  topic: string
+  created_at: number
+}
 
-const messages = sqliteTable(
-  'messages',
-  {
-    /** Minted by the sender (also the client's history/live dedup key). */
-    id: text('id').primaryKey(),
-    channelId: text('channel_id')
-      .notNull()
-      .references(() => channels.id, { onDelete: 'cascade' }),
-    authorId: text('author_id').notNull(),
-    // Denormalized author display fields: history renders without a join and survives renames.
-    authorName: text('author_name').notNull(),
-    authorColor: text('author_color').notNull(),
-    authorIsBot: integer('author_is_bot', { mode: 'boolean' }).notNull().default(false),
-    text: text('text').notNull(),
-    at: integer('at').notNull(),
-  },
-  (table) => [index('messages_channel_at').on(table.channelId, table.at)],
-)
+type MessageRow = {
+  /** Minted by the sender (also the client's history/live dedup key). */
+  id: string
+  channel_id: string
+  author_id: string
+  // Denormalized author display fields: history renders without a join and survives renames.
+  author_name: string
+  author_color: string
+  author_is_bot: 0 | 1
+  text: string
+  at: number
+}
 
-const dms = sqliteTable(
-  'dms',
-  {
-    id: text('id').primaryKey(),
-    /** The two user IDs, sorted and joined with `:` — one key per conversation. */
-    threadKey: text('thread_key').notNull(),
-    fromId: text('from_id').notNull(),
-    fromName: text('from_name').notNull(),
-    toId: text('to_id').notNull(),
-    toName: text('to_name').notNull(),
-    text: text('text').notNull(),
-    at: integer('at').notNull(),
-  },
-  (table) => [index('dms_thread_at').on(table.threadKey, table.at)],
-)
+type DmRow = {
+  id: string
+  /** The two user IDs, sorted and joined with `:` — one key per conversation. */
+  thread_key: string
+  from_id: string
+  from_name: string
+  to_id: string
+  to_name: string
+  text: string
+  at: number
+}
+
+const DDL = `
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    color TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    is_bot INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    expires_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS channels (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL UNIQUE,
+    topic TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    author_id TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    author_color TEXT NOT NULL,
+    author_is_bot INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL,
+    at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS messages_channel_at ON messages(channel_id, at);
+  CREATE TABLE IF NOT EXISTS dms (
+    id TEXT PRIMARY KEY,
+    thread_key TEXT NOT NULL,
+    from_id TEXT NOT NULL,
+    from_name TEXT NOT NULL,
+    to_id TEXT NOT NULL,
+    to_name TEXT NOT NULL,
+    text TEXT NOT NULL,
+    at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS dms_thread_at ON dms(thread_key, at);
+`

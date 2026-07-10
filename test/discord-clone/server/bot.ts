@@ -5,10 +5,8 @@ export { startBot }
 // answers a few commands in every text channel. (Its DM replies live in dms.telefunc.ts — DMs
 // are server-delivered in this app, they never ride the member-to-member lane.)
 
-import { eq } from 'drizzle-orm'
 import { Room, type LocalParticipant } from 'telefunc'
-import { db } from '../database/db'
-import { channels, users } from '../database/schema'
+import * as q from '../database/queries'
 import { asChannelMeta, asMemberMeta, type ChannelPublish, type GuildAnnouncement } from '../shared/types'
 import { BANNED_WORDS, getGuardedChannel, getGuardedGuild } from './guards'
 import { BOT_COLOR, BOT_NAME, channelRoomId } from './rooms'
@@ -16,7 +14,7 @@ import { BOT_COLOR, BOT_NAME, channelRoomId } from './rooms'
 const HELP = ['!help', '!ping — pong', '!members — who is online', '!roll — roll a d20'].join(' · ')
 
 async function startBot(): Promise<void> {
-  const botUser = db.select().from(users).where(eq(users.isBot, true)).limit(1).all()[0]
+  const botUser = q.theBotUser()
   if (botUser === undefined) throw new Error('Bot user missing — seed the database first')
   const identity = { userId: botUser.id, name: BOT_NAME, color: BOT_COLOR, bot: true }
 
@@ -25,13 +23,7 @@ async function startBot(): Promise<void> {
 
   // Watch every text channel — current ones now (awaited: the first user's join event must
   // find the bot already able to speak in #general), future ones as the guild announces them.
-  await Promise.all(
-    db
-      .select()
-      .from(channels)
-      .all()
-      .map((channel) => watchChannel(channelRoomId(channel.id), guild, identity)),
-  )
+  await Promise.all(q.listChannels().map((channel) => watchChannel(channelRoomId(channel.id), guild, identity)))
   guild.onAnnounce((data) => {
     const event = data as GuildAnnouncement
     if (event.kind === 'channel-created') void watchChannel(event.channelId, guild, identity)
@@ -41,7 +33,7 @@ async function startBot(): Promise<void> {
   // joiner's listeners (private deliveries are live-only), while a channel message is persisted
   // by the guard and replayed from history. See README finding on early messages.
   const greeted = new Set<string>()
-  const generalId = db.select().from(channels).where(eq(channels.name, 'general')).all()[0]?.id
+  const generalId = q.getChannelByName('general')?.id
   guild.onJoin((member) => {
     const meta = asMemberMeta(member.meta)
     if (meta.bot || greeted.has(meta.userId)) return

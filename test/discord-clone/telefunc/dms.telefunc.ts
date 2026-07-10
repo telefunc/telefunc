@@ -11,10 +11,9 @@ export { onDmThread, onListDmThreads, onSendDm }
 // app can't be built on it (see README finding). The guild guard closes it outright.
 
 import { randomUUID } from 'node:crypto'
-import { and, desc, eq, lt, or } from 'drizzle-orm'
 import { Abort, getContext, Room } from 'telefunc'
-import { db, dmThreadKey } from '../database/db'
-import { dms, users } from '../database/schema'
+import { dmThreadKey } from '../database/db'
+import * as q from '../database/queries'
 import { ensureLiveWorld, GUILD_ROOM_ID } from '../server/rooms'
 import { asMemberMeta, type DmMessage, type SystemNotice } from '../shared/types'
 
@@ -24,7 +23,7 @@ async function onSendDm(toUserId: string, text: string): Promise<DmMessage> {
   const user = requireUser()
   text = text.trim()
   if (text === '' || text.length > 2000) throw Abort('Say something (under 2000 characters)')
-  const target = db.select().from(users).where(eq(users.id, toUserId)).limit(1).all()[0]
+  const target = q.getUserById(toUserId)
   if (target === undefined) throw Abort('No such user')
   if (target.id === user.id) throw Abort("That's you")
 
@@ -42,7 +41,7 @@ async function onSendDm(toUserId: string, text: string): Promise<DmMessage> {
   await deliverLive(guild, participants, message)
 
   // The bot answers DMs — same lane, same persistence.
-  if (target.isBot) {
+  if (target.is_bot === 1) {
     const reply = persistDm({
       fromId: target.id,
       fromName: target.name,
@@ -59,32 +58,17 @@ async function onSendDm(toUserId: string, text: string): Promise<DmMessage> {
 /** A page of one conversation, newest-first cursor, oldest-first result. */
 async function onDmThread(otherUserId: string, beforeAt?: number) {
   const user = requireUser()
-  const threadKey = dmThreadKey(user.id, otherUserId)
-  const rows = db
-    .select()
-    .from(dms)
-    .where(
-      beforeAt === undefined ? eq(dms.threadKey, threadKey) : and(eq(dms.threadKey, threadKey), lt(dms.at, beforeAt)),
-    )
-    .orderBy(desc(dms.at))
-    .limit(PAGE_SIZE + 1)
-    .all()
+  const rows = q.pageDmThread(dmThreadKey(user.id, otherUserId), beforeAt, PAGE_SIZE + 1)
   return { hasMore: rows.length > PAGE_SIZE, messages: rows.slice(0, PAGE_SIZE).reverse().map(toDmMessage) }
 }
 
 /** The sidebar's conversation list: one entry per correspondent, newest first. */
 async function onListDmThreads() {
   const user = requireUser()
-  const rows = db
-    .select()
-    .from(dms)
-    .where(or(eq(dms.fromId, user.id), eq(dms.toId, user.id)))
-    .orderBy(desc(dms.at))
-    .limit(500)
-    .all()
   const threads = new Map<string, { otherId: string; otherName: string; lastText: string; lastAt: number }>()
-  for (const row of rows) {
-    const other = row.fromId === user.id ? { id: row.toId, name: row.toName } : { id: row.fromId, name: row.fromName }
+  for (const row of q.listDmsInvolving(user.id, 500)) {
+    const other =
+      row.from_id === user.id ? { id: row.to_id, name: row.to_name } : { id: row.from_id, name: row.from_name }
     if (!threads.has(other.id)) {
       threads.set(other.id, { otherId: other.id, otherName: other.name, lastText: row.text, lastAt: row.at })
     }
@@ -94,13 +78,13 @@ async function onListDmThreads() {
 
 // --- Helpers ---
 
-function toDmMessage(row: typeof dms.$inferSelect): DmMessage {
+function toDmMessage(row: import('../database/schema').DmRow): DmMessage {
   return {
     id: row.id,
-    fromId: row.fromId,
-    fromName: row.fromName,
-    toId: row.toId,
-    toName: row.toName,
+    fromId: row.from_id,
+    fromName: row.from_name,
+    toId: row.to_id,
+    toName: row.to_name,
     text: row.text,
     at: row.at,
   }
@@ -108,9 +92,16 @@ function toDmMessage(row: typeof dms.$inferSelect): DmMessage {
 
 function persistDm(dm: { fromId: string; fromName: string; toId: string; toName: string; text: string }): DmMessage {
   const message: DmMessage = { id: randomUUID(), ...dm, at: Date.now() }
-  db.insert(dms)
-    .values({ ...message, threadKey: dmThreadKey(dm.fromId, dm.toId) })
-    .run()
+  q.insertDm({
+    id: message.id,
+    thread_key: dmThreadKey(dm.fromId, dm.toId),
+    from_id: dm.fromId,
+    from_name: dm.fromName,
+    to_id: dm.toId,
+    to_name: dm.toName,
+    text: dm.text,
+    at: message.at,
+  })
   return message
 }
 

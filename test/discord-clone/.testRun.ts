@@ -28,6 +28,8 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
         // This app keeps telefunctions in telefunc/ (an API layer) instead of collocating.
         log.logText.includes('We recommend to collocate') ||
         log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
+        // node:sqlite prints this once at boot (Node < 24 marks it experimental).
+        log.logText.includes('SQLite is an experimental feature') ||
         // Page navigations/closures tear down live connections mid-flight.
         log.logText.includes('Channel timed out: client did not reconnect') ||
         log.logText.includes('The user aborted a request') ||

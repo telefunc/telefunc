@@ -62,7 +62,7 @@ function getCiJobs() {
     },
     {
       name: 'Discord Clone',
-      // Needs fake media devices (Linux CI runners) and native better-sqlite3 => Ubuntu-only
+      // Media pipelines (fake camera/mic, screen capture) are tuned on Linux runners => Ubuntu-only
       setups: setupModern,
       splitFiles: true,
     },

@@ -2,9 +2,7 @@ export { createSession, deleteSession, getSessionUser, hashPassword, registerUse
 export type { SessionUser }
 
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
-import { and, eq, gt } from 'drizzle-orm'
-import { db } from '../database/db'
-import { sessions, users } from '../database/schema'
+import * as q from '../database/queries'
 
 /** What `getContext().user` carries into every telefunction. */
 type SessionUser = { id: string; name: string; color: string; isAdmin: boolean }
@@ -29,18 +27,18 @@ function verifyPassword(password: string, stored: string): boolean {
 
 function registerUser(name: string, password: string, color: string): SessionUser {
   // The first human to register owns the server.
-  const isFirst = db.select({ id: users.id }).from(users).where(eq(users.isBot, false)).limit(1).all().length === 0
-  const user = {
+  const isFirst = q.countHumans() === 0
+  q.insertUser({
     id: randomUUID(),
     name,
     color,
-    passwordHash: hashPassword(password),
-    isAdmin: isFirst,
-    isBot: false,
-    createdAt: Date.now(),
-  }
-  db.insert(users).values(user).run()
-  return { id: user.id, name: user.name, color: user.color, isAdmin: user.isAdmin }
+    password_hash: hashPassword(password),
+    is_admin: isFirst ? 1 : 0,
+    is_bot: 0,
+    created_at: Date.now(),
+  })
+  const user = q.getUserByName(name)!
+  return { id: user.id, name: user.name, color: user.color, isAdmin: user.is_admin === 1 }
 }
 
 // --- Sessions ---
@@ -48,22 +46,17 @@ function registerUser(name: string, password: string, color: string): SessionUse
 function createSession(userId: string): { token: string; expiresAt: number } {
   const token = randomBytes(32).toString('hex')
   const expiresAt = Date.now() + SESSION_TTL_MS
-  db.insert(sessions).values({ token, userId, expiresAt }).run()
+  q.insertSession(token, userId, expiresAt)
   return { token, expiresAt }
 }
 
 function deleteSession(token: string): void {
-  db.delete(sessions).where(eq(sessions.token, token)).run()
+  q.deleteSession(token)
 }
 
 function getSessionUser(token: string | undefined): SessionUser | null {
   if (!token) return null
-  const rows = db
-    .select({ id: users.id, name: users.name, color: users.color, isAdmin: users.isAdmin })
-    .from(sessions)
-    .innerJoin(users, eq(sessions.userId, users.id))
-    .where(and(eq(sessions.token, token), gt(sessions.expiresAt, Date.now())))
-    .limit(1)
-    .all()
-  return rows[0] ?? null
+  const user = q.getSessionUser(token, Date.now())
+  if (user === undefined) return null
+  return { id: user.id, name: user.name, color: user.color, isAdmin: user.is_admin === 1 }
 }
