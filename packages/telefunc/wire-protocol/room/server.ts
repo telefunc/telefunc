@@ -32,7 +32,7 @@ import {
   sizeToWire,
   unframeMemberId,
   uuidToBytes,
-  type BinaryWants,
+  type MemberWants,
   type MemberSnapshot,
   type ReqJoinAck,
   type ReqOkAck,
@@ -565,7 +565,7 @@ class ServerRoom implements Room {
     if (this._stubs.size > 0) {
       const wireText = encodePublishText(serialized, rawInfo)
       for (const stub of this._stubs) {
-        if (!stub._wantsText) continue
+        if (!stub._wantsTextFrom(event.from)) continue
         if (stub._stubMembers.get(event.from)?.selfDelivery === false) continue
         stub._relayPublishText(wireText)
       }
@@ -715,6 +715,13 @@ class ServerRoom implements Room {
           this._syncSubs()
           return { ok: true }
         }
+        case 'sub-text': {
+          // Member-scoped text wants — the room-level (all) want rides the broadcast-sub ctrl.
+          const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
+          stub._textMemberWants = new Set(members)
+          this._syncSubs()
+          return { ok: true }
+        }
         default:
           return undefined
       }
@@ -769,8 +776,10 @@ class ServerRoom implements Room {
     )
 
     // Text: its own lane, brought up only for holders that actually consume messages —
-    // presence-only observers never receive the room's chatter.
-    const wantText = open && (state.dataListenerCount > 0 || this._stubsWantText())
+    // presence-only observers never receive the room's chatter. Wants are member-selective,
+    // like binary: room-level listeners want it all, participant-scoped ones only their member.
+    const textWants = this._aggregateTextWants()
+    const wantAnyText = open && (textWants.all || textWants.members.size > 0)
     const memberIds = open ? state.listMemberIds() : []
 
     // Roster loads are need-driven: a resident roster refreshes on the observe transition
@@ -783,19 +792,27 @@ class ServerRoom implements Room {
     const wantAnyBinary = open && (binaryWants.all || binaryWants.members.size > 0)
     const needsRoster =
       state.eventListenerCount + state.dataListenerCount + state.binaryListenerCount > 0 ||
-      (this._isolated && wantText) ||
+      (this._isolated && wantAnyText) ||
       wantAnyBinary
     if ((becomesObserved && state.rosterKnown) || (open && !state.rosterKnown && needsRoster)) {
       void this._refreshMembers().catch(reportRoomError)
     }
     if (this._isolated) {
-      this._syncMemberSubs(this._memberTextUnsubs, wantText ? memberIds : [], (memberId) =>
+      // Isolated text rides per-member keys, so upstream delivery narrows to the wanted set.
+      const textIds = !wantAnyText
+        ? []
+        : textWants.all
+          ? memberIds
+          : memberIds.filter((id) => textWants.members.has(id))
+      this._syncMemberSubs(this._memberTextUnsubs, textIds, (memberId) =>
         adapter.subscribe(roomMemberDataKey(this.id, memberId), (serialized, info) =>
           this._onTextData(serialized, info),
         ),
       )
     } else {
-      this._textSub.sync(wantText, () =>
+      // One shared key — the node ingests the room's text while anyone wants any of it;
+      // member-selectivity is enforced at the per-stub relay.
+      this._textSub.sync(wantAnyText, () =>
         adapter.subscribe(roomTextKey(this.id), (serialized, info) => this._onTextData(serialized, info)),
       )
     }
@@ -820,20 +837,27 @@ class ServerRoom implements Room {
     this._syncHeartbeat()
   }
 
-  /** Whether any client stub needs the text lane relayed. */
-  private _stubsWantText(): boolean {
-    for (const stub of this._stubs) if (stub._wantsText) return true
-    return false
-  }
-
   /** Union of this holder's own binary listeners and every client stub's declared wants. */
   private _aggregateBinaryWants(): { all: boolean; members: Set<string> } {
-    const local: BinaryWants = this._state.binaryWants()
+    const local: MemberWants = this._state.binaryWants()
     if (local.all) return { all: true, members: new Set() }
     const members = new Set(local.members)
     for (const stub of this._stubs) {
       if (stub._binaryWants.all) return { all: true, members: new Set() }
       for (const id of stub._binaryWants.members) members.add(id)
+    }
+    return { all: false, members }
+  }
+
+  /** The text-lane twin of `_aggregateBinaryWants()` — a stub's broadcast subscription is its
+   *  `all`, its `sub-text` set the member-scoped want. */
+  private _aggregateTextWants(): { all: boolean; members: Set<string> } {
+    const local: MemberWants = this._state.textWants()
+    if (local.all) return { all: true, members: new Set() }
+    const members = new Set(local.members)
+    for (const stub of this._stubs) {
+      if (stub._wantsText) return { all: true, members: new Set() }
+      for (const id of stub._textMemberWants) members.add(id)
     }
     return { all: false, members }
   }

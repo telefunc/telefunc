@@ -13,7 +13,7 @@ import {
   normalizeJoinOptions,
   sizeFromWire,
   unframeMemberId,
-  type BinaryWants,
+  type MemberWants,
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
   type ParticipantStubRequest,
@@ -53,6 +53,7 @@ class ClientRoom implements Room {
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   private _lastBinaryWantsSent = ''
+  private _lastTextWantsSent = ''
   private _rosterArrived!: () => void
   /** Settled by the first streamed roster (or wire death) — gates `getParticipants()`. */
   private readonly _rosterReady = new Promise<void>((resolve) => (this._rosterArrived = resolve))
@@ -257,16 +258,26 @@ class ClientRoom implements Room {
     this._localParticipants.clear()
   }
 
-  /** Declare this holder's wants to the server — synchronously, like `subscribe()`, so
-   *  same-connection FIFO guarantees a publish right after subscribing gets its own frame back.
-   *  Text is the standard broadcast subscription (on while data listeners exist); binary is the
-   *  member-selective `sub-binary` set (all / specific members), re-sent only when it changes. */
+  /** Declare this holder's wants to the server. Both data lanes are member-selective:
+   *  room-level text listeners ride the standard broadcast subscription — declared
+   *  synchronously, like `subscribe()`, so same-connection FIFO guarantees a publish right
+   *  after subscribing gets its own frame back — while participant-scoped text listeners
+   *  declare a `sub-text` member set and binary listeners a `sub-binary` one, each re-sent
+   *  only when it changes. */
   private _syncWants(): void {
     const state = this._state
-    this._stub._setWireTextSubscribed(!state.closed && state.dataListenerCount > 0)
+    const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
+    this._stub._setWireTextSubscribed(text.all)
 
     if (state.closed) return // stub is dead — nothing to declare
-    const wants: BinaryWants = state.binaryWants()
+    const textEncoded = text.all ? '' : [...text.members].sort().join(',')
+    if (textEncoded !== this._lastTextWantsSent) {
+      this._lastTextWantsSent = textEncoded
+      // A room-level subscription supersedes the member set — clear it server-side.
+      void this._stub.send({ __r: 'sub-text', members: text.all ? [] : text.members }, { ack: false }).catch(() => {})
+    }
+
+    const wants: MemberWants = state.binaryWants()
     const encoded = wants.all ? 'all' : [...wants.members].sort().join(',')
     if (encoded === this._lastBinaryWantsSent) return
     this._lastBinaryWantsSent = encoded

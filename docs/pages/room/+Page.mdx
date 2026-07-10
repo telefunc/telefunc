@@ -434,13 +434,15 @@ Each lane travels on its own pub/sub stream, and every one is pay-for-what-you-c
 | Lane | Who receives it | Cost |
 |---|---|---|
 | Control (joins, leaves, metadata, announcements) | Every observer | Tiny & low-rate — this is all a presence-only holder pays |
-| Text (`publish`) | Only holders with message subscribers | `messages/s × size` per consuming connection — a busy chat (20 msg/s × 300 B) is ~6 KB/s |
+| Text (`publish`) | Per publisher: only who subscribed — to that member, or to the whole room | `messages/s × size` per consuming connection, counting only subscribed senders — a busy chat (20 msg/s × 300 B) is ~6 KB/s |
 | Binary (`publishBinary`) | Per publisher: only who subscribed to that member | Scales with what each client watches, not with room size |
 | Private (`send`) | Only the target | Per message |
 
+Both data lanes are member-selective: `room.subscribe()` receives everyone, while subscribing on a single participant (`participant.subscribe()`) delivers only that member's messages to your connection — follow two people in a 10,000-member room and you receive two people's messages, not the room's firehose.
+
 - Server-side relay buffers are byte-capped with FIFO eviction: a client that falls behind loses the oldest buffered messages first, and server memory stays bounded. Binary can never evict control events.
 - Serializing a room to a client is O(1) — the member list streams separately, right behind the response.
-- **`isolated: true`**: text moves to per-member keys too (binary always uses them). On platforms that map each pub/sub key to a single coordinator — Cloudflare Durable Objects — this removes publish contention for chatty rooms. Clients don't see the difference. Elsewhere, the default shared text key means fewer subscriptions.
+- **`isolated: true`**: text moves to per-member keys too (binary always uses them). On platforms that map each pub/sub key to a single coordinator — Cloudflare Durable Objects — this removes publish contention for chatty rooms, and member-selective text subscriptions narrow the server's upstream delivery to exactly the watched members. Clients don't see the difference. Elsewhere, the default shared text key means fewer subscriptions.
 
 ### Consistency
 

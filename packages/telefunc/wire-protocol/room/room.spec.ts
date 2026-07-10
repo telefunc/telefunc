@@ -509,6 +509,43 @@ describe('selective binary delivery', () => {
     expect(frames).toEqual(['cam1:1'])
   })
 
+  it('isolated mode narrows the upstream text keys to the wanted members too', async () => {
+    const a = await Room.create('sel-text', { isolated: true })
+    const alice = await a.join({ name: 'alice' })
+    const bob = await a.join({ name: 'bob' })
+    const b = await Room.get('sel-text')
+    await b.getParticipants() // materialize the lazy roster
+
+    const subscribed = vi.spyOn(getBroadcastAdapter(), 'subscribe')
+    const heard: unknown[] = []
+    ;(await b.getParticipant(alice.id))!.subscribe((data) => heard.push(data))
+    const keys = () => subscribed.mock.calls.map(([key]) => key)
+    expect(keys()).toContain(roomMemberDataKey('sel-text', alice.id))
+    expect(keys()).not.toContain(roomMemberDataKey('sel-text', bob.id))
+
+    await alice.publish('a1')
+    await bob.publish('b1') // b never subscribed bob's key — nothing arrives, nothing to filter
+    expect(heard).toEqual(['a1'])
+
+    // A room-level subscription widens upstream to every member's key.
+    b.subscribe(() => {})
+    expect(keys()).toContain(roomMemberDataKey('sel-text', bob.id))
+  })
+
+  it('a shared-mode member-scoped listener still brings up the room text lane', async () => {
+    const a = await Room.create('sel-shared')
+    const alice = await a.join({ name: 'alice' })
+    const bob = await a.join({ name: 'bob' })
+    const b = await Room.get('sel-shared')
+    await b.getParticipants() // materialize the lazy roster
+
+    const heard: unknown[] = []
+    ;(await b.getParticipant(alice.id))!.subscribe((data) => heard.push(data))
+    await alice.publish('a1')
+    await bob.publish('b1') // one shared key — it reaches the node; the view filters it out
+    expect(heard).toEqual(['a1'])
+  })
+
   it("releases a departed member's listeners — the decoder pattern must not pin subscriptions", async () => {
     const a = await Room.create('release', { isolated: true })
     const cam = await a.join({ name: 'cam' })
@@ -950,6 +987,34 @@ describe('room stub channel', () => {
     expect(relayedTags()).toEqual(['join', 'data'])
   })
 
+  it('sub-text relays only the wanted members; a room-level subscription supersedes the set', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('member-text-stub')
+    const alice = await serverRoom.join({ name: 'Alice' })
+    const bob = await serverRoom.join({ name: 'Bob' })
+
+    const relayedData = () =>
+      peer
+        .decoded()
+        .filter((f) => f.tag === TAG.PUBLISH)
+        .map((f) => JSON.parse(f.text) as { __r: string; data?: unknown })
+        .filter((m) => m.__r === 'data')
+        .map((m) => m.data)
+
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [alice.id] }), 50)
+    await alice.publish('from-alice')
+    await bob.publish('from-bob') // not in the want set — never crosses the wire
+    expect(relayedData()).toEqual(['from-alice'])
+
+    stub._onPeerBroadcastSubscribe(false) // room-level subscription — everything flows
+    await bob.publish('bob-now-flows')
+    expect(relayedData()).toEqual(['from-alice', 'bob-now-flows'])
+
+    stub._onPeerBroadcastUnsubscribe(false) // back to the member set
+    await bob.publish('bob-dropped')
+    await alice.publish('alice-still-flows')
+    expect(relayedData()).toEqual(['from-alice', 'bob-now-flows', 'alice-still-flows'])
+  })
+
   it('a stub member joined with selfDelivery=false gets no echo of its own publishes', async () => {
     const { stub, peer } = await createServedRoom('quiet-stub')
     stub._onPeerBroadcastSubscribe(false) // the client listens for data — the echo skip must still hold
@@ -1191,6 +1256,47 @@ describe('ClientRoom', () => {
     unsubAll()
     unsub1()
     expect(subBinaryMsgs().at(-1)).toEqual({ __r: 'sub-binary', all: false, members: [cam2] })
+  })
+
+  it('declares member-scoped text wants — sub-text rides beside the broadcast subscription', async () => {
+    const alice = crypto.randomUUID()
+    const bob = crypto.randomUUID()
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('text-wants', { count: 2 }))
+    fake.emit({
+      __r: 'roster',
+      members: [
+        { id: alice, meta: {}, joinedAt: 1 },
+        { id: bob, meta: {}, joinedAt: 2 },
+      ],
+    })
+    const subTextMsgs = () => fake.sent.filter((m) => m.__r === 'sub-text')
+
+    // Participant-scoped listeners declare a member set — no room-level broadcast subscription.
+    const unsubAlice = (await clientRoom.getParticipant(alice))!.subscribe(() => {})
+    expect(fake.textSubscribed()).toBe(false)
+    expect(subTextMsgs()).toEqual([{ __r: 'sub-text', members: [alice] }])
+    const unsubBob = (await clientRoom.getParticipant(bob))!.subscribe(() => {})
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice, bob] })
+
+    // A room-level subscribe() upgrades to the broadcast subscription and clears the member
+    // set; listener changes that leave the effective want unchanged send nothing.
+    const unsubAll = clientRoom.subscribe(() => {})
+    expect(fake.textSubscribed()).toBe(true)
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [] })
+    const sentCount = subTextMsgs().length
+    const unsubDup = (await clientRoom.getParticipant(alice))!.subscribe(() => {})
+    expect(subTextMsgs().length).toBe(sentCount)
+
+    // Narrowing back re-declares the member set.
+    unsubDup()
+    unsubAll()
+    expect(fake.textSubscribed()).toBe(false)
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice, bob] })
+    unsubBob()
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice] })
+    unsubAlice()
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [] })
   })
 
   it("a member leaving releases its listeners — the client's declaration narrows without an unsubscribe", async () => {

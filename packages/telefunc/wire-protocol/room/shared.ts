@@ -39,7 +39,7 @@ export type {
   ReqOkAck,
   ReqJoinAck,
   ReqPublishAck,
-  BinaryWants,
+  MemberWants,
 }
 
 import { assert, assertUsage } from '../../utils/assert.js'
@@ -198,13 +198,16 @@ type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] }
 type RoomDmEnvelope = { __r: 'dm'; to: string; from: string; fromMeta: ParticipantMeta | null; data: unknown }
 
 /** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
- *  `sub-binary` declares which members' binary streams the client wants relayed (full replace). */
+ *  `sub-binary` declares which members' binary streams the client wants relayed (full replace);
+ *  `sub-text` does the same for member-scoped text — the room-level (all) text want rides the
+ *  standard broadcast-subscription ctrl instead, keeping its synchronous-declaration fence. */
 type RoomStubRequest =
   | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown }
   | { __r: 'sub-binary'; all: boolean; members: string[] }
+  | { __r: 'sub-text'; members: string[] }
 
 /** Client→server requests on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubRequest =
@@ -219,8 +222,9 @@ type ParticipantStubNotice =
   | { __r: 'p-meta'; meta: ParticipantMeta }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; data: unknown }
 
-/** Which members' binary streams a holder wants — `all` (room-level listeners) or a specific set. */
-type BinaryWants = { all: boolean; members: string[] }
+/** Which members' streams a holder wants on a data lane (text or binary) — `all` for
+ *  room-level listeners, or a specific member set for participant-scoped ones. */
+type MemberWants = { all: boolean; members: string[] }
 
 type ReqOkAck = { ok: true } | { ok: false; err: string }
 type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }
@@ -412,11 +416,22 @@ class RoomState {
 
   /** Which members' binary streams this holder needs delivered — drives the wire/adapter
    *  subscriptions on both sides (client declares it, server aggregates it per stub). */
-  binaryWants(): BinaryWants {
+  binaryWants(): MemberWants {
     if (this._roomBinaryCbs.length > 0) return { all: true, members: [] }
     const members: string[] = []
     for (const entry of this._members.values()) {
       if (entry.binaryCbs.length > 0) members.push(entry.id)
+    }
+    return { all: false, members }
+  }
+
+  /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist,
+   *  otherwise exactly the members with participant-scoped listeners. */
+  textWants(): MemberWants {
+    if (this._roomDataCbs.length > 0) return { all: true, members: [] }
+    const members: string[] = []
+    for (const entry of this._members.values()) {
+      if (entry.dataCbs.length > 0) members.push(entry.id)
     }
     return { all: false, members }
   }
