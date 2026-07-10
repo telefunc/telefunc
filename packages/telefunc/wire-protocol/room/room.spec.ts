@@ -25,7 +25,6 @@ import { createStreamingReviver } from '../client/response/registry.js'
 import type { ClientReviverContext, ServerReplacerContext } from '../types.js'
 import type { RemoteParticipant } from './types.js'
 import {
-  RoomState,
   frameWithMemberId,
   roomCtrlKey,
   roomTextKey,
@@ -35,7 +34,8 @@ import {
   unframeMemberId,
   type RoomMemberRecord,
   type RoomSnapshotMetadata,
-} from './shared.js'
+} from './protocol.js'
+import { RoomState } from './state.js'
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 

@@ -7,15 +7,12 @@ import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import {
   leaveCauseFromWire,
-  ParticipantBase,
-  RoomState,
   frameWithMemberId,
   hasRoomTag,
   normalizeJoinOptions,
   sizeFromWire,
   unframeMemberId,
   type BinaryWants,
-  type InboxMessage,
   type MemberWants,
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
@@ -30,7 +27,9 @@ import {
   type RoomActivityEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
-} from './shared.js'
+} from './protocol.js'
+import { RoomState } from './state.js'
+import { ParticipantBase, type InboxMessage } from './participant.js'
 import type {
   BinaryPublishOptions,
   RoomBinaryListener,

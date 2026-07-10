@@ -17,13 +17,11 @@ import {
 import { getBroadcastAdapter, type BroadcastAdapter, type BroadcastPublishResult } from '../server/broadcast.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
-  ParticipantBase,
   ROOM_KEY_NAMESPACE,
   errorMessage,
   leaveCauseFromWire,
   leaveCauseToWire,
   stampNewer,
-  RoomState,
   frameWithMemberId,
   hasRoomTag,
   normalizeJoinOptions,
@@ -61,7 +59,9 @@ import {
   type RoomMemberRecord,
   type RoomStubRequest,
   type RoomActivityEvent,
-} from './shared.js'
+} from './protocol.js'
+import { RoomState } from './state.js'
+import { ParticipantBase } from './participant.js'
 import type { RoomStubChannel } from './stubs.js'
 import type {
   BinaryPublishOptions,

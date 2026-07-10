@@ -22,7 +22,7 @@ import {
   type ReqOkAck,
   type ReqPublishAck,
   type RoomRosterEvent,
-} from './shared.js'
+} from './protocol.js'
 assertIsNotBrowser()
 
 // The wire adapters of the room domain: how a `Room` and a `LocalParticipant` cross a
