@@ -19,6 +19,7 @@ export {
   errorMessage,
   leaveCauseFromWire,
   leaveCauseToWire,
+  remoteBacking,
   RoomState,
   ParticipantBase,
 }
@@ -362,7 +363,22 @@ type RoomStateOptions = {
  * is absorbed silently. This lets owners seed state from a snapshot and apply a concurrently
  * produced event stream without double-firing.
  */
+/** Stamped (non-enumerably) on every `RemoteParticipant` a `RoomState` mints — the backing
+ *  that lets the serializer turn a view object back into (room, member) without a registry. */
+const ROOM_REMOTE_BRAND: unique symbol = Symbol.for('telefunc.RoomRemoteParticipant')
+
+type RemoteBacking = { state: RoomState; entry: MemberEntry }
+
+/** The `RoomState` backing of a minted `RemoteParticipant` — `null` for anything else. */
+function remoteBacking(value: unknown): RemoteBacking | null {
+  return typeof value === 'object' && value !== null && ROOM_REMOTE_BRAND in value
+    ? ((value as Record<typeof ROOM_REMOTE_BRAND, RemoteBacking>)[ROOM_REMOTE_BRAND] as RemoteBacking)
+    : null
+}
+
 class RoomState {
+  /** @internal — the owning `ServerRoom`/`ClientRoom`, for serialization backing. */
+  _owner: unknown = null
   readonly roomId: string
   meta: RoomMeta
   size: number
@@ -477,6 +493,16 @@ class RoomState {
 
   snapshotMembers(): MemberSnapshot[] {
     return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq }) => ({ id, meta, joinedAt, metaSeq }))
+  }
+
+  /** Revival side of a serialized `RemoteParticipant`: the live view wins when it already knows
+   *  the member; otherwise the entry is seeded silently from the snapshot — no events fire, no
+   *  count adjustment (the seed count already included the member), and the streamed roster
+   *  reconciles it like any other pre-roster knowledge. */
+  ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
+    const existing = this._members.get(snap.id)
+    if (existing) return existing.remote
+    return this._createEntry(snap).remote
   }
 
   // ── Listener registration (all return an unlisten function) ──
@@ -614,9 +640,29 @@ class RoomState {
    *  whether anything drifted, so the owner can re-sync downstream views (client stubs). */
   reconcile(members: MemberSnapshot[]): boolean {
     if (!this._rosterKnown) {
+      // First load: silent — but entries can already exist (pre-roster join events, revived
+      // views). Those objects must survive: listeners hang off them and revived handles must
+      // stay `===` with the view. Keep the object, refresh the facts; entries the authoritative
+      // roster doesn't know left before the load — their leave is narrated like any other.
       this._rosterKnown = true
       this.membershipVersion++
-      for (const member of members) this._createEntry(member)
+      const seen = new Set<string>()
+      for (const member of members) {
+        seen.add(member.id)
+        const existing = this._members.get(member.id)
+        if (!existing) {
+          this._createEntry(member)
+          continue
+        }
+        if (member.metaSeq > existing.metaSeq) {
+          existing.meta = member.meta
+          existing.metaSeq = member.metaSeq
+        }
+        existing.joinedAt = member.joinedAt
+      }
+      for (const id of [...this._members.keys()]) {
+        if (!seen.has(id)) this.applyLeave(id)
+      }
       this._wasFull = this.isFull
       return false
     }
@@ -682,6 +728,8 @@ class RoomState {
       updateCbs: [],
       leaveCbs: [],
     }
+    // Non-enumerable: never serialized as data, invisible to user iteration.
+    Object.defineProperty(entry.remote, ROOM_REMOTE_BRAND, { value: { state: this, entry } satisfies RemoteBacking })
     this._members.set(id, entry)
     return entry
   }

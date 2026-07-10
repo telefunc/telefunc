@@ -168,7 +168,9 @@ type LocalParticipant = {
   onLeave(callback: (cause: LeaveCause) => void): () => void
 }
 
-/** Another room member: subscribe to just their messages, observe their metadata and lifecycle. */
+/** Another room member: subscribe to just their messages, observe their metadata and lifecycle.
+ *  Returnable from a telefunction — it arrives bound to its room's live view: the backing room
+ *  rides along (deduplicated against a co-returned room), so `room.getParticipant(m.id) === m`. */
 type RemoteParticipant = {
   readonly id: string
   readonly meta: ParticipantMeta

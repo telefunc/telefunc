@@ -15,6 +15,10 @@ import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { RoomStubChannel } from './stubs.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
+import { createStreamingReplacer } from '../server/response/registry.js'
+import { createStreamingReviver } from '../client/response/registry.js'
+import type { ClientReviverContext, ServerReplacerContext } from '../types.js'
+import type { RemoteParticipant } from './types.js'
 import {
   RoomState,
   frameWithMemberId,
@@ -1554,5 +1558,93 @@ describe('adapter KV requirement', () => {
     }
     _resetBroadcastAdapterForTesting(pubSubOnly)
     await expect(Room.create('kv-less')).rejects.toThrow(/KV methods required by `Room`/)
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// Returnable RemoteParticipant — a view crosses the wire as (room, snapshot);
+// ref-identity dedup binds it to the co-returned room's live view.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('returnable RemoteParticipant', () => {
+  function makeRoundTrip() {
+    const registeredChannels: unknown[] = []
+    const serverCtx = {
+      createChannel: () => {
+        throw new Error('unused')
+      },
+      registerChannel: (ch: unknown) => registeredChannels.push(ch),
+      sendStream: () => {
+        throw new Error('unused')
+      },
+      validators: new Map(),
+    } as unknown as ServerReplacerContext
+    const replacer = createStreamingReplacer(
+      () => serverCtx,
+      () => {},
+      [],
+    )
+    const serialize = (v: unknown) => stringify(v, { replacer })
+
+    const fakes: FakeStub[] = []
+    const clientCtx = {
+      createBroadcast: () => {
+        const f = createFakeStub()
+        fakes.push(f)
+        return f.stub
+      },
+      createChannel: () => {
+        throw new Error('unused')
+      },
+      receiveStream: () => {
+        throw new Error('unused')
+      },
+      waitFor: () => {},
+    } as unknown as ClientReviverContext
+    const reviver = createStreamingReviver(clientCtx, () => {}, [])
+    const parseBody = (b: string) => parse(b, { reviver })
+    return { serialize, parseBody, fakes, registeredChannels }
+  }
+
+  it('returns alongside its room — one stub, duplicates ===, bound to the live view', async () => {
+    const server = await Room.create('viewable')
+    const alice = await server.join({ name: 'Alice' })
+    const member = (await server.getParticipant(alice.id))!
+
+    const { serialize, parseBody, fakes, registeredChannels } = makeRoundTrip()
+    const body = serialize({ room: server, member, memberDupe: member })
+    expect(registeredChannels.length).toBe(1) // one room stub — the view rides it
+
+    const out = parseBody(body) as { room: ClientRoom; member: RemoteParticipant; memberDupe: RemoteParticipant }
+    expect(out.memberDupe).toBe(out.member)
+    expect(out.member.id).toBe(alice.id)
+    expect(out.member.meta).toEqual({ name: 'Alice' })
+
+    // Bound to the same live view: the room's own lookup returns the very same object.
+    fakes[0]!.emit({
+      __r: 'roster',
+      members: [{ id: alice.id, meta: { name: 'Alice' }, joinedAt: 1, metaSeq: 0 }],
+    })
+    expect(await out.room.getParticipant(alice.id)).toBe(out.member)
+  })
+
+  it('returns on its own — the backing room rides along and keeps the view live', async () => {
+    const server = await Room.create('solo-view')
+    const bob = await server.join({ name: 'Bob' })
+    const member = (await server.getParticipant(bob.id))!
+
+    const { serialize, parseBody, fakes } = makeRoundTrip()
+    const out = parseBody(serialize({ solo: member })) as { solo: RemoteParticipant }
+    expect(fakes.length).toBe(1) // the embedded room minted its (one) client stub
+    expect(out.solo.id).toBe(bob.id)
+    expect(out.solo.meta).toEqual({ name: 'Bob' })
+
+    // Live: the member's events flow through the embedded room's stub into the view.
+    fakes[0]!.emit({ __r: 'p-meta', id: bob.id, meta: { name: 'Bobby' }, prev: { name: 'Bob' }, seq: 1 })
+    expect(out.solo.meta).toEqual({ name: 'Bobby' })
+    const causes: unknown[] = []
+    out.solo.onLeave((cause) => causes.push(cause))
+    fakes[0]!.emit({ __r: 'leave', id: bob.id, cause: 'removed', reason: 'bye' })
+    expect(causes).toEqual([{ type: 'removed', reason: 'bye' }])
   })
 })

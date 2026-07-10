@@ -1,7 +1,17 @@
-export { roomReviver, roomParticipantReviver }
+export { roomReviver, roomParticipantReviver, roomRemoteReviver }
 
-import type { ClientReviverContext, ReviverType, RoomContract, RoomParticipantContract } from '../../types.js'
-import { SERIALIZER_PREFIX_ROOM, SERIALIZER_PREFIX_ROOM_PARTICIPANT } from '../../constants.js'
+import type {
+  ClientReviverContext,
+  ReviverType,
+  RoomContract,
+  RoomParticipantContract,
+  RoomRemoteContract,
+} from '../../types.js'
+import {
+  SERIALIZER_PREFIX_ROOM,
+  SERIALIZER_PREFIX_ROOM_PARTICIPANT,
+  SERIALIZER_PREFIX_ROOM_REMOTE,
+} from '../../constants.js'
 import { ClientRoom, ClientStandaloneParticipant } from '../../room/client.js'
 import { roomCtrlKey } from '../../room/shared.js'
 
@@ -33,6 +43,22 @@ const roomParticipantReviver: ReviverType<RoomParticipantContract, ClientReviver
       abort(abortError) {
         channel.abort(abortError.abortValue, abortError.message)
       },
+    }
+  },
+}
+
+/** The metadata's `room` was revived first by the recursive parser — bind the view to that live
+ *  `ClientRoom` so `room.getParticipant(m.id) === m`. Subordinate lifetime: the view lives and
+ *  dies with its room (`gcTrack: false` — no GC proxy, which would break that `===`). */
+const roomRemoteReviver: ReviverType<RoomRemoteContract, ClientReviverContext> = {
+  prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
+  revive(metadata) {
+    const room = metadata.room as ClientRoom
+    return {
+      value: room._reviveRemote(metadata),
+      close() {},
+      abort() {},
+      gcTrack: false,
     }
   },
 }

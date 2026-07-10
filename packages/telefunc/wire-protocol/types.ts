@@ -36,6 +36,7 @@ export type {
   BroadcastContract,
   RoomContract,
   RoomParticipantContract,
+  RoomRemoteContract,
   FunctionContract,
   FileDownload,
   BlobDownload,
@@ -46,7 +47,7 @@ import type { ServerChannel } from './server/channel.js'
 import type { ServerBroadcast } from './server/server-broadcast.js'
 import type { ClientChannel, ClientBroadcast } from './client/channel.js'
 import type { ServerRoom, ServerLocalParticipant } from './room/server.js'
-import type { Room, LocalParticipant } from './room/types.js'
+import type { Room, LocalParticipant, RemoteParticipant } from './room/types.js'
 import type { RoomSnapshotMetadata, ParticipantStubMetadata } from './room/shared.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
@@ -96,7 +97,16 @@ type ReviverType<C extends TypeContract = TypeContract, Context = unknown> = {
   revive(
     metadata: C['metadata'],
     context: Context,
-  ): { value: C['result']; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }
+  ): {
+    value: C['result']
+    close: () => Promise<void> | void
+    abort: (abortError: AbortError) => void
+    /** `false` for values whose lifetime rides a parent revived in the same payload (e.g. a
+     *  `RemoteParticipant` view of a revived room): no GC proxy, no own close/abort wiring —
+     *  the parent's lifecycle covers them, and wrapping would break `===` with the parent's
+     *  own view objects. Default: `true`. */
+    gcTrack?: boolean
+  }
 }
 
 // ===== Producer =====
@@ -250,6 +260,15 @@ type BroadcastContract = TypeContract<ServerBroadcast, ClientBroadcast, { channe
 type RoomContract = TypeContract<ServerRoom, Room, RoomSnapshotMetadata>
 
 type RoomParticipantContract = TypeContract<ServerLocalParticipant, LocalParticipant, ParticipantStubMetadata>
+
+/** A `RemoteParticipant` view crossing the wire: (backing room, member snapshot). The room rides
+ *  inside the metadata — the ref-identity registries dedupe it against any co-returned occurrence,
+ *  so `room.getParticipant(m.id) === m` holds on the client. */
+type RoomRemoteContract = TypeContract<
+  RemoteParticipant,
+  RemoteParticipant,
+  { room: unknown; id: string; meta: Record<string, unknown>; joinedAt: number; metaSeq: number }
+>
 
 type FunctionContract = TypeContract<
   (...args: readonly unknown[]) => unknown,

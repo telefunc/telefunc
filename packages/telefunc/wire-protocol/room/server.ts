@@ -340,6 +340,7 @@ class ServerRoom implements Room {
       onListenersChanged: () => this._syncSubs(),
       onCallbackError: reportRoomError,
     })
+    this._state._owner = this
   }
 
   static isServerRoom(value: unknown): value is ServerRoom {

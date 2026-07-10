@@ -1,10 +1,20 @@
-export { roomReplacer, roomParticipantReplacer }
+export { roomReplacer, roomParticipantReplacer, roomRemoteReplacer }
 
-import type { ReplacerType, RoomContract, RoomParticipantContract, ServerReplacerContext } from '../../types.js'
-import { SERIALIZER_PREFIX_ROOM, SERIALIZER_PREFIX_ROOM_PARTICIPANT } from '../../constants.js'
+import type {
+  ReplacerType,
+  RoomContract,
+  RoomParticipantContract,
+  RoomRemoteContract,
+  ServerReplacerContext,
+} from '../../types.js'
+import {
+  SERIALIZER_PREFIX_ROOM,
+  SERIALIZER_PREFIX_ROOM_PARTICIPANT,
+  SERIALIZER_PREFIX_ROOM_REMOTE,
+} from '../../constants.js'
 import { ServerLocalParticipant, ServerRoom } from '../../room/server.js'
 import { bindParticipantStubChannel, RoomStubChannel } from '../../room/stubs.js'
-import { sizeToWire } from '../../room/shared.js'
+import { remoteBacking, sizeToWire } from '../../room/shared.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -38,6 +48,33 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
       abort(abortError) {
         stub.abort(abortError.abortValue)
       },
+    }
+  },
+}
+
+/** A `RemoteParticipant` view: serialized as (backing room, member snapshot). The room is a
+ *  regular value inside the metadata — the recursive serializer replaces it (or dedupes it
+ *  against a co-returned occurrence), so the client revives the view bound to the same live
+ *  `ClientRoom`. The view has no lifecycle of its own — it rides the room's stub. */
+const roomRemoteReplacer: ReplacerType<RoomRemoteContract, ServerReplacerContext> = {
+  prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
+  detect(value): value is RoomRemoteContract['value'] {
+    return remoteBacking(value)?.state._owner instanceof ServerRoom
+  },
+  replace(remote, _context) {
+    const { state, entry } = remoteBacking(remote)!
+    return {
+      // The entry survives the member's departure (the handle closes over it), so a serialize
+      // racing a leave still ships a coherent snapshot — the client's roster then heals it.
+      metadata: {
+        room: state._owner,
+        id: entry.id,
+        meta: entry.meta,
+        joinedAt: entry.joinedAt,
+        metaSeq: entry.metaSeq,
+      },
+      close() {},
+      abort() {},
     }
   },
 }

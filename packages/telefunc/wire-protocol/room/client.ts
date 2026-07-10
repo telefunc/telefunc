@@ -72,6 +72,7 @@ class ClientRoom implements Room {
       onListenersChanged: () => this._syncWants(),
       onCallbackError: reportRoomError,
     })
+    this._state._owner = this
     if (snapshot.closed) this._rosterArrived()
 
     // Delivery handlers are local-only — what the server relays is driven by the declared
@@ -130,6 +131,11 @@ class ClientRoom implements Room {
   /** @internal — sync view read for sender resolution (delivery must not wait on I/O). */
   _getRemote(id: string): RemoteParticipant | null {
     return this._state.getRemote(id)
+  }
+
+  /** @internal — revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
+  _reviveRemote(snap: { id: string; meta: ParticipantMeta; joinedAt: number; metaSeq: number }): RemoteParticipant {
+    return this._state.ensureRemoteFromSnapshot(snap)
   }
 
   subscribe(callback: (data: unknown, info: ChannelPublishInfo, from: Sender) => unknown): () => void {

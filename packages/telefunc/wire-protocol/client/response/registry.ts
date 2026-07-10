@@ -8,7 +8,7 @@ import { blobReviver } from './blob.js'
 import { fileDownloadReviver } from './fileDownload.js'
 import { blobDownloadReviver } from './blobDownload.js'
 import { promiseReviver } from './promise.js'
-import { roomReviver, roomParticipantReviver } from './room.js'
+import { roomReviver, roomParticipantReviver, roomRemoteReviver } from './room.js'
 import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
@@ -27,6 +27,7 @@ const clientTypes = [
   promiseReviver,
   roomReviver,
   roomParticipantReviver,
+  roomRemoteReviver,
   broadcastReviver,
   channelReviver,
   functionReviver,
@@ -44,6 +45,7 @@ function createStreamingReviver(
     value: unknown
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
+    gcTrack?: boolean
   }) => void,
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
