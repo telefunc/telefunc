@@ -116,6 +116,9 @@ class RoomState {
   }> = []
   private readonly _joinCbs: Array<(member: RemoteParticipant) => void> = []
   private readonly _leaveCbs: Array<(member: RemoteParticipant, cause?: LeaveCause) => void> = []
+  private readonly _participantUpdateCbs: Array<
+    (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void
+  > = []
   private readonly _updateCbs: Array<(meta: RoomMeta, prev: RoomMeta) => void> = []
   private readonly _emptyCbs: Array<() => void> = []
   private readonly _fullCbs: Array<() => void> = []
@@ -258,6 +261,11 @@ class RoomState {
   onLeave(cb: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
     return this._register(this._leaveCbs, cb, 'event')
   }
+  onParticipantUpdate(
+    cb: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
+  ): () => void {
+    return this._register(this._participantUpdateCbs, cb, 'event')
+  }
   onUpdate(cb: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
     return this._register(this._updateCbs, cb, 'event')
   }
@@ -358,6 +366,7 @@ class RoomState {
     entry.meta = meta
     this._bumpState()
     this._fireAll(entry.updateCbs, meta, prev)
+    this._fireAll(this._participantUpdateCbs, entry.remote, meta, prev)
   }
 
   /** Last-writer-wins by `(at, by)`: concurrent `Room.update()`s converge to the same winner on

@@ -192,6 +192,11 @@ class ClientRoom implements Room {
   onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
     return this._state.onLeave(callback)
   }
+  onParticipantUpdate(
+    callback: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
+  ): () => void {
+    return this._state.onParticipantUpdate(callback)
+  }
   onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
     return this._state.onUpdate(callback)
   }

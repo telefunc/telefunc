@@ -469,6 +469,27 @@ describe('presence', () => {
     expect(me.meta).toEqual({ name: 'Alice', score: 43 })
     expect((await b.getParticipant(me.id))!.meta).toEqual({ name: 'Alice', score: 43 })
   })
+
+  it('onParticipantUpdate fires room-level for every member meta change, with the member and delta', async () => {
+    const a = await Room.create('pmeta-delta')
+    const b = await Room.get('pmeta-delta')
+    const onA: Array<[string, unknown, unknown]> = []
+    const onB: Array<[string, unknown, unknown]> = []
+    a.onParticipantUpdate((m, meta, prev) => onA.push([m.id, meta, prev]))
+    b.onParticipantUpdate((m, meta, prev) => onB.push([m.id, meta, prev])) // observe from another instance
+
+    const me = await a.join({ name: 'A', v: 0 })
+    await me.setMeta({ name: 'A', v: 1 }) // full replace
+    await me.setAttributes({ v: 2 }) // per-key merge
+    await settle()
+
+    const expected = [
+      [me.id, { name: 'A', v: 1 }, { name: 'A', v: 0 }],
+      [me.id, { name: 'A', v: 2 }, { name: 'A', v: 1 }],
+    ]
+    expect(onA).toEqual(expected) // the origin sees each change with its delta…
+    expect(onB).toEqual(expected) // …and so does a remote observer, from the p-meta events
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────

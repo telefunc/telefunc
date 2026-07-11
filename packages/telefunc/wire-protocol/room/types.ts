@@ -266,6 +266,9 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** A participant left. `cause` says why (kick reasons ride along); it's `undefined` exactly
    *  when the leave was discovered by a roster resync — the event itself wasn't observed. */
   onLeave(callback: (member: RemoteParticipant<P, Pub>, cause?: LeaveCause) => void): () => void
+  /** Any participant's metadata changed — `member` is who, with the new and previous meta. One
+   *  subscription covering every member (vs. wiring `onUpdate` on each handle from `onJoin`). */
+  onParticipantUpdate(callback: (member: RemoteParticipant<P, Pub>, meta: P, prev: P) => void): () => void
   /** The room was reconfigured via `Room.update()`. */
   onUpdate(callback: (meta: M, prev: M) => void): () => void
   /** A room-authored message arrived (`Room.announce()`) — e.g. system notices. */
