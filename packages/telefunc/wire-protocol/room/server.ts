@@ -157,6 +157,10 @@ type RoomStatic = {
   /** Admin: update the room's configuration — provided fields replace, omitted fields keep
    *  their current value (`isolated` is fixed at creation). */
   update(id: string, options: RoomOptions): Promise<void>
+  /** Admin: merge the room's metadata per key — provided keys replace, omitted keys keep their
+   *  value, a key set to `undefined` is removed (`size`/`isolated` untouched). The room-level
+   *  counterpart to `LocalParticipant.setAttributes`. */
+  setAttributes(id: string, attributes: RoomMeta): Promise<void>
   /** Admin: close the room — disconnects all participants and removes the room. */
   close(id: string): Promise<void>
   /** Admin: remove a participant — by participant ID (throws when unknown), or every membership
@@ -194,6 +198,7 @@ const Room: RoomStatic = {
   join: joinRoom as RoomStatic['join'],
   list: listRooms,
   update: updateRoom,
+  setAttributes: setRoomAttributes,
   close: closeRoom,
   removeParticipant,
   announce: announceToRoom,
@@ -322,15 +327,35 @@ async function updateRoom(id: string, options: RoomOptions): Promise<void> {
     )
     sizeWire = sizeToWire(options.size)
   }
-  // Strictly after the config we read (hybrid-clock style): back-to-back updates from one
-  // writer always order, and cross-writer ordering stays wall-clock last-writer-wins.
+  await writeRoomConfig(id, kv, config, meta, sizeWire)
+}
+
+/** Merge into the room's metadata per key — provided keys replace, omitted keys keep their value,
+ *  a key set to `undefined` is removed (`size`/`isolated` untouched). The admin counterpart to
+ *  `LocalParticipant.setAttributes`: one changed field is one small write, not a whole-`meta` resend. */
+async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
+  assertUsage(isObject(attributes), 'Room.setAttributes() attributes should be an object')
+  const { kv, config } = await requireRoom(id)
+  await writeRoomConfig(id, kv, config, mergeAttributes(config.meta, attributes), config.size)
+}
+
+/** Commit a room-config change and converge it. The stamp is strictly after the config it derives
+ *  from (hybrid-clock): one writer's back-to-back writes always order, cross-writer ties break
+ *  wall-clock last-writer-wins. Everywhere the `update` event reaches converges on the `(at, by)`
+ *  stamp; the KV *write*, though, races — so read back and, if a stamp-losing write landed on top,
+ *  re-assert (only the winner rewrites, so the exchange terminates). Shared by `update()` (replace)
+ *  and `setAttributes()` (merge). */
+async function writeRoomConfig(
+  id: string,
+  kv: RoomKV,
+  config: RoomConfigRecord,
+  meta: RoomMeta,
+  sizeWire: number | null,
+): Promise<void> {
   const at = Math.max(Date.now(), config.at + 1)
   const next: RoomConfigRecord = { meta, size: sizeWire, isolated: config.isolated, at, by: writerId() }
   await kv.set(roomConfigKvKey(id), stringify(next))
   await publishCtrl(id, { __r: 'update', meta, prev: config.meta, size: sizeWire, at: next.at, by: next.by })
-  // Concurrent updates converge by the (at, by) stamp everywhere events reach — but the last KV
-  // *write* wins arbitrarily. Read back: if a stamp-losing write landed on top, re-assert the
-  // winner (only the winner rewrites, so the exchange terminates).
   const readBack = await readConfig(kv, id)
   if (readBack !== null && stampNewer(next, readBack)) await kv.set(roomConfigKvKey(id), stringify(next))
 }
