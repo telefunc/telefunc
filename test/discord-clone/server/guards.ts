@@ -36,7 +36,9 @@ async function getGuardedChannel(
 ): Promise<Room<ChannelMeta, MemberMeta, ChannelPublish>> {
   const dbChannelId = dbChannelIdOf(channelRoomId)
   if (dbChannelId === null) throw new Error('Not a channel room')
-  const channel = await Room.get<ChannelMeta, MemberMeta, ChannelPublish>(channelRoomId, { tail: options?.tail ?? false })
+  const channel = await Room.get<ChannelMeta, MemberMeta, ChannelPublish>(channelRoomId, {
+    tail: options?.tail ?? false,
+  })
 
   if (channel.meta.kind === 'voice') {
     Room.guard(channel, {
