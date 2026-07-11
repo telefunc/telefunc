@@ -1968,37 +1968,44 @@ describe('ClientRoom', () => {
     expect(inbox).toEqual([['welcome!', 'Bot']])
   })
 
-  it('a standalone participant joined with selfDelivery=false suppresses its echo in a sibling room', async () => {
+  it('selfDelivery=false suppresses a standalone participant only in its own room, not in an independent observer of it', async () => {
     const roomId = `sibling-${crypto.randomUUID()}`
-    const fake = createFakeStub()
-    const clientRoom = new ClientRoom(fake.stub, createSnapshot(roomId))
-    const received: unknown[] = []
-    clientRoom.subscribe((data) => received.push(data))
+    const mkChannel = () =>
+      ({
+        listen: () => () => {},
+        onClose: () => {},
+        send: async () => ({ ok: true }),
+        sendBinary: async () => ({ ok: true, ack: { key: roomId, seq: 1, timestamp: 1 } }),
+        close: async () => 0,
+      }) as unknown as ClientChannel
 
-    // The standalone participant arrives through its own channel, independent of the room stub.
-    const channel = {
-      listen: () => () => {},
-      onClose: () => {},
-      send: async () => ({ ok: true }),
-      sendBinary: async () => ({ ok: true, ack: { key: roomId, seq: 1, timestamp: 1 } }),
-      close: async () => 0,
-    } as unknown as ClientChannel
-    const me = new ClientStandaloneParticipant(channel, {
-      channelId: 'ch2',
-      roomId,
-      id: crypto.randomUUID(),
-      meta: {},
-      joinedAt: 1,
-      selfDelivery: false,
-    })
+    // Two independent views of the SAME room on the same page (separate stubs).
+    const fakeMine = createFakeStub()
+    const myRoom = new ClientRoom(fakeMine.stub, createSnapshot(roomId))
+    const mine: unknown[] = []
+    myRoom.subscribe((data) => mine.push(data))
+    const fakeObserver = createFakeStub()
+    const observerRoom = new ClientRoom(fakeObserver.stub, createSnapshot(roomId))
+    const observed: unknown[] = []
+    observerRoom.subscribe((data) => observed.push(data))
+
+    // The participant arrives on its own channel; the serializer carries its own room (metadata.room,
+    // here `myRoom`) because selfDelivery is off — that room, and only it, is its suppression scope.
+    const me = new ClientStandaloneParticipant(
+      mkChannel(),
+      { channelId: 'ch2', roomId, id: crypto.randomUUID(), meta: {}, joinedAt: 1, selfDelivery: false },
+      myRoom,
+    )
     const other = crypto.randomUUID()
-    fake.emit({ __r: 'join', id: me.id, meta: {}, joinedAt: 1 })
-    fake.emit({ __r: 'join', id: other, meta: {}, joinedAt: 2 })
+    for (const fake of [fakeMine, fakeObserver]) {
+      fake.emit({ __r: 'join', id: me.id, meta: {}, joinedAt: 1 })
+      fake.emit({ __r: 'join', id: other, meta: {}, joinedAt: 2 })
+      fake.emit({ __r: 'data', from: me.id, data: 'own-frame' })
+      fake.emit({ __r: 'data', from: other, data: 'their-frame' })
+    }
 
-    fake.emit({ __r: 'data', from: me.id, data: 'own-frame' })
-    fake.emit({ __r: 'data', from: other, data: 'their-frame' })
-
-    expect(received).toEqual(['their-frame']) // own echo suppressed via the shared registry, from revive on
+    expect(mine).toEqual(['their-frame']) // my own view drops my echo…
+    expect(observed).toEqual(['own-frame', 'their-frame']) // …but an independent observer sees everything
   })
 })
 

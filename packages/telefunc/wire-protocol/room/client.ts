@@ -1,7 +1,6 @@
 export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant }
 
 import { assert } from '../../utils/assert.js'
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isObject } from '../../utils/isObject.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
@@ -70,6 +69,10 @@ class ClientRoom implements Room {
   private readonly _stub: ClientBroadcast
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
+  /** @internal — members whose own messages this view drops (`selfDelivery` off). Scoped to this
+   *  instance and registered by the member itself, so a separate `ClientRoom` for the same room on
+   *  the same page still delivers them (it holds its own, empty, set). */
+  readonly _suppressForeign = new Set<string>()
   /** Wants already declared to the server, by lane. Every lane's declaration is a full
    *  replace, re-sent only when its canonical encoding changes — `''` encodes "nothing
    *  wanted" on every lane, which is also the nothing-declared-yet initial state. */
@@ -278,7 +281,7 @@ class ClientRoom implements Room {
           event.fromIdentity ?? null,
           event.data,
           makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
-          isSuppressed(this.id, event.from),
+          this._suppressForeign.has(event.from),
         )
         return
       case 'join':
@@ -345,7 +348,7 @@ class ClientRoom implements Room {
       unframed.track,
       unframed.keyFrame,
       makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
-      isSuppressed(this.id, unframed.from),
+      this._suppressForeign.has(unframed.from),
     )
   }
 
@@ -378,7 +381,7 @@ class ClientRoom implements Room {
           event.fromIdentity ?? null,
           event.data,
           info,
-          isSuppressed(this.id, event.from),
+          this._suppressForeign.has(event.from),
         )
       }
     }
@@ -406,10 +409,11 @@ class ClientRoom implements Room {
 // Local participants
 // ---------------------------------------------------------------------------
 
-/** Client-side half of both `LocalParticipant` flavors: links `selfDelivery` suppression
- *  to the sibling room via the registry below. */
+/** Client-side half of both `LocalParticipant` flavors. When `selfDelivery` is off it registers
+ *  self-suppression on its own room view (`_siblingRoom`) — scoped to that one `ClientRoom`, so an
+ *  independent observer of the same room on the same page still receives this member's messages. */
 abstract class ClientParticipantBase extends ParticipantBase {
-  protected readonly _roomId: string
+  private readonly _siblingRoom: ClientRoom | null
   /** Per-key conflation state for `publish(data, { coalesce })` — at most one in-flight send per
    *  key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
   private readonly _coalescers = new Map<
@@ -417,10 +421,16 @@ abstract class ClientParticipantBase extends ParticipantBase {
     { sending: boolean; pending: { data: unknown; waiters: CoalesceWaiter[] } | null }
   >()
 
-  constructor(roomId: string, id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
+  constructor(
+    siblingRoom: ClientRoom | null,
+    id: string,
+    meta: ParticipantMeta,
+    selfDelivery: boolean,
+    identity: string | null,
+  ) {
     super(id, meta, selfDelivery, identity)
-    this._roomId = roomId
-    if (!selfDelivery) setSuppressed(roomId, id, true)
+    this._siblingRoom = siblingRoom
+    if (!selfDelivery) siblingRoom?._suppressForeign.add(id)
   }
 
   /** The actual wire publish — each flavor supplies it; `publish()` wraps it with conflation. */
@@ -460,7 +470,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
   }
 
   override _onLeft(cause: LeaveCause): void {
-    setSuppressed(this._roomId, this.id, false)
+    this._siblingRoom?._suppressForeign.delete(this.id)
     super._onLeft(cause)
   }
 
@@ -474,8 +484,10 @@ class ClientRoomParticipant extends ClientParticipantBase {
   private readonly _room: ClientRoom
 
   constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
-    // Client-side joins carry no identity — it's server-assigned (see JoinOptions.identity).
-    super(clientRoom.id, id, meta, selfDelivery, null)
+    // Client-side joins carry no identity — it's server-assigned (see JoinOptions.identity). The
+    // room it joined through is its own view (its suppression scope, though the server already
+    // skips the echo to this stub — see server _onTextData).
+    super(clientRoom, id, meta, selfDelivery, null)
     this._room = clientRoom
   }
 
@@ -528,8 +540,8 @@ class ClientRoomParticipant extends ClientParticipantBase {
 class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
 
-  constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
-    super(metadata.roomId, metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null)
+  constructor(channel: ClientChannel, metadata: ParticipantStubMetadata, siblingRoom: ClientRoom | null) {
+    super(siblingRoom, metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null)
     this._channel = channel
 
     channel.listen((notice: unknown) => {
@@ -591,44 +603,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   private _request(req: ParticipantStubRequest): Promise<unknown> {
     return this._channel.send(req, { ack: true })
   }
-}
-
-// ---------------------------------------------------------------------------
-// selfDelivery registry — links participants to separately revived rooms
-// ---------------------------------------------------------------------------
-
-// A telefunction typically returns `{ room, participant }` — two independent wire values, often
-// from *different responses*. When the participant sets `selfDelivery = false`, the sibling
-// `ClientRoom` (same page, different wire object) must suppress that member's echoed messages.
-//
-// A module-global map looks avoidable; it is not — this page is the only place the link can
-// exist. The server can't suppress it: room stub and participant stub may ride different
-// responses, and "same browser across responses" is not a server-side concept (the stub-member
-// relay skip covers only members joined through the *room's own* stub). Nor can the objects
-// find each other at revival: they revive independently, so any rendezvous keyed by room ID is
-// this registry under another name. Member IDs are UUIDs (no cross-room collisions) and
-// entries are removed on leave — the registry cannot leak or misfire.
-//
-// (Storing `selfDelivery` in the member's KV record wouldn't help: every view would know every
-// member's flag, but a room still couldn't tell which members are *its own page's* — locality
-// is exactly the information only this registry has.)
-const globalObject = getGlobalObject('wire-protocol/room/client.ts', {
-  suppressed: new Map<string, Set<string>>(), // roomId → members with selfDelivery off
-})
-
-function setSuppressed(roomId: string, memberId: string, suppressed: boolean): void {
-  const members = globalObject.suppressed.get(roomId)
-  if (suppressed) {
-    if (members) members.add(memberId)
-    else globalObject.suppressed.set(roomId, new Set([memberId]))
-  } else if (members) {
-    members.delete(memberId)
-    if (members.size === 0) globalObject.suppressed.delete(roomId)
-  }
-}
-
-function isSuppressed(roomId: string, memberId: string): boolean {
-  return globalObject.suppressed.get(roomId)?.has(memberId) ?? false
 }
 
 // ---------------------------------------------------------------------------

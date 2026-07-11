@@ -101,6 +101,9 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantContract, ServerRepla
         joinedAt: participant._joinedAt,
         selfDelivery: participant.selfDelivery,
         identity: participant.identity,
+        // Only self-suppressing participants need their room on the client — carry it so revival can
+        // scope suppression to that room instance (deduped against a co-returned room). See below.
+        ...(participant.selfDelivery ? {} : { room: participant._room }),
       },
       async close() {
         await channel.close()

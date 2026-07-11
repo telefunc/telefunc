@@ -220,6 +220,10 @@ type ParticipantStubMetadata = {
   joinedAt: number
   selfDelivery: boolean
   identity: string | null
+  /** The participant's own room, carried only when `selfDelivery` is off so the client can scope
+   *  self-suppression to that exact `ClientRoom` instance (deduped against a co-returned room by
+   *  the ref-identity registries — same mechanism as `RoomRemoteContract.room`). Absent otherwise. */
+  room?: unknown
 }
 
 /** Presence & lifecycle events, published on the room's control key by whichever node caused them.
