@@ -234,11 +234,7 @@ type ParticipantBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & B
  * client — a `Room` can be returned from a telefunction as-is. Admin operations live on the
  * server-side `Room.*` statics, not on the instance.
  */
-type Room<
-  M extends RoomMeta = RoomMeta,
-  P extends ParticipantMeta = ParticipantMeta,
-  Pub = unknown,
-> = {
+type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   /** The ID the room was created with. */
   readonly id: string
   readonly meta: M

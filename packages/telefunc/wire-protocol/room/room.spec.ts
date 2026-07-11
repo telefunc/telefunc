@@ -204,7 +204,12 @@ describe('Room entry point', () => {
 
     await Room.setAttributes('room-attrs', { topic: 'b' }) // only topic changes; pinned untouched
 
-    expect(updates).toEqual([[{ topic: 'b', pinned: 1 }, { topic: 'a', pinned: 1 }]])
+    expect(updates).toEqual([
+      [
+        { topic: 'b', pinned: 1 },
+        { topic: 'a', pinned: 1 },
+      ],
+    ])
     expect(lobby.meta).toEqual({ topic: 'b', pinned: 1 })
     expect(lobby.size).toBe(3) // config untouched by a meta merge
 
