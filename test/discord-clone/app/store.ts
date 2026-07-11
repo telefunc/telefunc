@@ -4,9 +4,11 @@
 // Round 2 of the stress test: the hand-rolled ~80-line roster adapter (`watchRoster` + per-
 // member `onUpdate` bookkeeping + immutable copying) is gone — rooms now expose
 // `snapshot()`/`onChange()`, the exact UI-store contract (README finding 9, fixed upstream).
-// Unread badges ride the new `onActivity` control-lane signal instead of subscribing to every
-// channel's full text lane (finding 10, fixed upstream): only the open channel's messages
-// cross the wire.
+// Unread badges cost one subscription: the channel's `onAfterPublish` hook pings the guild
+// announce lane (which every client already listens to), so only the open channel's full text
+// lane crosses the wire (finding 10). History and the live lane share one clock and one order —
+// the message's central `seq` (finding 13) — and the first history read is fenced losslessly by
+// `Room.get(…, { tail: true })` (finding 14).
 //
 // Live handles (rooms, participants) live in module variables, never in the store.
 // All room wiring runs from user events (login, clicks) — none from render — which also keeps
@@ -325,16 +327,22 @@ function wireGuild(guildRoom: GuildRoom, myself: LocalParticipant<MemberMeta>): 
     if (getState().phase === 'ready') setState({ phase: 'disconnected' })
   })
 
-  // The guild announce lane: server banners, kick announcements — and the channel directory feed.
+  // The guild announce lane: server banners, kick announcements, the channel directory feed —
+  // and now unread activity. One subscription carries every channel's "something was posted"
+  // ping (the base removed the per-channel `onActivity` signal; the channel's `onAfterPublish`
+  // hook re-derives it here, server-side — README finding 10).
   guildRoom.onAnnounce((data) => {
     const event = data as GuildAnnouncement
     if (event.kind === 'announcement') showBanner(event.text, event.by)
     if (event.kind === 'channel-created') void adoptChannel(event.channelId)
     if (event.kind === 'member-kicked') showToast(`${event.name} was kicked by ${event.by}`)
+    if (event.kind === 'channel-activity') markChannelActivity(event.channelId)
   })
 }
 
-/** My own status changes (setMeta is a full replace — spread the rest; README finding 5). */
+/** My own status changes. `setAttributes` merges one field — no read-modify-write of the whole
+ *  metadata record, and a concurrent change to a different field can't clobber it (README
+ *  finding 5). */
 let myGuildParticipant: LocalParticipant<MemberMeta> | null = null
 function keepMyStatus(me: LocalParticipant<MemberMeta>): void {
   myGuildParticipant = me
@@ -343,7 +351,7 @@ function keepMyStatus(me: LocalParticipant<MemberMeta>): void {
 async function setStatus(status: Member['status']): Promise<void> {
   const { me } = getState()
   if (myGuildParticipant === null || me === null) return
-  await myGuildParticipant.setMeta({ ...myGuildParticipant.meta, status })
+  await myGuildParticipant.setAttributes({ status })
   setState({ me: { ...me, status } })
 }
 
@@ -362,20 +370,21 @@ function wireChannel(room: ChannelRoom): void {
   if (channelRooms.has(room.id)) return
   channelRooms.set(room.id, room)
 
-  if (room.meta.kind === 'text') {
-    // Unread dots ride `onActivity` — a throttled, body-free control-lane signal. The full text
-    // lane flows only for the channel that's actually open (see openChannel); this store used
-    // to subscribe to every channel just to count unreads (finding 10, fixed upstream).
-    room.onActivity(() => {
-      const state = getState()
-      const isOpen = state.activeChannelId === room.id && state.view.kind === 'channel'
-      if (!isOpen) setState({ unread: { ...state.unread, [room.id]: true } })
-    })
-  }
+  // Unread dots no longer need a per-channel subscription: the guild announce lane carries every
+  // channel's activity ping (see `markChannelActivity`, wired in wireGuild). The full text lane
+  // flows only for the channel that's actually open (see openChannel).
 
   // Counts, occupant/meta changes, topic edits — one subscription covers them all:
   room.onChange(publishChannels)
   room.onClose(() => dropChannel(room.id))
+}
+
+/** A message landed somewhere (a guild-lane activity ping) — show a dot unless that channel is
+ *  the one currently open. */
+function markChannelActivity(channelId: string): void {
+  const state = getState()
+  const isOpen = state.activeChannelId === channelId && state.view.kind === 'channel'
+  if (!isOpen) setState({ unread: { ...state.unread, [channelId]: true } })
 }
 
 function publishChannels(): void {
@@ -404,64 +413,71 @@ async function openChannel(channelId: string): Promise<void> {
     unread: { ...getState().unread, [channelId]: false },
   })
 
-  // The open channel is the only one whose text lane flows: swap the message subscription.
+  // Stop the previously open channel's live lane now; the new channel subscribes only *after* its
+  // history is rendered, so the tail buffered since the server returned the room flushes in order
+  // behind the past (README finding 14).
   activeMessagesUnsubscribe?.()
-  activeMessagesUnsubscribe = room.subscribe((data, info, from) => {
-    const published = data as ChannelPublish
-    if (published.kind === 'typing') {
-      markTyping(room.id, from.meta.name)
-      return
-    }
-    stopTyping(room.id, from.meta.name)
-    recordMessage(room.id, {
-      id: published.id,
-      authorId: from.identity ?? from.id,
-      author: { name: from.meta.name, color: from.meta.color, bot: from.meta.bot },
-      text: published.text,
-      at: info.timestamp,
-    })
-  })
+  activeMessagesUnsubscribe = null
 
-  // Swap my "viewing" membership — publishing (messages, typing) needs membership, and you
-  // publish into the channel you have open. The join is a telefunction (`onOpenChannel`) so the
-  // membership carries my trusted identity. Switches are chained so leave/join pairs can't
-  // interleave and senders always have a join to await.
-  //
-  // Note on the lossless-history recipe: the docs' fence ("the join ack proves the subscription
-  // is active") assumes the join rides the room's own connection. A telefunction join travels
-  // the HTTP lane instead, so the fence here is heuristic — two full round-trips after the
-  // subscribe (see README finding 14).
+  // Swap my "viewing" membership — publishing (messages, typing) needs membership, and you publish
+  // into the channel you have open. `onOpenChannel` is one telefunction that joins with my trusted
+  // identity *and* returns fenced history (it fetched the room with `{ tail: true }`). Switches are
+  // chained so leave/join pairs can't interleave and senders always have a join to await.
+  type Opened = { membership: LocalParticipant<MemberMeta>; history: ChatMessage[]; hasMore: boolean }
   const previousJoin = viewingJoin
   viewingNow = null
   const switchToken = Symbol(channelId)
   activeSwitch = switchToken
-  const thisJoin: Promise<LocalParticipant<MemberMeta> | null> = (async () => {
+  const thisOpen: Promise<Opened | null> = (async () => {
     const previous = await previousJoin.catch(() => null)
     if (previous !== null) void previous.leave().catch(() => {})
-    const membership = await onOpenChannel(channelId)
+    const opened = await onOpenChannel(channelId)
     if (activeSwitch !== switchToken) {
-      void membership.leave().catch(() => {}) // user moved on while the join was in flight
+      void opened.membership.leave().catch(() => {}) // user moved on while the join was in flight
       return null
     }
-    viewingNow = membership
-    return membership
+    viewingNow = opened.membership
+    return opened
   })()
-  viewingJoin = thisJoin
+  viewingJoin = thisOpen.then((opened) => opened?.membership ?? null)
 
-  if ((await thisJoin) === null) return
-  const history = await onChannelHistory(channelId)
-  for (const message of history.messages) recordMessage(channelId, message)
+  const opened = await thisOpen
+  if (opened === null) return
+
+  // The past first…
+  for (const message of opened.history) recordMessage(channelId, message)
+  // …then go live: subscribing flushes the held tail behind the history, deduped by id
+  // (`recordMessage` drops ids it has already shown). No message can fall in the gap.
+  if (activeSwitch === switchToken) {
+    activeMessagesUnsubscribe = room.subscribe((data, info, from) => {
+      const published = data as ChannelPublish
+      if (published.kind === 'typing') {
+        markTyping(room.id, from.meta.name)
+        return
+      }
+      stopTyping(room.id, from.meta.name)
+      recordMessage(room.id, {
+        id: published.id,
+        authorId: from.identity ?? from.id,
+        author: { name: from.meta.name, color: from.meta.color, bot: from.meta.bot },
+        text: published.text,
+        seq: info.seq,
+        at: info.timestamp,
+      })
+    })
+  }
   setState({
     unread: { ...getState().unread, [channelId]: false },
-    hasOlder: { ...getState().hasOlder, [channelId]: history.hasMore },
+    hasOlder: { ...getState().hasOlder, [channelId]: opened.hasMore },
   })
 }
 
-/** "Load older messages" — pages the database backwards from the oldest loaded message. */
+/** "Load older messages" — pages the database backwards from the oldest loaded message, by `seq`
+ *  (the room's authoritative order). */
 async function loadOlderMessages(channelId: string): Promise<void> {
   const oldest = getState().messages[channelId]?.[0]
   if (oldest === undefined) return
-  const page = await onChannelHistory(channelId, oldest.at)
+  const page = await onChannelHistory(channelId, oldest.seq)
   for (const message of page.messages) recordMessage(channelId, message)
   setState({ hasOlder: { ...getState().hasOlder, [channelId]: page.hasMore } })
 }
@@ -516,7 +532,8 @@ function recordMessage(channelId: string, message: ChatMessage): void {
   seenMessageIds.set(channelId, seen)
 
   const state = getState()
-  const thread = [...(state.messages[channelId] ?? []), message].sort((a, b) => a.at - b.at)
+  // Order by the room's authoritative `seq` — history and the live tail read as one timeline.
+  const thread = [...(state.messages[channelId] ?? []), message].sort((a, b) => a.seq - b.seq)
   setState({ messages: { ...state.messages, [channelId]: thread } })
 }
 

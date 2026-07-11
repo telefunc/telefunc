@@ -46,6 +46,10 @@ type MessageRow = {
   author_color: string
   author_is_bot: 0 | 1
   text: string
+  /** The room's authoritative per-channel order, from the `onAfterPublish` receipt (`info.seq`).
+   *  History is ordered and paginated by this, so it reads exactly as the live lane did. */
+  seq: number
+  /** Central server clock (`info.timestamp`) — one clock shared with the live render. */
   at: number
 }
 
@@ -91,9 +95,10 @@ const DDL = `
     author_color TEXT NOT NULL,
     author_is_bot INTEGER NOT NULL DEFAULT 0,
     text TEXT NOT NULL,
+    seq INTEGER NOT NULL,
     at INTEGER NOT NULL
   );
-  CREATE INDEX IF NOT EXISTS messages_channel_at ON messages(channel_id, at);
+  CREATE INDEX IF NOT EXISTS messages_channel_seq ON messages(channel_id, seq);
   CREATE TABLE IF NOT EXISTS dms (
     id TEXT PRIMARY KEY,
     thread_key TEXT NOT NULL,

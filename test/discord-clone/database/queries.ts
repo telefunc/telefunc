@@ -98,8 +98,8 @@ function deleteChannel(id: string): void {
 
 function insertMessage(message: MessageRow): void {
   db.prepare(
-    `INSERT INTO messages (id, channel_id, author_id, author_name, author_color, author_is_bot, text, at)
-     VALUES (?,?,?,?,?,?,?,?)`,
+    `INSERT INTO messages (id, channel_id, author_id, author_name, author_color, author_is_bot, text, seq, at)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
   ).run(
     message.id,
     message.channel_id,
@@ -108,18 +108,20 @@ function insertMessage(message: MessageRow): void {
     message.author_color,
     message.author_is_bot,
     message.text,
+    message.seq,
     message.at,
   )
 }
 
-/** Newest-first page (`limit + 1` rows tells the caller whether more exist). */
-function pageMessages(channelId: string, beforeAt: number | undefined, limit: number): MessageRow[] {
+/** Newest-first page, ordered by the room's authoritative `seq` (`beforeSeq` cursor). `limit + 1`
+ *  rows tells the caller whether more exist. */
+function pageMessages(channelId: string, beforeSeq: number | undefined, limit: number): MessageRow[] {
   return (
-    beforeAt === undefined
-      ? db.prepare('SELECT * FROM messages WHERE channel_id = ? ORDER BY at DESC LIMIT ?').all(channelId, limit)
+    beforeSeq === undefined
+      ? db.prepare('SELECT * FROM messages WHERE channel_id = ? ORDER BY seq DESC LIMIT ?').all(channelId, limit)
       : db
-          .prepare('SELECT * FROM messages WHERE channel_id = ? AND at < ? ORDER BY at DESC LIMIT ?')
-          .all(channelId, beforeAt, limit)
+          .prepare('SELECT * FROM messages WHERE channel_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?')
+          .all(channelId, beforeSeq, limit)
   ) as MessageRow[]
 }
 

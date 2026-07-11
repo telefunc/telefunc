@@ -7,16 +7,19 @@ export { joinCall, leaveCall, toggleMute, toggleCamera, toggleScreenShare, regis
 // { track })`, `info.keyFrame`), which deleted this app's hand-rolled `[kind][flags]` frame
 // envelope and demux switch (README finding 6, fixed upstream).
 //
-// Round 3: tracks are source-selective — the publish ack's `receivers` reports the track's live
-// subscription count, so an unwatched stream pauses its encoder and probes for returning
-// viewers (`receiverGate` below). Alone in a voice channel, nothing is encoded or uploaded.
+// Rounds 3–4: tracks are source-selective. An unwatched stream pauses its encoder — the publish
+// ack's `receivers` count pauses it while it's still publishing, and `me.onDemand((track, count))`
+// wakes it the moment a viewer returns. That first-class demand event replaced the hand-rolled
+// keyframe-probe loop this app used to poll with (`demandGate` below). Alone in a voice channel,
+// nothing is encoded or uploaded.
 //
 // The Room-relevant shape:
 // - The voice join is a telefunction (`onJoinVoice`): the membership carries my trusted
 //   `identity`, and the room's `onJoin` guard enforces capacity server-side (finding 11).
 // - `selfDelivery: false` at join — my own media must not come back to me.
-// - Mute / camera / screen state rides the member's *metadata* (`setMeta`), so it reaches
-//   every observer — including late joiners, who get it with the roster.
+// - Mute / camera / screen state rides the member's *metadata*, merged one field at a time with
+//   `setAttributes({ muted })` (no read-modify-write of the whole record — finding 5), so it
+//   reaches every observer, including late joiners who get it with the roster.
 // - Decoder lifecycle is presence: `room.onJoin` attaches a peer, `member.onLeave` tears it
 //   down (a member's listeners are released with it).
 
@@ -84,18 +87,18 @@ async function joinCall(channelId: string): Promise<void> {
       })
       const micHandle = captureHandle(mic)
       current.cleanups.push(micHandle.stop)
-      // Every Opus frame decodes on its own, so the paused-stream probe needs no keyframe
-      // handling — any frame that gets through doubles as the probe.
-      const gate = receiverGate(1000)
+      // Pause the mic encoder when nobody's listening; `onDemand` wakes it when someone joins.
+      const gate = demandGate(current.membership, 'mic')
+      current.cleanups.push(gate.stop)
       const encoder = encodeOpus(resampledTrack(mic, current.cleanups), (frame) => {
-        if (session !== current || current.muted || gate.skip()) return
+        if (session !== current || current.muted || gate.paused) return
         void current.membership.publishBinary(frame, { track: 'mic' }).then(gate.onAck, () => {})
       })
       current.cleanups.push(encoder.stop)
     } catch {
       current.micAvailable = false
       current.muted = true
-      await current.membership.setMeta({ ...current.membership.meta, muted: true })
+      await current.membership.setAttributes({ muted: true })
       showToast('Microphone unavailable — joined listen-only')
     }
 
@@ -172,7 +175,7 @@ async function toggleMute(): Promise<void> {
   current.muted = !current.muted
   syncCallState(current)
   // Metadata is a full replace — spread the rest or lose it (README finding 5).
-  await current.membership.setMeta({ ...current.membership.meta, muted: current.muted })
+  await current.membership.setAttributes({ muted: current.muted })
 }
 
 async function toggleCamera(): Promise<void> {
@@ -182,7 +185,7 @@ async function toggleCamera(): Promise<void> {
     current.camera.stop()
     current.camera = null
     syncCallState(current)
-    await current.membership.setMeta({ ...current.membership.meta, camera: false })
+    await current.membership.setAttributes({ camera: false })
     return
   }
   try {
@@ -191,7 +194,7 @@ async function toggleCamera(): Promise<void> {
     })
     current.camera = videoPipeline(current, stream, 'camera', { keyframeEvery: 15, bitrate: 500_000 })
     syncCallState(current)
-    await current.membership.setMeta({ ...current.membership.meta, camera: true })
+    await current.membership.setAttributes({ camera: true })
   } catch {
     showToast('Camera unavailable')
   }
@@ -204,7 +207,7 @@ async function toggleScreenShare(): Promise<void> {
     current.screen.stop()
     current.screen = null
     syncCallState(current)
-    await current.membership.setMeta({ ...current.membership.meta, screen: false })
+    await current.membership.setAttributes({ screen: false })
     return
   }
   try {
@@ -213,7 +216,7 @@ async function toggleScreenShare(): Promise<void> {
     // The browser's own "stop sharing" UI ends the track behind our back — mirror it.
     stream.getVideoTracks()[0]?.addEventListener('ended', () => void toggleScreenShare())
     syncCallState(current)
-    await current.membership.setMeta({ ...current.membership.meta, screen: true })
+    await current.membership.setAttributes({ screen: true })
   } catch {
     showToast('Screen share unavailable')
   }
@@ -354,7 +357,7 @@ function videoPipeline(
   track: 'camera' | 'screen',
   opts: { keyframeEvery: number; bitrate: number },
 ): CaptureHandle {
-  const gate = receiverGate(2000)
+  const gate = demandGate(current.membership, track)
   const encoder = new VideoEncoder({
     output(chunk) {
       if (session !== current) return
@@ -371,9 +374,8 @@ function videoPipeline(
   let count = 0
   const stopReading = readFrames(stream.getVideoTracks()[0]!, (data) => {
     const frame = data as VideoFrame
-    const probing = gate.paused // a probe must decode on its own — make it a keyframe
-    if (gate.skip()) {
-      frame.close()
+    if (gate.paused) {
+      frame.close() // nobody watching this track — don't even encode
       return
     }
     const w = frame.displayWidth - (frame.displayWidth % 2)
@@ -384,13 +386,14 @@ function videoPipeline(
       count = 0
       encoder.configure({ codec: 'vp8', width, height, bitrate: opts.bitrate })
     }
-    if (probing) count = 0
+    if (gate.takeResumed()) count = 0 // a returning viewer needs a keyframe to start decoding
     encoder.encode(frame, { keyFrame: count++ % opts.keyframeEvery === 0 })
     frame.close()
   })
   return {
     stream,
     stop() {
+      gate.stop()
       stopReading()
       if (encoder.state !== 'closed') encoder.close()
       for (const track of stream.getTracks()) track.stop()
@@ -429,31 +432,40 @@ function decodeVp8(draw: (frame: VideoFrame) => void): {
   }
 }
 
-/** Pause-when-unwatched: publish acks carry the track's live `receivers` count. After an ack
- *  reports 0, frames are dropped at the source — except one probe every `probeMs`, whose ack
- *  detects returning receivers and reopens the stream. */
-function receiverGate(probeMs: number): {
+/** Pause-when-unwatched, on one named track. Two signals settle `paused`: the publish ack's live
+ *  `receivers` count pauses the stream *while it's still publishing* (the fastest way to notice the
+ *  last viewer left), and `me.onDemand` — a first-class demand event — flips it back the instant a
+ *  viewer returns, so a paused (silent) stream needs no keyframe polling to notice. `takeResumed`
+ *  lets the video pipeline force a keyframe on the first frame after a resume. */
+function demandGate(
+  me: LocalParticipant<MemberMeta>,
+  track: string,
+): {
   readonly paused: boolean
-  skip(): boolean
   onAck(ack: { receivers?: number }): void
+  takeResumed(): boolean
+  stop(): void
 } {
   let paused = false
-  let lastProbeAt = 0
+  let justResumed = false
+  const stop = me.onDemand((t, count) => {
+    if (t !== track) return
+    if (count > 0 && paused) justResumed = true
+    paused = count === 0
+  })
   return {
     get paused() {
       return paused
     },
-    /** Drop this frame? While paused, everything but the periodic probe. */
-    skip() {
-      if (!paused) return false
-      const now = Date.now()
-      if (now - lastProbeAt < probeMs) return true
-      lastProbeAt = now
-      return false
-    },
     onAck(ack) {
-      if (typeof ack.receivers === 'number') paused = ack.receivers === 0
+      if (ack.receivers === 0) paused = true
     },
+    takeResumed() {
+      const resumed = justResumed
+      justResumed = false
+      return resumed
+    },
+    stop,
   }
 }
 

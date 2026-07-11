@@ -2,6 +2,7 @@ export { onChannelHistory, onCreateChannel, onDeleteChannel, onGetChannel, onJoi
 
 import { randomUUID } from 'node:crypto'
 import { Abort, getContext, Room, type LocalParticipant } from 'telefunc'
+import type { MessageRow } from '../database/schema'
 import * as q from '../database/queries'
 import { getGuardedChannel } from '../server/guards'
 import { channelRoomId, dbChannelIdOf, ensureLiveWorld, GUILD_ROOM_ID, VOICE_CHANNEL_SIZE } from '../server/rooms'
@@ -10,25 +11,31 @@ import type { ChannelRoom, ChatMessage, MemberMeta } from '../shared/types'
 // Page size is env-tunable so the e2e suite can exercise "Load older" without 50 sends.
 const PAGE_SIZE = Number(process.env.DISCORD_CLONE_PAGE_SIZE ?? 50)
 
-/** A page of history, newest-first cursor (`beforeAt`), returned oldest-first for rendering. */
-async function onChannelHistory(roomId: string, beforeAt?: number) {
+/** One newest-first page of history, ordered by the room's authoritative `seq`, returned
+ *  oldest-first for rendering. Reads the DB directly — see `onOpenChannel` for the fence that
+ *  makes the *first* read lossless against the live lane. */
+function readHistory(dbChannelId: string, beforeSeq?: number): { messages: ChatMessage[]; hasMore: boolean } {
+  const rows = q.pageMessages(dbChannelId, beforeSeq, PAGE_SIZE + 1)
+  const hasMore = rows.length > PAGE_SIZE
+  return { hasMore, messages: rows.slice(0, PAGE_SIZE).reverse().map(toChatMessage) }
+}
+
+function toChatMessage(row: MessageRow): ChatMessage {
+  return {
+    id: row.id,
+    authorId: row.author_id,
+    author: { name: row.author_name, color: row.author_color, bot: row.author_is_bot === 1 },
+    text: row.text,
+    seq: row.seq,
+    at: row.at,
+  }
+}
+
+/** "Load older": pages backwards from a `seq` cursor. The first page comes from `onOpenChannel`. */
+async function onChannelHistory(roomId: string, beforeSeq?: number) {
   requireUser()
   const dbChannelId = requireDbChannelId(roomId)
-  const rows = q.pageMessages(dbChannelId, beforeAt, PAGE_SIZE + 1)
-  const hasMore = rows.length > PAGE_SIZE
-  const page = rows.slice(0, PAGE_SIZE).reverse()
-  return {
-    hasMore,
-    messages: page.map(
-      (row): ChatMessage => ({
-        id: row.id,
-        authorId: row.author_id,
-        author: { name: row.author_name, color: row.author_color, bot: row.author_is_bot === 1 },
-        text: row.text,
-        at: row.at,
-      }),
-    ),
-  }
+  return readHistory(dbChannelId, beforeSeq)
 }
 
 async function onCreateChannel(kind: 'text' | 'voice', rawName: string) {
@@ -67,14 +74,24 @@ async function onGetChannel(roomId: string): Promise<ChannelRoom> {
 }
 
 /**
- * Open a text channel: the "viewing" membership (it grants publish). Joined server-side so the
- * membership carries the caller's trusted `identity` — client-side joins can't set one.
+ * Open a text channel: join the "viewing" membership (it grants publish, and carries the caller's
+ * trusted `identity` because the join is server-side) *and* load history — in one round-trip.
+ *
+ * `{ tail: true }` fetches the room already relaying its live messages; the client holds them until
+ * its first `subscribe()`. Reading history *after* that fetch means nothing published in between is
+ * lost — the client renders the page, then subscribes to flush the held tail behind it (deduped by
+ * id). That closes the lossless-history fence this app used to only approximate (README finding 14).
  */
-async function onOpenChannel(roomId: string): Promise<LocalParticipant<MemberMeta>> {
+async function onOpenChannel(
+  roomId: string,
+): Promise<{ membership: LocalParticipant<MemberMeta>; history: ChatMessage[]; hasMore: boolean }> {
   const user = requireUser()
-  const channel = await getGuardedChannel(roomId)
+  const dbChannelId = requireDbChannelId(roomId)
+  const channel = await getGuardedChannel(roomId, { tail: true })
   if (channel.meta.kind !== 'text') throw Abort('Not a text channel')
-  return await channel.join({ name: user.name, color: user.color, status: 'online' }, { identity: user.id })
+  const membership = await channel.join({ name: user.name, color: user.color, status: 'online' }, { identity: user.id })
+  const { messages, hasMore } = readHistory(dbChannelId) // read after tailing began — see above
+  return { membership, history: messages, hasMore }
 }
 
 /**

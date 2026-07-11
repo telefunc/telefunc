@@ -56,12 +56,17 @@ type ChannelPublish =
   | { kind: 'chat'; id: string; text: string } // sender mints `id` (the history/live dedup key)
   | { kind: 'typing' }
 
-/** A chat message as persisted by the `onPublish` guard and rendered by clients. */
+/** A chat message as persisted by the `onAfterPublish` hook and rendered by clients. */
 type ChatMessage = {
   id: string
   authorId: string
   author: { name: string; color: string; bot?: boolean }
   text: string
+  /** The room's authoritative order — the message's central per-channel `seq` (`info.seq`).
+   *  History and the live lane both carry it, so they interleave as one timeline. */
+  seq: number
+  /** Central server clock (`info.timestamp`) — the same value the live lane renders, so history
+   *  and live no longer disagree about a message's time (README finding 13). */
   at: number
 }
 
@@ -85,6 +90,10 @@ type GuildAnnouncement =
   | { kind: 'announcement'; text: string; by: string }
   | { kind: 'channel-created'; channelId: string }
   | { kind: 'member-kicked'; userId: string; name: string; by: string }
+  // Unread dots: the channel's `onAfterPublish` hook announces activity here (one guild-lane
+  // subscription for every channel), replacing the removed per-channel `onActivity` signal
+  // (README finding 10).
+  | { kind: 'channel-activity'; channelId: string }
 
 /**
  * Room-authored private notices (`Room.send` → `me.listen` with `from === null`).

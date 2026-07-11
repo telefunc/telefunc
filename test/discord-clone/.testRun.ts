@@ -117,8 +117,8 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
     })
     await b.fill('#composer', 'psst')
     await b.press('#composer', 'Enter')
-    // The unread dot rides the room's `onActivity` signal — body-free, so A pays nothing for
-    // messages in channels it isn't reading.
+    // The unread dot rides the guild announce lane (the channel's `onAfterPublish` hook pings it),
+    // so A pays for one guild subscription, not the full text lane of channels it isn't reading.
     await autoRetry(async () => {
       expect(await page.$(`[data-unread-for="${CHANNEL}"]`)).not.toBe(null) // A, sitting in #general
     })
