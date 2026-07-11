@@ -276,6 +276,21 @@ describe('Room entry point', () => {
     expect((await lobby.getParticipant(me.id))!.meta).toEqual({ v: 2 })
   })
 
+  it('a stale join echo never regresses meta that a later p-meta already advanced', async () => {
+    const lobby = await Room.create('join-echo')
+    const me = await lobby.join({ v: 0 })
+    await me.setMeta({ v: 1 }) // p-meta advances the meta past its join baseline
+
+    // A late redelivery of the original join event (broker redelivery / echo) lands after the update.
+    await getBroadcastAdapter().publish(
+      roomCtrlKey('join-echo'),
+      stringify({ __r: 'join', id: me.id, meta: { v: 0 }, joinedAt: 1 }),
+    )
+    await settle()
+
+    expect((await lobby.getParticipant(me.id))!.meta).toEqual({ v: 1 }) // not regressed to the join meta
+  })
+
   it('close() fires onClose on observers, removes the room, and fails later joins', async () => {
     const lobby = await Room.create('closing')
     const me = await lobby.join()

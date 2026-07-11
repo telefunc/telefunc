@@ -324,9 +324,9 @@ class RoomState {
     if (this.closed) return
     const existing = this._members.get(id)
     if (existing) {
-      // Echo of a member this side already applied (or got via snapshot) — absorb.
-      existing.meta = meta
-      existing.joinedAt = joinedAt
+      // The origin absorbing its own join echo. The event carries the seq-0 join meta, so it must
+      // not regress a value a later p-meta already advanced; `joinedAt` is immutable, so it's a no-op.
+      if (existing.metaSeq === 0) existing.meta = meta
       return
     }
     const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity })
