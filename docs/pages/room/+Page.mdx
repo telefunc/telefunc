@@ -360,7 +360,7 @@ type RoomOptions = {
 - `Room.get(id, { tail: true })` starts relaying live messages as soon as the room is returned to a client (see <Link href="#load-history-then-go-live">Load history</Link>).
 - `Room.update()` replaces the fields you provide and keeps the rest (`isolated` is fixed at creation).
 - `Room.removeParticipant(id, target, { reason? })` — `target` is a participant ID, or `{ identity }` to remove every membership of an identity at once (idempotent).
-- Typed metadata: `Room.get<ChatMeta, MemberMeta>(id)` types `room.meta`, `join`/`setMeta`, and `from.meta` everywhere. These type parameters are unchecked assertions you supply — Telefunc trusts them and doesn't validate the shape, exactly like `querySelector<T>`.
+- Typed metadata: `Room.get<ChatMeta, MemberMeta>(id)` types `room.meta`, `join`/`setMeta`, and `from.meta` everywhere. These type parameters are unchecked assertions you supply — Telefunc trusts them and doesn't validate the shape.
 
 ### `Room`
 
