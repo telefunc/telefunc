@@ -44,6 +44,7 @@ import type {
   Room,
   RoomMeta,
   RoomSnapshotView,
+  RoomIdentitySnapshotView,
   Sender,
 } from './types.js'
 
@@ -217,9 +218,11 @@ class ClientRoom implements Room {
     return this._state.onChange(callback)
   }
 
-  snapshot(): RoomSnapshotView {
+  snapshot(): RoomSnapshotView
+  snapshot(options: { by: 'identity' }): RoomIdentitySnapshotView
+  snapshot(options?: { by: 'identity' }): RoomSnapshotView | RoomIdentitySnapshotView {
     // The roster streams in right behind the response — its arrival is an onChange.
-    return this._state.snapshot()
+    return options?.by === 'identity' ? this._state.identitySnapshot() : this._state.snapshot()
   }
 
   // ── Requests & publishes (used by ClientRoomParticipant) ──

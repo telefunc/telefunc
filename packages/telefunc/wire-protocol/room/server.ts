@@ -75,6 +75,7 @@ import type {
   RoomOptions,
   RoomGetOptions,
   RoomSnapshotView,
+  RoomIdentitySnapshotView,
   JoinGuard,
   PublishGuard,
   SendGuard,
@@ -599,11 +600,13 @@ class ServerRoom implements Room {
     return this._state.onChange(callback)
   }
 
-  snapshot(): RoomSnapshotView {
+  snapshot(): RoomSnapshotView
+  snapshot(options: { by: 'identity' }): RoomIdentitySnapshotView
+  snapshot(options?: { by: 'identity' }): RoomSnapshotView | RoomIdentitySnapshotView {
     // Snapshot consumers want the member view — load it (need-driven, single-flight); the
     // arrival lands as an onChange, and the next snapshot() is complete.
     if (!this._state.rosterKnown) void this._ensureRoster().catch(reportRoomError)
-    return this._state.snapshot()
+    return options?.by === 'identity' ? this._state.identitySnapshot() : this._state.snapshot()
   }
 
   // ── Membership operations (shared by local participants and stub requests) ──

@@ -2190,6 +2190,33 @@ describe('snapshot() and onChange()', () => {
     expect(changes.length).toBeGreaterThanOrEqual(5) // join, meta, update, leave, close all signaled
   })
 
+  it("snapshot({ by: identity }) groups a user's memberships, keeps anonymous standalone, stays reference-stable", async () => {
+    const room = await Room.create('id-snap')
+    await room.join({ n: 't1' }, { identity: 'u1' })
+    await room.join({ n: 't2' }, { identity: 'u1' }) // same user, second tab
+    await room.join({ n: 'anon' }) // no identity — its own group
+    await room.join({ n: 't3' }, { identity: 'u2' })
+
+    const view = room.snapshot({ by: 'identity' })
+    expect(view.count).toBe(4)
+    expect(view.identities.map((g) => [g.identity, g.participants.map((p) => p.meta.n)])).toEqual([
+      ['u1', ['t1', 't2']],
+      [null, ['anon']],
+      ['u2', ['t3']],
+    ])
+    expect(room.snapshot({ by: 'identity' })).toBe(view) // cached — reference-stable
+    expect(Object.isFrozen(view.identities)).toBe(true)
+
+    await room.join({ n: 't4' }, { identity: 'u1' })
+    const view2 = room.snapshot({ by: 'identity' })
+    expect(view2).not.toBe(view) // a change invalidates it
+    expect(view2.identities.find((g) => g.identity === 'u1')?.participants.map((p) => p.meta.n)).toEqual([
+      't1',
+      't2',
+      't4',
+    ])
+  })
+
   it('a client view starts from the count seed and completes when the roster streams in', () => {
     const fake = createFakeStub()
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('viewlazy', { count: 2 }))
