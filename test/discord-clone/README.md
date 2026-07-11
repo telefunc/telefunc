@@ -16,14 +16,19 @@ deleted from app code.
   `getOrCreate`, typed metadata) and produced findings 14–16 — including a real bug in the new
   `snapshot()` cache that the migration flushed out (finding 15).
 - **Round 3** adopted source-selective tracks (`receivers` on the publish ack).
-- **Round 4** (this round) followed the base to `e810416`, which reshaped the surface again:
+- **Round 4** followed the base to `e810416`, which reshaped the surface again:
   guards split into `onBefore*`/`onAfter*` pre/post-commit hooks, the activity lane was **removed**,
   and `onDemand()`, `Room.get(…, { tail: true })`, `setAttributes()` and `publish({ coalesce })`
   landed. Migrating onto those closed four findings outright — the lossless-history fence
   (14), the two-clocks split (13), per-field metadata (5), and the encoder-pause probe hack (6) —
   and turned finding 10 into an instructive round-trip (adopted → removed upstream → re-derived a
-  better way). The finding-15 snapshot fix is re-verified against `e810416` and still rides this
-  PR for the author to fold in.
+  better way). A whole-app **smell audit** this round surfaced findings 17–22 (a coherent family:
+  identity and cross-room aren't first-class, and change events carry no delta) plus a set of
+  app-level bugs, fixed here.
+- **Round 5** followed the base to `f0f221f`, where the author **folded two of this app's findings
+  into `#436`**: the `snapshot()` cache-poisoning fix (finding 15) and the remaining view-type
+  exports (finding 16). This branch takes the upstream fix + tests and adopts the exported types —
+  both findings now close.
 
 **Features**
 
@@ -304,7 +309,7 @@ between. It never dropped a message in practice — but "wide margin" isn't "fen
   *then* subscribes. The heuristic "hope the race is won" comment is gone. This is the headline
   round-4 win — the one open finding the base built machinery specifically to close.
 
-### 15. `snapshot()` cache poisoning on first roster load — found & fixed in this PR
+### 15. `snapshot()` cache poisoning on first roster load — ✔ found here, now fixed upstream
 
 Real bug, caught by this app's first revival flow and worth the whole stress test: a
 `room.onChange()` subscriber that synchronously calls `room.snapshot()` — **the documented
@@ -315,27 +320,27 @@ bump) → every later `snapshot()` hits the poisoned cache. Symptom in this app:
 room whose member sidebar stayed empty forever while `getParticipants()` happily returned
 everyone.
 
-- Fixed here (rides this PR for the Room author to fold in): `RoomState.reconcile()` now bumps
-  strictly *after* the mutations in both branches, and `applyClosed()` bumps a second time after
-  clearing members (leave callbacks run user code between the bumps — same hazard). Regression
-  tests: `room.spec.ts` › "a subscriber that snapshots synchronously inside onChange cannot
-  poison the cache" (roster load + close).
-- Round-4 status: re-verified against base `e810416`. The base still bumps *before* the mutations
-  in both `reconcile()` branches and `applyClosed()`, and ships no equivalent regression test — so
-  the fix is genuinely still needed, and the merge preserves it (the two regression tests pass;
-  the whole room suite is green at 101 tests). Still pending in #436 itself.
+- The whole arc: this app's revival flow surfaced the bug (round 2); it was fixed and
+  regression-tested on this branch and re-verified as still-needed against each base update
+  (rounds 3–4); the Room author then **folded the fix into `#436` upstream** (base `f0f221f`,
+  "fix(room): snapshot() cache poisoning …"). The upstream fix is the same shape — `reconcile()`
+  bumps strictly *after* the mutations in both branches, `applyClosed()` bumps again after the
+  clear — and slightly more thorough (it also bumps after the drift-reconcile diff). This branch
+  now **takes upstream's `state.ts` and its equivalent regression tests** and drops the duplicates.
+  A stress-test finding that went full circle: app → bug → fix → upstream.
 
-### 16. The new surface's types aren't all exported — partially adopted
+### 16. The new surface's types weren't all exported — ✔ adopted upstream
 
-The public barrels keep growing: `Sender`, the guard types (`SendGuard`/`PublishGuard`/`JoinGuard`),
-and now round 4's post-commit hooks and receipts (`AfterPublishHook`/`AfterSendHook`/`AfterJoinHook`,
-`RoomPublishReceipt`/`RoomSendReceipt`/`RoomJoinReceipt`) are all exported from `telefunc`. Still
-missing: `LeaveCause`, `ParticipantSnapshotView`, `RoomSnapshotView`, `BinaryFrameInfo` — they
-exist in the room module but aren't re-exported from the package entry, so an app still can't name
-what `onLeave`, `snapshot()`, and `subscribeBinary` hand it. Receipt: `app/store.ts` still derives
-the participant-snapshot type structurally
-(`ReturnType<GuildRoom['snapshot']>['participants'][number]`), and the `onLeave` cause is typed
-only by inference.
+- Through rounds 2–4 the public barrels grew to cover `Sender`, the guard types, and the
+  `onAfter*` hooks + receipts — but `LeaveCause`, `ParticipantSnapshotView`, `RoomSnapshotView`,
+  and `BinaryFrameInfo` were still missing, so the app couldn't name what `onLeave`, `snapshot()`,
+  and `subscribeBinary` hand it.
+- Adopted (round 5): the base (`f0f221f`) re-exports all four from both `telefunc` and
+  `telefunc/client`. Receipts: `app/store.ts` drops the structural
+  `ReturnType<GuildRoom['snapshot']>['participants'][number]` for the named
+  `ParticipantSnapshotView<MemberMeta>`, and types the leave cause as `LeaveCause`;
+  `telefunc/dms.telefunc.ts` names its roster param `RemoteParticipant<MemberMeta>[]` instead of
+  `Awaited<ReturnType<…>>`. Nothing structural left to derive.
 
 ## Findings from a whole-app smell audit (17–22)
 

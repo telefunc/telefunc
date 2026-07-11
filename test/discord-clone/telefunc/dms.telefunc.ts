@@ -11,11 +11,11 @@ export { onDmThread, onListDmThreads, onSendDm }
 // app can't be built on it (see README finding). The guild guard closes it outright.
 
 import { randomUUID } from 'node:crypto'
-import { Abort, getContext, Room } from 'telefunc'
+import { Abort, getContext, Room, type RemoteParticipant } from 'telefunc'
 import { dmThreadKey } from '../database/db'
 import * as q from '../database/queries'
 import { ensureLiveWorld, GUILD_ROOM_ID } from '../server/rooms'
-import type { DmMessage, GuildRoom, SystemNotice } from '../shared/types'
+import type { DmMessage, GuildRoom, MemberMeta, SystemNotice } from '../shared/types'
 
 const PAGE_SIZE = 50
 
@@ -110,7 +110,7 @@ function persistDm(dm: { fromId: string; fromName: string; toId: string; toName:
  *  clients dedupe by message ID. A participant racing away mid-send is fine. */
 async function deliverLive(
   _guild: GuildRoom,
-  participants: Awaited<ReturnType<GuildRoom['getParticipants']>>,
+  participants: RemoteParticipant<MemberMeta>[],
   message: DmMessage,
 ): Promise<void> {
   const notice: SystemNotice = { kind: 'dm', message }

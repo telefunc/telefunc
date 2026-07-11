@@ -43,7 +43,7 @@ export {
   patchCall,
 }
 
-import type { LocalParticipant } from 'telefunc'
+import type { LeaveCause, LocalParticipant, ParticipantSnapshotView } from 'telefunc'
 import { create } from 'zustand'
 import type {
   ChannelPublish,
@@ -315,7 +315,7 @@ function wireGuild(guildRoom: GuildRoom, myself: LocalParticipant<MemberMeta>): 
   // Every leave carries its cause now — a kick arrives as `removed` with the kicker's name as
   // `reason`, on the leave itself. The old pre-kick notice and its 500ms cross-lane
   // disambiguation timer are gone (finding 12, fixed upstream).
-  myself.onLeave((cause) => {
+  myself.onLeave((cause: LeaveCause) => {
     if (getState().phase !== 'ready') return
     if (cause.type === 'removed') {
       setState({ phase: 'kicked', kickedBy: typeof cause.reason === 'string' ? cause.reason : null })
@@ -684,10 +684,7 @@ function patchCall(call: CallState | null): void {
 // Room → snapshot projection
 // ---------------------------------------------------------------------------
 
-// (`ParticipantSnapshotView` isn't re-exported by the package yet — derive it structurally.)
-type ParticipantSnapshot = ReturnType<GuildRoom['snapshot']>['participants'][number]
-
-function toMember(p: ParticipantSnapshot): Member {
+function toMember(p: ParticipantSnapshotView<MemberMeta>): Member {
   return {
     userId: p.identity ?? p.id, // all app joins are server-side, so identity is always set
     participantId: p.id,
