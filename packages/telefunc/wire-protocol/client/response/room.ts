@@ -14,6 +14,7 @@ import {
 } from '../../constants.js'
 import { ClientRoom, ClientStandaloneParticipant } from '../../room/client.js'
 import { roomCtrlKey } from '../../room/protocol.js'
+import { assert } from '../../../utils/assert.js'
 
 const roomReviver: ReviverType<RoomContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,
@@ -53,7 +54,10 @@ const roomParticipantReviver: ReviverType<RoomParticipantContract, ClientReviver
 const roomRemoteReviver: ReviverType<RoomRemoteContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   revive(metadata) {
-    const room = metadata.room as ClientRoom
+    // A remote is only ever serialized alongside its room, so the recursive parser has already
+    // revived `metadata.room` into its `ClientRoom` — assert that invariant instead of blind-casting.
+    assert(metadata.room instanceof ClientRoom)
+    const room = metadata.room
     return {
       value: room._reviveRemote(metadata),
       close() {},

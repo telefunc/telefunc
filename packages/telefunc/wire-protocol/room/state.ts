@@ -70,15 +70,6 @@ type RoomStateOptions = {
   onCallbackError: (err: unknown) => void
 }
 
-/**
- * The local, event-driven view of a room: membership, metadata, and every user-facing callback.
- * Server and client share this class so event semantics are identical on both sides; only the
- * event *source* differs (adapter subscription vs relayed wire frames).
- *
- * Event application is idempotent — a `join` for a known member or a `leave` for an unknown one
- * is absorbed silently. This lets owners seed state from a snapshot and apply a concurrently
- * produced event stream without double-firing.
- */
 /** Stamped (non-enumerably) on every `RemoteParticipant` a `RoomState` mints — the backing
  *  that lets the serializer turn a view object back into (room, member) without a registry. */
 const ROOM_REMOTE_BRAND: unique symbol = Symbol.for('telefunc.RoomRemoteParticipant')
@@ -92,6 +83,15 @@ function remoteBacking(value: unknown): RemoteBacking | null {
     : null
 }
 
+/**
+ * The local, event-driven view of a room: membership, metadata, and every user-facing callback.
+ * Server and client share this class so event semantics are identical on both sides; only the
+ * event *source* differs (adapter subscription vs relayed wire frames).
+ *
+ * Event application is idempotent — a `join` for a known member or a `leave` for an unknown one
+ * is absorbed silently. This lets owners seed state from a snapshot and apply a concurrently
+ * produced event stream without double-firing.
+ */
 class RoomState {
   /** @internal — the owning `ServerRoom`/`ClientRoom`, for serialization backing. */
   _owner: unknown = null
