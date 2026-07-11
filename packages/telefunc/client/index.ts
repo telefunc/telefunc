@@ -21,6 +21,10 @@ export type {
   LocalParticipant,
   RemoteParticipant,
   Sender,
+  LeaveCause,
+  RoomSnapshotView,
+  ParticipantSnapshotView,
+  BinaryFrameInfo,
 } from '../wire-protocol/room/types.js'
 
 export type { TelefuncClientExtension } from './extensions.js'

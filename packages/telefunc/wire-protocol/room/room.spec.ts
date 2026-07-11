@@ -2100,40 +2100,44 @@ describe('snapshot() and onChange()', () => {
     ])
   })
 
-  it('a subscriber that snapshots synchronously inside onChange cannot poison the cache (roster load)', () => {
-    // The documented pairing — useSyncExternalStore calls getSnapshot() synchronously from the
-    // change notification. Regression: the first-load reconcile used to bump BEFORE creating the
-    // entries, so this subscriber cached an empty roster under the post-load version, and the
-    // (silent) entry creation never invalidated it — a permanently empty view of a populated room.
+  it('an onChange subscriber that reads snapshot() on first roster load sees the roster, not an empty cache', () => {
+    // Regression for the documented `useSyncExternalStore(room.onChange, room.snapshot)` pairing:
+    // the first reconcile must bump the state version *after* creating entries. A pre-bump let the
+    // synchronous snapshot() read cache an empty roster under the new version, and the silent entry
+    // creation that followed never re-invalidated it — a populated room whose snapshot() stayed
+    // empty forever (while getParticipants() returned everyone).
     const fake = createFakeStub()
-    const clientRoom = new ClientRoom(fake.stub, createSnapshot('viewsync', { count: 1 }))
-    const seen: number[] = []
-    clientRoom.onChange(() => seen.push(clientRoom.snapshot().participants.length))
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('snap-poison-load', { count: 1 }))
+    const sawCounts: number[] = []
+    clientRoom.onChange(() => sawCounts.push(clientRoom.snapshot().participants.length))
 
     const alice = crypto.randomUUID()
-    fake.emit({ __r: 'roster', members: [{ id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0, identity: 'u1' }] })
+    fake.emit({
+      __r: 'roster',
+      members: [{ id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0, identity: 'u1' }],
+    })
 
-    expect(seen).toEqual([1]) // the in-callback read already sees the loaded roster
-    expect(clientRoom.snapshot().participants.map((p) => p.id)).toEqual([alice]) // …and didn't cache []
-    expect(clientRoom.snapshot().count).toBe(1)
+    expect(clientRoom.snapshot().participants.map((p) => p.id)).toEqual([alice])
+    expect(sawCounts[sawCounts.length - 1]).toBe(1) // the onChange that fired already saw the roster
   })
 
-  it('a subscriber that snapshots synchronously inside onChange cannot poison the cache (close)', () => {
-    // Same hazard on close: the members clear AFTER the first bump (per-member leave callbacks
-    // run user code in between), so a mid-close snapshot() must not pin the departed members
-    // under the current version.
-    const fake = createFakeStub()
-    const clientRoom = new ClientRoom(fake.stub, createSnapshot('viewclose'))
-    const alice = crypto.randomUUID()
-    fake.emit({ __r: 'roster', members: [{ id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0 }] })
+  it('an onChange subscriber that reads snapshot() during close sees the emptied, closed room', async () => {
+    // Regression: applyClosed() cleared members *after* its only bump, with leave callbacks running
+    // user code in between — so a snapshot() cached during close kept the stale roster forever.
+    const room = await Room.create('snap-poison-close', { meta: { topic: 'x' } })
+    await room.join({ name: 'Alice' }, { identity: 'u1' })
+    const seen: { closed: boolean; count: number }[] = []
+    room.onChange(() => {
+      const s = room.snapshot()
+      seen.push({ closed: s.isClosed, count: s.participants.length })
+    })
 
-    const seen: number[] = []
-    clientRoom.onChange(() => seen.push(clientRoom.snapshot().participants.length))
+    await Room.close('snap-poison-close')
 
-    fake.emit({ __r: 'closed' })
-    expect(seen.at(-1)).toBe(0) // the last notification already reads the cleared roster
-    expect(clientRoom.snapshot().isClosed).toBe(true)
-    expect(clientRoom.snapshot().participants).toEqual([]) // not pinned to the pre-clear cache
+    const final = room.snapshot()
+    expect(final.isClosed).toBe(true)
+    expect(final.participants).toEqual([]) // not the stale roster
+    expect(seen[seen.length - 1]).toEqual({ closed: true, count: 0 }) // last onChange saw it emptied
   })
 })
 

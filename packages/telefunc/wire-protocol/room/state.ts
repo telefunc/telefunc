@@ -389,10 +389,10 @@ class RoomState {
       this._releaseEntryListeners(entry)
     }
     this._members.clear()
-    // Second bump: the clear above is observable too — without it, an `onChange` subscriber
-    // that snapshotted between the bumps (leave callbacks run user code) would keep a cache
-    // that still lists the departed members at the current version.
-    this._bumpState()
+    // Second bump: the first ran with members still present (so `onChange` narrates the closure),
+    // and the leave callbacks above run user code — invalidate any snapshot cached against the
+    // now-emptied room before `onClose` fires.
+    this._bumpMembership()
     this._fireAll(this._closeCbs)
   }
 
@@ -486,13 +486,11 @@ class RoomState {
       for (const id of [...this._members.keys()]) {
         if (!seen.has(id)) this.applyLeave(id)
       }
-      this._wasFull = this.isFull
-      // Bump strictly AFTER the mutations: `_bumpState()` fires `onChange` synchronously, and a
-      // subscriber may synchronously call `snapshot()` (the documented `useSyncExternalStore`
-      // pairing) — bumping first would let it cache an empty roster under the new version, and
-      // the silent entry creation above (which never bumps on its own) would leave that cache
-      // stale forever.
+      // Bump strictly after the roster is populated: an `onChange` subscriber that synchronously
+      // reads `snapshot()` (the `useSyncExternalStore` contract) would otherwise cache an empty
+      // roster under the new version, and the silent `_createEntry`s above never re-invalidate it.
       this._bumpMembership()
+      this._wasFull = this.isFull
       return false
     }
 
@@ -524,9 +522,8 @@ class RoomState {
         drifted = true
       }
     }
-    // After the mutations (see the first-load branch): the `joinedAt`/`metaSeq`/track refreshes
-    // above don't bump on their own, and a bump-before-mutations would hand synchronous
-    // `onChange` → `snapshot()` subscribers a stale-forever cache.
+    // Bump after the diff is applied: the silent `joinedAt`/`tracks` refreshes above don't bump,
+    // so an early bump could strand a stale snapshot cached under the already-advanced version.
     this._bumpMembership()
     return drifted
   }

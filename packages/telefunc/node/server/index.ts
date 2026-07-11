@@ -36,6 +36,10 @@ export type {
   RoomPublishReceipt,
   RoomSendReceipt,
   RoomJoinReceipt,
+  LeaveCause,
+  RoomSnapshotView,
+  ParticipantSnapshotView,
+  BinaryFrameInfo,
 } from '../../wire-protocol/room/types.js'
 export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
