@@ -101,7 +101,11 @@ function demandKey(member: string, track: string): string {
 /** `Room` is one identifier with two meanings, like the built-in `Date`: the statics object
  *  below (value) and the instance type from ./types.js — re-established locally so the two
  *  merge into a single export. */
-type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta> = RoomInstance<M, P>
+type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
+  M,
+  P,
+  Pub
+>
 
 // ---------------------------------------------------------------------------
 // `Room` entry point
@@ -110,24 +114,25 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
 /** Meta type parameters are caller assertions (like `querySelector<T>`): metadata is data, so
  *  the types you pass declare what your app stores — nothing re-validates them at runtime. */
 type RoomStatic = {
-  /** Create a new room. Throws if it already exists. */
-  create<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
+  /** Create a new room. Throws if it already exists. `Pub` (3rd arg) types what members
+   *  `publish()`/`subscribe()` here — omit it for `unknown`. */
+  create<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
     options?: RoomOptions<M>,
-  ): Promise<Room<M, P>>
+  ): Promise<Room<M, P, Pub>>
   /** Get an existing room. Throws if it doesn't exist. Pass `{ tail: true }` to start relaying
    *  live messages at serialization time so a history read in the same telefunction misses
    *  nothing (see `RoomGetOptions`). */
-  get<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
+  get<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
     options?: RoomGetOptions,
-  ): Promise<Room<M, P>>
+  ): Promise<Room<M, P, Pub>>
   /** Get the room, creating it if it doesn't exist. Concurrent callers converge: one creates,
    *  the others get. `options` apply only when this call is the one that creates. */
-  getOrCreate<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
+  getOrCreate<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
     options?: RoomOptions<M>,
-  ): Promise<Room<M, P>>
+  ): Promise<Room<M, P, Pub>>
   /** Guard every membership granted through `room` — server-side and client-side `join()`s alike.
    *  Each operation has a pre-commit guard (`onBefore*`, throw to reject the caller before anything
    *  is written) and a post-commit hook (`onAfter*`, runs once the operation lands, with its
@@ -135,8 +140,8 @@ type RoomStatic = {
    *  private `send()`, `onBeforePublish`/`onAfterPublish` around each `publish()`/`publishBinary()`.
    *  Persist in `onAfterPublish` — its receipt carries the authoritative `seq`/`timestamp`. Declared
    *  in the granting telefunction (close over `getContext()`); one `Room.guard()` per instance. */
-  guard<M extends RoomMeta, P extends ParticipantMeta>(
-    room: Room<M, P>,
+  guard<M extends RoomMeta, P extends ParticipantMeta, Pub = unknown>(
+    room: Room<M, P, Pub>,
     guards: {
       onBeforeJoin?: JoinGuard<P>
       onAfterJoin?: AfterJoinHook<P>
@@ -147,11 +152,11 @@ type RoomStatic = {
     },
   ): void
   /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
-  join<P extends ParticipantMeta = ParticipantMeta>(
+  join<P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
     meta?: P,
     options?: JoinOptions,
-  ): Promise<LocalParticipant<P>>
+  ): Promise<LocalParticipant<P, Pub>>
   /** List all rooms — optionally only those whose ID starts with `prefix`. */
   list(options?: { prefix?: string }): Promise<RoomInfo[]>
   /** Admin: update the room's configuration — provided fields replace, omitted fields keep

@@ -213,6 +213,18 @@ describe('Room entry point', () => {
     await expect(Room.setAttributes('gone', {})).rejects.toThrow('Room not found: gone')
   })
 
+  it('typed publish: a declared Pub types publish() and subscribe() end to end', async () => {
+    type ChatMsg = { kind: 'chat'; text: string }
+    const room = await Room.create<{ topic: string }, { name: string }, ChatMsg>('typed-pub', { meta: { topic: 't' } })
+    const me = await room.join({ name: 'a' })
+    const received: ChatMsg[] = []
+    // `data` carries no annotation — pushing it into ChatMsg[] only compiles if `Pub` threaded through.
+    room.subscribe((data) => received.push(data))
+    await me.publish({ kind: 'chat', text: 'hello' })
+    await settle()
+    expect(received).toEqual([{ kind: 'chat', text: 'hello' }])
+  })
+
   it('concurrent updates converge to the same winner on every node, whatever the arrival order', () => {
     const view = (events: Array<{ at: number; by: string; topic: string }>) => {
       const state = new RoomState({
