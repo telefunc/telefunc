@@ -26,6 +26,8 @@ import {
   roomMemberDataKey,
   roomMemberTrackKey,
   roomMemberKvKey,
+  roomIdentityMemberKvKey,
+  roomIdentityKvPrefix,
   unframeMemberId,
   type RoomMemberRecord,
   type RoomSnapshotMetadata,
@@ -274,6 +276,21 @@ describe('Room entry point', () => {
     expect((await lobby.getParticipant(me.id))!.meta).toEqual({ v: 2 })
   })
 
+  it('a stale join echo never regresses meta that a later p-meta already advanced', async () => {
+    const lobby = await Room.create('join-echo')
+    const me = await lobby.join({ v: 0 })
+    await me.setMeta({ v: 1 }) // p-meta advances the meta past its join baseline
+
+    // A late redelivery of the original join event (broker redelivery / echo) lands after the update.
+    await getBroadcastAdapter().publish(
+      roomCtrlKey('join-echo'),
+      stringify({ __r: 'join', id: me.id, meta: { v: 0 }, joinedAt: 1 }),
+    )
+    await settle()
+
+    expect((await lobby.getParticipant(me.id))!.meta).toEqual({ v: 1 }) // not regressed to the join meta
+  })
+
   it('close() fires onClose on observers, removes the room, and fails later joins', async () => {
     const lobby = await Room.create('closing')
     const me = await lobby.join()
@@ -451,6 +468,27 @@ describe('presence', () => {
     await me.setAttributes({ away: undefined, score: 43 }) // delete a key while setting another
     expect(me.meta).toEqual({ name: 'Alice', score: 43 })
     expect((await b.getParticipant(me.id))!.meta).toEqual({ name: 'Alice', score: 43 })
+  })
+
+  it('onParticipantUpdate fires room-level for every member meta change, with the member and delta', async () => {
+    const a = await Room.create('pmeta-delta')
+    const b = await Room.get('pmeta-delta')
+    const onA: Array<[string, unknown, unknown]> = []
+    const onB: Array<[string, unknown, unknown]> = []
+    a.onParticipantUpdate((m, meta, prev) => onA.push([m.id, meta, prev]))
+    b.onParticipantUpdate((m, meta, prev) => onB.push([m.id, meta, prev])) // observe from another instance
+
+    const me = await a.join({ name: 'A', v: 0 })
+    await me.setMeta({ name: 'A', v: 1 }) // full replace
+    await me.setAttributes({ v: 2 }) // per-key merge
+    await settle()
+
+    const expected = [
+      [me.id, { name: 'A', v: 1 }, { name: 'A', v: 0 }],
+      [me.id, { name: 'A', v: 2 }, { name: 'A', v: 1 }],
+    ]
+    expect(onA).toEqual(expected) // the origin sees each change with its delta…
+    expect(onB).toEqual(expected) // …and so does a remote observer, from the p-meta events
   })
 })
 
@@ -951,6 +989,53 @@ describe('direct messages', () => {
 
     // Idempotent: sweeping an identity with no memberships is a no-op, not an error.
     await Room.removeParticipant('sweep', { identity: 'user-9' })
+  })
+
+  it('Room.send({ identity }) fans a server DM to every membership of that identity; none is a no-op', async () => {
+    const room = await Room.create('id-send')
+    const tab1 = await room.join({ name: 'T1' }, { identity: 'user-7' })
+    const tab2 = await room.join({ name: 'T2' }, { identity: 'user-7' })
+    const other = await room.join({ name: 'Other' }, { identity: 'user-6' })
+    const got1: unknown[] = []
+    const got2: unknown[] = []
+    const gotOther: unknown[] = []
+    tab1.listen((data, from) => got1.push([data, from]))
+    tab2.listen((data, from) => got2.push([data, from]))
+    other.listen((data, from) => gotOther.push([data, from]))
+
+    await Room.send('id-send', { identity: 'user-7' }, { ping: 1 })
+    await settle()
+
+    expect(got1).toEqual([[{ ping: 1 }, null]]) // server-authored → from: null
+    expect(got2).toEqual([[{ ping: 1 }, null]]) // both of the identity's tabs
+    expect(gotOther).toEqual([]) // a different identity is untouched
+
+    // Sending to an identity with no live membership is a no-op, not an error (e.g. a signed-out user).
+    await Room.send('id-send', { identity: 'nobody' }, { ping: 2 })
+  })
+
+  it('the identity index is a hint: a stale marker resolves to nothing and is pruned on read', async () => {
+    const kv = getBroadcastAdapter()
+    const room = await Room.create('id-heal')
+    const tab1 = await room.join({ name: 'T1' }, { identity: 'user-5' })
+    const ghost = await room.join({ name: 'Ghost' }, { identity: 'user-5' })
+
+    // Simulate the ghost's record vanishing (a reap or a crash mid-leave) with its marker lingering.
+    await kv.delete(roomMemberKvKey('id-heal', ghost.id))
+    const got1: unknown[] = []
+    const gotGhost: unknown[] = []
+    tab1.listen((data) => got1.push(data))
+    ghost.listen((data) => gotGhost.push(data))
+
+    await Room.send('id-heal', { identity: 'user-5' }, 'hi')
+    await settle()
+
+    expect(got1).toEqual(['hi']) // the live membership still receives
+    expect(gotGhost).toEqual([]) // the ghost has no record — filtered out, no phantom delivery
+    // …and resolving pruned the ghost's stale marker, leaving only the live one.
+    expect(await kv.keys(roomIdentityKvPrefix('id-heal', 'user-5'))).toEqual([
+      roomIdentityMemberKvKey('id-heal', 'user-5', tab1.id),
+    ])
   })
 
   it('Room.guard({ onBeforeSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
@@ -2103,6 +2188,33 @@ describe('snapshot() and onChange()', () => {
     await Room.close('viewstore')
     expect(room.snapshot().isClosed).toBe(true)
     expect(changes.length).toBeGreaterThanOrEqual(5) // join, meta, update, leave, close all signaled
+  })
+
+  it("snapshot({ by: identity }) groups a user's memberships, keeps anonymous standalone, stays reference-stable", async () => {
+    const room = await Room.create('id-snap')
+    await room.join({ n: 't1' }, { identity: 'u1' })
+    await room.join({ n: 't2' }, { identity: 'u1' }) // same user, second tab
+    await room.join({ n: 'anon' }) // no identity — its own group
+    await room.join({ n: 't3' }, { identity: 'u2' })
+
+    const view = room.snapshot({ by: 'identity' })
+    expect(view.count).toBe(4)
+    expect(view.identities.map((g) => [g.identity, g.participants.map((p) => p.meta.n)])).toEqual([
+      ['u1', ['t1', 't2']],
+      [null, ['anon']],
+      ['u2', ['t3']],
+    ])
+    expect(room.snapshot({ by: 'identity' })).toBe(view) // cached — reference-stable
+    expect(Object.isFrozen(view.identities)).toBe(true)
+
+    await room.join({ n: 't4' }, { identity: 'u1' })
+    const view2 = room.snapshot({ by: 'identity' })
+    expect(view2).not.toBe(view) // a change invalidates it
+    expect(view2.identities.find((g) => g.identity === 'u1')?.participants.map((p) => p.meta.n)).toEqual([
+      't1',
+      't2',
+      't4',
+    ])
   })
 
   it('a client view starts from the count seed and completes when the roster streams in', () => {

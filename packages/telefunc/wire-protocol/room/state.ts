@@ -15,7 +15,9 @@ import type {
   BinaryFrameInfo,
   LeaveCause,
   ParticipantMeta,
+  ParticipantSnapshotView,
   RemoteParticipant,
+  RoomIdentitySnapshotView,
   RoomMeta,
   RoomSnapshotView,
   Sender,
@@ -68,15 +70,6 @@ type RoomStateOptions = {
   onCallbackError: (err: unknown) => void
 }
 
-/**
- * The local, event-driven view of a room: membership, metadata, and every user-facing callback.
- * Server and client share this class so event semantics are identical on both sides; only the
- * event *source* differs (adapter subscription vs relayed wire frames).
- *
- * Event application is idempotent — a `join` for a known member or a `leave` for an unknown one
- * is absorbed silently. This lets owners seed state from a snapshot and apply a concurrently
- * produced event stream without double-firing.
- */
 /** Stamped (non-enumerably) on every `RemoteParticipant` a `RoomState` mints — the backing
  *  that lets the serializer turn a view object back into (room, member) without a registry. */
 const ROOM_REMOTE_BRAND: unique symbol = Symbol.for('telefunc.RoomRemoteParticipant')
@@ -90,6 +83,15 @@ function remoteBacking(value: unknown): RemoteBacking | null {
     : null
 }
 
+/**
+ * The local, event-driven view of a room: membership, metadata, and every user-facing callback.
+ * Server and client share this class so event semantics are identical on both sides; only the
+ * event *source* differs (adapter subscription vs relayed wire frames).
+ *
+ * Event application is idempotent — a `join` for a known member or a `leave` for an unknown one
+ * is absorbed silently. This lets owners seed state from a snapshot and apply a concurrently
+ * produced event stream without double-firing.
+ */
 class RoomState {
   /** @internal — the owning `ServerRoom`/`ClientRoom`, for serialization backing. */
   _owner: unknown = null
@@ -103,6 +105,7 @@ class RoomState {
    *  drives `onChange`/`snapshot()` cache invalidation. */
   private _stateVersion = 0
   private _snapshotCache: { version: number; value: RoomSnapshotView } | null = null
+  private _identitySnapshotCache: { version: number; value: RoomIdentitySnapshotView } | null = null
   private readonly _changeCbs: Array<() => void> = []
 
   private readonly _members = new Map<string, MemberEntry>()
@@ -116,6 +119,9 @@ class RoomState {
   }> = []
   private readonly _joinCbs: Array<(member: RemoteParticipant) => void> = []
   private readonly _leaveCbs: Array<(member: RemoteParticipant, cause?: LeaveCause) => void> = []
+  private readonly _participantUpdateCbs: Array<
+    (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void
+  > = []
   private readonly _updateCbs: Array<(meta: RoomMeta, prev: RoomMeta) => void> = []
   private readonly _emptyCbs: Array<() => void> = []
   private readonly _fullCbs: Array<() => void> = []
@@ -258,6 +264,11 @@ class RoomState {
   onLeave(cb: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
     return this._register(this._leaveCbs, cb, 'event')
   }
+  onParticipantUpdate(
+    cb: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
+  ): () => void {
+    return this._register(this._participantUpdateCbs, cb, 'event')
+  }
   onUpdate(cb: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
     return this._register(this._updateCbs, cb, 'event')
   }
@@ -303,6 +314,37 @@ class RoomState {
     return value
   }
 
+  /** `snapshot()` grouped by identity — a user's tabs/connections collapsed into one entry, in
+   *  first-seen order; anonymous members each stand alone. Cached against the same state version,
+   *  so it's reference-stable for its own `useSyncExternalStore` store. */
+  identitySnapshot(): RoomIdentitySnapshotView {
+    if (this._identitySnapshotCache?.version === this._stateVersion) return this._identitySnapshotCache.value
+    const groups: Array<{ identity: string | null; participants: ParticipantSnapshotView[] }> = []
+    const byIdentity = new Map<string, (typeof groups)[number]>()
+    for (const p of this.snapshot().participants) {
+      const group = p.identity !== null ? byIdentity.get(p.identity) : undefined
+      if (group) {
+        group.participants.push(p)
+      } else {
+        const created = { identity: p.identity, participants: [p] }
+        groups.push(created)
+        if (p.identity !== null) byIdentity.set(p.identity, created)
+      }
+    }
+    const value = Object.freeze({
+      id: this.roomId,
+      meta: this.meta,
+      size: this.size,
+      count: this.count,
+      isClosed: this.closed,
+      identities: Object.freeze(
+        groups.map((g) => Object.freeze({ identity: g.identity, participants: Object.freeze(g.participants) })),
+      ),
+    })
+    this._identitySnapshotCache = { version: this._stateVersion, value }
+    return value
+  }
+
   /** State changed observably — invalidate the snapshot and tell `onChange` subscribers. */
   private _bumpState(): void {
     this._stateVersion++
@@ -324,9 +366,9 @@ class RoomState {
     if (this.closed) return
     const existing = this._members.get(id)
     if (existing) {
-      // Echo of a member this side already applied (or got via snapshot) — absorb.
-      existing.meta = meta
-      existing.joinedAt = joinedAt
+      // The origin absorbing its own join echo. The event carries the seq-0 join meta, so it must
+      // not regress a value a later p-meta already advanced; `joinedAt` is immutable, so it's a no-op.
+      if (existing.metaSeq === 0) existing.meta = meta
       return
     }
     const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity })
@@ -358,6 +400,7 @@ class RoomState {
     entry.meta = meta
     this._bumpState()
     this._fireAll(entry.updateCbs, meta, prev)
+    this._fireAll(this._participantUpdateCbs, entry.remote, meta, prev)
   }
 
   /** Last-writer-wins by `(at, by)`: concurrent `Room.update()`s converge to the same winner on

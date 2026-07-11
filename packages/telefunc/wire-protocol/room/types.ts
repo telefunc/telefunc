@@ -24,6 +24,8 @@ export type {
   BinaryPublishOptions,
   RoomSnapshotView,
   ParticipantSnapshotView,
+  RoomIdentitySnapshotView,
+  IdentityGroupView,
   RoomListener,
   RoomBinaryListener,
   ParticipantListener,
@@ -177,6 +179,24 @@ type RoomSnapshotView<M extends RoomMeta = RoomMeta, P extends ParticipantMeta =
   readonly participants: readonly ParticipantSnapshotView<P>[]
 }
 
+/** One identity's memberships in `room.snapshot({ by: 'identity' })`. `identity` is `null` for an
+ *  anonymous participant — each is its own group, there being no identity to merge them by. */
+type IdentityGroupView<P extends ParticipantMeta = ParticipantMeta> = {
+  readonly identity: string | null
+  readonly participants: readonly ParticipantSnapshotView<P>[]
+}
+
+/** `room.snapshot({ by: 'identity' })` — the room view with participants collapsed to one group per
+ *  identity (a user's tabs/connections together). Reference-stable like `snapshot()`. */
+type RoomIdentitySnapshotView<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta> = {
+  readonly id: string
+  readonly meta: M
+  readonly size: number
+  readonly count: number
+  readonly isClosed: boolean
+  readonly identities: readonly IdentityGroupView<P>[]
+}
+
 /** Lightweight room snapshot returned by `Room.list()`. */
 type RoomInfo = {
   readonly id: string
@@ -266,6 +286,9 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** A participant left. `cause` says why (kick reasons ride along); it's `undefined` exactly
    *  when the leave was discovered by a roster resync — the event itself wasn't observed. */
   onLeave(callback: (member: RemoteParticipant<P, Pub>, cause?: LeaveCause) => void): () => void
+  /** Any participant's metadata changed — `member` is who, with the new and previous meta. One
+   *  subscription covering every member (vs. wiring `onUpdate` on each handle from `onJoin`). */
+  onParticipantUpdate(callback: (member: RemoteParticipant<P, Pub>, meta: P, prev: P) => void): () => void
   /** The room was reconfigured via `Room.update()`. */
   onUpdate(callback: (meta: M, prev: M) => void): () => void
   /** A room-authored message arrived (`Room.announce()`) — e.g. system notices. */
@@ -284,6 +307,9 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
    *  `useSyncExternalStore(room.onChange, room.snapshot)` is the entire React adapter.
    *  Participants appear once the member view loads (subscribing `onChange` loads it). */
   snapshot(): RoomSnapshotView<M, P>
+  /** The same view grouped by identity — one entry per user, their tabs/connections collapsed
+   *  (anonymous members each stand alone). Reference-stable, for a presence-by-user store. */
+  snapshot(options: { by: 'identity' }): RoomIdentitySnapshotView<M, P>
 }
 
 /**

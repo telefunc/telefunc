@@ -30,6 +30,9 @@ import {
   roomMemberTrackKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
+  roomIdentityMemberKvKey,
+  roomIdentityKvPrefix,
+  roomIdentityRoomKvPrefix,
   sizeFromWire,
   sizeToWire,
   unframeMemberId,
@@ -72,6 +75,7 @@ import type {
   RoomOptions,
   RoomGetOptions,
   RoomSnapshotView,
+  RoomIdentitySnapshotView,
   JoinGuard,
   PublishGuard,
   SendGuard,
@@ -81,6 +85,10 @@ import type {
   Sender,
 } from './types.js'
 assertIsNotBrowser()
+
+/** How many times a member-meta write re-asserts against a racing heartbeat before deferring to the
+ *  event stream — small: the heartbeat writes a member at most once per tick, so one re-assert wins. */
+const MEMBER_META_WRITE_MAX_ATTEMPTS = 3
 
 /** This process's identity as an LWW writer — breaks `Room.update()` timestamp ties.
  *  Minted lazily: Cloudflare Workers forbid crypto RNG in module scope (this module loads at
@@ -176,8 +184,10 @@ type RoomStatic = {
   removeParticipant(id: string, target: string | { identity: string }, options?: { reason?: unknown }): Promise<void>
   /** Publish a room-authored message — no sender, delivered to `onAnnounce()` (e.g. system notices). */
   announce(id: string, data: unknown): Promise<void>
-  /** Send a server-authored private message to one participant — arrives on `listen()` with `from: null`. */
-  send(id: string, participantId: string, data: unknown): Promise<void>
+  /** Send a server-authored private message — arrives on `listen()` with `from: null`. Target one
+   *  participant by ID (throws when unknown), or every membership of an app identity at once
+   *  (`{ identity }`, resolved from the identity index; 0 matches is a no-op — a signed-out user). */
+  send(id: string, target: string | { identity: string }, data: unknown): Promise<void>
 }
 
 /**
@@ -371,6 +381,7 @@ async function closeRoom(id: string): Promise<void> {
   // cleanup re-checks the config after writing its member record and rolls back.
   await publishCtrl(id, { __r: 'closed' })
   for (const { key } of await listMemberKeys(kv, id)) await kv.delete(key)
+  for (const key of await kv.keys(roomIdentityRoomKvPrefix(id))) await kv.delete(key)
   await kv.delete(roomConfigKvKey(id))
 }
 
@@ -385,10 +396,9 @@ async function removeParticipant(
 
   if (typeof target === 'string') {
     assertUsage(target.length > 0, 'The participant ID should be a non-empty string')
-    const memberKey = roomMemberKvKey(id, target)
-    if ((await kv.get(memberKey)) === null) throw new Error(`Participant not found: ${target}`)
-    await kv.delete(memberKey)
-    await publishCtrl(id, { __r: 'leave', id: target, ...leaveCauseToWire(cause) })
+    const raw = await kv.get(roomMemberKvKey(id, target))
+    if (raw === null) throw new Error(`Participant not found: ${target}`)
+    await evictMember(kv, id, target, (parse(raw) as RoomMemberRecord).identity, cause)
     return
   }
 
@@ -396,13 +406,10 @@ async function removeParticipant(
     isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
     'removeParticipant() target should be a participant ID or { identity }',
   )
-  // Identity sweep: every membership of that identity, across tabs and connections.
-  for (const { key, id: memberId } of await listMemberKeys(kv, id)) {
-    const raw = await kv.get(key)
-    if (raw === null) continue
-    if ((parse(raw) as RoomMemberRecord).identity !== target.identity) continue
-    await kv.delete(key)
-    await publishCtrl(id, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
+  // Identity sweep: every membership of that identity, across tabs and connections — resolved from
+  // the identity index in O(memberships), not a full-roster scan.
+  for (const memberId of await resolveIdentityMembers(kv, id, target.identity)) {
+    await evictMember(kv, id, memberId, target.identity, cause)
   }
 }
 
@@ -411,15 +418,29 @@ async function announceToRoom(id: string, data: unknown): Promise<void> {
   await getBroadcastAdapter().publish(roomCtrlKey(id), stringify({ __r: 'announce', data } satisfies RoomEnvelope))
 }
 
-async function sendToParticipant(id: string, participantId: string, data: unknown): Promise<void> {
+async function sendToParticipant(id: string, target: string | { identity: string }, data: unknown): Promise<void> {
   const { kv } = await requireRoom(id)
-  if ((await kv.get(roomMemberKvKey(id, participantId))) === null) {
-    throw new Error(`Participant not found: ${participantId}`)
+  if (typeof target === 'string') {
+    if ((await kv.get(roomMemberKvKey(id, target))) === null) throw new Error(`Participant not found: ${target}`)
+    await sendServerDm(id, target, data)
+    return
   }
-  // An empty `from` marks the message as server-authored — clients can't spoof it, their
-  // DMs are validated against the members joined through their own stub.
-  const envelope: RoomDmEnvelope = { __r: 'dm', to: participantId, from: '', fromMeta: null, data }
-  await getBroadcastAdapter().publish(roomDmKey(id, participantId), stringify(envelope))
+  assertUsage(
+    isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
+    'Room.send() target should be a participant ID or { identity }',
+  )
+  // Fan out to every membership of the identity (tabs, connections) — resolved from the index in
+  // O(memberships), never a full-roster scan. 0 matches is a no-op.
+  for (const memberId of await resolveIdentityMembers(kv, id, target.identity)) {
+    await sendServerDm(id, memberId, data)
+  }
+}
+
+/** Publish a server-authored DM to one member's inbox. An empty `from` marks it server-authored —
+ *  clients can't spoof it (their DMs are validated against members joined through their own stub). */
+async function sendServerDm(roomId: string, memberId: string, data: unknown): Promise<void> {
+  const envelope: RoomDmEnvelope = { __r: 'dm', to: memberId, from: '', fromMeta: null, data }
+  await getBroadcastAdapter().publish(roomDmKey(roomId, memberId), stringify(envelope))
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +579,11 @@ class ServerRoom implements Room {
   onLeave(callback: (member: RemoteParticipant, cause?: LeaveCause) => void): () => void {
     return this._state.onLeave(callback)
   }
+  onParticipantUpdate(
+    callback: (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void,
+  ): () => void {
+    return this._state.onParticipantUpdate(callback)
+  }
   onUpdate(callback: (meta: RoomMeta, prev: RoomMeta) => void): () => void {
     return this._state.onUpdate(callback)
   }
@@ -578,11 +604,13 @@ class ServerRoom implements Room {
     return this._state.onChange(callback)
   }
 
-  snapshot(): RoomSnapshotView {
+  snapshot(): RoomSnapshotView
+  snapshot(options: { by: 'identity' }): RoomIdentitySnapshotView
+  snapshot(options?: { by: 'identity' }): RoomSnapshotView | RoomIdentitySnapshotView {
     // Snapshot consumers want the member view — load it (need-driven, single-flight); the
     // arrival lands as an onChange, and the next snapshot() is complete.
     if (!this._state.rosterKnown) void this._ensureRoster().catch(reportRoomError)
-    return this._state.snapshot()
+    return options?.by === 'identity' ? this._state.identitySnapshot() : this._state.snapshot()
   }
 
   // ── Membership operations (shared by local participants and stub requests) ──
@@ -628,10 +656,16 @@ class ServerRoom implements Room {
       metaSeq: 0,
       ...(identity === null ? {} : { identity }),
     }
+    // Index the membership before writing its record — never after, so a reader can't miss a live
+    // member (an orphan marker is harmless; see resolveIdentityMembers).
+    if (identity !== null) {
+      await kv.set(roomIdentityMemberKvKey(this.id, identity, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
+    }
     await kv.set(roomMemberKvKey(this.id, id), stringify(record), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
     // The room may have been closed between the check and the write — roll back.
     if ((await readConfig(kv, this.id)) === null) {
       await kv.delete(roomMemberKvKey(this.id, id))
+      if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
       throw new Error(`Room is closed: ${this.id}`)
     }
     return joinedAt
@@ -640,7 +674,10 @@ class ServerRoom implements Room {
   /** @internal */
   async _removeMember(id: string, cause: LeaveCause): Promise<void> {
     if (this._state.closed) return // close() already removed everyone
-    await getRoomKV().delete(roomMemberKvKey(this.id, id))
+    const kv = getRoomKV()
+    const identity = this._state.getRemote(id)?.identity ?? null
+    await kv.delete(roomMemberKvKey(this.id, id)) // record first — a lingering marker resolves to nothing
+    if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
     this._applyLeave(id, cause)
     await publishCtrl(this.id, { __r: 'leave', id, ...leaveCauseToWire(cause) })
   }
@@ -673,6 +710,16 @@ class ServerRoom implements Room {
     // the revision counter — no separate sequencer needed.
     const next: RoomMemberRecord = { ...record, meta, metaSeq: record.metaSeq + 1, seenAt: Date.now() }
     await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
+    // Read-back re-assert: a concurrent `_heartbeatTick` rewrites the whole record to bump `seenAt`
+    // and, if it read the record before this write, its write carries a stale `meta`/`metaSeq` that
+    // reverts ours in KV. Re-assert until a record at least this revision is present (bounded — the
+    // `updateRoom`/`_ensureTrackAnnounced` discipline). The `p-meta` event below is the real
+    // convergence; this keeps the KV record from serving stale meta to a fresh loader.
+    for (let attempt = 0; attempt < MEMBER_META_WRITE_MAX_ATTEMPTS; attempt++) {
+      const readBack = await kv.get(memberKey)
+      if (readBack === null || (parse(readBack) as RoomMemberRecord).metaSeq >= next.metaSeq) break
+      await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
+    }
     this._state.applyParticipantMeta(id, meta, prev, next.metaSeq)
     await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, seq: next.metaSeq })
   }
@@ -1577,6 +1624,41 @@ async function listMemberKeys(kv: RoomKV, roomId: string): Promise<Array<{ key: 
     if (uuidToBytes(id)) memberKeys.push({ key, id })
   }
   return memberKeys
+}
+
+// ── Identity index ──────────────────────────────────────────────────────────
+// The (room, identity)→members index is a hint: one marker key per membership (so concurrent
+// same-identity joins never clobber — the KV has no compare-and-set), written before the member
+// record and cleared after it. So it may briefly over-include but never silently under-includes;
+// resolveIdentityMembers() confirms each marker against its member record, making a stale marker
+// resolve to nothing. Only server-side statics need it, so it never touches the client wire.
+
+/** Every live member ID of an identity in a room — read O(memberships-of-identity) from the index
+ *  (not O(roster)), each confirmed against its member record; a stale marker is pruned, not returned. */
+async function resolveIdentityMembers(kv: RoomKV, roomId: string, identity: string): Promise<string[]> {
+  const prefix = roomIdentityKvPrefix(roomId, identity)
+  const members: string[] = []
+  for (const key of await kv.keys(prefix)) {
+    const memberId = key.slice(prefix.length)
+    const raw = await kv.get(roomMemberKvKey(roomId, memberId))
+    if (raw !== null && (parse(raw) as RoomMemberRecord).identity === identity) members.push(memberId)
+    else await kv.delete(key) // the member left (or its join never committed) — prune the marker
+  }
+  return members
+}
+
+/** Remove one member from KV — its record, its identity marker (if any) — then announce the leave.
+ *  The admin-side counterpart to `_removeMember` (which also applies the leave to a live view). */
+async function evictMember(
+  kv: RoomKV,
+  roomId: string,
+  memberId: string,
+  identity: string | undefined,
+  cause: LeaveCause,
+): Promise<void> {
+  await kv.delete(roomMemberKvKey(roomId, memberId))
+  if (identity !== undefined) await kv.delete(roomIdentityMemberKvKey(roomId, identity, memberId))
+  await publishCtrl(roomId, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
 }
 
 // ---------------------------------------------------------------------------
