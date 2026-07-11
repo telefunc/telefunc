@@ -197,6 +197,39 @@ describe('Room entry point', () => {
     await expect(Room.update('gone', {})).rejects.toThrow('Room not found: gone')
   })
 
+  it('setAttributes() merges room meta per key and deletes on undefined — size/other keys survive', async () => {
+    const lobby = await Room.create('room-attrs', { meta: { topic: 'a', pinned: 1 }, size: 3 })
+    const updates: Array<[unknown, unknown]> = []
+    lobby.onUpdate((meta, prev) => updates.push([meta, prev]))
+
+    await Room.setAttributes('room-attrs', { topic: 'b' }) // only topic changes; pinned untouched
+
+    expect(updates).toEqual([
+      [
+        { topic: 'b', pinned: 1 },
+        { topic: 'a', pinned: 1 },
+      ],
+    ])
+    expect(lobby.meta).toEqual({ topic: 'b', pinned: 1 })
+    expect(lobby.size).toBe(3) // config untouched by a meta merge
+
+    await Room.setAttributes('room-attrs', { pinned: undefined, topic: 'c' }) // delete a key while setting another
+    expect(lobby.meta).toEqual({ topic: 'c' })
+    await expect(Room.setAttributes('gone', {})).rejects.toThrow('Room not found: gone')
+  })
+
+  it('typed publish: a declared Pub types publish() and subscribe() end to end', async () => {
+    type ChatMsg = { kind: 'chat'; text: string }
+    const room = await Room.create<{ topic: string }, { name: string }, ChatMsg>('typed-pub', { meta: { topic: 't' } })
+    const me = await room.join({ name: 'a' })
+    const received: ChatMsg[] = []
+    // `data` carries no annotation — pushing it into ChatMsg[] only compiles if `Pub` threaded through.
+    room.subscribe((data) => received.push(data))
+    await me.publish({ kind: 'chat', text: 'hello' })
+    await settle()
+    expect(received).toEqual([{ kind: 'chat', text: 'hello' }])
+  })
+
   it('concurrent updates converge to the same winner on every node, whatever the arrival order', () => {
     const view = (events: Array<{ at: number; by: string; topic: string }>) => {
       const state = new RoomState({

@@ -213,9 +213,10 @@ type BinaryPublishOptions = {
   keyFrame?: boolean
 }
 
-/** Receives all participant messages, with the verified sender (see `Sender`). */
-type RoomListener<P extends ParticipantMeta = ParticipantMeta> = (
-  data: unknown,
+/** Receives all participant messages, with the verified sender (see `Sender`). `Pub` is the room's
+ *  published-message type — `unknown` unless the room declares one (`Room<Meta, PMeta, Pub>`). */
+type RoomListener<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = (
+  data: Pub,
   info: ChannelPublishInfo,
   from: Sender<P>,
 ) => unknown
@@ -225,7 +226,7 @@ type RoomBinaryListener<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
 ) => unknown
 /** Receives a single participant's messages. */
-type ParticipantListener = (data: unknown, info: ChannelPublishInfo) => unknown
+type ParticipantListener<Pub = unknown> = (data: Pub, info: ChannelPublishInfo) => unknown
 type ParticipantBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
 
 /**
@@ -233,7 +234,7 @@ type ParticipantBinaryListener = (data: Uint8Array, info: ChannelPublishInfo & B
  * client — a `Room` can be returned from a telefunction as-is. Admin operations live on the
  * server-side `Room.*` statics, not on the instance.
  */
-type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta> = {
+type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   /** The ID the room was created with. */
   readonly id: string
   readonly meta: M
@@ -245,15 +246,15 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   readonly isClosed: boolean
 
   /** Join the room. Returns your own participant handle. */
-  join(meta?: P, options?: JoinOptions): Promise<LocalParticipant<P>>
+  join(meta?: P, options?: JoinOptions): Promise<LocalParticipant<P, Pub>>
 
-  getParticipants(): Promise<RemoteParticipant<P>[]>
+  getParticipants(): Promise<RemoteParticipant<P, Pub>[]>
   /** One participant, or `null` if they're not a member. Like `getParticipants()`, loads the
    *  member view on first need; once the view is loaded it resolves from it without I/O. */
-  getParticipant(id: string): Promise<RemoteParticipant<P> | null>
+  getParticipant(id: string): Promise<RemoteParticipant<P, Pub> | null>
 
   /** Receive all participant messages. Returns an unsubscribe function. */
-  subscribe(callback: RoomListener<P>): () => void
+  subscribe(callback: RoomListener<P, Pub>): () => void
   /** Receive all members' binary frames — or one track's: `{ track: 'screen' }` for a named
    *  track, `{ track: null }` for the default lane only. Selection is enforced at the source:
    *  unwanted tracks aren't delivered, relayed, or even subscribed upstream — dropping a
@@ -261,10 +262,10 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   subscribeBinary(callback: RoomBinaryListener<P>, options?: { track?: string | null }): () => void
 
   /** A participant joined. */
-  onJoin(callback: (member: RemoteParticipant<P>) => void): () => void
+  onJoin(callback: (member: RemoteParticipant<P, Pub>) => void): () => void
   /** A participant left. `cause` says why (kick reasons ride along); it's `undefined` exactly
    *  when the leave was discovered by a roster resync — the event itself wasn't observed. */
-  onLeave(callback: (member: RemoteParticipant<P>, cause?: LeaveCause) => void): () => void
+  onLeave(callback: (member: RemoteParticipant<P, Pub>, cause?: LeaveCause) => void): () => void
   /** The room was reconfigured via `Room.update()`. */
   onUpdate(callback: (meta: M, prev: M) => void): () => void
   /** A room-authored message arrived (`Room.announce()`) — e.g. system notices. */
@@ -290,7 +291,7 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
  * can be returned from a telefunction as-is. Room-wide messages are received on `Room` and
  * `RemoteParticipant`; only direct messages addressed to you arrive here (`listen()`).
  */
-type LocalParticipant<P extends ParticipantMeta = ParticipantMeta> = {
+type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   readonly id: string
   readonly meta: P
   /** The app identity this membership was joined with — `null` when none was set. */
@@ -298,9 +299,9 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta> = {
   /** Whether the messages you publish are delivered back to the room object on your side. Set at `join()`. */
   readonly selfDelivery: boolean
 
-  /** Publish a message to the whole room. Pass `{ coalesce: key }` to conflate high-frequency
-   *  updates — see `PublishOptions`. */
-  publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck>
+  /** Publish a message to the whole room (`Pub` — the room's message type when declared). Pass
+   *  `{ coalesce: key }` to conflate high-frequency updates — see `PublishOptions`. */
+  publish(data: Pub, options?: PublishOptions): Promise<ChannelPublishAck>
   /** Publish binary to the whole room — optionally on a named track and/or keyframe-flagged.
    *  The ack's `receivers` reports the track's live subscription count: `0` means nobody
    *  anywhere wants it right now — the signal to pause the encoder until someone subscribes. */
@@ -334,7 +335,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta> = {
 /** Another room member: subscribe to just their messages, observe their metadata and lifecycle.
  *  Returnable from a telefunction — it arrives bound to its room's live view: the backing room
  *  rides along (deduplicated against a co-returned room), so `room.getParticipant(m.id) === m`. */
-type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta> = {
+type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = {
   readonly id: string
   readonly meta: P
   /** The app identity stamped at join — `null` when none was set. Correlate the same human
@@ -344,7 +345,7 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta> = {
   readonly joinedAt: number
 
   /** Receive only this member's messages. Returns an unsubscribe function. */
-  subscribe(callback: ParticipantListener): () => void
+  subscribe(callback: ParticipantListener<Pub>): () => void
   /** Receive only this member's binary frames — or one track's: `{ track: 'screen' }` for a
    *  named track, `{ track: null }` for the default lane only (source-selective, like the
    *  room-level `subscribeBinary`). */

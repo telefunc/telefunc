@@ -101,7 +101,11 @@ function demandKey(member: string, track: string): string {
 /** `Room` is one identifier with two meanings, like the built-in `Date`: the statics object
  *  below (value) and the instance type from ./types.js — re-established locally so the two
  *  merge into a single export. */
-type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta> = RoomInstance<M, P>
+type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
+  M,
+  P,
+  Pub
+>
 
 // ---------------------------------------------------------------------------
 // `Room` entry point
@@ -110,24 +114,25 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
 /** Meta type parameters are caller assertions (like `querySelector<T>`): metadata is data, so
  *  the types you pass declare what your app stores — nothing re-validates them at runtime. */
 type RoomStatic = {
-  /** Create a new room. Throws if it already exists. */
-  create<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
+  /** Create a new room. Throws if it already exists. `Pub` (3rd arg) types what members
+   *  `publish()`/`subscribe()` here — omit it for `unknown`. */
+  create<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
     options?: RoomOptions<M>,
-  ): Promise<Room<M, P>>
+  ): Promise<Room<M, P, Pub>>
   /** Get an existing room. Throws if it doesn't exist. Pass `{ tail: true }` to start relaying
    *  live messages at serialization time so a history read in the same telefunction misses
    *  nothing (see `RoomGetOptions`). */
-  get<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
+  get<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
     options?: RoomGetOptions,
-  ): Promise<Room<M, P>>
+  ): Promise<Room<M, P, Pub>>
   /** Get the room, creating it if it doesn't exist. Concurrent callers converge: one creates,
    *  the others get. `options` apply only when this call is the one that creates. */
-  getOrCreate<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
+  getOrCreate<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
     options?: RoomOptions<M>,
-  ): Promise<Room<M, P>>
+  ): Promise<Room<M, P, Pub>>
   /** Guard every membership granted through `room` — server-side and client-side `join()`s alike.
    *  Each operation has a pre-commit guard (`onBefore*`, throw to reject the caller before anything
    *  is written) and a post-commit hook (`onAfter*`, runs once the operation lands, with its
@@ -135,8 +140,8 @@ type RoomStatic = {
    *  private `send()`, `onBeforePublish`/`onAfterPublish` around each `publish()`/`publishBinary()`.
    *  Persist in `onAfterPublish` — its receipt carries the authoritative `seq`/`timestamp`. Declared
    *  in the granting telefunction (close over `getContext()`); one `Room.guard()` per instance. */
-  guard<M extends RoomMeta, P extends ParticipantMeta>(
-    room: Room<M, P>,
+  guard<M extends RoomMeta, P extends ParticipantMeta, Pub = unknown>(
+    room: Room<M, P, Pub>,
     guards: {
       onBeforeJoin?: JoinGuard<P>
       onAfterJoin?: AfterJoinHook<P>
@@ -147,16 +152,20 @@ type RoomStatic = {
     },
   ): void
   /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
-  join<P extends ParticipantMeta = ParticipantMeta>(
+  join<P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
     meta?: P,
     options?: JoinOptions,
-  ): Promise<LocalParticipant<P>>
+  ): Promise<LocalParticipant<P, Pub>>
   /** List all rooms — optionally only those whose ID starts with `prefix`. */
   list(options?: { prefix?: string }): Promise<RoomInfo[]>
   /** Admin: update the room's configuration — provided fields replace, omitted fields keep
    *  their current value (`isolated` is fixed at creation). */
   update(id: string, options: RoomOptions): Promise<void>
+  /** Admin: merge the room's metadata per key — provided keys replace, omitted keys keep their
+   *  value, a key set to `undefined` is removed (`size`/`isolated` untouched). The room-level
+   *  counterpart to `LocalParticipant.setAttributes`. */
+  setAttributes(id: string, attributes: RoomMeta): Promise<void>
   /** Admin: close the room — disconnects all participants and removes the room. */
   close(id: string): Promise<void>
   /** Admin: remove a participant — by participant ID (throws when unknown), or every membership
@@ -194,6 +203,7 @@ const Room: RoomStatic = {
   join: joinRoom as RoomStatic['join'],
   list: listRooms,
   update: updateRoom,
+  setAttributes: setRoomAttributes,
   close: closeRoom,
   removeParticipant,
   announce: announceToRoom,
@@ -322,15 +332,35 @@ async function updateRoom(id: string, options: RoomOptions): Promise<void> {
     )
     sizeWire = sizeToWire(options.size)
   }
-  // Strictly after the config we read (hybrid-clock style): back-to-back updates from one
-  // writer always order, and cross-writer ordering stays wall-clock last-writer-wins.
+  await writeRoomConfig(id, kv, config, meta, sizeWire)
+}
+
+/** Merge into the room's metadata per key — provided keys replace, omitted keys keep their value,
+ *  a key set to `undefined` is removed (`size`/`isolated` untouched). The admin counterpart to
+ *  `LocalParticipant.setAttributes`: one changed field is one small write, not a whole-`meta` resend. */
+async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
+  assertUsage(isObject(attributes), 'Room.setAttributes() attributes should be an object')
+  const { kv, config } = await requireRoom(id)
+  await writeRoomConfig(id, kv, config, mergeAttributes(config.meta, attributes), config.size)
+}
+
+/** Commit a room-config change and converge it. The stamp is strictly after the config it derives
+ *  from (hybrid-clock): one writer's back-to-back writes always order, cross-writer ties break
+ *  wall-clock last-writer-wins. Everywhere the `update` event reaches converges on the `(at, by)`
+ *  stamp; the KV *write*, though, races — so read back and, if a stamp-losing write landed on top,
+ *  re-assert (only the winner rewrites, so the exchange terminates). Shared by `update()` (replace)
+ *  and `setAttributes()` (merge). */
+async function writeRoomConfig(
+  id: string,
+  kv: RoomKV,
+  config: RoomConfigRecord,
+  meta: RoomMeta,
+  sizeWire: number | null,
+): Promise<void> {
   const at = Math.max(Date.now(), config.at + 1)
   const next: RoomConfigRecord = { meta, size: sizeWire, isolated: config.isolated, at, by: writerId() }
   await kv.set(roomConfigKvKey(id), stringify(next))
   await publishCtrl(id, { __r: 'update', meta, prev: config.meta, size: sizeWire, at: next.at, by: next.by })
-  // Concurrent updates converge by the (at, by) stamp everywhere events reach — but the last KV
-  // *write* wins arbitrarily. Read back: if a stamp-losing write landed on top, re-assert the
-  // winner (only the winner rewrites, so the exchange terminates).
   const readBack = await readConfig(kv, id)
   if (readBack !== null && stampNewer(next, readBack)) await kv.set(roomConfigKvKey(id), stringify(next))
 }
