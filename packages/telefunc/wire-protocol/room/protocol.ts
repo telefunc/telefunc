@@ -13,6 +13,9 @@ export {
   roomIdFromConfigKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
+  roomIdentityMemberKvKey,
+  roomIdentityKvPrefix,
+  roomIdentityRoomKvPrefix,
   sizeToWire,
   sizeFromWire,
   stampNewer,
@@ -114,6 +117,28 @@ function roomMemberKvKey(roomId: string, memberId: string): string {
  *  how member records are told apart from keys of other rooms whose ID shares the prefix. */
 function roomMemberKvPrefix(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:m:`
+}
+
+/** Reserved KV namespace for the identity→membership index — kept separate from
+ *  `ROOM_KEY_NAMESPACE` so a room's member-record scan (`roomMemberKvPrefix`) never sweeps it. */
+const IDENTITY_KEY_NAMESPACE = 'telefunc:identity:'
+
+/** KV key marking one membership of an app identity: one key per (room, identity, member), so
+ *  concurrent joins of the same identity never clobber each other (a list value would — the KV has
+ *  no compare-and-set). The index is a hint — written before the member record and cleared after
+ *  it, so it may transiently over-include but never silently under-includes; readers confirm each
+ *  member ID against its record (identity match), which makes phantoms impossible. Room and identity
+ *  are encoded so a `:` in either can't collide across pairs; the member ID is a delimiter-free UUID. */
+function roomIdentityMemberKvKey(roomId: string, identity: string, memberId: string): string {
+  return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:${encodeURIComponent(identity)}:${memberId}`
+}
+/** KV prefix enumerating every membership of one identity in one room (`keys()` → member IDs). */
+function roomIdentityKvPrefix(roomId: string, identity: string): string {
+  return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:${encodeURIComponent(identity)}:`
+}
+/** KV prefix enumerating every identity-index key of a room — for wholesale cleanup on close. */
+function roomIdentityRoomKvPrefix(roomId: string): string {
+  return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:`
 }
 
 /** Stored at `roomConfigKvKey`. `size: null` encodes `Infinity` (not JSON-safe). `at`/`by` is

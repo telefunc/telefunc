@@ -26,6 +26,8 @@ import {
   roomMemberDataKey,
   roomMemberTrackKey,
   roomMemberKvKey,
+  roomIdentityMemberKvKey,
+  roomIdentityKvPrefix,
   unframeMemberId,
   type RoomMemberRecord,
   type RoomSnapshotMetadata,
@@ -951,6 +953,53 @@ describe('direct messages', () => {
 
     // Idempotent: sweeping an identity with no memberships is a no-op, not an error.
     await Room.removeParticipant('sweep', { identity: 'user-9' })
+  })
+
+  it('Room.send({ identity }) fans a server DM to every membership of that identity; none is a no-op', async () => {
+    const room = await Room.create('id-send')
+    const tab1 = await room.join({ name: 'T1' }, { identity: 'user-7' })
+    const tab2 = await room.join({ name: 'T2' }, { identity: 'user-7' })
+    const other = await room.join({ name: 'Other' }, { identity: 'user-6' })
+    const got1: unknown[] = []
+    const got2: unknown[] = []
+    const gotOther: unknown[] = []
+    tab1.listen((data, from) => got1.push([data, from]))
+    tab2.listen((data, from) => got2.push([data, from]))
+    other.listen((data, from) => gotOther.push([data, from]))
+
+    await Room.send('id-send', { identity: 'user-7' }, { ping: 1 })
+    await settle()
+
+    expect(got1).toEqual([[{ ping: 1 }, null]]) // server-authored → from: null
+    expect(got2).toEqual([[{ ping: 1 }, null]]) // both of the identity's tabs
+    expect(gotOther).toEqual([]) // a different identity is untouched
+
+    // Sending to an identity with no live membership is a no-op, not an error (e.g. a signed-out user).
+    await Room.send('id-send', { identity: 'nobody' }, { ping: 2 })
+  })
+
+  it('the identity index is a hint: a stale marker resolves to nothing and is pruned on read', async () => {
+    const kv = getBroadcastAdapter()
+    const room = await Room.create('id-heal')
+    const tab1 = await room.join({ name: 'T1' }, { identity: 'user-5' })
+    const ghost = await room.join({ name: 'Ghost' }, { identity: 'user-5' })
+
+    // Simulate the ghost's record vanishing (a reap or a crash mid-leave) with its marker lingering.
+    await kv.delete(roomMemberKvKey('id-heal', ghost.id))
+    const got1: unknown[] = []
+    const gotGhost: unknown[] = []
+    tab1.listen((data) => got1.push(data))
+    ghost.listen((data) => gotGhost.push(data))
+
+    await Room.send('id-heal', { identity: 'user-5' }, 'hi')
+    await settle()
+
+    expect(got1).toEqual(['hi']) // the live membership still receives
+    expect(gotGhost).toEqual([]) // the ghost has no record — filtered out, no phantom delivery
+    // …and resolving pruned the ghost's stale marker, leaving only the live one.
+    expect(await kv.keys(roomIdentityKvPrefix('id-heal', 'user-5'))).toEqual([
+      roomIdentityMemberKvKey('id-heal', 'user-5', tab1.id),
+    ])
   })
 
   it('Room.guard({ onBeforeSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
