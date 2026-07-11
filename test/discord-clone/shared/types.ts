@@ -44,8 +44,10 @@ type ChannelMeta = {
 
 /** The one guild room (meta is just a display name). */
 type GuildRoom = Room<{ name: string }, MemberMeta>
-/** A text or voice channel room. */
-type ChannelRoom = Room<ChannelMeta, MemberMeta>
+/** A text or voice channel room. The 3rd type arg is the room's published-message type, so
+ *  `publish()`/`subscribe()` are typed to `ChannelPublish` end-to-end — no `as` cast at the
+ *  subscriber (README finding 20, adopted upstream). Voice rooms carry binary only, so it's unused there. */
+type ChannelRoom = Room<ChannelMeta, MemberMeta, ChannelPublish>
 
 /**
  * Everything published on a text channel's room-wide lane. Chat messages and ephemeral typing

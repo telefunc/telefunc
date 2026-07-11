@@ -6,7 +6,7 @@ import type { MessageRow } from '../database/schema'
 import * as q from '../database/queries'
 import { getGuardedChannel } from '../server/guards'
 import { channelRoomId, dbChannelIdOf, ensureLiveWorld, GUILD_ROOM_ID, VOICE_CHANNEL_SIZE } from '../server/rooms'
-import type { ChannelRoom, ChatMessage, MemberMeta } from '../shared/types'
+import type { ChannelPublish, ChannelRoom, ChatMessage, MemberMeta } from '../shared/types'
 
 // Page size is env-tunable so the e2e suite can exercise "Load older" without 50 sends.
 const PAGE_SIZE = Number(process.env.DISCORD_CLONE_PAGE_SIZE ?? 50)
@@ -94,7 +94,7 @@ async function onGetChannel(roomId: string): Promise<ChannelRoom> {
  */
 async function onOpenChannel(
   roomId: string,
-): Promise<{ membership: LocalParticipant<MemberMeta>; history: ChatMessage[]; hasMore: boolean }> {
+): Promise<{ membership: LocalParticipant<MemberMeta, ChannelPublish>; history: ChatMessage[]; hasMore: boolean }> {
   const user = requireUser()
   const dbChannelId = requireDbChannelId(roomId)
   const channel = await getGuardedChannel(roomId, { tail: true })
@@ -131,9 +131,9 @@ async function onSetTopic(roomId: string, topic: string): Promise<void> {
   if (channel.meta.kind !== 'text') throw Abort('Voice channels have no topic')
   topic = topic.trim().slice(0, 120)
   q.setChannelTopic(dbChannelId, topic)
-  // `Room.update()` is per-field now — omitting `size` keeps the cap (README finding 5, fixed
-  // upstream; this used to require a read-modify-write of everything).
-  await Room.update(roomId, { meta: { ...channel.meta, topic } })
+  // Per-key room-meta merge — write just `topic`, no read-modify-write respread of `kind`/`name`
+  // and no clobber of a concurrent edit to another field (README finding 21, adopted upstream).
+  await Room.setAttributes(roomId, { topic })
 }
 
 async function onDeleteChannel(roomId: string): Promise<void> {

@@ -54,8 +54,8 @@ async function watchChannel(roomId: string, guild: GuildRoom, botUserId: string,
   channelBots.set(roomId, botMe)
   channel.onClose(() => channelBots.delete(roomId)) // channel deleted
 
-  channel.subscribe((data, _info, from) => {
-    const published = data as ChannelPublish
+  channel.subscribe((published, _info, from) => {
+    // `published` is typed `ChannelPublish` — the guarded channel carries its publish type (finding 20).
     if (published.kind !== 'chat') return
     if (from.meta.bot) return // never react to bots (that includes myself)
     void handleCommand(published.text, roomId, guild, from.meta.name)

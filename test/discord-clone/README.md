@@ -29,6 +29,10 @@ deleted from app code.
   into `#436`**: the `snapshot()` cache-poisoning fix (finding 15) and the remaining view-type
   exports (finding 16). This branch takes the upstream fix + tests and adopts the exported types —
   both findings now close.
+- **Round 6** followed the base to `3a619b9`, where the author began landing the audit findings as
+  "Tranche-1": **`Room.setAttributes()`** (per-key room-meta merge, finding 21) and a **typed
+  publish generic** `Room<Meta, PMeta, Pub>` (finding 20). Adopted both — `onSetTopic` is now a
+  one-field merge, and the channel room carries `ChannelPublish` so subscribers drop their casts.
 
 **Features**
 
@@ -78,7 +82,7 @@ you are (verified, not client-echoed).
 | Typing indicator | Ephemeral `publish({ kind: 'typing' })` — same lane as chat, skipped by the guard (never persisted, never acked as activity) |
 | Moderation | `onBeforePublish` guard throws → rejection travels the ack back to the sender's promise; persistence is the separate `onAfterPublish` post-commit hook |
 | DMs | **DB-first, server-delivered**: telefunction writes the row, then `Room.send()`s it to every live participant of both users (matched by `identity`). Works offline; DND enforced server-side. The member-to-member `me.send()` lane is deliberately closed by a guard (see finding 2) |
-| Channel create/topic/delete | `Room.create` / per-field `Room.update({ meta })` / `Room.close`; the guild's announce lane doubles as the directory feed (finding 4) |
+| Channel create/topic/delete | `Room.create` / per-key `Room.setAttributes({ topic })` / `Room.close`; the guild's announce lane doubles as the directory feed (finding 4) |
 | Kick | One `Room.removeParticipant(roomId, { identity }, { reason })` per room — the leave lands as `{ type: 'removed', reason }` on the kicked client, no side-channel notice (finding 12) |
 | Voice/video | One room per voice channel; capacity enforced by its `onBeforeJoin` guard. Mic/camera/screen are **named binary tracks** (`publishBinary(frame, { track, keyFrame })` / `subscribeBinary(cb, { track })`), each paused by `onDemand` when unwatched; mute/camera/screen state merges one field at a time via `setAttributes` |
 | Member sidebar / channel list | `room.snapshot()` + `room.onChange()` — the `useSyncExternalStore` contract, projected into Zustand |
@@ -392,26 +396,32 @@ full-tree re-render.
 - Fix: a change delta (what member/field changed) and/or an identity-keyed snapshot view
   (`snapshot({ by: 'identity' })`), so consumers update incrementally instead of rebuilding.
 
-### 20. `Room` isn't parameterized by its publish type — every payload is an unchecked `as` cast
+### 20. `Room` isn't parameterized by its publish type — ✔ adopted upstream
 
-`Room<Meta, ParticipantMeta>` types the metadata but not what flows over `publish`/`subscribe`/
-`onAnnounce`/`listen` — `data` is `unknown`. So every consumer hand-casts (`data as ChannelPublish`,
-`as GuildAnnouncement`, `as SystemNotice` in `app/store.ts`; the same lanes re-cast in
-`server/guards.ts`), unchecked, on the highest-traffic path. A stale cast after a payload refactor is
-a silent runtime bug with no compile-time flag.
+`Room<Meta, ParticipantMeta>` typed the metadata but not what flowed over `publish`/`subscribe` —
+`data` was `unknown`, so every consumer hand-cast (`data as ChannelPublish` etc.) on the
+highest-traffic path, and a stale cast after a payload refactor was a silent runtime bug.
 
-- Fix: a publish/message type parameter (`Room<Meta, PMeta, Publish>` or `subscribe<T>()`), so the
-  discriminated union is enforced end-to-end.
+- Adopted (round 6): the base added an optional third generic, `Room<Meta, PMeta, Pub>`, threaded
+  through `publish(data: Pub)` / `subscribe(RoomListener<P, Pub>)` / `getParticipant`. Receipts:
+  `ChannelRoom = Room<ChannelMeta, MemberMeta, ChannelPublish>` (`shared/types.ts`), and the
+  `as ChannelPublish` casts at the two subscribers — the client's open-channel lane (`app/store.ts`)
+  and the bot's command lane (`server/bot.ts`) — are deleted; `data` arrives typed.
+- Residual (minor): guard/hook callbacks (`onBeforePublish`/`onAfterPublish`) still receive
+  `data: unknown` (not parameterized by `Pub`), so `server/guards.ts` keeps its cast; and the
+  room-authored lanes (`announce`/`listen`, i.e. `GuildAnnouncement`/`SystemNotice`) aren't typed
+  by `Pub` either. Threading `Pub` (or a separate announce type) into those would close the gap.
 
-### 21. Room metadata has no per-key merge — topic edits are a read-modify-write
+### 21. Room metadata has no per-key merge — ✔ adopted upstream
 
-Participants got `setAttributes` (finding 5), but room meta didn't: `Room.update({ meta })` still
-replaces the whole object, so `onSetTopic` (`telefunc/channels.telefunc.ts`) does a separate
-`Room.get` to read current meta and respreads `kind`/`name` just to change `topic` — a
-read-modify-write with a round-trip in the middle, and two concurrent edits to different fields
-clobber each other.
+Participants got `setAttributes` (finding 5), but room meta didn't: `Room.update({ meta })` replaced
+the whole object, so `onSetTopic` had to read current meta and respread `kind`/`name` just to change
+`topic` — a read-modify-write with a round-trip in the middle, and concurrent edits to different
+fields clobbered each other.
 
-- Fix: `Room.setAttributes(id, partialMeta)` — the room-meta mirror of the participant merge.
+- Adopted (round 6): `Room.setAttributes(id, partialMeta)` — the admin, room-level mirror of the
+  participant merge. Receipt: `onSetTopic` (`telefunc/channels.telefunc.ts`) is now
+  `Room.setAttributes(roomId, { topic })` — one field written, no respread, no cross-field clobber.
 
 ### 22. Delivery-shape gaps: unscoped activity broadcast, and no reconnect-safe send
 
@@ -461,7 +471,7 @@ expired sessions and the bot's `greeted` set are never pruned.
 
 | API | Used | Where / why not |
 |---|---|---|
-| `Room.create` / `Room.get` (incl. `{ tail: true }`) / `Room.getOrCreate` / `Room.guard` / `Room.update` / `Room.close` | ✔ | `server/rooms.ts`, `server/guards.ts`, `telefunc/channels.telefunc.ts` — `tail` fences history (finding 14) |
+| `Room.create` / `Room.get` (incl. `{ tail: true }`) / `Room.getOrCreate` / `Room.guard` / `Room.update` / `Room.setAttributes` / `Room.close` | ✔ | `server/rooms.ts`, `server/guards.ts`, `telefunc/channels.telefunc.ts` — `tail` fences history (finding 14); `setAttributes` merges the topic per-key (finding 21) |
 | `Room.removeParticipant({ identity }, { reason })` / `Room.announce` / `Room.send` | ✔ | kick sweep, banners + directory + activity feed, DM delivery |
 | `Room.join` (static) / `Room.list` | ✖ | memberships need identity + guards (server-side, per-instance); the app's channels table already knows the rooms (finding 4) |
 | `room.join(meta, { identity })` / `getParticipants` / `subscribe` / `onJoin` / `onLeave` / `onUpdate` / `onAnnounce` / `onClose` / `count` / `size` / `isFull` / `meta` | ✔ | throughout `telefunc/*`, `server/bot.ts`, `app/store.ts` |

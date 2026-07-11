@@ -423,7 +423,7 @@ async function openChannel(channelId: string): Promise<void> {
   // into the channel you have open. `onOpenChannel` is one telefunction that joins with my trusted
   // identity *and* returns fenced history (it fetched the room with `{ tail: true }`). Switches are
   // chained so leave/join pairs can't interleave and senders always have a join to await.
-  type Opened = { membership: LocalParticipant<MemberMeta>; history: ChatMessage[]; hasMore: boolean }
+  type Opened = { membership: LocalParticipant<MemberMeta, ChannelPublish>; history: ChatMessage[]; hasMore: boolean }
   const previousJoin = viewingJoin
   viewingNow = null
   const switchToken = Symbol(channelId)
@@ -460,8 +460,9 @@ async function openChannel(channelId: string): Promise<void> {
   for (const message of opened.history) recordMessage(channelId, message)
   // …then go live: subscribing flushes the held tail behind the history, deduped by id
   // (`recordMessage` drops ids it has already shown). No message can fall in the gap.
-  activeMessagesUnsubscribe = room.subscribe((data, info, from) => {
-    const published = data as ChannelPublish
+  activeMessagesUnsubscribe = room.subscribe((published, info, from) => {
+    // `published` is typed `ChannelPublish` — the room carries its publish type now, no cast
+    // (README finding 20, adopted upstream).
     if (published.kind === 'typing') {
       markTyping(room.id, from.meta.name)
       return
