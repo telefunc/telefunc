@@ -250,7 +250,7 @@ member.subscribeBinary((data, info) => video.decode(data, { key: info.keyFrame }
 
 **Render only 9 of 500 cameras?** Subscribe to those 9 members — the other 491 streams never reach you, and your server never fetches them at all. The same holds per track: stop watching a screen share, and its bytes stop flowing to you.
 
-**Pause the encoder when nobody's watching.** `onDemand` fires when the number of subscribers to one of your tracks changes — `0` means nobody is watching, a later non-zero means a viewer returned:
+**Pause the encoder when nobody's watching.** `onDemand` fires when demand for one of your tracks changes — `0` means nobody anywhere is watching, a later non-zero means a viewer returned (it's a coarse interest signal, not an exact viewer count):
 
 ```js
 me.onDemand((track, count) => {
@@ -258,7 +258,7 @@ me.onDemand((track, count) => {
 })
 ```
 
-Each `publishBinary()` receipt also reports `receivers` — the track's live subscriber count at that moment. Use it to react while you're actively publishing; use `onDemand` (above) to learn when to resume once you've paused.
+Each `publishBinary()` receipt also reports `receivers` — the track's live subscription count at that moment (`0` truthfully means nobody anywhere wants it). Use it to react while you're actively publishing; use `onDemand` (above) to learn when to resume once you've paused.
 
 
 ### Load history, then go live
@@ -385,7 +385,7 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 | Method | Description |
 |---|---|
 | `publish(data, { coalesce? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst (see <Link href="#chat">Chat</Link>). |
-| `publishBinary(data, { track?, keyFrame? }?)` | Publish raw binary. The receipt's `receivers` is the live subscriber count. |
+| `publishBinary(data, { track?, keyFrame? }?)` | Publish raw binary. The receipt's `receivers` is the live subscription count (`0` = nobody anywhere). |
 | `send(to, data)` | Private message to one participant (or their ID). |
 | `listen(cb)` | Receive private messages: `(data, from)` — `from` is `null` for room-authored. |
 | `setMeta(meta)` / `setAttributes(partial)` | Replace / merge your metadata. |
