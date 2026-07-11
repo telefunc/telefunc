@@ -86,6 +86,10 @@ import type {
 } from './types.js'
 assertIsNotBrowser()
 
+/** How many times a member-meta write re-asserts against a racing heartbeat before deferring to the
+ *  event stream — small: the heartbeat writes a member at most once per tick, so one re-assert wins. */
+const MEMBER_META_WRITE_MAX_ATTEMPTS = 3
+
 /** This process's identity as an LWW writer — breaks `Room.update()` timestamp ties.
  *  Minted lazily: Cloudflare Workers forbid crypto RNG in module scope (this module loads at
  *  worker startup via the serializer registry), and inside a request it's always available. */
@@ -706,6 +710,16 @@ class ServerRoom implements Room {
     // the revision counter — no separate sequencer needed.
     const next: RoomMemberRecord = { ...record, meta, metaSeq: record.metaSeq + 1, seenAt: Date.now() }
     await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
+    // Read-back re-assert: a concurrent `_heartbeatTick` rewrites the whole record to bump `seenAt`
+    // and, if it read the record before this write, its write carries a stale `meta`/`metaSeq` that
+    // reverts ours in KV. Re-assert until a record at least this revision is present (bounded — the
+    // `updateRoom`/`_ensureTrackAnnounced` discipline). The `p-meta` event below is the real
+    // convergence; this keeps the KV record from serving stale meta to a fresh loader.
+    for (let attempt = 0; attempt < MEMBER_META_WRITE_MAX_ATTEMPTS; attempt++) {
+      const readBack = await kv.get(memberKey)
+      if (readBack === null || (parse(readBack) as RoomMemberRecord).metaSeq >= next.metaSeq) break
+      await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
+    }
     this._state.applyParticipantMeta(id, meta, prev, next.metaSeq)
     await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, seq: next.metaSeq })
   }
