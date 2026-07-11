@@ -30,6 +30,12 @@ export type {
   SendGuard,
   PublishGuard,
   JoinGuard,
+  AfterPublishHook,
+  AfterSendHook,
+  AfterJoinHook,
+  RoomPublishReceipt,
+  RoomSendReceipt,
+  RoomJoinReceipt,
 } from '../../wire-protocol/room/types.js'
 export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'

@@ -39,7 +39,7 @@ config.channel = {
 > - Want reconnects to replay more history → raise the replay buffers; lower them to cap memory.
 > - Want a tighter bound on what a client may send in one message (e.g. chat apps) → lower `messageLimit`.
 
-`messageLimit` is the hostile-input bound: a client declaring a gigabyte message is rejected from the declared length — the body is never buffered — and its connection is terminated. Honest clients never get that far: the limit is advertised to them, and an oversized `send()`/`publish()` fails locally with a clear error. Large payloads belong on streams (`File`, `Blob`, `ReadableStream`), which move as bounded chunks and aren't subject to the cap.
+`messageLimit` is the hostile-input bound: a client that declares a gigabyte message is rejected on that declared size — before its body is ever buffered — and its connection is terminated. Honest clients never get that far: the limit is advertised to them, and an oversized `send()`/`publish()` fails locally with a clear error. Large payloads belong on streams (`File`, `Blob`, `ReadableStream`), which move as bounded chunks and aren't subject to the cap.
 
 <ConfigWhereServer />
 

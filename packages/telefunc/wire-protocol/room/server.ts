@@ -8,12 +8,7 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
-import {
-  ROOM_ACTIVITY_THROTTLE_MS,
-  ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_MEMBER_KV_TTL_MS,
-  ROOM_MEMBER_TTL_MS,
-} from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { getBroadcastAdapter, type BroadcastAdapter, type BroadcastPublishResult } from '../server/broadcast.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
@@ -24,6 +19,7 @@ import {
   stampNewer,
   frameWithMemberId,
   hasRoomTag,
+  mergeAttributes,
   normalizeJoinOptions,
   roomConfigKvKey,
   roomDmKey,
@@ -32,7 +28,6 @@ import {
   roomTextKey,
   roomMemberDataKey,
   roomMemberTrackKey,
-  roomActivityKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
   sizeFromWire,
@@ -58,7 +53,6 @@ import {
   type RoomEnvelope,
   type RoomMemberRecord,
   type RoomStubRequest,
-  type RoomActivityEvent,
 } from './protocol.js'
 import { RoomState } from './state.js'
 import { ParticipantBase } from './participant.js'
@@ -70,15 +64,20 @@ import type {
   LeaveCause,
   LocalParticipant,
   ParticipantMeta,
+  PublishOptions,
   RemoteParticipant,
   Room as RoomInstance,
   RoomInfo,
   RoomMeta,
   RoomOptions,
+  RoomGetOptions,
   RoomSnapshotView,
   JoinGuard,
   PublishGuard,
   SendGuard,
+  AfterJoinHook,
+  AfterPublishHook,
+  AfterSendHook,
   Sender,
 } from './types.js'
 assertIsNotBrowser()
@@ -90,6 +89,13 @@ let _writerId: string | undefined
 function writerId(): string {
   _writerId ??= crypto.randomUUID()
   return _writerId
+}
+
+/** Composite key for the demand aggregation maps — `member` + a separator + `track` (the track
+ *  name, or `DEFAULT_TRACK` for the plain `publishBinary()` lane). */
+const DEMAND_SEP = '\u0000'
+function demandKey(member: string, track: string): string {
+  return member + DEMAND_SEP + track
 }
 
 /** `Room` is one identifier with two meanings, like the built-in `Date`: the statics object
@@ -109,22 +115,36 @@ type RoomStatic = {
     id: string,
     options?: RoomOptions<M>,
   ): Promise<Room<M, P>>
-  /** Get an existing room. Throws if it doesn't exist. */
-  get<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(id: string): Promise<Room<M, P>>
+  /** Get an existing room. Throws if it doesn't exist. Pass `{ tail: true }` to start relaying
+   *  live messages at serialization time so a history read in the same telefunction misses
+   *  nothing (see `RoomGetOptions`). */
+  get<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
+    id: string,
+    options?: RoomGetOptions,
+  ): Promise<Room<M, P>>
   /** Get the room, creating it if it doesn't exist. Concurrent callers converge: one creates,
    *  the others get. `options` apply only when this call is the one that creates. */
   getOrCreate<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta>(
     id: string,
     options?: RoomOptions<M>,
   ): Promise<Room<M, P>>
-  /** Guard every membership granted through `room` — server-side and client-side `join()`s
-   *  alike. `onJoin` runs before each `join()` (admission), `onSend` before each private
-   *  `send()`, `onPublish` before each `publish()`/`publishBinary()`; throwing rejects the
-   *  caller's promise with the error. Declared in the granting telefunction (close over
-   *  `getContext()`); one `Room.guard()` per instance — declare all guards together. */
+  /** Guard every membership granted through `room` — server-side and client-side `join()`s alike.
+   *  Each operation has a pre-commit guard (`onBefore*`, throw to reject the caller before anything
+   *  is written) and a post-commit hook (`onAfter*`, runs once the operation lands, with its
+   *  receipt): `onBeforeJoin`/`onAfterJoin` around admission, `onBeforeSend`/`onAfterSend` around a
+   *  private `send()`, `onBeforePublish`/`onAfterPublish` around each `publish()`/`publishBinary()`.
+   *  Persist in `onAfterPublish` — its receipt carries the authoritative `seq`/`timestamp`. Declared
+   *  in the granting telefunction (close over `getContext()`); one `Room.guard()` per instance. */
   guard<M extends RoomMeta, P extends ParticipantMeta>(
     room: Room<M, P>,
-    guards: { onSend?: SendGuard<P>; onPublish?: PublishGuard<P>; onJoin?: JoinGuard<P> },
+    guards: {
+      onBeforeJoin?: JoinGuard<P>
+      onAfterJoin?: AfterJoinHook<P>
+      onBeforeSend?: SendGuard<P>
+      onAfterSend?: AfterSendHook<P>
+      onBeforePublish?: PublishGuard<P>
+      onAfterPublish?: AfterPublishHook<P>
+    },
   ): void
   /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
   join<P extends ParticipantMeta = ParticipantMeta>(
@@ -196,12 +216,14 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   return new ServerRoom(id, config, { members: [] }) // fresh room — the roster is known: empty
 }
 
-async function getRoom(id: string): Promise<Room> {
+async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   const { kv, config } = await requireRoom(id)
   // One keys scan for the count — `isFull` capacity gates stay correct — but no per-member
   // reads: the roster itself loads lazily, on the first observation that needs it.
   const count = (await listMemberKeys(kv, id)).length
-  return new ServerRoom(id, config, { count })
+  const room = new ServerRoom(id, config, { count })
+  room._tail = options?.tail === true
+  return room
 }
 
 async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
@@ -216,22 +238,42 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
   }
 }
 
-function guardRoom(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard; onJoin?: JoinGuard }): void {
+const ROOM_GUARD_KEYS = [
+  'onBeforeJoin',
+  'onAfterJoin',
+  'onBeforeSend',
+  'onAfterSend',
+  'onBeforePublish',
+  'onAfterPublish',
+] as const
+
+/** The resolved guard/hook set an instance holds — each slot `null` when not declared. */
+type RoomGuards = {
+  onBeforeJoin: JoinGuard | null
+  onAfterJoin: AfterJoinHook | null
+  onBeforeSend: SendGuard | null
+  onAfterSend: AfterSendHook | null
+  onBeforePublish: PublishGuard | null
+  onAfterPublish: AfterPublishHook | null
+}
+
+function guardRoom(room: Room, guards: Partial<Record<(typeof ROOM_GUARD_KEYS)[number], unknown>>): void {
   assertUsage(ServerRoom.isServerRoom(room), 'Room.guard() expects a room obtained from Room.get()/Room.create()')
   assertUsage(isObject(guards), 'Room.guard() guards should be an object')
-  assertUsage(
-    guards.onSend === undefined || typeof guards.onSend === 'function',
-    'Room.guard() onSend should be a function',
-  )
-  assertUsage(
-    guards.onPublish === undefined || typeof guards.onPublish === 'function',
-    'Room.guard() onPublish should be a function',
-  )
-  assertUsage(
-    guards.onJoin === undefined || typeof guards.onJoin === 'function',
-    'Room.guard() onJoin should be a function',
-  )
-  room._setGuards({ onSend: guards.onSend ?? null, onPublish: guards.onPublish ?? null, onJoin: guards.onJoin ?? null })
+  for (const key of ROOM_GUARD_KEYS) {
+    assertUsage(
+      guards[key] === undefined || typeof guards[key] === 'function',
+      `Room.guard() ${key} should be a function`,
+    )
+  }
+  room._setGuards({
+    onBeforeJoin: (guards.onBeforeJoin as JoinGuard) ?? null,
+    onAfterJoin: (guards.onAfterJoin as AfterJoinHook) ?? null,
+    onBeforeSend: (guards.onBeforeSend as SendGuard) ?? null,
+    onAfterSend: (guards.onAfterSend as AfterSendHook) ?? null,
+    onBeforePublish: (guards.onBeforePublish as PublishGuard) ?? null,
+    onAfterPublish: (guards.onAfterPublish as AfterPublishHook) ?? null,
+  })
 }
 
 async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant> {
@@ -371,15 +413,16 @@ class ServerRoom implements Room {
   readonly [SERVER_ROOM_BRAND] = true
 
   /** @internal */ readonly _isolated: boolean
-  private _guards: { onSend: SendGuard | null; onPublish: PublishGuard | null; onJoin: JoinGuard | null } | null = null
+  /** @internal — when true, serializing this room starts relaying text immediately (buffered
+   *  pre-peer), so a history read after `Room.get(id, { tail: true })` misses no live message. */
+  _tail = false
+  private _guards: RoomGuards | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
 
   private readonly _ctrlSub = new SubSlot()
   private readonly _textSub = new SubSlot()
-  private readonly _activitySub = new SubSlot()
-  private _lastActivityAt = 0
   private readonly _memberTextUnsubs = new Map<string, () => void>()
   /** Upstream binary subscriptions, keyed by the full adapter key — one per wanted (member, track). */
   private readonly _binaryKeyUnsubs = new Map<string, () => void>()
@@ -387,6 +430,16 @@ class ServerRoom implements Room {
   /** (member, track) pairs this instance has already announced — first publish pays the
    *  KV append + ctrl event, every further frame is a Set lookup. */
   private readonly _announcedTracks = new Map<string, Set<string>>()
+  /** Unique id tagging this instance's demand gossip, so a member's owning instance can dedupe
+   *  demand reports across instances and nodes (see `onDemand`). */
+  private readonly _instanceId = crypto.randomUUID()
+  /** Composite key → [member, track] for the streams this instance currently has local binary
+   *  demand for — diffed each `_syncSubs` to gossip 0↔>0 transitions on the control lane. */
+  private _localDemand = new Map<string, [string, string]>()
+  /** Owner-side demand aggregation: composite key → the OTHER instance ids reporting demand. */
+  private readonly _remoteDemand = new Map<string, Set<string>>()
+  /** Owner-side: composite key → the demand count last pushed to the member (change detection). */
+  private readonly _pushedDemand = new Map<string, number>()
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _heartbeatBusy = false
   private _pendingRefresh: Promise<void> | null = null
@@ -410,7 +463,7 @@ class ServerRoom implements Room {
   }
 
   /** @internal — see `Room.guard()`. One declaration per instance keeps the grant declarative. */
-  _setGuards(guards: { onSend: SendGuard | null; onPublish: PublishGuard | null; onJoin: JoinGuard | null }): void {
+  _setGuards(guards: RoomGuards): void {
     assertUsage(
       this._guards === null,
       'Room.guard() was already called for this room instance — declare all guards in one call',
@@ -495,10 +548,6 @@ class ServerRoom implements Room {
     return this._state.onChange(callback)
   }
 
-  onActivity(callback: (info: { timestamp: number }) => void): () => void {
-    return this._state.onActivity(callback)
-  }
-
   snapshot(): RoomSnapshotView {
     // Snapshot consumers want the member view — load it (need-driven, single-flight); the
     // arrival lands as an onChange, and the next snapshot() is complete.
@@ -518,8 +567,8 @@ class ServerRoom implements Room {
   ): Promise<{ id: string; joinedAt: number }> {
     const id = crypto.randomUUID()
     // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
-    const onJoin = this._guards?.onJoin
-    if (onJoin) await onJoin({ id, meta, identity })
+    const onBeforeJoin = this._guards?.onBeforeJoin
+    if (onBeforeJoin) await onBeforeJoin({ id, meta, identity })
     const joinedAt = await this._createMember(id, meta, identity)
     track(id, joinedAt)
     this._syncSubs()
@@ -531,6 +580,9 @@ class ServerRoom implements Room {
       joinedAt,
       ...(identity === null ? {} : { identity }),
     })
+    // Post-commit: the member exists and its join is announced — the place for side effects.
+    const onAfterJoin = this._guards?.onAfterJoin
+    if (onAfterJoin) await onAfterJoin({ id, meta, identity }, { joinedAt })
     return { id, joinedAt }
   }
 
@@ -563,9 +615,22 @@ class ServerRoom implements Room {
     await publishCtrl(this.id, { __r: 'leave', id, ...leaveCauseToWire(cause) })
   }
 
-  /** @internal */
+  /** @internal — full replace (`setMeta`). */
   async _setMemberMeta(id: string, meta: ParticipantMeta): Promise<void> {
     assertUsage(isObject(meta), 'setMeta() meta should be an object')
+    await this._writeMemberMeta(id, () => meta)
+  }
+
+  /** @internal — per-key merge (`setAttributes`); an `undefined` value deletes the key. */
+  async _mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<void> {
+    assertUsage(isObject(attrs), 'setAttributes() attributes should be an object')
+    await this._writeMemberMeta(id, (current) => mergeAttributes(current, attrs))
+  }
+
+  private async _writeMemberMeta(
+    id: string,
+    computeMeta: (current: ParticipantMeta) => ParticipantMeta,
+  ): Promise<void> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
     const memberKey = roomMemberKvKey(this.id, id)
@@ -573,7 +638,8 @@ class ServerRoom implements Room {
     if (raw === null) throw new Error(`Participant not found (left?): ${id}`)
     const record = parse(raw) as RoomMemberRecord
     const prev = this._state.getRemote(id)?.meta ?? record.meta
-    // The member's single owner serializes its setMeta() calls, so the KV record doubles as
+    const meta = computeMeta(record.meta)
+    // The member's single owner serializes its meta writes, so the KV record doubles as
     // the revision counter — no separate sequencer needed.
     const next: RoomMemberRecord = { ...record, meta, metaSeq: record.metaSeq + 1, seenAt: Date.now() }
     await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
@@ -594,6 +660,8 @@ class ServerRoom implements Room {
       data,
     }
     return this._finishPublish(
+      sender,
+      data,
       getBroadcastAdapter().publish(
         this._isolated ? roomMemberDataKey(this.id, from) : roomTextKey(this.id),
         stringify(envelope),
@@ -608,9 +676,11 @@ class ServerRoom implements Room {
   async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
     const frame = unframeMemberId(framed)!
     // The guard sees exactly what a subscriber would: the payload, without the wire frame.
-    await this._admitPublish(from, frame.payload)
+    const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
     return this._finishPublish(
+      sender,
+      frame.payload,
       getBroadcastAdapter().publishBinary(
         frame.track === null ? roomMemberDataKey(this.id, from) : roomMemberTrackKey(this.id, from, frame.track),
         framed,
@@ -618,25 +688,37 @@ class ServerRoom implements Room {
     )
   }
 
-  /** Shared publish prologue: open check + `onPublish` guard, on the verified sender. */
+  /** Shared publish prologue: open check + `onBeforePublish` guard, on the verified sender. */
   private async _admitPublish(from: string, payload: unknown): Promise<Sender> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
     const sender = this._memberSender(from)
-    const onPublish = this._guards?.onPublish
-    if (onPublish) await onPublish(sender, payload)
+    const onBeforePublish = this._guards?.onBeforePublish
+    if (onBeforePublish) await onBeforePublish(sender, payload)
     return sender
   }
 
-  /** Shared publish epilogue: the activity trickle, then the receipt (with `receivers`). */
+  /** Shared publish epilogue: the receipt (with `receivers`) plus the `onAfterPublish` hook, which
+   *  sees the same `payload` the guard did and the authoritative `seq`/`timestamp` — the place to
+   *  persist for history. Awaited, so a throw rejects the publisher (the message is already out). */
   private async _finishPublish(
+    sender: Sender,
+    payload: unknown,
     publishing: BroadcastPublishResult | Promise<BroadcastPublishResult>,
   ): Promise<ChannelPublishAck> {
     const result = await publishing
-    this._announceActivity()
-    return Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), {
+    const ack = Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), {
       meta: result.meta,
       ...(result.receivers === undefined ? {} : { receivers: result.receivers }),
     })
+    const onAfterPublish = this._guards?.onAfterPublish
+    if (onAfterPublish) {
+      await onAfterPublish(sender, payload, {
+        seq: ack.seq,
+        timestamp: ack.timestamp,
+        ...(ack.receivers === undefined ? {} : { receivers: ack.receivers }),
+      })
+    }
+    return ack
   }
 
   /** First frame on a new (member, track): record the track on the member's KV record (late
@@ -671,21 +753,6 @@ class ServerRoom implements Room {
     announced.add(track)
   }
 
-  /** Leading-edge throttle, no timers: at most one activity signal per window per instance.
-   *  Badge consumers conflate by nature (a timestamp), so multi-node rooms just mean a couple
-   *  of trickles per window — still control-lane cost. */
-  private _announceActivity(): void {
-    const now = Date.now()
-    if (now - this._lastActivityAt < ROOM_ACTIVITY_THROTTLE_MS) return
-    this._lastActivityAt = now
-    void Promise.resolve(
-      getBroadcastAdapter().publish(
-        roomActivityKey(this.id),
-        stringify({ __r: 'activity', at: now } satisfies RoomActivityEvent),
-      ),
-    ).catch(reportRoomError)
-  }
-
   /** The verified sender as this node knows it — own participants first (freshest), then the
    *  view. The one place sender identity is assembled; guards and envelopes both consume it. */
   private _memberSender(from: string): Sender {
@@ -703,8 +770,8 @@ class ServerRoom implements Room {
     const target = await this._resolveMember(to)
     if (!target) throw new Error(`Participant not found: ${to}`)
     const sender = this._memberSender(from)
-    const onSend = this._guards?.onSend
-    if (onSend) await onSend(sender, target, data)
+    const onBeforeSend = this._guards?.onBeforeSend
+    if (onBeforeSend) await onBeforeSend(sender, target, data)
     const envelope: RoomDmEnvelope = {
       __r: 'dm',
       to,
@@ -713,7 +780,9 @@ class ServerRoom implements Room {
       ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
     }
-    await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+    const receipt = await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+    const onAfterSend = this._guards?.onAfterSend
+    if (onAfterSend) await onAfterSend(sender, target, data, { seq: receipt.seq, timestamp: receipt.timestamp })
   }
 
   /** The member's live view — falling back to the authoritative KV record, since the local
@@ -748,6 +817,10 @@ class ServerRoom implements Room {
     if (!hasRoomTag(envelope)) return
     const event = envelope as RoomEnvelope
     if (event.__r === 'data') return // data never travels on the control key
+    if (event.__r === 'want') {
+      this._applyWant(event) // demand gossip — node-to-node only, never relayed to clients
+      return
+    }
     const wasClosed = this._state.closed
 
     if (event.__r === 'announce') {
@@ -905,6 +978,11 @@ class ServerRoom implements Room {
   /** @internal — called by `roomReplacer` when this room is serialized into a response. */
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
+    // Tail mode (`Room.get(id, { tail: true })`): relay text from now, before the client
+    // declares a subscription, so a history read after this serialization misses nothing. The
+    // frames buffer in the stub's pre-peer buffer and the client holds them until its first
+    // subscribe(). `_syncSubs()` below brings up the upstream text ingestion.
+    if (this._tail) stub._wantsText = true
     // The snapshot carries only scalars; the roster streams once the peer is attached (never
     // buffered — a byte-capped pre-peer buffer must not be able to evict it). Everything
     // relayed before it is already reflected in it; later events apply incrementally.
@@ -949,6 +1027,10 @@ class ServerRoom implements Room {
           this._assertStubMember(stub, req.id)
           await this._setMemberMeta(req.id, isObject(req.meta) ? req.meta : {})
           return { ok: true }
+        case 'req-set-attrs':
+          this._assertStubMember(stub, req.id)
+          await this._mergeMemberMeta(req.id, isObject(req.attrs) ? req.attrs : {})
+          return { ok: true }
         case 'req-dm':
           this._assertStubMember(stub, req.id)
           await this._sendDm(req.id, req.to, req.data)
@@ -964,11 +1046,6 @@ class ServerRoom implements Room {
           // Member-scoped text wants — the room-level (all) want rides the broadcast-sub ctrl.
           const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
           stub._textMemberWants = new Set(members)
-          this._syncSubs()
-          return { ok: true }
-        }
-        case 'sub-activity': {
-          stub._wantsActivity = req.on === true
           this._syncSubs()
           return { ok: true }
         }
@@ -1067,18 +1144,16 @@ class ServerRoom implements Room {
       )
     }
 
-    // Activity: the badge trickle — subscribed only for holders that actually listen.
-    const wantActivity = open && (state.activityListenerCount > 0 || this._stubsWantActivity())
-    this._activitySub.sync(wantActivity, () =>
-      adapter.subscribe(roomActivityKey(this.id), (serialized) => this._onActivity(serialized)),
-    )
-
     // Binary: per-(publisher, track) keys in every mode — subscribing want-selectively at the
     // source makes upstream delivery pay-per-want, not filter-after-receive: dropping the last
     // want for a track drops its key, and the publisher's `receivers` hits 0.
     this._syncKeyedSubs(this._binaryKeyUnsubs, wantAnyBinary ? this._binaryKeys(binaryWants, memberIds) : [], (key) =>
       adapter.subscribeBinary(key, (framed, info) => this._onBinary(framed, info)),
     )
+
+    // Demand (`onDemand`): gossip this node's local binary-demand transitions and push the
+    // aggregated global count to any of our own members whose demand changed.
+    this._syncDemand(binaryWants, memberIds, open)
 
     // Inbox subscriptions follow ownership, not listeners — a holder must always be
     // able to receive direct messages addressed to its members.
@@ -1087,30 +1162,6 @@ class ServerRoom implements Room {
     )
 
     this._syncHeartbeat()
-  }
-
-  /** Whether any client stub declared an activity want (`sub-activity`). */
-  private _stubsWantActivity(): boolean {
-    for (const stub of this._stubs) if (stub._wantsActivity) return true
-    return false
-  }
-
-  private _onActivity(serialized: string): void {
-    let event: unknown
-    try {
-      event = parse(serialized)
-    } catch {
-      return // junk on the reserved key
-    }
-    if (!hasRoomTag(event) || event.__r !== 'activity') return
-    const activity = event as RoomActivityEvent
-    this._state.applyActivity(activity.at)
-    if (this._stubs.size > 0) {
-      const wireText = encodePublishText(serialized, { seq: 0, timestamp: activity.at })
-      for (const stub of this._stubs) {
-        if (stub._wantsActivity) stub._relayPublishText(wireText)
-      }
-    }
   }
 
   /** Union of this holder's own binary listeners and every client stub's declared wants. */
@@ -1144,6 +1195,91 @@ class ServerRoom implements Room {
       }
     }
     return keys
+  }
+
+  /** The (member, track) pairs this instance has local binary demand for — the demand twin of
+   *  `_binaryKeys`, kept in member/track terms so it can be gossiped and aggregated. */
+  private _localDemandPairs(wants: BinaryWants, memberIds: string[]): Array<[string, string]> {
+    const pairs: Array<[string, string]> = []
+    for (const memberId of memberIds) {
+      const memberWants = wants.members[memberId]
+      const eff = memberWants ? mergeTrackWants(wants.everyMember, memberWants) : wants.everyMember
+      const tracks = eff.all ? [DEFAULT_TRACK, ...this._state.memberTracks(memberId)] : eff.tracks
+      for (const track of tracks) pairs.push([memberId, track])
+    }
+    return pairs
+  }
+
+  /** Diff this instance's local binary demand, gossiping each 0↔>0 transition on the control lane
+   *  (so a member's owning instance can aggregate global demand), and refresh the pushed count for
+   *  any of our own members whose local contribution changed. */
+  private _syncDemand(binaryWants: BinaryWants, memberIds: string[], open: boolean): void {
+    const prev = this._localDemand
+    const next = new Map<string, [string, string]>()
+    if (open) {
+      for (const [member, track] of this._localDemandPairs(binaryWants, memberIds)) {
+        next.set(demandKey(member, track), [member, track])
+      }
+    }
+    this._localDemand = next
+    for (const [k, [member, track]] of next) {
+      if (!prev.has(k)) this._onDemandTransition(member, track, true)
+    }
+    for (const [k, [member, track]] of prev) {
+      if (!next.has(k)) this._onDemandTransition(member, track, false)
+    }
+  }
+
+  private _onDemandTransition(member: string, track: string, on: boolean): void {
+    void publishCtrl(this.id, { __r: 'want', member, track, node: this._instanceId, on }).catch(reportRoomError)
+    if (this._ownsMember(member)) this._recomputeDemand(member, track)
+  }
+
+  /** A demand gossip from another instance/node. Recorded regardless of ownership (ownership can
+   *  arrive later); only a member's owning instance pushes the resulting count to it. */
+  private _applyWant(event: { member: string; track: string; node: string; on: boolean }): void {
+    if (event.node === this._instanceId) return // our own gossip echoed back
+    const k = demandKey(event.member, event.track)
+    if (event.on) {
+      let set = this._remoteDemand.get(k)
+      if (!set) this._remoteDemand.set(k, (set = new Set()))
+      set.add(event.node)
+    } else {
+      const set = this._remoteDemand.get(k)
+      set?.delete(event.node)
+      if (set && set.size === 0) this._remoteDemand.delete(k)
+    }
+    if (this._ownsMember(event.member)) this._recomputeDemand(event.member, event.track)
+  }
+
+  /** Whether one of this instance's own members is `id` — the instance that must aggregate and
+   *  deliver `id`'s demand. */
+  private _ownsMember(id: string): boolean {
+    if (this._localParticipants.has(id)) return true
+    for (const stub of this._stubs) if (stub._stubMembers.has(id)) return true
+    return false
+  }
+
+  /** Global demand for one of our members' tracks = this instance's own local contribution plus
+   *  the distinct other instances reporting demand. Push it to the member only when it changed. */
+  private _recomputeDemand(member: string, track: string): void {
+    const k = demandKey(member, track)
+    const count = (this._remoteDemand.get(k)?.size ?? 0) + (this._localDemand.has(k) ? 1 : 0)
+    if (this._pushedDemand.get(k) === count || (count === 0 && !this._pushedDemand.has(k))) return
+    if (count === 0) this._pushedDemand.delete(k)
+    else this._pushedDemand.set(k, count)
+    const trackOut = track === DEFAULT_TRACK ? null : track
+    const local = this._localParticipants.get(member)
+    if (local) {
+      local._onDemand(trackOut, count)
+      return
+    }
+    for (const stub of this._stubs) {
+      if (stub._stubMembers.has(member)) {
+        stub._relayDemand({ __r: 'demand', member, track: trackOut, count })
+        return
+      }
+    }
   }
 
   /** The text-lane twin of `_aggregateBinaryWants()` — a stub's broadcast subscription is its
@@ -1294,7 +1430,9 @@ class ServerLocalParticipant extends ParticipantBase {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
   }
 
-  async publish(data: unknown): Promise<ChannelPublishAck> {
+  async publish(data: unknown, _options?: PublishOptions): Promise<ChannelPublishAck> {
+    // `coalesce` bounds a client's uplink under a burst; a server-side publisher has no uplink
+    // queue to conflate, so the option is accepted for signature parity and otherwise a no-op.
     this._assertActive()
     return await this._room._publishText(this.id, data)
   }
@@ -1319,6 +1457,12 @@ class ServerLocalParticipant extends ParticipantBase {
     this._assertActive()
     await this._room._setMemberMeta(this.id, meta)
     this._meta = meta
+  }
+
+  async setAttributes(attrs: ParticipantMeta): Promise<void> {
+    this._assertActive()
+    await this._room._mergeMemberMeta(this.id, attrs)
+    this._meta = mergeAttributes(this._meta, attrs)
   }
 
   async leave(): Promise<void> {

@@ -21,6 +21,7 @@ import {
   type ParticipantStubRequest,
   type ReqOkAck,
   type ReqPublishAck,
+  type RoomDemandEvent,
   type RoomRosterEvent,
 } from './protocol.js'
 assertIsNotBrowser()
@@ -48,8 +49,6 @@ class RoomStubChannel extends ServerBroadcast {
   _wantsText = false
   /** @internal — which members' text the client wants without a room-level subscription (`sub-text`). */
   _textMemberWants: Set<string> = new Set()
-  /** @internal — whether the client holds `onActivity` listeners (`sub-activity`). */
-  _wantsActivity = false
 
   /** @internal — relay gate: does this client want the (member, track) the frame belongs to? */
   _wantsBinary(memberId: string, track: string): boolean {
@@ -108,6 +107,11 @@ class RoomStubChannel extends ServerBroadcast {
     this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
   }
 
+  /** @internal — push a demand update for one of this client's members (see `onDemand`). */
+  _relayDemand(event: RoomDemandEvent): void {
+    this._relayPublishText(encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() }))
+  }
+
   /** @internal */
   _relayPublishText(wireText: string): void {
     if (this._peer) this._peer.sendPublish(wireText)
@@ -139,6 +143,9 @@ function bindParticipantStubChannel(
           return { ok: true, ack: await participant.publish(req.data) } satisfies ReqPublishAck
         case 'req-set-meta':
           await participant.setMeta(isObject(req.meta) ? req.meta : {})
+          return { ok: true } satisfies ReqOkAck
+        case 'req-set-attrs':
+          await participant.setAttributes(isObject(req.attrs) ? req.attrs : {})
           return { ok: true } satisfies ReqOkAck
         case 'req-dm':
           await participant.send(req.to, req.data)
@@ -183,6 +190,11 @@ function bindParticipantStubChannel(
       .catch(() => {})
   })
 
+  // Demand updates for this member's own tracks (onDemand) — forwarded to the client holder.
+  const unlistenDemand = participant.onDemand((track, count) => {
+    void channel.send({ __r: 'demand', track, count }).catch(() => {})
+  })
+
   const unlistenLeave = participant.onLeave((cause) => {
     const notice =
       cause.type === 'left'
@@ -195,6 +207,7 @@ function bindParticipantStubChannel(
   channel.onClose(() => {
     unlistenMeta?.()
     unlistenDm()
+    unlistenDemand()
     unlistenLeave()
     // The client is gone (page closed, GC, network death) — presence says the member leaves.
     void participant.leave().catch(reportRoomError)

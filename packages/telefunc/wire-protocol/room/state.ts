@@ -25,7 +25,7 @@ import type {
 // RoomState — the local view of a room, driven by the event stream
 // ---------------------------------------------------------------------------
 
-type ListenerKind = 'data' | 'binary' | 'event' | 'activity'
+type ListenerKind = 'data' | 'binary' | 'event'
 
 /** A binary listener's track filter: `undefined` = every track, `null` = the default lane only,
  *  a name = that track only. */
@@ -121,12 +121,10 @@ class RoomState {
   private readonly _fullCbs: Array<() => void> = []
   private readonly _closeCbs: Array<() => void> = []
   private readonly _announceCbs: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
-  private readonly _activityCbs: Array<(info: { timestamp: number }) => void> = []
 
   private _eventListenerCount = 0
   private _dataListenerCount = 0
   private _binaryListenerCount = 0
-  private _activityListenerCount = 0
   private _wasFull: boolean
   private _updateStamp: { at: number; by: string }
   private _rosterKnown: boolean
@@ -178,10 +176,6 @@ class RoomState {
   /** Listeners needing the binary data stream. */
   get binaryListenerCount(): number {
     return this._binaryListenerCount
-  }
-  /** Listeners needing the activity trickle. */
-  get activityListenerCount(): number {
-    return this._activityListenerCount
   }
 
   /** Which (member, track) binary streams this holder needs delivered — drives the wire/adapter
@@ -279,14 +273,6 @@ class RoomState {
 
   onChange(cb: () => void): () => void {
     return this._register(this._changeCbs, cb, 'event')
-  }
-
-  onActivity(cb: (info: { timestamp: number }) => void): () => void {
-    return this._register(this._activityCbs, cb, 'activity')
-  }
-
-  applyActivity(at: number): void {
-    this._fireAll(this._activityCbs, { timestamp: at })
   }
 
   /** A member published its first frame on a new named track (idempotent — echoes, rosters,
@@ -619,7 +605,6 @@ class RoomState {
   private _bumpListenerCount(kind: ListenerKind, delta: number): void {
     if (kind === 'data') this._dataListenerCount += delta
     else if (kind === 'binary') this._binaryListenerCount += delta
-    else if (kind === 'activity') this._activityListenerCount += delta
     else this._eventListenerCount += delta
     this._onListenersChanged()
   }

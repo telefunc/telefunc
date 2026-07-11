@@ -2,7 +2,14 @@ export { ParticipantBase }
 export type { InboxMessage }
 
 import type { ChannelPublishAck } from '../channel.js'
-import type { BinaryPublishOptions, LeaveCause, LocalParticipant, ParticipantMeta, Sender } from './types.js'
+import type {
+  BinaryPublishOptions,
+  LeaveCause,
+  LocalParticipant,
+  ParticipantMeta,
+  PublishOptions,
+  Sender,
+} from './types.js'
 
 // ---------------------------------------------------------------------------
 // ParticipantBase — the shared half of every LocalParticipant
@@ -36,6 +43,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private _leftCause: LeaveCause | null = null
   private _leaveCbs: Array<(cause: LeaveCause) => void> = []
   private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => void> = []
+  private readonly _demandCbs: Array<(track: string | null, count: number) => void> = []
   /** DMs delivered before the first `listen()` — held bounded, flushed on attach, then never
    *  allocated again (`null` = flushed or empty; zero steady-state cost). */
   private _pendingInbox: InboxMessage[] | null = null
@@ -51,10 +59,11 @@ abstract class ParticipantBase implements LocalParticipant {
     return this._meta
   }
 
-  abstract publish(data: unknown): Promise<ChannelPublishAck>
+  abstract publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck>
   abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
   abstract send(to: string | Sender, data: unknown): Promise<void>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
+  abstract setAttributes(attributes: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
   /** A user callback threw — each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
@@ -100,6 +109,26 @@ abstract class ParticipantBase implements LocalParticipant {
   /** The live room-backed sender, when this flavor has a room view. */
   protected _resolveSender(_id: string): Sender | null {
     return null
+  }
+
+  onDemand(callback: (track: string | null, count: number) => void): () => void {
+    this._demandCbs.push(callback)
+    return () => {
+      const i = this._demandCbs.indexOf(callback)
+      if (i >= 0) this._demandCbs.splice(i, 1)
+    }
+  }
+
+  /** @internal — the global demand for one of this member's tracks changed (see the room's
+   *  demand aggregation). `track` is `null` for the default `publishBinary()` lane. */
+  _onDemand(track: string | null, count: number): void {
+    for (const cb of [...this._demandCbs]) {
+      try {
+        cb(track, count)
+      } catch (err) {
+        this._reportError(err)
+      }
+    }
   }
 
   onLeave(callback: (cause: LeaveCause) => void): () => void {

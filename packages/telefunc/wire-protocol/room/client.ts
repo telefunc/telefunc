@@ -9,6 +9,7 @@ import {
   leaveCauseFromWire,
   frameWithMemberId,
   hasRoomTag,
+  mergeAttributes,
   normalizeJoinOptions,
   sizeFromWire,
   unframeMemberId,
@@ -20,11 +21,12 @@ import {
   type ReqJoinAck,
   type ReqOkAck,
   type ReqPublishAck,
+  type RoomDataEnvelope,
+  type RoomDemandEvent,
   type RoomDataPublish,
   type RoomDmEnvelope,
   type RoomEnvelope,
   type RoomRosterEvent,
-  type RoomActivityEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './protocol.js'
@@ -37,12 +39,20 @@ import type {
   LeaveCause,
   LocalParticipant,
   ParticipantMeta,
+  PublishOptions,
   RemoteParticipant,
   Room,
   RoomMeta,
   RoomSnapshotView,
   Sender,
 } from './types.js'
+
+/** One awaiter of a conflated publish — resolved with the winning send's receipt (see `_drainCoalesce`). */
+type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
+
+/** Cap on the tail hold (`Room.get(id, { tail: true })`) — generous, since the contract is that
+ *  the client subscribes promptly after the response; drop-oldest past it, deduped against history. */
+const ROOM_TAIL_HOLD_MAX = 10_000
 
 // ---------------------------------------------------------------------------
 // ClientRoom
@@ -66,6 +76,11 @@ class ClientRoom implements Room {
   /** DMs relayed before their participant's join ack resolved (a reactive send racing the
    *  join round-trip) — held bounded (count-capped, drop-oldest), flushed on registration. */
   private _pendingDms: Array<InboxMessage & { to: string }> | null = null
+  /** Tail mode (`Room.get(id, { tail: true })`): relayed text held until the first `subscribe()`
+   *  attaches, then flushed in order — so a history-then-go-live read loses no live message.
+   *  `null` once flushed or when tail is off. Count-capped drop-oldest (prompt subscribe is the
+   *  contract; the overlap with history is deduped by the app). */
+  private _tailHold: Array<{ event: RoomDataEnvelope; info: ChannelPublishInfo }> | null = null
   private _rosterArrived!: () => void
   /** Settled by the first streamed roster (or wire death) — gates `getParticipants()`. */
   private readonly _rosterReady = new Promise<void>((resolve) => (this._rosterArrived = resolve))
@@ -83,6 +98,7 @@ class ClientRoom implements Room {
       onCallbackError: reportRoomError,
     })
     this._state._owner = this
+    if (snapshot.tail) this._tailHold = []
     if (snapshot.closed) this._rosterArrived()
 
     // Delivery handlers are local-only — what the server relays is driven by the declared
@@ -196,10 +212,6 @@ class ClientRoom implements Room {
     return this._state.onChange(callback)
   }
 
-  onActivity(callback: (info: { timestamp: number }) => void): () => void {
-    return this._state.onActivity(callback)
-  }
-
   snapshot(): RoomSnapshotView {
     // The roster streams in right behind the response — its arrival is an onChange.
     return this._state.snapshot()
@@ -235,7 +247,7 @@ class ClientRoom implements Room {
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     if (!hasRoomTag(envelope)) return
-    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomActivityEvent
+    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomDemandEvent
     switch (event.__r) {
       case 'roster':
         // The authoritative member list, positioned in the relay stream: everything relayed
@@ -245,6 +257,13 @@ class ClientRoom implements Room {
         this._rosterArrived()
         return
       case 'data':
+        // Tail mode: hold relayed text until the first subscribe() attaches (see `_tailHold`),
+        // so nothing published between serialization and that subscribe is lost.
+        if (this._tailHold) {
+          this._tailHold.push({ event, info: makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp) })
+          if (this._tailHold.length > ROOM_TAIL_HOLD_MAX) this._tailHold.shift()
+          return
+        }
         this._state.applyData(
           event.from,
           event.fromMeta,
@@ -282,8 +301,9 @@ class ClientRoom implements Room {
       case 'announce':
         this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
         return
-      case 'activity':
-        this._state.applyActivity(event.at)
+      case 'demand':
+        // Global demand for one of our own members' tracks changed (onDemand).
+        this._localParticipants.get(event.member)?._onDemand(event.track, event.count)
         return
       case 'dm': {
         // Relayed from this member's private inbox — only its own stub ever receives it.
@@ -339,6 +359,21 @@ class ClientRoom implements Room {
   private _syncWants(): void {
     const state = this._state
     const text: MemberWants = state.closed ? { all: false, members: [] } : state.textWants()
+    // Tail mode: the first text listener flushes the held live tail, in order, before going live.
+    if (this._tailHold && (text.all || text.members.length > 0)) {
+      const held = this._tailHold
+      this._tailHold = null
+      for (const { event, info } of held) {
+        this._state.applyData(
+          event.from,
+          event.fromMeta,
+          event.fromIdentity ?? null,
+          event.data,
+          info,
+          isSuppressed(this.id, event.from),
+        )
+      }
+    }
     this._stub._setWireTextSubscribed(text.all)
     if (state.closed) return // stub is dead — nothing to declare
 
@@ -347,8 +382,6 @@ class ClientRoom implements Room {
       __r: 'sub-text',
       members: text.all ? [] : text.members,
     })
-    const wantActivity = state.activityListenerCount > 0
-    this._declareWant('activity', wantActivity ? 'on' : '', { __r: 'sub-activity', on: wantActivity })
     const binary = state.binaryWants()
     this._declareWant('binary', encodeBinaryWants(binary), { __r: 'sub-binary', wants: binary })
   }
@@ -369,11 +402,53 @@ class ClientRoom implements Room {
  *  to the sibling room via the registry below. */
 abstract class ClientParticipantBase extends ParticipantBase {
   protected readonly _roomId: string
+  /** Per-key conflation state for `publish(data, { coalesce })` — at most one in-flight send per
+   *  key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
+  private readonly _coalescers = new Map<
+    string,
+    { sending: boolean; pending: { data: unknown; waiters: CoalesceWaiter[] } | null }
+  >()
 
   constructor(roomId: string, id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
     super(id, meta, selfDelivery, identity)
     this._roomId = roomId
     if (!selfDelivery) setSuppressed(roomId, id, true)
+  }
+
+  /** The actual wire publish — each flavor supplies it; `publish()` wraps it with conflation. */
+  protected abstract _sendPublish(data: unknown): Promise<ChannelPublishAck>
+
+  publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
+    const key = options?.coalesce
+    if (key === undefined) return this._sendPublish(data)
+    return new Promise<ChannelPublishAck>((resolve, reject) => {
+      let slot = this._coalescers.get(key)
+      if (!slot) {
+        slot = { sending: false, pending: null }
+        this._coalescers.set(key, slot)
+      }
+      // Supersede any queued value; its waiters ride along and all resolve with the winning send.
+      slot.pending = { data, waiters: [...(slot.pending?.waiters ?? []), { resolve, reject }] }
+      this._drainCoalesce(key)
+    })
+  }
+
+  private _drainCoalesce(key: string): void {
+    const slot = this._coalescers.get(key)
+    if (!slot || slot.sending || !slot.pending) return
+    const { data, waiters } = slot.pending
+    slot.pending = null
+    slot.sending = true
+    this._sendPublish(data)
+      .then(
+        (ack) => waiters.forEach((w) => w.resolve(ack)),
+        (err) => waiters.forEach((w) => w.reject(err)),
+      )
+      .finally(() => {
+        slot.sending = false
+        if (slot.pending) this._drainCoalesce(key)
+        else this._coalescers.delete(key)
+      })
   }
 
   override _onLeft(cause: LeaveCause): void {
@@ -400,7 +475,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return this._room._getRemote(id)
   }
 
-  async publish(data: unknown): Promise<ChannelPublishAck> {
+  protected async _sendPublish(data: unknown): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._publishText(this.id, data)
   }
@@ -420,6 +495,12 @@ class ClientRoomParticipant extends ClientParticipantBase {
     this._assertActive()
     unwrapOkAck(await this._room._request({ __r: 'req-set-meta', id: this.id, meta }))
     this._meta = meta
+  }
+
+  async setAttributes(attrs: ParticipantMeta): Promise<void> {
+    this._assertActive()
+    unwrapOkAck(await this._room._request({ __r: 'req-set-attrs', id: this.id, attrs }))
+    this._meta = mergeAttributes(this._meta, attrs)
   }
 
   async leave(): Promise<void> {
@@ -447,6 +528,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       if (!hasRoomTag(notice)) return
       const msg = notice as ParticipantStubNotice
       if (msg.__r === 'p-meta') this._meta = msg.meta
+      else if (msg.__r === 'demand') this._onDemand(msg.track, msg.count)
       else if (msg.__r === 'dm')
         this._deliverMessage({
           from: msg.from,
@@ -459,7 +541,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
 
-  async publish(data: unknown): Promise<ChannelPublishAck> {
+  protected async _sendPublish(data: unknown): Promise<ChannelPublishAck> {
     this._assertActive()
     return unwrapPublishAck(await this._request({ __r: 'req-publish', data }))
   }
@@ -478,6 +560,12 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     this._assertActive()
     unwrapOkAck(await this._request({ __r: 'req-set-meta', meta }))
     this._meta = meta
+  }
+
+  async setAttributes(attrs: ParticipantMeta): Promise<void> {
+    this._assertActive()
+    unwrapOkAck(await this._request({ __r: 'req-set-attrs', attrs }))
+    this._meta = mergeAttributes(this._meta, attrs)
   }
 
   async leave(): Promise<void> {

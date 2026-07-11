@@ -8,7 +8,6 @@ export {
   roomTextKey,
   roomMemberDataKey,
   roomMemberTrackKey,
-  roomActivityKey,
   roomDmKey,
   roomConfigKvKey,
   roomIdFromConfigKey,
@@ -22,6 +21,7 @@ export {
   unframeMemberId,
   hasRoomTag,
   normalizeJoinOptions,
+  mergeAttributes,
   errorMessage,
   leaveCauseFromWire,
   leaveCauseToWire,
@@ -42,6 +42,7 @@ export type {
   ParticipantStubMetadata,
   RoomEnvelope,
   RoomRosterEvent,
+  RoomDemandEvent,
   RoomCtrlEnvelope,
   RoomDataEnvelope,
   RoomDataPublish,
@@ -56,7 +57,6 @@ export type {
   MemberWants,
   TrackWants,
   BinaryWants,
-  RoomActivityEvent,
 }
 
 import { assert, assertUsage } from '../../utils/assert.js'
@@ -92,11 +92,6 @@ function roomMemberDataKey(roomId: string, memberId: string): string {
  *  every hop, not just at delivery. */
 function roomMemberTrackKey(roomId: string, memberId: string, track: string): string {
   return `${roomMemberDataKey(roomId, memberId)}:t:${track}`
-}
-/** Pub/sub key carrying the room's throttled activity signal — subscribed only by holders with
- *  `onActivity` listeners (badge consumers), so nobody else pays even that trickle. */
-function roomActivityKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:a`
 }
 /** Pub/sub key carrying one member's private inbox — only the member's owning node subscribes. */
 function roomDmKey(roomId: string, memberId: string): string {
@@ -186,6 +181,9 @@ type RoomSnapshotMetadata = {
   count: number
   /** LWW stamp of the config the snapshot reflects — seeds `applyRoomUpdate` ordering. */
   stamp: { at: number; by: string }
+  /** Tail mode (`Room.get(id, { tail: true })`): the client holds relayed text until its first
+   *  `subscribe()`, so history read after serialization can be stitched to the live stream. */
+  tail?: boolean
 }
 
 /** Serializer metadata of a `LocalParticipant` crossing the wire. */
@@ -213,6 +211,11 @@ type RoomCtrlEnvelope =
   // A member's first publish on a new named track — announced before the frame, so live
   // all-track subscribers bring up the track-key subscription (idempotent, like join).
   | { __r: 'track'; id: string; track: string }
+  // Track-demand gossip (`onDemand`): a node announces that its local demand for one member's
+  // (member, track) stream turned on/off, tagged with its instance id. The member's owning node
+  // aggregates these across nodes into a global demand count — node-to-node only, never relayed
+  // to clients. `track` is `DEFAULT_TRACK` for the plain `publishBinary()` lane.
+  | { __r: 'want'; member: string; track: string; node: string; on: boolean }
   | { __r: 'closed' }
 
 /** A participant's message. Published on the room's text key (shared mode) or the member's own
@@ -224,10 +227,6 @@ type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; 
 /** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown }
 
-/** The activity trickle (own key `:a`): "something was published around `at`" — throttled at
- *  the publisher, consumed by badge-style listeners that don't want message bodies. */
-type RoomActivityEvent = { __r: 'activity'; at: number }
-
 /** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 
@@ -237,6 +236,11 @@ type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
  *  the adapter. Position-in-stream consistency: every event relayed before it is already
  *  reflected in it; later events apply incrementally on top. */
 type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] }
+
+/** Global demand for one of a member's own published tracks, pushed to that member's stub
+ *  (`onDemand`) whenever the owning node's aggregate count changes. `track` is `null` for the
+ *  default `publishBinary()` lane. `count` is the approximate number of interested subscribers. */
+type RoomDemandEvent = { __r: 'demand'; member: string; track: string | null; count: number }
 
 /** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
  *  privacy: only the target's owning node subscribes, only its holder receives the relay.
@@ -258,15 +262,16 @@ type RoomStubRequest =
   | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
+  | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown }
   | { __r: 'sub-binary'; wants: BinaryWants }
   | { __r: 'sub-text'; members: string[] }
-  | { __r: 'sub-activity'; on: boolean }
 
 /** Client→server requests on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubRequest =
   | { __r: 'req-publish'; data: unknown }
   | { __r: 'req-set-meta'; meta: ParticipantMeta }
+  | { __r: 'req-set-attrs'; attrs: ParticipantMeta }
   | { __r: 'req-dm'; to: string; data: unknown }
   | { __r: 'req-leave' }
 
@@ -275,6 +280,7 @@ type ParticipantStubNotice =
   | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
   | { __r: 'p-meta'; meta: ParticipantMeta }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown }
+  | { __r: 'demand'; track: string | null; count: number }
 
 /** Which members' streams a holder wants on the text lane — `all` for room-level listeners,
  *  or a specific member set for participant-scoped ones. */
@@ -303,6 +309,17 @@ function leaveCauseToWire(cause: LeaveCause): { cause?: 'removed' | 'disconnecte
 /** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {
   return isObject(value) && typeof value.__r === 'string'
+}
+
+/** Merge `attrs` into `meta` per key, returning a new object — the `setAttributes()` semantics.
+ *  A value of `undefined` deletes its key (the serializer preserves `undefined` on the wire). */
+function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): ParticipantMeta {
+  const next: ParticipantMeta = { ...meta }
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value === undefined) delete next[key]
+    else next[key] = value
+  }
+  return next
 }
 
 /** Validates `join(meta, options)` arguments; returns the resolved `selfDelivery`. */
