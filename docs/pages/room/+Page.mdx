@@ -7,7 +7,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 `Room` adds multi-party **rooms** on top of <Link href="/channel">channels</Link>: presence (who's in the room), participant metadata, per-member streams, private messages, and admin controls.
 
-> Use rooms for chat, video calls, game lobbies, collaborative editing — anything where *who is connected* matters. When you only need messaging or pub/sub, use <Link href="/channel">channels</Link> instead.
+> Use rooms for chat, game lobbies, collaborative editing — anything where *who is connected* matters. When you only need messaging or pub/sub, use <Link href="/channel">channels</Link> instead.
 
 | | <Link href="/channel#new-channel">`new Channel()`</Link> | <Link href="/channel#new-broadcastchannel">`new BroadcastChannel()`</Link> | `Room` |
 |---|---|---|---|
@@ -414,7 +414,7 @@ Every message callback receives its verified sender as `from` — `{ id, meta, i
 
 Rooms work across multiple server nodes out of the box with <Link href="/redis">`@telefunc/redis`</Link> and the <Link href="/stream/cloudflare">Cloudflare</Link> integration.
 
-- **Pay for what you consume.** Presence-only observers never receive the room's messages; binary flows only to members you subscribe to, and is fetched only while someone wants it.
+- **Pay for what you consume.** Presence-only observers never receive the room's messages; text and binary alike flow only from the members you subscribe to, and are fetched only while someone wants them.
 - **Crash-safe presence.** A clean `leave()` shows up everywhere at once. A crash can't: the node holding each connection refreshes its members every 30s, and any member that stops being refreshed is removed and its departure announced — with the store's own key-expiry as a final backstop, so a crashed node leaves no ghosts.
 - **Deterministic convergence.** Metadata and config updates land in the same final state on every node, no matter what order they arrive in.
 - **`isolated: true`** routes each member's `publish()` messages through their own pub/sub key instead of one key shared by the whole room. On platforms that map each key to its own coordinator (e.g. Cloudflare Durable Objects), that removes the contention of an entire room publishing through a single key; elsewhere it makes no difference.
