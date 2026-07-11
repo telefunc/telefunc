@@ -283,7 +283,7 @@ export async function onJoinChat(roomId) {
 }
 ```
 
-`{ tail: true }` starts buffering the room's live messages the moment the telefunction returns it, and the client holds them until your first `subscribe()`. So the history you read *after* that point can't miss a live message in between — the small overlap is deduped by message ID:
+`{ tail: true }` starts buffering the room's live messages the moment the telefunction returns the room, and the client holds them until your first `subscribe()`. So the history you read *after* can't miss a message published meanwhile — and where history and the live tail overlap, your own render skips ids it has already shown (the `seen` set below):
 
 ```js
 // Chat.js
