@@ -337,6 +337,121 @@ the participant-snapshot type structurally
 (`ReturnType<GuildRoom['snapshot']>['participants'][number]`), and the `onLeave` cause is typed
 only by inference.
 
+## Findings from a whole-app smell audit (17–22)
+
+A systematic pass over the finished app (not just "what did adopting X delete?" but "what shape is
+the app *still* forced into?") surfaced a coherent family of scaling/ergonomic pain points. The
+throughline: **`identity` and cross-room operations aren't first-class, and change notifications
+carry no delta**, so the app repeatedly pays `O(roster)`, `O(all-rooms)`, or `O(everything)` for
+work that is logically `O(1)` or `O(one user)`.
+
+### 17. `identity` is a second-class address — targeting one user means scanning the whole roster
+
+`Room` made `identity` the durable "who is this user": `join(meta, { identity })`,
+`removeParticipant(id, { identity })`, and `participant.identity` all speak it. But **send and query
+don't** — `Room.send(id, participantId, data)` and `getParticipant(id)` are participant-id-only,
+with no identity-scoped variant. So to act on a user you must materialize the entire roster and
+filter in app code. Receipts (`telefunc/dms.telefunc.ts`): the DND check (`getParticipants()` →
+`filter(p => p.identity === target.id)` → read one `.meta.status`) and the DM fan-out
+(`getParticipants()` → `filter` → `Room.send(GUILD, p.id, …)` per tab). Each `getParticipants()` is
+`O(roster)` **KV reads**, and a single DM-to-the-bot pays it three times. A 5,000-member guild ships
+5,000 participant records to deliver one DM. It also makes DND a per-connection quirk (any one tab
+in DND blocks, because presence can only be read per-participant).
+
+- Fix: make addressing symmetric with removal — `Room.send(id, { identity }, data)` (fan out to all
+  of an identity's live participants server-side) and an identity-scoped read
+  (`room.getParticipants({ identity })` / `getParticipantByIdentity`).
+
+### 18. No cross-room primitive — "act on this user everywhere" is an app-driven sweep
+
+`identity` spans rooms, but operations don't. Kicking (`telefunc/admin.telefunc.ts`) enumerates
+**every channel** from the app's own DB and calls `removeParticipant({ identity })` per room —
+including channels the user never joined — because there's no "remove this identity from all rooms"
+and no "which rooms is this identity in?" query. `Room.list({ prefix })` returns `RoomInfo` with no
+membership, so it doesn't help. At 500 channels that's 501 roster-scanning round-trips per kick.
+
+- Fix: `Room.removeParticipant({ identity }, { allRooms: true })`, or a maintained identity→rooms
+  index / `Room.list({ identity })`. Same root as 17: identity isn't a query axis.
+
+### 19. `onChange` carries no delta and `snapshot()` is per-connection — consumers re-derive everything
+
+`onChange()` fires a bare "something changed" with no indication of *what*, and `snapshot()` returns
+the whole per-connection roster. So every consumer rebuilds its entire projection on every event.
+Receipts (`app/store.ts`): `pushMembers` re-scans + dedupes-by-identity + re-sorts the whole roster
+on any member's status blip; `publishChannels` re-projects **all** channels (re-walking every voice
+room's occupants) when one channel changes; and the identity-grouping the app actually wants (one
+row per user, not per connection) has to be recomputed by full scan each time — the client mirror of
+17. In a large guild every presence blip is an `O(roster)`/`O(channels)` rebuild feeding a
+full-tree re-render.
+
+- Fix: a change delta (what member/field changed) and/or an identity-keyed snapshot view
+  (`snapshot({ by: 'identity' })`), so consumers update incrementally instead of rebuilding.
+
+### 20. `Room` isn't parameterized by its publish type — every payload is an unchecked `as` cast
+
+`Room<Meta, ParticipantMeta>` types the metadata but not what flows over `publish`/`subscribe`/
+`onAnnounce`/`listen` — `data` is `unknown`. So every consumer hand-casts (`data as ChannelPublish`,
+`as GuildAnnouncement`, `as SystemNotice` in `app/store.ts`; the same lanes re-cast in
+`server/guards.ts`), unchecked, on the highest-traffic path. A stale cast after a payload refactor is
+a silent runtime bug with no compile-time flag.
+
+- Fix: a publish/message type parameter (`Room<Meta, PMeta, Publish>` or `subscribe<T>()`), so the
+  discriminated union is enforced end-to-end.
+
+### 21. Room metadata has no per-key merge — topic edits are a read-modify-write
+
+Participants got `setAttributes` (finding 5), but room meta didn't: `Room.update({ meta })` still
+replaces the whole object, so `onSetTopic` (`telefunc/channels.telefunc.ts`) does a separate
+`Room.get` to read current meta and respreads `kind`/`name` just to change `topic` — a
+read-modify-write with a round-trip in the middle, and two concurrent edits to different fields
+clobber each other.
+
+- Fix: `Room.setAttributes(id, partialMeta)` — the room-meta mirror of the participant merge.
+
+### 22. Delivery-shape gaps: unscoped activity broadcast, and no reconnect-safe send
+
+Two consequences of removed/absent primitives:
+- **Unread is now a guild-wide broadcast.** With the activity lane gone (finding 10), the app pings
+  `channel-activity` on the guild announce lane for *every* chat message — delivered to *every*
+  member's client, just for dots. A busy channel turns the guild lane into an `O(members)`-per-message
+  firehose (there's no server-side throttle). The re-derivation is correct but doesn't scale; the
+  removed per-channel signal was the right shape. Fix: a scoped/throttled activity signal.
+- **`Room.send` has no replay.** Channels got a lossless "history then live" fence
+  (`Room.get({ tail })`, finding 14); DMs have no equivalent — a DM delivered in the window after a
+  recipient's participant is reaped but before their reconnect creates a new one is live-lost (it
+  survives in the DB but only resurfaces on a full reload). Fix: a replayable/cursored server-authored
+  send, the `Room.send` twin of `tail`.
+
+### App-level bugs the audit caught (fixed here, not Room-API issues)
+
+The same pass found ordinary defects in the app itself — fixed in this round:
+
+- **Boot latch memoized a rejected promise** (`server/rooms.ts`): one transient boot failure bricked
+  every later `ensureLiveWorld()` for the process. Now cleared on failure so the next call retries.
+- **`joinCall` had no switch fence** (`app/call.ts`): `session` is set only after `onJoinVoice`
+  resolves, so rapid voice-channel switching (or leaving mid-join) orphaned the previous call — a
+  leaked mic, `AudioContext`, and server-side voice slot. Now guarded by a join-intent token (the
+  media twin of `openChannel`'s switch fence).
+- **`openChannel` tail continuation wasn't fenced** (`app/store.ts`): after the awaited join, the
+  history-record and unread-clear could land on a channel the user had already switched away from
+  (wrongly clearing a genuinely-unread badge); and an `onOpenChannel` rejection bounced boot to the
+  login screen / left a silently dead channel. Now re-checks the switch token and toasts the error.
+- **Kick was non-atomic** (`telefunc/admin.telefunc.ts`): one channel throwing mid-sweep left a
+  half-kicked user and skipped the announcement. Now best-effort per room, announce regardless.
+- **`onSetTopic` had no authorization** (`telefunc/channels.telefunc.ts`): any logged-in user could
+  rewrite any channel's topic. Now admin-gated, like delete/announce/kick.
+- **`onCreateChannel` name race / ghost row**: a lost check-then-insert race threw a raw error
+  instead of the friendly "already exists"; a failed `Room.create` left a DB row with no room. Now
+  caught and compensated.
+- **Stale screen-share `ended`**: the browser's "stop sharing" handler read the global session, so a
+  late `ended` could toggle an unrelated later call. Now scoped to the capturing session.
+
+Still-open app-level notes (not yet addressed, lower priority): the client re-renders broadly (the
+root reads the whole store; no memoized selectors) and `recordMessage` re-sorts the whole thread per
+message — both amplified by finding 19's lack of deltas; dedupe sets and message arrays aren't
+windowed; `onListDmThreads` is a full-table scan capped at 500 rows (can drop older conversations);
+expired sessions and the bot's `greeted` set are never pruned.
+
 ## Room API coverage
 
 | API | Used | Where / why not |

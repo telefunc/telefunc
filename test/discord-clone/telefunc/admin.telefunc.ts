@@ -22,10 +22,16 @@ async function onKickUser(targetUserId: string): Promise<void> {
   if (target.is_bot === 1) throw Abort('The bot stays')
   if (target.id === actor.id) throw Abort("You can't kick yourself")
 
-  await Room.removeParticipant(GUILD_ROOM_ID, { identity: target.id }, { reason: actor.name })
-  for (const row of q.listChannels()) {
-    await Room.removeParticipant(channelRoomId(row.id), { identity: target.id }, { reason: actor.name })
-  }
+  // Best-effort, room by room: a channel closing mid-sweep must not abort the kick and leave the
+  // user still a member of the rest, and the announce below must fire regardless. (That this is a
+  // sweep at all — O(channels) round-trips because identity isn't a cross-room address — is
+  // itself finding 18.)
+  const rooms = [GUILD_ROOM_ID, ...q.listChannels().map((row) => channelRoomId(row.id))]
+  await Promise.all(
+    rooms.map((roomId) =>
+      Room.removeParticipant(roomId, { identity: target.id }, { reason: actor.name }).catch(() => {}),
+    ),
+  )
 
   // Tell everyone (room-authored, on the guild's announce lane).
   await Room.announce(GUILD_ROOM_ID, { kind: 'member-kicked', userId: target.id, name: target.name, by: actor.name })

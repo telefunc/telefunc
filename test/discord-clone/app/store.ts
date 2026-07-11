@@ -431,7 +431,16 @@ async function openChannel(channelId: string): Promise<void> {
   const thisOpen: Promise<Opened | null> = (async () => {
     const previous = await previousJoin.catch(() => null)
     if (previous !== null) void previous.leave().catch(() => {})
-    const opened = await onOpenChannel(channelId)
+    let opened: Opened
+    try {
+      opened = await onOpenChannel(channelId)
+    } catch (err) {
+      // Surface the failure instead of rejecting: a bare throw here bounces boot to the auth
+      // screen (enter()'s catch) and drops the sender's next message silently. Only toast if this
+      // switch is still the one the user is waiting on.
+      if (activeSwitch === switchToken) showToast(errorMessage(err))
+      return null
+    }
     if (activeSwitch !== switchToken) {
       void opened.membership.leave().catch(() => {}) // user moved on while the join was in flight
       return null
@@ -442,30 +451,31 @@ async function openChannel(channelId: string): Promise<void> {
   viewingJoin = thisOpen.then((opened) => opened?.membership ?? null)
 
   const opened = await thisOpen
-  if (opened === null) return
+  // Re-check the token: the user can switch away in the gap before this continuation runs, and the
+  // history-record + trailing unread-clear below would otherwise land on an abandoned channel
+  // (wrongly clearing a genuinely-unread badge).
+  if (opened === null || activeSwitch !== switchToken) return
 
   // The past first…
   for (const message of opened.history) recordMessage(channelId, message)
   // …then go live: subscribing flushes the held tail behind the history, deduped by id
   // (`recordMessage` drops ids it has already shown). No message can fall in the gap.
-  if (activeSwitch === switchToken) {
-    activeMessagesUnsubscribe = room.subscribe((data, info, from) => {
-      const published = data as ChannelPublish
-      if (published.kind === 'typing') {
-        markTyping(room.id, from.meta.name)
-        return
-      }
-      stopTyping(room.id, from.meta.name)
-      recordMessage(room.id, {
-        id: published.id,
-        authorId: from.identity ?? from.id,
-        author: { name: from.meta.name, color: from.meta.color, bot: from.meta.bot },
-        text: published.text,
-        seq: info.seq,
-        at: info.timestamp,
-      })
+  activeMessagesUnsubscribe = room.subscribe((data, info, from) => {
+    const published = data as ChannelPublish
+    if (published.kind === 'typing') {
+      markTyping(room.id, from.meta.name)
+      return
+    }
+    stopTyping(room.id, from.meta.name)
+    recordMessage(room.id, {
+      id: published.id,
+      authorId: from.identity ?? from.id,
+      author: { name: from.meta.name, color: from.meta.color, bot: from.meta.bot },
+      text: published.text,
+      seq: info.seq,
+      at: info.timestamp,
     })
-  }
+  })
   setState({
     unread: { ...getState().unread, [channelId]: false },
     hasOlder: { ...getState().hasOlder, [channelId]: opened.hasMore },

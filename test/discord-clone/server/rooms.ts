@@ -22,10 +22,15 @@ function dbChannelIdOf(roomId: string): string | null {
   return roomId.startsWith(CHANNEL_ROOM_PREFIX) ? roomId.slice(CHANNEL_ROOM_PREFIX.length) : null
 }
 
-/** Boot latch — on `globalThis` so dev-server module reloads don't re-run it. */
+/** Boot latch — on `globalThis` so dev-server module reloads don't re-run it. On failure the
+ *  latch is cleared, so a transient boot error (a KV blip, the bot failing to start) doesn't
+ *  memoize a rejected promise that bricks every later `ensureLiveWorld()` for the process. */
 async function ensureLiveWorld(): Promise<void> {
   const g = globalThis as { __discordWorldReady?: Promise<void> }
-  g.__discordWorldReady ??= boot()
+  g.__discordWorldReady ??= boot().catch((err) => {
+    g.__discordWorldReady = undefined
+    throw err
+  })
   await g.__discordWorldReady
 }
 

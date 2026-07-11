@@ -47,20 +47,33 @@ type Session = {
 type CaptureHandle = { stream: MediaStream; stop(): void }
 
 let session: Session | null = null
+// Guards the async join: `session` isn't set until `onJoinVoice` resolves, so without a token two
+// rapid joinCall()s (or a leave during a join) would both pass the `session` checks and the second
+// membership would overwrite the first without ever tearing it down — a leaked mic, AudioContext,
+// and server-side voice slot. Every join captures a token; if it's no longer current when the join
+// resolves, we undo it.
+let joinIntent: symbol | null = null
 
 async function joinCall(channelId: string): Promise<void> {
   const room = getChannelRoom(channelId)
   if (room === undefined || session?.channelId === channelId) return
   await leaveCall()
 
+  const intent = Symbol(channelId)
+  joinIntent = intent
+
   let membership: LocalParticipant<MemberMeta>
   try {
-    // Server-side join: trusted identity + the voice room's `onJoin` capacity guard — a full
+    // Server-side join: trusted identity + the voice room's `onBeforeJoin` capacity guard — a full
     // channel rejects here, on the server (this used to be a client-side `isFull` check that
     // nothing enforced).
     membership = await onJoinVoice(channelId)
   } catch (err) {
-    showToast(errorMessage(err))
+    if (joinIntent === intent) showToast(errorMessage(err))
+    return
+  }
+  if (joinIntent !== intent) {
+    void membership.leave().catch(() => {}) // superseded by a newer join/leave while we were joining
     return
   }
 
@@ -157,6 +170,7 @@ async function joinCall(channelId: string): Promise<void> {
 }
 
 async function leaveCall(): Promise<void> {
+  joinIntent = null // cancel any in-flight join so it undoes itself instead of resurrecting a call
   if (session === null) return
   const ending = session
   session = null
@@ -213,8 +227,11 @@ async function toggleScreenShare(): Promise<void> {
   try {
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 5 } } })
     current.screen = videoPipeline(current, stream, 'screen', { keyframeEvery: 5, bitrate: 1_200_000 })
-    // The browser's own "stop sharing" UI ends the track behind our back — mirror it.
-    stream.getVideoTracks()[0]?.addEventListener('ended', () => void toggleScreenShare())
+    // The browser's own "stop sharing" UI ends the track behind our back — mirror it, but only if
+    // this is still the current call and still sharing (a stale `ended` must not toggle a later call).
+    stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+      if (session === current && current.screen !== null) void toggleScreenShare()
+    })
     syncCallState(current)
     await current.membership.setAttributes({ screen: true })
   } catch {

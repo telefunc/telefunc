@@ -52,14 +52,24 @@ async function onCreateChannel(kind: 'text' | 'voice', rawName: string) {
   }
 
   const id = randomUUID()
-  q.insertChannel({ id, kind, name, topic: '', created_at: Date.now() })
+  try {
+    q.insertChannel({ id, kind, name, topic: '', created_at: Date.now() })
+  } catch {
+    // Lost the check-then-insert race to a concurrent create with the same name (UNIQUE(name)).
+    return { ok: false as const, error: `#${name} already exists` }
+  }
   const roomId = channelRoomId(id)
-  await Room.create(
-    roomId,
-    kind === 'voice'
-      ? { meta: { kind, name }, size: VOICE_CHANNEL_SIZE, isolated: true }
-      : { meta: { kind, name, topic: '' } },
-  )
+  try {
+    await Room.create(
+      roomId,
+      kind === 'voice'
+        ? { meta: { kind, name }, size: VOICE_CHANNEL_SIZE, isolated: true }
+        : { meta: { kind, name, topic: '' } },
+    )
+  } catch (err) {
+    q.deleteChannel(id) // don't leave a ghost row with no live room behind
+    throw err
+  }
   // Rooms have no directory events — nothing tells other clients a room appeared. The guild's
   // announce lane doubles as the app's directory feed (every client fetches the room on this).
   await Room.announce(GUILD_ROOM_ID, { kind: 'channel-created', channelId: roomId })
@@ -114,7 +124,8 @@ async function onJoinVoice(roomId: string): Promise<LocalParticipant<MemberMeta>
 }
 
 async function onSetTopic(roomId: string, topic: string): Promise<void> {
-  requireUser()
+  const user = requireUser()
+  if (!user.isAdmin) throw Abort('Only the server owner can edit channel topics') // was unguarded
   const dbChannelId = requireDbChannelId(roomId)
   const channel = await Room.get<import('../shared/types').ChannelMeta>(roomId)
   if (channel.meta.kind !== 'text') throw Abort('Voice channels have no topic')
