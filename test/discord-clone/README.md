@@ -33,6 +33,12 @@ deleted from app code.
   "Tranche-1": **`Room.setAttributes()`** (per-key room-meta merge, finding 21) and a **typed
   publish generic** `Room<Meta, PMeta, Pub>` (finding 20). Adopted both — `onSetTopic` is now a
   one-field merge, and the channel room carries `ChannelPublish` so subscribers drop their casts.
+- **Round 7** followed the base to `27f1ceb` ("Tranche-2"), landing the identity/delta family:
+  an **identity index** (`Room.send({ identity })`, index-resolved `removeParticipant({ identity })`
+  — findings 17 send-half, 18) and **`snapshot({ by: 'identity' })`** + **`onParticipantUpdate`**
+  (finding 19). Adopted — DM delivery is now two identity-addressed sends (no roster fan-out) and the
+  member sidebar drops its hand-rolled dedupe. The presence-read (17 query-half) and cross-room
+  sweep (18) residuals stay open.
 
 **Features**
 
@@ -81,7 +87,7 @@ you are (verified, not client-echoed).
 | Message history | `messages` table, written by the channel's `onAfterPublish` hook with the message's authoritative `seq`/`timestamp` (`author_id: from.identity`); the first read is fenced losslessly by `Room.get(…, { tail: true })` (finding 14), paginated by a `seq` cursor |
 | Typing indicator | Ephemeral `publish({ kind: 'typing' })` — same lane as chat, skipped by the guard (never persisted, never acked as activity) |
 | Moderation | `onBeforePublish` guard throws → rejection travels the ack back to the sender's promise; persistence is the separate `onAfterPublish` post-commit hook |
-| DMs | **DB-first, server-delivered**: telefunction writes the row, then `Room.send()`s it to every live participant of both users (matched by `identity`). Works offline; DND enforced server-side. The member-to-member `me.send()` lane is deliberately closed by a guard (see finding 2) |
+| DMs | **DB-first, server-delivered**: telefunction writes the row, then two `Room.send(room, { identity }, …)` calls push it to both users' live tabs — index-resolved server-side, no roster fan-out (finding 17). Works offline; DND enforced server-side. The member-to-member `me.send()` lane is deliberately closed by a guard (see finding 2) |
 | Channel create/topic/delete | `Room.create` / per-key `Room.setAttributes({ topic })` / `Room.close`; the guild's announce lane doubles as the directory feed (finding 4) |
 | Kick | One `Room.removeParticipant(roomId, { identity }, { reason })` per room — the leave lands as `{ type: 'removed', reason }` on the kicked client, no side-channel notice (finding 12) |
 | Voice/video | One room per voice channel; capacity enforced by its `onBeforeJoin` guard. Mic/camera/screen are **named binary tracks** (`publishBinary(frame, { track, keyFrame })` / `subscribeBinary(cb, { track })`), each paused by `onDemand` when unwatched; mute/camera/screen state merges one field at a time via `setAttributes` |
@@ -354,47 +360,52 @@ throughline: **`identity` and cross-room operations aren't first-class, and chan
 carry no delta**, so the app repeatedly pays `O(roster)`, `O(all-rooms)`, or `O(everything)` for
 work that is logically `O(1)` or `O(one user)`.
 
-### 17. `identity` is a second-class address — targeting one user means scanning the whole roster
+### 17. `identity` is a second-class address — send half ✔ adopted, query half open
 
-`Room` made `identity` the durable "who is this user": `join(meta, { identity })`,
-`removeParticipant(id, { identity })`, and `participant.identity` all speak it. But **send and query
-don't** — `Room.send(id, participantId, data)` and `getParticipant(id)` are participant-id-only,
-with no identity-scoped variant. So to act on a user you must materialize the entire roster and
-filter in app code. Receipts (`telefunc/dms.telefunc.ts`): the DND check (`getParticipants()` →
-`filter(p => p.identity === target.id)` → read one `.meta.status`) and the DM fan-out
-(`getParticipants()` → `filter` → `Room.send(GUILD, p.id, …)` per tab). Each `getParticipants()` is
-`O(roster)` **KV reads**, and a single DM-to-the-bot pays it three times. A 5,000-member guild ships
-5,000 participant records to deliver one DM. It also makes DND a per-connection quirk (any one tab
-in DND blocks, because presence can only be read per-participant).
+`Room` made `identity` the durable "who is this user" for `join`, `removeParticipant`, and reads —
+but originally **send and query didn't speak it**, so acting on a user meant materializing the whole
+roster and filtering in app code. The DM path paid `O(roster)` **KV reads** *per DM* (a DM-to-the-bot
+three times); a 5,000-member guild shipped 5,000 records to deliver one message.
 
-- Fix: make addressing symmetric with removal — `Room.send(id, { identity }, data)` (fan out to all
-  of an identity's live participants server-side) and an identity-scoped read
-  (`room.getParticipants({ identity })` / `getParticipantByIdentity`).
+- Adopted (round 7): Tranche-2 added an **identity index** — `Room.send(id, { identity }, data)`
+  fans out to every membership of an identity (tabs, connections) resolved in `O(memberships)`, not
+  a roster scan; a signed-out recipient is a no-op. Receipt (`telefunc/dms.telefunc.ts`): DM delivery
+  is now two `Room.send(GUILD, { identity }, notice)` calls (recipient + sender's other tabs) — the
+  `getParticipants()` fan-out fetch, the `filter`, and the per-tab loop are all deleted.
+- Still open (query half): there's no identity-scoped **presence read** — `getParticipants({ identity })`
+  / `getParticipantByIdentity`. So the DND check still loads the roster to read one user's `status`
+  (noted at its call site). `snapshot({ by: 'identity' })` groups the roster by user but still needs
+  the view loaded first, so it doesn't help a single-shot telefunction.
 
-### 18. No cross-room primitive — "act on this user everywhere" is an app-driven sweep
+### 18. No cross-room primitive — per-room sweep now O(k), cross-room enumeration still app-driven
 
-`identity` spans rooms, but operations don't. Kicking (`telefunc/admin.telefunc.ts`) enumerates
-**every channel** from the app's own DB and calls `removeParticipant({ identity })` per room —
-including channels the user never joined — because there's no "remove this identity from all rooms"
-and no "which rooms is this identity in?" query. `Room.list({ prefix })` returns `RoomInfo` with no
-membership, so it doesn't help. At 500 channels that's 501 roster-scanning round-trips per kick.
+`identity` spans rooms, but operations act on one room. Kicking (`telefunc/admin.telefunc.ts`)
+enumerates **every channel** from the app's own DB and removes the identity from each.
 
-- Fix: `Room.removeParticipant({ identity }, { allRooms: true })`, or a maintained identity→rooms
-  index / `Room.list({ identity })`. Same root as 17: identity isn't a query axis.
+- Adopted (round 7): each `removeParticipant({ identity })` is now index-resolved — `O(memberships
+  of that identity in that room)` instead of a full per-room roster scan — so the sweep got much
+  cheaper without an app change. (The kick already addressed by `{ identity }`, so it benefited
+  transparently on the base upgrade.)
+- Still open: the **cross-room enumeration** itself. There's no "remove this identity from all
+  rooms" and no "which rooms is this identity in?" — `Room.list()` carries no membership — so the
+  app still issues one call per channel. Fix: `removeParticipant({ identity }, { allRooms })` or an
+  identity→rooms index.
 
-### 19. `onChange` carries no delta and `snapshot()` is per-connection — consumers re-derive everything
+### 19. `onChange` carries no delta and `snapshot()` is per-connection — grouping ✔ adopted, delta available
 
-`onChange()` fires a bare "something changed" with no indication of *what*, and `snapshot()` returns
-the whole per-connection roster. So every consumer rebuilds its entire projection on every event.
-Receipts (`app/store.ts`): `pushMembers` re-scans + dedupes-by-identity + re-sorts the whole roster
-on any member's status blip; `publishChannels` re-projects **all** channels (re-walking every voice
-room's occupants) when one channel changes; and the identity-grouping the app actually wants (one
-row per user, not per connection) has to be recomputed by full scan each time — the client mirror of
-17. In a large guild every presence blip is an `O(roster)`/`O(channels)` rebuild feeding a
-full-tree re-render.
+`onChange()` fired a bare "something changed", and `snapshot()` returned the whole per-connection
+roster, so every consumer rebuilt its entire projection on every event — and the identity-grouping
+the app wants (one row per user, not per connection) was recomputed by full scan each time.
 
-- Fix: a change delta (what member/field changed) and/or an identity-keyed snapshot view
-  (`snapshot({ by: 'identity' })`), so consumers update incrementally instead of rebuilding.
+- Adopted (round 7): `room.snapshot({ by: 'identity' })` returns the roster **grouped by user**
+  (a user's tabs/connections collapsed), reference-stable like `snapshot()`. Receipt (`app/store.ts`):
+  `pushMembers` drops the hand-rolled `Map` dedupe — it maps `snapshot({ by: 'identity' }).identities`
+  straight to member rows. The server owns the grouping now (the client mirror of finding 17).
+- Available, not yet fully adopted: `room.onParticipantUpdate((member, meta, prev))` — one delta
+  subscription for every member's metadata change (vs. wiring `onUpdate` per handle from `onJoin`,
+  which `app/call.ts` still does per peer). Consuming the *delta* to update incrementally (rather
+  than `onChange` → rebuild-the-array) is coupled to the store's still-open selector/memo refactor,
+  so this half is noted, not yet claimed.
 
 ### 20. `Room` isn't parameterized by its publish type — ✔ adopted upstream
 
@@ -472,10 +483,11 @@ expired sessions and the bot's `greeted` set are never pruned.
 | API | Used | Where / why not |
 |---|---|---|
 | `Room.create` / `Room.get` (incl. `{ tail: true }`) / `Room.getOrCreate` / `Room.guard` / `Room.update` / `Room.setAttributes` / `Room.close` | ✔ | `server/rooms.ts`, `server/guards.ts`, `telefunc/channels.telefunc.ts` — `tail` fences history (finding 14); `setAttributes` merges the topic per-key (finding 21) |
-| `Room.removeParticipant({ identity }, { reason })` / `Room.announce` / `Room.send` | ✔ | kick sweep, banners + directory + activity feed, DM delivery |
+| `Room.removeParticipant({ identity }, { reason })` / `Room.announce` / `Room.send(room, { identity }, …)` | ✔ | kick sweep (index-resolved per room, finding 18), banners + directory + activity feed, identity-addressed DM delivery (finding 17) |
 | `Room.join` (static) / `Room.list` | ✖ | memberships need identity + guards (server-side, per-instance); the app's channels table already knows the rooms (finding 4) |
 | `room.join(meta, { identity })` / `getParticipants` / `subscribe` / `onJoin` / `onLeave` / `onUpdate` / `onAnnounce` / `onClose` / `count` / `size` / `isFull` / `meta` | ✔ | throughout `telefunc/*`, `server/bot.ts`, `app/store.ts` |
-| `room.snapshot` / `onChange` | ✔ | the entire Room→React adapter (`app/store.ts`) |
+| `room.snapshot` / `snapshot({ by: 'identity' })` / `onChange` | ✔ | the Room→React adapter; the identity-grouped view is the member sidebar (finding 19) — `app/store.ts` |
+| `room.onParticipantUpdate` | ✖ | available (finding 19 delta hook); `app/call.ts` still wires per-peer `member.onUpdate` — full adoption is tied to the store's selector/memo refactor |
 | ~~`room.onActivity`~~ | — | removed upstream in round 4; unread is re-derived from `onAfterPublish` → guild announce (finding 10) |
 | guards: `onBeforePublish` / `onAfterPublish` / `onBeforeSend` / `onBeforeJoin` | ✔ | validate + persist (split), closing the DM lane, voice capacity (`server/guards.ts`) |
 | `room.getParticipant` / `onEmpty` / `onFull` / `isEmpty` / `isClosed` / `onAfterSend` / `onAfterJoin` | ✖ | roster filtering + live getters covered every need; the app persists in `onAfterPublish` only |

@@ -11,11 +11,11 @@ export { onDmThread, onListDmThreads, onSendDm }
 // app can't be built on it (see README finding). The guild guard closes it outright.
 
 import { randomUUID } from 'node:crypto'
-import { Abort, getContext, Room, type RemoteParticipant } from 'telefunc'
+import { Abort, getContext, Room } from 'telefunc'
 import { dmThreadKey } from '../database/db'
 import * as q from '../database/queries'
 import { ensureLiveWorld, GUILD_ROOM_ID } from '../server/rooms'
-import type { DmMessage, GuildRoom, MemberMeta, SystemNotice } from '../shared/types'
+import type { DmMessage, GuildRoom, SystemNotice } from '../shared/types'
 
 const PAGE_SIZE = 50
 
@@ -30,16 +30,16 @@ async function onSendDm(toUserId: string, text: string): Promise<DmMessage> {
   await ensureLiveWorld()
   const guild: GuildRoom = await Room.get(GUILD_ROOM_ID)
 
-  // Do-Not-Disturb: live presence state, read from the guild roster. `identity` is the
-  // server-stamped app identity — the durable way to say "the same user" (finding 1).
+  // Do-Not-Disturb still reads the roster: Tranche-2 gave send/kick an O(k) identity index (adopted
+  // below), but there's no identity-scoped *presence* read yet — so checking one user's status is
+  // still a load-and-filter (the query half of finding 17, still open).
   const participants = await guild.getParticipants()
-  const targetParticipants = participants.filter((p) => p.identity === target.id)
-  if (targetParticipants.some((p) => p.meta.status === 'dnd')) {
+  if (participants.some((p) => p.identity === target.id && p.meta.status === 'dnd')) {
     throw Abort(`${target.name} has Do Not Disturb on`)
   }
 
   const message = persistDm({ fromId: user.id, fromName: user.name, toId: target.id, toName: target.name, text })
-  await deliverLive(guild, participants, message)
+  await deliverDm(message)
 
   // The bot answers DMs — same lane, same persistence.
   if (target.is_bot === 1) {
@@ -50,7 +50,7 @@ async function onSendDm(toUserId: string, text: string): Promise<DmMessage> {
       toName: user.name,
       text: `You said: "${text.slice(0, 200)}" — I'm a bot; try !help in a channel.`,
     })
-    await deliverLive(guild, participants, reply)
+    await deliverDm(reply)
   }
 
   return message
@@ -106,19 +106,16 @@ function persistDm(dm: { fromId: string; fromName: string; toId: string; toName:
   return message
 }
 
-/** Push to every participant of the two users involved (sender's other tabs included) —
- *  clients dedupe by message ID. A participant racing away mid-send is fine. */
-async function deliverLive(
-  _guild: GuildRoom,
-  participants: RemoteParticipant<MemberMeta>[],
-  message: DmMessage,
-): Promise<void> {
+/** Push the DM live to both parties — every tab/connection of each identity, resolved server-side
+ *  from the identity index by `Room.send(room, { identity }, …)`. No roster fetch and no
+ *  per-participant loop: the two addressees are the two identities, not their N live memberships
+ *  (finding 17). A signed-out recipient is a no-op — the row is already in the DB for later. */
+async function deliverDm(message: DmMessage): Promise<void> {
   const notice: SystemNotice = { kind: 'dm', message }
-  await Promise.all(
-    participants
-      .filter((p) => p.identity === message.toId || p.identity === message.fromId)
-      .map((p) => Room.send(GUILD_ROOM_ID, p.id, notice).catch(() => {})),
-  )
+  await Promise.all([
+    Room.send(GUILD_ROOM_ID, { identity: message.toId }, notice).catch(() => {}),
+    Room.send(GUILD_ROOM_ID, { identity: message.fromId }, notice).catch(() => {}),
+  ])
 }
 
 function requireUser() {

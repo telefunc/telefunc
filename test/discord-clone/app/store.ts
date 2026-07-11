@@ -291,16 +291,16 @@ async function logout(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function wireGuild(guildRoom: GuildRoom, myself: LocalParticipant<MemberMeta>): void {
-  // The member sidebar. `snapshot()` is reference-stable and immutable, `onChange()` is one
-  // subscription for everything observable — the entire roster adapter this store used to
-  // hand-roll (finding 9, fixed upstream). One row per *user*: dedupe on `identity`.
+  // The member sidebar. `snapshot({ by: 'identity' })` returns one group per *user* — the server
+  // collapses a user's tabs/connections, so this store no longer hand-rolls the identity dedupe
+  // with a Map (finding 19). Reference-stable + `onChange()` is still the whole adapter (finding 9).
   const pushMembers = () => {
-    const byUser = new Map<string, Member>()
-    for (const p of guildRoom.snapshot().participants) {
-      const member = toMember(p)
-      if (!byUser.has(member.userId)) byUser.set(member.userId, member)
+    const members: Member[] = []
+    for (const group of guildRoom.snapshot({ by: 'identity' }).identities) {
+      const rep = group.participants[0] // a group always has ≥1 membership; the tabs share a user
+      if (rep !== undefined) members.push(toMember(rep))
     }
-    setState({ members: [...byUser.values()].sort(byName) })
+    setState({ members: members.sort(byName) })
   }
   guildRoom.onChange(pushMembers)
   pushMembers()
