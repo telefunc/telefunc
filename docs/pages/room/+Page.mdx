@@ -275,7 +275,7 @@ export async function onJoinChat(roomId) {
   const room = await Room.get(roomId, { tail: true }) // relay live messages from now
   Room.guard(room, {
     onAfterPublish: async (from, message, info) => {
-      await db.messages.insert({ ...message, roomId, authorId: from.id, seq: info.seq, at: info.timestamp })
+      await db.messages.insert({ ...message, roomId, authorId: from.identity, seq: info.seq, at: info.timestamp })
     },
   })
   const history = await db.messages.latest(roomId, 50) // read after tailing began, ordered by seq
