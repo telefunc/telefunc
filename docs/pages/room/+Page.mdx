@@ -140,7 +140,7 @@ onCursorMove((pos) => me.publish({ pos }, { coalesce: 'cursor' }))
 
 ### Identify your users
 
-Participant IDs are per-membership: the same person is a different participant in every room, tab, and reconnect. To correlate memberships, stamp an `identity` at join. It's server-assigned in the telefunction (a client `join()` can't claim one), and travels spoof-proof with the member:
+Participant IDs are per-membership: the same person is a different participant in every room, tab, and reconnect. To correlate memberships, stamp an `identity` at join. It's server-assigned in the telefunction (a client `join()` can't claim one), travels with the member, and can't be spoofed:
 
 ```js
 // Chat.telefunc.js
@@ -296,7 +296,7 @@ for (const m of history) show(m)   // the past
 room.subscribe(show)               // flushes the held live tail, then stays live
 ```
 
-Order history by your own stored timestamp; treat the live receipt's `info.timestamp` as display metadata.
+Order history by your own stored timestamp; treat the live receipt's `info.timestamp` as display metadata (server clocks differ across nodes).
 
 
 ### Switching rooms
