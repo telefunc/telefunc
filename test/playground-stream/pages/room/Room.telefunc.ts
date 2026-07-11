@@ -1,12 +1,21 @@
 export {
   onCreateRoom,
   onGetRoom,
+  onGetRoomTail,
+  onGetOrCreateRoom,
   onGetGuardedRoom,
+  onGetAuditRoom,
+  onGetAudit,
   onJoinAsServer,
   onGetRoomWithMember,
+  onWatchRoom,
+  onGetWatched,
   onAnnounce,
   onSystemSend,
+  onUpdateRoom,
+  onListRooms,
   onKick,
+  onKickByIdentity,
   onCloseRoom,
 }
 
@@ -20,6 +29,17 @@ async function onCreateRoom(roomId: string, opts?: { size?: number; isolated?: b
 
 async function onGetRoom(roomId: string) {
   return await Room.get(roomId)
+}
+
+/** Tail mode: relay starts the moment the room is serialized, so a message published between
+ *  this call and the client's first `subscribe()` is held and flushed, never missed. */
+async function onGetRoomTail(roomId: string) {
+  return await Room.get(roomId, { tail: true })
+}
+
+/** Idempotent create — returns the existing room if present, creates it otherwise. */
+async function onGetOrCreateRoom(roomId: string) {
+  return await Room.getOrCreate(roomId, { meta: { topic: 'e2e' } })
 }
 
 /** Guarded grant — every membership through this instance is policed server-side. */
@@ -39,6 +59,33 @@ async function onGetGuardedRoom(roomId: string) {
   return room
 }
 
+/** After-hooks record an audit trail with authoritative receipts (seq/joinedAt) — the documented
+ *  place to persist for history. Keyed by the per-run room ID, read back via `onGetAudit`. */
+const auditLog = new Map<string, Array<Record<string, unknown>>>()
+function audit(roomId: string, entry: Record<string, unknown>) {
+  const list = auditLog.get(roomId) ?? []
+  list.push(entry)
+  auditLog.set(roomId, list)
+}
+async function onGetAuditRoom(roomId: string) {
+  const room = await Room.get(roomId)
+  Room.guard(room, {
+    onAfterJoin: (member, info) => {
+      audit(roomId, { kind: 'join', name: member.meta.name, joinedAt: info.joinedAt })
+    },
+    onAfterPublish: (from, data, info) => {
+      audit(roomId, { kind: 'publish', name: from.meta.name, data, seq: info.seq })
+    },
+    onAfterSend: (from, to, data, info) => {
+      audit(roomId, { kind: 'send', name: from.meta.name, to: to.meta.name, seq: info.seq })
+    },
+  })
+  return room
+}
+async function onGetAudit(roomId: string) {
+  return auditLog.get(roomId) ?? []
+}
+
 /** Server-side join returning a standalone `LocalParticipant` — exercises the participant
  *  stub (its own channel), unlike client-side `room.join()` which rides the room's stub.
  *  Identity is stamped here, where trust lives. */
@@ -54,6 +101,22 @@ async function onGetRoomWithMember(roomId: string, memberId: string) {
   return { room, member }
 }
 
+/** A server-side room subscriber — a genuinely *different* client than the browser, so it isn't
+ *  subject to the browser's own `selfDelivery` self-suppression. Proves a `selfDelivery: false`
+ *  publish still reaches everyone else. The room is kept referenced so its subscription survives. */
+const watched = new Map<string, unknown[]>()
+const watchedRooms = new Map<string, unknown>()
+async function onWatchRoom(roomId: string) {
+  const room = await Room.get(roomId)
+  const list: unknown[] = []
+  watched.set(roomId, list)
+  watchedRooms.set(roomId, room)
+  room.subscribe((data) => list.push(data))
+}
+async function onGetWatched(roomId: string) {
+  return watched.get(roomId) ?? []
+}
+
 async function onAnnounce(roomId: string, data: unknown) {
   await Room.announce(roomId, data)
 }
@@ -62,8 +125,23 @@ async function onSystemSend(roomId: string, participantId: string, data: unknown
   await Room.send(roomId, participantId, data)
 }
 
+/** Reconfigure a room's metadata and capacity — propagates to observers via `room.onUpdate()`. */
+async function onUpdateRoom(roomId: string, meta: Record<string, unknown>, size?: number) {
+  await Room.update(roomId, { meta, ...(size === undefined ? {} : { size }) })
+}
+
+/** Enumerate rooms by ID prefix. */
+async function onListRooms(prefix: string) {
+  return (await Room.list({ prefix })).map((r) => r.id).sort()
+}
+
 async function onKick(roomId: string, participantId: string) {
   await Room.removeParticipant(roomId, participantId, { reason: 'be nice' })
+}
+
+/** Multi-tab kick: remove every membership carrying this app identity. */
+async function onKickByIdentity(roomId: string, identity: string) {
+  await Room.removeParticipant(roomId, { identity }, { reason: 'multi-tab' })
 }
 
 async function onCloseRoom(roomId: string) {

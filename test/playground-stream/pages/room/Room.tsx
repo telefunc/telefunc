@@ -4,19 +4,29 @@ import React, { useEffect, useState } from 'react'
 import {
   onCreateRoom,
   onGetRoom,
+  onGetRoomTail,
+  onGetOrCreateRoom,
   onGetGuardedRoom,
+  onGetAuditRoom,
+  onGetAudit,
   onJoinAsServer,
   onGetRoomWithMember,
+  onWatchRoom,
+  onGetWatched,
   onAnnounce,
   onSystemSend,
+  onUpdateRoom,
+  onListRooms,
   onKick,
+  onKickByIdentity,
   onCloseRoom,
 } from './Room.telefunc'
 
-/** Render every poll so the e2e autoRetry sees fresh data on each iteration (see Publish.tsx). */
-async function pollUntil(render: () => { done: boolean }) {
+/** Render every poll so the e2e autoRetry sees fresh data on each iteration (see Publish.tsx).
+ *  `render` may be async — some scenarios read server-side state (e.g. an audit log) each tick. */
+async function pollUntil(render: () => { done: boolean } | Promise<{ done: boolean }>) {
   for (let poll = 0; poll < 50; poll++) {
-    if (render().done) break
+    if ((await render()).done) break
     await new Promise((r) => setTimeout(r, 200))
   }
 }
@@ -314,6 +324,342 @@ function Room() {
         }}
       >
         Announce, system send, kick, close
+      </button>
+
+      <h2>Coalesce (conflation)</h2>
+
+      <button
+        id="test-room-conflate"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-conflate:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const lobby = await onGetRoom(roomId)
+          const received: number[] = []
+          lobby.subscribe((data) => received.push((data as { n: number }).n))
+          const me = await lobby.join({ name: 'Cursor' })
+
+          // A synchronous burst under one key: the first send goes, 2..5 collapse into a single
+          // pending, so only the first and the latest reach the room — deterministically [1, 5].
+          const acks = await Promise.all([1, 2, 3, 4, 5].map((n) => me.publish({ n }, { coalesce: 'cursor' })))
+
+          await pollUntil(() => {
+            setResult(JSON.stringify({ received, acked: acks.length, allSeqs: acks.every((a) => a.seq > 0) }))
+            return { done: received.includes(5) && received.length >= 2 }
+          })
+        }}
+      >
+        Coalesced burst
+      </button>
+
+      <h2>setAttributes (partial merge)</h2>
+
+      <button
+        id="test-room-attributes"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-attr:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const lobby = await onGetRoom(roomId)
+          const me = await lobby.join({ name: 'Zoe', score: 1 })
+          let remote = await lobby.getParticipant(me.id)
+          for (let i = 0; i < 50 && !remote; i++) {
+            await new Promise((r) => setTimeout(r, 200))
+            remote = await lobby.getParticipant(me.id)
+          }
+
+          await me.setAttributes({ score: 2 }) // merge — name is untouched
+          await me.setAttributes({ title: 'lead' }) // add a key
+          await me.setAttributes({ score: undefined }) // a key set to undefined is removed
+
+          await pollUntil(() => {
+            const meta = (remote?.meta ?? {}) as { name?: string; score?: number; title?: string }
+            const localMeta = me.meta as { name?: string; score?: number; title?: string }
+            setResult(
+              JSON.stringify({
+                name: meta.name ?? null,
+                title: meta.title ?? null,
+                hasScore: 'score' in meta,
+                localName: localMeta.name ?? null,
+                localHasScore: 'score' in localMeta,
+              }),
+            )
+            return { done: meta.name === 'Zoe' && meta.title === 'lead' && !('score' in meta) }
+          })
+        }}
+      >
+        Merge & delete attributes
+      </button>
+
+      <h2>onDemand (track demand)</h2>
+
+      <button
+        id="test-room-demand"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-demand:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const pubRoom = await onGetRoom(roomId)
+          const pub = await pubRoom.join({ name: 'Pub' })
+          const cam: number[] = []
+          pub.onDemand((track, count) => {
+            if (track === 'camera') cam.push(count)
+          })
+          // Announce the camera track so demand is attributable to (Pub, camera).
+          await pub.publishBinary(new Uint8Array(8).fill(1), { track: 'camera', keyFrame: true })
+
+          // A separate observer wants the track — demand rises; releasing it — demand falls.
+          const viewer = await onGetRoom(roomId)
+          const unsub = viewer.subscribeBinary(() => {}, { track: 'camera' })
+          await pollUntil(() => {
+            setResult(JSON.stringify({ cam }))
+            return { done: cam.includes(1) }
+          })
+          unsub()
+          await pollUntil(() => {
+            setResult(JSON.stringify({ cam }))
+            return { done: cam.includes(1) && cam[cam.length - 1] === 0 }
+          })
+        }}
+      >
+        Track demand up & down
+      </button>
+
+      <h2>Tail (single-call history)</h2>
+
+      <button
+        id="test-room-tail"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-tail:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const owner = await onGetRoom(roomId)
+          const me = await owner.join({ name: 'Src' })
+
+          // Tail handle: relay starts at serialize time, buffered on the client until subscribe().
+          const tailed = await onGetRoomTail(roomId)
+          // Published AFTER the tail handle exists but BEFORE we subscribe — must not be dropped.
+          await me.publish({ t: 'between' })
+
+          const received: string[] = []
+          tailed.subscribe((data) => received.push((data as { t: string }).t))
+
+          await pollUntil(() => {
+            setResult(JSON.stringify({ received }))
+            return { done: received.includes('between') }
+          })
+        }}
+      >
+        Tail holds pre-subscribe messages
+      </button>
+
+      <h2>After-hooks (persistence receipts)</h2>
+
+      <button
+        id="test-room-hooks"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-hooks:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const room = await onGetAuditRoom(roomId)
+          const a = await room.join({ name: 'A' })
+          const b = await room.join({ name: 'B' })
+          await a.publish('hello')
+          await a.send(b.id, 'dm')
+
+          await pollUntil(async () => {
+            const auditLog = (await onGetAudit(roomId)) as Array<{
+              kind: string
+              name?: string
+              to?: string
+              seq?: number
+              joinedAt?: number
+              data?: unknown
+            }>
+            const joinA = auditLog.find((e) => e.kind === 'join' && e.name === 'A')
+            const publish = auditLog.find((e) => e.kind === 'publish')
+            const send = auditLog.find((e) => e.kind === 'send')
+            setResult(
+              JSON.stringify({
+                joins: auditLog
+                  .filter((e) => e.kind === 'join')
+                  .map((e) => e.name)
+                  .sort(),
+                joinHasTs: typeof joinA?.joinedAt === 'number',
+                publish: publish ? { name: publish.name, data: publish.data, seqOk: (publish.seq ?? 0) > 0 } : null,
+                send: send ? { name: send.name, to: send.to, seqOk: (send.seq ?? 0) > 0 } : null,
+              }),
+            )
+            return { done: !!joinA && !!publish && !!send }
+          })
+        }}
+      >
+        After-join/publish/send receipts
+      </button>
+
+      <h2>Member-selective receive</h2>
+
+      <button
+        id="test-room-member-sub"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-membersub:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const room = await onGetRoom(roomId)
+          const x = await room.join({ name: 'X' })
+          const y = await room.join({ name: 'Y' })
+
+          const observer = await onGetRoom(roomId)
+          let remoteX = await observer.getParticipant(x.id)
+          for (let i = 0; i < 50 && !remoteX; i++) {
+            await new Promise((r) => setTimeout(r, 200))
+            remoteX = await observer.getParticipant(x.id)
+          }
+          const xText: string[] = []
+          const xBin: number[] = []
+          remoteX!.subscribe((data) => xText.push(data as string))
+          remoteX!.subscribeBinary((data) => xBin.push(data[0]!), { track: null })
+          // Room-level control: proves Y's traffic really was delivered, so xText's absence means something.
+          const all: string[] = []
+          observer.subscribe((data) => all.push(data as string))
+
+          await x.publish('x1')
+          await y.publish('y1')
+          await x.publishBinary(new Uint8Array([7]))
+          await y.publishBinary(new Uint8Array([8]))
+
+          await pollUntil(() => {
+            setResult(JSON.stringify({ xText, xBin, all: [...all].sort() }))
+            return { done: all.includes('x1') && all.includes('y1') && xBin.includes(7) }
+          })
+        }}
+      >
+        Follow one member
+      </button>
+
+      <h2>DM pre-listen hold</h2>
+
+      <button
+        id="test-room-dm-hold"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-dmhold:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const observer = await onGetRoom(roomId)
+          const bob = await onJoinAsServer(roomId, 'Bob')
+          const ally = await observer.join({ name: 'Ally' })
+
+          // Sent BEFORE Bob listens — held in his inbox, flushed the moment he attaches.
+          await ally.send(bob.id, 'early')
+          const held: string[] = []
+          bob.listen((data) => held.push(data as string))
+
+          await pollUntil(() => {
+            setResult(JSON.stringify({ held }))
+            return { done: held.includes('early') }
+          })
+        }}
+      >
+        Send before listen
+      </button>
+
+      <h2>selfDelivery: false</h2>
+
+      <button
+        id="test-room-self"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-self:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          // The "others receive it" observer must be a *different* client — a second browser handle
+          // shares this client's self-suppression registry. A server-side subscriber doesn't.
+          await onWatchRoom(roomId)
+          const room = await onGetRoom(roomId)
+          const me = await room.join({ name: 'Solo' }, { selfDelivery: false })
+          const mine: string[] = []
+          room.subscribe((data) => mine.push(data as string))
+
+          await me.publish('hi')
+
+          await pollUntil(async () => {
+            const theirs = (await onGetWatched(roomId)) as string[]
+            setResult(JSON.stringify({ mine, theirs, selfDelivery: me.selfDelivery }))
+            // `theirs` arriving proves the publish propagated — so `mine` staying empty is meaningful.
+            return { done: theirs.includes('hi') }
+          })
+        }}
+      >
+        Own frames suppressed
+      </button>
+
+      <h2>Reconfigure, list, getOrCreate</h2>
+
+      <button
+        id="test-room-reconfig"
+        onClick={async () => {
+          setResult('')
+          const base = `e2e-reconfig:${crypto.randomUUID()}`
+          const roomId = `${base}:a`
+          await onCreateRoom(roomId, { size: 10 })
+          const room = await onGetRoom(roomId)
+          const me = await room.join({ name: 'R' })
+          const updates: string[] = []
+          room.onUpdate((meta) => updates.push((meta as { topic?: string }).topic ?? ''))
+
+          await onUpdateRoom(roomId, { topic: 'updated' }, 20)
+          await onCreateRoom(`${base}:b`) // a second room under the same prefix, for list()
+          const same = await onGetOrCreateRoom(roomId) // idempotent — returns the existing room
+          const listed = await onListRooms(base)
+
+          await pollUntil(() => {
+            setResult(
+              JSON.stringify({
+                updates,
+                topic: (room.meta as { topic?: string }).topic ?? null,
+                size: room.size,
+                listed,
+                sameId: same.id === roomId,
+                sameCount: same.count,
+                memberId: me.id.length > 0,
+              }),
+            )
+            return { done: updates.includes('updated') }
+          })
+        }}
+      >
+        Update, list, getOrCreate
+      </button>
+
+      <h2>Kick by identity, onEmpty</h2>
+
+      <button
+        id="test-room-identity"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-identity:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          const observer = await onGetRoom(roomId)
+          let empty = false
+          observer.onEmpty(() => {
+            empty = true
+          })
+
+          // Server-side join stamps identity 'user:Multi'.
+          const multi = await onJoinAsServer(roomId, 'Multi')
+          let cause: { type: string; reason?: unknown } | null = null
+          multi.onLeave((c) => {
+            cause = c
+          })
+          await pollUntil(() => ({ done: observer.count >= 1 }))
+
+          await onKickByIdentity(roomId, 'user:Multi')
+          await pollUntil(() => {
+            setResult(JSON.stringify({ cause, count: observer.count, empty }))
+            return { done: cause !== null && observer.count === 0 }
+          })
+        }}
+      >
+        Remove by identity
       </button>
     </div>
   )

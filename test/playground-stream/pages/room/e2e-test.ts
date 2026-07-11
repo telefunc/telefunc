@@ -173,4 +173,145 @@ function testRoom() {
       expect(result.count).toBe(0)
     })
   })
+
+  test('room: coalesce conflates a same-key burst to first + latest', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-conflate')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ received: number[]; acked: number; allSeqs: boolean }>('#room-result')
+      expect(r.received).deep.equal([1, 5]) // 2..4 collapsed into the single pending slot
+      expect(r.acked).toBe(5) // every caller's promise still resolves...
+      expect(r.allSeqs).toBe(true) // ...with the winning send's ack
+    })
+  })
+
+  test('room: setAttributes merges per key and deletes on undefined', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-attributes')
+
+    await autoRetry(async () => {
+      const r = await getResult<{
+        name: string | null
+        title: string | null
+        hasScore: boolean
+        localName: string | null
+        localHasScore: boolean
+      }>('#room-result')
+      expect(r.name).toBe('Zoe') // untouched key preserved across merges
+      expect(r.title).toBe('lead') // added key
+      expect(r.hasScore).toBe(false) // score removed by `undefined`
+      expect(r.localName).toBe('Zoe') // the local handle reflects the merge too
+      expect(r.localHasScore).toBe(false)
+    })
+  })
+
+  test('room: onDemand rises when a subscriber wants a track and falls when it leaves', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-demand')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ cam: number[] }>('#room-result')
+      expect(r.cam).toContain(1) // a viewer arrived (pause-at-0 lifts)
+      expect(r.cam[r.cam.length - 1]).toBe(0) // ...and left again — back to zero
+    })
+  })
+
+  test('room: Room.get({ tail }) holds a between-get-and-subscribe message', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-tail')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ received: string[] }>('#room-result')
+      expect(r.received).toContain('between') // relay started at serialize, buffered until subscribe
+    })
+  })
+
+  test('room: onAfterJoin/Publish/Send fire with authoritative receipts', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-hooks')
+
+    await autoRetry(async () => {
+      const r = await getResult<{
+        joins: string[]
+        joinHasTs: boolean
+        publish: { name: string; data: unknown; seqOk: boolean } | null
+        send: { name: string; to: string; seqOk: boolean } | null
+      }>('#room-result')
+      expect(r.joins).deep.equal(['A', 'B']) // onAfterJoin fired for both grants
+      expect(r.joinHasTs).toBe(true) // receipt carries joinedAt
+      expect(r.publish).deep.equal({ name: 'A', data: 'hello', seqOk: true }) // onAfterPublish + seq
+      expect(r.send).deep.equal({ name: 'A', to: 'B', seqOk: true }) // onAfterSend + seq
+    })
+  })
+
+  test('room: a per-member subscription receives only that member', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-member-sub')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ xText: string[]; xBin: number[]; all: string[] }>('#room-result')
+      expect(r.all).deep.equal(['x1', 'y1']) // both delivered room-wide (so absence below is meaningful)
+      expect(r.xText).deep.equal(['x1']) // the per-member text sub saw only X
+      expect(r.xBin).deep.equal([7]) // per-member binary is selective too
+    })
+  })
+
+  test('room: a DM sent before listen() is held and flushed on attach', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-dm-hold')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ held: string[] }>('#room-result')
+      expect(r.held).deep.equal(['early'])
+    })
+  })
+
+  test('room: selfDelivery:false suppresses your own frames locally, not for others', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-self')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ mine: string[]; theirs: string[]; selfDelivery: boolean }>('#room-result')
+      expect(r.selfDelivery).toBe(false)
+      expect(r.theirs).deep.equal(['hi']) // others receive it
+      expect(r.mine).deep.equal([]) // you don't
+    })
+  })
+
+  test('room: Room.update propagates; list and getOrCreate resolve', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-reconfig')
+
+    await autoRetry(async () => {
+      const r = await getResult<{
+        updates: string[]
+        topic: string | null
+        size: number
+        listed: string[]
+        sameId: boolean
+        sameCount: number
+      }>('#room-result')
+      expect(r.updates).toContain('updated') // room.onUpdate fired
+      expect(r.topic).toBe('updated') // room.meta reflects it
+      expect(r.size).toBe(20) // capacity reconfigured
+      expect(r.listed.length).toBe(2) // both prefixed rooms enumerated by Room.list
+      expect(r.sameId).toBe(true) // getOrCreate returned the existing room
+      expect(r.sameCount).greaterThanOrEqual(1) // ...with its member preserved
+    })
+  })
+
+  test('room: removeParticipant({ identity }) kicks; onEmpty fires', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-identity')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ cause: { type: string; reason?: unknown } | null; count: number; empty: boolean }>(
+        '#room-result',
+      )
+      expect(r.cause).deep.equal({ type: 'removed', reason: 'multi-tab' }) // kicked by identity, reason rode along
+      expect(r.count).toBe(0)
+      expect(r.empty).toBe(true) // onEmpty fired when the last member went
+    })
+  })
 }
