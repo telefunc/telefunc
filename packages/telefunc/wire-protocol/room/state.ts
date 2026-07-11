@@ -389,6 +389,10 @@ class RoomState {
       this._releaseEntryListeners(entry)
     }
     this._members.clear()
+    // Second bump: the first ran with members still present (so `onChange` narrates the closure),
+    // and the leave callbacks above run user code — invalidate any snapshot cached against the
+    // now-emptied room before `onClose` fires.
+    this._bumpMembership()
     this._fireAll(this._closeCbs)
   }
 
@@ -464,7 +468,6 @@ class RoomState {
       // stay `===` with the view. Keep the object, refresh the facts; entries the authoritative
       // roster doesn't know left before the load — their leave is narrated like any other.
       this._rosterKnown = true
-      this._bumpMembership()
       const seen = new Set<string>()
       for (const member of members) {
         seen.add(member.id)
@@ -483,11 +486,14 @@ class RoomState {
       for (const id of [...this._members.keys()]) {
         if (!seen.has(id)) this.applyLeave(id)
       }
+      // Bump strictly after the roster is populated: an `onChange` subscriber that synchronously
+      // reads `snapshot()` (the `useSyncExternalStore` contract) would otherwise cache an empty
+      // roster under the new version, and the silent `_createEntry`s above never re-invalidate it.
+      this._bumpMembership()
       this._wasFull = this.isFull
       return false
     }
 
-    this._bumpMembership()
     let drifted = false
     const seen = new Set<string>()
     for (const member of members) {
@@ -516,6 +522,9 @@ class RoomState {
         drifted = true
       }
     }
+    // Bump after the diff is applied: the silent `joinedAt`/`tracks` refreshes above don't bump,
+    // so an early bump could strand a stale snapshot cached under the already-advanced version.
+    this._bumpMembership()
     return drifted
   }
 
