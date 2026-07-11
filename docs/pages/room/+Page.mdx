@@ -187,15 +187,17 @@ export async function onJoinChat(roomId) {
   const { user } = getContext()
   const room = await Room.get(roomId)
   Room.guard(room, {
-    onJoin: (member) => { if (banned.has(member.identity)) throw new Error('banned') },
-    onPublish: (from, data) => { if (isSpam(data)) throw new Error('blocked') },
-    onSend: async (from, to) => { if (!(await areFriends(from.identity, to.identity))) throw new Error('not friends') },
+    onBeforeJoin: (member) => { if (banned.has(member.identity)) throw new Error('banned') },
+    onBeforePublish: (from, data) => { if (isSpam(data)) throw new Error('blocked') },
+    onBeforeSend: async (from, to) => { if (!(await areFriends(from.identity, to.identity))) throw new Error('not friends') },
   })
   return { room, me: await room.join({ name: user.name }, { identity: user.id }) }
 }
 ```
 
-Each guard's first argument is the acting member. Throwing rejects the caller's `join()`/`publish()`/`send()` with that error, on the client too. A rejected join adds no member and leaves no trace. Guards run on the server.
+Each `onBefore*` guard's first argument is the acting member. Throwing rejects the caller's `join()`/`publish()`/`send()` with that error, on the client too. A rejected join adds no member and leaves no trace. Guards run on the server.
+
+Each has an `onAfter*` counterpart — `onAfterJoin`, `onAfterSend`, `onAfterPublish` — that runs once the operation commits, with its receipt (`{ seq, timestamp }` for a message). That's where you persist a message with its server-assigned order (see <Link href="#load-history-then-go-live">Load history</Link>).
 
 **Kicks carry their reason.** Every departure says why, and a kick's reason arrives with the removal:
 
@@ -244,7 +246,7 @@ captureAndEncode(camera, (frame, isKey) => me.publishBinary(frame, { track: 'cam
 member.subscribeBinary((data, info) => video.decode(data, { key: info.keyFrame }), { track: 'camera' })
 ```
 
-<Warning>Rooms move binary over the same reliable, ordered transport as everything else (WebSocket / SSE). That's ideal for binary *data* and for small or controlled-network A/V — but it lacks what large-scale live video needs: congestion control, simulcast, and jitter buffering. For production multi-party video, pair rooms (presence, chat, signaling) with a WebRTC SFU such as [LiveKit](https://livekit.io) for the media. Lifting this ceiling would need a lane that trades reliability for latency — dropping late frames instead of queuing them; an unreliable WebTransport datagram channel is being explored for that in [telefunc#449](https://github.com/telefunc/telefunc/issues/449).</Warning>
+<Warning>Rooms move binary over the same reliable, ordered transport as everything else (WebSocket / SSE). That's ideal for binary *data* and for small or controlled-network A/V — but it lacks what large-scale live video needs: congestion control, simulcast, and jitter buffering. For production multi-party video, pair rooms (presence, chat, signaling) with a WebRTC SFU for the media. Lifting this ceiling would need a lane that trades reliability for latency — dropping late frames instead of queuing them; an unreliable WebTransport datagram channel is being explored for that in [telefunc#449](https://github.com/telefunc/telefunc/issues/449).</Warning>
 
 **Render only 9 of 500 cameras?** Subscribe to those 9 members — the other 491 streams never reach you, and your server never fetches them at all. The same holds per track: stop watching a screen share, and its bytes stop flowing to you.
 
@@ -263,7 +265,7 @@ Each `publishBinary()` receipt also reports `receivers` — the track's live sub
 
 Rooms deliver *live* messages; history belongs in your database (retention, search, pagination — your rules). Store each message as it's published, then load history and go live in one call.
 
-**Store** in the `onPublish` guard — it runs once per message, on the server, with the verified sender:
+**Store** in the `onAfterPublish` hook — it runs once per message, on the server, after the message is sequenced, so it carries the verified sender *and* the message's authoritative order (`info.seq`, `info.timestamp`):
 
 ```js
 // Chat.telefunc.js
@@ -272,11 +274,11 @@ Rooms deliver *live* messages; history belongs in your database (retention, sear
 export async function onJoinChat(roomId) {
   const room = await Room.get(roomId, { tail: true }) // relay live messages from now
   Room.guard(room, {
-    onPublish: async (from, message) => {
-      await db.messages.insert({ id: message.id, roomId, authorId: from.id, ...message })
+    onAfterPublish: async (from, message, info) => {
+      await db.messages.insert({ ...message, roomId, authorId: from.id, seq: info.seq, at: info.timestamp })
     },
   })
-  const history = await db.messages.latest(roomId, 50) // read after tailing began
+  const history = await db.messages.latest(roomId, 50) // read after tailing began, ordered by seq
   return { room, history }
 }
 ```
@@ -296,7 +298,7 @@ for (const m of history) show(m)   // the past
 room.subscribe(show)               // flushes the held live tail, then stays live
 ```
 
-Order history by your own stored timestamp; treat the live receipt's `info.timestamp` as display metadata (server clocks differ across nodes).
+Order both the stored history and the live tail by `seq` — the strict per-key counter every message carries — so they read as one timeline. `seq` and `timestamp` are assigned centrally (Redis, or the Cloudflare key authority), never a per-node clock, so the order holds across nodes.
 
 
 ### Switching rooms
@@ -338,7 +340,7 @@ The server-side entry point. Clients get a room when a telefunction returns it.
 | `Room.create(id, options?)` | `Room` | If the room already exists |
 | `Room.get(id, options?)` | `Room` | If the room doesn't exist |
 | `Room.getOrCreate(id, options?)` | `Room` | - |
-| `Room.guard(room, { onJoin?, onSend?, onPublish? })` | `void` | If called twice for one instance |
+| `Room.guard(room, { onBefore*?, onAfter*? })` | `void` | If called twice for one instance |
 | `Room.join(id, meta?, options?)` | `LocalParticipant` | If the room doesn't exist |
 | `Room.list({ prefix? }?)` | `RoomInfo[]` | - |
 | `Room.update(id, options)` | `void` | If the room doesn't exist |

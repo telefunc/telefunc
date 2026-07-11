@@ -13,6 +13,12 @@ export type {
   SendGuard,
   PublishGuard,
   JoinGuard,
+  AfterPublishHook,
+  AfterSendHook,
+  AfterJoinHook,
+  RoomPublishReceipt,
+  RoomSendReceipt,
+  RoomJoinReceipt,
   LeaveCause,
   BinaryFrameInfo,
   BinaryPublishOptions,
@@ -43,8 +49,8 @@ type Sender<P extends ParticipantMeta = ParticipantMeta> = {
   readonly identity: string | null
 }
 
-/** Guards private messages (`Room.guard(room, { onSend })`): runs before every `send()` from a
- *  membership granted through that room instance — including client-side `join()`s on it.
+/** Guards private messages (`Room.guard(room, { onBeforeSend })`): runs before every `send()`
+ *  from a membership granted through that room instance — including client-side `join()`s on it.
  *  Throw to reject (the sender's promise rejects with the error). */
 type SendGuard<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
@@ -52,19 +58,62 @@ type SendGuard<P extends ParticipantMeta = ParticipantMeta> = (
   data: unknown,
 ) => void | Promise<void>
 
-/** Guards room-wide messages (`Room.guard(room, { onPublish })`): runs before every `publish()`
- *  and `publishBinary()` from a membership granted through that room instance — `data` is the
- *  payload a subscriber would receive. Throw to reject (the sender's promise rejects). */
+/** Guards room-wide messages (`Room.guard(room, { onBeforePublish })`): runs before every
+ *  `publish()` and `publishBinary()` from a membership granted through that room instance —
+ *  `data` is the payload a subscriber would receive. Throw to reject (the sender's promise
+ *  rejects). */
 type PublishGuard<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
   data: unknown,
 ) => void | Promise<void>
 
-/** Guards admission (`Room.guard(room, { onJoin })`): runs before every `join()` through that
- *  room instance — server-side and client-side alike. `member` is the joiner: the ID it will
+/** Guards admission (`Room.guard(room, { onBeforeJoin })`): runs before every `join()` through
+ *  that room instance — server-side and client-side alike. `member` is the joiner: the ID it will
  *  receive and the metadata it requested. Throw to reject (the joiner's `join()` rejects with
  *  the error, before any membership state is written). */
 type JoinGuard<P extends ParticipantMeta = ParticipantMeta> = (member: Sender<P>) => void | Promise<void>
+
+/** The receipt for a committed room-wide message, passed to `onAfterPublish`. `seq` is the key's
+ *  strict per-key counter and `timestamp` the central server clock (Redis `TIME`, or the Cloudflare
+ *  key authority) — together they order the room's messages. `receivers` is the live subscriber
+ *  count at publish time (absent when the transport can't count). */
+type RoomPublishReceipt = { seq: number; timestamp: number; receivers?: number }
+
+/** The receipt for a delivered private message, passed to `onAfterSend`. */
+type RoomSendReceipt = { seq: number; timestamp: number }
+
+/** The receipt for a committed join, passed to `onAfterJoin`. `joinedAt` is the server-stamped
+ *  join time. */
+type RoomJoinReceipt = { joinedAt: number }
+
+/** Runs after a room-wide message is sequenced and delivered (`Room.guard(room, { onAfterPublish })`):
+ *  the same `from`/`data` as `onBeforePublish`, plus the `info` receipt — so you can persist the
+ *  message with its authoritative order (see the history guide). Fires for `publish()` and
+ *  `publishBinary()` alike (branch on `data` to skip binary frames). Awaited; throwing rejects the
+ *  caller but does not undo the delivery. */
+type AfterPublishHook<P extends ParticipantMeta = ParticipantMeta> = (
+  from: Sender<P>,
+  data: unknown,
+  info: RoomPublishReceipt,
+) => void | Promise<void>
+
+/** Runs after a private message is delivered (`Room.guard(room, { onAfterSend })`): the same
+ *  `from`/`to`/`data` as `onBeforeSend`, plus the `info` receipt. Awaited; throwing rejects the
+ *  caller but does not undo the delivery. */
+type AfterSendHook<P extends ParticipantMeta = ParticipantMeta> = (
+  from: Sender<P>,
+  to: Sender<P>,
+  data: unknown,
+  info: RoomSendReceipt,
+) => void | Promise<void>
+
+/** Runs after a join is committed and announced (`Room.guard(room, { onAfterJoin })`): the joined
+ *  `member` plus the `info` receipt — the place for post-join side effects (provision, welcome DM,
+ *  audit). Awaited; throwing rejects the caller but does not undo the join. */
+type AfterJoinHook<P extends ParticipantMeta = ParticipantMeta> = (
+  member: Sender<P>,
+  info: RoomJoinReceipt,
+) => void | Promise<void>
 
 /** Why a participant is gone. `reason` is set by `Room.removeParticipant(id, pid, { reason })`
  *  and travels with the removal — a kicked client learns it's kicked (and why) from the leave

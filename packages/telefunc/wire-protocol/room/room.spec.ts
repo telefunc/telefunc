@@ -881,7 +881,7 @@ describe('direct messages', () => {
     // Guards see it — bans by identity are one comparison.
     const guarded = await Room.get('who')
     const guardSaw: Array<string | null> = []
-    Room.guard(guarded, { onJoin: (member) => void guardSaw.push(member.identity) })
+    Room.guard(guarded, { onBeforeJoin: (member) => void guardSaw.push(member.identity) })
     await guarded.join({ name: 'Tab2' }, { identity: 'user-1' })
     expect(guardSaw).toEqual(['user-1'])
   })
@@ -920,11 +920,11 @@ describe('direct messages', () => {
     await Room.removeParticipant('sweep', { identity: 'user-9' })
   })
 
-  it('Room.guard({ onSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
+  it('Room.guard({ onBeforeSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
     await Room.create('guarded')
     const lobby = await Room.get('guarded')
     Room.guard(lobby, {
-      onSend: (from, to, data) => {
+      onBeforeSend: (from, to, data) => {
         if (data === 'blocked') throw new Error('not friends')
         expect(from.meta).toEqual({ name: 'Alice' }) // resolved sender, meta included
         expect(to.meta).toEqual({ name: 'Bob' }) // resolved target, meta included
@@ -941,11 +941,11 @@ describe('direct messages', () => {
     expect(inbox).toEqual([['hi', alice.id, { name: 'Alice' }]])
   })
 
-  it('Room.guard({ onSend }) guards client-side joins made through that instance', async () => {
+  it('Room.guard({ onBeforeSend }) guards client-side joins made through that instance', async () => {
     await Room.create('gated')
     const served = (await Room.get('gated')) as ServerRoom
     Room.guard(served, {
-      onSend: (from, _to, data) => {
+      onBeforeSend: (from, _to, data) => {
         if (data === 'blocked') throw new Error(`no messages from ${from.meta.name}`)
       },
     })
@@ -964,11 +964,11 @@ describe('direct messages', () => {
     expect(inbox).toEqual(['hi']) // the guarded send never delivered
   })
 
-  it('Room.guard({ onPublish }) gates room-wide messages — text and binary, server and client joins', async () => {
+  it('Room.guard({ onBeforePublish }) gates room-wide messages — text and binary, server and client joins', async () => {
     await Room.create('moderated')
     const served = (await Room.get('moderated')) as ServerRoom
     Room.guard(served, {
-      onPublish: (from, data) => {
+      onBeforePublish: (from, data) => {
         if (data === 'slur' || (data instanceof Uint8Array && data[0] === 0xff)) {
           throw new Error(`blocked: ${from.meta.name}`)
         }
@@ -995,12 +995,12 @@ describe('direct messages', () => {
     expect(seen).toEqual(['fine']) // never published
   })
 
-  it('Room.guard({ onJoin }) gates admission — server and client joins, a rejected join writes nothing', async () => {
+  it('Room.guard({ onBeforeJoin }) gates admission — server and client joins, a rejected join writes nothing', async () => {
     await Room.create('door')
     const served = (await Room.get('door')) as ServerRoom
     const seen: { id: string; meta: Record<string, unknown> }[] = []
     Room.guard(served, {
-      onJoin: (member) => {
+      onBeforeJoin: (member) => {
         seen.push(member)
         if (member.meta.name === 'Banned') throw new Error(`no entry for ${member.meta.name}`)
       },
@@ -1029,25 +1029,77 @@ describe('direct messages', () => {
     await Room.create('velvet')
     const granted = await Room.get('velvet')
     Room.guard(granted, {
-      onJoin: () => {
+      onBeforeJoin: () => {
         throw new Error('nobody enters')
       },
     })
     await expect(granted.join()).rejects.toThrow('nobody enters')
-    const me = await Room.join('velvet', { name: 'Direct' }) // no grant involved — like Room.announce() vs onPublish
+    const me = await Room.join('velvet', { name: 'Direct' }) // no grant involved — like Room.announce() vs onBeforePublish
     expect(me.meta).toEqual({ name: 'Direct' })
   })
 
   it('Room.guard() is one-shot and validates its arguments', async () => {
     await Room.create('strict')
     const room = await Room.get('strict')
-    Room.guard(room, { onSend: () => {} })
-    expect(() => Room.guard(room, { onSend: () => {} })).toThrow('already called')
+    Room.guard(room, { onBeforeSend: () => {} })
+    expect(() => Room.guard(room, { onBeforeSend: () => {} })).toThrow('already called')
     // @ts-expect-error — runtime validation
-    expect(() => Room.guard(room, { onPublish: 'nope' })).toThrow('should be a function')
+    expect(() => Room.guard(room, { onBeforePublish: 'nope' })).toThrow('should be a function')
     // @ts-expect-error — runtime validation
-    expect(() => Room.guard(room, { onJoin: 'nope' })).toThrow('should be a function')
+    expect(() => Room.guard(room, { onBeforeJoin: 'nope' })).toThrow('should be a function')
     expect(() => Room.guard({} as never, {})).toThrow('expects a room')
+  })
+
+  it('Room.guard() after-hooks fire post-commit with the authoritative receipt', async () => {
+    await Room.create('after')
+    const room = await Room.get('after')
+    const joins: Array<{ id: string; name: unknown; joinedAt: unknown }> = []
+    const published: Array<{ data: unknown; seq: number; timestamp: unknown; receivers: unknown }> = []
+    const sent: Array<{ to: string; data: unknown; seq: unknown }> = []
+    Room.guard(room, {
+      onAfterJoin: (member, info) =>
+        void joins.push({ id: member.id, name: member.meta.name, joinedAt: info.joinedAt }),
+      onAfterPublish: (_from, data, info) =>
+        void published.push({ data, seq: info.seq, timestamp: info.timestamp, receivers: info.receivers }),
+      onAfterSend: (_from, to, data, info) => void sent.push({ to: to.id, data, seq: info.seq }),
+    })
+
+    const alice = await room.join({ name: 'Alice' })
+    expect(joins).toHaveLength(1)
+    expect(joins[0]).toMatchObject({ id: alice.id, name: 'Alice' })
+    expect(typeof joins[0]!.joinedAt).toBe('number')
+
+    const bob = await room.join({ name: 'Bob' })
+    await alice.publish({ text: 'one' })
+    await alice.publish({ text: 'two' })
+    expect(published.map((p) => p.data)).toEqual([{ text: 'one' }, { text: 'two' }])
+    // The receipt carries the key's strict, monotonic counter — the order you persist for history.
+    expect(published[1]!.seq).toBeGreaterThan(published[0]!.seq)
+    expect(typeof published[0]!.timestamp).toBe('number')
+    expect(typeof published[0]!.receivers).toBe('number')
+
+    await alice.send(bob.id, 'hi bob')
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ to: bob.id, data: 'hi bob' })
+    expect(typeof sent[0]!.seq).toBe('number')
+  })
+
+  it('a throwing after-hook rejects the caller, but the message is already delivered', async () => {
+    await Room.create('after-throw')
+    const room = await Room.get('after-throw')
+    Room.guard(room, {
+      onAfterPublish: (_from, data) => {
+        if (data === 'boom') throw new Error('persist failed')
+      },
+    })
+    const observer = await Room.get('after-throw')
+    const seen: unknown[] = []
+    observer.subscribe((data) => seen.push(data))
+    const me = await room.join({ name: 'A' })
+
+    await expect(me.publish('boom')).rejects.toThrow('persist failed')
+    // onAfterPublish runs post-commit: the message was already broadcast before the hook threw.
+    expect(seen).toEqual(['boom'])
   })
 
   it("delivers to a member the sender's stale local view doesn't know yet (KV fallback)", async () => {
@@ -1958,7 +2010,7 @@ describe('typed metadata', () => {
       const _senderName: string = from.meta.name
     })
     Room.guard(room, {
-      onJoin: (member) => {
+      onBeforeJoin: (member) => {
         const _joinerName: string = member.meta.name
       },
     })

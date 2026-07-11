@@ -75,6 +75,9 @@ import type {
   JoinGuard,
   PublishGuard,
   SendGuard,
+  AfterJoinHook,
+  AfterPublishHook,
+  AfterSendHook,
   Sender,
 } from './types.js'
 assertIsNotBrowser()
@@ -125,14 +128,23 @@ type RoomStatic = {
     id: string,
     options?: RoomOptions<M>,
   ): Promise<Room<M, P>>
-  /** Guard every membership granted through `room` — server-side and client-side `join()`s
-   *  alike. `onJoin` runs before each `join()` (admission), `onSend` before each private
-   *  `send()`, `onPublish` before each `publish()`/`publishBinary()`; throwing rejects the
-   *  caller's promise with the error. Declared in the granting telefunction (close over
-   *  `getContext()`); one `Room.guard()` per instance — declare all guards together. */
+  /** Guard every membership granted through `room` — server-side and client-side `join()`s alike.
+   *  Each operation has a pre-commit guard (`onBefore*`, throw to reject the caller before anything
+   *  is written) and a post-commit hook (`onAfter*`, runs once the operation lands, with its
+   *  receipt): `onBeforeJoin`/`onAfterJoin` around admission, `onBeforeSend`/`onAfterSend` around a
+   *  private `send()`, `onBeforePublish`/`onAfterPublish` around each `publish()`/`publishBinary()`.
+   *  Persist in `onAfterPublish` — its receipt carries the authoritative `seq`/`timestamp`. Declared
+   *  in the granting telefunction (close over `getContext()`); one `Room.guard()` per instance. */
   guard<M extends RoomMeta, P extends ParticipantMeta>(
     room: Room<M, P>,
-    guards: { onSend?: SendGuard<P>; onPublish?: PublishGuard<P>; onJoin?: JoinGuard<P> },
+    guards: {
+      onBeforeJoin?: JoinGuard<P>
+      onAfterJoin?: AfterJoinHook<P>
+      onBeforeSend?: SendGuard<P>
+      onAfterSend?: AfterSendHook<P>
+      onBeforePublish?: PublishGuard<P>
+      onAfterPublish?: AfterPublishHook<P>
+    },
   ): void
   /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
   join<P extends ParticipantMeta = ParticipantMeta>(
@@ -226,22 +238,42 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
   }
 }
 
-function guardRoom(room: Room, guards: { onSend?: SendGuard; onPublish?: PublishGuard; onJoin?: JoinGuard }): void {
+const ROOM_GUARD_KEYS = [
+  'onBeforeJoin',
+  'onAfterJoin',
+  'onBeforeSend',
+  'onAfterSend',
+  'onBeforePublish',
+  'onAfterPublish',
+] as const
+
+/** The resolved guard/hook set an instance holds — each slot `null` when not declared. */
+type RoomGuards = {
+  onBeforeJoin: JoinGuard | null
+  onAfterJoin: AfterJoinHook | null
+  onBeforeSend: SendGuard | null
+  onAfterSend: AfterSendHook | null
+  onBeforePublish: PublishGuard | null
+  onAfterPublish: AfterPublishHook | null
+}
+
+function guardRoom(room: Room, guards: Partial<Record<(typeof ROOM_GUARD_KEYS)[number], unknown>>): void {
   assertUsage(ServerRoom.isServerRoom(room), 'Room.guard() expects a room obtained from Room.get()/Room.create()')
   assertUsage(isObject(guards), 'Room.guard() guards should be an object')
-  assertUsage(
-    guards.onSend === undefined || typeof guards.onSend === 'function',
-    'Room.guard() onSend should be a function',
-  )
-  assertUsage(
-    guards.onPublish === undefined || typeof guards.onPublish === 'function',
-    'Room.guard() onPublish should be a function',
-  )
-  assertUsage(
-    guards.onJoin === undefined || typeof guards.onJoin === 'function',
-    'Room.guard() onJoin should be a function',
-  )
-  room._setGuards({ onSend: guards.onSend ?? null, onPublish: guards.onPublish ?? null, onJoin: guards.onJoin ?? null })
+  for (const key of ROOM_GUARD_KEYS) {
+    assertUsage(
+      guards[key] === undefined || typeof guards[key] === 'function',
+      `Room.guard() ${key} should be a function`,
+    )
+  }
+  room._setGuards({
+    onBeforeJoin: (guards.onBeforeJoin as JoinGuard) ?? null,
+    onAfterJoin: (guards.onAfterJoin as AfterJoinHook) ?? null,
+    onBeforeSend: (guards.onBeforeSend as SendGuard) ?? null,
+    onAfterSend: (guards.onAfterSend as AfterSendHook) ?? null,
+    onBeforePublish: (guards.onBeforePublish as PublishGuard) ?? null,
+    onAfterPublish: (guards.onAfterPublish as AfterPublishHook) ?? null,
+  })
 }
 
 async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant> {
@@ -384,7 +416,7 @@ class ServerRoom implements Room {
   /** @internal — when true, serializing this room starts relaying text immediately (buffered
    *  pre-peer), so a history read after `Room.get(id, { tail: true })` misses no live message. */
   _tail = false
-  private _guards: { onSend: SendGuard | null; onPublish: PublishGuard | null; onJoin: JoinGuard | null } | null = null
+  private _guards: RoomGuards | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
@@ -431,7 +463,7 @@ class ServerRoom implements Room {
   }
 
   /** @internal — see `Room.guard()`. One declaration per instance keeps the grant declarative. */
-  _setGuards(guards: { onSend: SendGuard | null; onPublish: PublishGuard | null; onJoin: JoinGuard | null }): void {
+  _setGuards(guards: RoomGuards): void {
     assertUsage(
       this._guards === null,
       'Room.guard() was already called for this room instance — declare all guards in one call',
@@ -535,8 +567,8 @@ class ServerRoom implements Room {
   ): Promise<{ id: string; joinedAt: number }> {
     const id = crypto.randomUUID()
     // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
-    const onJoin = this._guards?.onJoin
-    if (onJoin) await onJoin({ id, meta, identity })
+    const onBeforeJoin = this._guards?.onBeforeJoin
+    if (onBeforeJoin) await onBeforeJoin({ id, meta, identity })
     const joinedAt = await this._createMember(id, meta, identity)
     track(id, joinedAt)
     this._syncSubs()
@@ -548,6 +580,9 @@ class ServerRoom implements Room {
       joinedAt,
       ...(identity === null ? {} : { identity }),
     })
+    // Post-commit: the member exists and its join is announced — the place for side effects.
+    const onAfterJoin = this._guards?.onAfterJoin
+    if (onAfterJoin) await onAfterJoin({ id, meta, identity }, { joinedAt })
     return { id, joinedAt }
   }
 
@@ -625,6 +660,8 @@ class ServerRoom implements Room {
       data,
     }
     return this._finishPublish(
+      sender,
+      data,
       getBroadcastAdapter().publish(
         this._isolated ? roomMemberDataKey(this.id, from) : roomTextKey(this.id),
         stringify(envelope),
@@ -639,9 +676,11 @@ class ServerRoom implements Room {
   async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
     const frame = unframeMemberId(framed)!
     // The guard sees exactly what a subscriber would: the payload, without the wire frame.
-    await this._admitPublish(from, frame.payload)
+    const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
     return this._finishPublish(
+      sender,
+      frame.payload,
       getBroadcastAdapter().publishBinary(
         frame.track === null ? roomMemberDataKey(this.id, from) : roomMemberTrackKey(this.id, from, frame.track),
         framed,
@@ -649,24 +688,37 @@ class ServerRoom implements Room {
     )
   }
 
-  /** Shared publish prologue: open check + `onPublish` guard, on the verified sender. */
+  /** Shared publish prologue: open check + `onBeforePublish` guard, on the verified sender. */
   private async _admitPublish(from: string, payload: unknown): Promise<Sender> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
     const sender = this._memberSender(from)
-    const onPublish = this._guards?.onPublish
-    if (onPublish) await onPublish(sender, payload)
+    const onBeforePublish = this._guards?.onBeforePublish
+    if (onBeforePublish) await onBeforePublish(sender, payload)
     return sender
   }
 
-  /** Shared publish epilogue: the receipt (with `receivers`). */
+  /** Shared publish epilogue: the receipt (with `receivers`) plus the `onAfterPublish` hook, which
+   *  sees the same `payload` the guard did and the authoritative `seq`/`timestamp` — the place to
+   *  persist for history. Awaited, so a throw rejects the publisher (the message is already out). */
   private async _finishPublish(
+    sender: Sender,
+    payload: unknown,
     publishing: BroadcastPublishResult | Promise<BroadcastPublishResult>,
   ): Promise<ChannelPublishAck> {
     const result = await publishing
-    return Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), {
+    const ack = Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), {
       meta: result.meta,
       ...(result.receivers === undefined ? {} : { receivers: result.receivers }),
     })
+    const onAfterPublish = this._guards?.onAfterPublish
+    if (onAfterPublish) {
+      await onAfterPublish(sender, payload, {
+        seq: ack.seq,
+        timestamp: ack.timestamp,
+        ...(ack.receivers === undefined ? {} : { receivers: ack.receivers }),
+      })
+    }
+    return ack
   }
 
   /** First frame on a new (member, track): record the track on the member's KV record (late
@@ -718,8 +770,8 @@ class ServerRoom implements Room {
     const target = await this._resolveMember(to)
     if (!target) throw new Error(`Participant not found: ${to}`)
     const sender = this._memberSender(from)
-    const onSend = this._guards?.onSend
-    if (onSend) await onSend(sender, target, data)
+    const onBeforeSend = this._guards?.onBeforeSend
+    if (onBeforeSend) await onBeforeSend(sender, target, data)
     const envelope: RoomDmEnvelope = {
       __r: 'dm',
       to,
@@ -728,7 +780,9 @@ class ServerRoom implements Room {
       ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
     }
-    await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+    const receipt = await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+    const onAfterSend = this._guards?.onAfterSend
+    if (onAfterSend) await onAfterSend(sender, target, data, { seq: receipt.seq, timestamp: receipt.timestamp })
   }
 
   /** The member's live view — falling back to the authoritative KV record, since the local
