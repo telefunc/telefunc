@@ -8,7 +8,7 @@ import type { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { ACK_STATUS, encodePublishText } from '../shared-ws.js'
 import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from './server.js'
-import type { ParticipantMeta } from './types.js'
+import type { ParticipantMeta, RoomSendReceipt } from './types.js'
 import {
   binaryWantsCovers,
   emptyTrackWants,
@@ -17,6 +17,7 @@ import {
   roomCtrlKey,
   unframeMemberId,
   type BinaryWants,
+  type DmReply,
   type MemberSnapshot,
   type ParticipantStubRequest,
   type ReqOkAck,
@@ -44,6 +45,9 @@ class RoomStubChannel extends ServerBroadcast {
   private readonly _room: ServerRoom
   /** @internal — members the remote client joined through this stub (membership & lifecycle). */
   readonly _stubMembers = new Set<string>()
+  /** @internal — ack DMs relayed to this client awaiting its `dm-reply`: `ackId → sender`. Only an
+   *  `ackId` recorded here is honored, so a forged reply routes nowhere. Dropped with the stub. */
+  readonly _pendingAckDms = new Map<string, string>()
   /** @internal — members whose own echo this client's room view must not receive (`selfDelivery`
    *  off). The one relay-gate input, fed by both ways a member arises: a client `req-join` adds
    *  here directly, and a co-returned server-side participant is bound here at serialization time
@@ -164,7 +168,11 @@ function bindParticipantStubChannel(
           await participant.setAttributes(isObject(req.attrs) ? req.attrs : {})
           return { ok: true } satisfies ReqOkAck
         case 'req-dm':
-          return { ok: true, ack: await participant.send(req.to, req.data) } satisfies ReqDmAck
+          return (
+            req.ack
+              ? { ok: true, reply: await participant.send(req.to, req.data, { ack: true }) }
+              : { ok: true, ack: (await participant.send(req.to, req.data)) as RoomSendReceipt }
+          ) satisfies ReqDmAck
         case 'req-leave':
           await participant.leave()
           return { ok: true } satisfies ReqOkAck
@@ -192,17 +200,26 @@ function bindParticipantStubChannel(
     (meta: ParticipantMeta) => void channel.send({ __r: 'p-meta', meta }).catch(() => {}),
   )
 
-  // The participant's holder is the client — forward inbox deliveries to it.
-  const unlistenDm = participant.listen((data, from) => {
-    void channel
-      .send({
-        __r: 'dm',
-        from: from?.id ?? '',
-        fromMeta: from?.meta ?? null,
-        ...(from?.identity == null ? {} : { fromIdentity: from.identity }),
-        data,
-      })
-      .catch(() => {})
+  // The participant's holder is the client — forward inbox deliveries to it. An ack DM rides the
+  // channel's own ack: the client's `listen` reply comes back as the channel ack, which becomes
+  // the DM reply routed to the sender (see server `_onDm`).
+  participant._setForwarder((msg) => {
+    const notice = {
+      __r: 'dm' as const,
+      from: msg.from,
+      fromMeta: msg.fromMeta,
+      ...(msg.fromIdentity == null ? {} : { fromIdentity: msg.fromIdentity }),
+      data: msg.data,
+      ...(msg.ackId ? { ackId: msg.ackId } : {}),
+    }
+    if (!msg.ackId) {
+      void channel.send(notice).catch(() => {})
+      return
+    }
+    return channel.send(notice, { ack: true }).then(
+      (reply) => reply as DmReply,
+      (err) => ({ ok: false, err: errorMessage(err) }) as DmReply,
+    )
   })
 
   // Demand updates for this member's own tracks (onDemand) — forwarded to the client holder.
@@ -221,7 +238,6 @@ function bindParticipantStubChannel(
 
   channel.onClose(() => {
     unlistenMeta?.()
-    unlistenDm()
     unlistenDemand()
     unlistenLeave()
     // The client is gone (page closed, GC, network death) — presence says the member leaves.

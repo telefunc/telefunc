@@ -355,11 +355,21 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
 
   /** Send a private message to one participant (or their ID) — nobody else receives it. Resolves
    *  with the delivery receipt (`{ seq, timestamp }`) once the message is sequenced on the
-   *  recipient's inbox — so `await send(...)` waits for the hand-off, not just the local enqueue. */
+   *  recipient's inbox — so `await send(...)` waits for the hand-off, not just the local enqueue.
+   *
+   *  The hand-off is best-effort (fire-and-forget) — the underlying pub/sub is at-most-once on
+   *  every adapter. For *confirmed* delivery, pass `{ ack: true }`: it waits for the recipient to
+   *  actually handle the message and resolves with whatever their `listen` handler returns (the
+   *  last one, if several), rejecting if that handler throws or the recipient leaves before
+   *  handling. That's the request/response twin of the channel `send({ ack: true })`, and it
+   *  behaves identically whether the recipient is a server-side participant or a client. */
   send(to: string | Sender<P>, data: unknown): Promise<RoomSendReceipt>
-  /** Receive private messages addressed to you. `from` is the verified sender —
-   *  `null` for room-authored messages (`Room.send()`). Returns an unlisten function. */
-  listen(callback: (data: unknown, from: Sender<P> | null) => void): () => void
+  send(to: string | Sender<P>, data: unknown, options: { ack?: false }): Promise<RoomSendReceipt>
+  send(to: string | Sender<P>, data: unknown, options: { ack: true }): Promise<unknown>
+  /** Receive private messages addressed to you. `from` is the verified sender — `null` for
+   *  room-authored messages (`Room.send()`). Returning a value replies to a `send(…, { ack: true })`
+   *  sender (the last handler's return wins). Returns an unlisten function. */
+  listen(callback: (data: unknown, from: Sender<P> | null) => unknown): () => void
 
   /** Watch the live demand for your own published tracks: `(track, count)` fires when the number
    *  of subscribers to one of your streams changes (`track` is `null` for the default

@@ -57,6 +57,8 @@ export type {
   RoomDataPublish,
   RoomAnnounceEnvelope,
   RoomDmEnvelope,
+  RoomDmAckEnvelope,
+  DmReply,
   RoomStubRequest,
   ParticipantStubRequest,
   ParticipantStubNotice,
@@ -318,7 +320,9 @@ type RoomDemandEvent = { __r: 'demand'; member: string; track: string | null; co
 
 /** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
  *  privacy: only the target's owning node subscribes, only its holder receives the relay.
- *  `to` lets a holder of several participants route the message to the right one. */
+ *  `to` lets a holder of several participants route the message to the right one. `ackId` is
+ *  present iff the sender wants a reply (`send(…, { ack: true })`) — the recipient's node routes
+ *  the handler's result back as a `RoomDmAckEnvelope` on the sender's inbox. */
 type RoomDmEnvelope = {
   __r: 'dm'
   to: string
@@ -326,7 +330,16 @@ type RoomDmEnvelope = {
   fromMeta: ParticipantMeta | null
   fromIdentity?: string
   data: unknown
+  ackId?: string
 }
+
+/** The reply to an `{ ack: true }` DM, published back on the *sender's* inbox key (`roomDmKey`) —
+ *  which the sender's own node already subscribes to. `to` is the original sender; `ackId`
+ *  correlates it to the pending `send`. Carries the recipient's handler return, or its error. */
+type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
+
+/** The result of handling an `{ ack: true }` DM: the recipient's `listen` return, or its throw. */
+type DmReply = { ok: true; result: unknown } | { ok: false; err: string }
 
 /** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
  *  `sub-binary` declares the client's binary wants (full replace, see `BinaryWants`);
@@ -337,23 +350,28 @@ type RoomStubRequest =
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
   | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }
-  | { __r: 'req-dm'; id: string; to: string; data: unknown }
+  | { __r: 'req-dm'; id: string; to: string; data: unknown; ack?: boolean }
+  // A client-held member's reply to an `{ ack: true }` DM it received — routed back to the sender.
+  | ({ __r: 'dm-reply'; id: string; ackId: string } & DmReply)
   | { __r: 'sub-binary'; wants: BinaryWants }
   | { __r: 'sub-text'; members: string[] }
 
-/** Client→server requests on a standalone `LocalParticipant` stub channel. */
+/** Client→server requests on a standalone `LocalParticipant` stub channel. (An ack DM this
+ *  participant receives replies through the channel's own ack, so there is no `dm-reply` here —
+ *  unlike the shared room stub, which multiplexes many members and needs the explicit reply.) */
 type ParticipantStubRequest =
   | { __r: 'req-publish'; data: unknown; retain?: boolean }
   | { __r: 'req-set-meta'; meta: ParticipantMeta }
   | { __r: 'req-set-attrs'; attrs: ParticipantMeta }
-  | { __r: 'req-dm'; to: string; data: unknown }
+  | { __r: 'req-dm'; to: string; data: unknown; ack?: boolean }
   | { __r: 'req-leave' }
 
-/** Server→client notices on a standalone `LocalParticipant` stub channel. */
+/** Server→client notices on a standalone `LocalParticipant` stub channel. `dm`'s `ackId`, when
+ *  present, asks the client to reply (`send(…, { ack: true })`) — see `RoomDmEnvelope`. */
 type ParticipantStubNotice =
   | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
   | { __r: 'p-meta'; meta: ParticipantMeta }
-  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown }
+  | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
   | { __r: 'demand'; track: string | null; count: number }
 
 /** Which members' streams a holder wants on the text lane — `all` for room-level listeners,
@@ -363,7 +381,9 @@ type MemberWants = { all: boolean; members: string[] }
 type ReqOkAck = { ok: true } | { ok: false; err: string }
 type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }
 type ReqPublishAck = { ok: true; ack: ChannelPublishInfo } | { ok: false; err: string }
-type ReqDmAck = { ok: true; ack: RoomSendReceipt } | { ok: false; err: string }
+/** The stub's answer to a client `req-dm`: a delivery receipt for a plain send, or the recipient's
+ *  reply for `{ ack: true }`, or an error. */
+type ReqDmAck = { ok: true; ack: RoomSendReceipt } | { ok: true; reply: unknown } | { ok: false; err: string }
 
 /** Decode a leave event's cause — an absent wire cause means a voluntary leave. */
 function leaveCauseFromWire(event: { cause?: 'removed' | 'disconnected'; reason?: unknown }): LeaveCause {

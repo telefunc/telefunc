@@ -1366,6 +1366,79 @@ describe('direct messages', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
+// Direct message acks — `send(to, data, { ack: true })` waits for the recipient
+// to handle the message and resolves with its reply, rejecting on the handler's
+// throw or the recipient's departure. Mirrors the channel `send({ ack: true })`.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('direct message acks', () => {
+  it('resolves with the recipient handler’s reply (the request/response twin of channel ack)', async () => {
+    const room = await Room.create('dm-ack')
+    const authority = await room.join({ role: 'authority' })
+    const player = await room.join({ name: 'p' })
+    authority.listen((cmd) => `applied:${cmd}`)
+
+    expect(await player.send(authority.id, 'move e4', { ack: true })).toBe('applied:move e4')
+  })
+
+  it('rejects with the recipient handler’s error', async () => {
+    const room = await Room.create('dm-ack-throw')
+    const authority = await room.join({})
+    const player = await room.join({})
+    authority.listen(() => {
+      throw new Error('illegal move')
+    })
+
+    await expect(player.send(authority.id, 'x', { ack: true })).rejects.toThrow('illegal move')
+  })
+
+  it('replies with the last listener’s return, like a channel', async () => {
+    const room = await Room.create('dm-ack-last')
+    const a = await room.join({})
+    const b = await room.join({})
+    b.listen(() => 'first')
+    b.listen(() => 'second')
+
+    expect(await a.send(b.id, 'x', { ack: true })).toBe('second')
+  })
+
+  it('waits for a recipient that listens after the fact — no spurious failure on the pre-listen race', async () => {
+    const room = await Room.create('dm-ack-hold')
+    const authority = await room.join({})
+    const player = await room.join({})
+
+    const pending = player.send(authority.id, 'ping', { ack: true }) // no listener yet — held
+    await settle()
+    authority.listen((cmd) => `pong:${cmd}`) // attaches now → the held DM is handled
+
+    expect(await pending).toBe('pong:ping')
+  })
+
+  it('rejects if the recipient leaves before handling', async () => {
+    const room = await Room.create('dm-ack-leave')
+    const authority = await room.join({})
+    const player = await room.join({})
+
+    const pending = player.send(authority.id, 'x', { ack: true }) // no listener → held
+    await settle()
+    await authority.leave()
+
+    await expect(pending).rejects.toThrow(/left the room/)
+  })
+
+  it('a plain send() (no ack) still resolves with a delivery receipt, ignoring any handler return', async () => {
+    const room = await Room.create('dm-noack')
+    const a = await room.join({})
+    const b = await room.join({})
+    b.listen(() => 'ignored')
+
+    const receipt = await a.send(b.id, 'x')
+    expect(typeof receipt.seq).toBe('number')
+    expect(typeof receipt.timestamp).toBe('number')
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
 // Room-authored messages — system notices without a synthetic member: they
 // carry no sender, never pollute the member list, and can't be spoofed by
 // clients (their publishes/DMs are validated against their own members).
@@ -1875,9 +1948,12 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
     _setWireTextSubscribed: (on: boolean) => {
       wireTextSubscribed = on
     },
-    send: async (msg: { __r: string }) => {
+    send: async (msg: { __r: string; ack?: boolean }) => {
       sent.push(msg)
-      return msg.__r === 'req-join' ? { ok: true, id: joinAck?.id ?? crypto.randomUUID(), joinedAt: 1 } : { ok: true }
+      if (msg.__r === 'req-join') return { ok: true, id: joinAck?.id ?? crypto.randomUUID(), joinedAt: 1 }
+      if (msg.__r === 'req-dm')
+        return msg.ack ? { ok: true, reply: 'fake-reply' } : { ok: true, ack: { seq: ++seq, timestamp: 1 } }
+      return { ok: true }
     },
     publish: async (envelope: unknown) => {
       published.push(envelope)
@@ -1991,6 +2067,25 @@ describe('ClientRoom', () => {
     fake.emit({ __r: 'dm', to: memberId, from: peer, fromMeta: { name: 'Peer' }, data: 'reply' })
     fake.emit({ __r: 'dm', to: crypto.randomUUID(), from: peer, data: 'not-mine' })
     expect(inbox).toEqual([['reply', { id: peer, meta: { name: 'Peer' }, identity: null }]]) // snapshot sender — peer isn't in the local view
+  })
+
+  it('replies to an ack DM with its handler’s return, routed back up the stub', async () => {
+    const memberId = crypto.randomUUID()
+    const fake = createFakeStub({ id: memberId })
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('dm-ack'))
+    const me = await clientRoom.join({})
+    me.listen((data) => `handled:${data}`) // a client recipient replies exactly like a server-side one
+
+    fake.emit({ __r: 'dm', to: memberId, from: crypto.randomUUID(), data: 'ping', ackId: 'ack-1' })
+    await settle()
+
+    expect(fake.sent).toContainEqual({
+      __r: 'dm-reply',
+      id: memberId,
+      ackId: 'ack-1',
+      ok: true,
+      result: 'handled:ping',
+    })
   })
 
   it('applies leave/p-meta/update/closed events to state and local participants', async () => {
