@@ -41,16 +41,21 @@ async function startBot(): Promise<void> {
   })
 }
 
-// --- Text channels: one bot membership each, commands via subscribe ---
+// --- Text channels: the bot is each channel's server seat, commands via subscribe ---
 
-const channelBots = new Map<string, LocalParticipant>() // channel room ID → the bot's membership
+const channelBots = new Map<string, LocalParticipant>() // channel room ID → the bot's server seat
 
 async function watchChannel(roomId: string, guild: GuildRoom, botUserId: string, meta: MemberMeta): Promise<void> {
   if (channelBots.has(roomId)) return
   const channel = await getGuardedChannel(roomId)
   if (channel.meta.kind !== 'text') return
 
-  const botMe = await channel.join(meta, { identity: botUserId })
+  // The bot joins each channel as its **server seat** (`{ server: true }`) — a full participant
+  // (it publishes replies and subscribes to commands) but excluded from presence, so it doesn't
+  // occupy a seat in the channel's count/roster. Exactly the "a bot, a command sink" case the
+  // seat is for. The bot stays a *visible* member of the guild room (its guild join is a normal
+  // identity join) — Discord shows bots in the member list.
+  const botMe = await channel.join(meta, { identity: botUserId, server: true })
   channelBots.set(roomId, botMe)
   channel.onClose(() => channelBots.delete(roomId)) // channel deleted
 

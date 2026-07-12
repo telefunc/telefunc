@@ -42,6 +42,12 @@ deleted from app code.
   query-half — the DND check no longer loads the roster) and a telefunction **`Abort`'s message now
   on `err.message`** (finding 7 — `errorMessage()` drops the `abortValue` dig-out). Findings 7 and 17
   now fully close.
+- **Round 9** followed the base to `3d5ad65`, which added a **server seat** (`join({ server: true })` →
+  `room.server`): a full participant excluded from presence, "for a bot, a command sink". Adopted —
+  RoomBot joins each channel as its server seat (publishes replies, listens for commands, but isn't
+  counted in the channel's roster) while staying a *visible* guild member. (The round's other
+  additions — `me.send()` returning its receipt, `Room.list<M>()`, and the identity-snapshot view
+  exports — touch lanes this app doesn't use or already covers.)
 
 **Features**
 
@@ -95,7 +101,7 @@ you are (verified, not client-echoed).
 | Kick | One `Room.removeParticipant(roomId, { identity }, { reason })` per room — the leave lands as `{ type: 'removed', reason }` on the kicked client, no side-channel notice (finding 12) |
 | Voice/video | One room per voice channel; capacity enforced by its `onBeforeJoin` guard. Mic/camera/screen are **named binary tracks** (`publishBinary(frame, { track, keyFrame })` / `subscribeBinary(cb, { track })`), each paused by `onDemand` when unwatched; mute/camera/screen state merges one field at a time via `setAttributes` |
 | Member sidebar / channel list | `room.snapshot()` + `room.onChange()` — the `useSyncExternalStore` contract, projected into Zustand |
-| Bot | A server-side member driven by the same Room API |
+| Bot | Same Room API, no browser. A **visible guild member**, but takes each text channel's **server seat** (`join({ server: true })`) — a full participant (publishes replies, subscribes to commands) that's excluded from the channel's presence count (`server/bot.ts`) |
 
 Module map: `database/` (row types + DDL, `node:sqlite` bootstrap, all SQL in `queries.ts`) ·
 `server/` (auth, sessions, room bootstrap, guards, bot) · `telefunc/` (the API: enter, channels,
@@ -488,7 +494,8 @@ expired sessions and the bot's `greeted` set are never pruned.
 | `Room.create` / `Room.get` (incl. `{ tail: true }`) / `Room.getOrCreate` / `Room.guard` / `Room.update` / `Room.setAttributes` / `Room.close` | ✔ | `server/rooms.ts`, `server/guards.ts`, `telefunc/channels.telefunc.ts` — `tail` fences history (finding 14); `setAttributes` merges the topic per-key (finding 21) |
 | `Room.removeParticipant({ identity }, { reason })` / `Room.announce` / `Room.send(room, { identity }, …)` / `Room.getParticipants(id, { identity })` | ✔ | kick sweep (index-resolved per room, finding 18), banners + directory + activity feed, identity-addressed DM delivery + the DND presence read (finding 17) |
 | `Room.join` (static) / `Room.list` | ✖ | memberships need identity + guards (server-side, per-instance); the app's channels table already knows the rooms (finding 4) |
-| `room.join(meta, { identity })` / `getParticipants` / `subscribe` / `onJoin` / `onLeave` / `onUpdate` / `onAnnounce` / `onClose` / `count` / `size` / `isFull` / `meta` | ✔ | throughout `telefunc/*`, `server/bot.ts`, `app/store.ts` |
+| `room.join(meta, { identity })` (incl. `{ server: true }`) / `getParticipants` / `subscribe` / `onJoin` / `onLeave` / `onUpdate` / `onAnnounce` / `onClose` / `count` / `size` / `isFull` / `meta` | ✔ | throughout `telefunc/*`, `server/bot.ts`, `app/store.ts` — the bot's per-channel seat is a **server seat** (round 9), `server/bot.ts` |
+| `room.server` | ✖ | the bot holds the `LocalParticipant` that `join({ server: true })` returns, so it never re-fetches its seat (`server/bot.ts`) |
 | `room.snapshot` / `snapshot({ by: 'identity' })` / `onChange` | ✔ | the Room→React adapter; the identity-grouped view is the member sidebar (finding 19) — `app/store.ts` |
 | `room.onParticipantUpdate` | ✖ | available (finding 19 delta hook); `app/call.ts` still wires per-peer `member.onUpdate` — full adoption is tied to the store's selector/memo refactor |
 | ~~`room.onActivity`~~ | — | removed upstream in round 4; unread is re-derived from `onAfterPublish` → guild announce (finding 10) |
