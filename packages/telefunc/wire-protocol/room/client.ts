@@ -135,11 +135,19 @@ class ClientRoom implements Room {
   get isClosed(): boolean {
     return this._state.closed
   }
+  get server(): RemoteParticipant | null {
+    return this._state.getServer()
+  }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     if (options?.identity !== undefined) {
       throw new Error(
         'join() options.identity is server-assigned: identity is trusted, so set it where trust lives — in the granting telefunction (server-side join()), not on the client.',
+      )
+    }
+    if (options?.server !== undefined) {
+      throw new Error(
+        'join() options.server is server-side only: the server seat is created by the granting telefunction (server-side join({ server: true })), not by a client.',
       )
     }
     const selfDelivery = normalizeJoinOptions(meta, options)
@@ -178,7 +186,13 @@ class ClientRoom implements Room {
   }
 
   /** @internal — revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
-  _reviveRemote(snap: { id: string; meta: ParticipantMeta; joinedAt: number; metaSeq: number }): RemoteParticipant {
+  _reviveRemote(snap: {
+    id: string
+    meta: ParticipantMeta
+    joinedAt: number
+    metaSeq: number
+    server?: boolean
+  }): RemoteParticipant {
     return this._state.ensureRemoteFromSnapshot(snap)
   }
 

@@ -177,6 +177,9 @@ type RoomMemberRecord = {
   /** Named binary tracks this member has published — appended by the owner before the first
    *  frame of each track, so late observers can subscribe every track they can't name. */
   tracks?: string[]
+  /** A server seat (`join({ server: true })`) — a member for routing/discovery but excluded from
+   *  presence (count, roster, `onJoin`/`onLeave`/`onEmpty`). Surfaced to observers as `room.server`. */
+  server?: boolean
 }
 
 function sizeToWire(size: number): number | null {
@@ -199,6 +202,9 @@ type MemberSnapshot = {
   identity?: string | null
   /** Named binary tracks the member has published (see `RoomMemberRecord.tracks`). */
   tracks?: string[]
+  /** Whether this is the room's server seat — carried on the roster so observers bind `room.server`
+   *  and exclude it from presence (see `RoomMemberRecord.server`). */
+  server?: boolean
 }
 
 /** Serializer metadata of a `Room` crossing the wire. Carries only scalars — the roster itself

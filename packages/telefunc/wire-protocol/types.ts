@@ -274,7 +274,7 @@ type RoomParticipantContract = TypeContract<ServerLocalParticipant, LocalPartici
 type RoomRemoteContract = TypeContract<
   RemoteParticipant,
   RemoteParticipant,
-  { room: unknown; id: string; meta: Record<string, unknown>; joinedAt: number; metaSeq: number }
+  { room: unknown; id: string; meta: Record<string, unknown>; joinedAt: number; metaSeq: number; server?: boolean }
 >
 
 type FunctionContract = TypeContract<

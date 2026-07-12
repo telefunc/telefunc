@@ -158,6 +158,12 @@ type JoinOptions = {
    *  trusted, so it's assigned where trust lives: in the granting telefunction. A client-side
    *  `join()` rejects it. Immutable for the membership's lifetime. */
   identity?: string
+  /** Join as the room's server seat (default: `false`) — a full participant (publish, `listen`,
+   *  `send`, `onDemand`) that is excluded from presence (`count`, roster, `onJoin`/`onLeave`/
+   *  `onEmpty`) and surfaced to observers as `room.server`. For a server that acts in a room —
+   *  authoritative state, a bot, a command sink — without impersonating a player. Server-side
+   *  `join()` only (like `identity`); a client-side `join()` ignores it. At most one per room. */
+  server?: boolean
 }
 
 /** One participant inside `room.snapshot()`. */
@@ -265,6 +271,11 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   readonly isEmpty: boolean
   readonly isFull: boolean
   readonly isClosed: boolean
+
+  /** The room's server seat (`join({ server: true })`), or `null` if there is none. A reachable
+   *  non-presence participant: `room.server.send(cmd)` addresses the server without scanning the
+   *  roster, and `room.server.subscribeBinary(...)` reads its tracks. */
+  readonly server: RemoteParticipant<P, Pub> | null
 
   /** Join the room. Returns your own participant handle. */
   join(meta?: P, options?: JoinOptions): Promise<LocalParticipant<P, Pub>>

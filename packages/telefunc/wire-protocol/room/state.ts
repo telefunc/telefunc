@@ -43,6 +43,9 @@ type MemberEntry = {
   /** Named tracks the member is known to publish — grown by `track` events and rosters,
    *  never shrunk (tracks live as long as the member). Drives all-track key subscriptions. */
   tracks: Set<string>
+  /** The room's server seat — a member for routing/discovery, excluded from every presence read
+   *  (`count`, `snapshot`, `onJoin`/`onLeave`/`onEmpty`). At most one per room. */
+  server: boolean
   remote: RemoteParticipant
   dataCbs: Array<(data: unknown, info: ChannelPublishInfo) => unknown>
   binaryCbs: Array<{
@@ -157,9 +160,19 @@ class RoomState {
   // ── Reads ──
 
   /** Exact once the roster is known (seeded or reconciled); before that, the seeded count
-   *  adjusted by the events this view applied since. */
+   *  adjusted by the events this view applied since. Excludes the server seat — it's a member for
+   *  routing, never a counted participant (the seeded count may still include it until the roster
+   *  loads, like any other pre-roster fact). */
   get count(): number {
-    return this._rosterKnown ? this._members.size : this._seedCount
+    if (!this._rosterKnown) return this._seedCount
+    return this._members.size - (this.getServer() ? 1 : 0)
+  }
+
+  /** The room's server seat, or `null` — the `{ server: true }` member, surfaced as `room.server`.
+   *  A member for routing and discovery, excluded from every presence read. */
+  getServer(): RemoteParticipant | null {
+    for (const entry of this._members.values()) if (entry.server) return entry.remote
+    return null
   }
 
   /** Whether this view holds the authoritative member list (vs just a count). */
@@ -216,7 +229,7 @@ class RoomState {
   }
 
   listRemotes(): RemoteParticipant[] {
-    return [...this._members.values()].map((entry) => entry.remote)
+    return [...this._members.values()].filter((entry) => !entry.server).map((entry) => entry.remote)
   }
 
   /** Member IDs currently known — drives isolated-mode per-member key subscriptions. */
@@ -225,13 +238,14 @@ class RoomState {
   }
 
   snapshotMembers(): MemberSnapshot[] {
-    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq, identity, tracks }) => ({
+    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq, identity, tracks, server }) => ({
       id,
       meta,
       joinedAt,
       metaSeq,
       identity,
       ...(tracks.size === 0 ? {} : { tracks: [...tracks] }),
+      ...(server ? { server: true } : {}),
     }))
   }
 
@@ -298,9 +312,9 @@ class RoomState {
   snapshot(): RoomSnapshotView {
     if (this._snapshotCache?.version === this._stateVersion) return this._snapshotCache.value
     const participants = Object.freeze(
-      [...this._members.values()].map(({ id, identity, meta, joinedAt }) =>
-        Object.freeze({ id, identity, meta, joinedAt }),
-      ),
+      [...this._members.values()]
+        .filter((entry) => !entry.server)
+        .map(({ id, identity, meta, joinedAt }) => Object.freeze({ id, identity, meta, joinedAt })),
     )
     const value = Object.freeze({
       id: this.roomId,
@@ -362,7 +376,7 @@ class RoomState {
 
   // ── Event application ──
 
-  applyJoin(id: string, meta: ParticipantMeta, joinedAt: number, identity?: string | null): void {
+  applyJoin(id: string, meta: ParticipantMeta, joinedAt: number, identity?: string | null, server?: boolean): void {
     if (this.closed) return
     const existing = this._members.get(id)
     if (existing) {
@@ -371,7 +385,14 @@ class RoomState {
       if (existing.metaSeq === 0) existing.meta = meta
       return
     }
-    const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity })
+    const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity, server })
+    // The server seat is not a participant: it never moves the count, fires no `onJoin`, and can't
+    // fill the room. It's discovered through the roster, not narrated as a presence event — but the
+    // roster did change, so `onChange` still fires (`room.server` observers re-read).
+    if (entry.server) {
+      this._bumpMembership()
+      return
+    }
     this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
     this._bumpMembership()
     this._fireAll(this._joinCbs, entry.remote)
@@ -382,13 +403,24 @@ class RoomState {
     const entry = this._members.get(id)
     if (!entry) return // unknown here: absorbed (pre-reconcile misses correct at reconcile)
     this._members.delete(id)
-    this._seedCount = Math.max(0, this._seedCount - 1)
+    // A seat leaving is invisible to presence — no count change, no room-level `onLeave`, and it's
+    // never the "last participant" that empties the room. Its own leave handler and listener release
+    // still run. The participant path keeps its exact original ordering.
+    if (!entry.server) this._seedCount = Math.max(0, this._seedCount - 1)
     this._bumpMembership()
     this._fireAll(entry.leaveCbs, cause)
-    this._fireAll(this._leaveCbs, entry.remote, cause)
+    if (!entry.server) this._fireAll(this._leaveCbs, entry.remote, cause)
     this._releaseEntryListeners(entry)
+    if (entry.server) return
     this._wasFull = this.isFull
-    if (this._members.size === 0) this._fireAll(this._emptyCbs)
+    if (!this._hasParticipants()) this._fireAll(this._emptyCbs)
+  }
+
+  /** A non-server member is present — the presence notion of "not empty" (`onEmpty` fires when the
+   *  last of these leaves, even though the server seat lingers). */
+  private _hasParticipants(): boolean {
+    for (const entry of this._members.values()) if (!entry.server) return true
+    return false
   }
 
   /** Applies only revisions newer than the entry's — the origin's echo (same seq) and events
@@ -547,7 +579,7 @@ class RoomState {
       seen.add(member.id)
       const entry = this._members.get(member.id)
       if (!entry) {
-        this.applyJoin(member.id, member.meta, member.joinedAt, member.identity)
+        this.applyJoin(member.id, member.meta, member.joinedAt, member.identity, member.server)
         const created = this._members.get(member.id)
         if (created) {
           created.metaSeq = member.metaSeq
@@ -592,6 +624,7 @@ class RoomState {
       identity: entrySeed.identity ?? null,
       metaSeq: entrySeed.metaSeq,
       tracks: new Set(entrySeed.tracks),
+      server: entrySeed.server === true,
       remote: {
         id,
         get meta() {

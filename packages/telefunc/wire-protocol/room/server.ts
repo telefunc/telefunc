@@ -437,7 +437,9 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
     )
     members = await readMembers(kv, id, await resolveIdentityMembers(kv, id, target.identity))
   }
-  return members.map((m) => ({ id: m.id, identity: m.identity ?? null, meta: m.meta, joinedAt: m.joinedAt }))
+  return members
+    .filter((m) => !m.server) // the server seat is not a participant
+    .map((m) => ({ id: m.id, identity: m.identity ?? null, meta: m.meta, joinedAt: m.joinedAt }))
 }
 
 async function announceToRoom(id: string, data: unknown): Promise<void> {
@@ -574,12 +576,25 @@ class ServerRoom implements Room {
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     const selfDelivery = normalizeJoinOptions(meta, options)
     const identity = normalizeIdentity(options)
+    const server = normalizeServer(options)
+    // Best-effort local guard — a second seat on another node can't be seen without a KV scan, so
+    // "at most one" is ultimately a contract; this catches the common same-object double-join.
+    if (server) assertUsage(!this._state.getServer(), 'A room can have at most one server participant.')
     let participant!: ServerLocalParticipant
-    await this._admitMember(meta, identity, (id, joinedAt) => {
-      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, identity)
-      this._localParticipants.set(id, participant)
-    })
+    await this._admitMember(
+      meta,
+      identity,
+      (id, joinedAt) => {
+        participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, identity)
+        this._localParticipants.set(id, participant)
+      },
+      server,
+    )
     return participant
+  }
+
+  get server(): RemoteParticipant | null {
+    return this._state.getServer()
   }
 
   async getParticipants(): Promise<RemoteParticipant[]> {
@@ -647,15 +662,19 @@ class ServerRoom implements Room {
     meta: ParticipantMeta,
     identity: string | null,
     track: (id: string, joinedAt: number) => void,
+    server = false,
   ): Promise<{ id: string; joinedAt: number }> {
     const id = crypto.randomUUID()
+    // The server seat is not a party seeking admission — it's the server itself — so it bypasses the
+    // participant-join ceremony: no `onBeforeJoin` policy, no `join` control event, no `onAfterJoin`.
     // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
     const onBeforeJoin = this._guards?.onBeforeJoin
-    if (onBeforeJoin) await onBeforeJoin({ id, meta, identity })
-    const joinedAt = await this._createMember(id, meta, identity)
+    if (!server && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
+    const joinedAt = await this._createMember(id, meta, identity, server)
     track(id, joinedAt)
     this._syncSubs()
-    this._state.applyJoin(id, meta, joinedAt, identity)
+    this._state.applyJoin(id, meta, joinedAt, identity, server)
+    if (server) return { id, joinedAt } // roster-only: no control-lane announce, no post-join hook
     await publishCtrl(this.id, {
       __r: 'join',
       id,
@@ -670,7 +689,12 @@ class ServerRoom implements Room {
   }
 
   /** KV half of a join, guarding against a concurrent `Room.close()`. */
-  private async _createMember(id: string, meta: ParticipantMeta, identity: string | null): Promise<number> {
+  private async _createMember(
+    id: string,
+    meta: ParticipantMeta,
+    identity: string | null,
+    server = false,
+  ): Promise<number> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
     const joinedAt = Date.now()
@@ -680,6 +704,7 @@ class ServerRoom implements Room {
       seenAt: joinedAt,
       metaSeq: 0,
       ...(identity === null ? {} : { identity }),
+      ...(server ? { server: true } : {}),
     }
     // Index the membership before writing its record — never after, so a reader can't miss a live
     // member (an orphan marker is harmless; see resolveIdentityMembers).
@@ -1595,6 +1620,7 @@ async function readMembers(kv: RoomKV, roomId: string, ids?: string[]): Promise<
       metaSeq: record.metaSeq,
       identity: record.identity ?? null,
       ...(record.tracks === undefined ? {} : { tracks: record.tracks }),
+      ...(record.server ? { server: true } : {}),
     })
   }
   return members
@@ -1686,6 +1712,14 @@ function normalizeIdentity(options: JoinOptions | undefined): string | null {
     'join() options.identity should be a non-empty string',
   )
   return options.identity
+}
+
+/** Server-side only, like `identity`: a client `join()` never reads this option, so it can't seat
+ *  itself as the server. */
+function normalizeServer(options: JoinOptions | undefined): boolean {
+  if (options?.server === undefined) return false
+  assertUsage(typeof options.server === 'boolean', 'join() options.server should be a boolean')
+  return options.server
 }
 
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta; size: number } {
