@@ -29,13 +29,13 @@ Three objects:
 - **`LocalParticipant`** — the current user, returned by `join()`. You publish, send private messages, and update your metadata through it.
 - **`RemoteParticipant`** — everyone else, as seen through a room: subscribe to one member's messages, watch their metadata, notice when they leave.
 
-And three message lanes:
+And three kinds of message:
 
-| Lane | Send | Receive | Typical use |
+| Kind | Send | Receive | Typical use |
 |---|---|---|---|
-| Room-wide | `me.publish(data)` | `room.subscribe(cb)`, `member.subscribe(cb)` | Chat, game state, media |
-| Private | `me.send(to, data)` | `me.listen(cb)` | DMs, invites, game moves |
-| Room-authored | `Room.announce()`, `Room.send()` | `room.onAnnounce(cb)`, `me.listen(cb)` | System notices, rewards |
+| To the whole room | `me.publish(data)` | `room.subscribe(cb)`, `member.subscribe(cb)` | Chat, game state, media |
+| To one participant | `me.send(to, data)` | `me.listen(cb)` | DMs, invites, game moves |
+| From the room itself | `Room.announce()`, `Room.send()` | `room.onAnnounce(cb)`, `me.listen(cb)` | System notices, rewards |
 
 Two things hold everywhere:
 
@@ -373,21 +373,14 @@ Order both the stored history and the live tail by `seq` — the strict per-key 
 
 ### Switching rooms
 
-Membership is per room, so switching rooms is a `leave()` then a `join()`:
+Membership is per room, so switching is `leave()` then `join()`:
 
 ```js
 await current?.leave()
 current = await nextRoom.join({ name })
-await current.publish({ id: crypto.randomUUID(), text })
 ```
 
-A send on a room you've left rejects explicitly (`Participant has left the room`). If a message might be sent mid-switch (a fast-typed line), join the next room *before* leaving the old one — there's then no instant without a live membership:
-
-```js
-const next = await nextRoom.join({ name })
-await current?.leave()
-current = next
-```
+Publishing to a room you've already left throws (`Participant has left the room`).
 
 
 ### Enforce capacity
@@ -407,11 +400,11 @@ export async function onJoinLobby(name) {
 
 ### Beyond one room
 
-Unread counts and room discovery sit one level up from a single room — both reuse what you already have, so neither needs a dedicated lane.
+Unread counts, room discovery, and subgroups all live one level up from a single room — and each is just another room, or a query against a database you already have.
 
-- **Unread badges.** The count is `messages-since(lastRead)` — a query against the same store you persist to in `onAfterPublish`. For a live nudge about a room the user *isn't* watching, give each user a personal room they stay subscribed to and `Room.announce(userRoom, { roomId })` on write: the sidebar holds one subscription, not one per room.
-- **Discover rooms.** A lobby is itself a room. Viewers observe `lobby`; creating a room does `Room.announce('lobby', { created: id, meta })` (and `{ closed: id }` on close). One control message per room lifecycle, delivered to exactly the waiting clients — no polling, no thundering herd.
-- **Subgroups & team chat.** A subgroup — a team, a breakout, a private side-channel — is its own room, with its own membership and guards; publish there and outsiders never receive it (the `{ room, me }` seam returns several rooms at once, so a client holds `match` and `match:red` together). For a one-off whisper to a subset rather than a standing group, fan out with `Room.send(id, { identity }, data)`.
+- **Unread badges** are a `messages-since(lastRead)` query against the store you write to in `onAfterPublish`. To notify a user about a room they *aren't* currently watching, give each user their own room that they stay subscribed to, and `Room.announce(userRoom, { roomId })` when a message arrives — their sidebar keeps one subscription open instead of one per room.
+- **A room directory** is itself a room. Clients watch a `lobby` room; creating or closing a room calls `Room.announce('lobby', { created: id })` or `{ closed: id }`. Waiting clients hear about it right away, with no polling.
+- **Subgroups and team chat** are separate rooms. A team, a breakout, or a private thread each has its own membership and guards, so a message sent there never reaches anyone outside it. A single telefunction can return several rooms at once (e.g. `match` and `match:red`). To message a few people instead of a standing group, use `Room.send(id, { identity }, data)`.
 
 
 ## Reference
