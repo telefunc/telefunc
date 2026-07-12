@@ -36,15 +36,10 @@ const roomParticipantReviver: ReviverType<RoomParticipantContract, ClientReviver
   prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   revive(metadata, context) {
     const channel = context.createChannel({ channelId: metadata.channelId })
-    // `metadata.room` rides along only when selfDelivery is off (see the server replacer); the
-    // recursive parser has revived it into its ClientRoom, deduped against any co-returned room.
-    let siblingRoom: ClientRoom | null = null
-    if (metadata.room !== undefined) {
-      assert(metadata.room instanceof ClientRoom)
-      siblingRoom = metadata.room
-    }
+    // selfDelivery is enforced at the source (the server never relays a suppressed echo to this
+    // client's room stub — see server _onTextData), so the client reconstructs a plain standalone.
     return {
-      value: new ClientStandaloneParticipant(channel, metadata, siblingRoom),
+      value: new ClientStandaloneParticipant(channel, metadata),
       async close() {
         await channel.close()
       },

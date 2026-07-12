@@ -453,7 +453,10 @@ class RoomState {
     fromIdentity: string | null,
     data: unknown,
     info: ChannelPublishInfo,
-    suppress: boolean,
+    // Server-only: a server-side room subscriber drops its own echo (see ServerRoom._suppress). The
+    // client never passes this — the server already withholds a self-suppressed member's echo at the
+    // relay gate, so nothing to drop here.
+    suppress = false,
   ): void {
     if (suppress) return
     const entry = this._members.get(from)
@@ -471,7 +474,8 @@ class RoomState {
     track: string | null,
     keyFrame: boolean,
     info: ChannelPublishInfo,
-    suppress: boolean,
+    // Server-only (see applyData) — the client omits it; suppression already happened at the source.
+    suppress = false,
   ): void {
     if (suppress) return
     const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, keyFrame }

@@ -8,6 +8,7 @@ export {
   onGetAuditRoom,
   onGetAudit,
   onJoinAsServer,
+  onJoinRoomAsServerSelf,
   onGetRoomWithMember,
   onWatchRoom,
   onGetWatched,
@@ -110,6 +111,16 @@ async function onGetAudit(roomId: string) {
  *  Identity is stamped here, where trust lives. */
 async function onJoinAsServer(roomId: string, name: string) {
   return await Room.join(roomId, { name }, { identity: `user:${name}` })
+}
+
+/** Server-side join with `selfDelivery: false`, returning `{ room, me }` together — the co-return
+ *  case. On the client `me` is a standalone participant, `room` its live view; the server binds
+ *  `me`'s echo-suppression onto that room's stub at serialization, so `me`'s own publishes never
+ *  come back to `room` — no client-side drop, no wasted network. */
+async function onJoinRoomAsServerSelf(roomId: string, name: string) {
+  const room = await Room.get(roomId)
+  const me = await room.join({ name }, { selfDelivery: false })
+  return { room, me }
 }
 
 /** A `RemoteParticipant` view returned alongside its room — ref-identity binds them:

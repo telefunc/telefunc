@@ -279,6 +279,18 @@ function testRoom() {
     })
   })
 
+  test('room: a co-returned server-side selfDelivery:false member is suppressed at the source, while a client join on the same stub is delivered', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-self-server')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ mine: string[]; theirs: string[]; selfDelivery: boolean }>('#room-result')
+      expect(r.selfDelivery).toBe(false)
+      expect(r.theirs).deep.equal(['from-me', 'from-notme']) // the observer receives both
+      expect(r.mine).deep.equal(['from-notme']) // own co-return echo suppressed; client join delivered
+    })
+  })
+
   test('room: Room.update propagates; list and getOrCreate resolve', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-reconfig')

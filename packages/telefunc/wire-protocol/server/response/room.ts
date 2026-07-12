@@ -19,6 +19,20 @@ import { remoteBacking } from '../../room/state.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
+/** Per-response echo-suppression rendezvous (`selfDelivery: false`). Both a room and a co-returned
+ *  self-suppressing participant are serialized into the same response, in arbitrary key order — so
+ *  the drop-set of member ids lives in `context.passScope`, one shared `Set` per room instance. The
+ *  participant adds its id; the room's stub adopts the very same set by reference. Order-independent
+ *  by object identity, scoped to this one response, discarded when the pass ends. */
+const ROOM_SELF_SUPPRESS = Symbol('telefunc:roomSelfSuppress')
+function roomSelfSuppressSet(context: ServerReplacerContext, room: ServerRoom): Set<string> {
+  let byRoom = context.passScope.get(ROOM_SELF_SUPPRESS) as Map<ServerRoom, Set<string>> | undefined
+  if (!byRoom) context.passScope.set(ROOM_SELF_SUPPRESS, (byRoom = new Map()))
+  let set = byRoom.get(room)
+  if (!set) byRoom.set(room, (set = new Set()))
+  return set
+}
+
 const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,
   detect(value): value is RoomContract['value'] {
@@ -27,6 +41,9 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
   replace(serverRoom, context) {
     const stub = new RoomStubChannel(serverRoom)
     context.registerChannel(stub)
+    // Adopt this response's echo drop-set for the room: any co-returned self-suppressing member
+    // (either serialization order) lands in the same set, and the relay gate reads it at source.
+    stub._adoptSelfSuppressed(roomSelfSuppressSet(context, serverRoom))
     // Attach before snapshotting: events from this point on are relayed to the client,
     // earlier state is in the snapshot — overlaps are absorbed by idempotent application.
     serverRoom._attachStub(stub)
@@ -92,6 +109,10 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantContract, ServerRepla
   replace(participant, context) {
     const channel = context.createChannel()
     bindParticipantStubChannel(channel, participant)
+    // selfDelivery off: bind this member's id onto its room's stub drop-set for this response, so the
+    // server drops its echo at the source. If the room isn't co-returned there's no stub to adopt the
+    // set and it's discarded with the pass — a clean no-op, never leaking to another client's stub.
+    if (!participant.selfDelivery) roomSelfSuppressSet(context, participant._room).add(participant.id)
     return {
       metadata: {
         channelId: channel.id,
@@ -101,9 +122,6 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantContract, ServerRepla
         joinedAt: participant._joinedAt,
         selfDelivery: participant.selfDelivery,
         identity: participant.identity,
-        // Only self-suppressing participants need their room on the client — carry it so revival can
-        // scope suppression to that room instance (deduped against a co-returned room). See below.
-        ...(participant.selfDelivery ? {} : { room: participant._room }),
       },
       async close() {
         await channel.close()

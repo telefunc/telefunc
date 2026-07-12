@@ -14,7 +14,8 @@ import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS }
 import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { RoomStubChannel } from './stubs.js'
-import { ClientRoom, ClientStandaloneParticipant } from './client.js'
+import { ClientRoom } from './client.js'
+import { ServerChannel } from '../server/channel.js'
 import { createStreamingReplacer } from '../server/response/registry.js'
 import { createStreamingReviver } from '../client/response/registry.js'
 import type { ClientReviverContext, ServerReplacerContext } from '../types.js'
@@ -33,7 +34,7 @@ import {
   type RoomSnapshotMetadata,
 } from './protocol.js'
 import { RoomState } from './state.js'
-import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
+import type { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 
 const previousAdapter = getBroadcastAdapter()
@@ -1551,6 +1552,69 @@ describe('room stub channel', () => {
       .filter((f) => f.tag === TAG.PUBLISH && (JSON.parse(f.text) as { __r: string }).__r === 'data')
     expect(dataFrames).toEqual([]) // the echo was skipped at the relay, not just client-side
   })
+
+  it('a co-returned selfDelivery=false participant is bound onto its room stub at the source, in either serialization order', async () => {
+    const serverRoom = (await Room.create('self-src-order')) as ServerRoom
+    const me = await serverRoom.join({ name: 'me' }, { selfDelivery: false })
+
+    // Whether the app returns { room, me } or { me, room }, the serializer converges on one drop-set:
+    // the room's stub adopts the pass's set, the participant adds its id — order-independent by identity.
+    for (const value of [
+      { room: serverRoom, me },
+      { me, room: serverRoom },
+    ]) {
+      const registered: unknown[] = []
+      const context = {
+        createChannel: () => new ServerChannel(),
+        registerChannel: (ch: unknown) => registered.push(ch),
+        sendStream: () => {
+          throw new Error('unused')
+        },
+        validators: new Map(),
+        passScope: new Map(),
+      } as unknown as ServerReplacerContext
+      const replacer = createStreamingReplacer(
+        () => context,
+        () => {},
+        [],
+      )
+      stringify(value, { replacer })
+      const stub = registered.find((c): c is RoomStubChannel => c instanceof RoomStubChannel)!
+      expect(stub._selfSuppressed.has(me.id)).toBe(true)
+    }
+  })
+
+  it('a source-bound member is suppressed on its own client stub yet still relayed to independent observers', async () => {
+    const serverRoom = (await Room.create('self-src-relay')) as ServerRoom
+    const me = await serverRoom.join({ name: 'me' }, { selfDelivery: false })
+
+    // Own stub: the serializer bound `me` into its drop-set (see the order-independence test above).
+    const own = new RoomStubChannel(serverRoom)
+    own._registerChannel()
+    own._adoptSelfSuppressed(new Set([me.id]))
+    serverRoom._attachStub(own)
+    const ownPeer = attachPeer(own)
+    own._onPeerBroadcastSubscribe(false)
+
+    // Observer stub: an independent view of the same room, with no binding.
+    const observer = new RoomStubChannel(serverRoom)
+    observer._registerChannel()
+    serverRoom._attachStub(observer)
+    const observerPeer = attachPeer(observer)
+    observer._onPeerBroadcastSubscribe(false)
+
+    await settle() // rosters stream once the peers attach
+    await me.publish({ text: 'own' })
+    await settle()
+
+    const dataOf = (p: { decoded: () => any[] }) =>
+      p
+        .decoded()
+        .filter((f) => f.tag === TAG.PUBLISH && (JSON.parse(f.text) as { __r: string }).__r === 'data')
+        .map((f) => (JSON.parse(f.text) as { data: unknown }).data)
+    expect(dataOf(ownPeer)).toEqual([]) // suppressed at the source — never written to its own client's wire
+    expect(dataOf(observerPeer)).toEqual([{ text: 'own' }]) // an independent observer still receives it
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1967,46 +2031,6 @@ describe('ClientRoom', () => {
     me.listen((data, from) => inbox.push([data, from?.meta.name]))
     expect(inbox).toEqual([['welcome!', 'Bot']])
   })
-
-  it('selfDelivery=false suppresses a standalone participant only in its own room, not in an independent observer of it', async () => {
-    const roomId = `sibling-${crypto.randomUUID()}`
-    const mkChannel = () =>
-      ({
-        listen: () => () => {},
-        onClose: () => {},
-        send: async () => ({ ok: true }),
-        sendBinary: async () => ({ ok: true, ack: { key: roomId, seq: 1, timestamp: 1 } }),
-        close: async () => 0,
-      }) as unknown as ClientChannel
-
-    // Two independent views of the SAME room on the same page (separate stubs).
-    const fakeMine = createFakeStub()
-    const myRoom = new ClientRoom(fakeMine.stub, createSnapshot(roomId))
-    const mine: unknown[] = []
-    myRoom.subscribe((data) => mine.push(data))
-    const fakeObserver = createFakeStub()
-    const observerRoom = new ClientRoom(fakeObserver.stub, createSnapshot(roomId))
-    const observed: unknown[] = []
-    observerRoom.subscribe((data) => observed.push(data))
-
-    // The participant arrives on its own channel; the serializer carries its own room (metadata.room,
-    // here `myRoom`) because selfDelivery is off — that room, and only it, is its suppression scope.
-    const me = new ClientStandaloneParticipant(
-      mkChannel(),
-      { channelId: 'ch2', roomId, id: crypto.randomUUID(), meta: {}, joinedAt: 1, selfDelivery: false },
-      myRoom,
-    )
-    const other = crypto.randomUUID()
-    for (const fake of [fakeMine, fakeObserver]) {
-      fake.emit({ __r: 'join', id: me.id, meta: {}, joinedAt: 1 })
-      fake.emit({ __r: 'join', id: other, meta: {}, joinedAt: 2 })
-      fake.emit({ __r: 'data', from: me.id, data: 'own-frame' })
-      fake.emit({ __r: 'data', from: other, data: 'their-frame' })
-    }
-
-    expect(mine).toEqual(['their-frame']) // my own view drops my echo…
-    expect(observed).toEqual(['own-frame', 'their-frame']) // …but an independent observer sees everything
-  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -2310,6 +2334,7 @@ describe('returnable RemoteParticipant', () => {
         throw new Error('unused')
       },
       validators: new Map(),
+      passScope: new Map(),
     } as unknown as ServerReplacerContext
     const replacer = createStreamingReplacer(
       () => serverCtx,

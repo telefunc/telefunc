@@ -939,7 +939,7 @@ class ServerRoom implements Room {
       const wireText = encodePublishText(serialized, rawInfo)
       for (const stub of this._stubs) {
         if (!stub._wantsTextFrom(event.from)) continue
-        if (stub._stubMembers.get(event.from)?.selfDelivery === false) continue
+        if (stub._selfSuppressed.has(event.from)) continue
         stub._relayPublishText(wireText)
       }
     }
@@ -963,7 +963,7 @@ class ServerRoom implements Room {
       const wireData = encodePublishBinary(framed, rawInfo)
       for (const stub of this._stubs) {
         if (!stub._wantsBinary(unframed.from, unframed.track ?? DEFAULT_TRACK)) continue
-        if (stub._stubMembers.get(unframed.from)?.selfDelivery === false) continue
+        if (stub._selfSuppressed.has(unframed.from)) continue
         stub._relayPublishBinary(wireData)
       }
     }
@@ -1033,7 +1033,10 @@ class ServerRoom implements Room {
       // vanished record with no observed event means the member was removed.
       local._onLeft(cause ?? { type: 'removed' })
     }
-    for (const stub of this._stubs) stub._stubMembers.delete(id)
+    for (const stub of this._stubs) {
+      stub._stubMembers.delete(id)
+      stub._selfSuppressed.delete(id)
+    }
     this._syncSubs()
   }
 
@@ -1090,9 +1093,10 @@ class ServerRoom implements Room {
         case 'req-join': {
           const meta = isObject(req.meta) ? req.meta : {}
           // Identity is trusted and therefore server-assigned — a client join never carries one.
-          const { id, joinedAt } = await this._admitMember(meta, null, (id) =>
-            stub._stubMembers.set(id, { selfDelivery: req.selfDelivery !== false }),
-          )
+          const { id, joinedAt } = await this._admitMember(meta, null, (id) => {
+            stub._stubMembers.add(id)
+            if (req.selfDelivery === false) stub._selfSuppressed.add(id)
+          })
           return { ok: true, id, joinedAt }
         }
         case 'req-leave':
