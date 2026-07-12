@@ -1039,6 +1039,24 @@ describe('direct messages', () => {
     ])
   })
 
+  it("Room.getParticipants({ identity }) reads one identity's memberships as snapshots, without loading the roster", async () => {
+    const room = await Room.create('id-read')
+    const tab1 = await room.join({ name: 'T1', dnd: true }, { identity: 'user-4' })
+    const tab2 = await room.join({ name: 'T2', dnd: true }, { identity: 'user-4' })
+    await room.join({ name: 'Other' }, { identity: 'user-3' })
+
+    const mine = await Room.getParticipants('id-read', { identity: 'user-4' })
+    expect(mine.map((p) => p.id).sort()).toEqual([tab1.id, tab2.id].sort()) // both of the identity's tabs
+    const t1 = mine.find((p) => p.id === tab1.id)!
+    expect(t1.identity).toBe('user-4')
+    expect(t1.meta).toEqual({ name: 'T1', dnd: true }) // a DND/presence check reads meta directly
+    expect(typeof t1.joinedAt).toBe('number')
+    expect(Object.keys(t1).sort()).toEqual(['id', 'identity', 'joinedAt', 'meta']) // a plain snapshot, not a live handle
+
+    expect((await Room.getParticipants('id-read')).length).toBe(3) // whole roster (no target)
+    expect(await Room.getParticipants('id-read', { identity: 'nobody' })).toEqual([]) // signed-out user → [], not an error
+  })
+
   it('Room.guard({ onBeforeSend }) guards sends: rejections reach the sender, the guard sees rich identities', async () => {
     await Room.create('guarded')
     const lobby = await Room.get('guarded')

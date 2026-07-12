@@ -1,4 +1,4 @@
-export { Abort, AbortError, isAbort, createAbortError }
+export { Abort, AbortError, isAbort, createAbortError, abortValueMessage }
 
 import { assertUsage } from '../utils/assert.js'
 
@@ -48,12 +48,19 @@ function isAbort(thing: unknown): thing is AbortError {
   return thing instanceof AbortError || (typeof thing === 'object' && thing !== null && abortBrand in thing)
 }
 
-function getAbortMessage(abortValue: unknown): string {
+/** The human message carried by an abort value — a string is itself, an `Error`/`{ message }` its
+ *  `.message` — or `undefined` when the value carries none (a structured `{ code }` payload, or a
+ *  client-initiated cancellation with no value). Callers layer their own fallback. */
+function abortValueMessage(abortValue: unknown): string | undefined {
   if (typeof abortValue === 'string') return abortValue
   if (abortValue instanceof Error) return abortValue.message
   if (typeof abortValue === 'object' && abortValue !== null && 'message' in abortValue) {
     const { message } = abortValue as { message?: unknown }
     if (typeof message === 'string') return message
   }
-  return DEFAULT_ABORT_MESSAGE
+  return undefined
+}
+
+function getAbortMessage(abortValue: unknown): string {
+  return abortValueMessage(abortValue) ?? DEFAULT_ABORT_MESSAGE
 }
