@@ -10,12 +10,12 @@ import { ACK_STATUS, encodePublishText } from '../shared-ws.js'
 import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from './server.js'
 import type { ParticipantMeta } from './types.js'
 import {
+  binaryWantsCovers,
   emptyTrackWants,
   errorMessage,
   hasRoomTag,
   roomCtrlKey,
   unframeMemberId,
-  wantsTrack,
   type BinaryWants,
   type MemberSnapshot,
   type ParticipantStubRequest,
@@ -63,9 +63,7 @@ class RoomStubChannel extends ServerBroadcast {
 
   /** @internal — relay gate: does this client want the (member, track) the frame belongs to? */
   _wantsBinary(memberId: string, track: string): boolean {
-    if (wantsTrack(this._binaryWants.everyMember, track)) return true
-    const memberWants = this._binaryWants.members[memberId]
-    return memberWants !== undefined && wantsTrack(memberWants, track)
+    return binaryWantsCovers(this._binaryWants, memberId, track)
   }
 
   /** @internal */
@@ -103,8 +101,12 @@ class RoomStubChannel extends ServerBroadcast {
   // binary flavor is ignored: binary wants ride the richer member-selective `sub-binary`.
   override _onPeerBroadcastSubscribe(binary: boolean): void {
     if (binary) return
+    const prevWantsText = this._wantsText
     this._wantsText = true
     this._room._syncSubs()
+    // MQTT-retained delivery: back-fill the last `publish(…, { retain: true })` now that this
+    // client wants the text lane (see `_replayRetainedText` for the newly-covered semantics).
+    void this._room._replayRetainedText(this, prevWantsText, this._textMemberWants).catch(reportRoomError)
   }
   override _onPeerBroadcastUnsubscribe(binary: boolean): void {
     if (binary) return
@@ -151,7 +153,10 @@ function bindParticipantStubChannel(
     try {
       switch (req.__r) {
         case 'req-publish':
-          return { ok: true, ack: await participant.publish(req.data) } satisfies ReqPublishAck
+          return {
+            ok: true,
+            ack: await participant.publish(req.data, req.retain ? { retain: true } : undefined),
+          } satisfies ReqPublishAck
         case 'req-set-meta':
           await participant.setMeta(isObject(req.meta) ? req.meta : {})
           return { ok: true } satisfies ReqOkAck

@@ -135,9 +135,6 @@ class ClientRoom implements Room {
   get isClosed(): boolean {
     return this._state.closed
   }
-  get server(): RemoteParticipant | null {
-    return this._state.getServer()
-  }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     if (options?.identity !== undefined) {
@@ -145,9 +142,9 @@ class ClientRoom implements Room {
         'join() options.identity is server-assigned: identity is trusted, so set it where trust lives — in the granting telefunction (server-side join()), not on the client.',
       )
     }
-    if (options?.server !== undefined) {
+    if (options?.hidden !== undefined) {
       throw new Error(
-        'join() options.server is server-side only: the server seat is created by the granting telefunction (server-side join({ server: true })), not by a client.',
+        'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
       )
     }
     const selfDelivery = normalizeJoinOptions(meta, options)
@@ -160,9 +157,10 @@ class ClientRoom implements Room {
     return participant
   }
 
-  async getParticipants(): Promise<RemoteParticipant[]> {
+  async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     if (!this._state.rosterKnown) await this._rosterReady
-    return this._state.listRemotes() // kept fresh by the event stream from there on
+    // kept fresh by the event stream from there on
+    return options?.hidden ? this._state.listHidden() : this._state.listRemotes()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
@@ -191,7 +189,7 @@ class ClientRoom implements Room {
     meta: ParticipantMeta
     joinedAt: number
     metaSeq: number
-    server?: boolean
+    hidden?: boolean
   }): RemoteParticipant {
     return this._state.ensureRemoteFromSnapshot(snap)
   }
@@ -251,8 +249,13 @@ class ClientRoom implements Room {
 
   /** @internal — the envelope sent upward is a claim: the server validates `from` against this
    *  stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
-  async _publishText(from: string, data: unknown): Promise<ChannelPublishAck> {
-    return await this._stub.publish({ __r: 'data', from, data } satisfies RoomDataPublish)
+  async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
+    return await this._stub.publish({
+      __r: 'data',
+      from,
+      data,
+      ...(retain ? { retain: true } : {}),
+    } satisfies RoomDataPublish)
   }
 
   /** @internal */
@@ -296,7 +299,7 @@ class ClientRoom implements Room {
         )
         return
       case 'join':
-        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.server)
+        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.hidden)
         return
       case 'leave': {
         const cause = leaveCauseFromWire(event)
@@ -420,7 +423,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
    *  key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
   private readonly _coalescers = new Map<
     string,
-    { sending: boolean; pending: { data: unknown; waiters: CoalesceWaiter[] } | null }
+    { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
   >()
 
   constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
@@ -428,11 +431,11 @@ abstract class ClientParticipantBase extends ParticipantBase {
   }
 
   /** The actual wire publish — each flavor supplies it; `publish()` wraps it with conflation. */
-  protected abstract _sendPublish(data: unknown): Promise<ChannelPublishAck>
+  protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
 
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     const key = options?.coalesce
-    if (key === undefined) return this._sendPublish(data)
+    if (key === undefined) return this._sendPublish(data, options?.retain)
     return new Promise<ChannelPublishAck>((resolve, reject) => {
       let slot = this._coalescers.get(key)
       if (!slot) {
@@ -440,7 +443,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
         this._coalescers.set(key, slot)
       }
       // Supersede any queued value; its waiters ride along and all resolve with the winning send.
-      slot.pending = { data, waiters: [...(slot.pending?.waiters ?? []), { resolve, reject }] }
+      slot.pending = { data, retain: options?.retain, waiters: [...(slot.pending?.waiters ?? []), { resolve, reject }] }
       this._drainCoalesce(key)
     })
   }
@@ -448,10 +451,10 @@ abstract class ClientParticipantBase extends ParticipantBase {
   private _drainCoalesce(key: string): void {
     const slot = this._coalescers.get(key)
     if (!slot || slot.sending || !slot.pending) return
-    const { data, waiters } = slot.pending
+    const { data, retain, waiters } = slot.pending
     slot.pending = null
     slot.sending = true
-    this._sendPublish(data)
+    this._sendPublish(data, retain)
       .then(
         (ack) => waiters.forEach((w) => w.resolve(ack)),
         (err) => waiters.forEach((w) => w.reject(err)),
@@ -482,9 +485,9 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return this._room._getRemote(id)
   }
 
-  protected async _sendPublish(data: unknown): Promise<ChannelPublishAck> {
+  protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishText(this.id, data)
+    return await this._room._publishText(this.id, data, retain)
   }
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
@@ -548,9 +551,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
 
-  protected async _sendPublish(data: unknown): Promise<ChannelPublishAck> {
+  protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return unwrapPublishAck(await this._request({ __r: 'req-publish', data }))
+    return unwrapPublishAck(await this._request({ __r: 'req-publish', data, ...(retain ? { retain: true } : {}) }))
   }
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {

@@ -29,13 +29,13 @@ Three objects:
 - **`LocalParticipant`** — the current user, returned by `join()`. You publish, send private messages, and update your metadata through it.
 - **`RemoteParticipant`** — everyone else, as seen through a room: subscribe to one member's messages, watch their metadata, notice when they leave.
 
-And three message lanes:
+And three kinds of message:
 
-| Lane | Send | Receive | Typical use |
+| Kind | Send | Receive | Typical use |
 |---|---|---|---|
-| Room-wide | `me.publish(data)` | `room.subscribe(cb)`, `member.subscribe(cb)` | Chat, game state, media |
-| Private | `me.send(to, data)` | `me.listen(cb)` | DMs, invites, game moves |
-| Room-authored | `Room.announce()`, `Room.send()` | `room.onAnnounce(cb)`, `me.listen(cb)` | System notices, rewards |
+| To the whole room | `me.publish(data)` | `room.subscribe(cb)`, `member.subscribe(cb)` | Chat, game state, media |
+| To one participant | `me.send(to, data)` | `me.listen(cb)` | DMs, invites, game moves |
+| From the room itself | `Room.announce()`, `Room.send()` | `room.onAnnounce(cb)`, `me.listen(cb)` | System notices, rewards |
 
 Two things hold everywhere:
 
@@ -264,38 +264,43 @@ me.listen((data, from) => {
 
 ### Let the server play
 
-`Room.announce()` / `Room.send()` let the room *speak*. But a server that needs to *act* in a room — run an authoritative game loop, drive a bot, be the sink every client sends commands to — wants a real participant: publish, receive private messages, watch demand. Join one with `{ server: true }`. Create it once, where the room's server-side state lives:
+`Room.announce()` / `Room.send()` let the room *speak*. But a server that needs to *act* in a room — run an authoritative game loop, drive a bot, be the sink every client sends commands to — wants a real participant: publish, receive private messages, watch demand. Join one with `{ hidden: true }`. Create it once, where the room's server-side state lives:
 
 ```js
 // When the match is created (once), on the node that will run it:
 const room = await Room.create(matchId)
-const authority = await room.join({}, { server: true })
-startGameLoop(matchId, authority) // each tick: authority.publishBinary(worldState)
+const authority = await room.join({ role: 'authority' }, { hidden: true })
+authority.listen((cmd) => world.apply(cmd))  // clients' commands arrive as DMs
+startGameLoop(matchId, authority)            // each tick: authority.publishBinary(worldState)
 ```
 
-The seat is an ordinary `LocalParticipant` — `authority.publishBinary(...)`, `.listen(cmd)`, `.onDemand(...)` all work. But it is **not a player**: it's left out of `count`, `isFull`, `getParticipants()`, `snapshot()`, and `onJoin`/`onLeave`/`onEmpty`. So capacity stays about real players, and `onEmpty` fires when the last *player* leaves — the seat still seated. That's the teardown signal a server-authoritative room actually wants:
+A hidden participant is an ordinary `LocalParticipant` — `publishBinary()`, `listen()`, `send()`, `onDemand()` all work. It's simply left out of *presence*: `count`, `isFull`, `getParticipants()`, `snapshot()`, and `onJoin`/`onLeave`/`onEmpty` ignore it. So capacity stays about real players, and `onEmpty` fires when the last *player* leaves — the authority still seated. That's the teardown signal a server-authoritative room actually wants:
 
 ```js
-room.onEmpty(() => stopGameLoop(matchId)) // last player gone; the seat doesn't keep the room "busy"
+room.onEmpty(() => stopGameLoop(matchId)) // last player gone; the hidden participant doesn't keep the room "busy"
 ```
 
-Players just join; clients reach the seat as `room.server`, commanding the server without scanning the roster for a magic member:
+Join as many as you need — a game authority, a moderation bot, and a metrics sink can all sit hidden in one room. They're server-side only (a client `join({ hidden: true })` throws) and read back with `getParticipants({ hidden: true })`. Hand a client the one it should talk to by returning it from the telefunction; commanding it is then just a DM to a participant it holds — no `room.server` magic, no roster scan:
 
 ```js
 // Match.telefunc.js — server
 export async function onJoinMatch(matchId, name) {
   const { user } = getContext()
   const room = await Room.get(matchId)
-  return { room, me: await room.join({ name }, { identity: user.id }) }
+  const [authority] = await room.getParticipants({ hidden: true })
+  return { room, me: await room.join({ name }, { identity: user.id }), authority }
 }
 ```
 ```js
 // Client
-await room.server.send({ type: 'move', to: 'e4' })          // command the authority
-room.server.subscribeBinary((frame) => world.apply(frame))  // read its state
+await me.send(authority, { type: 'move', to: 'e4' })       // command the authority (an ordinary DM)
+authority.subscribeBinary((frame) => world.apply(frame))   // read its state
 ```
 
-A room has at most one seat, and it's server-side only — a client `join({ server: true })` throws. The per-room loop runs wherever the seat lives; hold it in a module singleton keyed by room id (use `globalThis` if a dev server splits your module graph) so exactly one loop runs per room, and clear it on `onEmpty`.
+Two honest limits come with a server-authoritative loop:
+
+- **Commands are at-most-once.** Across nodes, the receipt from `me.send(authority, cmd)` confirms the command reached the authority's node — not that the loop applied it, since a mid-flight node failure can still drop it. Make commands idempotent (carry a move id), the discipline you'd want for any networked input.
+- **One owner, no failover.** The authority and its loop live on the node that created them; the room's membership and streams are distributed, but the loop is not. If that node dies, restart the authority elsewhere — the room outlives it. Hold the loop in a module singleton keyed by room id (use `globalThis` if a dev server splits your module graph) so exactly one runs per room, and clear it on `onEmpty`.
 
 
 ### Binary streams & tracks
@@ -322,11 +327,13 @@ me.onDemand((track, count) => {
 
 Each `publishBinary()` receipt also reports `receivers` — the track's live subscription count at that moment (`0` truthfully means nobody anywhere wants it). Use it to react while you're actively publishing; use `onDemand` (above) to learn when to resume once you've paused.
 
-**Seed late subscribers with a keyframe.** A subscriber that joins mid-stream can't apply your deltas until it gets a keyframe. `onDemand` is the hook: when a track's demand rises above `0`, push a fresh keyframe so the newcomer can sync; a periodic keyframe covers those who join while demand is already non-zero.
+**Seed late subscribers with a keyframe.** A subscriber that joins mid-stream can't apply your deltas until it gets a keyframe. Mark keyframes `{ retain: true }` and the server keeps the last one per track, replaying it to every new subscriber before any live frame — so a joiner syncs immediately, with nothing to wire up:
 
 ```js
-me.onDemand((track, count) => { if (count > 0) reseed(track) }) // a viewer arrived — send it a keyframe
+me.publishBinary(keyframe, { track: 'camera', keyFrame: true, retain: true }) // kept for late joiners
 ```
+
+`{ retain: true }` works the same on `publish()`: the server keeps the last retained text message and hands it to late subscribers — the current state a joiner needs (a game phase, a pinned notice). Last write wins per lane; the retained value is dropped when its publisher leaves or the room closes, never on a timer. Like MQTT retained messages.
 
 Every binary frame also carries `info.seq` (a strict per-track counter) and `info.timestamp`, assigned centrally like text — so you rarely need to pack your own sequence number or delta-baseline id into the payload.
 
@@ -373,21 +380,14 @@ Order both the stored history and the live tail by `seq` — the strict per-key 
 
 ### Switching rooms
 
-Membership is per room, so switching rooms is a `leave()` then a `join()`:
+Membership is per room, so switching is `leave()` then `join()`:
 
 ```js
 await current?.leave()
 current = await nextRoom.join({ name })
-await current.publish({ id: crypto.randomUUID(), text })
 ```
 
-A send on a room you've left rejects explicitly (`Participant has left the room`). If a message might be sent mid-switch (a fast-typed line), join the next room *before* leaving the old one — there's then no instant without a live membership:
-
-```js
-const next = await nextRoom.join({ name })
-await current?.leave()
-current = next
-```
+Publishing to a room you've already left throws (`Participant has left the room`).
 
 
 ### Enforce capacity
@@ -407,11 +407,11 @@ export async function onJoinLobby(name) {
 
 ### Beyond one room
 
-Unread counts and room discovery sit one level up from a single room — both reuse what you already have, so neither needs a dedicated lane.
+Unread counts, room discovery, and subgroups all live one level up from a single room — and each is just another room, or a query against a database you already have.
 
-- **Unread badges.** The count is `messages-since(lastRead)` — a query against the same store you persist to in `onAfterPublish`. For a live nudge about a room the user *isn't* watching, give each user a personal room they stay subscribed to and `Room.announce(userRoom, { roomId })` on write: the sidebar holds one subscription, not one per room.
-- **Discover rooms.** A lobby is itself a room. Viewers observe `lobby`; creating a room does `Room.announce('lobby', { created: id, meta })` (and `{ closed: id }` on close). One control message per room lifecycle, delivered to exactly the waiting clients — no polling, no thundering herd.
-- **Subgroups & team chat.** A subgroup — a team, a breakout, a private side-channel — is its own room, with its own membership and guards; publish there and outsiders never receive it (the `{ room, me }` seam returns several rooms at once, so a client holds `match` and `match:red` together). For a one-off whisper to a subset rather than a standing group, fan out with `Room.send(id, { identity }, data)`.
+- **Unread badges** are a `messages-since(lastRead)` query against the store you write to in `onAfterPublish`. To notify a user about a room they *aren't* currently watching, give each user their own room that they stay subscribed to, and `Room.announce(userRoom, { roomId })` when a message arrives — their sidebar keeps one subscription open instead of one per room.
+- **A room directory** is itself a room. Clients watch a `lobby` room; creating or closing a room calls `Room.announce('lobby', { created: id })` or `{ closed: id }`. Waiting clients hear about it right away, with no polling.
+- **Subgroups and team chat** are separate rooms. A team, a breakout, or a private thread each has its own membership and guards, so a message sent there never reaches anyone outside it. A single telefunction can return several rooms at once (e.g. `match` and `match:red`). To message a few people instead of a standing group, use `Room.send(id, { identity }, data)`.
 
 
 ## Reference
@@ -453,8 +453,8 @@ type RoomOptions = {
 
 | Method | Description |
 |---|---|
-| `join(meta?, options?)` | Join; returns your `LocalParticipant`. Options: `{ selfDelivery?, identity?, server? }` (`identity` and `server` are server-side only). |
-| `getParticipants()` / `getParticipant(id)` | The member list / one member (or `null`). |
+| `join(meta?, options?)` | Join; returns your `LocalParticipant`. Options: `{ selfDelivery?, identity?, hidden? }` (`identity` and `hidden` are server-side only). |
+| `getParticipants(options?)` / `getParticipant(id)` | The member list / one member (or `null`). `getParticipants({ hidden: true })` reads the off-presence participants instead (see <Link href="#let-the-server-play">Let the server play</Link>). |
 | `subscribe(cb)` | All participant messages: `(data, info, from)`. Returns an unsubscribe. |
 | `subscribeBinary(cb, { track? }?)` | Same, for binary — optionally one track. `info` carries `track` and `keyFrame`. |
 | `onJoin(cb)` / `onLeave(cb)` | A participant joined / left: `(member)` / `(member, cause?)`. |
@@ -463,7 +463,7 @@ type RoomOptions = {
 | `onEmpty(cb)` / `onFull(cb)` / `onClose(cb)` | Last participant left / reached capacity / room closed. |
 | `onChange(cb)` / `snapshot()` | One change signal + immutable view — the `useSyncExternalStore` pair. |
 
-State getters: `id`, `meta`, `size`, `count`, `isEmpty`, `isFull`, `isClosed`, and `server` — the `{ server: true }` seat as a `RemoteParticipant`, or `null` (see <Link href="#let-the-server-play">Let the server play</Link>).
+State getters: `id`, `meta`, `size`, `count`, `isEmpty`, `isFull`, `isClosed`. Counts and presence reflect real players only — off-presence participants are read separately with `getParticipants({ hidden: true })`.
 
 ### `LocalParticipant`
 
@@ -471,8 +471,8 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 
 | Method | Description |
 |---|---|
-| `publish(data, { coalesce? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst (see <Link href="#chat">Chat</Link>). |
-| `publishBinary(data, { track?, keyFrame? }?)` | Publish raw binary. The receipt's `receivers` is the live subscription count (`0` = nobody anywhere). |
+| `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst (see <Link href="#chat">Chat</Link>); `retain` keeps it as the room's last message for late subscribers. |
+| `publishBinary(data, { track?, keyFrame?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers (see <Link href="#binary-streams-tracks">keyframes</Link>). The receipt's `receivers` is the live subscription count (`0` = nobody anywhere). |
 | `send(to, data)` | Private message to one participant (or their ID). Resolves with the delivery receipt `{ seq, timestamp }`. |
 | `listen(cb)` | Receive private messages: `(data, from)` — `from` is `null` for room-authored. |
 | `setMeta(meta)` / `setAttributes(partial)` | Replace / merge your metadata. |

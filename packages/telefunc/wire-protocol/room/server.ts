@@ -33,6 +33,11 @@ import {
   roomIdentityMemberKvKey,
   roomIdentityKvPrefix,
   roomIdentityRoomKvPrefix,
+  roomRetainedTextKey,
+  roomRetainedBinaryKey,
+  roomRetainedBinaryPrefix,
+  bytesToBase64,
+  base64ToBytes,
   sizeFromWire,
   sizeToWire,
   unframeMemberId,
@@ -40,6 +45,7 @@ import {
   DEFAULT_TRACK,
   emptyTrackWants,
   mergeTrackWants,
+  binaryWantsCovers,
   sanitizeBinaryWants,
   wantsAnyBinary,
   type BinaryWants,
@@ -390,6 +396,8 @@ async function closeRoom(id: string): Promise<void> {
   await publishCtrl(id, { __r: 'closed' })
   for (const { key } of await listMemberKeys(kv, id)) await kv.delete(key)
   for (const key of await kv.keys(roomIdentityRoomKvPrefix(id))) await kv.delete(key)
+  for (const key of await kv.keys(roomRetainedBinaryPrefix(id))) await kv.delete(key)
+  await kv.delete(roomRetainedTextKey(id))
   await kv.delete(roomConfigKvKey(id))
 }
 
@@ -438,7 +446,7 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
     members = await readMembers(kv, id, await resolveIdentityMembers(kv, id, target.identity))
   }
   return members
-    .filter((m) => !m.server) // the server seat is not a participant
+    .filter((m) => !m.hidden) // hidden participants aren't presence participants
     .map((m) => ({ id: m.id, identity: m.identity ?? null, meta: m.meta, joinedAt: m.joinedAt }))
 }
 
@@ -496,6 +504,9 @@ class ServerRoom implements Room {
   /** @internal — when true, serializing this room starts relaying text immediately (buffered
    *  pre-peer), so a history read after `Room.get(id, { tail: true })` misses no live message. */
   _tail = false
+  /** Set once this node stores any retained binary frame, so a member's leave only pays the
+   *  retained-frame cleanup in rooms that actually use `publishBinary(…, { retain: true })`. */
+  private _hasRetainedBinary = false
   private _guards: RoomGuards | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
@@ -576,10 +587,7 @@ class ServerRoom implements Room {
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     const selfDelivery = normalizeJoinOptions(meta, options)
     const identity = normalizeIdentity(options)
-    const server = normalizeServer(options)
-    // Best-effort local guard — a second seat on another node can't be seen without a KV scan, so
-    // "at most one" is ultimately a contract; this catches the common same-object double-join.
-    if (server) assertUsage(!this._state.getServer(), 'A room can have at most one server participant.')
+    const hidden = normalizeHidden(options)
     let participant!: ServerLocalParticipant
     await this._admitMember(
       meta,
@@ -588,18 +596,14 @@ class ServerRoom implements Room {
         participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, identity)
         this._localParticipants.set(id, participant)
       },
-      server,
+      hidden,
     )
     return participant
   }
 
-  get server(): RemoteParticipant | null {
-    return this._state.getServer()
-  }
-
-  async getParticipants(): Promise<RemoteParticipant[]> {
+  async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     await this._ensureRoster()
-    return this._state.listRemotes()
+    return options?.hidden ? this._state.listHidden() : this._state.listRemotes()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
@@ -662,29 +666,29 @@ class ServerRoom implements Room {
     meta: ParticipantMeta,
     identity: string | null,
     track: (id: string, joinedAt: number) => void,
-    server = false,
+    hidden = false,
   ): Promise<{ id: string; joinedAt: number }> {
     const id = crypto.randomUUID()
-    // The server seat is not a party seeking admission — it's the server itself — so it bypasses the
-    // admission ceremony: no `onBeforeJoin` policy and no `onAfterJoin` side effects. But its join
-    // IS announced on the control lane (flagged), so observers already connected learn of it live and
-    // bind `room.server` — the presence callbacks (`onJoin`/`count`) stay suppressed via the flag in
-    // `applyJoin`. Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
+    // A hidden participant is not a party seeking admission — it's a server/bot/recorder — so it
+    // bypasses the admission ceremony: no `onBeforeJoin` policy and no `onAfterJoin` side effects. But
+    // its join IS announced on the control lane (flagged), so observers already connected learn of it
+    // live — the presence callbacks (`onJoin`/`count`) stay suppressed via the flag in `applyJoin`.
+    // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
     const onBeforeJoin = this._guards?.onBeforeJoin
-    if (!server && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
-    const joinedAt = await this._createMember(id, meta, identity, server)
+    if (!hidden && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
+    const joinedAt = await this._createMember(id, meta, identity, hidden)
     track(id, joinedAt)
     this._syncSubs()
-    this._state.applyJoin(id, meta, joinedAt, identity, server)
+    this._state.applyJoin(id, meta, joinedAt, identity, hidden)
     await publishCtrl(this.id, {
       __r: 'join',
       id,
       meta,
       joinedAt,
       ...(identity === null ? {} : { identity }),
-      ...(server ? { server: true } : {}),
+      ...(hidden ? { hidden: true } : {}),
     })
-    if (server) return { id, joinedAt } // announced above; the seat has no post-join hook
+    if (hidden) return { id, joinedAt } // announced above; a hidden participant has no post-join hook
     // Post-commit: the member exists and its join is announced — the place for side effects.
     const onAfterJoin = this._guards?.onAfterJoin
     if (onAfterJoin) await onAfterJoin({ id, meta, identity }, { joinedAt })
@@ -696,7 +700,7 @@ class ServerRoom implements Room {
     id: string,
     meta: ParticipantMeta,
     identity: string | null,
-    server = false,
+    hidden = false,
   ): Promise<number> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
@@ -707,7 +711,7 @@ class ServerRoom implements Room {
       seenAt: joinedAt,
       metaSeq: 0,
       ...(identity === null ? {} : { identity }),
-      ...(server ? { server: true } : {}),
+      ...(hidden ? { hidden: true } : {}),
     }
     // Index the membership before writing its record — never after, so a reader can't miss a live
     // member (an orphan marker is harmless; see resolveIdentityMembers).
@@ -731,8 +735,19 @@ class ServerRoom implements Room {
     const identity = this._state.getRemote(id)?.identity ?? null
     await kv.delete(roomMemberKvKey(this.id, id)) // record first — a lingering marker resolves to nothing
     if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
+    // A leaving member's per-track streams end, so their retained frames go too — read before the
+    // leave applies, while the member's track set is still known. Room close prefix-sweeps the rest.
+    if (this._hasRetainedBinary) await this._dropRetainedBinary(id)
     this._applyLeave(id, cause)
     await publishCtrl(this.id, { __r: 'leave', id, ...leaveCauseToWire(cause) })
+  }
+
+  /** Delete a member's retained binary frames — the default lane plus every named track they
+   *  published (from the live track set, no KV read). Deleting an absent key is a no-op. */
+  private async _dropRetainedBinary(id: string): Promise<void> {
+    const kv = getRoomKV()
+    await kv.delete(roomRetainedBinaryKey(this.id, id, DEFAULT_TRACK))
+    for (const track of this._state.memberTracks(id)) await kv.delete(roomRetainedBinaryKey(this.id, id, track))
   }
 
   /** @internal — full replace (`setMeta`). */
@@ -779,8 +794,9 @@ class ServerRoom implements Room {
 
   /** @internal — publish a member's text message. The sender's verified meta/identity are
    *  stamped into the envelope here — never client-supplied. Text rides the room's text key,
-   *  or the member's own key in isolated mode. */
-  async _publishText(from: string, data: unknown): Promise<ChannelPublishAck> {
+   *  or the member's own key in isolated mode. `retain` stores the message as the room's one
+   *  retained-text slot (MQTT-style), replayed to any later text subscriber (see `_replayRetainedText`). */
+  async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
     const sender = await this._admitPublish(from, data)
     const envelope: RoomDataEnvelope = {
       __r: 'data',
@@ -789,12 +805,17 @@ class ServerRoom implements Room {
       ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
     }
+    const serialized = stringify(envelope)
+    // Store before publishing live, so a subscriber that arrives around now is never left with a
+    // gap: it either receives the live message (subscribed in time) or replays it (subscribed after
+    // the store). The reverse order could drop it in the window between publish and store.
+    if (retain) await getRoomKV().set(roomRetainedTextKey(this.id), serialized)
     return this._finishPublish(
       sender,
       data,
       getBroadcastAdapter().publish(
         this._isolated ? roomMemberDataKey(this.id, from) : roomTextKey(this.id),
-        stringify(envelope),
+        serialized,
       ),
     )
   }
@@ -808,6 +829,15 @@ class ServerRoom implements Room {
     // The guard sees exactly what a subscriber would: the payload, without the wire frame.
     const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
+    // Retained per (member, track), MQTT-style: replayed to any later subscriber of that lane (see
+    // `_replayRetainedBinary`). Stored base64 (KV is string-only) before the live publish, so the
+    // frame is never lost in the publish→store window. No TTL — like the room config record and the
+    // retained-text slot, it's reaped by lifecycle (the publisher's leave, or room close), never by
+    // expiry, so text and binary retention behave identically.
+    if (frame.retain) {
+      this._hasRetainedBinary = true
+      await getRoomKV().set(roomRetainedBinaryKey(this.id, from, frame.track ?? DEFAULT_TRACK), bytesToBase64(framed))
+    }
     return this._finishPublish(
       sender,
       frame.payload,
@@ -1054,7 +1084,7 @@ class ServerRoom implements Room {
   private _applyCtrl(event: RoomCtrlEnvelope): void {
     switch (event.__r) {
       case 'join':
-        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.server)
+        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.hidden)
         this._syncSubs() // a new member means a new per-member key candidate
         return
       case 'track':
@@ -1173,15 +1203,19 @@ class ServerRoom implements Room {
         case 'sub-binary': {
           const wants = sanitizeBinaryWants(req.wants)
           if (!wants) throw new Error('Malformed sub-binary declaration')
+          const prev = stub._binaryWants
           stub._binaryWants = wants
           this._syncSubs()
+          await this._replayRetainedBinary(stub, prev)
           return { ok: true }
         }
         case 'sub-text': {
           // Member-scoped text wants — the room-level (all) want rides the broadcast-sub ctrl.
           const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
+          const prev = stub._textMemberWants
           stub._textMemberWants = new Set(members)
           this._syncSubs()
+          await this._replayRetainedText(stub, stub._wantsText, prev)
           return { ok: true }
         }
         default:
@@ -1204,7 +1238,7 @@ class ServerRoom implements Room {
       if (!hasRoomTag(envelope) || envelope.__r !== 'data') throw new Error('Malformed room publish')
       const publish = envelope as RoomDataPublish
       this._assertStubMember(stub, publish.from)
-      return await this._publishText(publish.from, publish.data)
+      return await this._publishText(publish.from, publish.data, publish.retain)
     }
     const from = unframeMemberId(payload.binary)?.from
     this._assertStubMember(stub, from)
@@ -1214,6 +1248,41 @@ class ServerRoom implements Room {
   private _assertStubMember(stub: RoomStubChannel, id: unknown): asserts id is string {
     if (typeof id !== 'string' || !stub._stubMembers.has(id)) {
       throw new Error('Not a participant of this room (joined through this connection)')
+    }
+  }
+
+  /** @internal — MQTT-retained replay for the text lane. Called when a stub's text want grows
+   *  (`_onPeerBroadcastSubscribe` for the whole lane, `sub-text` for member-scoped): replay the
+   *  room's one retained-text slot iff this change is what newly covers the message's sender —
+   *  an already-covered stub received it live, so it's delivered exactly once per subscription. */
+  async _replayRetainedText(
+    stub: RoomStubChannel,
+    prevWantsText: boolean,
+    prevMemberWants: ReadonlySet<string>,
+  ): Promise<void> {
+    const stored = await getRoomKV().get(roomRetainedTextKey(this.id))
+    if (stored === null) return
+    const from = (parse(stored) as RoomDataEnvelope).from
+    if (prevWantsText || prevMemberWants.has(from) || !stub._wantsTextFrom(from)) return
+    stub._relayPublishText(encodePublishText(stored, { seq: 0, timestamp: Date.now() }))
+  }
+
+  /** @internal — MQTT-retained replay for the binary lanes. Called when a stub's `sub-binary` want
+   *  grows: replay each retained (member, track) frame this change newly covers (in the new want,
+   *  not the old), so a subscriber gets the last keyframe of every lane it starts watching. The
+   *  frame is self-describing, so the sender/track come from the frame itself, not the key. */
+  async _replayRetainedBinary(stub: RoomStubChannel, prevWants: BinaryWants): Promise<void> {
+    if (!wantsAnyBinary(stub._binaryWants)) return
+    const kv = getRoomKV()
+    for (const key of await kv.keys(roomRetainedBinaryPrefix(this.id))) {
+      const stored = await kv.get(key)
+      if (stored === null) continue
+      const framed = base64ToBytes(stored)
+      const frame = unframeMemberId(framed)
+      if (!frame) continue
+      const track = frame.track ?? DEFAULT_TRACK
+      if (binaryWantsCovers(prevWants, frame.from, track) || !stub._wantsBinary(frame.from, track)) continue
+      stub._relayPublishBinary(encodePublishBinary(framed, { seq: 0, timestamp: Date.now() }))
     }
   }
 
@@ -1518,11 +1587,12 @@ class ServerLocalParticipant extends ParticipantBase {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
   }
 
-  async publish(data: unknown, _options?: PublishOptions): Promise<ChannelPublishAck> {
+  async publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     // `coalesce` bounds a client's uplink under a burst; a server-side publisher has no uplink
-    // queue to conflate, so the option is accepted for signature parity and otherwise a no-op.
+    // queue to conflate, so it's accepted for signature parity and otherwise a no-op. `retain`
+    // still applies — a server-side publisher retains exactly like a client one.
     this._assertActive()
-    return await this._room._publishText(this.id, data)
+    return await this._room._publishText(this.id, data, options?.retain)
   }
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
@@ -1623,7 +1693,7 @@ async function readMembers(kv: RoomKV, roomId: string, ids?: string[]): Promise<
       metaSeq: record.metaSeq,
       identity: record.identity ?? null,
       ...(record.tracks === undefined ? {} : { tracks: record.tracks }),
-      ...(record.server ? { server: true } : {}),
+      ...(record.hidden ? { hidden: true } : {}),
     })
   }
   return members
@@ -1717,12 +1787,12 @@ function normalizeIdentity(options: JoinOptions | undefined): string | null {
   return options.identity
 }
 
-/** Server-side only, like `identity`: a client `join()` never reads this option, so it can't seat
- *  itself as the server. */
-function normalizeServer(options: JoinOptions | undefined): boolean {
-  if (options?.server === undefined) return false
-  assertUsage(typeof options.server === 'boolean', 'join() options.server should be a boolean')
-  return options.server
+/** Server-side only, like `identity`: a client `join()` never reads this option, so it can't hide
+ *  itself from the room. */
+function normalizeHidden(options: JoinOptions | undefined): boolean {
+  if (options?.hidden === undefined) return false
+  assertUsage(typeof options.hidden === 'boolean', 'join() options.hidden should be a boolean')
+  return options.hidden
 }
 
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta; size: number } {
