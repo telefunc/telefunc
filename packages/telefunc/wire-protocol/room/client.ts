@@ -296,7 +296,7 @@ class ClientRoom implements Room {
         )
         return
       case 'join':
-        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null)
+        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.server)
         return
       case 'leave': {
         const cause = leaveCauseFromWire(event)

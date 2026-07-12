@@ -243,7 +243,7 @@ type ParticipantStubMetadata = {
  *  `p-meta` orders by the owner-issued `seq`, `update` by its `at`/`by` stamp — echoes and
  *  concurrent writers converge to the same winner on every node, whatever the arrival order. */
 type RoomCtrlEnvelope =
-  | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string }
+  | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string; server?: boolean }
   | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected'; reason?: unknown }
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; prev: ParticipantMeta; seq: number }
   | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; at: number; by: string }
