@@ -67,6 +67,7 @@ import type {
   LeaveCause,
   LocalParticipant,
   ParticipantMeta,
+  ParticipantSnapshotView,
   PublishOptions,
   RemoteParticipant,
   Room as RoomInstance,
@@ -188,6 +189,15 @@ type RoomStatic = {
    *  participant by ID (throws when unknown), or every membership of an app identity at once
    *  (`{ identity }`, resolved from the identity index; 0 matches is a no-op — a signed-out user). */
   send(id: string, target: string | { identity: string }, data: unknown): Promise<void>
+  /** Server-side snapshot of a room's participants — a point-in-time read with no live view or
+   *  subscription (unlike the instance `room.getParticipants()`). Omit `target` for the whole roster;
+   *  pass `{ identity }` to read one app identity's memberships (its open tabs/connections) in
+   *  O(memberships) via the identity index — the cheap "is this user present / what's their status"
+   *  read that doesn't load the roster. Returns `[]` for an absent identity. */
+  getParticipants<P extends ParticipantMeta = ParticipantMeta>(
+    id: string,
+    target?: { identity: string },
+  ): Promise<ParticipantSnapshotView<P>[]>
 }
 
 /**
@@ -218,6 +228,7 @@ const Room: RoomStatic = {
   removeParticipant,
   announce: announceToRoom,
   send: sendToParticipant,
+  getParticipants: getRoomParticipants as RoomStatic['getParticipants'],
 }
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
@@ -411,6 +422,25 @@ async function removeParticipant(
   for (const memberId of await resolveIdentityMembers(kv, id, target.identity)) {
     await evictMember(kv, id, memberId, target.identity, cause)
   }
+}
+
+/** Server-side snapshot read of a room's participants (`Room.getParticipants`) — no live view, no
+ *  subscription, unlike the instance `room.getParticipants()`. Omit `target` for the whole roster;
+ *  pass `{ identity }` to read one identity's memberships in O(memberships) via the identity index —
+ *  the cheap "is this user present / what's their status" read without loading the roster. */
+async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantSnapshotView[]> {
+  const { kv } = await requireRoom(id)
+  let members: MemberSnapshot[]
+  if (target === undefined) {
+    members = await readMembers(kv, id)
+  } else {
+    assertUsage(
+      isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
+      'Room.getParticipants() target should be { identity }',
+    )
+    members = await readMembers(kv, id, await resolveIdentityMembers(kv, id, target.identity))
+  }
+  return members.map((m) => ({ id: m.id, identity: m.identity ?? null, meta: m.meta, joinedAt: m.joinedAt }))
 }
 
 async function announceToRoom(id: string, data: unknown): Promise<void> {
@@ -1594,10 +1624,13 @@ async function readConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord 
 }
 
 /** Read a room's member records, reaping members whose owning node stopped heartbeating
- *  (hard crash): their record is deleted and their leave announced to all observers. */
-async function readMembers(kv: RoomKV, roomId: string): Promise<MemberSnapshot[]> {
+ *  (hard crash): their record is deleted and their leave announced to all observers. Pass `ids`
+ *  to read a specific subset (e.g. one identity's memberships) instead of scanning the whole roster. */
+async function readMembers(kv: RoomKV, roomId: string, ids?: string[]): Promise<MemberSnapshot[]> {
+  const memberKeys =
+    ids === undefined ? await listMemberKeys(kv, roomId) : ids.map((id) => ({ key: roomMemberKvKey(roomId, id), id }))
   const members: MemberSnapshot[] = []
-  for (const { key, id } of await listMemberKeys(kv, roomId)) {
+  for (const { key, id } of memberKeys) {
     const raw = await kv.get(key)
     if (raw === null) continue // member left concurrently
     const record = parse(raw) as RoomMemberRecord
