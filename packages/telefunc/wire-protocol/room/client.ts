@@ -135,9 +135,6 @@ class ClientRoom implements Room {
   get isClosed(): boolean {
     return this._state.closed
   }
-  get server(): RemoteParticipant | null {
-    return this._state.getServer()
-  }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     if (options?.identity !== undefined) {
@@ -145,9 +142,9 @@ class ClientRoom implements Room {
         'join() options.identity is server-assigned: identity is trusted, so set it where trust lives — in the granting telefunction (server-side join()), not on the client.',
       )
     }
-    if (options?.server !== undefined) {
+    if (options?.hidden !== undefined) {
       throw new Error(
-        'join() options.server is server-side only: the server seat is created by the granting telefunction (server-side join({ server: true })), not by a client.',
+        'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
       )
     }
     const selfDelivery = normalizeJoinOptions(meta, options)
@@ -160,9 +157,10 @@ class ClientRoom implements Room {
     return participant
   }
 
-  async getParticipants(): Promise<RemoteParticipant[]> {
+  async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     if (!this._state.rosterKnown) await this._rosterReady
-    return this._state.listRemotes() // kept fresh by the event stream from there on
+    // kept fresh by the event stream from there on
+    return options?.hidden ? this._state.listHidden() : this._state.listRemotes()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
@@ -191,7 +189,7 @@ class ClientRoom implements Room {
     meta: ParticipantMeta
     joinedAt: number
     metaSeq: number
-    server?: boolean
+    hidden?: boolean
   }): RemoteParticipant {
     return this._state.ensureRemoteFromSnapshot(snap)
   }
@@ -296,7 +294,7 @@ class ClientRoom implements Room {
         )
         return
       case 'join':
-        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.server)
+        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.hidden)
         return
       case 'leave': {
         const cause = leaveCauseFromWire(event)

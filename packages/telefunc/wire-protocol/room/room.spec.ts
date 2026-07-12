@@ -494,21 +494,21 @@ describe('presence', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
-// Server seat — a `join({ server: true })` member: reachable as `room.server`,
-// excluded from every presence read, its join/leave announced on the control lane.
+// Hidden participants — `join({ hidden: true })`: off-presence members (a server
+// authority, a bot, a recorder), any number, addressable like any member.
 // ───────────────────────────────────────────────────────────────────────────
 
-describe('server seat', () => {
-  it('is reachable as room.server but excluded from presence', async () => {
-    const room = await Room.create('seat', { size: 2 })
+describe('hidden participants', () => {
+  it('are excluded from presence but reachable and addressable', async () => {
+    const room = await Room.create('hidden', { size: 2 })
     const joins: string[] = []
     room.onJoin((m) => joins.push(m.id))
 
-    const server = await room.join({ role: 'authority' }, { server: true })
+    const authority = await room.join({ role: 'authority' }, { hidden: true })
     const p1 = await room.join({ name: 'P1' })
     const p2 = await room.join({ name: 'P2' })
 
-    // Presence excludes the seat: two players fill a size-2 room, the seat is not one of them.
+    // Excluded from presence: two players fill a size-2 room; the hidden one isn't counted.
     expect(room.count).toBe(2)
     expect(room.isFull).toBe(true)
     expect((await room.getParticipants()).map((m) => m.id).sort()).toEqual([p1.id, p2.id].sort())
@@ -518,81 +518,86 @@ describe('server seat', () => {
         .participants.map((p) => p.id)
         .sort(),
     ).toEqual([p1.id, p2.id].sort())
-    expect(joins).toEqual([p1.id, p2.id]) // onJoin never fired for the seat
+    expect(joins).toEqual([p1.id, p2.id]) // onJoin never fired for the hidden one
 
     // But it's a first-class, addressable member.
-    expect(room.server!.id).toBe(server.id)
-    expect((await room.getParticipant(server.id))!.id).toBe(server.id)
+    expect((await room.getParticipants({ hidden: true })).map((p) => p.id)).toEqual([authority.id])
+    expect((await room.getParticipant(authority.id))!.id).toBe(authority.id)
   })
 
-  it('room.onEmpty fires when the last real player leaves — the seat lingers', async () => {
-    const room = await Room.create('seat-empty')
+  it('any number of hidden participants coexist', async () => {
+    const room = await Room.create('hidden-many')
+    const a = await room.join({ role: 'authority' }, { hidden: true })
+    const b = await room.join({ role: 'recorder' }, { hidden: true })
+    await room.join({ name: 'P1' })
+
+    expect(room.count).toBe(1) // only the player is present
+    expect((await room.getParticipants({ hidden: true })).map((p) => p.id).sort()).toEqual([a.id, b.id].sort())
+  })
+
+  it('room.onEmpty fires when the last real player leaves — hidden participants linger', async () => {
+    const room = await Room.create('hidden-empty')
     const events: string[] = []
     room.onLeave((m) => events.push(`leave:${m.id}`))
     room.onEmpty(() => events.push('empty'))
 
-    await room.join({}, { server: true })
+    await room.join({}, { hidden: true })
     const player = await room.join({ name: 'solo' })
-    expect(room.count).toBe(1) // the seat doesn't count
+    expect(room.count).toBe(1) // the hidden one doesn't count
 
     await player.leave()
-    expect(events).toEqual([`leave:${player.id}`, 'empty']) // onEmpty despite the seat still seated
+    expect(events).toEqual([`leave:${player.id}`, 'empty']) // onEmpty despite the hidden one lingering
     expect(room.count).toBe(0)
-    expect(room.server).not.toBeNull() // the seat outlives the players
+    expect((await room.getParticipants({ hidden: true })).length).toBe(1) // it outlives the players
   })
 
   it('is discovered cross-instance via the roster, still excluded from presence', async () => {
-    const a = await Room.create('seat-x')
-    const server = await a.join({}, { server: true })
+    const a = await Room.create('hidden-x')
+    const authority = await a.join({}, { hidden: true })
     await a.join({ name: 'P1' })
 
-    const b = await Room.get('seat-x')
+    const b = await Room.get('hidden-x')
     const participants = await b.getParticipants() // materializes the roster from KV
-    expect(participants.map((m) => m.meta)).toEqual([{ name: 'P1' }]) // seat excluded
+    expect(participants.map((m) => m.meta)).toEqual([{ name: 'P1' }]) // hidden excluded
     expect(b.count).toBe(1)
-    expect(b.server!.id).toBe(server.id) // reachable as room.server on the sibling
+    expect((await b.getParticipants({ hidden: true })).map((p) => p.id)).toEqual([authority.id]) // reachable on the sibling
   })
 
-  it('an already-connected observer learns of the seat live — join is announced on the control lane', async () => {
-    const a = await Room.create('seat-live')
-    const b = await Room.get('seat-live')
-    const changes: (string | null)[] = []
+  it('an already-connected observer learns of a hidden join live (announced on the control lane)', async () => {
+    const a = await Room.create('hidden-live')
+    const b = await Room.get('hidden-live')
+    let changes = 0
     const joins: string[] = []
-    b.onChange(() => changes.push(b.server?.id ?? null))
+    b.onChange(() => changes++)
     b.onJoin((m) => joins.push(m.id))
-    expect(b.server).toBeNull() // no seat yet — b connected during the "lobby"
+    await b.getParticipants() // b is a live observer with a loaded roster
+    expect((await b.getParticipants({ hidden: true })).length).toBe(0) // none yet
 
-    const seat = await a.join({ role: 'authority' }, { server: true }) // seated AFTER b connected
+    const hidden = await a.join({ role: 'authority' }, { hidden: true }) // joined AFTER b connected
 
-    expect(b.server?.id).toBe(seat.id) // learned live, not via a roster re-read (the lobby→match case)
-    expect(b.count).toBe(0) // still not a counted participant
-    expect(joins).toEqual([]) // and not narrated as a participant join
-    expect(changes.at(-1)).toBe(seat.id) // onChange narrated the room.server change
+    expect((await b.getParticipants({ hidden: true })).map((p) => p.id)).toEqual([hidden.id]) // learned live
+    expect(b.count).toBe(0) // still not counted
+    expect(joins).toEqual([]) // not narrated as a participant join
+    expect(changes).toBeGreaterThan(0) // but onChange fired (the roster changed)
 
-    await seat.leave()
-    expect(b.server).toBeNull() // symmetric: the seat's departure reaches observers too
+    await hidden.leave()
+    expect((await b.getParticipants({ hidden: true })).length).toBe(0) // symmetric: departure reaches observers
   })
 
-  it('the seat sends and receives DMs like any member', async () => {
-    const room = await Room.create('seat-dm')
-    const server = await room.join({}, { server: true })
+  it('sends and receives DMs like any member', async () => {
+    const room = await Room.create('hidden-dm')
+    const authority = await room.join({}, { hidden: true })
     const player = await room.join({ name: 'P1' })
-    const toServer: unknown[] = []
+    const toAuthority: unknown[] = []
     const toPlayer: unknown[] = []
-    server.listen((data) => toServer.push(data))
+    authority.listen((data) => toAuthority.push(data))
     player.listen((data) => toPlayer.push(data))
 
-    await player.send(room.server!.id, { cmd: 'move' }) // address the server without scanning the roster
-    await server.send(player.id, { ack: true })
+    await player.send(authority.id, { cmd: 'move' }) // address it by id
+    await authority.send(player.id, { ack: true })
 
-    expect(toServer).toEqual([{ cmd: 'move' }])
+    expect(toAuthority).toEqual([{ cmd: 'move' }])
     expect(toPlayer).toEqual([{ ack: true }])
-  })
-
-  it('rejects a second server seat', async () => {
-    const room = await Room.create('seat-one')
-    await room.join({}, { server: true })
-    await expect(room.join({}, { server: true })).rejects.toThrow('at most one server')
   })
 })
 
@@ -1837,27 +1842,27 @@ describe('ClientRoom', () => {
     expect(clientRoom.count).toBe(2)
   })
 
-  it('rejects a client-side server seat; a roster server member surfaces as room.server, off-presence', async () => {
+  it('rejects a client-side hidden join; a roster hidden member is off-presence but reachable', async () => {
     const fake = createFakeStub()
-    const clientRoom = new ClientRoom(fake.stub, createSnapshot('seat', { count: 1 }))
-    await expect(clientRoom.join({}, { server: true })).rejects.toThrow('server-side only')
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('hidden', { count: 1 }))
+    await expect(clientRoom.join({}, { hidden: true })).rejects.toThrow('server-side only')
 
-    const serverId = crypto.randomUUID()
+    const hiddenId = crypto.randomUUID()
     const player = crypto.randomUUID()
     const joins: string[] = []
     clientRoom.onJoin((m) => joins.push(m.id))
     fake.emit({
       __r: 'roster',
       members: [
-        { id: serverId, meta: { role: 'authority' }, joinedAt: 1, server: true },
+        { id: hiddenId, meta: { role: 'authority' }, joinedAt: 1, hidden: true },
         { id: player, meta: { name: 'P1' }, joinedAt: 2 },
       ],
     })
 
-    expect(clientRoom.server!.id).toBe(serverId) // reachable
+    expect((await clientRoom.getParticipants({ hidden: true })).map((p) => p.id)).toEqual([hiddenId]) // reachable
     expect(clientRoom.count).toBe(1) // but not a participant
     expect((await clientRoom.getParticipants()).map((m) => m.id)).toEqual([player])
-    expect(joins).toEqual([]) // roster seeds silently; the seat is not a join event either
+    expect(joins).toEqual([]) // roster seeds silently; the hidden one is not a join event either
   })
 
   it('join() + publish() wrap the wire protocol; relayed data comes back with sender identity', async () => {

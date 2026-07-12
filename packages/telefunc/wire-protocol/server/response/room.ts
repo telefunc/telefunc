@@ -94,9 +94,9 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteContract, ServerReplacerContext
         meta: entry.meta,
         joinedAt: entry.joinedAt,
         metaSeq: entry.metaSeq,
-        // The seat flag rides the snapshot so a directly-returned `room.server` revives off-presence
-        // (unlike the roster, a reconcile won't re-flag an already-revived entry).
-        ...(entry.server ? { server: true } : {}),
+        // The hidden flag rides the snapshot so a directly-returned hidden participant revives
+        // off-presence (unlike the roster, a reconcile won't re-flag an already-revived entry).
+        ...(entry.hidden ? { hidden: true } : {}),
       },
       close() {},
       abort() {},
