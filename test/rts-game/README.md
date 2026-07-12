@@ -15,8 +15,9 @@ management, and a per-room simulation loop — and that is exactly where the new
 Every place the Room API forced complexity into app code is flagged inline (search for `FINDING`)
 and collected in [Findings](#findings--room-pr-436-pain-points-a-server-authoritative-game-hits).
 
-> Screenshots (lobby + a live match with fog of war, minimap, and the command HUD) are attached to
-> the pull request.
+![A live match — team-shared fog of war (the clear vision circle), minimap, HQ + workers + crystals, and the build/produce command HUD](./screenshot-match.png)
+
+![The lobby — Room presence, team selection via `setAttributes`, ready-up, and all-chat](./screenshot-lobby.png)
 
 ## The game (it's real)
 
