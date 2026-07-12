@@ -159,6 +159,18 @@ room.subscribe((data, info, from) => {
 await Room.removeParticipant(roomId, { identity: userId }, { reason: 'banned' }) // kick every tab at once
 ```
 
+Read one user's presence without loading the roster, or act on them across rooms:
+
+```js
+// Server
+const [me] = await Room.getParticipants(roomId, { identity: userId }) // their memberships (tabs); [] if offline
+if (me?.meta.status === 'dnd') skipNotification()
+
+// "Ban everywhere": your app knows a user's rooms (it assigned identity at join) — loop and kick each.
+for (const { id } of await Room.list()) // or your own list of the user's rooms
+  await Room.removeParticipant(id, { identity: userId }, { reason: 'banned' }) // idempotent: 0 matches is fine
+```
+
 
 ### Private messages
 
@@ -172,7 +184,17 @@ me.listen((data, from) => showDm(from.meta.name, data))
 await bob.send(aliceId, 'meet me in room 2') // a RemoteParticipant works too
 ```
 
-Sending to an unknown or departed participant rejects. Private messages are one-shot signaling (invites, whispers, game moves): delivered to a live participant at most once, never retried or stored. Durable messaging — offline recipients, history — belongs in your database, delivered to live participants with `Room.send()`.
+Private messages are one-shot signaling (invites, whispers, game moves): delivered to a live participant at most once, never retried or stored. A `send()` during a brief disconnect still arrives when the participant reconnects; once they've fully left it's gone (a `{ identity }` send to an offline user is a no-op). For delivery that survives a full disconnect, persist as you send and redeliver on the next join — keyed by `identity`, which is stable across reconnects (the participant ID isn't):
+
+```js
+// Server
+Room.guard(room, {
+  onAfterSend: (from, to, data) => db.saveDm(to.identity, data), // persist as it's sent
+  onAfterJoin: async (member) => {                               // redeliver on (re)join
+    for (const dm of await db.undeliveredDms(member.identity)) await Room.send(room.id, member.id, dm.data)
+  },
+})
+```
 
 
 ### Moderate
@@ -311,7 +333,13 @@ current = await nextRoom.join({ name })
 await current.publish({ id: crypto.randomUUID(), text })
 ```
 
-A send on a room you've left rejects explicitly (`Participant has left the room`).
+A send on a room you've left rejects explicitly (`Participant has left the room`). If a message might be sent mid-switch (a fast-typed line), join the next room *before* leaving the old one — there's then no instant without a live membership:
+
+```js
+const next = await nextRoom.join({ name })
+await current?.leave()
+current = next
+```
 
 
 ### Enforce capacity
@@ -327,6 +355,14 @@ export async function onJoinLobby(name) {
 ```
 
 `count` is exact at `Room.get()` and stays live while the room is observed.
+
+
+### Beyond one room
+
+Unread counts and room discovery sit one level up from a single room — both reuse what you already have, so neither needs a dedicated lane.
+
+- **Unread badges.** The count is `messages-since(lastRead)` — a query against the same store you persist to in `onAfterPublish`. For a live nudge about a room the user *isn't* watching, give each user a personal room they stay subscribed to and `Room.announce(userRoom, { roomId })` on write: the sidebar holds one subscription, not one per room.
+- **Discover rooms.** A lobby is itself a room. Viewers observe `lobby`; creating a room does `Room.announce('lobby', { created: id, meta })` (and `{ closed: id }` on close). One control message per room lifecycle, delivered to exactly the waiting clients — no polling, no thundering herd.
 
 
 ## Reference
@@ -348,6 +384,7 @@ The server-side entry point. Clients get a room when a telefunction returns it.
 | `Room.removeParticipant(id, target, { reason? })` | `void` | Unknown participant ID |
 | `Room.announce(id, data)` | `void` | If the room doesn't exist |
 | `Room.send(id, participantId, data)` | `void` | If the room or participant doesn't exist |
+| `Room.getParticipants(id, target?)` | `ParticipantSnapshotView[]` | If the room doesn't exist |
 
 ```ts
 type RoomOptions = {
@@ -360,6 +397,7 @@ type RoomOptions = {
 - `Room.get(id, { tail: true })` starts relaying live messages as soon as the room is returned to a client (see <Link href="#load-history-then-go-live">Load history</Link>).
 - `Room.update()` replaces the fields you provide and keeps the rest (`isolated` is fixed at creation).
 - `Room.removeParticipant(id, target, { reason? })` — `target` is a participant ID, or `{ identity }` to remove every membership of an identity at once (idempotent).
+- `Room.getParticipants(id, target?)` — a server-side point-in-time read (no live view, no subscription). Omit `target` for the whole roster; pass `{ identity }` to read one user's memberships (their open tabs) — the cheap "is this user online / what's their status" check that doesn't load the roster. `[]` for an absent identity.
 - Typed metadata: `Room.get<ChatMeta, MemberMeta>(id)` types `room.meta`, `join`/`setMeta`, and `from.meta` everywhere. These type parameters are unchecked assertions you supply — Telefunc trusts them and doesn't validate the shape.
 
 ### `Room`
@@ -416,6 +454,7 @@ Rooms work across multiple server nodes out of the box with <Link href="/redis">
 
 - **Pay for what you consume.** Presence-only observers never receive the room's messages; text and binary alike flow only from the members you subscribe to, and are fetched only while someone wants them.
 - **Crash-safe presence.** A clean `leave()` shows up everywhere at once. A crash can't: the node holding each connection refreshes its members every 30s, and any member that stops being refreshed is removed and its departure announced — with the store's own key-expiry as a final backstop, so a crashed node leaves no ghosts.
+- **Tuning presence latency.** A silently-dropped connection is held for <Link href="/channel-config">`config.channel.reconnectTimeout`</Link> before its members leave, so a brief blip doesn't flap presence — lower it for snappier away-detection, raise it to ride out flaky mobile networks. (A per-member `onReconnecting` / `onReconnected` signal — gray out a blipping member rather than removing them — is on the roadmap.)
 - **Deterministic convergence.** Metadata and config updates land in the same final state on every node, no matter what order they arrive in.
 - **`isolated: true`** routes each member's `publish()` messages through their own pub/sub key instead of one key shared by the whole room. On platforms that map each key to its own coordinator (e.g. Cloudflare Durable Objects), that removes the contention of an entire room publishing through a single key; elsewhere it makes no difference.
 
