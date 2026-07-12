@@ -13,6 +13,11 @@ export { joinCall, leaveCall, toggleMute, toggleCamera, toggleScreenShare, regis
 // keyframe-probe loop this app used to poll with (`demandGate` below). Alone in a voice channel,
 // nothing is encoded or uploaded.
 //
+// Round 10: keyframes publish with `{ retain: true }`. The server keeps the last keyframe per track
+// and replays it to any *new* subscriber before live frames, so a viewer joining an already-active
+// stream paints immediately instead of waiting for the next periodic keyframe. `onDemand` still owns
+// pause/resume; `retain` owns late-joiner seeding — the two split the job cleanly (README finding 22).
+//
 // The Room-relevant shape:
 // - The voice join is a telefunction (`onJoinVoice`): the membership carries my trusted
 //   `identity`, and the room's `onJoin` guard enforces capacity server-side (finding 11).
@@ -380,7 +385,10 @@ function videoPipeline(
       if (session !== current) return
       const bytes = new Uint8Array(chunk.byteLength)
       chunk.copyTo(bytes)
-      void current.membership.publishBinary(bytes, { track, keyFrame: chunk.type === 'key' }).then(gate.onAck, () => {})
+      // Retain keyframes so a late subscriber is seeded with one before any delta (see file header).
+      // `takeResumed` still forces a fresh keyframe on resume — a retained frame is stale after a pause.
+      const keyFrame = chunk.type === 'key'
+      void current.membership.publishBinary(bytes, { track, keyFrame, retain: keyFrame }).then(gate.onAck, () => {})
     },
     error(err) {
       console.error('[discord:call] video encode error', err)

@@ -47,7 +47,17 @@ deleted from app code.
   RoomBot joins each channel as its server seat (publishes replies, listens for commands, but isn't
   counted in the channel's roster) while staying a *visible* guild member. (The round's other
   additions — `me.send()` returning its receipt, `Room.list<M>()`, and the identity-snapshot view
-  exports — touch lanes this app doesn't use or already covers.)
+  exports — touch lanes this app doesn't use or already covers.) *(The seat was generalized/renamed
+  in round 10 — see below.)*
+- **Round 10** followed the base to `46ab8ae`, which **generalized the round-9 server seat into
+  hidden participants** (`join({ hidden: true })` — any number, read via `getParticipants({ hidden:
+  true })`; the one-per-room `{ server: true }` / `room.server` pair is gone) and added
+  **`publish({ retain })` / `publishBinary({ retain })`** — MQTT-style server-retained replay to late
+  subscribers. Adopted both: the bot's channel seat is now `{ hidden: true }` (`server/bot.ts`), and
+  video keyframes publish with `{ retain: true }` so a viewer joining an *active* stream paints at
+  once instead of waiting for the next periodic keyframe (`app/call.ts`) — `onDemand` still owns
+  pause/resume, `retain` owns late-joiner seeding. `retain` is the publish-lane replay finding 22
+  asked for; the `Room.send` twin (22b) is still open.
 
 **Features**
 
@@ -99,9 +109,9 @@ you are (verified, not client-echoed).
 | DMs | **DB-first, server-delivered**: telefunction writes the row, then two `Room.send(room, { identity }, …)` calls push it to both users' live tabs — index-resolved server-side, no roster fan-out (finding 17). Works offline; DND enforced server-side. The member-to-member `me.send()` lane is deliberately closed by a guard (see finding 2) |
 | Channel create/topic/delete | `Room.create` / per-key `Room.setAttributes({ topic })` / `Room.close`; the guild's announce lane doubles as the directory feed (finding 4) |
 | Kick | One `Room.removeParticipant(roomId, { identity }, { reason })` per room — the leave lands as `{ type: 'removed', reason }` on the kicked client, no side-channel notice (finding 12) |
-| Voice/video | One room per voice channel; capacity enforced by its `onBeforeJoin` guard. Mic/camera/screen are **named binary tracks** (`publishBinary(frame, { track, keyFrame })` / `subscribeBinary(cb, { track })`), each paused by `onDemand` when unwatched; mute/camera/screen state merges one field at a time via `setAttributes` |
+| Voice/video | One room per voice channel; capacity enforced by its `onBeforeJoin` guard. Mic/camera/screen are **named binary tracks** (`publishBinary(frame, { track, keyFrame, retain })` / `subscribeBinary(cb, { track })`), each paused by `onDemand` when unwatched; keyframes are **retained** so a late subscriber paints at once (finding 22); mute/camera/screen state merges one field at a time via `setAttributes` |
 | Member sidebar / channel list | `room.snapshot()` + `room.onChange()` — the `useSyncExternalStore` contract, projected into Zustand |
-| Bot | Same Room API, no browser. A **visible guild member**, but takes each text channel's **server seat** (`join({ server: true })`) — a full participant (publishes replies, subscribes to commands) that's excluded from the channel's presence count (`server/bot.ts`) |
+| Bot | Same Room API, no browser. A **visible guild member**, but joins each text channel as a **hidden participant** (`join({ hidden: true })`) — a full participant (publishes replies, subscribes to commands) that's excluded from the channel's presence count/roster (`server/bot.ts`) |
 
 Module map: `database/` (row types + DDL, `node:sqlite` bootstrap, all SQL in `queries.ts`) ·
 `server/` (auth, sessions, room bootstrap, guards, bot) · `telefunc/` (the API: enter, channels,
@@ -451,11 +461,15 @@ Two consequences of removed/absent primitives:
   member's client, just for dots. A busy channel turns the guild lane into an `O(members)`-per-message
   firehose (there's no server-side throttle). The re-derivation is correct but doesn't scale; the
   removed per-channel signal was the right shape. Fix: a scoped/throttled activity signal.
-- **`Room.send` has no replay.** Channels got a lossless "history then live" fence
-  (`Room.get({ tail })`, finding 14); DMs have no equivalent — a DM delivered in the window after a
-  recipient's participant is reaped but before their reconnect creates a new one is live-lost (it
-  survives in the DB but only resurfaces on a full reload). Fix: a replayable/cursored server-authored
-  send, the `Room.send` twin of `tail`.
+- **`Room.send` has no replay** *(22b — partly addressed in round 10)*. Channels got a lossless
+  "history then live" fence (`Room.get({ tail })`, finding 14); the room-authored send lane had no
+  equivalent — a DM delivered in the window after a recipient's participant is reaped but before their
+  reconnect creates a new one is live-lost (it survives in the DB but only resurfaces on a full
+  reload). Round 10 landed **`publish({ retain })` / `publishBinary({ retain })`** — MQTT-style
+  server-retained replay to late subscribers, exactly this shape for the *publish* lane; the app
+  adopted the binary half for video keyframes (a late viewer paints immediately, `app/call.ts`). But
+  `retain` is one *latched* value, not a cursored backlog, and it rides `publish`, not the
+  room-authored `Room.send` the DM path uses — so the reconnect-safe DM twin of `tail` is still open.
 
 ### App-level bugs the audit caught (fixed here, not Room-API issues)
 
@@ -494,15 +508,15 @@ expired sessions and the bot's `greeted` set are never pruned.
 | `Room.create` / `Room.get` (incl. `{ tail: true }`) / `Room.getOrCreate` / `Room.guard` / `Room.update` / `Room.setAttributes` / `Room.close` | ✔ | `server/rooms.ts`, `server/guards.ts`, `telefunc/channels.telefunc.ts` — `tail` fences history (finding 14); `setAttributes` merges the topic per-key (finding 21) |
 | `Room.removeParticipant({ identity }, { reason })` / `Room.announce` / `Room.send(room, { identity }, …)` / `Room.getParticipants(id, { identity })` | ✔ | kick sweep (index-resolved per room, finding 18), banners + directory + activity feed, identity-addressed DM delivery + the DND presence read (finding 17) |
 | `Room.join` (static) / `Room.list` | ✖ | memberships need identity + guards (server-side, per-instance); the app's channels table already knows the rooms (finding 4) |
-| `room.join(meta, { identity })` (incl. `{ server: true }`) / `getParticipants` / `subscribe` / `onJoin` / `onLeave` / `onUpdate` / `onAnnounce` / `onClose` / `count` / `size` / `isFull` / `meta` | ✔ | throughout `telefunc/*`, `server/bot.ts`, `app/store.ts` — the bot's per-channel seat is a **server seat** (round 9), `server/bot.ts` |
-| `room.server` | ✖ | the bot holds the `LocalParticipant` that `join({ server: true })` returns, so it never re-fetches its seat (`server/bot.ts`) |
+| `room.join(meta, { identity })` (incl. `{ hidden: true }`) / `getParticipants` / `subscribe` / `onJoin` / `onLeave` / `onUpdate` / `onAnnounce` / `onClose` / `count` / `size` / `isFull` / `meta` | ✔ | throughout `telefunc/*`, `server/bot.ts`, `app/store.ts` — the bot's per-channel seat is a **hidden participant** (round 10), `server/bot.ts` |
+| `getParticipants({ hidden: true })` | ✖ | the read-path for hidden participants; the bot holds the `LocalParticipant` that `join({ hidden: true })` returns, so it never re-reads its own seat (`server/bot.ts`) |
 | `room.snapshot` / `snapshot({ by: 'identity' })` / `onChange` | ✔ | the Room→React adapter; the identity-grouped view is the member sidebar (finding 19) — `app/store.ts` |
 | `room.onParticipantUpdate` | ✖ | available (finding 19 delta hook); `app/call.ts` still wires per-peer `member.onUpdate` — full adoption is tied to the store's selector/memo refactor |
 | ~~`room.onActivity`~~ | — | removed upstream in round 4; unread is re-derived from `onAfterPublish` → guild announce (finding 10) |
 | guards: `onBeforePublish` / `onAfterPublish` / `onBeforeSend` / `onBeforeJoin` | ✔ | validate + persist (split), closing the DM lane, voice capacity (`server/guards.ts`) |
 | `room.getParticipant` / `onEmpty` / `onFull` / `isEmpty` / `isClosed` / `onAfterSend` / `onAfterJoin` | ✖ | roster filtering + live getters covered every need; the app persists in `onAfterPublish` only |
-| `me.publish` / `publishBinary({ track, keyFrame })` + ack `receivers` / `onDemand` / `listen` / `setAttributes` / `leave` / `onLeave` (with `LeaveCause`) / `selfDelivery: false` | ✔ | chat + typing, media tracks paused by `onDemand` when unwatched, DM notices, per-field status & mute, channel switching, kick screen (`setMeta` superseded by `setAttributes` everywhere — finding 5) |
-| `publish({ coalesce })` | ✖ | conflation is for lossy high-frequency streams (cursors); this app's chat and typing are both lossless/rate-limited already |
+| `me.publish` / `publishBinary({ track, keyFrame, retain })` + ack `receivers` / `onDemand` / `listen` / `setAttributes` / `leave` / `onLeave` (with `LeaveCause`) / `selfDelivery: false` | ✔ | chat + typing, media tracks paused by `onDemand` when unwatched, **keyframes `retain`ed for late joiners** (round 10, finding 22), DM notices, per-field status & mute, channel switching, kick screen (`setMeta` superseded by `setAttributes` everywhere — finding 5) |
+| `publish({ coalesce })` / `publish({ retain })` (text) | ✖ | `coalesce` is for lossy high-frequency streams (cursors) — this app's chat/typing are lossless/rate-limited already; text `retain` (last-message-only) has no home either — chat is DB-backed and replayed by `Room.get({ tail })` history, richer than one retained message (binary `retain` **is** used, above) |
 | `me.send` | ✖ | deliberately closed by guard — see finding 2 |
 | `member.subscribeBinary(cb, { track })` / `onUpdate` / `onLeave` / `joinedAt` / `meta` / `identity` | ✔ | per-track media, live rosters, decoder lifecycle, tab dedupe |
 | `member.subscribe` | ✖ | room-level `subscribe` + the verified `from` covered per-member needs |
