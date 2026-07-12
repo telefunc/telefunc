@@ -30,7 +30,7 @@ export {
 import type { LocalParticipant, RoomIdentitySnapshotView, RoomSnapshotView } from 'telefunc'
 import { create } from 'zustand'
 import { BLUE, NEUTRAL, RED, type Team } from '../shared/constants'
-import type { ChatMsg, MatchListing, MatchMeta, MatchRoom, PlayerMeta } from '../shared/types'
+import type { ChatMsg, MatchAuthority, MatchListing, MatchMeta, MatchRoom, PlayerMeta } from '../shared/types'
 import type { HudSnapshot } from './engine/game'
 import type { SelectionInfo } from './engine/input'
 import { startStream, stopStream } from './net'
@@ -86,6 +86,7 @@ const getState = useApp.getState
 // ── live handles (kept out of the store) ────────────────────────────────────────────────────
 let room: MatchRoom | null = null
 let me: LocalParticipant<PlayerMeta> | null = null
+let authority: MatchAuthority | null = null // the room's hidden sim participant, from onEnterMatch
 let unsubs: (() => void)[] = []
 let streaming = false
 let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -157,7 +158,7 @@ async function createMatch(name: string): Promise<void> {
 
 async function joinMatch(roomId: string): Promise<void> {
   if (room) await leaveMatch()
-  let res: { room: MatchRoom; me: LocalParticipant<PlayerMeta> }
+  let res: { room: MatchRoom; me: LocalParticipant<PlayerMeta>; authority: MatchAuthority }
   try {
     res = await onEnterMatch(roomId)
   } catch (err) {
@@ -166,6 +167,7 @@ async function joinMatch(roomId: string): Promise<void> {
   }
   room = res.room
   me = res.me
+  authority = res.authority
   streaming = false
   const meta = room.meta
   setState({
@@ -237,17 +239,15 @@ function rosterFromSnapshot(): LobbyPlayer[] {
   return out.sort((a, b) => a.team - b.team || a.name.localeCompare(b.name))
 }
 
-/** Open the binary stream once the match is live. The server's simulation is the room's **seat**,
- *  reachable directly as `room.server` (finding 2 adopted) — no roster scan for a marker flag, no
- *  `getParticipant()` round-trip. It's `null` until the seat joins at match start; a later
- *  `onChange` retries. */
+/** Open the binary stream once the match is live. The server's simulation is the room's **hidden
+ *  authority**, handed to us by `onEnterMatch` (finding 1+2 adopted) — no roster scan, no
+ *  `room.server`, no `getParticipant()` round-trip, and no "wait for the seat to appear" retry: the
+ *  authority is seated before anyone joins, so we hold it from the moment we entered. */
 function beginStream(): void {
-  if (!room || !me || streaming) return
-  const seat = room.server
-  if (!seat) return
+  if (!room || !me || !authority || streaming) return
   streaming = true
   setState({ myTeam: me.meta.team, phase: 'match' })
-  startStream(seat, me, me.meta.team)
+  startStream(authority, me, me.meta.team)
 }
 
 async function setTeam(team: Team): Promise<void> {
@@ -294,6 +294,7 @@ async function leaveMatch(): Promise<void> {
   const leaving = me
   room = null
   me = null
+  authority = null
   if (leaving) await leaving.leave().catch(() => {})
   setState({
     phase: getState().user ? 'home' : 'auth',

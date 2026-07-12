@@ -13,13 +13,14 @@ import type { MatchRoom } from '../shared/types'
 // to detach from the room. ────────────────────────────────────────────────────────────────────
 //
 // The round-1 anti-spoof check (rejecting a client-forged `meta.authority`) is gone: with the
-// server seat (`join({ server: true })`, findings 1+2 adopted in 51b4613) there is no marker flag
-// to forge — the seat is a non-presence member, not a roster row a client could impersonate.
+// hidden authority (`join({ hidden: true })`, findings 1+2 adopted in 51b4613, generalized in
+// da1b9f7) there is no marker flag to forge — it's a non-presence member, not a roster row a
+// client could impersonate. A hidden join bypasses `onBeforeJoin` entirely, so this never sees it.
 function guardMatchRoom(room: MatchRoom): void {
   Room.guard(room, {
     onBeforeJoin: () => {
       // Capacity: `size` is only a hint (Telefunc tracks it but never enforces it), so the app
-      // rejects the over-capacity join itself. `count` excludes the server seat, so this is the
+      // rejects the over-capacity join itself. `count` excludes the hidden authority, so this is the
       // true player count.
       if (room.count >= room.size) throw new Error('This match is full')
     },

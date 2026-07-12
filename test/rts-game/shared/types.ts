@@ -1,7 +1,7 @@
 // Types that cross the wire: room/participant metadata, the typed `Room` aliases, and the
 // client→authority command protocol.
 
-import type { Room } from 'telefunc'
+import type { RemoteParticipant, Room } from 'telefunc'
 import type { Team } from './constants'
 
 export type MatchPhase = 'lobby' | 'playing' | 'ended'
@@ -16,9 +16,9 @@ export type MatchMeta = {
   winner: Team // 0 while playing; set when phase === 'ended'
 }
 
-/** Participant metadata. The server's simulation seat is *not* a participant (it joins with
- *  `{ server: true }` and is surfaced as `room.server`, excluded from presence), so no marker
- *  flag is needed here — the roster is players only. */
+/** Participant metadata. The server's simulation seat is a *hidden* participant (it joins with
+ *  `{ hidden: true }`, excluded from presence), so no marker flag is needed here — the roster is
+ *  players only. The seat reuses this shape (a display name/color) purely for convenience. */
 export type PlayerMeta = {
   name: string
   color: string
@@ -46,9 +46,14 @@ export type Announce =
 
 export type MatchRoom = Room<MatchMeta, PlayerMeta, ChatMsg>
 
-// ── Commands: client → server seat ───────────────────────────────────────────────────────────
+/** The match **authority**: the room's hidden `{ hidden: true }` participant that runs the sim,
+ *  handed to the client by `onEnterMatch`. The client subscribes to its binary tracks and DMs it
+ *  orders — no `room.server`, no roster scan. */
+export type MatchAuthority = RemoteParticipant<PlayerMeta, ChatMsg>
+
+// ── Commands: client → authority ─────────────────────────────────────────────────────────────
 // Issued by selecting units and right-clicking / pressing build hotkeys. Delivered with
-// `me.send(room.server.id, command)` to the room's server seat (`join({ server: true })`), which
+// `me.send(authority.id, command)` to the room's hidden authority (`join({ hidden: true })`), which
 // `listen()`s for them server-side — see app/net.ts and server/sim/match.ts. (Round-2 adoption of
 // the seat closed the "no first-class client→server lane" finding; `send()` now returns a receipt.)
 export type Command =

@@ -14,8 +14,8 @@ const MATCH_SIZE = 20 // 10v10 — the server seat is not counted (excluded from
 // `setInterval` + authoritative object on. That's by design: a per-room loop in a multi-node
 // deployment needs leader election (which node runs it?), which a lifecycle hook can't provide —
 // so the app owns it. Single-node, the idiomatic shape is this `globalThis` singleton registry
-// (pinned so Vite's dual SSR graphs / dev reloads don't spawn a second loop), and the **server
-// seat** now gives a real `onEmpty` to drive teardown (see wireAbandonment) instead of the
+// (pinned so Vite's dual SSR graphs / dev reloads don't spawn a second loop), and the **hidden
+// authority** now gives a real `onEmpty` to drive teardown (see wireAbandonment) instead of the
 // hand-rolled real-player count round 1 needed. 51b4613 documents both.
 function registry(): Map<string, Match> {
   const g = globalThis as { __rtsMatches?: Map<string, Match> }
@@ -44,9 +44,9 @@ async function createMatch(name: string, hostId: string): Promise<MatchRoom> {
   }
   const room = await Room.create<MatchMeta, PlayerMeta, ChatMsg>(roomId, { meta, size: MATCH_SIZE })
 
-  // Seat the server *now*, before any client joins, so every lobby client sees it in its initial
-  // roster (the seat join is roster-only — a client can't discover a seat that appears later). The
-  // simulation doesn't run until the host launches (`startMatch` → `match.begin`).
+  // Seat the hidden authority *now*, at room creation, so it's present before any client enters:
+  // `onEnterMatch` hands each client the authority directly (`getParticipants({ hidden: true })`).
+  // The simulation doesn't run until the host launches (`startMatch` → `match.begin`).
   const match = new Match(roomId, room)
   match.onDispose = () => {
     registry().delete(roomId)
@@ -83,8 +83,8 @@ async function startMatch(roomId: string, byIdentity: string): Promise<void> {
 
   // Snapshot the lobby's team choices server-side (trusted). `meta.team` is client-authored
   // display state, so it is read *here, once*, to build the authoritative identity→team map — it
-  // is never trusted again mid-match (see commands.ts). The roster is players only — the seat is a
-  // non-presence member, so `getParticipants()` never includes it.
+  // is never trusted again mid-match (see commands.ts). The roster is players only — the authority
+  // is a hidden member, so `getParticipants()` (without `{ hidden: true }`) never includes it.
   const participants = await room.getParticipants()
   const teamPlayers = new Map<Team, string[]>([
     [RED, []],
@@ -106,11 +106,11 @@ async function startMatch(roomId: string, byIdentity: string): Promise<void> {
   wireAbandonment(room, match)
 }
 
-/** Tear a match down once every player has left for good. The **server seat** is excluded from
+/** Tear a match down once every player has left for good. The **hidden authority** is excluded from
  *  presence, so `onEmpty` fires exactly when the last *real* player leaves (round 1 had to count
  *  non-authority participants by hand). The grace also starts at creation, so a match created but
- *  never joined (host bailed) doesn't linger. A reload keeps the seat for `reconnectTimeout`, so a
- *  normal reconnect fires `onJoin` and cancels the grace before it abandons. */
+ *  never joined (host bailed) doesn't linger. A reload keeps the player's seat for `reconnectTimeout`,
+ *  so a normal reconnect fires `onJoin` and cancels the grace before it abandons. */
 function wireAbandonment(room: MatchRoom, match: Match): void {
   let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => match.abandon(), 45_000)
   const arm = (): void => {

@@ -41,12 +41,12 @@ class WorldBuffer {
   winner = 0
   tick = 0
   lastFrameAt = 0
-  // ── finding #5 (keyframe-on-subscribe) — documented pattern in 51b4613 ───────────────────────
-  // Deltas can't be applied until a keyframe seeds the baseline. Rather than a new primitive, the
-  // blessed pattern is: the publisher watches `onDemand` and re-keyframes when a track's subscriber
-  // count rises (a new/reconnecting client), and the client ignores frames until that first
-  // keyframe (this gate). It works without per-subscriber delivery — which is what keeps bytes at
-  // the source (finding #6). See server/sim/match.ts and README finding #5.
+  // ── finding #5 (keyframe-on-subscribe) — ✔ built as `{ retain: true }` (90dcb4a) ─────────────
+  // Deltas can't be applied until a keyframe seeds the baseline. The authority marks each team-track
+  // keyframe `{ retain: true }`, so the server replays the last one to a new subscriber before any
+  // live frame — this client is seeded the instant it subscribes, with nothing to wire up. This gate
+  // stays as a cheap safety net: ignore frames until the first keyframe arrives, so a delta that
+  // races ahead of the retained replay can't corrupt an unseeded set. See server/sim/match.ts.
   private seeded = false
 
   reset(): void {

@@ -57,21 +57,21 @@ the weight on `Room`'s delivery lanes.
 
 | Concern | How it maps onto `Room` |
 |---|---|
-| A match | One room `rts:match:<id>`, sized 20 (10v10 — the server seat isn't counted). Phase (`lobby`/`playing`/`ended`) + winner live in room meta, read live by the browser list and joined players. |
+| A match | One room `rts:match:<id>`, sized 20 (10v10 — the hidden authority isn't counted). Phase (`lobby`/`playing`/`ended`) + winner live in room meta, read live by the browser list and joined players. |
 | Identity & reconnect | `join(meta, { identity: userId })`, server-stamped. Units are owned by team; the trusted `identity→team` map is snapshotted at match start (client `meta.team` is display-only). A reload rejoins the same identity → same army. |
 | Lobby presence | `room.snapshot({ by: 'identity' })` + `onChange` — the `useSyncExternalStore` contract, tabs collapsed per player. |
 | Team pick / ready | client `me.setAttributes({ team })` / `{ ready }`. |
 | Match browser | `Room.list<MatchMeta>({ prefix })`, **polled** (no live directory event). |
-| **State broadcast** | The server takes the room's **seat** (`join({ server: true })`, created up front) and `publishBinary`es a per-team, fog-filtered, delta-compressed frame on a **named track** (`state:red` / `state:blue` / `state:full`) every tick. Clients `subscribeBinary({ track })` on `room.server` to just their team's. |
-| **Commands** | `me.send(room.server.id, cmd)` → the seat's `listen()`; `send()` resolves with a receipt. |
+| **State broadcast** | The server runs on the room's **hidden authority** (`join({ hidden: true })`, seated up front) and `publishBinary`es a per-team, fog-filtered, delta-compressed frame on a **named track** (`state:red` / `state:blue` / `state:full`) every tick, marking keyframes `{ retain: true }` so a late subscriber is seeded automatically. Clients `subscribeBinary({ track })` on the authority to just their team's. |
+| **Commands** | `me.send(authority.id, cmd)` → the authority's `listen()`; `send()` resolves with a receipt. The client gets the authority handle from `onEnterMatch` (no `room.server`). |
 | Chat | room-wide `publish`/`subscribe` (all-chat). |
 | System banners | `Room.announce()` (match-end). |
-| Capacity | `Room.guard(room, { onBeforeJoin })` (`count` excludes the seat). |
-| Kick / close | `Room.removeParticipant` / `Room.close` (match teardown, driven by the seat's `onEmpty`). |
+| Capacity | `Room.guard(room, { onBeforeJoin })` (`count` excludes the hidden authority). |
+| Kick / close | `Room.removeParticipant` / `Room.close` (match teardown, driven by `onEmpty` — the hidden authority doesn't keep the room busy). |
 
 **Module map** — `shared/` (game constants + the binary wire protocol + typed `Room` aliases) ·
 `server/sim/` (the authoritative `World`, the per-tick fog + delta snapshot builder, the command
-validator, and the `Match` that holds the room's server seat + tick loop) · `server/` (identity, the
+validator, and the `Match` that holds the room's hidden authority + tick loop) · `server/` (identity, the
 match registry, guards) · `telefunc/` (lobby + match API) · `app/net.ts` (the client's stream +
 command lanes) · `app/engine/` (PixiJS renderer, camera, input, fog, minimap, interpolation) ·
 `app/ui/` (React + the Zustand Room→React adapter).
@@ -101,21 +101,25 @@ binary, to receive private input, to own a loop and per-audience views — and (
 had no seat for it, so the app seated the server as a synthetic "participant" and hand-rolled the
 rest.
 
-## Round 2 — the triage, adopted (`51b4613`)
+## Round 2 — the triage, adopted (`51b4613` → `46ab8ae`)
 
-Round 1 audited against `cea87ef`. The author triaged all 12 findings and landed the accepted ones
-in `51b4613`; this app then migrated onto them, **deleting the workarounds** — the point of the
-exercise. Verdicts and receipts:
+Round 1 audited against `cea87ef`. The author triaged all 12 findings, landed the accepted ones in
+`51b4613`, and then — as this app migrated onto them and kept reporting — **built two more**:
+`da1b9f7` generalized the round-2 server seat into **hidden participants** (`join({ hidden: true })`,
+any number, read with `getParticipants({ hidden: true })`, no more singular `room.server`), and
+`90dcb4a` built **`{ retain: true }`** — MQTT-style keyframe-on-subscribe, the exact fix finding #5
+asked for. This app tracks the base (now `46ab8ae`) and **deletes the workaround each time** — the
+point of the exercise. Verdicts and receipts:
 
 | # | Finding | Verdict | What the adoption deleted / resolved |
 |---|---|---|---|
-| **1+2** | server binary broadcast · client→server lane | **✔ the server seat** — `join({ server: true })` → `room.server`, a non-presence member (publish/`listen`/`send`/`onDemand`) | the synthetic "authority" participant, its `meta.authority` flag, the anti-spoof guard (`server/guards.ts`), the client's `meta.authority` roster scan (`app/store.ts` → `room.server`), and the hand-rolled real-player teardown count (`server/matches.ts` → real `onEmpty`) |
+| **1+2** | server binary broadcast · client→server lane | **✔ hidden authority** — `join({ hidden: true })` (the `51b4613` server seat, generalized in `da1b9f7`), handed to the client by `onEnterMatch` | the synthetic "authority" participant, its `meta.authority` flag, the anti-spoof guard (`server/guards.ts`), the hand-rolled teardown count — **and now `room.server` itself**: the client holds the authority returned from the join telefunction, so there's no accessor and no roster scan at all |
+| **5** | keyframe-on-subscribe | **✔ `{ retain: true }`** (`90dcb4a`) — was DOCS, now built | the `onDemand`-force-keyframe seam on the team tracks (`server/sim/match.ts`): the server retains the last keyframe and replays it to each new subscriber, so one joiner no longer re-broadcasts a keyframe to the whole track. `onDemand` stays only for the on-demand spectator track (see below) |
 | **2b** | `send()` returned void | **✔** `send(): Promise<RoomSendReceipt>` | commands are now acked (`app/net.ts`); kept fire-and-forget since orders are idempotent |
 | **9** | identity-view types unexported | **✔** exported from the barrels | the structural type derivation in `rosterFromSnapshot` (`app/store.ts`) — now names `RoomIdentitySnapshotView` |
 | **10a** | `RoomInfo.meta` untyped | **✔** `Room.list<M>()` | the `as MatchMeta` cast in `listMatches` (`server/matches.ts`) |
 | **4** | 1-bit framing | **DOCS** (I overstated it) | the subscriber's `info` already carries `seq`+`timestamp`; the in-band `tick` is game-semantic |
-| **5** | keyframe-on-subscribe | **DOCS** | the `onDemand`-force-keyframe pattern is the blessed shape (single-publisher replay, no per-subscriber encode) |
-| **7** | sim-loop lifecycle | **DOCS / by-design** | multi-node needs leader election; the `globalThis` singleton + the seat's `onEmpty` are idiomatic |
+| **7** | sim-loop lifecycle | **DOCS / by-design** | multi-node needs leader election; the `globalThis` singleton + the hidden authority's `onEmpty` are idiomatic |
 | **11** | client meta re-derived | **DOCS** | trust callout beside "identity is trusted" |
 | **3** | binary DM | **REJECT** | no workload — per-(member,track) keys already deliver identity-scoped binary; fog is per-team tracks |
 | **6** | per-subscriber filter | **REJECT** | would force a per-subscriber re-encode → destroys "bytes never leave the source"; per-player fog is honestly N tracks |
@@ -123,12 +127,20 @@ exercise. Verdicts and receipts:
 | **10b** | live `watchList` | **REJECT** | the #445 lobby-room + announce directory pattern covers it; this app polls for simplicity |
 | **12** | latest-only binary | **DEFER #449** | can't evict the transport send-buffer → false promise on a reliable lane; the datagram lane is the honest fix |
 
+**One residual, surfaced by the adoption (`server/sim/match.ts`).** `{ retain: true }` fully seeds a
+late subscriber for an **always-on** track (the two team fog streams broadcast every tick, so a
+retained keyframe always exists). It can't seed the **on-demand** spectator `full` track: that track
+is published only while someone watches it, so a fresh watcher may find *no* retained frame (or a
+stale one from a prior spectator). So the app keeps `onDemand` for that one track — force a fresh
+keyframe when its subscriber count rises — and uses pure retention for the team tracks. Not a defect;
+the honest boundary of a retained-message model is "there must be a last message to retain."
+
 The finding write-ups below are the round-1 audit, each now tagged with its verdict; the inline
 `grep FINDING` call-outs in the code reflect the adopted state.
 
 ## 1. No server-authored **binary** broadcast — the server has to impersonate a player
 
-> _Verdict: ✔ **Adopted** — the server seat (`join({ server: true })` → `room.server`), `51b4613`._
+> _Verdict: ✔ **Adopted** — the hidden authority (`join({ hidden: true })`, `51b4613` + `da1b9f7`), handed to the client by `onEnterMatch`; no `room.server`, no roster scan._
 
 `Room.announce()` is the room-authored broadcast, but it is **text/JSON only** — there is no
 `Room.announceBinary()`. A server-authoritative game's entire output is a compact binary state
@@ -150,7 +162,7 @@ bytes, { track, keyFrame })`), or a blessed "server participant" that isn't a ro
 
 ## 2. No first-class client→server lane — commands ride `send` against its contract
 
-> _Verdict: ✔ **Adopted** — the server seat’s inbox + `room.server.id`; `send()` receipt (2b), `51b4613`._
+> _Verdict: ✔ **Adopted** — the hidden authority’s inbox + `authority.id` (returned by `onEnterMatch`); `send()` receipt (2b), `51b4613`._
 
 The server is not a participant with an inbox. The only server-side receive points are **guards**
 (policy hooks) and a server-side **`subscribe()`** (which sees room-wide broadcasts, not private,
@@ -200,25 +212,28 @@ metadata blob alongside `{ track, keyFrame }`, or a small typed header.
 
 ## 5. No keyframe-on-subscribe / binary replay — the binary twin of `tail` (extends Discord #22)
 
-> _Verdict: **Docs** — the `onDemand`-force-keyframe pattern is the blessed shape (single-publisher replay)._
+> _Verdict: ✔ **Built** — `{ retain: true }` (`90dcb4a`), the MQTT-style keyframe-on-subscribe this asked for. Was DOCS in `51b4613`; the author then built it._
 
-Channels got a lossless "history then live" fence (`Room.get({ tail })`). The **binary state lane
-has no equivalent**: a client that subscribes mid-stream — a fresh joiner, a reconnect, a
-backgrounded tab — receives deltas it can't apply, and there is **no "send me the current state on
-subscribe"**. The publisher only learns a new subscriber exists via `onDemand` count *changes*
-(coarse — a count, not an identity, not an event you can answer with a payload).
+Channels got a lossless "history then live" fence (`Room.get({ tail })`). In round 1 the **binary
+state lane had no equivalent**: a client that subscribed mid-stream — a fresh joiner, a reconnect, a
+backgrounded tab — received deltas it couldn't apply, and there was **no "send me the current state
+on subscribe"**. Round 1 hand-rolled the seam off `onDemand` count *changes* (coarse — a count, not
+an event you can answer with a payload), which also meant one late joiner forced a **full
+re-broadcast to the entire track audience**.
 
-So the app hand-rolls the seam from both ends:
-- Server: when a track's `onDemand` count **rises**, force the next frame on that track to be a
-  keyframe (`server/sim/match.ts` → `server/sim/snapshot.ts` `forceKeyframe`), plus a periodic
-  keyframe every 3s as a net.
-- Client: **ignore all frames until the first keyframe** seeds the baseline (`app/engine/world-buffer.ts`
-  `seeded` gate).
+**`90dcb4a` built the fix as `publishBinary(frame, { keyFrame: true, retain: true })`:** the server
+keeps the last retained frame per `(publisher, track)` and replays it to every new subscriber
+*before* any live frame — MQTT retained-message semantics, dropped when the publisher leaves or the
+room closes. The app now marks its team-track keyframes `{ retain: true }` (`server/sim/match.ts`)
+and the whole `onDemand`-force-keyframe seam on those tracks is gone. It's **strictly better** than
+the round-1 workaround: only the joiner pays (its own retained-frame replay), so a reconnect no
+longer re-keyframes the other nine subscribers on the team track. The one client-side remnant — the
+`seeded` gate in `app/engine/world-buffer.ts` — stays as a cheap safety net (ignore frames until the
+first keyframe), now defending only against a delta racing ahead of the retained replay.
 
-And because a track is shared, one late joiner forces a **full re-broadcast to the entire track
-audience** — there is no per-subscriber snapshot. **Fix shape**: `subscribeBinary` delivering the
-publisher's latest keyframe on attach, or an `onSubscribe(peer)` hook the publisher can answer with
-a targeted frame.
+Residual (see the triage note): retention needs a last message to retain, so the **on-demand**
+spectator `full` track — published only while watched — still leans on `onDemand` to force the first
+watcher's keyframe. Pure retention covers the always-on team tracks; `onDemand` covers the cold one.
 
 ## 6. Interest management is per-(publisher, track), not spatial/per-subscriber
 
@@ -237,7 +252,7 @@ just track-name-based.
 
 ## 7. A per-room simulation loop has no lifecycle home (extends Discord #13)
 
-> _Verdict: **Docs / by-design** — multi-node needs leader election; `globalThis` singleton + the seat’s `onEmpty` are idiomatic._
+> _Verdict: **Docs / by-design** — multi-node needs leader election; `globalThis` singleton + the hidden authority’s `onEmpty` are idiomatic._
 
 The Room API is request-driven (telefunctions) and event-driven (guards/hooks). There is no **room
 lifecycle** — no "created / first participant / went idle / gone" — to hang a match's authoritative
@@ -316,15 +331,15 @@ shape**: `coalesce`/latest-only for `publishBinary`, or the datagram lane of #44
 | `Room.create` / `get` / `getOrCreate` / `list` / `close` / `guard` / `setAttributes` / `announce` / `removeParticipant` | ✔ | `server/matches.ts`, `server/sim/match.ts`, `server/guards.ts` — `list` is the polled match browser (§10), `setAttributes`/`announce` drive phase + result |
 | `Room.get({ tail })` | ✖ | history is a DB/replay concept; an RTS match is ephemeral and has no text history to fence — but the **binary** analog is exactly what's missing (§5) |
 | `Room.send(room, { identity }, …)` | ✖ | text-only (§3); state is per-team binary tracks, not identity-addressed sends |
-| `room.join({ identity, server })` / `getParticipants` / `room.server` | ✔ | identity-stamped joins; the server **seat** (`join({ server: true })`) binds the state stream via `room.server` (`app/store.ts`) |
+| `room.join({ identity, hidden })` / `getParticipants({ hidden })` | ✔ | identity-stamped joins; the **hidden authority** (`join({ hidden: true })`) runs the sim, read off-presence and handed to the client by `onEnterMatch` — no `room.server` accessor (`telefunc/match.telefunc.ts`, `app/store.ts`) |
 | `room.snapshot()` / `snapshot({ by: 'identity' })` / `onChange` | ✔ | the Room→React lobby adapter; identity-grouped roster, named types (§9 adopted) |
 | `room.subscribe` / `publish` (typed `Pub`) | ✔ | all-chat (§8); `Room<MatchMeta, PlayerMeta, ChatMsg>` |
-| `seat.publishBinary({ track, keyFrame })` + ack `receivers` | ✔ | **the core** — per-team fog-filtered delta frames from the server seat (§1, §4) |
-| `member.subscribeBinary({ track })` | ✔ | each client takes only its team's fog track (§6) |
-| `me.onDemand((track, count))` | ✔ | force-keyframe on a new subscriber (§5); skip encoding the spectator track when unwatched |
-| `me.send(room.server.id)` (receipt) / `seat.listen` | ✔ | the client→server command lane into the seat (§2 adopted) |
+| `authority.publishBinary({ track, keyFrame, retain })` + ack `receivers` | ✔ | **the core** — per-team fog-filtered delta frames from the hidden authority; keyframes `{ retain: true }` seed late subscribers (§1, §4, §5) |
+| `member.subscribeBinary({ track })` | ✔ | each client takes only its team's fog track; the retained keyframe arrives first (§5, §6) |
+| `me.onDemand((track, count))` | ✔ | gate + force-keyframe for the **on-demand** spectator track only (§5); team tracks use retain, not `onDemand` |
+| `me.send(authority.id)` (receipt) / `authority.listen` | ✔ | the client→server command lane into the hidden authority (§2 adopted) |
 | `me.setAttributes` | ✔ | team pick + ready in the lobby |
-| guards: `onBeforeJoin` | ✔ | capacity only now — the seat needs no anti-spoof (`server/guards.ts`); per-instance (Discord #3) |
+| guards: `onBeforeJoin` | ✔ | capacity only now — the hidden authority needs no anti-spoof and bypasses the hook (`server/guards.ts`); per-instance (Discord #3) |
 | `onAfter*` hooks / `LeaveCause` reasons / `onParticipantUpdate` | ✖ | no message persistence; leave/kick handling is coarse (back-to-home) — a longer game would use them |
 | `publish({ coalesce })` | ✖ | chat is low-rate; the state lane wants `coalesce` but it's **binary-only-absent** (§12) |
 
@@ -332,9 +347,12 @@ shape**: `coalesce`/latest-only for `publishBinary`, or the datagram lane of #44
 
 Plenty did, and it's worth recording: **named binary tracks + source-selective `subscribeBinary`**
 are a genuinely good fit for team fog (fog is enforced upstream, so an opponent's vision never
-touches your socket); **`onDemand`** cleanly powers both "pause the spectator stream when unwatched"
-and the keyframe-on-join seam; **identity** made reconnect-to-your-army trivial; **`snapshot()` +
-`onChange`** is the entire lobby adapter; and returning `{ room, me }` from one telefunction with
-reference-identity serialization means the client wires the whole match off two handles. The gaps
-above are all about the server needing to be a *first-class actor*, not about the peer model, which
-is solid.
+touches your socket); **`{ retain: true }`** made keyframe-on-join a one-word change that seeds each
+late subscriber without disturbing the rest of the track, and **`onDemand`** still cleanly pauses the
+spectator stream when unwatched; the **hidden authority** (`join({ hidden: true })`) gave the server
+a first-class, non-presence seat and, handed back from `onEnterMatch`, erased the `room.server`
+roster dance entirely; **identity** made reconnect-to-your-army trivial; **`snapshot()` + `onChange`**
+is the entire lobby adapter; and returning `{ room, me, authority }` from one telefunction with
+reference-identity serialization means the client wires the whole match off three handles. The gaps
+above are all about the server needing to be a *first-class actor*, and round after round the API has
+grown to meet exactly that — the peer model was always solid.

@@ -10,18 +10,20 @@ import { MatchSnapshots, TRACK } from './snapshot'
 import { World } from './world'
 
 /** A running match: it owns the authoritative `World`, the tick loop, and the room's delivery
- *  lanes. It takes the room's **server seat** (`join({ server: true })`, surfaced as `room.server`)
- *  to broadcast binary state and receive commands.
+ *  lanes. It takes a **hidden participant** (`join({ hidden: true })`) to broadcast binary state and
+ *  receive commands.
  *
- * ── ✔ ADOPTED (findings 1 + 2: the server seat) ───────────────────────────────────────────────
+ * ── ✔ ADOPTED (findings 1 + 2: the hidden authority seat) ──────────────────────────────────────
  * Round 1 modelled the server as a synthetic "authority" participant — the one workaround that
- * unlocked server-authored binary broadcast + a command inbox, at the cost of the seat leaking
- * into every roster/`count` (filtered by a `meta.authority` flag), an anti-spoof guard, a
- * `meta.authority` roster scan on the client, and a hand-rolled real-player count for teardown.
- * `51b4613` landed the **server seat**: a full participant (publish, `listen`, `send`, `onDemand`)
- * that is *excluded from presence* and reachable as `room.server`. Adopting it deleted all of the
- * above — the join is now `{ server: true }`, clients read `room.server` directly, and real
- * `onEmpty` drives teardown (server/matches.ts). `send()` now also returns a delivery receipt.
+ * unlocked server-authored binary broadcast + a command inbox, at the cost of the seat leaking into
+ * every roster/`count` (filtered by a `meta.authority` flag), an anti-spoof guard, a `meta.authority`
+ * client scan, and a hand-rolled real-player count for teardown. `51b4613` landed the **server seat**
+ * (`{ server: true }` → `room.server`), which deleted all of that. `da1b9f7` then generalized it to
+ * **hidden participants**: `{ hidden: true }`, any number, read with `getParticipants({ hidden: true
+ * })` — and dropped the singular `room.server` accessor. We now hand each client its authority
+ * straight from the join telefunction (see match.telefunc.ts → `onEnterMatch`), so there's no
+ * `room.server` and no roster scan anywhere — the maintainer's blessed shape. Real `onEmpty` drives
+ * teardown (server/matches.ts); `send()` returns a delivery receipt (finding 2b).
  */
 class Match {
   readonly roomId: string
@@ -51,18 +53,18 @@ class Match {
     return this.playerTeam.get(identity)
   }
 
-  /** Take the room's server seat — at *room creation*, before any client joins, so every client
-   *  sees it in its initial roster (`room.server`). The seat join is roster-only (no control-lane
-   *  announce), so a client that joined earlier would never discover a seat that appears later;
-   *  seating the server up front sidesteps that. Wires command intake + demand; the sim itself
-   *  doesn't run until `begin()`. */
+  /** Take the room's hidden authority seat — a `join({ hidden: true })` participant, created at
+   *  *room creation* so it's present before the first client joins. `onEnterMatch` then hands each
+   *  client the authority directly (`getParticipants({ hidden: true })`), so there's no roster scan
+   *  and no `room.server` to wait on. Wires command intake + demand; the sim doesn't run until
+   *  `begin()`. */
   async takeSeat(): Promise<void> {
     if (this.seat) return
-    // A non-presence member (`{ server: true }` → `room.server`), excluded from roster/`count`/
-    // `onEmpty`. `selfDelivery: false` — it must never receive its own frames back.
+    // A hidden, non-presence member (`{ hidden: true }`), excluded from roster/`count`/`onEmpty`.
+    // `selfDelivery: false` — it must never receive its own frames back.
     this.seat = await this.room.join(
       { name: 'server', color: '#8892b0', team: NEUTRAL, ready: true },
-      { server: true, selfDelivery: false },
+      { hidden: true, selfDelivery: false },
     )
 
     // Command intake. `from.identity` is server-verified; team comes from the trusted snapshot,
@@ -80,11 +82,13 @@ class Match {
       applyCommand(this.world, team, cmd)
     })
 
-    // Track demand: a track's subscriber count rising means a (re)connected client that needs a
-    // keyframe to seed its baseline; the spectator `full` track is only computed while watched.
+    // Track demand for the on-demand spectator `full` track: it's published only while watched, so a
+    // fresh watcher (count rose) still needs a forced keyframe — there may be no retained frame yet,
+    // or only a stale one from a prior spectator session. The always-on team tracks need nothing
+    // here: they retain their keyframes (see `publish`), so retention seeds a (re)subscriber for free.
     this.seat.onDemand((track, count) => {
       const prev = this.demand.get(track ?? '') ?? 0
-      if (track && count > prev) this.snaps.forceKeyframe(track as (typeof TRACK)[keyof typeof TRACK])
+      if (track === TRACK.full && count > prev) this.snaps.forceKeyframe(TRACK.full)
       this.demand.set(track ?? '', count)
     })
   }
@@ -115,15 +119,23 @@ class Match {
   private publish(track: (typeof TRACK)[keyof typeof TRACK], periodic: boolean, clockSec: number): void {
     if (!this.seat) return
     const frame = this.snaps.build(this.world, track, periodic, clockSec)
-    // `receivers` on the ack is the exact per-publish subscriber count; we drive keyframes off
-    // `onDemand` instead, so the ack is fire-and-forget (guarded against teardown races).
+    // ── ✔ ADOPTED (finding #5: keyframe-on-subscribe → `{ retain: true }`, 90dcb4a) ───────────────
+    // Retain each keyframe: the server keeps the last one per track and replays it to any new
+    // subscriber before live frames, so a late/reconnecting client is seeded with a baseline it can
+    // apply deltas onto — no `onDemand` re-keyframe dance. It's also strictly better than round 2's
+    // force-keyframe: one joiner no longer forces a full keyframe onto the other 9 subscribers of a
+    // team track; only the joiner pays, via its own retained-frame replay. The residual gap (deltas
+    // between the retained keyframe and subscribe time) self-heals at the next periodic keyframe.
+    // The on-demand `full` track can't lean on this — a never-published track has no retained frame —
+    // so it keeps `onDemand` (see the demand handler). Deltas are never retained (unusable alone).
     //
     // ── finding #12 (no lossy/latest-only binary) — deferred to the datagram lane (#449) ─────────
     // The lane is reliable + ordered, so a slow client accumulates a state-frame backlog when only
     // the newest frame matters. An app/coalesce "latest-only" can't fix it: you can't evict the
     // transport send-buffer, so it's a false promise on a reliable lane — the honest fix is the
     // unreliable datagram lane scoped in #449. We stay at 10 Hz with small frames to live under it.
-    this.seat.publishBinary(encodeFrame(frame), { track, keyFrame: frame.keyframe }).catch(() => {})
+    const retain = frame.keyframe && track !== TRACK.full
+    this.seat.publishBinary(encodeFrame(frame), { track, keyFrame: frame.keyframe, retain }).catch(() => {})
   }
 
   private async finish(winner: Team): Promise<void> {

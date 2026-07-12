@@ -31,8 +31,10 @@ class MatchSnapshots {
     for (const t of Object.values(TRACK)) this.baseline.set(t, new Map())
   }
 
-  /** Force the next frame on `track` to be a keyframe — used when a new subscriber appears
-   *  (`onDemand` count rose) and can't apply deltas against a baseline it never received. */
+  /** Force the next frame on `track` to be a keyframe. Only the on-demand spectator `full` track
+   *  needs this now: it's published solely while watched, so a fresh watcher may find no retained
+   *  frame (or a stale one). The always-on team tracks instead mark keyframes `{ retain: true }`, so
+   *  the server replays the last one to a new subscriber for free (see match.ts → `publish`). */
   forceKeyframe(track: TrackName): void {
     this.forced.add(track)
   }
