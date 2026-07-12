@@ -165,11 +165,10 @@ type RoomStatic = {
       onAfterPublish?: AfterPublishHook<P>
     },
   ): void
-  /** Shorthand for `(await Room.get(id)).join(meta, options)`. */
+  /** Shorthand for `(await Room.get(id)).join(options)`. */
   join<P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
-    meta?: P,
-    options?: JoinOptions,
+    options?: JoinOptions<P>,
   ): Promise<LocalParticipant<P, Pub>>
   /** List all rooms — optionally only those whose ID starts with `prefix`. `M` types the returned
    *  `meta` (`Room.list<MatchMeta>()`), replacing a `r.meta as MatchMeta` cast at the call site. */
@@ -215,7 +214,7 @@ type RoomStatic = {
  *
  * await Room.create('lobby', { meta: { topic: 'general' }, size: 100 })
  * const lobby = await Room.get('lobby')
- * const me = await lobby.join({ name: 'Alice' })
+ * const me = await lobby.join({ meta: { name: 'Alice' } })
  * await me.publish({ text: 'hello' })
  * ```
  */
@@ -313,11 +312,11 @@ function guardRoom(room: Room, guards: Partial<Record<(typeof ROOM_GUARD_KEYS)[n
   })
 }
 
-async function joinRoom(id: string, meta?: ParticipantMeta, options?: JoinOptions): Promise<LocalParticipant> {
+async function joinRoom(id: string, options?: JoinOptions): Promise<LocalParticipant> {
   // A pure joiner only wants its own participant handle — it never reads the roster, so it
   // skips even the count scan `Room.get()` pays: config read, join, done.
   const { config } = await requireRoom(id)
-  return await new ServerRoom(id, config, { count: 0 }).join(meta, options)
+  return await new ServerRoom(id, config, { count: 0 }).join(options)
 }
 
 async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
@@ -593,8 +592,8 @@ class ServerRoom implements Room {
     return this._state.closed
   }
 
-  async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
-    const selfDelivery = normalizeJoinOptions(meta, options)
+  async join(options?: JoinOptions): Promise<LocalParticipant> {
+    const { meta, selfDelivery } = normalizeJoinOptions(options)
     const identity = normalizeIdentity(options)
     const hidden = normalizeHidden(options)
     let participant!: ServerLocalParticipant

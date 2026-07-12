@@ -51,7 +51,7 @@ type ChatMsg = { kind: 'chat'; text: string }
 async function onGetTypedRoom(roomId: string) {
   const room = await Room.create<{ topic: string }, { name: string }, ChatMsg>(roomId, { meta: { topic: 'typed' } })
   if (roomId === '\0unreachable') {
-    const me = await room.join({ name: 'a' })
+    const me = await room.join({ meta: { name: 'a' } })
     room.subscribe((data) => data.text.toUpperCase()) // `data` is ChatMsg — dereferenced with no cast
     await me.publish({ kind: 'chat', text: 'ok' })
     // @ts-expect-error — publish is typed to ChatMsg; a bare number is rejected
@@ -110,7 +110,7 @@ async function onGetAudit(roomId: string) {
  *  stub (its own channel), unlike client-side `room.join()` which rides the room's stub.
  *  Identity is stamped here, where trust lives. */
 async function onJoinAsServer(roomId: string, name: string) {
-  return await Room.join(roomId, { name }, { identity: `user:${name}` })
+  return await Room.join(roomId, { meta: { name }, identity: `user:${name}` })
 }
 
 /** Server-side join with `selfDelivery: false`, returning `{ room, me }` together — the co-return
@@ -119,7 +119,7 @@ async function onJoinAsServer(roomId: string, name: string) {
  *  come back to `room` — no client-side drop, no wasted network. */
 async function onJoinRoomAsServerSelf(roomId: string, name: string) {
   const room = await Room.get(roomId)
-  const me = await room.join({ name }, { selfDelivery: false })
+  const me = await room.join({ meta: { name }, selfDelivery: false })
   return { room, me }
 }
 

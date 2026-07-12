@@ -68,7 +68,7 @@ const lobby = await onGetLobby()
 lobby.onJoin((m) => console.log(`${m.meta.name} joined`))
 lobby.subscribe((data, info, from) => console.log(`${from.meta.name}:`, data))
 
-const me = await lobby.join({ name: 'Alice' })
+const me = await lobby.join({ meta: { name: 'Alice' } })
 await me.publish({ text: 'hello' })
 ```
 
@@ -129,7 +129,7 @@ room.onJoin((member) => {
 
 A member's `publish()` reaches both room-level subscribers (with `from`) and that member's subscribers.
 
-By default your own publishes come back to your own side. Turn that off per participant when you don't want the echo: `join(meta, { selfDelivery: false })`.
+By default your own publishes come back to your own side. Turn that off per participant when you don't want the echo: `join({ meta, selfDelivery: false })`.
 
 **High-frequency updates** (cursors, live reactions) can flood a slow connection. Pass `{ coalesce: key }` and, while a publish with that key is still in flight, newer ones collapse into a single pending send — only the latest goes out:
 
@@ -149,7 +149,7 @@ Participant IDs are per-membership: the same person is a different participant i
 export async function onJoinChat(roomId) {
   const { user } = getContext()
   const room = await Room.get(roomId)
-  return { room, me: await room.join({ name: user.name }, { identity: user.id }) }
+  return { room, me: await room.join({ meta: { name: user.name }, identity: user.id }) }
 }
 ```
 ```js
@@ -224,7 +224,7 @@ export async function onJoinChat(roomId) {
     onBeforePublish: (from, data) => { if (isSpam(data)) throw new Error('blocked') },
     onBeforeSend: async (from, to) => { if (!(await areFriends(from.identity, to.identity))) throw new Error('not friends') },
   })
-  return { room, me: await room.join({ name: user.name }, { identity: user.id }) }
+  return { room, me: await room.join({ meta: { name: user.name }, identity: user.id }) }
 }
 ```
 
@@ -276,7 +276,7 @@ me.listen((data, from) => {
 ```js
 // When the match is created (once), on the node that will run it:
 const room = await Room.create(matchId)
-const authority = await room.join({}, { identity: 'authority', hidden: true })  // identity is trusted, not spoofable
+const authority = await room.join({ identity: 'authority', hidden: true })  // identity is trusted, not spoofable
 authority.listen((cmd) => world.apply(cmd))  // commands arrive as DMs; the return is the ack reply
 startGameLoop(matchId, authority)            // each tick: authority.publishBinary(worldState)
 ```
@@ -295,7 +295,7 @@ export async function onJoinMatch(matchId, name) {
   const { user } = getContext()
   const room = await Room.get(matchId)
   const authority = (await room.getParticipants({ hidden: true })).find((p) => p.identity === 'authority')
-  return { room, me: await room.join({ name }, { identity: user.id }), authority }
+  return { room, me: await room.join({ meta: { name }, identity: user.id }), authority }
 }
 ```
 ```js
@@ -391,7 +391,7 @@ Membership is per room, so switching is `leave()` then `join()`:
 
 ```js
 await current?.leave()
-current = await nextRoom.join({ name })
+current = await nextRoom.join({ meta: { name } })
 ```
 
 Publishing to a room you've already left throws (`Participant has left the room`).
@@ -405,7 +405,7 @@ Publishing to a room you've already left throws (`Participant has left the room`
 export async function onJoinLobby(name) {
   const lobby = await Room.get('lobby')
   if (lobby.isFull) throw new Error('room is full')
-  return await lobby.join({ name })
+  return await lobby.join({ meta: { name } })
 }
 ```
 
@@ -433,7 +433,7 @@ The server-side entry point. Clients get a room when a telefunction returns it.
 | `Room.get(id, options?)` | `Room` | If the room doesn't exist |
 | `Room.getOrCreate(id, options?)` | `Room` | - |
 | `Room.guard(room, { onBefore*?, onAfter*? })` | `void` | If called twice for one instance |
-| `Room.join(id, meta?, options?)` | `LocalParticipant` | If the room doesn't exist |
+| `Room.join(id, options?)` | `LocalParticipant` | If the room doesn't exist |
 | `Room.list({ prefix? }?)` | `RoomInfo[]` | - |
 | `Room.update(id, options)` | `void` | If the room doesn't exist |
 | `Room.close(id)` | `void` | If the room doesn't exist |
@@ -460,7 +460,7 @@ type RoomOptions = {
 
 | Method | Description |
 |---|---|
-| `join(meta?, options?)` | Join; returns your `LocalParticipant`. Options: `{ selfDelivery?, identity?, hidden? }` (`identity` and `hidden` are server-side only). |
+| `join(options?)` | Join; returns your `LocalParticipant`. Options: `{ meta?, selfDelivery?, identity?, hidden? }` (`identity` and `hidden` are server-side only). |
 | `getParticipants(options?)` / `getParticipant(id)` | The member list / one member (or `null`). `getParticipants({ hidden: true })` reads the off-presence participants instead (see <Link href="#let-the-server-play">Let the server play</Link>). |
 | `subscribe(cb)` | All participant messages: `(data, info, from)`. Returns an unsubscribe. |
 | `subscribeBinary(cb, { track? }?)` | Same, for binary — optionally one track. `info` carries `track` and `keyFrame`. |

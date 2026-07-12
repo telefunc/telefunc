@@ -461,7 +461,7 @@ const lobby = await onGetLobby()
 lobby.onJoin((member) => console.log(`${member.meta.name} joined`))
 lobby.subscribe((data, info, from) => showMessage(from.meta.name, data))
 
-const me = await lobby.join({ name: 'Alice' })
+const me = await lobby.join({ meta: { name: 'Alice' } })
 await me.publish({ text: 'hello' })
 ```
 

@@ -229,7 +229,7 @@ describe('Room over the Redis transport', () => {
     observer.onLeave((m) => log.push(`leave:${m.id}`))
     observer.subscribe((data, _info, from) => log.push(`msg:${from.meta.name}:${data}`))
 
-    const me = await lobby.join({ name: 'Alice' })
+    const me = await lobby.join({ meta: { name: 'Alice' } })
     await me.publish('hello')
     await Room.removeParticipant('lobby', me.id)
 

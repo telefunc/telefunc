@@ -136,7 +136,7 @@ class ClientRoom implements Room {
     return this._state.closed
   }
 
-  async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
+  async join(options?: JoinOptions): Promise<LocalParticipant> {
     if (options?.identity !== undefined) {
       throw new Error(
         'join() options.identity is server-assigned: identity is trusted, so set it where trust lives — in the granting telefunction (server-side join()), not on the client.',
@@ -147,7 +147,7 @@ class ClientRoom implements Room {
         'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
       )
     }
-    const selfDelivery = normalizeJoinOptions(meta, options)
+    const { meta, selfDelivery } = normalizeJoinOptions(options)
     const ack = (await this._request({ __r: 'req-join', meta, selfDelivery })) as ReqJoinAck
     if (!ack.ok) throw new Error(ack.err)
     const participant = new ClientRoomParticipant(this, ack.id, meta, selfDelivery)

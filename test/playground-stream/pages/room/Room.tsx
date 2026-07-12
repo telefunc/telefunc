@@ -63,7 +63,7 @@ function Room() {
           let changes = 0
           lobby.onChange(() => changes++)
 
-          const me = await lobby.join({ name: 'Alice' })
+          const me = await lobby.join({ meta: { name: 'Alice' } })
           const countAfterJoin = lobby.count
           const updates: unknown[] = []
           ;(await lobby.getParticipant(me.id))!.onUpdate((meta, prev) => updates.push([meta.score, prev.score]))
@@ -121,7 +121,7 @@ function Room() {
 
           // Direct message: a room-joined participant whispers to the standalone one.
           // Privacy: it must reach Bob's inbox and never the room stream.
-          const ally = await observer.join({ name: 'Ally' })
+          const ally = await observer.join({ meta: { name: 'Ally' } })
           const dms: Array<{ data: unknown; fromAlly: boolean }> = []
           me.listen((data, from) => dms.push({ data, fromAlly: from?.id === ally.id }))
           await ally.send(me.id, 'psst')
@@ -159,7 +159,7 @@ function Room() {
           const roomId = `e2e-binary:${crypto.randomUUID()}`
           await onCreateRoom(roomId, { isolated: true })
           const videoRoom = await onGetRoom(roomId)
-          const me = await videoRoom.join({ name: 'Cam' })
+          const me = await videoRoom.join({ meta: { name: 'Cam' } })
 
           const frames: Array<{
             size: number
@@ -219,12 +219,12 @@ function Room() {
           const received: unknown[] = []
           room.subscribe((data) => received.push(data))
           // Admission is guarded too — the rejection reaches the joiner's promise over the wire.
-          const joinError = await room.join({ name: 'Banned' }).then(
+          const joinError = await room.join({ meta: { name: 'Banned' } }).then(
             () => null,
             (err: Error) => err.message,
           )
-          const me = await room.join({ name: 'Mallory' })
-          const peer = await room.join({ name: 'Peer' })
+          const me = await room.join({ meta: { name: 'Mallory' } })
+          const peer = await room.join({ meta: { name: 'Peer' } })
           const inbox: unknown[] = []
           peer.listen((data) => inbox.push(data))
 
@@ -258,7 +258,7 @@ function Room() {
           const roomId = `e2e-member:${crypto.randomUUID()}`
           await onCreateRoom(roomId)
           const lobby = await onGetRoom(roomId)
-          const me = await lobby.join({ name: 'Viewed' })
+          const me = await lobby.join({ meta: { name: 'Viewed' } })
 
           // A telefunction returns { room, member } — ref-identity binds the view to the room.
           const out = await onGetRoomWithMember(roomId, me.id)
@@ -283,7 +283,7 @@ function Room() {
           const roomId = `e2e-admin:${crypto.randomUUID()}`
           await onCreateRoom(roomId)
           const lobby = await onGetRoom(roomId)
-          const me = await lobby.join({ name: 'Eve' })
+          const me = await lobby.join({ meta: { name: 'Eve' } })
 
           // Room-authored messages: a broadcast to everyone, and a whisper (fromId === '').
           const announcements: unknown[] = []
@@ -338,7 +338,7 @@ function Room() {
           const lobby = await onGetRoom(roomId)
           const received: number[] = []
           lobby.subscribe((data) => received.push((data as { n: number }).n))
-          const me = await lobby.join({ name: 'Cursor' })
+          const me = await lobby.join({ meta: { name: 'Cursor' } })
 
           // A synchronous burst under one key: the first send goes, 2..5 collapse into a single
           // pending, so only the first and the latest reach the room — deterministically [1, 5].
@@ -362,7 +362,7 @@ function Room() {
           const roomId = `e2e-attr:${crypto.randomUUID()}`
           await onCreateRoom(roomId)
           const lobby = await onGetRoom(roomId)
-          const me = await lobby.join({ name: 'Zoe', score: 1 })
+          const me = await lobby.join({ meta: { name: 'Zoe', score: 1 } })
           let remote = await lobby.getParticipant(me.id)
           for (let i = 0; i < 50 && !remote; i++) {
             await new Promise((r) => setTimeout(r, 200))
@@ -401,7 +401,7 @@ function Room() {
           const roomId = `e2e-demand:${crypto.randomUUID()}`
           await onCreateRoom(roomId)
           const pubRoom = await onGetRoom(roomId)
-          const pub = await pubRoom.join({ name: 'Pub' })
+          const pub = await pubRoom.join({ meta: { name: 'Pub' } })
           const cam: number[] = []
           pub.onDemand((track, count) => {
             if (track === 'camera') cam.push(count)
@@ -435,7 +435,7 @@ function Room() {
           const roomId = `e2e-tail:${crypto.randomUUID()}`
           await onCreateRoom(roomId)
           const owner = await onGetRoom(roomId)
-          const me = await owner.join({ name: 'Src' })
+          const me = await owner.join({ meta: { name: 'Src' } })
 
           // Tail handle: relay starts at serialize time, buffered on the client until subscribe().
           const tailed = await onGetRoomTail(roomId)
@@ -463,8 +463,8 @@ function Room() {
           const roomId = `e2e-hooks:${crypto.randomUUID()}`
           await onCreateRoom(roomId)
           const room = await onGetAuditRoom(roomId)
-          const a = await room.join({ name: 'A' })
-          const b = await room.join({ name: 'B' })
+          const a = await room.join({ meta: { name: 'A' } })
+          const b = await room.join({ meta: { name: 'B' } })
           await a.publish('hello')
           await a.send(b.id, 'dm')
 
@@ -507,8 +507,8 @@ function Room() {
           const roomId = `e2e-membersub:${crypto.randomUUID()}`
           await onCreateRoom(roomId)
           const room = await onGetRoom(roomId)
-          const x = await room.join({ name: 'X' })
-          const y = await room.join({ name: 'Y' })
+          const x = await room.join({ meta: { name: 'X' } })
+          const y = await room.join({ meta: { name: 'Y' } })
 
           const observer = await onGetRoom(roomId)
           let remoteX = await observer.getParticipant(x.id)
@@ -548,7 +548,7 @@ function Room() {
           await onCreateRoom(roomId)
           const observer = await onGetRoom(roomId)
           const bob = await onJoinAsServer(roomId, 'Bob')
-          const ally = await observer.join({ name: 'Ally' })
+          const ally = await observer.join({ meta: { name: 'Ally' } })
 
           // Sent BEFORE Bob listens — held in his inbox, flushed the moment he attaches.
           await ally.send(bob.id, 'early')
@@ -576,7 +576,7 @@ function Room() {
           // client with its own stub. Suppression is per-stub at the source, so it isn't affected.
           await onWatchRoom(roomId)
           const room = await onGetRoom(roomId)
-          const me = await room.join({ name: 'Solo' }, { selfDelivery: false })
+          const me = await room.join({ meta: { name: 'Solo' }, selfDelivery: false })
           const mine: string[] = []
           room.subscribe((data) => mine.push(data as string))
 
@@ -612,7 +612,7 @@ function Room() {
 
           // `notMe`: a client-side join (selfDelivery on) on the SAME room stub — its publishes DO
           // come back to `mine`. Proves both source gates coexist on one subscription, keyed by sender.
-          const notMe = await room.join({ name: 'NotMe' })
+          const notMe = await room.join({ meta: { name: 'NotMe' } })
           await notMe.publish('from-notme')
 
           await pollUntil(async () => {
@@ -636,7 +636,7 @@ function Room() {
           const roomId = `${base}:a`
           await onCreateRoom(roomId, { size: 10 })
           const room = await onGetRoom(roomId)
-          const me = await room.join({ name: 'R' })
+          const me = await room.join({ meta: { name: 'R' } })
           const updates: string[] = []
           room.onUpdate((meta) => updates.push((meta as { topic?: string }).topic ?? ''))
 

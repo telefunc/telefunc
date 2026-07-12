@@ -417,11 +417,12 @@ function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): Partici
   return next
 }
 
-/** Validates `join(meta, options)` arguments; returns the resolved `selfDelivery`. */
-function normalizeJoinOptions(meta: unknown, options: JoinOptions | undefined): boolean {
-  assertUsage(isObject(meta), 'join() meta should be an object')
+/** Validates `join(options)` and resolves the participant `meta` + `selfDelivery`. */
+function normalizeJoinOptions(options: JoinOptions | undefined): { meta: ParticipantMeta; selfDelivery: boolean } {
   assertUsage(options === undefined || isObject(options), 'join() options should be an object')
-  return options?.selfDelivery !== false
+  const meta = options?.meta ?? {}
+  assertUsage(isObject(meta), 'join() options.meta should be an object')
+  return { meta, selfDelivery: options?.selfDelivery !== false }
 }
 
 /** How errors travel inside `ok: false` acks. */

@@ -154,7 +154,9 @@ type RoomGetOptions = {
   tail?: boolean
 }
 
-type JoinOptions = {
+type JoinOptions<P extends ParticipantMeta = ParticipantMeta> = {
+  /** Your participant metadata (e.g. name, score), visible to all observers. Default: `{}`. */
+  meta?: P
   /** Whether the messages you publish are delivered back to the room object on your side
    *  (default: `true`). Turn off e.g. for video, where you don't want your own frames back. */
   selfDelivery?: boolean
@@ -288,8 +290,8 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   readonly isFull: boolean
   readonly isClosed: boolean
 
-  /** Join the room. Returns your own participant handle. */
-  join(meta?: P, options?: JoinOptions): Promise<LocalParticipant<P, Pub>>
+  /** Join the room, optionally with your participant `meta`. Returns your own participant handle. */
+  join(options?: JoinOptions<P>): Promise<LocalParticipant<P, Pub>>
 
   /** The room's participants. Pass `{ hidden: true }` for the off-presence participants instead —
    *  a server authority, a bot, a recorder (see `JoinOptions.hidden`); addressable (`me.send(p.id,

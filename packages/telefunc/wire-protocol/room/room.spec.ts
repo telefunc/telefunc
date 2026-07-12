@@ -123,7 +123,7 @@ describe('Room entry point', () => {
     await Room.create('shortcut')
     const observer = await Room.get('shortcut')
 
-    const me = await Room.join('shortcut', { name: 'Bot' }, { selfDelivery: false })
+    const me = await Room.join('shortcut', { meta: { name: 'Bot' }, selfDelivery: false })
 
     expect(me.meta).toEqual({ name: 'Bot' })
     expect(me.selfDelivery).toBe(false)
@@ -133,8 +133,8 @@ describe('Room entry point', () => {
 
   it('Room.get() never reads member records up front — one scan for the count, roster lazy', async () => {
     await Room.create('scan')
-    await Room.join('scan', { n: 1 })
-    await Room.join('scan', { n: 2 })
+    await Room.join('scan', { meta: { n: 1 } })
+    await Room.join('scan', { meta: { n: 2 } })
     await settle()
 
     const reads = vi.spyOn(getBroadcastAdapter(), 'get')
@@ -153,7 +153,7 @@ describe('Room entry point', () => {
     await Room.create('scan2')
     const scans = vi.spyOn(getBroadcastAdapter(), 'keys')
     const reads = vi.spyOn(getBroadcastAdapter(), 'get')
-    await Room.join('scan2', { n: 1 })
+    await Room.join('scan2', { meta: { n: 1 } })
     await settle()
     expect(scans.mock.calls.length).toBe(0) // roster loads are need-driven; a joiner has no need
     expect(reads.mock.calls.filter((c) => String(c[0]).includes(':m:'))).toEqual([])
@@ -224,7 +224,7 @@ describe('Room entry point', () => {
   it('typed publish: a declared Pub types publish() and subscribe() end to end', async () => {
     type ChatMsg = { kind: 'chat'; text: string }
     const room = await Room.create<{ topic: string }, { name: string }, ChatMsg>('typed-pub', { meta: { topic: 't' } })
-    const me = await room.join({ name: 'a' })
+    const me = await room.join({ meta: { name: 'a' } })
     const received: ChatMsg[] = []
     // `data` carries no annotation — pushing it into ChatMsg[] only compiles if `Pub` threaded through.
     room.subscribe((data) => received.push(data))
@@ -264,7 +264,7 @@ describe('Room entry point', () => {
 
   it('a stale p-meta revision never overwrites a newer one', async () => {
     const lobby = await Room.create('rev')
-    const me = await lobby.join({ v: 0 })
+    const me = await lobby.join({ meta: { v: 0 } })
     await me.setMeta({ v: 1 })
     await me.setMeta({ v: 2 })
 
@@ -279,7 +279,7 @@ describe('Room entry point', () => {
 
   it('a stale join echo never regresses meta that a later p-meta already advanced', async () => {
     const lobby = await Room.create('join-echo')
-    const me = await lobby.join({ v: 0 })
+    const me = await lobby.join({ meta: { v: 0 } })
     await me.setMeta({ v: 1 }) // p-meta advances the meta past its join baseline
 
     // A late redelivery of the original join event (broker redelivery / echo) lands after the update.
@@ -314,7 +314,7 @@ describe('Room entry point', () => {
 
   it('removeParticipant() kicks: the member leaves everywhere, its LocalParticipant fires onLeave', async () => {
     const lobby = await Room.create('kick')
-    const me = await lobby.join({ name: 'Alice' })
+    const me = await lobby.join({ meta: { name: 'Alice' } })
     const observer = await Room.get('kick')
     const kicked: string[] = []
     observer.onLeave((m) => kicked.push(m.id))
@@ -337,14 +337,14 @@ describe('Room entry point', () => {
     observer.onLeave((m, cause) => observed.push([String(m.meta.name), cause]))
 
     // Voluntary leave.
-    const alice = await lobby.join({ name: 'Alice' })
+    const alice = await lobby.join({ meta: { name: 'Alice' } })
     const aliceCauses: unknown[] = []
     alice.onLeave((cause) => aliceCauses.push(cause))
     await alice.leave()
     expect(aliceCauses).toEqual([{ type: 'left' }])
 
     // Kick, with the reason riding the removal event itself.
-    const bob = await lobby.join({ name: 'Bob' })
+    const bob = await lobby.join({ meta: { name: 'Bob' } })
     const bobCauses: unknown[] = []
     bob.onLeave((cause) => bobCauses.push(cause))
     await Room.removeParticipant('causes', bob.id, { reason: { rule: 'spam' } })
@@ -356,7 +356,7 @@ describe('Room entry point', () => {
     ])
 
     // Room closure.
-    const carol = await lobby.join({ name: 'Carol' })
+    const carol = await lobby.join({ meta: { name: 'Carol' } })
     const carolCauses: unknown[] = []
     carol.onLeave((cause) => carolCauses.push(cause))
     await Room.close('causes')
@@ -383,7 +383,7 @@ describe('presence', () => {
     a.onJoin((m) => joinsA.push(m.id))
     b.onJoin((m) => joinsB.push(m.meta))
 
-    const me = await a.join({ name: 'Alice' })
+    const me = await a.join({ meta: { name: 'Alice' } })
 
     expect(joinsA).toEqual([me.id]) // origin: local apply, echo absorbed
     expect(joinsB).toEqual([{ name: 'Alice' }]) // sibling: applied via the event
@@ -422,7 +422,7 @@ describe('presence', () => {
 
   it('getParticipants() on an unobserved instance resyncs from KV', async () => {
     const a = await Room.create('lazy')
-    const me = await a.join({ name: 'Alice' })
+    const me = await a.join({ meta: { name: 'Alice' } })
 
     // `b` has no listeners/joins/stubs — it did not receive the join event.
     const b = await Room.get('lazy')
@@ -439,7 +439,7 @@ describe('presence', () => {
     const seenOnB: unknown[] = []
     b.onJoin((m) => m.onUpdate((meta, prev) => seenOnB.push([meta, prev])))
 
-    const me = await a.join({ name: 'Alice', score: 0 })
+    const me = await a.join({ meta: { name: 'Alice', score: 0 } })
     const seenOnA: unknown[] = []
     ;(await a.getParticipant(me.id))!.onUpdate((meta, prev) => seenOnA.push([meta, prev]))
 
@@ -460,7 +460,7 @@ describe('presence', () => {
   it('setAttributes() merges per key and deletes on undefined — other keys survive', async () => {
     const a = await Room.create('attrs')
     const b = await Room.get('attrs')
-    const me = await a.join({ name: 'Alice', score: 0, away: true })
+    const me = await a.join({ meta: { name: 'Alice', score: 0, away: true } })
 
     await me.setAttributes({ score: 42 }) // only score changes; name & away untouched
     expect(me.meta).toEqual({ name: 'Alice', score: 42, away: true })
@@ -479,7 +479,7 @@ describe('presence', () => {
     a.onParticipantUpdate((m, meta, prev) => onA.push([m.id, meta, prev]))
     b.onParticipantUpdate((m, meta, prev) => onB.push([m.id, meta, prev])) // observe from another instance
 
-    const me = await a.join({ name: 'A', v: 0 })
+    const me = await a.join({ meta: { name: 'A', v: 0 } })
     await me.setMeta({ name: 'A', v: 1 }) // full replace
     await me.setAttributes({ v: 2 }) // per-key merge
     await settle()
@@ -504,9 +504,9 @@ describe('hidden participants', () => {
     const joins: string[] = []
     room.onJoin((m) => joins.push(m.id))
 
-    const authority = await room.join({ role: 'authority' }, { hidden: true })
-    const p1 = await room.join({ name: 'P1' })
-    const p2 = await room.join({ name: 'P2' })
+    const authority = await room.join({ meta: { role: 'authority' }, hidden: true })
+    const p1 = await room.join({ meta: { name: 'P1' } })
+    const p2 = await room.join({ meta: { name: 'P2' } })
 
     // Excluded from presence: two players fill a size-2 room; the hidden one isn't counted.
     expect(room.count).toBe(2)
@@ -527,9 +527,9 @@ describe('hidden participants', () => {
 
   it('any number of hidden participants coexist', async () => {
     const room = await Room.create('hidden-many')
-    const a = await room.join({ role: 'authority' }, { hidden: true })
-    const b = await room.join({ role: 'recorder' }, { hidden: true })
-    await room.join({ name: 'P1' })
+    const a = await room.join({ meta: { role: 'authority' }, hidden: true })
+    const b = await room.join({ meta: { role: 'recorder' }, hidden: true })
+    await room.join({ meta: { name: 'P1' } })
 
     expect(room.count).toBe(1) // only the player is present
     expect((await room.getParticipants({ hidden: true })).map((p) => p.id).sort()).toEqual([a.id, b.id].sort())
@@ -541,8 +541,8 @@ describe('hidden participants', () => {
     room.onLeave((m) => events.push(`leave:${m.id}`))
     room.onEmpty(() => events.push('empty'))
 
-    await room.join({}, { hidden: true })
-    const player = await room.join({ name: 'solo' })
+    await room.join({ hidden: true })
+    const player = await room.join({ meta: { name: 'solo' } })
     expect(room.count).toBe(1) // the hidden one doesn't count
 
     await player.leave()
@@ -553,8 +553,8 @@ describe('hidden participants', () => {
 
   it('is discovered cross-instance via the roster, still excluded from presence', async () => {
     const a = await Room.create('hidden-x')
-    const authority = await a.join({}, { hidden: true })
-    await a.join({ name: 'P1' })
+    const authority = await a.join({ hidden: true })
+    await a.join({ meta: { name: 'P1' } })
 
     const b = await Room.get('hidden-x')
     const participants = await b.getParticipants() // materializes the roster from KV
@@ -573,7 +573,7 @@ describe('hidden participants', () => {
     await b.getParticipants() // b is a live observer with a loaded roster
     expect((await b.getParticipants({ hidden: true })).length).toBe(0) // none yet
 
-    const hidden = await a.join({ role: 'authority' }, { hidden: true }) // joined AFTER b connected
+    const hidden = await a.join({ meta: { role: 'authority' }, hidden: true }) // joined AFTER b connected
 
     expect((await b.getParticipants({ hidden: true })).map((p) => p.id)).toEqual([hidden.id]) // learned live
     expect(b.count).toBe(0) // still not counted
@@ -586,8 +586,8 @@ describe('hidden participants', () => {
 
   it('sends and receives DMs like any member', async () => {
     const room = await Room.create('hidden-dm')
-    const authority = await room.join({}, { hidden: true })
-    const player = await room.join({ name: 'P1' })
+    const authority = await room.join({ hidden: true })
+    const player = await room.join({ meta: { name: 'P1' } })
     const toAuthority: unknown[] = []
     const toPlayer: unknown[] = []
     authority.listen((data) => toAuthority.push(data))
@@ -613,7 +613,7 @@ describe('data pub/sub', () => {
     const received: Array<{ data: unknown; from: unknown; key: string; seq: number }> = []
     b.subscribe((data, info, from) => received.push({ data, from: from.meta, key: info.key, seq: info.seq }))
 
-    const me = await a.join({ name: 'Alice' })
+    const me = await a.join({ meta: { name: 'Alice' } })
     const ack = await me.publish({ text: 'hello' })
 
     expect(received).toEqual([{ data: { text: 'hello' }, from: { name: 'Alice' }, key: 'chat', seq: ack.seq }])
@@ -623,8 +623,8 @@ describe('data pub/sub', () => {
 
   it("per-member subscribe receives only that member's messages", async () => {
     const lobby = await Room.create('duo')
-    const alice = await lobby.join({ name: 'Alice' })
-    const bob = await lobby.join({ name: 'Bob' })
+    const alice = await lobby.join({ meta: { name: 'Alice' } })
+    const bob = await lobby.join({ meta: { name: 'Bob' } })
 
     const fromAlice: unknown[] = []
     ;(await lobby.getParticipant(alice.id))!.subscribe((data) => fromAlice.push(data))
@@ -644,8 +644,8 @@ describe('data pub/sub', () => {
     a.subscribe((data) => seenOnA.push(data))
     b.subscribe((data) => seenOnB.push(data))
 
-    const chatty = await a.join({ name: 'chatty' })
-    const muted = await a.join({ name: 'muted' }, { selfDelivery: false })
+    const chatty = await a.join({ meta: { name: 'chatty' } })
+    const muted = await a.join({ meta: { name: 'muted' }, selfDelivery: false })
     await chatty.publish('echoed')
     await muted.publish('not-here')
 
@@ -669,7 +669,7 @@ describe('data pub/sub', () => {
     Broadcast.subscribe<{ __r: string }>(roomCtrlKey('lanes'), (msg) => ctrlTraffic.push(msg.__r))
     Broadcast.subscribe<{ __r: string }>(roomTextKey('lanes'), (msg) => textTraffic.push(msg.__r))
 
-    const me = await room.join({ name: 'Alice' })
+    const me = await room.join({ meta: { name: 'Alice' } })
     await me.publish('hello')
     await Room.announce('lanes', 'notice')
 
@@ -679,8 +679,8 @@ describe('data pub/sub', () => {
 
   it('binary rides per-publisher keys in shared mode too — upstream subscriptions are member-selective', async () => {
     const a = await Room.create('per-pub')
-    const cam1 = await a.join({ name: 'cam1' })
-    const cam2 = await a.join({ name: 'cam2' })
+    const cam1 = await a.join({ meta: { name: 'cam1' } })
+    const cam2 = await a.join({ meta: { name: 'cam2' } })
     const b = await Room.get('per-pub')
     await b.getParticipants() // materialize the lazy roster
     const subscribed = vi.spyOn(getBroadcastAdapter(), 'subscribeBinary')
@@ -730,7 +730,7 @@ describe('data pub/sub', () => {
           ? { seq: 0, timestamp: 0 }
           : realPublish(key, payload),
       )
-    const ghostly = await a.join({ name: 'Casper' })
+    const ghostly = await a.join({ meta: { name: 'Casper' } })
     drop.mockRestore()
     expect(await observer.getParticipant(ghostly.id)).toBe(null) // the view drifted
 
@@ -774,8 +774,8 @@ describe('data pub/sub', () => {
 describe('selective binary delivery', () => {
   it("isolated mode subscribes only the wanted members' upstream keys", async () => {
     const a = await Room.create('sel', { isolated: true })
-    const cam1 = await a.join({ name: 'cam1' })
-    const cam2 = await a.join({ name: 'cam2' })
+    const cam1 = await a.join({ meta: { name: 'cam1' } })
+    const cam2 = await a.join({ meta: { name: 'cam2' } })
     const b = await Room.get('sel')
     await b.getParticipants() // materialize the lazy roster
 
@@ -789,7 +789,7 @@ describe('selective binary delivery', () => {
 
   it('named tracks multiplex one member lane — filters, keyframe bits, zero-cost default', async () => {
     const a = await Room.create('media', { isolated: true })
-    const cam = await a.join({ name: 'Cam' })
+    const cam = await a.join({ meta: { name: 'Cam' } })
     const b = await Room.get('media')
     await b.getParticipants() // materialize the lazy roster
 
@@ -833,8 +833,8 @@ describe('selective binary delivery', () => {
 
   it('isolated mode narrows the upstream text keys to the wanted members too', async () => {
     const a = await Room.create('sel-text', { isolated: true })
-    const alice = await a.join({ name: 'alice' })
-    const bob = await a.join({ name: 'bob' })
+    const alice = await a.join({ meta: { name: 'alice' } })
+    const bob = await a.join({ meta: { name: 'bob' } })
     const b = await Room.get('sel-text')
     await b.getParticipants() // materialize the lazy roster
 
@@ -856,8 +856,8 @@ describe('selective binary delivery', () => {
 
   it('a shared-mode member-scoped listener still brings up the room text lane', async () => {
     const a = await Room.create('sel-shared')
-    const alice = await a.join({ name: 'alice' })
-    const bob = await a.join({ name: 'bob' })
+    const alice = await a.join({ meta: { name: 'alice' } })
+    const bob = await a.join({ meta: { name: 'bob' } })
     const b = await Room.get('sel-shared')
     await b.getParticipants() // materialize the lazy roster
 
@@ -870,7 +870,7 @@ describe('selective binary delivery', () => {
 
   it("releases a departed member's listeners — the decoder pattern must not pin subscriptions", async () => {
     const a = await Room.create('release', { isolated: true })
-    const cam = await a.join({ name: 'cam' })
+    const cam = await a.join({ meta: { name: 'cam' } })
     const b = await Room.get('release')
     await b.getParticipants() // materialize the lazy roster
 
@@ -887,7 +887,7 @@ describe('selective binary delivery', () => {
 
   it("the screen-share flow: unsubscribing a track stops its bytes at the source — the publisher's ack says so", async () => {
     const a = await Room.create('share')
-    const sharer = await a.join({ name: 'Sharer' }, { selfDelivery: false })
+    const sharer = await a.join({ meta: { name: 'Sharer' }, selfDelivery: false })
     const viewer = await Room.get('share')
     await viewer.getParticipants()
 
@@ -912,7 +912,7 @@ describe('selective binary delivery', () => {
 
   it('named tracks ride per-(member, track) keys; the default lane stays on the member key', async () => {
     const a = await Room.create('track-keys')
-    const cam = await a.join({ name: 'Cam' })
+    const cam = await a.join({ meta: { name: 'Cam' } })
     const b = await Room.get('track-keys')
     b.subscribeBinary(() => {}) // all tracks — forces the upstream keys up as tracks appear
 
@@ -931,7 +931,7 @@ describe('selective binary delivery', () => {
 
   it('an all-track observer arriving after the track exists discovers it from the roster', async () => {
     const a = await Room.create('discover')
-    const cam = await a.join({ name: 'Cam' })
+    const cam = await a.join({ meta: { name: 'Cam' } })
     await cam.publishBinary(new Uint8Array([1]), { track: 'screen' }) // track born before any observer
 
     const late = await Room.get('discover')
@@ -945,7 +945,7 @@ describe('selective binary delivery', () => {
 
   it('`track: null` selects the default lane only — named tracks never reach it', async () => {
     const a = await Room.create('default-only')
-    const cam = await a.join({ name: 'Cam' })
+    const cam = await a.join({ meta: { name: 'Cam' } })
     const b = await Room.get('default-only')
     await b.getParticipants()
 
@@ -971,8 +971,8 @@ describe('direct messages', () => {
   it('delivers privately across instances — only the target hears it', async () => {
     const a = await Room.create('dm')
     const b = await Room.get('dm')
-    const alice = await a.join({ name: 'Alice' })
-    const bob = await b.join({ name: 'Bob' })
+    const alice = await a.join({ meta: { name: 'Alice' } })
+    const bob = await b.join({ meta: { name: 'Bob' } })
     const bobInbox: unknown[] = []
     const aliceInbox: unknown[] = []
     const roomStream: unknown[] = []
@@ -1003,11 +1003,11 @@ describe('direct messages', () => {
 
   it("a reactive DM beating the target's listen() is held and flushed — never dropped", async () => {
     const room = await Room.create('reactive')
-    const greeter = await room.join({ name: 'Bot' })
+    const greeter = await room.join({ meta: { name: 'Bot' } })
     // The bot greets on join — before the joiner had any chance to attach listen().
     room.onJoin((member) => void greeter.send(member.id, 'welcome!').catch(() => {}))
 
-    const newcomer = await (await Room.get('reactive')).join({ name: 'New' })
+    const newcomer = await (await Room.get('reactive')).join({ meta: { name: 'New' } })
     await settle() // let the greet round-trip land — nobody is listening yet
 
     const inbox: unknown[] = []
@@ -1017,8 +1017,8 @@ describe('direct messages', () => {
 
   it('the pre-listen hold is bounded (drop-oldest) and released on leave', async () => {
     const room = await Room.create('hold-cap')
-    const sender = await room.join({ name: 'S' })
-    const target = await (await Room.get('hold-cap')).join({ name: 'T' })
+    const sender = await room.join({ meta: { name: 'S' } })
+    const target = await (await Room.get('hold-cap')).join({ meta: { name: 'T' } })
     for (let i = 0; i < 70; i++) await sender.send(target.id, i)
 
     const inbox: number[] = []
@@ -1028,7 +1028,7 @@ describe('direct messages', () => {
     expect(inbox[63]).toBe(69)
 
     // Held messages die with the membership.
-    const gone = await (await Room.get('hold-cap')).join({ name: 'G' })
+    const gone = await (await Room.get('hold-cap')).join({ meta: { name: 'G' } })
     await sender.send(gone.id, 'never-read')
     await gone.leave()
     const late: unknown[] = []
@@ -1038,7 +1038,7 @@ describe('direct messages', () => {
 
   it('identity is stamped at server-side join and travels everywhere, spoof-proof', async () => {
     const a = await Room.create('who')
-    const alice = await a.join({ name: 'Alice' }, { identity: 'user-1' })
+    const alice = await a.join({ meta: { name: 'Alice' }, identity: 'user-1' })
     expect(alice.identity).toBe('user-1')
 
     // Roster: another instance sees the identity.
@@ -1054,7 +1054,7 @@ describe('direct messages', () => {
     expect(senders).toEqual([['Alice', 'user-1']])
 
     // DMs: the inbox sender carries it too.
-    const bob = await a.join({ name: 'Bob' })
+    const bob = await a.join({ meta: { name: 'Bob' } })
     expect(bob.identity).toBe(null) // identity is opt-in
     const inbox: Array<string | null> = []
     bob.listen((_data, from) => inbox.push(from?.identity ?? null))
@@ -1065,7 +1065,7 @@ describe('direct messages', () => {
     const guarded = await Room.get('who')
     const guardSaw: Array<string | null> = []
     Room.guard(guarded, { onBeforeJoin: (member) => void guardSaw.push(member.identity) })
-    await guarded.join({ name: 'Tab2' }, { identity: 'user-1' })
+    await guarded.join({ meta: { name: 'Tab2' }, identity: 'user-1' })
     expect(guardSaw).toEqual(['user-1'])
   })
 
@@ -1083,9 +1083,9 @@ describe('direct messages', () => {
 
   it('removeParticipant({ identity }) sweeps every membership of that identity, with the reason', async () => {
     const room = await Room.create('sweep')
-    const tab1 = await room.join({ name: 'T1' }, { identity: 'user-9' })
-    const tab2 = await room.join({ name: 'T2' }, { identity: 'user-9' })
-    const other = await room.join({ name: 'Other' }, { identity: 'user-8' })
+    const tab1 = await room.join({ meta: { name: 'T1' }, identity: 'user-9' })
+    const tab2 = await room.join({ meta: { name: 'T2' }, identity: 'user-9' })
+    const other = await room.join({ meta: { name: 'Other' }, identity: 'user-8' })
     const causes: unknown[] = []
     tab1.onLeave((cause) => causes.push(cause))
     tab2.onLeave((cause) => causes.push(cause))
@@ -1105,9 +1105,9 @@ describe('direct messages', () => {
 
   it('Room.send({ identity }) fans a server DM to every membership of that identity; none is a no-op', async () => {
     const room = await Room.create('id-send')
-    const tab1 = await room.join({ name: 'T1' }, { identity: 'user-7' })
-    const tab2 = await room.join({ name: 'T2' }, { identity: 'user-7' })
-    const other = await room.join({ name: 'Other' }, { identity: 'user-6' })
+    const tab1 = await room.join({ meta: { name: 'T1' }, identity: 'user-7' })
+    const tab2 = await room.join({ meta: { name: 'T2' }, identity: 'user-7' })
+    const other = await room.join({ meta: { name: 'Other' }, identity: 'user-6' })
     const got1: unknown[] = []
     const got2: unknown[] = []
     const gotOther: unknown[] = []
@@ -1129,8 +1129,8 @@ describe('direct messages', () => {
   it('the identity index is a hint: a stale marker resolves to nothing and is pruned on read', async () => {
     const kv = getBroadcastAdapter()
     const room = await Room.create('id-heal')
-    const tab1 = await room.join({ name: 'T1' }, { identity: 'user-5' })
-    const ghost = await room.join({ name: 'Ghost' }, { identity: 'user-5' })
+    const tab1 = await room.join({ meta: { name: 'T1' }, identity: 'user-5' })
+    const ghost = await room.join({ meta: { name: 'Ghost' }, identity: 'user-5' })
 
     // Simulate the ghost's record vanishing (a reap or a crash mid-leave) with its marker lingering.
     await kv.delete(roomMemberKvKey('id-heal', ghost.id))
@@ -1152,9 +1152,9 @@ describe('direct messages', () => {
 
   it("Room.getParticipants({ identity }) reads one identity's memberships as snapshots, without loading the roster", async () => {
     const room = await Room.create('id-read')
-    const tab1 = await room.join({ name: 'T1', dnd: true }, { identity: 'user-4' })
-    const tab2 = await room.join({ name: 'T2', dnd: true }, { identity: 'user-4' })
-    await room.join({ name: 'Other' }, { identity: 'user-3' })
+    const tab1 = await room.join({ meta: { name: 'T1', dnd: true }, identity: 'user-4' })
+    const tab2 = await room.join({ meta: { name: 'T2', dnd: true }, identity: 'user-4' })
+    await room.join({ meta: { name: 'Other' }, identity: 'user-3' })
 
     const mine = await Room.getParticipants('id-read', { identity: 'user-4' })
     expect(mine.map((p) => p.id).sort()).toEqual([tab1.id, tab2.id].sort()) // both of the identity's tabs
@@ -1178,10 +1178,10 @@ describe('direct messages', () => {
         expect(to.meta).toEqual({ name: 'Bob' }) // resolved target, meta included
       },
     })
-    const bob = await lobby.join({ name: 'Bob' })
+    const bob = await lobby.join({ meta: { name: 'Bob' } })
     const inbox: unknown[] = []
     bob.listen((data, from) => inbox.push([data, from?.id, from?.meta]))
-    const alice = await lobby.join({ name: 'Alice' })
+    const alice = await lobby.join({ meta: { name: 'Alice' } })
 
     await expect(alice.send(bob.id, 'blocked')).rejects.toThrow('not friends')
     await alice.send(bob.id, 'hi')
@@ -1200,7 +1200,7 @@ describe('direct messages', () => {
     const stub = new RoomStubChannel(served)
     stub._registerChannel()
     served._attachStub(stub)
-    const target = await served.join({ name: 'T' })
+    const target = await served.join({ meta: { name: 'T' } })
     const inbox: unknown[] = []
     target.listen((data) => inbox.push(data))
     await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: { name: 'C' } }), 1)
@@ -1225,7 +1225,7 @@ describe('direct messages', () => {
     const observer = await Room.get('moderated')
     const seen: unknown[] = []
     observer.subscribe((data) => seen.push(data))
-    const me = await served.join({ name: 'Mallory' })
+    const me = await served.join({ meta: { name: 'Mallory' } })
 
     await expect(me.publish('slur')).rejects.toThrow('blocked: Mallory')
     await expect(me.publishBinary(new Uint8Array([0xff, 1]))).rejects.toThrow('blocked: Mallory')
@@ -1254,12 +1254,12 @@ describe('direct messages', () => {
       },
     })
 
-    await expect(served.join({ name: 'Banned' })).rejects.toThrow('no entry for Banned')
+    await expect(served.join({ meta: { name: 'Banned' } })).rejects.toThrow('no entry for Banned')
     // The guard runs before any state is written — a rejected join leaves no trace.
     expect(served.count).toBe(0)
     expect(await (await Room.get('door')).getParticipants()).toEqual([])
 
-    const alice = await served.join({ name: 'Alice' })
+    const alice = await served.join({ meta: { name: 'Alice' } })
     expect(seen.map((m) => m.meta)).toEqual([{ name: 'Banned' }, { name: 'Alice' }])
     expect(seen[1]!.id).toBe(alice.id) // the guard saw the definitive member ID
 
@@ -1282,7 +1282,7 @@ describe('direct messages', () => {
       },
     })
     await expect(granted.join()).rejects.toThrow('nobody enters')
-    const me = await Room.join('velvet', { name: 'Direct' }) // no grant involved — like Room.announce() vs onBeforePublish
+    const me = await Room.join('velvet', { meta: { name: 'Direct' } }) // no grant involved — like Room.announce() vs onBeforePublish
     expect(me.meta).toEqual({ name: 'Direct' })
   })
 
@@ -1312,12 +1312,12 @@ describe('direct messages', () => {
       onAfterSend: (_from, to, data, info) => void sent.push({ to: to.id, data, seq: info.seq }),
     })
 
-    const alice = await room.join({ name: 'Alice' })
+    const alice = await room.join({ meta: { name: 'Alice' } })
     expect(joins).toHaveLength(1)
     expect(joins[0]).toMatchObject({ id: alice.id, name: 'Alice' })
     expect(typeof joins[0]!.joinedAt).toBe('number')
 
-    const bob = await room.join({ name: 'Bob' })
+    const bob = await room.join({ meta: { name: 'Bob' } })
     await alice.publish({ text: 'one' })
     await alice.publish({ text: 'two' })
     expect(published.map((p) => p.data)).toEqual([{ text: 'one' }, { text: 'two' }])
@@ -1343,7 +1343,7 @@ describe('direct messages', () => {
     const observer = await Room.get('after-throw')
     const seen: unknown[] = []
     observer.subscribe((data) => seen.push(data))
-    const me = await room.join({ name: 'A' })
+    const me = await room.join({ meta: { name: 'A' } })
 
     await expect(me.publish('boom')).rejects.toThrow('persist failed')
     // onAfterPublish runs post-commit: the message was already broadcast before the hook threw.
@@ -1352,9 +1352,9 @@ describe('direct messages', () => {
 
   it("delivers to a member the sender's stale local view doesn't know yet (KV fallback)", async () => {
     const a = await Room.create('dm-lag')
-    const alice = await a.join({ name: 'Alice' })
+    const alice = await a.join({ meta: { name: 'Alice' } })
     const b = await Room.get('dm-lag') // snapshot: alice only
-    const bob = await a.join({ name: 'Bob' }) // b is unobserved — it missed this join
+    const bob = await a.join({ meta: { name: 'Bob' } }) // b is unobserved — it missed this join
     const bobInbox: unknown[] = []
     bob.listen((data, from) => bobInbox.push([data, from?.id]))
 
@@ -1374,8 +1374,8 @@ describe('direct messages', () => {
 describe('direct message acks', () => {
   it('resolves with the recipient handler’s reply (the request/response twin of channel ack)', async () => {
     const room = await Room.create('dm-ack')
-    const authority = await room.join({ role: 'authority' })
-    const player = await room.join({ name: 'p' })
+    const authority = await room.join({ meta: { role: 'authority' } })
+    const player = await room.join({ meta: { name: 'p' } })
     authority.listen((cmd) => `applied:${cmd}`)
 
     // A superset of the plain-send receipt: the reply plus the message's own seq/timestamp.
@@ -1387,8 +1387,8 @@ describe('direct message acks', () => {
 
   it('rejects with the recipient handler’s error', async () => {
     const room = await Room.create('dm-ack-throw')
-    const authority = await room.join({})
-    const player = await room.join({})
+    const authority = await room.join()
+    const player = await room.join()
     authority.listen(() => {
       throw new Error('illegal move')
     })
@@ -1398,8 +1398,8 @@ describe('direct message acks', () => {
 
   it('replies with the last listener’s return, like a channel', async () => {
     const room = await Room.create('dm-ack-last')
-    const a = await room.join({})
-    const b = await room.join({})
+    const a = await room.join()
+    const b = await room.join()
     b.listen(() => 'first')
     b.listen(() => 'second')
 
@@ -1408,8 +1408,8 @@ describe('direct message acks', () => {
 
   it('waits for a recipient that listens after the fact — no spurious failure on the pre-listen race', async () => {
     const room = await Room.create('dm-ack-hold')
-    const authority = await room.join({})
-    const player = await room.join({})
+    const authority = await room.join()
+    const player = await room.join()
 
     const pending = player.send(authority.id, 'ping', { ack: true }) // no listener yet — held
     await settle()
@@ -1420,8 +1420,8 @@ describe('direct message acks', () => {
 
   it('rejects if the recipient leaves before handling', async () => {
     const room = await Room.create('dm-ack-leave')
-    const authority = await room.join({})
-    const player = await room.join({})
+    const authority = await room.join()
+    const player = await room.join()
 
     const pending = player.send(authority.id, 'x', { ack: true }) // no listener → held
     await settle()
@@ -1432,8 +1432,8 @@ describe('direct message acks', () => {
 
   it('a plain send() (no ack) still resolves with a delivery receipt, ignoring any handler return', async () => {
     const room = await Room.create('dm-noack')
-    const a = await room.join({})
-    const b = await room.join({})
+    const a = await room.join()
+    const b = await room.join()
     b.listen(() => 'ignored')
 
     const receipt = await a.send(b.id, 'x')
@@ -1452,7 +1452,7 @@ describe('room-authored messages', () => {
   it('announce() reaches onAnnounce() everywhere — and never the participant streams', async () => {
     const a = await Room.create('sys')
     const b = await Room.get('sys')
-    await a.join({ name: 'Alice' })
+    await a.join({ meta: { name: 'Alice' } })
     const announced: unknown[] = []
     const streamed: unknown[] = []
     b.onAnnounce((data, info) => announced.push([data, info.key]))
@@ -1467,8 +1467,8 @@ describe('room-authored messages', () => {
 
   it('Room.send() whispers to one participant — from is null (room-authored)', async () => {
     const lobby = await Room.create('automod')
-    const alice = await lobby.join({ name: 'Alice' })
-    const bob = await lobby.join({ name: 'Bob' })
+    const alice = await lobby.join({ meta: { name: 'Alice' } })
+    const bob = await lobby.join({ meta: { name: 'Bob' } })
     const aliceInbox: unknown[] = []
     const bobInbox: unknown[] = []
     alice.listen((data, from) => aliceInbox.push([data, from]))
@@ -1499,7 +1499,7 @@ describe('isolated mode', () => {
     Broadcast.subscribe<{ __r: string }>(roomCtrlKey('vid'), (msg) => ctrlTraffic.push(msg.__r))
     Broadcast.subscribe<{ __r: string }>(roomTextKey('vid'), (msg) => textTraffic.push(msg.__r))
 
-    const me = await a.join({ name: 'Alice' })
+    const me = await a.join({ meta: { name: 'Alice' } })
     await me.publish('frame-1')
 
     expect(received).toEqual([['frame-1', { name: 'Alice' }]]) // delivered via the member key
@@ -1550,7 +1550,7 @@ describe('room stub channel', () => {
   it('room events are relayed to the client as PUBLISH frames, behind the streamed roster', async () => {
     const { serverRoom, peer } = await createServedRoom('relay')
     await settle() // the roster streams once the peer attaches
-    await serverRoom.join({ name: 'Alice' })
+    await serverRoom.join({ meta: { name: 'Alice' } })
 
     const relayed = peer
       .decoded()
@@ -1593,8 +1593,8 @@ describe('room stub channel', () => {
 
   it("binary frames are relayed selectively, per the client's declared (member, track) wants", async () => {
     const { serverRoom, stub, peer } = await createServedRoom('lazy-bin')
-    const wanted = await serverRoom.join({ name: 'wanted' })
-    const unwanted = await serverRoom.join({ name: 'unwanted' })
+    const wanted = await serverRoom.join({ meta: { name: 'wanted' } })
+    const unwanted = await serverRoom.join({ meta: { name: 'unwanted' } })
     const subBinary = (wants: unknown, seq: number) =>
       stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants }), seq)
     const relayed = () => peer.decoded().filter((f: any) => f.tag === TAG.PUBLISH_BINARY)
@@ -1649,7 +1649,7 @@ describe('room stub channel', () => {
     serverRoom._attachStub(bystander)
     const bystanderPeer = attachPeer(bystander)
 
-    const sender = await serverRoom.join({ name: 'Srv' })
+    const sender = await serverRoom.join({ meta: { name: 'Srv' } })
     await sender.send(id, 'psst')
 
     const dmFramesOf = (frames: any[]) =>
@@ -1660,7 +1660,7 @@ describe('room stub channel', () => {
 
   it("routes a stub member's DM to a server-held participant, validating the sender", async () => {
     const { serverRoom, stub, peer } = await createServedRoom('dm-stub-send')
-    const target = await serverRoom.join({ name: 'Srv' })
+    const target = await serverRoom.join({ meta: { name: 'Srv' } })
     const inbox: unknown[] = []
     target.listen((data, from) => inbox.push([data, from?.id]))
     const { id } = await joinViaStub(stub, peer, 1)
@@ -1677,7 +1677,7 @@ describe('room stub channel', () => {
 
   it('text is relayed only after the client subscribes; control always flows', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('lazy-text-stub')
-    const me = await serverRoom.join({ name: 'Alice' })
+    const me = await serverRoom.join({ meta: { name: 'Alice' } })
 
     await me.publish('before-subscribe')
     const relayedTags = () =>
@@ -1699,8 +1699,8 @@ describe('room stub channel', () => {
 
   it('sub-text relays only the wanted members; a room-level subscription supersedes the set', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('member-text-stub')
-    const alice = await serverRoom.join({ name: 'Alice' })
-    const bob = await serverRoom.join({ name: 'Bob' })
+    const alice = await serverRoom.join({ meta: { name: 'Alice' } })
+    const bob = await serverRoom.join({ meta: { name: 'Bob' } })
 
     const relayedData = () =>
       peer
@@ -1727,7 +1727,7 @@ describe('room stub channel', () => {
 
   it('tail mode relays text from serialization, before any client subscription', async () => {
     const serverRoom = (await Room.create('tail-relay')) as ServerRoom
-    const alice = await serverRoom.join({ name: 'A' })
+    const alice = await serverRoom.join({ meta: { name: 'A' } })
     serverRoom._tail = true // set by Room.get(id, { tail: true }); read by roomReplacer/_attachStub
     const stub = new RoomStubChannel(serverRoom)
     stub._registerChannel()
@@ -1761,7 +1761,7 @@ describe('room stub channel', () => {
 
   it('a co-returned selfDelivery=false participant is bound onto its room stub at the source, in either serialization order', async () => {
     const serverRoom = (await Room.create('self-src-order')) as ServerRoom
-    const me = await serverRoom.join({ name: 'me' }, { selfDelivery: false })
+    const me = await serverRoom.join({ meta: { name: 'me' }, selfDelivery: false })
 
     // Whether the app returns { room, me } or { me, room }, the serializer converges on one drop-set:
     // the room's stub adopts the pass's set, the participant adds its id — order-independent by identity.
@@ -1792,7 +1792,7 @@ describe('room stub channel', () => {
 
   it('a source-bound member is suppressed on its own client stub yet still relayed to independent observers', async () => {
     const serverRoom = (await Room.create('self-src-relay')) as ServerRoom
-    const me = await serverRoom.join({ name: 'me' }, { selfDelivery: false })
+    const me = await serverRoom.join({ meta: { name: 'me' }, selfDelivery: false })
 
     // Own stub: the serializer bound `me` into its drop-set (see the order-independence test above).
     const own = new RoomStubChannel(serverRoom)
@@ -1840,7 +1840,7 @@ describe('room stub channel', () => {
 
   it('replays the last { retain: true } text message to a late subscriber — non-retained and superseded ones are not kept', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('retain-text')
-    const alice = await serverRoom.join({ name: 'Alice' })
+    const alice = await serverRoom.join({ meta: { name: 'Alice' } })
     await alice.publish('transient') // never retained
     await alice.publish('pinned', { retain: true })
     await alice.publish('newer', { retain: true }) // supersedes — last write wins, one slot per room
@@ -1853,7 +1853,7 @@ describe('room stub channel', () => {
 
   it('replays the last retained frame of every (member, track) a client starts watching', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('retain-binary')
-    const cam = await serverRoom.join({ name: 'cam' })
+    const cam = await serverRoom.join({ meta: { name: 'cam' } })
     await cam.publishBinary(new Uint8Array([1])) // never retained
     await cam.publishBinary(new Uint8Array([2]), { retain: true }) // retained on the default lane
     await cam.publishBinary(new Uint8Array([9]), { track: 'screen', retain: true }) // retained on a named track
@@ -1868,7 +1868,7 @@ describe('room stub channel', () => {
 
   it('a leaving member takes their retained frames with them — a later subscriber gets nothing for that lane', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('retain-leave')
-    const cam = await serverRoom.join({ name: 'cam' })
+    const cam = await serverRoom.join({ meta: { name: 'cam' } })
     await cam.publishBinary(new Uint8Array([7]), { retain: true })
     await cam.leave()
 
@@ -1880,8 +1880,8 @@ describe('room stub channel', () => {
 
   it('replays a retained lane once — growing the want set never resends an already-covered lane', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('retain-once')
-    const a = await serverRoom.join({ name: 'a' })
-    const b = await serverRoom.join({ name: 'b' })
+    const a = await serverRoom.join({ meta: { name: 'a' } })
+    const b = await serverRoom.join({ meta: { name: 'b' } })
     await a.publishBinary(new Uint8Array([1]), { retain: true })
     await b.publishBinary(new Uint8Array([2]), { retain: true })
 
@@ -1901,8 +1901,8 @@ describe('room stub channel', () => {
 
   it('replays retained text to a member-scoped subscriber only once it wants the sender — the binary rule, for text', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('retain-text-scoped')
-    const alice = await serverRoom.join({ name: 'Alice' })
-    const bob = await serverRoom.join({ name: 'Bob' })
+    const alice = await serverRoom.join({ meta: { name: 'Alice' } })
+    const bob = await serverRoom.join({ meta: { name: 'Bob' } })
     await bob.publish('bob-pinned', { retain: true })
 
     stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [alice.id] }), 44) // wants Alice, not Bob
@@ -2017,7 +2017,7 @@ describe('ClientRoom', () => {
   it('rejects a client-side hidden join; a hidden member never rides the roster to a client', async () => {
     const fake = createFakeStub()
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('hidden', { count: 1 }))
-    await expect(clientRoom.join({}, { hidden: true })).rejects.toThrow('server-side only')
+    await expect(clientRoom.join({ hidden: true })).rejects.toThrow('server-side only')
 
     const hiddenId = crypto.randomUUID()
     const player = crypto.randomUUID()
@@ -2059,7 +2059,7 @@ describe('ClientRoom', () => {
     const received: unknown[] = []
     clientRoom.subscribe((data, info, from) => received.push([data, info.key, from.id]))
 
-    const me = await clientRoom.join({ name: 'Me' })
+    const me = await clientRoom.join({ meta: { name: 'Me' } })
     expect(me.id).toBe(memberId)
     expect(clientRoom.count).toBe(1)
 
@@ -2074,7 +2074,7 @@ describe('ClientRoom', () => {
     const memberId = crypto.randomUUID()
     const fake = createFakeStub({ id: memberId })
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('dms'))
-    const me = await clientRoom.join({}, { selfDelivery: false })
+    const me = await clientRoom.join({ selfDelivery: false })
     const inbox: unknown[] = []
     me.listen((data, from) => inbox.push([data, from]))
 
@@ -2092,7 +2092,7 @@ describe('ClientRoom', () => {
     const memberId = crypto.randomUUID()
     const fake = createFakeStub({ id: memberId })
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('dm-ack'))
-    const me = await clientRoom.join({})
+    const me = await clientRoom.join()
     me.listen((data) => `handled:${data}`) // a client recipient replies exactly like a server-side one
 
     fake.emit({ __r: 'dm', to: memberId, from: crypto.randomUUID(), data: 'ping', ackId: 'ack-1' })
@@ -2301,7 +2301,7 @@ describe('ClientRoom', () => {
       onClose: () => {},
     }
     const clientRoom = new ClientRoom(stub as unknown as ClientBroadcast, createSnapshot('coalesce'))
-    const me = await clientRoom.join({ name: 'cursor' })
+    const me = await clientRoom.join({ meta: { name: 'cursor' } })
 
     const pA = me.publish({ x: 1 }, { coalesce: 'pos' }) // sent immediately, now in flight (gated)
     const pB = me.publish({ x: 2 }, { coalesce: 'pos' }) // conflates while A is in flight…
@@ -2340,7 +2340,7 @@ describe('ClientRoom', () => {
 
   it('onDemand fires when demand for a member track turns on, then off', async () => {
     const room = await Room.create('demand')
-    const alice = await room.join({ name: 'A' })
+    const alice = await room.join({ meta: { name: 'A' } })
     const demand: Array<[string | null, number]> = []
     alice.onDemand((track, count) => demand.push([track, count]))
 
@@ -2408,7 +2408,7 @@ describe('liveness', () => {
 
   it('reaps members with a stale heartbeat on read, announcing the leave everywhere', async () => {
     const a = await Room.create('crashed')
-    const me = await a.join({ name: 'Ghost' })
+    const me = await a.join({ meta: { name: 'Ghost' } })
     const observer = await Room.get('crashed')
     const leaves: Array<[string, unknown]> = []
     observer.onLeave((m, cause) => leaves.push([m.id, cause]))
@@ -2429,7 +2429,7 @@ describe('liveness', () => {
     vi.useFakeTimers()
     try {
       const a = await Room.create('abandoned')
-      const me = await a.join({ name: 'Ghost' })
+      const me = await a.join({ meta: { name: 'Ghost' } })
       const key = roomMemberKvKey('abandoned', me.id)
       const adapter = getBroadcastAdapter()
       expect(await adapter.get!(key)).not.toBe(null)
@@ -2511,7 +2511,7 @@ describe('typed metadata', () => {
     const room = await Room.create<ChatMeta, MemberMeta>('typed', { meta: { topic: 'general' } })
     const topic: string = room.meta.topic
 
-    const me = await room.join({ name: 'Alice' })
+    const me = await room.join({ meta: { name: 'Alice' } })
     const myName: string = me.meta.name
     room.subscribe((_data, _info, from) => {
       const _senderName: string = from.meta.name
@@ -2530,7 +2530,7 @@ describe('typed metadata', () => {
     if (first) {
       const _snapName: string = first.meta.name
     }
-    const direct = await Room.join<MemberMeta>('typed', { name: 'Bob' })
+    const direct = await Room.join<MemberMeta>('typed', { meta: { name: 'Bob' } })
     const _directName: string = direct.meta.name
 
     expect(topic).toBe('general')
@@ -2555,7 +2555,7 @@ describe('snapshot() and onChange()', () => {
     expect(s0).toMatchObject({ id: 'viewstore', meta: { topic: 'a' }, size: 5, count: 0, isClosed: false })
     expect(Object.isFrozen(s0)).toBe(true)
 
-    const me = await room.join({ name: 'Alice' }, { identity: 'u1' })
+    const me = await room.join({ meta: { name: 'Alice' }, identity: 'u1' })
     const s1 = room.snapshot()
     expect(s1).not.toBe(s0)
     expect(s1.participants).toMatchObject([{ id: me.id, identity: 'u1', meta: { name: 'Alice' } }])
@@ -2581,10 +2581,10 @@ describe('snapshot() and onChange()', () => {
 
   it("snapshot({ by: identity }) groups a user's memberships, keeps anonymous standalone, stays reference-stable", async () => {
     const room = await Room.create('id-snap')
-    await room.join({ n: 't1' }, { identity: 'u1' })
-    await room.join({ n: 't2' }, { identity: 'u1' }) // same user, second tab
-    await room.join({ n: 'anon' }) // no identity — its own group
-    await room.join({ n: 't3' }, { identity: 'u2' })
+    await room.join({ meta: { n: 't1' }, identity: 'u1' })
+    await room.join({ meta: { n: 't2' }, identity: 'u1' }) // same user, second tab
+    await room.join({ meta: { n: 'anon' } }) // no identity — its own group
+    await room.join({ meta: { n: 't3' }, identity: 'u2' })
 
     const view = room.snapshot({ by: 'identity' })
     expect(view.count).toBe(4)
@@ -2596,7 +2596,7 @@ describe('snapshot() and onChange()', () => {
     expect(room.snapshot({ by: 'identity' })).toBe(view) // cached — reference-stable
     expect(Object.isFrozen(view.identities)).toBe(true)
 
-    await room.join({ n: 't4' }, { identity: 'u1' })
+    await room.join({ meta: { n: 't4' }, identity: 'u1' })
     const view2 = room.snapshot({ by: 'identity' })
     expect(view2).not.toBe(view) // a change invalidates it
     expect(view2.identities.find((g) => g.identity === 'u1')?.participants.map((p) => p.meta.n)).toEqual([
@@ -2659,7 +2659,7 @@ describe('snapshot() and onChange()', () => {
     // Regression: applyClosed() cleared members *after* its only bump, with leave callbacks running
     // user code in between — so a snapshot() cached during close kept the stale roster forever.
     const room = await Room.create('snap-poison-close', { meta: { topic: 'x' } })
-    await room.join({ name: 'Alice' }, { identity: 'u1' })
+    await room.join({ meta: { name: 'Alice' }, identity: 'u1' })
     const seen: { closed: boolean; count: number }[] = []
     room.onChange(() => {
       const s = room.snapshot()
@@ -2723,7 +2723,7 @@ describe('returnable RemoteParticipant', () => {
 
   it('returns alongside its room — one stub, duplicates ===, bound to the live view', async () => {
     const server = await Room.create('viewable')
-    const alice = await server.join({ name: 'Alice' })
+    const alice = await server.join({ meta: { name: 'Alice' } })
     const member = (await server.getParticipant(alice.id))!
 
     const { serialize, parseBody, fakes, registeredChannels } = makeRoundTrip()
@@ -2745,7 +2745,7 @@ describe('returnable RemoteParticipant', () => {
 
   it('returns on its own — the backing room rides along and keeps the view live', async () => {
     const server = await Room.create('solo-view')
-    const bob = await server.join({ name: 'Bob' })
+    const bob = await server.join({ meta: { name: 'Bob' } })
     const member = (await server.getParticipant(bob.id))!
 
     const { serialize, parseBody, fakes } = makeRoundTrip()
