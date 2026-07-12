@@ -156,7 +156,7 @@ export async function onJoinChat(roomId) {
 room.subscribe((data, info, from) => {
   if (from.identity === myUserId) return // one of my own tabs
 })
-await Room.removeParticipant(roomId, { identity: userId }, { reason: 'banned' }) // kick every tab at once
+await Room.removeParticipant(roomId, { identity: userId, reason: 'banned' }) // kick every tab at once
 ```
 
 Read one user's presence without loading the roster, or act on them across rooms:
@@ -168,7 +168,7 @@ if (me?.meta.status === 'dnd') skipNotification()
 
 // "Ban everywhere": your app knows a user's rooms (it assigned identity at join) — loop and kick each.
 for (const { id } of await Room.list()) // or your own list of the user's rooms
-  await Room.removeParticipant(id, { identity: userId }, { reason: 'banned' }) // idempotent: 0 matches is fine
+  await Room.removeParticipant(id, { identity: userId, reason: 'banned' }) // idempotent: 0 matches is fine
 ```
 
 <Warning>Metadata is display state, not authorization. `from.meta.role` (or `.team`, `.isAdmin`) is whatever that client last set — never gate on it. Snapshot the trusted `identity → role` map server-side, from the telefunction where `identity` is stamped and `getContext()` is available, and check *that*. The rule: **`identity` is trusted, `meta` is not.**</Warning>
@@ -202,7 +202,7 @@ A plain `send()` is one-shot signaling (invites, whispers, fire-and-forget game 
 Room.guard(room, {
   onAfterSend: (from, to, data) => db.saveDm(to.identity, data), // persist as it's sent
   onAfterJoin: async (member) => {                               // redeliver on (re)join
-    for (const dm of await db.undeliveredDms(member.identity)) await Room.send(room.id, member.id, dm.data)
+    for (const dm of await db.undeliveredDms(member.identity)) await Room.send(room.id, { id: member.id }, dm.data)
   },
 })
 ```
@@ -236,7 +236,7 @@ Each has an `onAfter*` counterpart — `onAfterJoin`, `onAfterSend`, `onAfterPub
 
 ```js
 // Server
-await Room.removeParticipant(roomId, participantId, { reason: 'be nice' })
+await Room.removeParticipant(roomId, { id: participantId, reason: 'be nice' })
 
 // The kicked client
 me.onLeave((cause) => {
@@ -257,7 +257,7 @@ The room itself can speak — receivers can't confuse it with a member message:
 ```js
 // Server
 await Room.announce('lobby', { type: 'maintenance', in: '5min' }) // to everyone
-await Room.send('lobby', winnerId, { badge: 'first-blood' })      // to one participant
+await Room.send('lobby', { id: winnerId }, { badge: 'first-blood' }) // to one participant
 ```
 ```js
 // Client
@@ -437,9 +437,9 @@ The server-side entry point. Clients get a room when a telefunction returns it.
 | `Room.list({ prefix? }?)` | `RoomInfo[]` | - |
 | `Room.update(id, options)` | `void` | If the room doesn't exist |
 | `Room.close(id)` | `void` | If the room doesn't exist |
-| `Room.removeParticipant(id, target, { reason? })` | `void` | Unknown participant ID |
+| `Room.removeParticipant(id, target)` | `void` | Unknown participant `{ id }` |
 | `Room.announce(id, data)` | `void` | If the room doesn't exist |
-| `Room.send(id, participantId, data)` | `void` | If the room or participant doesn't exist |
+| `Room.send(id, target, data)` | `void` | If the room or participant doesn't exist |
 | `Room.getParticipants(id, target?)` | `ParticipantSnapshotView[]` | If the room doesn't exist |
 
 ```ts
@@ -452,7 +452,7 @@ type RoomOptions = {
 
 - `Room.get(id, { tail: true })` starts relaying live messages as soon as the room is returned to a client (see <Link href="#load-history-then-go-live">Load history</Link>).
 - `Room.update()` replaces the fields you provide and keeps the rest (`isolated` is fixed at creation).
-- `Room.removeParticipant(id, target, { reason? })` — `target` is a participant ID, or `{ identity }` to remove every membership of an identity at once (idempotent).
+- `Room.removeParticipant(id, target)` / `Room.send(id, target, data)` — `target` addresses a participant with one ref: `{ id }` for a single membership (throws when unknown), or `{ identity }` for every membership of an identity at once (an idempotent sweep / fan-out). `removeParticipant` also carries its `reason` in that same object: `{ id, reason? }` or `{ identity, reason? }`.
 - `Room.getParticipants(id, target?)` — a server-side point-in-time read (no live view, no subscription). Omit `target` for the whole roster; pass `{ identity }` to read one user's memberships (their open tabs) — the cheap "is this user online / what's their status" check that doesn't load the roster. `[]` for an absent identity.
 - Typed metadata: `Room.get<ChatMeta, MemberMeta>(id)` types `room.meta`, `join`/`setMeta`, and `from.meta` everywhere; `Room.list<ChatMeta>()` types each `RoomInfo.meta`. These type parameters are unchecked assertions you supply — Telefunc trusts them and doesn't validate the shape.
 

@@ -77,6 +77,7 @@ import type {
   LeaveCause,
   LocalParticipant,
   ParticipantMeta,
+  ParticipantRef,
   ParticipantSnapshotView,
   PublishOptions,
   RemoteParticipant,
@@ -182,18 +183,18 @@ type RoomStatic = {
   setAttributes(id: string, attributes: RoomMeta): Promise<void>
   /** Admin: close the room — disconnects all participants and removes the room. */
   close(id: string): Promise<void>
-  /** Admin: remove a participant — by participant ID (throws when unknown), or every membership
-   *  of an app identity at once (`{ identity }`, an idempotent sweep: kicking a user removes all
-   *  their tabs/connections, and 0 matches is fine). `reason` travels with the removal — the
-   *  kicked participant's `onLeave` receives `{ type: 'removed', reason }`, so "why" never races
-   *  the removal. */
-  removeParticipant(id: string, target: string | { identity: string }, options?: { reason?: unknown }): Promise<void>
+  /** Admin: remove a participant — one membership by `{ id }` (throws when unknown), or every
+   *  membership of an app identity at once (`{ identity }`, an idempotent sweep: kicking a user removes
+   *  all their tabs/connections, and 0 matches is fine). `reason` rides in the same descriptor and
+   *  travels with the removal — the kicked participant's `onLeave` receives `{ type: 'removed', reason }`,
+   *  so "why" never races the removal. */
+  removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void>
   /** Publish a room-authored message — no sender, delivered to `onAnnounce()` (e.g. system notices). */
   announce(id: string, data: unknown): Promise<void>
   /** Send a server-authored private message — arrives on `listen()` with `from: null`. Target one
-   *  participant by ID (throws when unknown), or every membership of an app identity at once
+   *  participant by `{ id }` (throws when unknown), or every membership of an app identity at once
    *  (`{ identity }`, resolved from the identity index; 0 matches is a no-op — a signed-out user). */
-  send(id: string, target: string | { identity: string }, data: unknown): Promise<void>
+  send(id: string, target: ParticipantRef, data: unknown): Promise<void>
   /** Server-side snapshot of a room's participants — a point-in-time read with no live view or
    *  subscription (unlike the instance `room.getParticipants()`). Omit `target` for the whole roster;
    *  pass `{ identity }` to read one app identity's memberships (its open tabs/connections) in
@@ -403,31 +404,38 @@ async function closeRoom(id: string): Promise<void> {
   await kv.delete(roomConfigKvKey(id))
 }
 
-async function removeParticipant(
-  id: string,
-  target: string | { identity: string },
-  options?: { reason?: unknown },
-): Promise<void> {
-  const cause: LeaveCause =
-    options?.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: options.reason }
-  const { kv } = await requireRoom(id)
-
-  if (typeof target === 'string') {
-    assertUsage(target.length > 0, 'The participant ID should be a non-empty string')
-    const raw = await kv.get(roomMemberKvKey(id, target))
-    if (raw === null) throw new Error(`Participant not found: ${target}`)
-    await evictMember(kv, id, target, (parse(raw) as RoomMemberRecord).identity, cause)
-    return
+/** The `(memberId, identity)` pairs a `ParticipantRef` addresses — shared by `Room.send()` and
+ *  `Room.removeParticipant()`. `{ id }` is one membership and must exist (throws otherwise); `{ identity }`
+ *  is every membership of that identity, resolved from the identity index in O(memberships) rather than a
+ *  full-roster scan (0 matches is fine — an idempotent sweep, a no-op DM). */
+async function resolveParticipantRef(
+  kv: RoomKV,
+  roomId: string,
+  target: ParticipantRef,
+): Promise<{ memberId: string; identity: string | undefined }[]> {
+  if ('id' in target) {
+    assertUsage(
+      typeof target.id === 'string' && target.id.length > 0,
+      'The participant { id } should be a non-empty string',
+    )
+    const raw = await kv.get(roomMemberKvKey(roomId, target.id))
+    if (raw === null) throw new Error(`Participant not found: ${target.id}`)
+    return [{ memberId: target.id, identity: (parse(raw) as RoomMemberRecord).identity }]
   }
-
   assertUsage(
     isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
-    'removeParticipant() target should be a participant ID or { identity }',
+    'The participant ref should be { id } or { identity }',
   )
-  // Identity sweep: every membership of that identity, across tabs and connections — resolved from
-  // the identity index in O(memberships), not a full-roster scan.
-  for (const memberId of await resolveIdentityMembers(kv, id, target.identity)) {
-    await evictMember(kv, id, memberId, target.identity, cause)
+  const { identity } = target
+  return (await resolveIdentityMembers(kv, roomId, identity)).map((memberId) => ({ memberId, identity }))
+}
+
+async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
+  const cause: LeaveCause =
+    target.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: target.reason }
+  const { kv } = await requireRoom(id)
+  for (const { memberId, identity } of await resolveParticipantRef(kv, id, target)) {
+    await evictMember(kv, id, memberId, identity, cause)
   }
 }
 
@@ -457,20 +465,10 @@ async function announceToRoom(id: string, data: unknown): Promise<void> {
   await getBroadcastAdapter().publish(roomCtrlKey(id), stringify({ __r: 'announce', data } satisfies RoomEnvelope))
 }
 
-async function sendToParticipant(id: string, target: string | { identity: string }, data: unknown): Promise<void> {
+async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
   const { kv } = await requireRoom(id)
-  if (typeof target === 'string') {
-    if ((await kv.get(roomMemberKvKey(id, target))) === null) throw new Error(`Participant not found: ${target}`)
-    await sendServerDm(id, target, data)
-    return
-  }
-  assertUsage(
-    isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
-    'Room.send() target should be a participant ID or { identity }',
-  )
-  // Fan out to every membership of the identity (tabs, connections) — resolved from the index in
-  // O(memberships), never a full-roster scan. 0 matches is a no-op.
-  for (const memberId of await resolveIdentityMembers(kv, id, target.identity)) {
+  // `{ id }` is one participant; `{ identity }` fans out to every membership (tabs, connections).
+  for (const { memberId } of await resolveParticipantRef(kv, id, target)) {
     await sendServerDm(id, memberId, data)
   }
 }

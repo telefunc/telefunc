@@ -152,7 +152,7 @@ async function onAnnounce(roomId: string, data: unknown) {
 }
 
 async function onSystemSend(roomId: string, participantId: string, data: unknown) {
-  await Room.send(roomId, participantId, data)
+  await Room.send(roomId, { id: participantId }, data)
 }
 
 /** Reconfigure a room's metadata and capacity — propagates to observers via `room.onUpdate()`. */
@@ -166,12 +166,12 @@ async function onListRooms(prefix: string) {
 }
 
 async function onKick(roomId: string, participantId: string) {
-  await Room.removeParticipant(roomId, participantId, { reason: 'be nice' })
+  await Room.removeParticipant(roomId, { id: participantId, reason: 'be nice' })
 }
 
 /** Multi-tab kick: remove every membership carrying this app identity. */
 async function onKickByIdentity(roomId: string, identity: string) {
-  await Room.removeParticipant(roomId, { identity }, { reason: 'multi-tab' })
+  await Room.removeParticipant(roomId, { identity, reason: 'multi-tab' })
 }
 
 async function onCloseRoom(roomId: string) {

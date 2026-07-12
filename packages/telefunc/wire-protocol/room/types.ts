@@ -21,6 +21,7 @@ export type {
   RoomAckReceipt,
   RoomJoinReceipt,
   LeaveCause,
+  ParticipantRef,
   BinaryFrameInfo,
   BinaryPublishOptions,
   RoomSnapshotView,
@@ -123,7 +124,7 @@ type AfterJoinHook<P extends ParticipantMeta = ParticipantMeta> = (
   info: RoomJoinReceipt,
 ) => void | Promise<void>
 
-/** Why a participant is gone. `reason` is set by `Room.removeParticipant(id, pid, { reason })`
+/** Why a participant is gone. `reason` is set by `Room.removeParticipant(id, { id, reason })`
  *  and travels with the removal — a kicked client learns it's kicked (and why) from the leave
  *  itself, with nothing to race. On `Room`/`RemoteParticipant` leave callbacks the cause is
  *  `undefined` exactly when the leave was discovered by a roster resync rather than an event —
@@ -132,6 +133,11 @@ type LeaveCause = {
   type: 'left' | 'removed' | 'closed' | 'disconnected'
   reason?: unknown
 }
+
+/** Addresses a participant in an admin operation (`Room.send()`, `Room.removeParticipant()`): one
+ *  membership by its participant `id`, or every membership of an app `identity` at once (a user's
+ *  tabs and connections — an idempotent sweep, 0 matches is fine). */
+type ParticipantRef = { id: string } | { identity: string }
 
 type RoomOptions<M extends RoomMeta = RoomMeta> = {
   /** Room metadata, visible to all observers. Default: `{}`. */

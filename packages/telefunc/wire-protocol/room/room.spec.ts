@@ -321,13 +321,13 @@ describe('Room entry point', () => {
     let meLeft = false
     me.onLeave(() => (meLeft = true))
 
-    await Room.removeParticipant('kick', me.id)
+    await Room.removeParticipant('kick', { id: me.id })
 
     expect(kicked).toEqual([me.id])
     expect(meLeft).toBe(true)
     expect(lobby.count).toBe(0)
     await expect(me.publish({ text: 'too late' })).rejects.toThrow('Participant has left')
-    await expect(Room.removeParticipant('kick', me.id)).rejects.toThrow('Participant not found')
+    await expect(Room.removeParticipant('kick', { id: me.id })).rejects.toThrow('Participant not found')
   })
 
   it('every leave carries its cause — kick reasons travel with the removal, nothing to race', async () => {
@@ -347,7 +347,7 @@ describe('Room entry point', () => {
     const bob = await lobby.join({ meta: { name: 'Bob' } })
     const bobCauses: unknown[] = []
     bob.onLeave((cause) => bobCauses.push(cause))
-    await Room.removeParticipant('causes', bob.id, { reason: { rule: 'spam' } })
+    await Room.removeParticipant('causes', { id: bob.id, reason: { rule: 'spam' } })
     expect(bobCauses).toEqual([{ type: 'removed', reason: { rule: 'spam' } }])
 
     expect(observed).toEqual([
@@ -1090,7 +1090,7 @@ describe('direct messages', () => {
     tab1.onLeave((cause) => causes.push(cause))
     tab2.onLeave((cause) => causes.push(cause))
 
-    await Room.removeParticipant('sweep', { identity: 'user-9' }, { reason: 'banned' })
+    await Room.removeParticipant('sweep', { identity: 'user-9', reason: 'banned' })
 
     expect(causes).toEqual([
       { type: 'removed', reason: 'banned' },
@@ -1474,11 +1474,11 @@ describe('room-authored messages', () => {
     alice.listen((data, from) => aliceInbox.push([data, from]))
     bob.listen((data) => bobInbox.push(data))
 
-    await Room.send('automod', alice.id, { warning: 'watch the language' })
+    await Room.send('automod', { id: alice.id }, { warning: 'watch the language' })
 
     expect(aliceInbox).toEqual([[{ warning: 'watch the language' }, null]]) // null = room-authored
     expect(bobInbox).toEqual([])
-    await expect(Room.send('automod', crypto.randomUUID(), 'x')).rejects.toThrow('Participant not found')
+    await expect(Room.send('automod', { id: crypto.randomUUID() }, 'x')).rejects.toThrow('Participant not found')
   })
 })
 

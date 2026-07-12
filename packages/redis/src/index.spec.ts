@@ -231,7 +231,7 @@ describe('Room over the Redis transport', () => {
 
     const me = await lobby.join({ meta: { name: 'Alice' } })
     await me.publish('hello')
-    await Room.removeParticipant('lobby', me.id)
+    await Room.removeParticipant('lobby', { id: me.id })
 
     expect(log).toEqual([`join:Alice`, `msg:Alice:hello`, `leave:${me.id}`])
     expect(observer.count).toBe(0)
