@@ -1,14 +1,12 @@
 // The authoritative game world. This is the durable truth of a match — the Room holds only
 // presence and the delivery lanes; nothing here lives inside the Room object.
 //
-// ── FINDING (the authoritative state has no home in the Room) ──────────────────────────────────
+// ── finding #7 (authoritative state / loop lifecycle) — working-as-designed ────────────────────
 // A Room is presence + message lanes; it cannot *hold* an authoritative simulation, so the app
-// owns this parallel world keyed by room id and keeps the two in sync by hand (join/leave →
-// add/seed/reap a player here). The Discord clone hit the mild version of this ("the DB is the
-// durable truth; rooms are the live layer"); a server-authoritative game hits the sharp version:
-// the truth is a mutable object graph that must be ticked, and the Room offers no lifecycle to
-// hang it on (see server/sim/match.ts and server/matches.ts). See README finding "Server-owned
-// per-room simulation state and loop have no lifecycle home".
+// owns this parallel world keyed by room id and keeps the two in sync by hand. That's by design:
+// a per-room authoritative loop in a multi-node deployment needs leader election, which the Room
+// can't provide — single-node, the `globalThis` singleton registry + the server seat's `onEmpty`
+// (server/matches.ts) are the idiomatic shape, documented in 51b4613. See README finding #7.
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 
 export type { Entity }

@@ -13,25 +13,25 @@ const worldBuffer = new WorldBuffer()
 const netStats = { frames: 0, keyframes: 0, bytes: 0, tick: 0 }
 
 let me: LocalParticipant<PlayerMeta> | null = null
-let authorityId: string | null = null
+let serverId: string | null = null
 let unsub: (() => void) | null = null
 
-/** Begin consuming the match stream. `authority` is the server's simulation participant, found in
- *  the roster by `meta.authority` (see app/store.ts) — there is no first-class server/host handle,
- *  so the client discovers the authority as a member and both subscribes to and commands it.
- *  We subscribe to just our team's track; the enemy positions outside our vision never cross the
- *  wire (source-selective binary — the fog is enforced upstream, not hidden client-side). */
-function startStream(authority: RemoteParticipant<PlayerMeta>, self: LocalParticipant<PlayerMeta>, team: Team): void {
+/** Begin consuming the match stream. `seat` is the room's **server seat** (`room.server`) — a
+ *  first-class, non-presence handle to the server's simulation (findings 1+2 adopted in 51b4613),
+ *  so no roster scan is needed. We subscribe to just our team's track; enemy positions outside our
+ *  vision never cross the wire (source-selective binary — fog enforced upstream, not hidden
+ *  client-side). */
+function startStream(seat: RemoteParticipant<PlayerMeta>, self: LocalParticipant<PlayerMeta>, team: Team): void {
   stopStream()
   me = self
-  authorityId = authority.id
+  serverId = seat.id
   worldBuffer.reset()
   netStats.frames = 0
   netStats.keyframes = 0
   netStats.bytes = 0
 
   const track = team === RED ? 'state:red' : team === BLUE ? 'state:blue' : 'state:full'
-  unsub = authority.subscribeBinary(
+  unsub = seat.subscribeBinary(
     (bytes) => {
       const frame = decodeFrame(bytes)
       worldBuffer.applyFrame(frame, performance.now())
@@ -48,24 +48,22 @@ function stopStream(): void {
   unsub?.()
   unsub = null
   me = null
-  authorityId = null
+  serverId = null
 }
 
-/** Issue a command to the authority.
+/** Issue a command to the server seat.
  *
- * ── FINDING (commands ride `send`, against its contract) ─────────────────────────────────────
- * This is the client→server lane, and the only fit is `me.send(authorityId, cmd)`. `send` is
- * documented as at-most-once peer signaling — "delivered to a live participant at most once, never
- * retried or stored" — yet an RTS needs its orders to arrive reliably and in order. We lean on the
- * live WebSocket underneath being ordered + reliable (which it is), but the API makes no such
- * promise, and there is no ack, no sequence number, and no binary form for a compact order batch.
- * Orders are made resend-safe by being absolute (goto/attack this id), so a dropped one is
- * re-issuable — but that is the app hardening around a lane that isn't meant for this.
+ * The client→server lane is `me.send(room.server.id, cmd)` into the seat's `listen()` — a private,
+ * ordered lane to the authority (findings 1+2 adopted). `send()` now resolves with a delivery
+ * receipt `{ seq, timestamp }` (finding 2b adopted), so a command *is* acked; we still fire-and-
+ * forget here because orders are absolute (goto/attack this id) and thus idempotently re-issuable —
+ * a dropped one just gets re-sent by the next order. The receipt is there if we ever want
+ * per-order confirmation or lag estimation.
  */
 async function sendCommand(cmd: Command): Promise<void> {
-  if (!me || !authorityId) return
+  if (!me || !serverId) return
   try {
-    await me.send(authorityId, cmd)
+    await me.send(serverId, cmd)
   } catch {
     // A command lost to a teardown/rejection is non-fatal: orders are absolute and re-issuable.
   }

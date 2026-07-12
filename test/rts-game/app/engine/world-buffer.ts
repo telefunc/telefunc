@@ -41,12 +41,12 @@ class WorldBuffer {
   winner = 0
   tick = 0
   lastFrameAt = 0
-  // ── FINDING (no keyframe-on-subscribe — the binary twin of `tail`) ───────────────────────────
-  // Deltas can't be applied until a keyframe seeds the baseline, and the Room binary lane has no
-  // "send me the current state on subscribe": a fresh/reconnecting subscriber just starts receiving
-  // mid-stream. So the client ignores every frame until the first keyframe arrives — which the
-  // server only knows to send because our subscription bumped the track's `onDemand` count (see
-  // server/sim/match.ts). See README finding #5.
+  // ── finding #5 (keyframe-on-subscribe) — documented pattern in 51b4613 ───────────────────────
+  // Deltas can't be applied until a keyframe seeds the baseline. Rather than a new primitive, the
+  // blessed pattern is: the publisher watches `onDemand` and re-keyframes when a track's subscriber
+  // count rises (a new/reconnecting client), and the client ignores frames until that first
+  // keyframe (this gate). It works without per-subscriber delivery — which is what keeps bytes at
+  // the source (finding #6). See server/sim/match.ts and README finding #5.
   private seeded = false
 
   reset(): void {

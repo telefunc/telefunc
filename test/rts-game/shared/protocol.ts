@@ -5,14 +5,12 @@
 // parse-the-world on every frame. So the authority packs each per-team, fog-filtered snapshot
 // into this compact layout and ships it with `participant.publishBinary(bytes, { track, keyFrame })`.
 //
-// ── FINDING (binary framing) ────────────────────────────────────────────────────────────────
-// The Room binary lane gives exactly two pieces of per-frame metadata: the named `track` and one
-// `keyFrame` bit (`BinaryFrameInfo`). That is all the structure a real delta-compressed protocol
-// gets from the API — everything else (protocol version, tick number, delta-vs-full beyond the
-// single bit, entity/removed/event framing) we hand-roll inside the payload below. The `keyFrame`
-// bit maps cleanly onto "full snapshot vs delta", but there is no room for an app-defined header
-// (a tick/sequence number, a baseline id for delta reconciliation), so it lives in-band here. See
-// README finding "Binary frames carry only {track, keyFrame}".
+// ── finding #4 (binary framing) — DOCS (I overstated it) ──────────────────────────────────────
+// Per-frame the lane gives `{ track, keyFrame }` (`BinaryFrameInfo`) PLUS the subscriber's
+// `ChannelPublishInfo` — which already carries `seq` (strict per-key counter, for gap detection)
+// and `timestamp`. So delta-baseline reconciliation has what it needs at the receiver; the bytes
+// below are genuine game state, and the in-band `tick` is the game's logical clock (for
+// interpolation), not a framing workaround. There's no real gap. See README finding #4.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 export type { SnapEntity, SnapEvent, Frame }

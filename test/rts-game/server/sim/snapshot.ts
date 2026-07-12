@@ -8,12 +8,12 @@ import type { Entity, World } from './world'
 // own track; a client subscribes to just its team's (see app/net.ts). `full` is the spectator
 // stream — computed only while someone watches it (driven by `onDemand`, see match.ts).
 //
-// ── FINDING (interest management is per-track, not per-subscriber) ────────────────────────────
+// ── finding #6 (per-track vs per-subscriber interest) — working-as-designed ───────────────────
 // `subscribeBinary({ track })` selectivity is by named track, enforced at the source — perfect for
-// "2 teams = 2 fog streams" (an opponent's vision never touches your socket). But it is not
-// per-*subscriber* filtering: real per-player fog (or FFA) would need one pre-computed track and one
-// encode per distinct audience, with no primitive to share the diff work. We pre-compute + diff one
-// baseline per track below; it does not generalize past a handful of audiences. See README finding #6.
+// "2 teams = 2 fog streams" (an opponent's vision never touches your socket). It is deliberately
+// *not* per-subscriber filtering: that would force a per-subscriber re-encode at the relay and
+// destroy the property that bytes never leave the source. Per-player fog (or FFA) is honestly
+// N tracks — one pre-computed + diffed baseline per audience, as below.
 const TRACK = {
   red: 'state:red',
   blue: 'state:blue',

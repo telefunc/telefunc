@@ -55,7 +55,7 @@ function pickTeam(participants: { identity: string | null; meta: PlayerMeta }[])
   let blue = 0
   const seen = new Set<string>()
   for (const p of participants) {
-    if (p.meta.authority || !p.identity || seen.has(p.identity)) continue
+    if (!p.identity || seen.has(p.identity)) continue
     seen.add(p.identity)
     if (p.meta.team === BLUE) blue++
     else if (p.meta.team === RED) red++

@@ -16,14 +16,14 @@ export type MatchMeta = {
   winner: Team // 0 while playing; set when phase === 'ended'
 }
 
-/** Participant metadata. `authority` marks the server's own simulation participant so clients
- *  filter it out of the player list (see the FINDING in server/sim/match.ts). */
+/** Participant metadata. The server's simulation seat is *not* a participant (it joins with
+ *  `{ server: true }` and is surfaced as `room.server`, excluded from presence), so no marker
+ *  flag is needed here — the roster is players only. */
 export type PlayerMeta = {
   name: string
   color: string
   team: Team
   ready: boolean
-  authority?: boolean
 }
 
 /** Room-wide chat, delivered over `publish()`/`subscribe()` and typed via the room's third
@@ -46,10 +46,11 @@ export type Announce =
 
 export type MatchRoom = Room<MatchMeta, PlayerMeta, ChatMsg>
 
-// ── Commands: client → authority ─────────────────────────────────────────────────────────────
-// Issued by selecting units and right-clicking / pressing build hotkeys. They are delivered with
-// `me.send(authorityId, command)` — see the FINDING in app/net.ts and server/sim/match.ts about
-// there being no first-class server inbox, so the authority is modeled as a room participant.
+// ── Commands: client → server seat ───────────────────────────────────────────────────────────
+// Issued by selecting units and right-clicking / pressing build hotkeys. Delivered with
+// `me.send(room.server.id, command)` to the room's server seat (`join({ server: true })`), which
+// `listen()`s for them server-side — see app/net.ts and server/sim/match.ts. (Round-2 adoption of
+// the seat closed the "no first-class client→server lane" finding; `send()` now returns a receipt.)
 export type Command =
   | { t: 'move'; ids: number[]; x: number; y: number }
   | { t: 'attackMove'; ids: number[]; x: number; y: number }

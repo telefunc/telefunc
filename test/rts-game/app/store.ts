@@ -1,6 +1,6 @@
 // The client store (zustand): all Room wiring on one side, plain state for React on the other.
 //
-// Live handles (the room, my participant, the authority) live in module variables, never in the
+// Live handles (the room, my participant) live in module variables, never in the
 // store — and every subscription is set up from user events (sign-in, join, start), never from
 // render, so nothing double-subscribes. The member list is `snapshot({ by: 'identity' })`, so two
 // tabs of one player collapse to one lobby row; the match's high-frequency world does NOT flow
@@ -27,7 +27,7 @@ export {
   showToast,
 }
 
-import type { LocalParticipant, RemoteParticipant, RoomSnapshotView } from 'telefunc'
+import type { LocalParticipant, RoomIdentitySnapshotView, RoomSnapshotView } from 'telefunc'
 import { create } from 'zustand'
 import { BLUE, NEUTRAL, RED, type Team } from '../shared/constants'
 import type { ChatMsg, MatchListing, MatchMeta, MatchRoom, PlayerMeta } from '../shared/types'
@@ -207,7 +207,7 @@ function wireRoom(r: MatchRoom, self: LocalParticipant<PlayerMeta>): void {
 }
 
 /** Reconcile store state from the room on any change: roster, phase, and — when the match starts —
- *  discovering the authority participant and opening the binary stream. */
+ *  discovering the server seat and opening the binary stream. */
 function syncRoom(): void {
   if (!room || !me) return
   const snap = room.snapshot() as RoomSnapshotView<MatchMeta, PlayerMeta>
@@ -222,31 +222,32 @@ function syncRoom(): void {
   if (meta.phase === 'playing' && !streaming) beginStream()
 }
 
-/** Collapse tabs to one row per identity. `RoomIdentitySnapshotView` isn't exported from the
- *  public barrel, so its type is derived structurally (see README finding "Identity snapshot view
- *  types aren't exported"). */
+/** Collapse tabs to one row per identity. `RoomIdentitySnapshotView` / `IdentityGroupView` are now
+ *  exported from the public barrel (finding 9 adopted in 51b4613), so the view is named directly —
+ *  no structural derivation. The server seat isn't in the roster, so there's nothing to filter. */
 function rosterFromSnapshot(): LobbyPlayer[] {
   if (!room) return []
-  const view = room.snapshot({ by: 'identity' })
+  const view: RoomIdentitySnapshotView<MatchMeta, PlayerMeta> = room.snapshot({ by: 'identity' })
   const out: LobbyPlayer[] = []
   for (const g of view.identities) {
     const p = g.participants[0]
-    if (!p || p.meta.authority || g.identity === null) continue
+    if (!p || g.identity === null) continue
     out.push({ identity: g.identity, name: p.meta.name, color: p.meta.color, team: p.meta.team, ready: p.meta.ready })
   }
   return out.sort((a, b) => a.team - b.team || a.name.localeCompare(b.name))
 }
 
-async function beginStream(): Promise<void> {
+/** Open the binary stream once the match is live. The server's simulation is the room's **seat**,
+ *  reachable directly as `room.server` (finding 2 adopted) — no roster scan for a marker flag, no
+ *  `getParticipant()` round-trip. It's `null` until the seat joins at match start; a later
+ *  `onChange` retries. */
+function beginStream(): void {
   if (!room || !me || streaming) return
-  const snap = room.snapshot()
-  const auth = snap.participants.find((p) => (p.meta as PlayerMeta).authority)
-  if (!auth) return // authority hasn't joined yet; a later onChange will retry
-  const remote = (await room.getParticipant(auth.id)) as RemoteParticipant<PlayerMeta> | null
-  if (!remote || streaming) return
+  const seat = room.server
+  if (!seat) return
   streaming = true
   setState({ myTeam: me.meta.team, phase: 'match' })
-  startStream(remote, me, me.meta.team)
+  startStream(seat, me, me.meta.team)
 }
 
 async function setTeam(team: Team): Promise<void> {

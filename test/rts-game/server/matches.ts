@@ -1,4 +1,4 @@
-export { createMatch, getMatchRoom, listMatches, startMatch, getPlayerTeam, MATCH_PREFIX, isAuthorityIdentity }
+export { createMatch, getMatchRoom, listMatches, startMatch, getPlayerTeam, MATCH_PREFIX }
 
 import { randomUUID } from 'node:crypto'
 import { Room } from 'telefunc'
@@ -7,16 +7,16 @@ import type { ChatMsg, MatchListing, MatchMeta, MatchRoom, PlayerMeta } from '..
 import { Match } from './sim/match'
 
 const MATCH_PREFIX = 'rts:match:'
+const MATCH_SIZE = 20 // 10v10 — the server seat is not counted (excluded from presence)
 
-// ── FINDING (server-owned per-room state + loop have no lifecycle home) ────────────────────────
-// The Room API is request-driven (telefunctions) and event-driven (guards/hooks). There is no
-// "room created / first player / room idle / room gone" lifecycle a match's authoritative object
-// and 10 Hz `setInterval` can hang on. So the app keeps a global registry of live `Match`
-// instances, starts/stops the loop by hand, and — because Vite runs *two* SSR module graphs and
-// reloads them in dev — pins the registry on `globalThis` so a reload doesn't spawn a second tick
-// loop for the same match. This is the Discord clone's finding 13 ("long-lived server state needs
-// globalThis latches") escalated from a bot + a DB handle to a real-time simulation loop.
-// ──────────────────────────────────────────────────────────────────────────────────────────────
+// ── FINDING #7 (per-room sim loop lifecycle) — resolved as DOCS in 51b4613 ─────────────────────
+// The Room API is request/event-driven, with no "room active/idle" hook to hang a 10 Hz
+// `setInterval` + authoritative object on. That's by design: a per-room loop in a multi-node
+// deployment needs leader election (which node runs it?), which a lifecycle hook can't provide —
+// so the app owns it. Single-node, the idiomatic shape is this `globalThis` singleton registry
+// (pinned so Vite's dual SSR graphs / dev reloads don't spawn a second loop), and the **server
+// seat** now gives a real `onEmpty` to drive teardown (see wireAbandonment) instead of the
+// hand-rolled real-player count round 1 needed. 51b4613 documents both.
 function registry(): Map<string, Match> {
   const g = globalThis as { __rtsMatches?: Map<string, Match> }
   g.__rtsMatches ??= new Map()
@@ -25,10 +25,6 @@ function registry(): Map<string, Match> {
 
 function matchRoomId(matchId: string): string {
   return MATCH_PREFIX + matchId
-}
-
-function isAuthorityIdentity(identity: string | null): boolean {
-  return identity !== null && identity.startsWith('authority:')
 }
 
 /** The trusted team of a player in a running match (or null): lets a reconnecting client be
@@ -46,36 +42,49 @@ async function createMatch(name: string, hostId: string): Promise<MatchRoom> {
     mapSeed: (Math.random() * 1e9) | 0,
     winner: 0,
   }
-  return await Room.create<MatchMeta, PlayerMeta, ChatMsg>(roomId, { meta, size: 21 }) // 10v10 + authority
+  const room = await Room.create<MatchMeta, PlayerMeta, ChatMsg>(roomId, { meta, size: MATCH_SIZE })
+
+  // Seat the server *now*, before any client joins, so every lobby client sees it in its initial
+  // roster (the seat join is roster-only — a client can't discover a seat that appears later). The
+  // simulation doesn't run until the host launches (`startMatch` → `match.begin`).
+  const match = new Match(roomId, room)
+  match.onDispose = () => {
+    registry().delete(roomId)
+    Room.close(roomId).catch(() => {})
+  }
+  registry().set(roomId, match)
+  await match.takeSeat()
+  wireAbandonment(room, match)
+  return room
 }
 
 async function getMatchRoom(roomId: string): Promise<MatchRoom> {
   return await Room.get<MatchMeta, PlayerMeta, ChatMsg>(roomId)
 }
 
-/** The match browser. `Room.list` gives a point-in-time directory; there is no live "a match
- *  opened/closed" event, so the browser polls this (see README finding "No live room directory").
- *  `RoomInfo.meta` is untyped (`Room.list` predates the metadata generics), hence the cast. */
+/** The match browser. `Room.list` is a point-in-time directory — there's no live "a match
+ *  opened/closed" event, so the browser polls this (finding 10b, working-as-designed: the lobby-
+ *  room + announce pattern is the live shape). `Room.list<MatchMeta>()` types `meta` end-to-end
+ *  now (finding 10a adopted in 51b4613 — the cast is gone). `count` excludes the server seat. */
 async function listMatches(): Promise<MatchListing[]> {
-  const rooms = await Room.list({ prefix: MATCH_PREFIX })
+  const rooms = await Room.list<MatchMeta>({ prefix: MATCH_PREFIX })
   return rooms
-    .map((r) => {
-      const meta = r.meta as MatchMeta
-      return { id: r.id, name: meta.name, phase: meta.phase, players: r.count, size: r.size - 1 }
-    })
+    .map((r) => ({ id: r.id, name: r.meta.name, phase: r.meta.phase, players: r.count, size: r.size }))
     .filter((m) => m.phase === 'lobby')
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 async function startMatch(roomId: string, byIdentity: string): Promise<void> {
-  if (registry().has(roomId)) return // already running (guards a double-start race)
+  const match = registry().get(roomId)
+  if (!match) throw new Error('That match no longer exists')
   const room = await getMatchRoom(roomId)
   if (room.meta.hostId !== byIdentity) throw new Error('Only the host can start the match')
-  if (room.meta.phase !== 'lobby') return
+  if (room.meta.phase !== 'lobby' || match.isRunning) return // already launched (double-start guard)
 
   // Snapshot the lobby's team choices server-side (trusted). `meta.team` is client-authored
   // display state, so it is read *here, once*, to build the authoritative identity→team map — it
-  // is never trusted again mid-match (see commands.ts).
+  // is never trusted again mid-match (see commands.ts). The roster is players only — the seat is a
+  // non-presence member, so `getParticipants()` never includes it.
   const participants = await room.getParticipants()
   const teamPlayers = new Map<Team, string[]>([
     [RED, []],
@@ -83,7 +92,7 @@ async function startMatch(roomId: string, byIdentity: string): Promise<void> {
   ])
   const seen = new Set<string>()
   for (const p of participants) {
-    if (p.meta.authority || !p.identity || seen.has(p.identity)) continue
+    if (!p.identity || seen.has(p.identity)) continue
     seen.add(p.identity)
     const team: Team = p.meta.team === BLUE ? BLUE : RED
     teamPlayers.get(team)?.push(p.identity)
@@ -92,36 +101,27 @@ async function startMatch(roomId: string, byIdentity: string): Promise<void> {
     throw new Error('Both teams need at least one player')
   }
 
-  const match = new Match(roomId, room)
-  match.onDispose = () => {
-    registry().delete(roomId)
-    Room.close(roomId).catch(() => {})
-  }
-  registry().set(roomId, match)
-  await match.start(teamPlayers)
+  await match.begin(teamPlayers)
 
-  wireAbandonment(room, match, roomId)
+  wireAbandonment(room, match)
 }
 
-/** End a match as a no-contest if every real player has left for good (a reload keeps the seat
- *  for `reconnectTimeout`, so a normal reconnect never trips this). */
-function wireAbandonment(room: MatchRoom, match: Match, roomId: string): void {
-  let timer: ReturnType<typeof setTimeout> | null = null
-  const authorityIdentity = 'authority:' + roomId
-  const realPlayers = (): number => {
-    const ids = new Set<string>()
-    for (const p of room.snapshot().participants)
-      if (p.identity && p.identity !== authorityIdentity) ids.add(p.identity)
-    return ids.size
+/** Tear a match down once every player has left for good. The **server seat** is excluded from
+ *  presence, so `onEmpty` fires exactly when the last *real* player leaves (round 1 had to count
+ *  non-authority participants by hand). The grace also starts at creation, so a match created but
+ *  never joined (host bailed) doesn't linger. A reload keeps the seat for `reconnectTimeout`, so a
+ *  normal reconnect fires `onJoin` and cancels the grace before it abandons. */
+function wireAbandonment(room: MatchRoom, match: Match): void {
+  let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => match.abandon(), 45_000)
+  const arm = (): void => {
+    if (!timer) timer = setTimeout(() => match.abandon(), 30_000)
   }
-  const check = (): void => {
-    if (realPlayers() === 0) {
-      if (!timer) timer = setTimeout(() => match.abandon(), 30_000)
-    } else if (timer) {
+  const cancel = (): void => {
+    if (timer) {
       clearTimeout(timer)
       timer = null
     }
   }
-  room.onLeave(check)
-  room.onJoin(check)
+  room.onEmpty(arm)
+  room.onJoin(cancel)
 }
