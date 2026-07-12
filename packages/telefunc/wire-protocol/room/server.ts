@@ -48,6 +48,7 @@ import {
   type MemberSnapshot,
   type ReqJoinAck,
   type ReqOkAck,
+  type ReqDmAck,
   type RoomConfigRecord,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
@@ -76,6 +77,7 @@ import type {
   RoomMeta,
   RoomOptions,
   RoomGetOptions,
+  RoomSendReceipt,
   RoomSnapshotView,
   RoomIdentitySnapshotView,
   JoinGuard,
@@ -160,8 +162,9 @@ type RoomStatic = {
     meta?: P,
     options?: JoinOptions,
   ): Promise<LocalParticipant<P, Pub>>
-  /** List all rooms — optionally only those whose ID starts with `prefix`. */
-  list(options?: { prefix?: string }): Promise<RoomInfo[]>
+  /** List all rooms — optionally only those whose ID starts with `prefix`. `M` types the returned
+   *  `meta` (`Room.list<MatchMeta>()`), replacing a `r.meta as MatchMeta` cast at the call site. */
+  list<M extends RoomMeta = RoomMeta>(options?: { prefix?: string }): Promise<RoomInfo<M>[]>
   /** Admin: update the room's configuration — provided fields replace, omitted fields keep
    *  their current value (`isolated` is fixed at creation). */
   update(id: string, options: RoomOptions): Promise<void>
@@ -215,7 +218,7 @@ const Room: RoomStatic = {
   getOrCreate: getOrCreateRoom as RoomStatic['getOrCreate'],
   guard: guardRoom as RoomStatic['guard'],
   join: joinRoom as RoomStatic['join'],
-  list: listRooms,
+  list: listRooms as RoomStatic['list'],
   update: updateRoom,
   setAttributes: setRoomAttributes,
   close: closeRoom,
@@ -434,7 +437,9 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
     )
     members = await readMembers(kv, id, await resolveIdentityMembers(kv, id, target.identity))
   }
-  return members.map((m) => ({ id: m.id, identity: m.identity ?? null, meta: m.meta, joinedAt: m.joinedAt }))
+  return members
+    .filter((m) => !m.server) // the server seat is not a participant
+    .map((m) => ({ id: m.id, identity: m.identity ?? null, meta: m.meta, joinedAt: m.joinedAt }))
 }
 
 async function announceToRoom(id: string, data: unknown): Promise<void> {
@@ -571,12 +576,25 @@ class ServerRoom implements Room {
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     const selfDelivery = normalizeJoinOptions(meta, options)
     const identity = normalizeIdentity(options)
+    const server = normalizeServer(options)
+    // Best-effort local guard — a second seat on another node can't be seen without a KV scan, so
+    // "at most one" is ultimately a contract; this catches the common same-object double-join.
+    if (server) assertUsage(!this._state.getServer(), 'A room can have at most one server participant.')
     let participant!: ServerLocalParticipant
-    await this._admitMember(meta, identity, (id, joinedAt) => {
-      participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, identity)
-      this._localParticipants.set(id, participant)
-    })
+    await this._admitMember(
+      meta,
+      identity,
+      (id, joinedAt) => {
+        participant = new ServerLocalParticipant(this, id, meta, joinedAt, selfDelivery, identity)
+        this._localParticipants.set(id, participant)
+      },
+      server,
+    )
     return participant
+  }
+
+  get server(): RemoteParticipant | null {
+    return this._state.getServer()
   }
 
   async getParticipants(): Promise<RemoteParticipant[]> {
@@ -644,15 +662,19 @@ class ServerRoom implements Room {
     meta: ParticipantMeta,
     identity: string | null,
     track: (id: string, joinedAt: number) => void,
+    server = false,
   ): Promise<{ id: string; joinedAt: number }> {
     const id = crypto.randomUUID()
+    // The server seat is not a party seeking admission — it's the server itself — so it bypasses the
+    // participant-join ceremony: no `onBeforeJoin` policy, no `join` control event, no `onAfterJoin`.
     // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
     const onBeforeJoin = this._guards?.onBeforeJoin
-    if (onBeforeJoin) await onBeforeJoin({ id, meta, identity })
-    const joinedAt = await this._createMember(id, meta, identity)
+    if (!server && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
+    const joinedAt = await this._createMember(id, meta, identity, server)
     track(id, joinedAt)
     this._syncSubs()
-    this._state.applyJoin(id, meta, joinedAt, identity)
+    this._state.applyJoin(id, meta, joinedAt, identity, server)
+    if (server) return { id, joinedAt } // roster-only: no control-lane announce, no post-join hook
     await publishCtrl(this.id, {
       __r: 'join',
       id,
@@ -667,7 +689,12 @@ class ServerRoom implements Room {
   }
 
   /** KV half of a join, guarding against a concurrent `Room.close()`. */
-  private async _createMember(id: string, meta: ParticipantMeta, identity: string | null): Promise<number> {
+  private async _createMember(
+    id: string,
+    meta: ParticipantMeta,
+    identity: string | null,
+    server = false,
+  ): Promise<number> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
     const joinedAt = Date.now()
@@ -677,6 +704,7 @@ class ServerRoom implements Room {
       seenAt: joinedAt,
       metaSeq: 0,
       ...(identity === null ? {} : { identity }),
+      ...(server ? { server: true } : {}),
     }
     // Index the membership before writing its record — never after, so a reader can't miss a live
     // member (an orphan marker is harmless; see resolveIdentityMembers).
@@ -864,7 +892,7 @@ class ServerRoom implements Room {
   /** @internal — send a private message: published on the target's inbox key, which only
    *  the target's owning node subscribes to (see `_onDm`). The sender's verified meta rides
    *  the envelope so every receiver can surface a rich sender. */
-  async _sendDm(from: string, to: string, data: unknown): Promise<void> {
+  async _sendDm(from: string, to: string, data: unknown): Promise<RoomSendReceipt> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
     const target = await this._resolveMember(to)
     if (!target) throw new Error(`Participant not found: ${to}`)
@@ -880,8 +908,10 @@ class ServerRoom implements Room {
       data,
     }
     const receipt = await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+    const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._guards?.onAfterSend
-    if (onAfterSend) await onAfterSend(sender, target, data, { seq: receipt.seq, timestamp: receipt.timestamp })
+    if (onAfterSend) await onAfterSend(sender, target, data, info)
+    return info
   }
 
   /** The member's live view — falling back to the authoritative KV record, since the local
@@ -1107,7 +1137,7 @@ class ServerRoom implements Room {
   }
 
   /** @internal — requests arriving on a room stub channel. The return value is the ack. */
-  async _handleStubRequest(stub: RoomStubChannel, msg: unknown): Promise<ReqJoinAck | ReqOkAck | undefined> {
+  async _handleStubRequest(stub: RoomStubChannel, msg: unknown): Promise<ReqJoinAck | ReqOkAck | ReqDmAck | undefined> {
     if (!hasRoomTag(msg)) return undefined
     const req = msg as RoomStubRequest
     try {
@@ -1136,8 +1166,7 @@ class ServerRoom implements Room {
           return { ok: true }
         case 'req-dm':
           this._assertStubMember(stub, req.id)
-          await this._sendDm(req.id, req.to, req.data)
-          return { ok: true }
+          return { ok: true, ack: await this._sendDm(req.id, req.to, req.data) }
         case 'sub-binary': {
           const wants = sanitizeBinaryWants(req.wants)
           if (!wants) throw new Error('Malformed sub-binary declaration')
@@ -1504,9 +1533,9 @@ class ServerLocalParticipant extends ParticipantBase {
     return this._room._publishBinaryFramed(this.id, framed)
   }
 
-  async send(to: string | Sender, data: unknown): Promise<void> {
+  async send(to: string | Sender, data: unknown): Promise<RoomSendReceipt> {
     this._assertActive()
-    await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
+    return await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -1591,6 +1620,7 @@ async function readMembers(kv: RoomKV, roomId: string, ids?: string[]): Promise<
       metaSeq: record.metaSeq,
       identity: record.identity ?? null,
       ...(record.tracks === undefined ? {} : { tracks: record.tracks }),
+      ...(record.server ? { server: true } : {}),
     })
   }
   return members
@@ -1682,6 +1712,14 @@ function normalizeIdentity(options: JoinOptions | undefined): string | null {
     'join() options.identity should be a non-empty string',
   )
   return options.identity
+}
+
+/** Server-side only, like `identity`: a client `join()` never reads this option, so it can't seat
+ *  itself as the server. */
+function normalizeServer(options: JoinOptions | undefined): boolean {
+  if (options?.server === undefined) return false
+  assertUsage(typeof options.server === 'boolean', 'join() options.server should be a boolean')
+  return options.server
 }
 
 function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta; size: number } {

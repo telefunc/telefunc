@@ -24,6 +24,8 @@ export type {
   LeaveCause,
   RoomSnapshotView,
   ParticipantSnapshotView,
+  RoomIdentitySnapshotView,
+  IdentityGroupView,
   BinaryFrameInfo,
 } from '../wire-protocol/room/types.js'
 

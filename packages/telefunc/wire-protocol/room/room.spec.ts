@@ -494,6 +494,89 @@ describe('presence', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
+// Server seat — a `join({ server: true })` member: reachable as `room.server`,
+// excluded from every presence read, discovered through the roster.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('server seat', () => {
+  it('is reachable as room.server but excluded from presence', async () => {
+    const room = await Room.create('seat', { size: 2 })
+    const joins: string[] = []
+    room.onJoin((m) => joins.push(m.id))
+
+    const server = await room.join({ role: 'authority' }, { server: true })
+    const p1 = await room.join({ name: 'P1' })
+    const p2 = await room.join({ name: 'P2' })
+
+    // Presence excludes the seat: two players fill a size-2 room, the seat is not one of them.
+    expect(room.count).toBe(2)
+    expect(room.isFull).toBe(true)
+    expect((await room.getParticipants()).map((m) => m.id).sort()).toEqual([p1.id, p2.id].sort())
+    expect(
+      room
+        .snapshot()
+        .participants.map((p) => p.id)
+        .sort(),
+    ).toEqual([p1.id, p2.id].sort())
+    expect(joins).toEqual([p1.id, p2.id]) // onJoin never fired for the seat
+
+    // But it's a first-class, addressable member.
+    expect(room.server!.id).toBe(server.id)
+    expect((await room.getParticipant(server.id))!.id).toBe(server.id)
+  })
+
+  it('room.onEmpty fires when the last real player leaves — the seat lingers', async () => {
+    const room = await Room.create('seat-empty')
+    const events: string[] = []
+    room.onLeave((m) => events.push(`leave:${m.id}`))
+    room.onEmpty(() => events.push('empty'))
+
+    await room.join({}, { server: true })
+    const player = await room.join({ name: 'solo' })
+    expect(room.count).toBe(1) // the seat doesn't count
+
+    await player.leave()
+    expect(events).toEqual([`leave:${player.id}`, 'empty']) // onEmpty despite the seat still seated
+    expect(room.count).toBe(0)
+    expect(room.server).not.toBeNull() // the seat outlives the players
+  })
+
+  it('is discovered cross-instance via the roster, still excluded from presence', async () => {
+    const a = await Room.create('seat-x')
+    const server = await a.join({}, { server: true })
+    await a.join({ name: 'P1' })
+
+    const b = await Room.get('seat-x')
+    const participants = await b.getParticipants() // materializes the roster from KV
+    expect(participants.map((m) => m.meta)).toEqual([{ name: 'P1' }]) // seat excluded
+    expect(b.count).toBe(1)
+    expect(b.server!.id).toBe(server.id) // reachable as room.server on the sibling
+  })
+
+  it('the seat sends and receives DMs like any member', async () => {
+    const room = await Room.create('seat-dm')
+    const server = await room.join({}, { server: true })
+    const player = await room.join({ name: 'P1' })
+    const toServer: unknown[] = []
+    const toPlayer: unknown[] = []
+    server.listen((data) => toServer.push(data))
+    player.listen((data) => toPlayer.push(data))
+
+    await player.send(room.server!.id, { cmd: 'move' }) // address the server without scanning the roster
+    await server.send(player.id, { ack: true })
+
+    expect(toServer).toEqual([{ cmd: 'move' }])
+    expect(toPlayer).toEqual([{ ack: true }])
+  })
+
+  it('rejects a second server seat', async () => {
+    const room = await Room.create('seat-one')
+    await room.join({}, { server: true })
+    await expect(room.join({}, { server: true })).rejects.toThrow('at most one server')
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
 // Data pub/sub — bug classes targeted: lost sender identity, cross-member
 // bleed on per-member subscriptions, self-echo despite selfDelivery=false.
 // ───────────────────────────────────────────────────────────────────────────
@@ -873,11 +956,14 @@ describe('direct messages', () => {
     a.subscribe((data) => roomStream.push(data))
     b.subscribe((data) => roomStream.push(data))
 
-    await alice.send((await a.getParticipant(bob.id))!, 'psst') // target as object — or pass the ID
+    const receipt = await alice.send((await a.getParticipant(bob.id))!, 'psst') // target as object — or pass the ID
 
     expect(bobInbox).toEqual([['psst', alice.id, { name: 'Alice' }]]) // live RemoteParticipant sender
     expect(aliceInbox).toEqual([]) // not echoed to the sender
     expect(roomStream).toEqual([]) // never on the room stream
+    // send() resolves with the delivery receipt — the sequenced hand-off, not a fire-and-forget.
+    expect(typeof receipt.seq).toBe('number')
+    expect(typeof receipt.timestamp).toBe('number')
   })
 
   it('rejects unknown targets and departed senders', async () => {
@@ -1729,6 +1815,29 @@ describe('ClientRoom', () => {
     fake.emit({ __r: 'join', id: bob, meta: { name: 'Bob' }, joinedAt: 2 })
     expect(joins).toEqual([bob])
     expect(clientRoom.count).toBe(2)
+  })
+
+  it('rejects a client-side server seat; a roster server member surfaces as room.server, off-presence', async () => {
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('seat', { count: 1 }))
+    await expect(clientRoom.join({}, { server: true })).rejects.toThrow('server-side only')
+
+    const serverId = crypto.randomUUID()
+    const player = crypto.randomUUID()
+    const joins: string[] = []
+    clientRoom.onJoin((m) => joins.push(m.id))
+    fake.emit({
+      __r: 'roster',
+      members: [
+        { id: serverId, meta: { role: 'authority' }, joinedAt: 1, server: true },
+        { id: player, meta: { name: 'P1' }, joinedAt: 2 },
+      ],
+    })
+
+    expect(clientRoom.server!.id).toBe(serverId) // reachable
+    expect(clientRoom.count).toBe(1) // but not a participant
+    expect((await clientRoom.getParticipants()).map((m) => m.id)).toEqual([player])
+    expect(joins).toEqual([]) // roster seeds silently; the seat is not a join event either
   })
 
   it('join() + publish() wrap the wire protocol; relayed data comes back with sender identity', async () => {

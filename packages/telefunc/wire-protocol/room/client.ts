@@ -20,6 +20,7 @@ import {
   type ReqJoinAck,
   type ReqOkAck,
   type ReqPublishAck,
+  type ReqDmAck,
   type RoomDataEnvelope,
   type RoomDemandEvent,
   type RoomDataPublish,
@@ -42,6 +43,7 @@ import type {
   RemoteParticipant,
   Room,
   RoomMeta,
+  RoomSendReceipt,
   RoomSnapshotView,
   RoomIdentitySnapshotView,
   Sender,
@@ -133,11 +135,19 @@ class ClientRoom implements Room {
   get isClosed(): boolean {
     return this._state.closed
   }
+  get server(): RemoteParticipant | null {
+    return this._state.getServer()
+  }
 
   async join(meta: ParticipantMeta = {}, options?: JoinOptions): Promise<LocalParticipant> {
     if (options?.identity !== undefined) {
       throw new Error(
         'join() options.identity is server-assigned: identity is trusted, so set it where trust lives — in the granting telefunction (server-side join()), not on the client.',
+      )
+    }
+    if (options?.server !== undefined) {
+      throw new Error(
+        'join() options.server is server-side only: the server seat is created by the granting telefunction (server-side join({ server: true })), not by a client.',
       )
     }
     const selfDelivery = normalizeJoinOptions(meta, options)
@@ -176,7 +186,13 @@ class ClientRoom implements Room {
   }
 
   /** @internal — revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
-  _reviveRemote(snap: { id: string; meta: ParticipantMeta; joinedAt: number; metaSeq: number }): RemoteParticipant {
+  _reviveRemote(snap: {
+    id: string
+    meta: ParticipantMeta
+    joinedAt: number
+    metaSeq: number
+    server?: boolean
+  }): RemoteParticipant {
     return this._state.ensureRemoteFromSnapshot(snap)
   }
 
@@ -227,7 +243,7 @@ class ClientRoom implements Room {
   // ── Requests & publishes (used by ClientRoomParticipant) ──
 
   /** @internal */
-  async _request(req: RoomStubRequest): Promise<ReqJoinAck | ReqOkAck> {
+  async _request(req: RoomStubRequest): Promise<ReqJoinAck | ReqOkAck | ReqDmAck> {
     const ack = await this._stub.send(req, { ack: true })
     assert(isObject(ack) && typeof ack.ok === 'boolean')
     return ack as ReqJoinAck | ReqOkAck
@@ -476,10 +492,10 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return await this._room._publishBinaryFramed(frameWithMemberId(this.id, data, options))
   }
 
-  async send(to: string | Sender, data: unknown): Promise<void> {
+  async send(to: string | Sender, data: unknown): Promise<RoomSendReceipt> {
     this._assertActive()
     const toId = typeof to === 'string' ? to : to.id
-    unwrapOkAck(await this._room._request({ __r: 'req-dm', id: this.id, to: toId, data }))
+    return unwrapDmAck(await this._room._request({ __r: 'req-dm', id: this.id, to: toId, data }))
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -542,9 +558,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return unwrapPublishAck(await this._channel.sendBinary(frameWithMemberId(this.id, data, options), { ack: true }))
   }
 
-  async send(to: string | Sender, data: unknown): Promise<void> {
+  async send(to: string | Sender, data: unknown): Promise<RoomSendReceipt> {
     this._assertActive()
-    unwrapOkAck(await this._request({ __r: 'req-dm', to: typeof to === 'string' ? to : to.id, data }))
+    return unwrapDmAck(await this._request({ __r: 'req-dm', to: typeof to === 'string' ? to : to.id, data }))
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -589,6 +605,13 @@ function unwrapOkAck(ack: unknown): void {
 function unwrapPublishAck(ack: unknown): ChannelPublishAck {
   assert(isObject(ack) && typeof ack.ok === 'boolean')
   const res = ack as ReqPublishAck
+  if (!res.ok) throw new Error(res.err)
+  return res.ack
+}
+
+function unwrapDmAck(ack: unknown): RoomSendReceipt {
+  assert(isObject(ack) && typeof ack.ok === 'boolean')
+  const res = ack as ReqDmAck
   if (!res.ok) throw new Error(res.err)
   return res.ack
 }

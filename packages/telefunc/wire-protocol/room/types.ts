@@ -158,6 +158,12 @@ type JoinOptions = {
    *  trusted, so it's assigned where trust lives: in the granting telefunction. A client-side
    *  `join()` rejects it. Immutable for the membership's lifetime. */
   identity?: string
+  /** Join as the room's server seat (default: `false`) — a full participant (publish, `listen`,
+   *  `send`, `onDemand`) that is excluded from presence (`count`, roster, `onJoin`/`onLeave`/
+   *  `onEmpty`) and surfaced to observers as `room.server`. For a server that acts in a room —
+   *  authoritative state, a bot, a command sink — without impersonating a player. Server-side
+   *  `join()` only (like `identity`); a client-side `join()` ignores it. At most one per room. */
+  server?: boolean
 }
 
 /** One participant inside `room.snapshot()`. */
@@ -197,10 +203,11 @@ type RoomIdentitySnapshotView<M extends RoomMeta = RoomMeta, P extends Participa
   readonly identities: readonly IdentityGroupView<P>[]
 }
 
-/** Lightweight room snapshot returned by `Room.list()`. */
-type RoomInfo = {
+/** Lightweight room snapshot returned by `Room.list()`. `M` types `meta` — pass your room's meta
+ *  type (`Room.list<MatchMeta>()`), same caller-assertion relationship as `Room<M>`. */
+type RoomInfo<M extends RoomMeta = RoomMeta> = {
   readonly id: string
-  readonly meta: RoomMeta
+  readonly meta: M
   readonly size: number
   readonly count: number
   readonly isEmpty: boolean
@@ -264,6 +271,11 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   readonly isEmpty: boolean
   readonly isFull: boolean
   readonly isClosed: boolean
+
+  /** The room's server seat (`join({ server: true })`), or `null` if there is none. A reachable
+   *  non-presence participant: `room.server.send(cmd)` addresses the server without scanning the
+   *  roster, and `room.server.subscribeBinary(...)` reads its tracks. */
+  readonly server: RemoteParticipant<P, Pub> | null
 
   /** Join the room. Returns your own participant handle. */
   join(meta?: P, options?: JoinOptions): Promise<LocalParticipant<P, Pub>>
@@ -333,8 +345,10 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
    *  anywhere wants it right now — the signal to pause the encoder until someone subscribes. */
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
 
-  /** Send a private message to one participant (or their ID) — nobody else receives it. */
-  send(to: string | Sender<P>, data: unknown): Promise<void>
+  /** Send a private message to one participant (or their ID) — nobody else receives it. Resolves
+   *  with the delivery receipt (`{ seq, timestamp }`) once the message is sequenced on the
+   *  recipient's inbox — so `await send(...)` waits for the hand-off, not just the local enqueue. */
+  send(to: string | Sender<P>, data: unknown): Promise<RoomSendReceipt>
   /** Receive private messages addressed to you. `from` is the verified sender —
    *  `null` for room-authored messages (`Room.send()`). Returns an unlisten function. */
   listen(callback: (data: unknown, from: Sender<P> | null) => void): () => void
