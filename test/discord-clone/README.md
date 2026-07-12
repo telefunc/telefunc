@@ -58,6 +58,13 @@ deleted from app code.
   once instead of waiting for the next periodic keyframe (`app/call.ts`) — `onDemand` still owns
   pause/resume, `retain` owns late-joiner seeding. `retain` is the publish-lane replay finding 22
   asked for; the `Room.send` twin (22b) is still open.
+- **Round 11** followed the base to `e240b5b`, which added an **opt-in DM ack**: `me.send(to, data,
+  { ack: true })` waits for the recipient's `listen` handler to run and resolves with its return
+  (request/response), rejecting if they leave before handling. Nothing to adopt — this app closes the
+  member-to-member `me.send()` lane by guard (finding 2), DMs are server-delivered, and `ack` is still
+  live-only (both parties present), so it's request/response, not the offline-capable messaging
+  finding 2 is about. Merged to stay current and verified: `me.listen()` (which carries the app's DM
+  notices) is unaffected — its callback return type widened `void`→`unknown`, source-compatible.
 
 **Features**
 
@@ -165,7 +172,10 @@ close the lane so clients can't bypass the server path (`server/guards.ts`).
   (a DM fired reactively on a join event could arrive before the joiner attached its listener)
   is gone.
 - Still open (by design): the lane is ephemeral peer-signaling, not messaging. The DB-first
-  architecture stands; the docs should keep positioning the lane that way.
+  architecture stands; the docs should keep positioning the lane that way. *(Round 11 added opt-in
+  `me.send(to, data, { ack: true })` — confirmed request/response delivery that resolves with the
+  recipient's `listen` return. It sharpens the lane's purpose but stays live-only, both parties
+  present, so it still can't carry offline DMs — the disposition holds.)*
 
 ### 3. Guards are per-instance — policy holes are one `Room.get()` away
 
@@ -517,7 +527,7 @@ expired sessions and the bot's `greeted` set are never pruned.
 | `room.getParticipant` / `onEmpty` / `onFull` / `isEmpty` / `isClosed` / `onAfterSend` / `onAfterJoin` | ✖ | roster filtering + live getters covered every need; the app persists in `onAfterPublish` only |
 | `me.publish` / `publishBinary({ track, keyFrame, retain })` + ack `receivers` / `onDemand` / `listen` / `setAttributes` / `leave` / `onLeave` (with `LeaveCause`) / `selfDelivery: false` | ✔ | chat + typing, media tracks paused by `onDemand` when unwatched, **keyframes `retain`ed for late joiners** (round 10, finding 22), DM notices, per-field status & mute, channel switching, kick screen (`setMeta` superseded by `setAttributes` everywhere — finding 5) |
 | `publish({ coalesce })` / `publish({ retain })` (text) | ✖ | `coalesce` is for lossy high-frequency streams (cursors) — this app's chat/typing are lossless/rate-limited already; text `retain` (last-message-only) has no home either — chat is DB-backed and replayed by `Room.get({ tail })` history, richer than one retained message (binary `retain` **is** used, above) |
-| `me.send` | ✖ | deliberately closed by guard — see finding 2 |
+| `me.send` / `me.send({ ack })` | ✖ | deliberately closed by guard — see finding 2; the round-11 `{ ack }` confirmed-delivery option rides this same lane and is still live-only, so it doesn't change the server-mediated DM design |
 | `member.subscribeBinary(cb, { track })` / `onUpdate` / `onLeave` / `joinedAt` / `meta` / `identity` | ✔ | per-track media, live rosters, decoder lifecycle, tab dedupe |
 | `member.subscribe` | ✖ | room-level `subscribe` + the verified `from` covered per-member needs |
 
