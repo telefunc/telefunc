@@ -8,6 +8,7 @@ import type {
   LocalParticipant,
   ParticipantMeta,
   PublishOptions,
+  RoomSendReceipt,
   Sender,
 } from './types.js'
 
@@ -61,7 +62,7 @@ abstract class ParticipantBase implements LocalParticipant {
 
   abstract publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck>
   abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
-  abstract send(to: string | Sender, data: unknown): Promise<void>
+  abstract send(to: string | Sender, data: unknown): Promise<RoomSendReceipt>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract setAttributes(attributes: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>

@@ -873,11 +873,14 @@ describe('direct messages', () => {
     a.subscribe((data) => roomStream.push(data))
     b.subscribe((data) => roomStream.push(data))
 
-    await alice.send((await a.getParticipant(bob.id))!, 'psst') // target as object — or pass the ID
+    const receipt = await alice.send((await a.getParticipant(bob.id))!, 'psst') // target as object — or pass the ID
 
     expect(bobInbox).toEqual([['psst', alice.id, { name: 'Alice' }]]) // live RemoteParticipant sender
     expect(aliceInbox).toEqual([]) // not echoed to the sender
     expect(roomStream).toEqual([]) // never on the room stream
+    // send() resolves with the delivery receipt — the sequenced hand-off, not a fire-and-forget.
+    expect(typeof receipt.seq).toBe('number')
+    expect(typeof receipt.timestamp).toBe('number')
   })
 
   it('rejects unknown targets and departed senders', async () => {

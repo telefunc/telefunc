@@ -48,6 +48,7 @@ import {
   type MemberSnapshot,
   type ReqJoinAck,
   type ReqOkAck,
+  type ReqDmAck,
   type RoomConfigRecord,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
@@ -76,6 +77,7 @@ import type {
   RoomMeta,
   RoomOptions,
   RoomGetOptions,
+  RoomSendReceipt,
   RoomSnapshotView,
   RoomIdentitySnapshotView,
   JoinGuard,
@@ -865,7 +867,7 @@ class ServerRoom implements Room {
   /** @internal — send a private message: published on the target's inbox key, which only
    *  the target's owning node subscribes to (see `_onDm`). The sender's verified meta rides
    *  the envelope so every receiver can surface a rich sender. */
-  async _sendDm(from: string, to: string, data: unknown): Promise<void> {
+  async _sendDm(from: string, to: string, data: unknown): Promise<RoomSendReceipt> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
     const target = await this._resolveMember(to)
     if (!target) throw new Error(`Participant not found: ${to}`)
@@ -881,8 +883,10 @@ class ServerRoom implements Room {
       data,
     }
     const receipt = await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+    const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._guards?.onAfterSend
-    if (onAfterSend) await onAfterSend(sender, target, data, { seq: receipt.seq, timestamp: receipt.timestamp })
+    if (onAfterSend) await onAfterSend(sender, target, data, info)
+    return info
   }
 
   /** The member's live view — falling back to the authoritative KV record, since the local
@@ -1108,7 +1112,7 @@ class ServerRoom implements Room {
   }
 
   /** @internal — requests arriving on a room stub channel. The return value is the ack. */
-  async _handleStubRequest(stub: RoomStubChannel, msg: unknown): Promise<ReqJoinAck | ReqOkAck | undefined> {
+  async _handleStubRequest(stub: RoomStubChannel, msg: unknown): Promise<ReqJoinAck | ReqOkAck | ReqDmAck | undefined> {
     if (!hasRoomTag(msg)) return undefined
     const req = msg as RoomStubRequest
     try {
@@ -1137,8 +1141,7 @@ class ServerRoom implements Room {
           return { ok: true }
         case 'req-dm':
           this._assertStubMember(stub, req.id)
-          await this._sendDm(req.id, req.to, req.data)
-          return { ok: true }
+          return { ok: true, ack: await this._sendDm(req.id, req.to, req.data) }
         case 'sub-binary': {
           const wants = sanitizeBinaryWants(req.wants)
           if (!wants) throw new Error('Malformed sub-binary declaration')
@@ -1505,9 +1508,9 @@ class ServerLocalParticipant extends ParticipantBase {
     return this._room._publishBinaryFramed(this.id, framed)
   }
 
-  async send(to: string | Sender, data: unknown): Promise<void> {
+  async send(to: string | Sender, data: unknown): Promise<RoomSendReceipt> {
     this._assertActive()
-    await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
+    return await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {

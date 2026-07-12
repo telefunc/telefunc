@@ -334,8 +334,10 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
    *  anywhere wants it right now — the signal to pause the encoder until someone subscribes. */
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
 
-  /** Send a private message to one participant (or their ID) — nobody else receives it. */
-  send(to: string | Sender<P>, data: unknown): Promise<void>
+  /** Send a private message to one participant (or their ID) — nobody else receives it. Resolves
+   *  with the delivery receipt (`{ seq, timestamp }`) once the message is sequenced on the
+   *  recipient's inbox — so `await send(...)` waits for the hand-off, not just the local enqueue. */
+  send(to: string | Sender<P>, data: unknown): Promise<RoomSendReceipt>
   /** Receive private messages addressed to you. `from` is the verified sender —
    *  `null` for room-authored messages (`Room.send()`). Returns an unlisten function. */
   listen(callback: (data: unknown, from: Sender<P> | null) => void): () => void

@@ -57,6 +57,7 @@ export type {
   ReqOkAck,
   ReqJoinAck,
   ReqPublishAck,
+  ReqDmAck,
   MemberWants,
   TrackWants,
   BinaryWants,
@@ -65,7 +66,14 @@ export type {
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import type { ChannelPublishInfo } from '../channel.js'
-import type { BinaryPublishOptions, JoinOptions, LeaveCause, ParticipantMeta, RoomMeta } from './types.js'
+import type {
+  BinaryPublishOptions,
+  JoinOptions,
+  LeaveCause,
+  ParticipantMeta,
+  RoomMeta,
+  RoomSendReceipt,
+} from './types.js'
 
 // ---------------------------------------------------------------------------
 // Keys & records
@@ -314,6 +322,7 @@ type MemberWants = { all: boolean; members: string[] }
 type ReqOkAck = { ok: true } | { ok: false; err: string }
 type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }
 type ReqPublishAck = { ok: true; ack: ChannelPublishInfo } | { ok: false; err: string }
+type ReqDmAck = { ok: true; ack: RoomSendReceipt } | { ok: false; err: string }
 
 /** Decode a leave event's cause — an absent wire cause means a voluntary leave. */
 function leaveCauseFromWire(event: { cause?: 'removed' | 'disconnected'; reason?: unknown }): LeaveCause {

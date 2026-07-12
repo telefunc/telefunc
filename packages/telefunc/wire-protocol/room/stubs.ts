@@ -21,6 +21,7 @@ import {
   type ParticipantStubRequest,
   type ReqOkAck,
   type ReqPublishAck,
+  type ReqDmAck,
   type RoomDemandEvent,
   type RoomRosterEvent,
 } from './protocol.js'
@@ -158,8 +159,7 @@ function bindParticipantStubChannel(
           await participant.setAttributes(isObject(req.attrs) ? req.attrs : {})
           return { ok: true } satisfies ReqOkAck
         case 'req-dm':
-          await participant.send(req.to, req.data)
-          return { ok: true } satisfies ReqOkAck
+          return { ok: true, ack: await participant.send(req.to, req.data) } satisfies ReqDmAck
         case 'req-leave':
           await participant.leave()
           return { ok: true } satisfies ReqOkAck
