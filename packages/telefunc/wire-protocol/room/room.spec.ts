@@ -1378,7 +1378,11 @@ describe('direct message acks', () => {
     const player = await room.join({ name: 'p' })
     authority.listen((cmd) => `applied:${cmd}`)
 
-    expect(await player.send(authority.id, 'move e4', { ack: true })).toBe('applied:move e4')
+    // A superset of the plain-send receipt: the reply plus the message's own seq/timestamp.
+    const receipt = await player.send(authority.id, 'move e4', { ack: true })
+    expect(receipt.response).toBe('applied:move e4')
+    expect(typeof receipt.seq).toBe('number')
+    expect(typeof receipt.timestamp).toBe('number')
   })
 
   it('rejects with the recipient handler’s error', async () => {
@@ -1399,7 +1403,7 @@ describe('direct message acks', () => {
     b.listen(() => 'first')
     b.listen(() => 'second')
 
-    expect(await a.send(b.id, 'x', { ack: true })).toBe('second')
+    expect((await a.send(b.id, 'x', { ack: true })).response).toBe('second')
   })
 
   it('waits for a recipient that listens after the fact — no spurious failure on the pre-listen race', async () => {
@@ -1411,7 +1415,7 @@ describe('direct message acks', () => {
     await settle()
     authority.listen((cmd) => `pong:${cmd}`) // attaches now → the held DM is handled
 
-    expect(await pending).toBe('pong:ping')
+    expect((await pending).response).toBe('pong:ping')
   })
 
   it('rejects if the recipient leaves before handling', async () => {

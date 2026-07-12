@@ -18,6 +18,7 @@ export type {
   AfterJoinHook,
   RoomPublishReceipt,
   RoomSendReceipt,
+  RoomAckReceipt,
   RoomJoinReceipt,
   LeaveCause,
   BinaryFrameInfo,
@@ -83,6 +84,11 @@ type RoomPublishReceipt = { seq: number; timestamp: number; receivers?: number }
 
 /** The receipt for a delivered private message, passed to `onAfterSend`. */
 type RoomSendReceipt = { seq: number; timestamp: number }
+
+/** The receipt for a `send(…, { ack: true })` — a strict superset of `RoomSendReceipt`: the same
+ *  `seq`/`timestamp` (the message's sequencing on the recipient's inbox), plus `response`, the value
+ *  the recipient's `listen` handler returned. */
+type RoomAckReceipt = RoomSendReceipt & { response: unknown }
 
 /** The receipt for a committed join, passed to `onAfterJoin`. `joinedAt` is the server-stamped
  *  join time. */
@@ -359,13 +365,13 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
    *
    *  The hand-off is best-effort (fire-and-forget) — the underlying pub/sub is at-most-once on
    *  every adapter. For *confirmed* delivery, pass `{ ack: true }`: it waits for the recipient to
-   *  actually handle the message and resolves with whatever their `listen` handler returns (the
-   *  last one, if several), rejecting if that handler throws or the recipient leaves before
-   *  handling. That's the request/response twin of the channel `send({ ack: true })`, and it
-   *  behaves identically whether the recipient is a server-side participant or a client. */
+   *  actually handle the message and resolves with a `RoomAckReceipt` — the plain `{ seq, timestamp }`
+   *  plus `response`, whatever their `listen` handler returned (the last one, if several) — rejecting
+   *  if that handler throws or the recipient leaves before handling. The request/response twin of the
+   *  channel `send({ ack: true })`; behaves identically whether the recipient is server-side or a client. */
   send(to: string | Sender<P>, data: unknown): Promise<RoomSendReceipt>
   send(to: string | Sender<P>, data: unknown, options: { ack?: false }): Promise<RoomSendReceipt>
-  send(to: string | Sender<P>, data: unknown, options: { ack: true }): Promise<unknown>
+  send(to: string | Sender<P>, data: unknown, options: { ack: true }): Promise<RoomAckReceipt>
   /** Receive private messages addressed to you. `from` is the verified sender — `null` for
    *  room-authored messages (`Room.send()`). Returning a value replies to a `send(…, { ack: true })`
    *  sender (the last handler's return wins). Returns an unlisten function. */

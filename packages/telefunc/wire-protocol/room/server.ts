@@ -86,6 +86,7 @@ import type {
   RoomOptions,
   RoomGetOptions,
   RoomSendReceipt,
+  RoomAckReceipt,
   RoomSnapshotView,
   RoomIdentitySnapshotView,
   JoinGuard,
@@ -940,16 +941,18 @@ class ServerRoom implements Room {
   /** @internal — `send(…, { ack: true })`: publish the DM tagged with an `ackId`, then wait for the
    *  recipient's node to route the handler's reply back on our own inbox (`_onDm` → `_resolveDmAck`).
    *  Rejects if the recipient's handler throws, or the recipient leaves / the room closes first. */
-  async _sendDmAck(from: string, to: string, data: unknown): Promise<unknown> {
+  async _sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
     const ackId = crypto.randomUUID()
     const reply = new Promise<unknown>((resolve, reject) => this._pendingDmAcks.set(ackId, { to, resolve, reject }))
+    let receipt: RoomSendReceipt
     try {
-      await this._publishDm(from, to, data, ackId)
+      receipt = await this._publishDm(from, to, data, ackId)
     } catch (err) {
       this._pendingDmAcks.delete(ackId)
       throw err
     }
-    return reply
+    // Superset of the plain-send receipt: the outbound DM's sequencing plus the recipient's reply.
+    return { ...receipt, response: await reply }
   }
 
   /** Shared DM publish: validate the target, run the send guards, stamp the verified sender, and
