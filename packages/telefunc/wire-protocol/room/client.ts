@@ -180,7 +180,22 @@ class ClientRoom implements Room {
     if (held.length === 0) return
     const rest = this._pendingDms.filter((msg) => msg.to !== id)
     this._pendingDms = rest.length > 0 ? rest : null
-    for (const msg of held) participant._deliverMessage(msg)
+    for (const msg of held) this._deliverDm(participant, msg)
+  }
+
+  /** Deliver a DM to a locally-held member. A plain DM just fires its listeners; an ack DM
+   *  (`send(…, { ack: true })`) routes the handler's reply back up the stub as a `dm-reply`, which
+   *  the server turns into the sender's `dm-ack` — so a client recipient replies just like a
+   *  server-side one. */
+  private _deliverDm(participant: ClientRoomParticipant, msg: InboxMessage): void {
+    if (msg.ackId === undefined) {
+      participant._deliverMessage(msg)
+      return
+    }
+    const ackId = msg.ackId
+    void participant._deliverMessageAck(msg).then((reply) => {
+      void this._stub.send({ __r: 'dm-reply', id: participant.id, ackId, ...reply }, { ack: false }).catch(() => {})
+    })
   }
 
   /** @internal — revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
@@ -337,10 +352,11 @@ class ClientRoom implements Room {
           fromMeta: event.fromMeta,
           fromIdentity: event.fromIdentity ?? null,
           data: event.data,
+          ...(event.ackId ? { ackId: event.ackId } : {}),
         }
         const local = this._localParticipants.get(event.to)
         if (local) {
-          local._deliverMessage(msg)
+          this._deliverDm(local, msg)
           return
         }
         // The DM beat its target's join ack (same connection, different request) — hold it.
@@ -495,10 +511,18 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return await this._room._publishBinaryFramed(frameWithMemberId(this.id, data, options))
   }
 
-  async send(to: string | Sender, data: unknown): Promise<RoomSendReceipt> {
+  // Impl of the overloaded `LocalParticipant.send`; callers get precise result types via the interface.
+  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
     const toId = typeof to === 'string' ? to : to.id
-    return unwrapDmAck(await this._room._request({ __r: 'req-dm', id: this.id, to: toId, data }))
+    const res = await this._room._request({
+      __r: 'req-dm',
+      id: this.id,
+      to: toId,
+      data,
+      ...(options?.ack ? { ack: true } : {}),
+    })
+    return options?.ack ? unwrapDmReply(res) : unwrapDmAck(res)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -539,14 +563,18 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       const msg = notice as ParticipantStubNotice
       if (msg.__r === 'p-meta') this._meta = msg.meta
       else if (msg.__r === 'demand') this._onDemand(msg.track, msg.count)
-      else if (msg.__r === 'dm')
-        this._deliverMessage({
+      else if (msg.__r === 'dm') {
+        const inbox: InboxMessage = {
           from: msg.from,
           fromMeta: msg.fromMeta,
           fromIdentity: msg.fromIdentity ?? null,
           data: msg.data,
-        })
-      else if (msg.__r === 'left') this._onLeft(standaloneLeftCause(msg))
+          ...(msg.ackId ? { ackId: msg.ackId } : {}),
+        }
+        // An ack DM replies through the channel's own ack — the handler's return rides it home.
+        if (msg.ackId) return this._deliverMessageAck(inbox)
+        this._deliverMessage(inbox)
+      } else if (msg.__r === 'left') this._onLeft(standaloneLeftCause(msg))
     })
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
@@ -561,9 +589,12 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     return unwrapPublishAck(await this._channel.sendBinary(frameWithMemberId(this.id, data, options), { ack: true }))
   }
 
-  async send(to: string | Sender, data: unknown): Promise<RoomSendReceipt> {
+  // Impl of the overloaded `LocalParticipant.send`; callers get precise result types via the interface.
+  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
-    return unwrapDmAck(await this._request({ __r: 'req-dm', to: typeof to === 'string' ? to : to.id, data }))
+    const toId = typeof to === 'string' ? to : to.id
+    const res = await this._request({ __r: 'req-dm', to: toId, data, ...(options?.ack ? { ack: true } : {}) })
+    return options?.ack ? unwrapDmReply(res) : unwrapDmAck(res)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -616,7 +647,17 @@ function unwrapDmAck(ack: unknown): RoomSendReceipt {
   assert(isObject(ack) && typeof ack.ok === 'boolean')
   const res = ack as ReqDmAck
   if (!res.ok) throw new Error(res.err)
+  assert('ack' in res)
   return res.ack
+}
+
+/** Unwrap a `send(…, { ack: true })` response — the recipient's reply, or their error rethrown. */
+function unwrapDmReply(ack: unknown): unknown {
+  assert(isObject(ack) && typeof ack.ok === 'boolean')
+  const res = ack as ReqDmAck
+  if (!res.ok) throw new Error(res.err)
+  assert('reply' in res)
+  return res.reply
 }
 
 /** A standalone participant's `left` notice carries the server-side cause verbatim. */

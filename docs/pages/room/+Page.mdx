@@ -188,7 +188,14 @@ const { seq, timestamp } = await bob.send(aliceId, 'meet me in room 2') // a Rem
 
 `await send(...)` resolves with the delivery receipt `{ seq, timestamp }` once the message is sequenced onto the recipient's inbox — so awaiting it waits for the hand-off, not just the local enqueue.
 
-Private messages are one-shot signaling (invites, whispers, game moves): delivered to a live participant at most once, never retried or stored. A `send()` during a brief disconnect still arrives when the participant reconnects; once they've fully left it's gone (a `{ identity }` send to an offline user is a no-op). For delivery that survives a full disconnect, persist as you send and redeliver on the next join — keyed by `identity`, which is stable across reconnects (the participant ID isn't):
+**Need confirmation, or a reply?** Pass `{ ack: true }` and `send` waits for the recipient's `listen` handler to run, resolving with whatever it returns — and rejecting if that handler throws or the recipient leaves first. It turns a one-shot signal into a request/response, and gives a delivery guarantee the fire-and-forget send can't (the pub/sub underneath is at-most-once). It's the exact twin of the channel `send({ ack: true })`, and works the same whether the recipient is a server-side participant or a client:
+
+```js
+const reply = await bob.send(aliceId, { move: 'e4' }, { ack: true }) // waits for Alice's handler, returns her reply
+// Alice: me.listen((move) => rules.check(move) ? 'ok' : 'illegal')  // her return becomes Bob's `reply`
+```
+
+A plain `send()` is one-shot signaling (invites, whispers, fire-and-forget game moves): delivered to a live participant at most once, never retried or stored. A `send()` during a brief disconnect still arrives when the participant reconnects; once they've fully left it's gone (a `{ identity }` send to an offline user is a no-op). For delivery that survives a full disconnect, persist as you send and redeliver on the next join — keyed by `identity`, which is stable across reconnects (the participant ID isn't):
 
 ```js
 // Server
@@ -293,13 +300,13 @@ export async function onJoinMatch(matchId, name) {
 ```
 ```js
 // Client
-await me.send(authority, { type: 'move', to: 'e4' })       // command the authority (an ordinary DM)
-authority.subscribeBinary((frame) => world.apply(frame))   // read its state
+const verdict = await me.send(authority, { type: 'move', to: 'e4' }, { ack: true }) // command + await its reply
+authority.subscribeBinary((frame) => world.apply(frame))                            // read its state
 ```
 
-Two honest limits come with a server-authoritative loop:
+Two honest properties come with a server-authoritative loop:
 
-- **Commands are at-most-once.** Across nodes, the receipt from `me.send(authority, cmd)` confirms the command reached the authority's node — not that the loop applied it, since a mid-flight node failure can still drop it. Make commands idempotent (carry a move id), the discipline you'd want for any networked input.
+- **Delivery is best-effort by default, confirmed on demand.** A plain `me.send(authority, cmd)` is fire-and-forget — the room's pub/sub is at-most-once on *every* adapter (Redis and Cloudflare alike; neither persists or retries). For a command you need to land, `await me.send(authority, cmd, { ack: true })`: it waits for the authority's handler to run and resolves with whatever it returns (`"illegal move"`, the new state id, …), or rejects if the handler throws or the authority is gone. Retrying a rejected ack is at-least-once, so keep commands idempotent if you retry.
 - **One owner, no failover.** The authority and its loop live on the node that created them; the room's membership and streams are distributed, but the loop is not. If that node dies, restart the authority elsewhere — the room outlives it. Hold the loop in a module singleton keyed by room id (use `globalThis` if a dev server splits your module graph) so exactly one runs per room, and clear it on `onEmpty`.
 
 
@@ -473,8 +480,9 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 |---|---|
 | `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst (see <Link href="#chat">Chat</Link>); `retain` keeps it as the room's last message for late subscribers. |
 | `publishBinary(data, { track?, keyFrame?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers (see <Link href="#binary-streams-tracks">keyframes</Link>). The receipt's `receivers` is the live subscription count (`0` = nobody anywhere). |
-| `send(to, data)` | Private message to one participant (or their ID). Resolves with the delivery receipt `{ seq, timestamp }`. |
-| `listen(cb)` | Receive private messages: `(data, from)` — `from` is `null` for room-authored. |
+| `send(to, data)` | Private message to one participant (or their ID). Resolves with the delivery receipt `{ seq, timestamp }` (best-effort hand-off). |
+| `send(to, data, { ack: true })` | Confirmed send: waits for the recipient's `listen` handler and resolves with its return (the reply), rejecting if it throws or the recipient leaves. The request/response twin of the channel `send({ ack: true })`. |
+| `listen(cb)` | Receive private messages: `(data, from)` — `from` is `null` for room-authored. Return a value to reply to a `send(…, { ack: true })` sender. |
 | `setMeta(meta)` / `setAttributes(partial)` | Replace / merge your metadata. |
 | `onDemand(cb)` | `(track, count)` when demand for one of your tracks changes — `count === 0` = nobody watching. |
 | `leave()` / `onLeave(cb)` | Leave / observe your own departure: `cause.type` is `'left' \| 'removed' \| 'closed' \| 'disconnected'`. |

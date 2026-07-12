@@ -2,6 +2,7 @@ export { ParticipantBase }
 export type { InboxMessage }
 
 import type { ChannelPublishAck } from '../channel.js'
+import type { DmReply } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -20,12 +21,14 @@ import type {
  * The private-message inbox and the leave lifecycle, identical on server and client.
  * Flavors supply the transport through the abstract operations and their own error pipeline.
  */
-/** A delivered private message, as stamped by the sender's node. */
+/** A delivered private message, as stamped by the sender's node. `ackId` is present when the
+ *  sender awaits a reply (`send(…, { ack: true })`) — the recipient's handler return is routed back. */
 type InboxMessage = {
   from: string
   fromMeta: ParticipantMeta | null
   fromIdentity: string | null
   data: unknown
+  ackId?: string
 }
 
 /** Pre-listen inbox hold: count-capped, drop-oldest. The DM lane is the only
@@ -43,11 +46,20 @@ abstract class ParticipantBase implements LocalParticipant {
   protected _left = false
   private _leftCause: LeaveCause | null = null
   private _leaveCbs: Array<(cause: LeaveCause) => void> = []
-  private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => void> = []
+  private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => unknown> = []
   private readonly _demandCbs: Array<(track: string | null, count: number) => void> = []
   /** DMs delivered before the first `listen()` — held bounded, flushed on attach, then never
-   *  allocated again (`null` = flushed or empty; zero steady-state cost). */
-  private _pendingInbox: InboxMessage[] | null = null
+   *  allocated again (`null` = flushed or empty; zero steady-state cost). An entry carries an
+   *  `ackResolve` when the sender awaits a reply — resolved when the hold flushes (or on leave). */
+  private _pendingInbox: Array<{ msg: InboxMessage; ackResolve?: (reply: DmReply) => void }> | null = null
+  /** When a client holds this participant, its inbox forwards there instead of to local listeners;
+   *  the forwarder returns the client's reply for an ack DM (see `bindParticipantStubChannel`). */
+  private _forwarder: ((msg: InboxMessage) => Promise<DmReply> | void) | null = null
+
+  /** @internal — route this participant's inbox to a remote holder instead of local listeners. */
+  _setForwarder(forwarder: (msg: InboxMessage) => Promise<DmReply> | void): void {
+    this._forwarder = forwarder
+  }
 
   constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
     this.id = id
@@ -62,19 +74,25 @@ abstract class ParticipantBase implements LocalParticipant {
 
   abstract publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck>
   abstract publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>
-  abstract send(to: string | Sender, data: unknown): Promise<RoomSendReceipt>
+  // Implementation signature for the overloaded `LocalParticipant.send` (receipt, or the recipient's
+  // reply with `{ ack: true }`); callers see the precise overloads through the interface. `any` is
+  // the standard overload-implementation return.
+  abstract send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any>
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract setAttributes(attributes: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
   /** A user callback threw — each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
 
-  listen(callback: (data: unknown, from: Sender | null) => void): () => void {
+  listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
     this._messageCbs.push(callback)
     if (this._pendingInbox) {
       const held = this._pendingInbox
       this._pendingInbox = null
-      for (const msg of held) this._deliverMessage(msg)
+      for (const entry of held) {
+        if (entry.ackResolve) void this._fireInboxAck(entry.msg).then(entry.ackResolve)
+        else this._fireInbox(entry.msg)
+      }
     }
     return () => {
       const i = this._messageCbs.indexOf(callback)
@@ -82,29 +100,76 @@ abstract class ParticipantBase implements LocalParticipant {
     }
   }
 
-  /** @internal — a direct message arrived on this member's inbox. `from`/`fromMeta` come from
-   *  the wire envelope; `resolve` upgrades to the live `RemoteParticipant` when a room view
-   *  exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
+  /** @internal — a direct message arrived on this member's inbox. Forwarded to a remote holder if
+   *  one is bound (client-held), else delivered to local listeners — held bounded until the first
+   *  `listen()` if none is registered yet (a reactive send can beat `listen()` by a tick). */
   _deliverMessage(msg: InboxMessage): void {
-    if (this._messageCbs.length === 0) {
-      // A reactive send can beat the app's `listen()` by a tick — hold it (bounded) instead of
-      // dropping it. A departed participant will never flush: drop.
-      if (this._left) return
-      const pending = (this._pendingInbox ??= [])
-      pending.push(msg)
-      if (pending.length > PENDING_INBOX_MAX_COUNT) pending.shift()
+    if (this._forwarder) {
+      void this._forwarder(msg)
       return
     }
-    const { from, fromMeta, fromIdentity, data } = msg
-    const sender =
-      from === '' ? null : (this._resolveSender(from) ?? { id: from, meta: fromMeta ?? {}, identity: fromIdentity })
+    if (this._messageCbs.length === 0) {
+      if (this._left) return // a departed participant will never flush: drop
+      this._hold(msg)
+      return
+    }
+    this._fireInbox(msg)
+  }
+
+  /** @internal — deliver an `{ ack: true }` DM and resolve with the recipient's reply: the last
+   *  listener's return, its thrown error, or — when a client holds this participant — the client's
+   *  reply. Held (like any DM) until the first `listen()` if none is registered; resolves with an
+   *  error if the participant leaves first (see `_onLeft`). Never rejects. */
+  _deliverMessageAck(msg: InboxMessage): Promise<DmReply> {
+    if (this._forwarder) return Promise.resolve(this._forwarder(msg) ?? { ok: true, result: undefined })
+    if (this._messageCbs.length === 0) {
+      if (this._left) return Promise.resolve({ ok: false, err: 'Participant left the room' })
+      return new Promise<DmReply>((resolve) => this._hold(msg, resolve))
+    }
+    return this._fireInboxAck(msg)
+  }
+
+  private _hold(msg: InboxMessage, ackResolve?: (reply: DmReply) => void): void {
+    const pending = (this._pendingInbox ??= [])
+    pending.push({ msg, ackResolve })
+    if (pending.length > PENDING_INBOX_MAX_COUNT) {
+      pending.shift()?.ackResolve?.({ ok: false, err: 'Inbox overflowed before the message was handled' })
+    }
+  }
+
+  /** `from`/`fromMeta` come from the wire envelope; upgrades to the live `RemoteParticipant` when a
+   *  room view exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
+  private _senderOf(msg: InboxMessage): Sender | null {
+    const { from, fromMeta, fromIdentity } = msg
+    return from === ''
+      ? null
+      : (this._resolveSender(from) ?? { id: from, meta: fromMeta ?? {}, identity: fromIdentity })
+  }
+
+  private _fireInbox(msg: InboxMessage): void {
+    const sender = this._senderOf(msg)
     for (const cb of [...this._messageCbs]) {
       try {
-        cb(data, sender)
+        cb(msg.data, sender)
       } catch (err) {
         this._reportError(err)
       }
     }
+  }
+
+  /** Run every listener (channel semantics: the last non-throwing return is the reply); a throw
+   *  short-circuits to an error reply. */
+  private async _fireInboxAck(msg: InboxMessage): Promise<DmReply> {
+    const sender = this._senderOf(msg)
+    let result: unknown
+    for (const cb of [...this._messageCbs]) {
+      try {
+        result = await cb(msg.data, sender)
+      } catch (err) {
+        return { ok: false, err: err instanceof Error ? err.message : String(err) }
+      }
+    }
+    return { ok: true, result }
   }
 
   /** The live room-backed sender, when this flavor has a room view. */
@@ -150,7 +215,10 @@ abstract class ParticipantBase implements LocalParticipant {
     this._left = true
     if (this._leftCause) return
     this._leftCause = cause
+    // Held ack DMs will never be handled now — fail their senders instead of hanging them.
+    const held = this._pendingInbox
     this._pendingInbox = null
+    if (held) for (const entry of held) entry.ackResolve?.({ ok: false, err: 'Participant left the room' })
     const cbs = this._leaveCbs
     this._leaveCbs = []
     for (const cb of cbs) this._invoke(cb, cause)

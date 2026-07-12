@@ -60,13 +60,15 @@ import {
   type RoomDataEnvelope,
   type RoomDataPublish,
   type RoomDmEnvelope,
+  type RoomDmAckEnvelope,
+  type DmReply,
   type RoomEnvelope,
   type RoomMemberRecord,
   type RoomStubRequest,
 } from './protocol.js'
 import { RoomState } from './state.js'
 import { RoomDemand } from './demand.js'
-import { ParticipantBase } from './participant.js'
+import { ParticipantBase, type InboxMessage } from './participant.js'
 import type { RoomStubChannel } from './stubs.js'
 import type {
   BinaryPublishOptions,
@@ -507,6 +509,12 @@ class ServerRoom implements Room {
   /** Set once this node stores any retained binary frame, so a member's leave only pays the
    *  retained-frame cleanup in rooms that actually use `publishBinary(…, { retain: true })`. */
   private _hasRetainedBinary = false
+  /** In-flight `send(…, { ack: true })`s awaiting the recipient's reply, keyed by `ackId`. `to` is
+   *  the recipient, so a leave/close can fail the ones it strands. Empty at steady state. */
+  private readonly _pendingDmAcks = new Map<
+    string,
+    { to: string; resolve: (reply: unknown) => void; reject: (err: Error) => void }
+  >()
   private _guards: RoomGuards | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
@@ -926,6 +934,27 @@ class ServerRoom implements Room {
    *  the target's owning node subscribes to (see `_onDm`). The sender's verified meta rides
    *  the envelope so every receiver can surface a rich sender. */
   async _sendDm(from: string, to: string, data: unknown): Promise<RoomSendReceipt> {
+    return this._publishDm(from, to, data)
+  }
+
+  /** @internal — `send(…, { ack: true })`: publish the DM tagged with an `ackId`, then wait for the
+   *  recipient's node to route the handler's reply back on our own inbox (`_onDm` → `_resolveDmAck`).
+   *  Rejects if the recipient's handler throws, or the recipient leaves / the room closes first. */
+  async _sendDmAck(from: string, to: string, data: unknown): Promise<unknown> {
+    const ackId = crypto.randomUUID()
+    const reply = new Promise<unknown>((resolve, reject) => this._pendingDmAcks.set(ackId, { to, resolve, reject }))
+    try {
+      await this._publishDm(from, to, data, ackId)
+    } catch (err) {
+      this._pendingDmAcks.delete(ackId)
+      throw err
+    }
+    return reply
+  }
+
+  /** Shared DM publish: validate the target, run the send guards, stamp the verified sender, and
+   *  publish on the target's inbox key. `ackId` rides the envelope when a reply is awaited. */
+  private async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
     if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
     const target = await this._resolveMember(to)
     if (!target) throw new Error(`Participant not found: ${to}`)
@@ -939,12 +968,37 @@ class ServerRoom implements Room {
       fromMeta: sender.meta,
       ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
+      ...(ackId ? { ackId } : {}),
     }
     const receipt = await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._guards?.onAfterSend
     if (onAfterSend) await onAfterSend(sender, target, data, info)
     return info
+  }
+
+  /** @internal — publish an `{ ack: true }` reply back to the sender's inbox (`to` is the sender). */
+  private async _publishDmAck(to: string, ackId: string, reply: DmReply): Promise<void> {
+    const envelope: RoomDmAckEnvelope = { __r: 'dm-ack', to, ackId, ...reply }
+    await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
+  }
+
+  /** @internal — the recipient replied: settle the matching pending `send(…, { ack: true })`. */
+  private _resolveDmAck(envelope: RoomDmAckEnvelope): void {
+    const pending = this._pendingDmAcks.get(envelope.ackId)
+    if (!pending) return
+    this._pendingDmAcks.delete(envelope.ackId)
+    if (envelope.ok) pending.resolve(envelope.result)
+    else pending.reject(new Error(envelope.err))
+  }
+
+  /** @internal — fail any pending ack whose recipient just left (or, on close, all of them). */
+  private _rejectDmAcks(message: string, to?: string): void {
+    for (const [ackId, pending] of this._pendingDmAcks) {
+      if (to !== undefined && pending.to !== to) continue
+      this._pendingDmAcks.delete(ackId)
+      pending.reject(new Error(message))
+    }
   }
 
   /** The member's live view — falling back to the authoritative KV record, since the local
@@ -1063,21 +1117,39 @@ class ServerRoom implements Room {
     } catch {
       return // junk on the reserved key
     }
-    if (!hasRoomTag(envelope) || envelope.__r !== 'dm') return
+    if (!hasRoomTag(envelope)) return
+    // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
+    if (envelope.__r === 'dm-ack') return this._resolveDmAck(envelope as RoomDmAckEnvelope)
+    if (envelope.__r !== 'dm') return
     const dm = envelope as RoomDmEnvelope
+    const msg: InboxMessage = {
+      from: dm.from,
+      fromMeta: dm.fromMeta,
+      fromIdentity: dm.fromIdentity ?? null,
+      data: dm.data,
+      ...(dm.ackId ? { ackId: dm.ackId } : {}),
+    }
     const local = this._localParticipants.get(dm.to)
     if (local) {
-      local._deliverMessage({
-        from: dm.from,
-        fromMeta: dm.fromMeta,
-        fromIdentity: dm.fromIdentity ?? null,
-        data: dm.data,
-      })
+      // A server-side participant, or one a client holds (its forwarder replies). Either way,
+      // for an ack DM we route the handler's reply back to the sender's inbox.
+      if (dm.ackId) {
+        void local
+          ._deliverMessageAck(msg)
+          .then((reply) => this._publishDmAck(dm.from, dm.ackId!, reply))
+          .catch(reportRoomError)
+      } else {
+        local._deliverMessage(msg)
+      }
       return
     }
+    // A client held through a room stub — relay the DM (its `ackId` rides along); the client
+    // replies with `dm-reply`, which `_handleStubRequest` turns into the `dm-ack` above.
     const wireText = encodePublishText(serialized, rawInfo)
     for (const stub of this._stubs) {
-      if (stub._stubMembers.has(dm.to)) stub._relayPublishText(wireText)
+      if (!stub._stubMembers.has(dm.to)) continue
+      if (dm.ackId) stub._pendingAckDms.set(dm.ackId, dm.from)
+      stub._relayPublishText(wireText)
     }
   }
 
@@ -1111,6 +1183,7 @@ class ServerRoom implements Room {
   private _applyLeave(id: string, cause?: LeaveCause): void {
     this._state.applyLeave(id, cause)
     this._announcedTracks.delete(id)
+    this._rejectDmAcks('Recipient left the room before replying', id) // strand no waiter on a gone member
     const local = this._localParticipants.get(id)
     if (local) {
       this._localParticipants.delete(id)
@@ -1127,6 +1200,7 @@ class ServerRoom implements Room {
 
   /** The room closed — runs once, after the `closed` event has been applied and relayed. */
   private _teardown(): void {
+    this._rejectDmAcks('Room is closed') // no recipient will reply now
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
     for (const stub of this._stubs) void stub.close().catch(() => {})
@@ -1199,7 +1273,24 @@ class ServerRoom implements Room {
           return { ok: true }
         case 'req-dm':
           this._assertStubMember(stub, req.id)
-          return { ok: true, ack: await this._sendDm(req.id, req.to, req.data) }
+          return req.ack
+            ? { ok: true, reply: await this._sendDmAck(req.id, req.to, req.data) }
+            : { ok: true, ack: await this._sendDm(req.id, req.to, req.data) }
+        case 'dm-reply': {
+          // A client-held member replied to an ack DM we relayed it — route the reply to the sender.
+          // We only honor an `ackId` we actually relayed to this stub (forged ones match nothing).
+          this._assertStubMember(stub, req.id)
+          const sender = stub._pendingAckDms.get(req.ackId)
+          if (sender !== undefined) {
+            stub._pendingAckDms.delete(req.ackId)
+            await this._publishDmAck(
+              sender,
+              req.ackId,
+              req.ok ? { ok: true, result: req.result } : { ok: false, err: req.err },
+            )
+          }
+          return { ok: true }
+        }
         case 'sub-binary': {
           const wants = sanitizeBinaryWants(req.wants)
           if (!wants) throw new Error('Malformed sub-binary declaration')
@@ -1606,9 +1697,12 @@ class ServerLocalParticipant extends ParticipantBase {
     return this._room._publishBinaryFramed(this.id, framed)
   }
 
-  async send(to: string | Sender, data: unknown): Promise<RoomSendReceipt> {
+  // The impl of the overloaded `LocalParticipant.send` (see the interface for the precise result
+  // types callers get); `any` is the overload-implementation signature.
+  async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
-    return await this._room._sendDm(this.id, typeof to === 'string' ? to : to.id, data)
+    const toId = typeof to === 'string' ? to : to.id
+    return options?.ack ? this._room._sendDmAck(this.id, toId, data) : this._room._sendDm(this.id, toId, data)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
