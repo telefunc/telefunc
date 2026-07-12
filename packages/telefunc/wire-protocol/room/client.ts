@@ -69,10 +69,6 @@ class ClientRoom implements Room {
   private readonly _stub: ClientBroadcast
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
-  /** @internal — members whose own messages this view drops (`selfDelivery` off). Scoped to this
-   *  instance and registered by the member itself, so a separate `ClientRoom` for the same room on
-   *  the same page still delivers them (it holds its own, empty, set). */
-  readonly _suppressForeign = new Set<string>()
   /** Wants already declared to the server, by lane. Every lane's declaration is a full
    *  replace, re-sent only when its canonical encoding changes — `''` encodes "nothing
    *  wanted" on every lane, which is also the nothing-declared-yet initial state. */
@@ -281,7 +277,6 @@ class ClientRoom implements Room {
           event.fromIdentity ?? null,
           event.data,
           makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
-          this._suppressForeign.has(event.from),
         )
         return
       case 'join':
@@ -348,7 +343,6 @@ class ClientRoom implements Room {
       unframed.track,
       unframed.keyFrame,
       makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
-      this._suppressForeign.has(unframed.from),
     )
   }
 
@@ -375,14 +369,7 @@ class ClientRoom implements Room {
       const held = this._tailHold
       this._tailHold = null
       for (const { event, info } of held) {
-        this._state.applyData(
-          event.from,
-          event.fromMeta,
-          event.fromIdentity ?? null,
-          event.data,
-          info,
-          this._suppressForeign.has(event.from),
-        )
+        this._state.applyData(event.from, event.fromMeta, event.fromIdentity ?? null, event.data, info)
       }
     }
     this._stub._setWireTextSubscribed(text.all)
@@ -409,11 +396,10 @@ class ClientRoom implements Room {
 // Local participants
 // ---------------------------------------------------------------------------
 
-/** Client-side half of both `LocalParticipant` flavors. When `selfDelivery` is off it registers
- *  self-suppression on its own room view (`_siblingRoom`) — scoped to that one `ClientRoom`, so an
- *  independent observer of the same room on the same page still receives this member's messages. */
+/** Client-side half of both `LocalParticipant` flavors. `selfDelivery` needs nothing here: the
+ *  server never relays a self-suppressed member's echo to this client's room stub (see server
+ *  `_onTextData`), so the flag is carried purely as a public read-only property. */
 abstract class ClientParticipantBase extends ParticipantBase {
-  private readonly _siblingRoom: ClientRoom | null
   /** Per-key conflation state for `publish(data, { coalesce })` — at most one in-flight send per
    *  key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
   private readonly _coalescers = new Map<
@@ -421,16 +407,8 @@ abstract class ClientParticipantBase extends ParticipantBase {
     { sending: boolean; pending: { data: unknown; waiters: CoalesceWaiter[] } | null }
   >()
 
-  constructor(
-    siblingRoom: ClientRoom | null,
-    id: string,
-    meta: ParticipantMeta,
-    selfDelivery: boolean,
-    identity: string | null,
-  ) {
+  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
     super(id, meta, selfDelivery, identity)
-    this._siblingRoom = siblingRoom
-    if (!selfDelivery) siblingRoom?._suppressForeign.add(id)
   }
 
   /** The actual wire publish — each flavor supplies it; `publish()` wraps it with conflation. */
@@ -469,11 +447,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
       })
   }
 
-  override _onLeft(cause: LeaveCause): void {
-    this._siblingRoom?._suppressForeign.delete(this.id)
-    super._onLeft(cause)
-  }
-
   protected _reportError(err: unknown): void {
     reportRoomError(err)
   }
@@ -484,10 +457,8 @@ class ClientRoomParticipant extends ClientParticipantBase {
   private readonly _room: ClientRoom
 
   constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
-    // Client-side joins carry no identity — it's server-assigned (see JoinOptions.identity). The
-    // room it joined through is its own view (its suppression scope, though the server already
-    // skips the echo to this stub — see server _onTextData).
-    super(clientRoom, id, meta, selfDelivery, null)
+    // Client-side joins carry no identity — it's server-assigned (see JoinOptions.identity).
+    super(id, meta, selfDelivery, null)
     this._room = clientRoom
   }
 
@@ -540,8 +511,8 @@ class ClientRoomParticipant extends ClientParticipantBase {
 class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _channel: ClientChannel
 
-  constructor(channel: ClientChannel, metadata: ParticipantStubMetadata, siblingRoom: ClientRoom | null) {
-    super(siblingRoom, metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null)
+  constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
+    super(metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity ?? null)
     this._channel = channel
 
     channel.listen((notice: unknown) => {

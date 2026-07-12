@@ -10,6 +10,7 @@ import {
   onGetAuditRoom,
   onGetAudit,
   onJoinAsServer,
+  onJoinRoomAsServerSelf,
   onGetRoomWithMember,
   onWatchRoom,
   onGetWatched,
@@ -571,8 +572,8 @@ function Room() {
           setResult('')
           const roomId = `e2e-self:${crypto.randomUUID()}`
           await onCreateRoom(roomId)
-          // The "others receive it" observer must be a *different* client — a second browser handle
-          // shares this client's self-suppression registry. A server-side subscriber doesn't.
+          // The "others receive it" observer is a server-side subscriber — a genuinely different
+          // client with its own stub. Suppression is per-stub at the source, so it isn't affected.
           await onWatchRoom(roomId)
           const room = await onGetRoom(roomId)
           const me = await room.join({ name: 'Solo' }, { selfDelivery: false })
@@ -590,6 +591,39 @@ function Room() {
         }}
       >
         Own frames suppressed
+      </button>
+
+      <h2>selfDelivery: false (server co-return + client join on one stub)</h2>
+
+      <button
+        id="test-room-self-server"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-self-server:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+          await onWatchRoom(roomId) // a different (server-side) client — receives everything
+
+          // `me`: server-side join with selfDelivery:false, co-returned with its room. Its own echo
+          // must be dropped at the source for this client's `room` view (never crosses the wire).
+          const { room, me } = await onJoinRoomAsServerSelf(roomId, 'Solo')
+          const mine: string[] = []
+          room.subscribe((data) => mine.push(data as string))
+          await me.publish('from-me')
+
+          // `notMe`: a client-side join (selfDelivery on) on the SAME room stub — its publishes DO
+          // come back to `mine`. Proves both source gates coexist on one subscription, keyed by sender.
+          const notMe = await room.join({ name: 'NotMe' })
+          await notMe.publish('from-notme')
+
+          await pollUntil(async () => {
+            const theirs = (await onGetWatched(roomId)) as string[]
+            setResult(JSON.stringify({ mine, theirs, selfDelivery: me.selfDelivery }))
+            // Gate on the client seeing notMe's frame (published last) and the watcher seeing me's.
+            return { done: mine.includes('from-notme') && theirs.includes('from-me') }
+          })
+        }}
+      >
+        Co-return suppressed, client join delivered
       </button>
 
       <h2>Reconfigure, list, getOrCreate</h2>

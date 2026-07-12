@@ -41,8 +41,18 @@ assertIsNotBrowser()
  */
 class RoomStubChannel extends ServerBroadcast {
   private readonly _room: ServerRoom
-  /** @internal — members the remote client joined through this stub. */
-  readonly _stubMembers = new Map<string, { selfDelivery: boolean }>()
+  /** @internal — members the remote client joined through this stub (membership & lifecycle). */
+  readonly _stubMembers = new Set<string>()
+  /** @internal — members whose own echo this client's room view must not receive (`selfDelivery`
+   *  off). The one relay-gate input, fed by both ways a member arises: a client `req-join` adds
+   *  here directly, and a co-returned server-side participant is bound here at serialization time
+   *  (`roomReplacer` adopts the pass's drop-set by reference, so `{room, me}` and `{me, room}`
+   *  converge on the same set). A suppressed frame is never written to this client's wire. */
+  _selfSuppressed = new Set<string>()
+  /** @internal — adopt the serialization pass's drop-set for this room (see `roomReplacer`). */
+  _adoptSelfSuppressed(set: Set<string>): void {
+    this._selfSuppressed = set
+  }
   /** @internal — the client's declared binary wants, per member and track (`sub-binary`). */
   _binaryWants: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
   /** @internal — whether the client subscribes to the whole text lane (the broadcast-sub ctrl). */
