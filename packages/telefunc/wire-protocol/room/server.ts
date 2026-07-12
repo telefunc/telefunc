@@ -86,6 +86,7 @@ import type {
   RoomOptions,
   RoomGetOptions,
   RoomSendReceipt,
+  RoomAckReceipt,
   RoomSnapshotView,
   RoomIdentitySnapshotView,
   JoinGuard,
@@ -940,16 +941,18 @@ class ServerRoom implements Room {
   /** @internal — `send(…, { ack: true })`: publish the DM tagged with an `ackId`, then wait for the
    *  recipient's node to route the handler's reply back on our own inbox (`_onDm` → `_resolveDmAck`).
    *  Rejects if the recipient's handler throws, or the recipient leaves / the room closes first. */
-  async _sendDmAck(from: string, to: string, data: unknown): Promise<unknown> {
+  async _sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
     const ackId = crypto.randomUUID()
     const reply = new Promise<unknown>((resolve, reject) => this._pendingDmAcks.set(ackId, { to, resolve, reject }))
+    let receipt: RoomSendReceipt
     try {
-      await this._publishDm(from, to, data, ackId)
+      receipt = await this._publishDm(from, to, data, ackId)
     } catch (err) {
       this._pendingDmAcks.delete(ackId)
       throw err
     }
-    return reply
+    // Superset of the plain-send receipt: the outbound DM's sequencing plus the recipient's reply.
+    return { ...receipt, response: await reply }
   }
 
   /** Shared DM publish: validate the target, run the send guards, stamp the verified sender, and
@@ -1038,6 +1041,9 @@ class ServerRoom implements Room {
       return
     }
     const wasClosed = this._state.closed
+    // A hidden member's presence events (join/leave/meta/track) are server-only — decide before
+    // applying, since `leave` removes the member from state (see `_hidesFromClients`).
+    const serverOnly = this._hidesFromClients(event)
 
     if (event.__r === 'announce') {
       this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
@@ -1045,12 +1051,27 @@ class ServerRoom implements Room {
       this._applyCtrl(event)
     }
 
-    if (this._stubs.size > 0) {
+    if (this._stubs.size > 0 && !serverOnly) {
       const wireText = encodePublishText(serialized, rawInfo)
       for (const stub of this._stubs) stub._relayPublishText(wireText)
     }
 
     if (this._state.closed && !wasClosed) this._teardown()
+  }
+
+  /** Whether a control event concerns a hidden (server-only) member and so must not reach clients —
+   *  their presence never rides the roster or the control lane (see `getParticipants({ hidden })`). */
+  private _hidesFromClients(event: RoomEnvelope): boolean {
+    switch (event.__r) {
+      case 'join':
+        return event.hidden === true
+      case 'leave':
+      case 'p-meta':
+      case 'track':
+        return this._state.isHidden(event.id)
+      default:
+        return false // room-level events (update/announce/closed) always reach clients
+    }
   }
 
   /** The text data lane — relayed per stub, skipping the sender's own holder when it opted out. */
@@ -1228,7 +1249,8 @@ class ServerRoom implements Room {
     stub.onOpen(() => {
       void this._ensureRoster()
         .then(() => {
-          if (this._stubs.has(stub) && !this._state.closed) stub._relayRoster(this._state.snapshotMembers())
+          if (this._stubs.has(stub) && !this._state.closed)
+            stub._relayRoster(this._state.snapshotMembers().filter((m) => !m.hidden))
         })
         .catch(reportRoomError)
     })
@@ -1589,7 +1611,7 @@ class ServerRoom implements Room {
           // Clients seeded from the pre-drift state must be re-synced the same way they were
           // seeded — the streamed roster (position-in-stream consistent, replace semantics).
           if (drifted) {
-            for (const stub of this._stubs) stub._relayRoster(this._state.snapshotMembers())
+            for (const stub of this._stubs) stub._relayRoster(this._state.snapshotMembers().filter((m) => !m.hidden))
           }
           return
         }

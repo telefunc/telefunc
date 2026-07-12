@@ -25,8 +25,15 @@ const KV_STORE_PREFIX = 'tfkv:'
  *  RPC properties are lazy stubs that must be awaited to resolve their values. */
 async function unwrapRpcResult(rpc: Promise<BroadcastPublishResult>): Promise<BroadcastPublishResult> {
   const r = await rpc
-  const [seq, timestamp, meta] = await Promise.all([r.seq, r.timestamp, r.meta])
-  return { seq, timestamp, ...(meta ? { meta } : undefined) }
+  // `receivers` (the authority's live subscriber count) rides back like `meta` — without this it
+  // was dropped, blinding `publishBinary().receivers` / `onDemand` on Cloudflare.
+  const [seq, timestamp, meta, receivers] = await Promise.all([r.seq, r.timestamp, r.meta, r.receivers])
+  return {
+    seq,
+    timestamp,
+    ...(meta ? { meta } : undefined),
+    ...(receivers === undefined ? undefined : { receivers }),
+  }
 }
 
 type BroadcastPublishRequest = {
