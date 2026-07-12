@@ -37,8 +37,11 @@ deleted from app code.
   an **identity index** (`Room.send({ identity })`, index-resolved `removeParticipant({ identity })`
   — findings 17 send-half, 18) and **`snapshot({ by: 'identity' })`** + **`onParticipantUpdate`**
   (finding 19). Adopted — DM delivery is now two identity-addressed sends (no roster fan-out) and the
-  member sidebar drops its hand-rolled dedupe. The presence-read (17 query-half) and cross-room
-  sweep (18) residuals stay open.
+  member sidebar drops its hand-rolled dedupe.
+- **Round 8** followed the base to `49700a9`: **`Room.getParticipants(id, { identity })`** (finding 17
+  query-half — the DND check no longer loads the roster) and a telefunction **`Abort`'s message now
+  on `err.message`** (finding 7 — `errorMessage()` drops the `abortValue` dig-out). Findings 7 and 17
+  now fully close.
 
 **Features**
 
@@ -199,22 +202,22 @@ demux, and keyframe bookkeeping.
   a keyframe, read the probe's ack) is deleted. Alone in a voice channel, nothing is encoded or
   uploaded, and a returning viewer is noticed immediately instead of at the next probe.
 
-### 7. Expected-rejection ergonomics differ by lane — partially adopted
+### 7. Expected-rejection ergonomics differ by lane — ✔ adopted upstream
 
 A guard `throw new Error('nope')` reaches the sender's promise verbatim through the publish ack
-— great. The same throw in a telefunction is masked ("Internal Server Error") unless you use
-`Abort`, whose client-side `Error.message` is generic (the text hides in `err.abortValue`, see
-`errorMessage()` in `app/store.ts`).
+— great. The same throw in a telefunction was masked ("Internal Server Error") unless you used
+`Abort`, whose client-side `Error.message` was generic — the real text hid in `err.abortValue`.
 
 - Adopted: guard-rejected publishes are no longer *also* logged client-side as
   `[telefunc:channel-error]` — expected control flow stays out of the console (the e2e suite's
   `tolerateError` entry for it is gone).
-- Round 4 clarified the guard shape: guards split into `onBefore*` (pre-commit, throw to reject)
-  and `onAfter*` (post-commit, with the receipt). This app now validates in `onBeforePublish` and
-  persists in `onAfterPublish` (`server/guards.ts`) — the two concerns that used to share one
-  `onPublish` are cleanly separated, and persistence gets the authoritative order for free
-  (finding 13).
-- Still open: `Abort` message surfacing (`err.abortValue` vs `err.message`).
+- Round 4 clarified the guard shape: `onBefore*` (pre-commit, throw to reject) / `onAfter*`
+  (post-commit, with the receipt). This app validates in `onBeforePublish`, persists in
+  `onAfterPublish` (`server/guards.ts`).
+- Adopted (round 8): a telefunction `Abort('…')` now **surfaces its own message on `err.message`**.
+  Receipt: `errorMessage()` in `app/store.ts` drops the `err.abortValue` dig-out — expected
+  failures (banned word, DND, capacity) read straight off `Error.message`, one path for guard-ack
+  and telefunction rejections alike.
 
 ### 8. The channel-switch publish window
 
@@ -360,22 +363,22 @@ throughline: **`identity` and cross-room operations aren't first-class, and chan
 carry no delta**, so the app repeatedly pays `O(roster)`, `O(all-rooms)`, or `O(everything)` for
 work that is logically `O(1)` or `O(one user)`.
 
-### 17. `identity` is a second-class address — send half ✔ adopted, query half open
+### 17. `identity` is a second-class address — ✔ adopted upstream (send + query)
 
 `Room` made `identity` the durable "who is this user" for `join`, `removeParticipant`, and reads —
 but originally **send and query didn't speak it**, so acting on a user meant materializing the whole
 roster and filtering in app code. The DM path paid `O(roster)` **KV reads** *per DM* (a DM-to-the-bot
 three times); a 5,000-member guild shipped 5,000 records to deliver one message.
 
-- Adopted (round 7): Tranche-2 added an **identity index** — `Room.send(id, { identity }, data)`
-  fans out to every membership of an identity (tabs, connections) resolved in `O(memberships)`, not
-  a roster scan; a signed-out recipient is a no-op. Receipt (`telefunc/dms.telefunc.ts`): DM delivery
-  is now two `Room.send(GUILD, { identity }, notice)` calls (recipient + sender's other tabs) — the
-  `getParticipants()` fan-out fetch, the `filter`, and the per-tab loop are all deleted.
-- Still open (query half): there's no identity-scoped **presence read** — `getParticipants({ identity })`
-  / `getParticipantByIdentity`. So the DND check still loads the roster to read one user's `status`
-  (noted at its call site). `snapshot({ by: 'identity' })` groups the roster by user but still needs
-  the view loaded first, so it doesn't help a single-shot telefunction.
+- Adopted (round 7, send): the **identity index** — `Room.send(id, { identity }, data)` fans out to
+  every membership of an identity resolved in `O(memberships)`, not a roster scan; a signed-out
+  recipient is a no-op. Receipt (`telefunc/dms.telefunc.ts`): DM delivery is two
+  `Room.send(GUILD, { identity }, notice)` calls — the fan-out fetch, `filter`, and per-tab loop gone.
+- Adopted (round 8, query): `Room.getParticipants(id, { identity })` — a server-side, `O(memberships)`
+  presence read off the same index (`[]` for an absent identity). Receipt: the DND check reads only
+  the target's tabs (`Room.getParticipants(GUILD, { identity: target.id })`), so `onSendDm` no longer
+  loads — or even fetches — the guild roster. Send *and* query are now identity-addressed; the DM path
+  is fully `O(one user)`.
 
 ### 18. No cross-room primitive — per-room sweep now O(k), cross-room enumeration still app-driven
 
@@ -483,7 +486,7 @@ expired sessions and the bot's `greeted` set are never pruned.
 | API | Used | Where / why not |
 |---|---|---|
 | `Room.create` / `Room.get` (incl. `{ tail: true }`) / `Room.getOrCreate` / `Room.guard` / `Room.update` / `Room.setAttributes` / `Room.close` | ✔ | `server/rooms.ts`, `server/guards.ts`, `telefunc/channels.telefunc.ts` — `tail` fences history (finding 14); `setAttributes` merges the topic per-key (finding 21) |
-| `Room.removeParticipant({ identity }, { reason })` / `Room.announce` / `Room.send(room, { identity }, …)` | ✔ | kick sweep (index-resolved per room, finding 18), banners + directory + activity feed, identity-addressed DM delivery (finding 17) |
+| `Room.removeParticipant({ identity }, { reason })` / `Room.announce` / `Room.send(room, { identity }, …)` / `Room.getParticipants(id, { identity })` | ✔ | kick sweep (index-resolved per room, finding 18), banners + directory + activity feed, identity-addressed DM delivery + the DND presence read (finding 17) |
 | `Room.join` (static) / `Room.list` | ✖ | memberships need identity + guards (server-side, per-instance); the app's channels table already knows the rooms (finding 4) |
 | `room.join(meta, { identity })` / `getParticipants` / `subscribe` / `onJoin` / `onLeave` / `onUpdate` / `onAnnounce` / `onClose` / `count` / `size` / `isFull` / `meta` | ✔ | throughout `telefunc/*`, `server/bot.ts`, `app/store.ts` |
 | `room.snapshot` / `snapshot({ by: 'identity' })` / `onChange` | ✔ | the Room→React adapter; the identity-grouped view is the member sidebar (finding 19) — `app/store.ts` |

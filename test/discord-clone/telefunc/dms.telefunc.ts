@@ -15,7 +15,7 @@ import { Abort, getContext, Room } from 'telefunc'
 import { dmThreadKey } from '../database/db'
 import * as q from '../database/queries'
 import { ensureLiveWorld, GUILD_ROOM_ID } from '../server/rooms'
-import type { DmMessage, GuildRoom, SystemNotice } from '../shared/types'
+import type { DmMessage, MemberMeta, SystemNotice } from '../shared/types'
 
 const PAGE_SIZE = 50
 
@@ -28,13 +28,12 @@ async function onSendDm(toUserId: string, text: string): Promise<DmMessage> {
   if (target.id === user.id) throw Abort("That's you")
 
   await ensureLiveWorld()
-  const guild: GuildRoom = await Room.get(GUILD_ROOM_ID)
 
-  // Do-Not-Disturb still reads the roster: Tranche-2 gave send/kick an O(k) identity index (adopted
-  // below), but there's no identity-scoped *presence* read yet — so checking one user's status is
-  // still a load-and-filter (the query half of finding 17, still open).
-  const participants = await guild.getParticipants()
-  if (participants.some((p) => p.identity === target.id && p.meta.status === 'dnd')) {
+  // Do-Not-Disturb reads only the target's own memberships via the identity index — O(memberships),
+  // no roster load (finding 17 query-half, now adopted: `Room.getParticipants(id, { identity })`).
+  // `[]` means signed out → not DND.
+  const targetTabs = await Room.getParticipants<MemberMeta>(GUILD_ROOM_ID, { identity: target.id })
+  if (targetTabs.some((p) => p.meta.status === 'dnd')) {
     throw Abort(`${target.name} has Do Not Disturb on`)
   }
 

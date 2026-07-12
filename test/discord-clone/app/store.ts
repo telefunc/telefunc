@@ -723,10 +723,7 @@ function byName(a: Member, b: Member): number {
 }
 
 function errorMessage(err: unknown): string {
-  // Expected failures arrive as telefunc aborts — the human-readable text is the abort value.
-  if (typeof err === 'object' && err !== null && 'abortValue' in err) {
-    const value = (err as { abortValue: unknown }).abortValue
-    if (typeof value === 'string') return value
-  }
+  // A telefunction `Abort('…')` now surfaces its own message on `err.message` (finding 7, fixed
+  // upstream), so expected failures read straight off the Error — no digging in `err.abortValue`.
   return err instanceof Error ? err.message : String(err)
 }
