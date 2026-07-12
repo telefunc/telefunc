@@ -2014,7 +2014,7 @@ describe('ClientRoom', () => {
     expect(clientRoom.count).toBe(2)
   })
 
-  it('rejects a client-side hidden join; a roster hidden member is off-presence but reachable', async () => {
+  it('rejects a client-side hidden join; a hidden member never rides the roster to a client', async () => {
     const fake = createFakeStub()
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('hidden', { count: 1 }))
     await expect(clientRoom.join({}, { hidden: true })).rejects.toThrow('server-side only')
@@ -2023,6 +2023,7 @@ describe('ClientRoom', () => {
     const player = crypto.randomUUID()
     const joins: string[] = []
     clientRoom.onJoin((m) => joins.push(m.id))
+    // Hidden members are server-only; even if one leaks into a streamed roster the client drops it.
     fake.emit({
       __r: 'roster',
       members: [
@@ -2031,10 +2032,24 @@ describe('ClientRoom', () => {
       ],
     })
 
-    expect((await clientRoom.getParticipants({ hidden: true })).map((p) => p.id)).toEqual([hiddenId]) // reachable
-    expect(clientRoom.count).toBe(1) // but not a participant
+    expect((await clientRoom.getParticipants({ hidden: true })).map((p) => p.id)).toEqual([]) // never surfaced
+    expect(clientRoom.count).toBe(1) // the real player only
     expect((await clientRoom.getParticipants()).map((m) => m.id)).toEqual([player])
-    expect(joins).toEqual([]) // roster seeds silently; the hidden one is not a join event either
+    expect(joins).toEqual([])
+  })
+
+  it('a directly-granted hidden handle survives roster drift — it is grant-managed, not roster-managed', async () => {
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('grant'))
+    const authorityId = crypto.randomUUID()
+    // A telefunction returning the hidden authority's handle revives it off-presence.
+    clientRoom._reviveRemote({ id: authorityId, meta: { role: 'authority' }, joinedAt: 1, metaSeq: 0, hidden: true })
+
+    // The presence-only roster (no hidden members) is the drift that must not reap the granted handle.
+    const player = crypto.randomUUID()
+    fake.emit({ __r: 'roster', members: [{ id: player, meta: { name: 'P1' }, joinedAt: 1 }] })
+    expect((await clientRoom.getParticipants({ hidden: true })).map((p) => p.id)).toEqual([authorityId]) // survived
+    expect((await clientRoom.getParticipants()).map((m) => m.id)).toEqual([player])
   })
 
   it('join() + publish() wrap the wire protocol; relayed data comes back with sender identity', async () => {

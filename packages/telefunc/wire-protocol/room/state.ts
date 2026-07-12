@@ -218,6 +218,11 @@ class RoomState {
     return entry ? [...entry.tracks] : []
   }
 
+  /** Whether this member is off-presence (`join({ hidden: true })`) — `false` for unknown members. */
+  isHidden(id: string): boolean {
+    return this._members.get(id)?.hidden === true
+  }
+
   /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist,
    *  otherwise exactly the members with participant-scoped listeners. */
   textWants(): MemberWants {
@@ -546,7 +551,11 @@ class RoomState {
    *  appliers, so `onJoin`/`onLeave`/`onUpdate` fire exactly once per real change — whichever
    *  path (event or reconcile) learns of it first, the other is absorbed as an echo. Returns
    *  whether anything drifted, so the owner can re-sync downstream views (client stubs). */
-  reconcile(members: MemberSnapshot[]): boolean {
+  reconcile(members: MemberSnapshot[], rosterOmitsHidden = false): boolean {
+    // A client's streamed roster carries only presence members (hidden ones are server-only), so a
+    // hidden entry it holds is a directly-granted handle, not roster-managed — never reap it here.
+    const roster = rosterOmitsHidden ? members.filter((m) => !m.hidden) : members
+    const keepsHidden = (id: string) => rosterOmitsHidden && this.isHidden(id)
     if (!this._rosterKnown) {
       // First load: silent — but entries can already exist (pre-roster join events, revived
       // views). Those objects must survive: listeners hang off them and revived handles must
@@ -554,7 +563,7 @@ class RoomState {
       // roster doesn't know left before the load — their leave is narrated like any other.
       this._rosterKnown = true
       const seen = new Set<string>()
-      for (const member of members) {
+      for (const member of roster) {
         seen.add(member.id)
         const existing = this._members.get(member.id)
         if (!existing) {
@@ -569,7 +578,7 @@ class RoomState {
         for (const track of member.tracks ?? []) existing.tracks.add(track)
       }
       for (const id of [...this._members.keys()]) {
-        if (!seen.has(id)) this.applyLeave(id)
+        if (!seen.has(id) && !keepsHidden(id)) this.applyLeave(id)
       }
       // Bump strictly after the roster is populated: an `onChange` subscriber that synchronously
       // reads `snapshot()` (the `useSyncExternalStore` contract) would otherwise cache an empty
@@ -581,7 +590,7 @@ class RoomState {
 
     let drifted = false
     const seen = new Set<string>()
-    for (const member of members) {
+    for (const member of roster) {
       seen.add(member.id)
       const entry = this._members.get(member.id)
       if (!entry) {
@@ -602,7 +611,7 @@ class RoomState {
       }
     }
     for (const id of [...this._members.keys()]) {
-      if (!seen.has(id)) {
+      if (!seen.has(id) && !keepsHidden(id)) {
         this.applyLeave(id)
         drifted = true
       }

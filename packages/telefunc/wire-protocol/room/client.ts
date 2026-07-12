@@ -292,8 +292,10 @@ class ClientRoom implements Room {
     switch (event.__r) {
       case 'roster':
         // The authoritative member list, positioned in the relay stream: everything relayed
-        // before it is reflected in it, later events apply incrementally on top.
-        this._state.reconcile(event.members)
+        // before it is reflected in it, later events apply incrementally on top. The client's
+        // roster carries only presence members, so reconcile must not reap directly-granted hidden
+        // handles (they aren't roster-managed) — see `RoomState.reconcile`.
+        this._state.reconcile(event.members, true)
         this._syncWants() // per-member binary wants may reference the members just learned
         this._rosterArrived()
         return
