@@ -666,22 +666,25 @@ class ServerRoom implements Room {
   ): Promise<{ id: string; joinedAt: number }> {
     const id = crypto.randomUUID()
     // The server seat is not a party seeking admission — it's the server itself — so it bypasses the
-    // participant-join ceremony: no `onBeforeJoin` policy, no `join` control event, no `onAfterJoin`.
-    // Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
+    // admission ceremony: no `onBeforeJoin` policy and no `onAfterJoin` side effects. But its join
+    // IS announced on the control lane (flagged), so observers already connected learn of it live and
+    // bind `room.server` — the presence callbacks (`onJoin`/`count`) stay suppressed via the flag in
+    // `applyJoin`. Admission policy runs first, on the definitive member ID — a rejected join writes nothing.
     const onBeforeJoin = this._guards?.onBeforeJoin
     if (!server && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
     const joinedAt = await this._createMember(id, meta, identity, server)
     track(id, joinedAt)
     this._syncSubs()
     this._state.applyJoin(id, meta, joinedAt, identity, server)
-    if (server) return { id, joinedAt } // roster-only: no control-lane announce, no post-join hook
     await publishCtrl(this.id, {
       __r: 'join',
       id,
       meta,
       joinedAt,
       ...(identity === null ? {} : { identity }),
+      ...(server ? { server: true } : {}),
     })
+    if (server) return { id, joinedAt } // announced above; the seat has no post-join hook
     // Post-commit: the member exists and its join is announced — the place for side effects.
     const onAfterJoin = this._guards?.onAfterJoin
     if (onAfterJoin) await onAfterJoin({ id, meta, identity }, { joinedAt })
@@ -1051,7 +1054,7 @@ class ServerRoom implements Room {
   private _applyCtrl(event: RoomCtrlEnvelope): void {
     switch (event.__r) {
       case 'join':
-        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null)
+        this._state.applyJoin(event.id, event.meta, event.joinedAt, event.identity ?? null, event.server)
         this._syncSubs() // a new member means a new per-member key candidate
         return
       case 'track':

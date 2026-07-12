@@ -387,8 +387,9 @@ class RoomState {
     }
     const entry = this._createEntry({ id, meta, joinedAt, metaSeq: 0, identity, server })
     // The server seat is not a participant: it never moves the count, fires no `onJoin`, and can't
-    // fill the room. It's discovered through the roster, not narrated as a presence event — but the
-    // roster did change, so `onChange` still fires (`room.server` observers re-read).
+    // fill the room — it's not narrated as a presence event. But the roster did change, so `onChange`
+    // still fires and `room.server` observers re-read (its join is announced on the control lane, so
+    // already-connected observers learn of the seat live, not only from a fresh roster).
     if (entry.server) {
       this._bumpMembership()
       return

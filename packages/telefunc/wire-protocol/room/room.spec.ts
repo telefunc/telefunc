@@ -495,7 +495,7 @@ describe('presence', () => {
 
 // ───────────────────────────────────────────────────────────────────────────
 // Server seat — a `join({ server: true })` member: reachable as `room.server`,
-// excluded from every presence read, discovered through the roster.
+// excluded from every presence read, its join/leave announced on the control lane.
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('server seat', () => {
@@ -551,6 +551,26 @@ describe('server seat', () => {
     expect(participants.map((m) => m.meta)).toEqual([{ name: 'P1' }]) // seat excluded
     expect(b.count).toBe(1)
     expect(b.server!.id).toBe(server.id) // reachable as room.server on the sibling
+  })
+
+  it('an already-connected observer learns of the seat live — join is announced on the control lane', async () => {
+    const a = await Room.create('seat-live')
+    const b = await Room.get('seat-live')
+    const changes: (string | null)[] = []
+    const joins: string[] = []
+    b.onChange(() => changes.push(b.server?.id ?? null))
+    b.onJoin((m) => joins.push(m.id))
+    expect(b.server).toBeNull() // no seat yet — b connected during the "lobby"
+
+    const seat = await a.join({ role: 'authority' }, { server: true }) // seated AFTER b connected
+
+    expect(b.server?.id).toBe(seat.id) // learned live, not via a roster re-read (the lobby→match case)
+    expect(b.count).toBe(0) // still not a counted participant
+    expect(joins).toEqual([]) // and not narrated as a participant join
+    expect(changes.at(-1)).toBe(seat.id) // onChange narrated the room.server change
+
+    await seat.leave()
+    expect(b.server).toBeNull() // symmetric: the seat's departure reaches observers too
   })
 
   it('the seat sends and receives DMs like any member', async () => {
