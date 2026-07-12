@@ -276,8 +276,8 @@ me.listen((data, from) => {
 ```js
 // When the match is created (once), on the node that will run it:
 const room = await Room.create(matchId)
-const authority = await room.join({ role: 'authority' }, { hidden: true })
-authority.listen((cmd) => world.apply(cmd))  // clients' commands arrive as DMs
+const authority = await room.join({}, { identity: 'authority', hidden: true })  // identity is trusted, not spoofable
+authority.listen((cmd) => world.apply(cmd))  // commands arrive as DMs; the return is the ack reply
 startGameLoop(matchId, authority)            // each tick: authority.publishBinary(worldState)
 ```
 
@@ -287,14 +287,14 @@ A hidden participant is an ordinary `LocalParticipant` — `publishBinary()`, `l
 room.onEmpty(() => stopGameLoop(matchId)) // last player gone; the hidden participant doesn't keep the room "busy"
 ```
 
-Join as many as you need — a game authority, a moderation bot, and a metrics sink can all sit hidden in one room. They're server-side only (a client `join({ hidden: true })` throws) and read back with `getParticipants({ hidden: true })`. Hand a client the one it should talk to by returning it from the telefunction; commanding it is then just a DM to a participant it holds — no `room.server` magic, no roster scan:
+Join as many as you need — a game authority, a moderation bot, and a metrics sink can all sit hidden in one room, each with its own trusted `identity`. They're server-side only (a client `join({ hidden: true })` throws) and **never visible to clients**: `getParticipants({ hidden: true })` reads them back **on the server**, keyed by `identity` (`meta` is client-settable, so never gate on `meta.role`). Hand a client the one it should talk to by returning it from the telefunction; commanding it is then just a DM to a participant it holds — no roster scan, nothing to spoof:
 
 ```js
 // Match.telefunc.js — server
 export async function onJoinMatch(matchId, name) {
   const { user } = getContext()
   const room = await Room.get(matchId)
-  const [authority] = await room.getParticipants({ hidden: true })
+  const authority = (await room.getParticipants({ hidden: true })).find((p) => p.identity === 'authority')
   return { room, me: await room.join({ name }, { identity: user.id }), authority }
 }
 ```
@@ -306,7 +306,7 @@ authority.subscribeBinary((frame) => world.apply(frame))                        
 
 Two honest properties come with a server-authoritative loop:
 
-- **Delivery is best-effort by default, confirmed on demand.** A plain `me.send(authority, cmd)` is fire-and-forget — the room's pub/sub is at-most-once on *every* adapter (Redis and Cloudflare alike; neither persists or retries). For a command you need to land, `await me.send(authority, cmd, { ack: true })`: it waits for the authority's handler to run and resolves with whatever it returns (`"illegal move"`, the new state id, …), or rejects if the handler throws or the authority is gone. Retrying a rejected ack is at-least-once, so keep commands idempotent if you retry.
+- **Delivery is best-effort by default, confirmed on demand.** A plain `me.send(authority, cmd)` is fire-and-forget — the room's pub/sub is at-most-once on *every* adapter (Redis and Cloudflare alike; neither persists or retries). For a command you need to land, `await me.send(authority, cmd, { ack: true })`: it waits for the authority's handler to run and resolves with `{ response, seq, timestamp }` — `response` being whatever the handler returned (`"illegal move"`, the new state id, …) — or rejects if the handler throws or the authority is gone. On a reject you can retry: if the handler runs inside a transaction, a thrown ack applied *nothing*, so retrying is safe. The only case that can double-apply is a reply lost *after* the handler committed (the ack timed out, the authority moved) — guard those by ignoring a command id you've already recorded.
 - **One owner, no failover.** The authority and its loop live on the node that created them; the room's membership and streams are distributed, but the loop is not. If that node dies, restart the authority elsewhere — the room outlives it. Hold the loop in a module singleton keyed by room id (use `globalThis` if a dev server splits your module graph) so exactly one runs per room, and clear it on `onEmpty`.
 
 
