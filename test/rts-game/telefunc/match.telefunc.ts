@@ -43,7 +43,10 @@ async function onEnterMatch(
 
   let me: LocalParticipant<PlayerMeta>
   try {
-    me = await room.join({ name: user.name, color: user.color, team, ready: false }, { identity: user.id })
+    me = await room.join({
+      meta: { name: user.name, color: user.color, team, ready: false },
+      identity: user.id,
+    })
   } catch (err) {
     throw Abort({ error: err instanceof Error ? err.message : 'Could not join' })
   }

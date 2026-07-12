@@ -62,10 +62,11 @@ class Match {
     if (this.seat) return
     // A hidden, non-presence member (`{ hidden: true }`), excluded from roster/`count`/`onEmpty`.
     // `selfDelivery: false` — it must never receive its own frames back.
-    this.seat = await this.room.join(
-      { name: 'server', color: '#8892b0', team: NEUTRAL, ready: true },
-      { hidden: true, selfDelivery: false },
-    )
+    this.seat = await this.room.join({
+      meta: { name: 'server', color: '#8892b0', team: NEUTRAL, ready: true },
+      hidden: true,
+      selfDelivery: false,
+    })
 
     // Command intake. `from.identity` is server-verified; team comes from the trusted snapshot,
     // never from `from.meta.team` (client-authored display state — see commands.ts). Commands
