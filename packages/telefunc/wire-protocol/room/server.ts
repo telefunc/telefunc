@@ -160,8 +160,9 @@ type RoomStatic = {
     meta?: P,
     options?: JoinOptions,
   ): Promise<LocalParticipant<P, Pub>>
-  /** List all rooms — optionally only those whose ID starts with `prefix`. */
-  list(options?: { prefix?: string }): Promise<RoomInfo[]>
+  /** List all rooms — optionally only those whose ID starts with `prefix`. `M` types the returned
+   *  `meta` (`Room.list<MatchMeta>()`), replacing a `r.meta as MatchMeta` cast at the call site. */
+  list<M extends RoomMeta = RoomMeta>(options?: { prefix?: string }): Promise<RoomInfo<M>[]>
   /** Admin: update the room's configuration — provided fields replace, omitted fields keep
    *  their current value (`isolated` is fixed at creation). */
   update(id: string, options: RoomOptions): Promise<void>
@@ -215,7 +216,7 @@ const Room: RoomStatic = {
   getOrCreate: getOrCreateRoom as RoomStatic['getOrCreate'],
   guard: guardRoom as RoomStatic['guard'],
   join: joinRoom as RoomStatic['join'],
-  list: listRooms,
+  list: listRooms as RoomStatic['list'],
   update: updateRoom,
   setAttributes: setRoomAttributes,
   close: closeRoom,

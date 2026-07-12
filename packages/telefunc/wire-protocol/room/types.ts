@@ -197,10 +197,11 @@ type RoomIdentitySnapshotView<M extends RoomMeta = RoomMeta, P extends Participa
   readonly identities: readonly IdentityGroupView<P>[]
 }
 
-/** Lightweight room snapshot returned by `Room.list()`. */
-type RoomInfo = {
+/** Lightweight room snapshot returned by `Room.list()`. `M` types `meta` — pass your room's meta
+ *  type (`Room.list<MatchMeta>()`), same caller-assertion relationship as `Room<M>`. */
+type RoomInfo<M extends RoomMeta = RoomMeta> = {
   readonly id: string
-  readonly meta: RoomMeta
+  readonly meta: M
   readonly size: number
   readonly count: number
   readonly isEmpty: boolean
