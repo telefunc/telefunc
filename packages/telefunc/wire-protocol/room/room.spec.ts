@@ -1744,6 +1744,98 @@ describe('room stub channel', () => {
     expect(dataOf(ownPeer)).toEqual([]) // suppressed at the source — never written to its own client's wire
     expect(dataOf(observerPeer)).toEqual([{ text: 'own' }]) // an independent observer still receives it
   })
+
+  // ── Retained messages (`{ retain: true }`) — the last message per lane, replayed to a client that
+  //    subscribes after the fact. Text and binary behave identically; only the lane's scope differs.
+  const allBinary = { everyMember: { all: true, tracks: [] }, members: {} }
+  const dataFramesOf = (p: { decoded: () => any[] }) =>
+    p
+      .decoded()
+      .filter((f) => f.tag === TAG.PUBLISH)
+      .map((f) => JSON.parse(f.text) as { __r: string; data?: unknown })
+      .filter((m) => m.__r === 'data')
+      .map((m) => m.data)
+  const binaryFramesOf = (p: { decoded: () => any[] }) =>
+    p
+      .decoded()
+      .filter((f) => f.tag === TAG.PUBLISH_BINARY)
+      .map((f) => unframeMemberId(f.data)!)
+
+  it('replays the last { retain: true } text message to a late subscriber — non-retained and superseded ones are not kept', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-text')
+    const alice = await serverRoom.join({ name: 'Alice' })
+    await alice.publish('transient') // never retained
+    await alice.publish('pinned', { retain: true })
+    await alice.publish('newer', { retain: true }) // supersedes — last write wins, one slot per room
+
+    stub._onPeerBroadcastSubscribe(false) // a client's subscribe() arriving after the publishes
+    await settle()
+
+    expect(dataFramesOf(peer)).toEqual(['newer'])
+  })
+
+  it('replays the last retained frame of every (member, track) a client starts watching', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-binary')
+    const cam = await serverRoom.join({ name: 'cam' })
+    await cam.publishBinary(new Uint8Array([1])) // never retained
+    await cam.publishBinary(new Uint8Array([2]), { retain: true }) // retained on the default lane
+    await cam.publishBinary(new Uint8Array([9]), { track: 'screen', retain: true }) // retained on a named track
+
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 40)
+    await settle()
+
+    const got = binaryFramesOf(peer)
+    expect(got.map((r) => r.payload[0]).sort()).toEqual([2, 9]) // the retained frames, not [1]
+    expect(got.every((r) => r.from === cam.id)).toBe(true)
+  })
+
+  it('a leaving member takes their retained frames with them — a later subscriber gets nothing for that lane', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-leave')
+    const cam = await serverRoom.join({ name: 'cam' })
+    await cam.publishBinary(new Uint8Array([7]), { retain: true })
+    await cam.leave()
+
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 41)
+    await settle()
+
+    expect(binaryFramesOf(peer)).toEqual([]) // reaped on leave — the stream is over
+  })
+
+  it('replays a retained lane once — growing the want set never resends an already-covered lane', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-once')
+    const a = await serverRoom.join({ name: 'a' })
+    const b = await serverRoom.join({ name: 'b' })
+    await a.publishBinary(new Uint8Array([1]), { retain: true })
+    await b.publishBinary(new Uint8Array([2]), { retain: true })
+
+    stub._onPeerMessage(
+      JSON.stringify({
+        __r: 'sub-binary',
+        wants: { everyMember: { all: false, tracks: [] }, members: { [a.id]: { all: true, tracks: [] } } },
+      }),
+      42,
+    )
+    await settle()
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 43) // grow to everyone
+    await settle()
+
+    expect(binaryFramesOf(peer).map((r) => r.payload[0])).toEqual([1, 2]) // a once, then b once — never [1, 1, 2]
+  })
+
+  it('replays retained text to a member-scoped subscriber only once it wants the sender — the binary rule, for text', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-text-scoped')
+    const alice = await serverRoom.join({ name: 'Alice' })
+    const bob = await serverRoom.join({ name: 'Bob' })
+    await bob.publish('bob-pinned', { retain: true })
+
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [alice.id] }), 44) // wants Alice, not Bob
+    await settle()
+    expect(dataFramesOf(peer)).toEqual([]) // Bob's retained message isn't for this subscriber yet
+
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [alice.id, bob.id] }), 45) // now wants Bob
+    await settle()
+    expect(dataFramesOf(peer)).toEqual(['bob-pinned'])
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────

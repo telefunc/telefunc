@@ -231,6 +231,10 @@ type PublishOptions = {
    *  the latest value goes out. Bounds the uplink to one message per key under a burst (cursors,
    *  live reactions), at the cost of dropping intermediate values. Omit for lossless delivery. */
   coalesce?: string
+  /** Keep this as the room's *retained* message: the server holds the last one and delivers it to
+   *  any new subscriber before live messages — the current state a late joiner needs (a status, a
+   *  pinned notice). Last-write-wins; one retained value per room. Like MQTT retained messages. */
+  retain?: boolean
 }
 
 /** Publish-side binary options. */
@@ -239,6 +243,11 @@ type BinaryPublishOptions = {
   track?: string
   /** Mark the frame as a keyframe — surfaced as `info.keyFrame` on every subscriber. */
   keyFrame?: boolean
+  /** Keep this frame as the track's *retained* frame: the server holds the last one and delivers it
+   *  to any new subscriber before live frames — so a late joiner is seeded with a keyframe it can
+   *  apply deltas onto, with no `onDemand` dance. Last-write-wins per (member, track). Retain your
+   *  keyframes. Like MQTT retained messages, the binary twin of `publish({ retain })`. */
+  retain?: boolean
 }
 
 /** Receives all participant messages, with the verified sender (see `Sender`). `Pub` is the room's

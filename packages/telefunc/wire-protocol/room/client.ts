@@ -249,8 +249,13 @@ class ClientRoom implements Room {
 
   /** @internal — the envelope sent upward is a claim: the server validates `from` against this
    *  stub's members and stamps the verified `fromMeta` itself before anything reaches the room. */
-  async _publishText(from: string, data: unknown): Promise<ChannelPublishAck> {
-    return await this._stub.publish({ __r: 'data', from, data } satisfies RoomDataPublish)
+  async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
+    return await this._stub.publish({
+      __r: 'data',
+      from,
+      data,
+      ...(retain ? { retain: true } : {}),
+    } satisfies RoomDataPublish)
   }
 
   /** @internal */
@@ -418,7 +423,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
    *  key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
   private readonly _coalescers = new Map<
     string,
-    { sending: boolean; pending: { data: unknown; waiters: CoalesceWaiter[] } | null }
+    { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
   >()
 
   constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
@@ -426,11 +431,11 @@ abstract class ClientParticipantBase extends ParticipantBase {
   }
 
   /** The actual wire publish — each flavor supplies it; `publish()` wraps it with conflation. */
-  protected abstract _sendPublish(data: unknown): Promise<ChannelPublishAck>
+  protected abstract _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck>
 
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     const key = options?.coalesce
-    if (key === undefined) return this._sendPublish(data)
+    if (key === undefined) return this._sendPublish(data, options?.retain)
     return new Promise<ChannelPublishAck>((resolve, reject) => {
       let slot = this._coalescers.get(key)
       if (!slot) {
@@ -438,7 +443,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
         this._coalescers.set(key, slot)
       }
       // Supersede any queued value; its waiters ride along and all resolve with the winning send.
-      slot.pending = { data, waiters: [...(slot.pending?.waiters ?? []), { resolve, reject }] }
+      slot.pending = { data, retain: options?.retain, waiters: [...(slot.pending?.waiters ?? []), { resolve, reject }] }
       this._drainCoalesce(key)
     })
   }
@@ -446,10 +451,10 @@ abstract class ClientParticipantBase extends ParticipantBase {
   private _drainCoalesce(key: string): void {
     const slot = this._coalescers.get(key)
     if (!slot || slot.sending || !slot.pending) return
-    const { data, waiters } = slot.pending
+    const { data, retain, waiters } = slot.pending
     slot.pending = null
     slot.sending = true
-    this._sendPublish(data)
+    this._sendPublish(data, retain)
       .then(
         (ack) => waiters.forEach((w) => w.resolve(ack)),
         (err) => waiters.forEach((w) => w.reject(err)),
@@ -480,9 +485,9 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return this._room._getRemote(id)
   }
 
-  protected async _sendPublish(data: unknown): Promise<ChannelPublishAck> {
+  protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishText(this.id, data)
+    return await this._room._publishText(this.id, data, retain)
   }
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
@@ -546,9 +551,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
 
-  protected async _sendPublish(data: unknown): Promise<ChannelPublishAck> {
+  protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return unwrapPublishAck(await this._request({ __r: 'req-publish', data }))
+    return unwrapPublishAck(await this._request({ __r: 'req-publish', data, ...(retain ? { retain: true } : {}) }))
   }
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {

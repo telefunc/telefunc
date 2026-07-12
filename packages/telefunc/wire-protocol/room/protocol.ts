@@ -9,6 +9,11 @@ export {
   roomMemberDataKey,
   roomMemberTrackKey,
   roomDmKey,
+  roomRetainedTextKey,
+  roomRetainedBinaryKey,
+  roomRetainedBinaryPrefix,
+  bytesToBase64,
+  base64ToBytes,
   roomConfigKvKey,
   roomIdFromConfigKey,
   roomMemberKvKey,
@@ -35,6 +40,7 @@ export {
   mergeTrackWants,
   wantsTrack,
   wantsAnyBinary,
+  binaryWantsCovers,
   sanitizeBinaryWants,
 }
 export type {
@@ -107,6 +113,34 @@ function roomMemberTrackKey(roomId: string, memberId: string, track: string): st
 /** Pub/sub key carrying one member's private inbox — only the member's owning node subscribes. */
 function roomDmKey(roomId: string, memberId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:dm:${memberId}`
+}
+/** KV key holding the room's last `publish(data, { retain: true })` — replayed to new text subscribers. */
+function roomRetainedTextKey(roomId: string): string {
+  return `${ROOM_KEY_NAMESPACE}${roomId}:rt`
+}
+/** KV key holding the last `publishBinary(data, { retain: true })` on one (member, track) — replayed
+ *  (base64-encoded, since KV values are strings) to a new subscriber before live frames. Track is
+ *  `DEFAULT_TRACK` (`''`) for the unnamed lane. */
+function roomRetainedBinaryKey(roomId: string, memberId: string, track: string): string {
+  return `${roomRetainedBinaryPrefix(roomId)}${memberId}:${track}`
+}
+/** KV prefix under which all of a room's retained binary frames live (`keys()` enumerates them). */
+function roomRetainedBinaryPrefix(roomId: string): string {
+  return `${ROOM_KEY_NAMESPACE}${roomId}:rb:`
+}
+
+/** Uint8Array ⇄ base64, for stashing binary frames in string-only KV. `btoa`/`atob` are global on
+ *  Node 16+ and edge runtimes; the chunked build avoids the call-stack limit on large keyframes. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return btoa(binary)
+}
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
 }
 /** KV key of the room's config record. */
 function roomConfigKvKey(roomId: string): string {
@@ -265,7 +299,7 @@ type RoomCtrlEnvelope =
 type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; fromIdentity?: string; data: unknown }
 
 /** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
-type RoomDataPublish = { __r: 'data'; from: string; data: unknown }
+type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: boolean }
 
 /** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
@@ -309,7 +343,7 @@ type RoomStubRequest =
 
 /** Client→server requests on a standalone `LocalParticipant` stub channel. */
 type ParticipantStubRequest =
-  | { __r: 'req-publish'; data: unknown }
+  | { __r: 'req-publish'; data: unknown; retain?: boolean }
   | { __r: 'req-set-meta'; meta: ParticipantMeta }
   | { __r: 'req-set-attrs'; attrs: ParticipantMeta }
   | { __r: 'req-dm'; to: string; data: unknown }
@@ -406,6 +440,7 @@ function bytesToUuid(bytes: Uint8Array): string {
 /** Binary frame flags (one byte after the member ID). */
 const FRAME_FLAG_KEY = 0b0000_0001
 const FRAME_FLAG_TRACK = 0b0000_0010
+const FRAME_FLAG_RETAIN = 0b0000_0100
 /** Track names stay tiny — they ride every frame. */
 const TRACK_MAX_BYTES = 64
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
@@ -418,6 +453,7 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
   const idBytes = uuidToBytes(memberId)
   assert(idBytes, 'room member IDs are UUIDs')
   let flags = opts?.keyFrame === true ? FRAME_FLAG_KEY : 0
+  if (opts?.retain === true) flags |= FRAME_FLAG_RETAIN
   let trackBytes: Uint8Array | null = null
   if (opts?.track !== undefined) {
     assertUsage(typeof opts.track === 'string' && opts.track.length > 0, 'track should be a non-empty string')
@@ -440,10 +476,11 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
 /** Split a binary relay frame into sender, track, keyframe bit, and payload. `null` on truncation. */
 function unframeMemberId(
   data: Uint8Array,
-): { from: string; payload: Uint8Array; track: string | null; keyFrame: boolean } | null {
+): { from: string; payload: Uint8Array; track: string | null; keyFrame: boolean; retain: boolean } | null {
   if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
   const flags = data[MEMBER_ID_BYTE_LENGTH]!
   const keyFrame = (flags & FRAME_FLAG_KEY) !== 0
+  const retain = (flags & FRAME_FLAG_RETAIN) !== 0
   let track: string | null = null
   let offset = MEMBER_ID_BYTE_LENGTH + 1
   if (flags & FRAME_FLAG_TRACK) {
@@ -454,7 +491,7 @@ function unframeMemberId(
     track = frameTextDecoder.decode(data.subarray(offset, offset + trackLength))
     offset += trackLength
   }
-  return { from: bytesToUuid(data), payload: data.subarray(offset), track, keyFrame }
+  return { from: bytesToUuid(data), payload: data.subarray(offset), track, keyFrame, retain }
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +527,15 @@ function mergeTrackWants(a: TrackWants, b: TrackWants): TrackWants {
 
 function wantsTrack(wants: TrackWants, track: string): boolean {
   return wants.all || wants.tracks.includes(track)
+}
+
+/** Does a complete binary want cover one (member, track)? The one predicate behind both the live
+ *  relay gate (`RoomStubChannel._wantsBinary`) and retained-frame replay: `everyMember` applies to
+ *  all members, `members` adds participant-scoped wants on top. */
+function binaryWantsCovers(wants: BinaryWants, memberId: string, track: string): boolean {
+  if (wantsTrack(wants.everyMember, track)) return true
+  const memberWants = wants.members[memberId]
+  return memberWants !== undefined && wantsTrack(memberWants, track)
 }
 
 function wantsAnyBinary(wants: BinaryWants): boolean {
