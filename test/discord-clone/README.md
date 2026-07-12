@@ -65,6 +65,13 @@ deleted from app code.
   live-only (both parties present), so it's request/response, not the offline-capable messaging
   finding 2 is about. Merged to stay current and verified: `me.listen()` (which carries the app's DM
   notices) is unaffected — its callback return type widened `void`→`unknown`, source-compatible.
+- **Round 12** followed the base to `c6ea3ca`, which hardened **hidden participants** (now
+  server-only — never streamed to clients, so no enumeration leak), refined the **ack receipt**
+  (`{ response, seq, timestamp }` — a superset of plain send's receipt), fixed **Cloudflare `receivers`**
+  threading, and clarified **authority identity** (identify by trusted identity, not user-supplied meta)
+  + ack retry semantics. Nothing to adopt — the app doesn't use ack (finding 2 design), hidden members
+  work transparently at the API level (no visibility leak for the bot), and Cloudflare's receivers
+  count now flows through correctly. Merged, verified, merged to stay current.
 
 **Features**
 
