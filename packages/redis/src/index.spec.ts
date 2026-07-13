@@ -222,7 +222,7 @@ describe('Room over the Redis transport', () => {
     const fake = new FakeIoredis()
     config.broadcast.transport = new RedisTransport({ redis: fake as unknown as Redis })
 
-    const lobby = await Room.create('lobby', { meta: { topic: 'redis' }, size: 10 })
+    const lobby = await Room.create('lobby', { meta: { topic: 'redis' } })
     const observer = await Room.get('lobby')
     const log: string[] = []
     observer.onJoin((m) => log.push(`join:${m.meta.name}`))
