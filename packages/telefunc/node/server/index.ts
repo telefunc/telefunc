@@ -39,8 +39,6 @@ export type {
   LeaveCause,
   RoomSnapshotView,
   ParticipantSnapshotView,
-  RoomIdentitySnapshotView,
-  IdentityGroupView,
   BinaryFrameInfo,
 } from '../../wire-protocol/room/types.js'
 export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'

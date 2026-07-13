@@ -17,7 +17,6 @@ import type {
   ParticipantMeta,
   ParticipantSnapshotView,
   RemoteParticipant,
-  RoomIdentitySnapshotView,
   RoomMeta,
   RoomSnapshotView,
   Sender,
@@ -108,7 +107,6 @@ class RoomState {
    *  drives `onChange`/`snapshot()` cache invalidation. */
   private _stateVersion = 0
   private _snapshotCache: { version: number; value: RoomSnapshotView } | null = null
-  private _identitySnapshotCache: { version: number; value: RoomIdentitySnapshotView } | null = null
   private readonly _changeCbs: Array<() => void> = []
 
   private readonly _members = new Map<string, MemberEntry>()
@@ -335,37 +333,6 @@ class RoomState {
       participants,
     })
     this._snapshotCache = { version: this._stateVersion, value }
-    return value
-  }
-
-  /** `snapshot()` grouped by identity — a user's tabs/connections collapsed into one entry, in
-   *  first-seen order; anonymous members each stand alone. Cached against the same state version,
-   *  so it's reference-stable for its own `useSyncExternalStore` store. */
-  identitySnapshot(): RoomIdentitySnapshotView {
-    if (this._identitySnapshotCache?.version === this._stateVersion) return this._identitySnapshotCache.value
-    const groups: Array<{ identity: string | null; participants: ParticipantSnapshotView[] }> = []
-    const byIdentity = new Map<string, (typeof groups)[number]>()
-    for (const p of this.snapshot().participants) {
-      const group = p.identity !== null ? byIdentity.get(p.identity) : undefined
-      if (group) {
-        group.participants.push(p)
-      } else {
-        const created = { identity: p.identity, participants: [p] }
-        groups.push(created)
-        if (p.identity !== null) byIdentity.set(p.identity, created)
-      }
-    }
-    const value = Object.freeze({
-      id: this.roomId,
-      meta: this.meta,
-      size: this.size,
-      count: this.count,
-      isClosed: this.closed,
-      identities: Object.freeze(
-        groups.map((g) => Object.freeze({ identity: g.identity, participants: Object.freeze(g.participants) })),
-      ),
-    })
-    this._identitySnapshotCache = { version: this._stateVersion, value }
     return value
   }
 
