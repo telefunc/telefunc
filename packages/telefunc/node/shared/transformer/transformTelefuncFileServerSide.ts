@@ -1,6 +1,6 @@
 export { transformTelefuncFileServerSide }
 
-import { ExportList, getExportList } from './getExportList.js'
+import { ExportList, getExportList, getTelefunctionRef } from './getExportList.js'
 import { isNotNullish } from '../../../utils/isNullish.js'
 import { assertPosixPath } from '../../../utils/path.js'
 import { generateShield } from './generateShield/generateShield.js'
@@ -43,13 +43,17 @@ async function transformTelefuncFileServerSide(
 function decorateTelefunctions(exportList: ExportList, filePath: string, appRootDir: string) {
   assertPosixPath(filePath)
 
-  return [
-    'import { __decorateTelefunction } from "telefunc";',
-    ...exportList.map(
-      ({ exportName, localName }) =>
-        // TODO: change to `fn = __decorateTelefunction(fn, ...)` so the returned wrapper sets up
-        // context — enables server-side context aware telefunction calls (currently no context for direct calls).
-        `__decorateTelefunction(${localName || exportName}, "${exportName}", "${filePath}", "${appRootDir}");`,
-    ),
-  ].join('\n')
+  const lines = ['import { __decorateTelefunction } from "telefunc";']
+  exportList.forEach((e) => {
+    const telefunctionRef = getTelefunctionRef(e)
+    if (!e.localName && e.reExport) {
+      // `export { foo } from './a.js'` doesn't create a local binding we can reference => import the
+      // telefunction from its source module. (Appending the import is fine: ESM imports are hoisted.)
+      lines.push(`import { ${e.reExport.sourceName} as ${telefunctionRef} } from ${JSON.stringify(e.reExport.source)};`)
+    }
+    // TODO: change to `fn = __decorateTelefunction(fn, ...)` so the returned wrapper sets up
+    // context — enables server-side context aware telefunction calls (currently no context for direct calls).
+    lines.push(`__decorateTelefunction(${telefunctionRef}, "${e.exportName}", "${filePath}", "${appRootDir}");`)
+  })
+  return lines.join('\n')
 }
