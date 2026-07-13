@@ -279,8 +279,8 @@ authority.subscribeBinary((frame) => world.apply(frame))                        
 
 Two properties to design around:
 
-- **Commands are best-effort unless you ack them.** A plain `me.send(authority, cmd)` is at-most-once (Redis and Cloudflare both; neither persists or retries). For a command that must land, `await me.send(authority, cmd, { ack: true })` waits for the handler and returns `{ response, seq, timestamp }`, or rejects. Retrying a rejected ack is safe when the handler runs in a transaction, since a throw applied nothing; the one case that can double-apply is a reply lost *after* commit, so dedupe by command id there.
-- **One owner, no failover.** The authority and its loop live on the node that created them; membership and streams are distributed, the loop is not. If that node dies, restart the authority elsewhere and the room outlives it. Hold the loop in a module singleton keyed by room id (use `globalThis` if a dev server splits your module graph), and clear it on `onEmpty`.
+- **Commands are best-effort unless you ack them.** A plain `me.send(authority, cmd)` is at-most-once (Redis and Cloudflare both; neither persists or retries). For a command that must land, `await me.send(authority, cmd, { ack: true })` waits for the handler and returns `{ response, seq, timestamp }`, or rejects.
+- **One owner, no failover.** The authority and its loop live on the node that created them; membership and streams are distributed, the loop is not.
 
 
 ### Binary streams & tracks
@@ -290,10 +290,10 @@ Two properties to design around:
 ```js
 captureAndEncode(camera, (frame, isKey) => me.publishBinary(frame, { track: 'camera', meta: { key: isKey } }))
 
-member.subscribeBinary((data, info) => video.decode(data, { key: info.meta?.key }), { track: 'camera' })
+member.subscribeBinary((data, { meta, track }) => video.decode(data, { key: meta?.key, track }), { track: 'camera' })
 ```
 
-<Warning>Rooms move binary over the same reliable, ordered transport as text (WebSocket or SSE). That is right for binary *data* and for small or controlled-network A/V. It lacks what large-scale live video needs (congestion control, simulcast, jitter buffering), so for production multi-party video pair rooms, used for presence, chat, and signaling, with a WebRTC SFU for the media.</Warning>
+<Warning>Rooms move binary over the same reliable, ordered transport as text (WebSocket or SSE). That is right for binary *data* and for small or controlled-network A/V. It lacks what large-scale live video needs (congestion control, simulcast, jitter buffering), so for production multi-party video pair rooms, used for presence, chat, and signaling, with a WebRTC SFU for the media. A lower-latency, unreliable media lane is tracked in [telefunc#449](https://github.com/telefunc/telefunc/issues/449).</Warning>
 
 **Render only 9 of 500 cameras?** Subscribe to those 9 members, and the other 491 streams never reach you; your server never fetches them at all. The same holds per track: stop watching a screen share and its bytes stop flowing to you.
 
