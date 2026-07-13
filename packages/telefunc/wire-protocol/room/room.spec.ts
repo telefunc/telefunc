@@ -787,26 +787,26 @@ describe('selective binary delivery', () => {
     expect(frames).toEqual(['cam1:1'])
   })
 
-  it('named tracks multiplex one member lane — filters, keyframe bits, zero-cost default', async () => {
+  it('named tracks multiplex one member lane — filters, per-frame meta, zero-cost default', async () => {
     const a = await Room.create('media', { isolated: true })
     const cam = await a.join({ meta: { name: 'Cam' } })
     const b = await Room.get('media')
     await b.getParticipants() // materialize the lazy roster
 
-    const all: Array<[string | null, boolean, number]> = []
+    const all: Array<[string | null, Record<string, unknown> | null, number]> = []
     const mics: number[] = []
     const remote = (await b.getParticipant(cam.id))!
-    remote.subscribeBinary((data, info) => all.push([info.track, info.keyFrame, data[0]!]))
+    remote.subscribeBinary((data, info) => all.push([info.track, info.meta, data[0]!]))
     remote.subscribeBinary((data) => mics.push(data[0]!), { track: 'mic' })
 
     await cam.publishBinary(new Uint8Array([1])) // default track
     await cam.publishBinary(new Uint8Array([2]), { track: 'mic' })
-    await cam.publishBinary(new Uint8Array([3]), { track: 'camera', keyFrame: true })
+    await cam.publishBinary(new Uint8Array([3]), { track: 'camera', meta: { key: true } })
 
     expect(all).toEqual([
-      [null, false, 1],
-      ['mic', false, 2],
-      ['camera', true, 3],
+      [null, null, 1],
+      ['mic', null, 2],
+      ['camera', { key: true }, 3],
     ])
     expect(mics).toEqual([2]) // the filter saw only its track
 
@@ -821,13 +821,13 @@ describe('selective binary delivery', () => {
     const id = crypto.randomUUID()
     const plain = frameWithMemberId(id, new Uint8Array([7, 8]))
     expect(plain.byteLength).toBe(16 + 1 + 2) // member + flags + payload
-    expect(unframeMemberId(plain)).toMatchObject({ from: id, track: null, keyFrame: false })
+    expect(unframeMemberId(plain)).toMatchObject({ from: id, track: null, meta: null })
     expect([...unframeMemberId(plain)!.payload]).toEqual([7, 8])
 
-    const tracked = frameWithMemberId(id, new Uint8Array([9]), { track: 'screen', keyFrame: true })
+    const tracked = frameWithMemberId(id, new Uint8Array([9]), { track: 'screen', meta: { key: true, ts: 42 } })
     const out = unframeMemberId(tracked)!
     expect(out.track).toBe('screen')
-    expect(out.keyFrame).toBe(true)
+    expect(out.meta).toEqual({ key: true, ts: 42 })
     expect([...out.payload]).toEqual([9])
   })
 

@@ -166,7 +166,7 @@ function Room() {
             firstByte: number
             fromSelf: boolean
             track: string | null
-            keyFrame: boolean
+            meta: Record<string, unknown> | null
           }> = []
           videoRoom.subscribeBinary((data, info, from) => {
             frames.push({
@@ -174,7 +174,7 @@ function Room() {
               firstByte: data[0]!,
               fromSelf: from.id === me.id,
               track: info.track,
-              keyFrame: info.keyFrame,
+              meta: info.meta,
             })
           })
           const cameraOnly: number[] = []
@@ -186,9 +186,9 @@ function Room() {
           for (let i = 0; i < 3; i++) {
             await me.publishBinary(new Uint8Array(64).fill(i + 1))
           }
-          // Named track + keyframe bit — mic/camera/screen multiplex over one member lane;
+          // Named track + per-frame meta — mic/camera/screen multiplex over one member lane;
           // the ack's `receivers` counts the track's live subscriptions (the pause-at-0 signal).
-          const camAck = await me.publishBinary(new Uint8Array(32).fill(9), { track: 'camera', keyFrame: true })
+          const camAck = await me.publishBinary(new Uint8Array(32).fill(9), { track: 'camera', meta: { key: true } })
 
           await pollUntil(() => {
             setResult(JSON.stringify({ frames, cameraOnly, defaultOnly, camReceivers: camAck.receivers }))
@@ -407,7 +407,7 @@ function Room() {
             if (track === 'camera') cam.push(count)
           })
           // Announce the camera track so demand is attributable to (Pub, camera).
-          await pub.publishBinary(new Uint8Array(8).fill(1), { track: 'camera', keyFrame: true })
+          await pub.publishBinary(new Uint8Array(8).fill(1), { track: 'camera', meta: { key: true } })
 
           // A separate observer wants the track — demand rises; releasing it — demand falls.
           const viewer = await onGetRoom(roomId)

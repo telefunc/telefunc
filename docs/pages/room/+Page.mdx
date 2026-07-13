@@ -312,12 +312,12 @@ Two honest properties come with a server-authoritative loop:
 
 ### Binary streams & tracks
 
-`publishBinary()` / `subscribeBinary()` carry raw bytes — canvas deltas, audio snippets, file chunks, small-scale audio/video. Mic, camera, and screen share travel over one member's stream as *named tracks* — several substreams sharing one connection. Publish with `{ track }`; subscribe with `{ track }` to receive only that substream (`{ track: null }` is the default, unnamed track). Each frame also carries a `keyFrame` flag (`info.keyFrame`) so decoders know where they can resync:
+`publishBinary()` / `subscribeBinary()` carry raw bytes — canvas deltas, audio snippets, file chunks, small-scale audio/video. Mic, camera, and screen share travel over one member's stream as *named tracks* — several substreams sharing one connection. Publish with `{ track }`; subscribe with `{ track }` to receive only that substream (`{ track: null }` is the default, unnamed track). Attach per-frame `meta` for whatever the decoder needs — a keyframe marker, a timestamp — and read it back on `info.meta`:
 
 ```js
-captureAndEncode(camera, (frame, isKey) => me.publishBinary(frame, { track: 'camera', keyFrame: isKey }))
+captureAndEncode(camera, (frame, isKey) => me.publishBinary(frame, { track: 'camera', meta: { key: isKey } }))
 
-member.subscribeBinary((data, info) => video.decode(data, { key: info.keyFrame }), { track: 'camera' })
+member.subscribeBinary((data, info) => video.decode(data, { key: info.meta?.key }), { track: 'camera' })
 ```
 
 <Warning>Rooms move binary over the same reliable, ordered transport as everything else (WebSocket / SSE). That's ideal for binary *data* and for small or controlled-network A/V — but it lacks what large-scale live video needs: congestion control, simulcast, and jitter buffering. For production multi-party video, pair rooms (presence, chat, signaling) with a WebRTC SFU for the media. Lifting this ceiling would need a lane that trades reliability for latency — dropping late frames instead of queuing them; an unreliable WebTransport datagram channel is being explored for that in [telefunc#449](https://github.com/telefunc/telefunc/issues/449).</Warning>
@@ -337,7 +337,7 @@ Each `publishBinary()` receipt also reports `receivers` — the track's live sub
 **Seed late subscribers with a keyframe.** A subscriber that joins mid-stream can't apply your deltas until it gets a keyframe. Mark keyframes `{ retain: true }` and the server keeps the last one per track, replaying it to every new subscriber before any live frame — so a joiner syncs immediately, with nothing to wire up:
 
 ```js
-me.publishBinary(keyframe, { track: 'camera', keyFrame: true, retain: true }) // kept for late joiners
+me.publishBinary(keyframe, { track: 'camera', meta: { key: true }, retain: true }) // kept for late joiners
 ```
 
 `{ retain: true }` works the same on `publish()`: the server keeps the last retained text message and hands it to late subscribers — the current state a joiner needs (a game phase, a pinned notice). Last write wins per lane; the retained value is dropped when its publisher leaves or the room closes, never on a timer. Like MQTT retained messages.
@@ -463,7 +463,7 @@ type RoomOptions = {
 | `join(options?)` | Join; returns your `LocalParticipant`. Options: `{ meta?, selfDelivery?, identity?, hidden? }` (`identity` and `hidden` are server-side only). |
 | `getParticipants(options?)` / `getParticipant(id)` | The member list / one member (or `null`). `getParticipants({ hidden: true })` reads the off-presence participants instead (see <Link href="#let-the-server-play">Let the server play</Link>). |
 | `subscribe(cb)` | All participant messages: `(data, info, from)`. Returns an unsubscribe. |
-| `subscribeBinary(cb, { track? }?)` | Same, for binary — optionally one track. `info` carries `track` and `keyFrame`. |
+| `subscribeBinary(cb, { track? }?)` | Same, for binary — optionally one track. `info` carries `track` and `meta`. |
 | `onJoin(cb)` / `onLeave(cb)` | A participant joined / left: `(member)` / `(member, cause?)`. |
 | `onUpdate(cb)` | The room was reconfigured: `(meta, prev)`. |
 | `onAnnounce(cb)` | A room-authored announcement arrived. |
@@ -479,7 +479,7 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 | Method | Description |
 |---|---|
 | `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst (see <Link href="#chat">Chat</Link>); `retain` keeps it as the room's last message for late subscribers. |
-| `publishBinary(data, { track?, keyFrame?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers (see <Link href="#binary-streams-tracks">keyframes</Link>). The receipt's `receivers` is the live subscription count (`0` = nobody anywhere). |
+| `publishBinary(data, { track?, meta?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers (see <Link href="#binary-streams-tracks">keyframes</Link>). The receipt's `receivers` is the live subscription count (`0` = nobody anywhere). |
 | `send(to, data)` | Private message to one participant (or their ID). Resolves with the delivery receipt `{ seq, timestamp }` (best-effort hand-off). |
 | `send(to, data, { ack: true })` | Confirmed send: waits for the recipient's `listen` handler and resolves with its return (the reply), rejecting if it throws or the recipient leaves. The request/response twin of the channel `send({ ack: true })`. |
 | `listen(cb)` | Receive private messages: `(data, from)` — `from` is `null` for room-authored. Return a value to reply to a `send(…, { ack: true })` sender. |

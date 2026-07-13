@@ -71,6 +71,8 @@ export type {
   BinaryWants,
 }
 
+import { parse } from '@brillout/json-serializer/parse'
+import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import type { ChannelPublishInfo } from '../channel.js'
@@ -459,22 +461,24 @@ function bytesToUuid(bytes: Uint8Array): string {
 }
 
 /** Binary frame flags (one byte after the member ID). */
-const FRAME_FLAG_KEY = 0b0000_0001
+const FRAME_FLAG_META = 0b0000_0001
 const FRAME_FLAG_TRACK = 0b0000_0010
 const FRAME_FLAG_RETAIN = 0b0000_0100
 /** Track names stay tiny — they ride every frame. */
 const TRACK_MAX_BYTES = 64
+/** Per-frame meta stays small — it rides every frame that carries it. */
+const META_MAX_BYTES = 4096
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder()
 
-/** Binary relay format: `[16-byte member UUID][1-byte flags][?1-byte track length + track][payload]`.
- *  A plain publish costs one flag byte; named tracks (mic/camera/screen on one member lane) and
- *  the keyframe bit make media multiplexing first-class — no hand-rolled envelopes. */
+/** Binary relay format:
+ *  `[16-byte member UUID][1-byte flags][?1-byte track length + track][?2-byte meta length + meta][payload]`.
+ *  A plain publish costs one flag byte; named tracks (mic/camera/screen on one member lane) and optional
+ *  per-frame `meta` ride only when set, so media multiplexing needs no hand-rolled envelopes. */
 function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
   const idBytes = uuidToBytes(memberId)
   assert(idBytes, 'room member IDs are UUIDs')
-  let flags = opts?.keyFrame === true ? FRAME_FLAG_KEY : 0
-  if (opts?.retain === true) flags |= FRAME_FLAG_RETAIN
+  let flags = opts?.retain === true ? FRAME_FLAG_RETAIN : 0
   let trackBytes: Uint8Array | null = null
   if (opts?.track !== undefined) {
     assertUsage(typeof opts.track === 'string' && opts.track.length > 0, 'track should be a non-empty string')
@@ -482,27 +486,55 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
     assertUsage(trackBytes.byteLength <= TRACK_MAX_BYTES, `track should be at most ${TRACK_MAX_BYTES} bytes`)
     flags |= FRAME_FLAG_TRACK
   }
-  const headerLength = MEMBER_ID_BYTE_LENGTH + 1 + (trackBytes ? 1 + trackBytes.byteLength : 0)
+  let metaBytes: Uint8Array | null = null
+  if (opts?.meta !== undefined) {
+    assertUsage(isObject(opts.meta), 'publishBinary() meta should be an object')
+    metaBytes = frameTextEncoder.encode(stringify(opts.meta))
+    assertUsage(
+      metaBytes.byteLength <= META_MAX_BYTES,
+      `publishBinary() meta should be at most ${META_MAX_BYTES} bytes once serialized`,
+    )
+    flags |= FRAME_FLAG_META
+  }
+  const headerLength =
+    MEMBER_ID_BYTE_LENGTH +
+    1 +
+    (trackBytes ? 1 + trackBytes.byteLength : 0) +
+    (metaBytes ? 2 + metaBytes.byteLength : 0)
   const framed = new Uint8Array(headerLength + payload.byteLength)
   framed.set(idBytes, 0)
   framed[MEMBER_ID_BYTE_LENGTH] = flags
+  let offset = MEMBER_ID_BYTE_LENGTH + 1
   if (trackBytes) {
-    framed[MEMBER_ID_BYTE_LENGTH + 1] = trackBytes.byteLength
-    framed.set(trackBytes, MEMBER_ID_BYTE_LENGTH + 2)
+    framed[offset] = trackBytes.byteLength
+    framed.set(trackBytes, offset + 1)
+    offset += 1 + trackBytes.byteLength
+  }
+  if (metaBytes) {
+    framed[offset] = (metaBytes.byteLength >> 8) & 0xff
+    framed[offset + 1] = metaBytes.byteLength & 0xff
+    framed.set(metaBytes, offset + 2)
+    offset += 2 + metaBytes.byteLength
   }
   framed.set(payload, headerLength)
   return framed
 }
 
-/** Split a binary relay frame into sender, track, keyframe bit, and payload. `null` on truncation. */
+/** Split a binary relay frame into sender, track, per-frame meta, and payload. `null` on truncation. */
 function unframeMemberId(
   data: Uint8Array,
-): { from: string; payload: Uint8Array; track: string | null; keyFrame: boolean; retain: boolean } | null {
+): {
+  from: string
+  payload: Uint8Array
+  track: string | null
+  meta: Record<string, unknown> | null
+  retain: boolean
+} | null {
   if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
   const flags = data[MEMBER_ID_BYTE_LENGTH]!
-  const keyFrame = (flags & FRAME_FLAG_KEY) !== 0
   const retain = (flags & FRAME_FLAG_RETAIN) !== 0
   let track: string | null = null
+  let meta: Record<string, unknown> | null = null
   let offset = MEMBER_ID_BYTE_LENGTH + 1
   if (flags & FRAME_FLAG_TRACK) {
     if (data.byteLength < offset + 1) return null
@@ -512,7 +544,15 @@ function unframeMemberId(
     track = frameTextDecoder.decode(data.subarray(offset, offset + trackLength))
     offset += trackLength
   }
-  return { from: bytesToUuid(data), payload: data.subarray(offset), track, keyFrame, retain }
+  if (flags & FRAME_FLAG_META) {
+    if (data.byteLength < offset + 2) return null
+    const metaLength = (data[offset]! << 8) | data[offset + 1]!
+    offset += 2
+    if (data.byteLength < offset + metaLength) return null
+    meta = parse(frameTextDecoder.decode(data.subarray(offset, offset + metaLength))) as Record<string, unknown>
+    offset += metaLength
+  }
+  return { from: bytesToUuid(data), payload: data.subarray(offset), track, meta, retain }
 }
 
 // ---------------------------------------------------------------------------

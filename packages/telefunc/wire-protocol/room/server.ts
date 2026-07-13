@@ -1110,7 +1110,7 @@ class ServerRoom implements Room {
       unframed.from,
       unframed.payload,
       unframed.track,
-      unframed.keyFrame,
+      unframed.meta,
       info,
       this._suppress(unframed.from),
     )
@@ -1379,7 +1379,7 @@ class ServerRoom implements Room {
 
   /** @internal — MQTT-retained replay for the binary lanes. Called when a stub's `sub-binary` want
    *  grows: replay each retained (member, track) frame this change newly covers (in the new want,
-   *  not the old), so a subscriber gets the last keyframe of every lane it starts watching. The
+   *  not the old), so a subscriber gets the last retained frame of every lane it starts watching. The
    *  frame is self-describing, so the sender/track come from the frame itself, not the key. */
   async _replayRetainedBinary(stub: RoomStubChannel, prevWants: BinaryWants): Promise<void> {
     if (!wantsAnyBinary(stub._binaryWants)) return

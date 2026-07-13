@@ -234,8 +234,9 @@ type BinaryFrameInfo = {
   /** The named substream this frame belongs to (`publishBinary(data, { track })`) — `null` for
    *  the default track. Mic/camera/screen multiplex over one member lane by name. */
   track: string | null
-  /** The keyframe bit (`publishBinary(data, { keyFrame: true })`) — decoders resync on these. */
-  keyFrame: boolean
+  /** The per-frame metadata the publisher attached (`publishBinary(data, { meta })`) — `null` when none.
+   *  Where app-level frame info rides: a keyframe marker (`{ key: true }`), a timestamp, dimensions. */
+  meta: Record<string, unknown> | null
 }
 
 /** Publish-side options for text messages. */
@@ -255,8 +256,9 @@ type PublishOptions = {
 type BinaryPublishOptions = {
   /** Named substream (≤ 64 bytes) — subscribers can filter by it. Default: the default track. */
   track?: string
-  /** Mark the frame as a keyframe — surfaced as `info.keyFrame` on every subscriber. */
-  keyFrame?: boolean
+  /** Per-frame metadata, surfaced as `info.meta` on every subscriber (≤ 4 KB serialized). For whatever
+   *  the receiver needs to interpret the bytes: `{ key: true }` for a keyframe, a timestamp, dimensions. */
+  meta?: Record<string, unknown>
   /** Keep this frame as the track's *retained* frame: the server holds the last one and delivers it
    *  to any new subscriber before live frames — so a late joiner is seeded with a keyframe it can
    *  apply deltas onto, with no `onDemand` dance. Last-write-wins per (member, track). Retain your
@@ -362,7 +364,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   /** Publish a message to the whole room (`Pub` — the room's message type when declared). Pass
    *  `{ coalesce: key }` to conflate high-frequency updates — see `PublishOptions`. */
   publish(data: Pub, options?: PublishOptions): Promise<ChannelPublishAck>
-  /** Publish binary to the whole room — optionally on a named track and/or keyframe-flagged.
+  /** Publish binary to the whole room — optionally on a named track and/or with per-frame `meta`.
    *  The ack's `receivers` reports the track's live subscription count: `0` means nobody
    *  anywhere wants it right now — the signal to pause the encoder until someone subscribes. */
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck>

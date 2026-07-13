@@ -378,7 +378,7 @@ class ClientRoom implements Room {
       unframed.from,
       unframed.payload,
       unframed.track,
-      unframed.keyFrame,
+      unframed.meta,
       makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp),
     )
   }

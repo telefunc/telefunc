@@ -509,19 +509,19 @@ class RoomState {
 
   /** Binary frames carry only the sender's ID — a pre-join frame surfaces as `{ id, meta: {} }`
    *  (rare: binary pipelines attach per member via `onJoin`, so the roster is normally ahead).
-   *  `track`/`key` come from the frame header; listeners with a `track` filter receive only
+   *  `track`/`meta` come from the frame header; listeners with a `track` filter receive only
    *  that track's frames. */
   applyBinary(
     from: string,
     payload: Uint8Array,
     track: string | null,
-    keyFrame: boolean,
+    meta: Record<string, unknown> | null,
     info: ChannelPublishInfo,
     // Server-only (see applyData) — the client omits it; suppression already happened at the source.
     suppress = false,
   ): void {
     if (suppress) return
-    const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, keyFrame }
+    const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, meta }
     const entry = this._members.get(from)
     const sender = entry?.remote ?? { id: from, meta: {}, identity: null }
     this._fireTrackFiltered(this._roomBinaryCbs, track, (cb) => cb(payload, frameInfo, sender))
