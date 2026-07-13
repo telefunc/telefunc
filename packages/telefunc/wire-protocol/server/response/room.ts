@@ -14,7 +14,6 @@ import {
 } from '../../constants.js'
 import { ServerLocalParticipant, ServerRoom } from '../../room/server.js'
 import { bindParticipantStubChannel, RoomStubChannel } from '../../room/stubs.js'
-import { sizeToWire } from '../../room/protocol.js'
 import { remoteBacking } from '../../room/state.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -52,7 +51,6 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
         channelId: stub.id,
         roomId: serverRoom.id,
         meta: serverRoom.meta,
-        size: sizeToWire(serverRoom.size),
         isolated: serverRoom._isolated,
         closed: serverRoom.isClosed,
         stamp: serverRoom._state.updateStamp,

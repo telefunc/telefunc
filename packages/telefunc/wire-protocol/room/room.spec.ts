@@ -51,11 +51,10 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe('Room entry point', () => {
   it('create → get returns the same room config', async () => {
-    await Room.create('lobby', { meta: { topic: 'general' }, size: 5 })
+    await Room.create('lobby', { meta: { topic: 'general' } })
     const lobby = await Room.get('lobby')
     expect(lobby.id).toBe('lobby')
     expect(lobby.meta).toEqual({ topic: 'general' })
-    expect(lobby.size).toBe(5)
     expect(lobby.count).toBe(0)
     expect(lobby.isEmpty).toBe(true)
     expect(lobby.isClosed).toBe(false)
@@ -70,34 +69,25 @@ describe('Room entry point', () => {
   it('getOrCreate creates once and converges — concurrent callers, existing rooms, later options ignored', async () => {
     // Two concurrent boots: both read "missing", one wins the create, the loser gets.
     const [a, b] = await Promise.all([
-      Room.getOrCreate('boot', { meta: { topic: 'first' }, size: 3 }),
-      Room.getOrCreate('boot', { meta: { topic: 'first' }, size: 3 }),
+      Room.getOrCreate('boot', { meta: { topic: 'first' } }),
+      Room.getOrCreate('boot', { meta: { topic: 'first' } }),
     ])
     expect(a.meta).toEqual({ topic: 'first' })
     expect(b.meta).toEqual({ topic: 'first' })
-    expect(a.size).toBe(3)
 
     // Already exists: returned as-is, options don't overwrite.
-    const again = await Room.getOrCreate('boot', { meta: { topic: 'second' }, size: 99 })
+    const again = await Room.getOrCreate('boot', { meta: { topic: 'second' } })
     expect(again.meta).toEqual({ topic: 'first' })
-    expect(again.size).toBe(3)
   })
 
-  it('update replaces provided fields only — updating the topic never resets the capacity', async () => {
-    await Room.create('cfg', { meta: { topic: 'general' }, size: 5 })
+  it('setMeta replaces the room meta wholesale and propagates to observers', async () => {
+    await Room.create('cfg', { meta: { topic: 'general', pinned: true } })
     const observer = await Room.get('cfg')
     observer.onUpdate(() => {}) // observing — receives update events
 
-    await Room.update('cfg', { meta: { topic: 'renamed' } })
-    expect((await Room.get('cfg')).size).toBe(5) // omitted — kept, not reset to Infinity
+    await Room.setMeta('cfg', { topic: 'renamed' }) // wholesale replace — `pinned` is dropped
     expect((await Room.get('cfg')).meta).toEqual({ topic: 'renamed' })
-
-    await Room.update('cfg', { size: 10 })
-    const after = await Room.get('cfg')
-    expect(after.meta).toEqual({ topic: 'renamed' }) // omitted — kept
-    expect(after.size).toBe(10)
-    expect(observer.size).toBe(10) // the update event carried the effective config
-    expect(observer.meta).toEqual({ topic: 'renamed' })
+    expect(observer.meta).toEqual({ topic: 'renamed' }) // the update event carried the new meta
   })
 
   it('list({ prefix }) filters by room-ID prefix', async () => {
@@ -106,17 +96,6 @@ describe('Room entry point', () => {
     await Room.create('voice:c')
     expect((await Room.list({ prefix: 'chat:' })).map((r) => r.id).sort()).toEqual(['chat:a', 'chat:b'])
     expect((await Room.list()).length).toBe(3)
-  })
-
-  it('size defaults to Infinity and is a hint — joins beyond capacity are not rejected', async () => {
-    const lobby = await Room.create('unbounded')
-    expect(lobby.size).toBe(Infinity)
-    expect(lobby.isFull).toBe(false)
-
-    const tiny = await Room.create('tiny', { size: 1 })
-    await tiny.join()
-    await tiny.join() // not enforced
-    expect(tiny.count).toBe(2)
   })
 
   it('Room.join() is a shorthand for get + join', async () => {
@@ -163,13 +142,13 @@ describe('Room entry point', () => {
 
   it('list() reflects rooms and their live member counts', async () => {
     await Room.create('a')
-    const b = await Room.create('b', { meta: { topic: 'x' }, size: 2 })
+    const b = await Room.create('b', { meta: { topic: 'x' } })
     await b.join()
 
     const rooms = (await Room.list()).sort((x, y) => x.id.localeCompare(y.id))
     expect(rooms).toEqual([
-      { id: 'a', meta: {}, size: Infinity, count: 0, isEmpty: true, isFull: false },
-      { id: 'b', meta: { topic: 'x' }, size: 2, count: 1, isEmpty: false, isFull: false },
+      { id: 'a', meta: {}, count: 0, isEmpty: true },
+      { id: 'b', meta: { topic: 'x' }, count: 1, isEmpty: false },
     ])
   })
 
@@ -186,22 +165,20 @@ describe('Room entry point', () => {
     expect(rooms.find((r) => r.id === 'a:m:b')!.count).toBe(0)
   })
 
-  it('update() replaces provided fields, keeps the rest, and fires onUpdate', async () => {
-    const lobby = await Room.create('conf', { meta: { topic: 'a' }, size: 2 })
+  it('setMeta() replaces the room meta and fires onUpdate with the delta', async () => {
+    const lobby = await Room.create('conf', { meta: { topic: 'a' } })
     const updates: Array<[unknown, unknown]> = []
     lobby.onUpdate((meta, prev) => updates.push([meta, prev]))
 
-    await Room.update('conf', { meta: { topic: 'b' } })
+    await Room.setMeta('conf', { topic: 'b' })
 
     expect(updates).toEqual([[{ topic: 'b' }, { topic: 'a' }]])
     expect(lobby.meta).toEqual({ topic: 'b' })
-    expect(lobby.size).toBe(2) // omitted — kept
-    await expect(Room.update('conf', { isolated: true })).rejects.toThrow('fixed at creation')
-    await expect(Room.update('gone', {})).rejects.toThrow('Room not found: gone')
+    await expect(Room.setMeta('gone', {})).rejects.toThrow('Room not found: gone')
   })
 
-  it('setAttributes() merges room meta per key and deletes on undefined — size/other keys survive', async () => {
-    const lobby = await Room.create('room-attrs', { meta: { topic: 'a', pinned: 1 }, size: 3 })
+  it('setAttributes() merges room meta per key and deletes on undefined — other keys survive', async () => {
+    const lobby = await Room.create('room-attrs', { meta: { topic: 'a', pinned: 1 } })
     const updates: Array<[unknown, unknown]> = []
     lobby.onUpdate((meta, prev) => updates.push([meta, prev]))
 
@@ -214,7 +191,6 @@ describe('Room entry point', () => {
       ],
     ])
     expect(lobby.meta).toEqual({ topic: 'b', pinned: 1 })
-    expect(lobby.size).toBe(3) // config untouched by a meta merge
 
     await Room.setAttributes('room-attrs', { pinned: undefined, topic: 'c' }) // delete a key while setting another
     expect(lobby.meta).toEqual({ topic: 'c' })
@@ -238,13 +214,12 @@ describe('Room entry point', () => {
       const state = new RoomState({
         roomId: 'lww',
         meta: { topic: 'seed' },
-        size: Infinity,
         seed: { members: [] },
         updateStamp: { at: 0, by: '' },
         onListenersChanged: () => {},
         onCallbackError: () => {},
       })
-      for (const e of events) state.applyRoomUpdate({ topic: e.topic }, {}, Infinity, e.at, e.by)
+      for (const e of events) state.applyRoomUpdate({ topic: e.topic }, {}, e.at, e.by)
       return state.meta
     }
     const a = { at: 5, by: 'writer-a', topic: 'from-a' }
@@ -257,8 +232,8 @@ describe('Room entry point', () => {
   it('back-to-back updates from one writer always order — the stamp outruns a frozen clock', async () => {
     const lobby = await Room.create('rapid', { meta: { v: 0 } })
     lobby.onUpdate(() => {}) // observe — an unobserved room doesn't follow events
-    await Room.update('rapid', { meta: { v: 1 } })
-    await Room.update('rapid', { meta: { v: 2 } }) // same millisecond as v1 — must still win
+    await Room.setMeta('rapid', { v: 1 })
+    await Room.setMeta('rapid', { v: 2 }) // same millisecond as v1 — must still win
     expect(lobby.meta).toEqual({ v: 2 })
   })
 
@@ -408,18 +383,6 @@ describe('presence', () => {
     await me.leave() // idempotent
   })
 
-  it('onFull fires when the room reaches capacity', async () => {
-    const lobby = await Room.create('full', { size: 2 })
-    let full = 0
-    lobby.onFull(() => full++)
-
-    await lobby.join()
-    expect(full).toBe(0)
-    await lobby.join()
-    expect(full).toBe(1)
-    expect(lobby.isFull).toBe(true)
-  })
-
   it('getParticipants() on an unobserved instance resyncs from KV', async () => {
     const a = await Room.create('lazy')
     const me = await a.join({ meta: { name: 'Alice' } })
@@ -500,7 +463,7 @@ describe('presence', () => {
 
 describe('hidden participants', () => {
   it('are excluded from presence but reachable and addressable', async () => {
-    const room = await Room.create('hidden', { size: 2 })
+    const room = await Room.create('hidden')
     const joins: string[] = []
     room.onJoin((m) => joins.push(m.id))
 
@@ -508,9 +471,8 @@ describe('hidden participants', () => {
     const p1 = await room.join({ meta: { name: 'P1' } })
     const p2 = await room.join({ meta: { name: 'P2' } })
 
-    // Excluded from presence: two players fill a size-2 room; the hidden one isn't counted.
+    // Excluded from presence: the two players are counted; the hidden one isn't.
     expect(room.count).toBe(2)
-    expect(room.isFull).toBe(true)
     expect((await room.getParticipants()).map((m) => m.id).sort()).toEqual([p1.id, p2.id].sort())
     expect(
       room
@@ -1982,7 +1944,6 @@ function createSnapshot(roomId: string, partial?: Partial<RoomSnapshotMetadata>)
     channelId: 'ch1',
     roomId,
     meta: {},
-    size: null,
     isolated: false,
     closed: false,
     count: 0,
@@ -2109,7 +2070,7 @@ describe('ClientRoom', () => {
 
   it('applies leave/p-meta/update/closed events to state and local participants', async () => {
     const fake = createFakeStub()
-    const clientRoom = new ClientRoom(fake.stub, createSnapshot('events', { size: 5, meta: { topic: 'a' } }))
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('events', { meta: { topic: 'a' } }))
     const me = await clientRoom.join()
     const log: string[] = []
     clientRoom.onUpdate((meta) => log.push(`update:${JSON.stringify(meta)}`))
@@ -2119,8 +2080,8 @@ describe('ClientRoom', () => {
     fake.emit({ __r: 'p-meta', id: me.id, meta: { mood: 'happy' }, prev: {}, seq: 1 })
     expect(me.meta).toEqual({ mood: 'happy' })
 
-    fake.emit({ __r: 'update', meta: { topic: 'b' }, prev: { topic: 'a' }, size: null, at: 9, by: 'w1' })
-    expect(clientRoom.size).toBe(Infinity)
+    fake.emit({ __r: 'update', meta: { topic: 'b' }, prev: { topic: 'a' }, at: 9, by: 'w1' })
+    expect(clientRoom.meta).toEqual({ topic: 'b' })
 
     fake.emit({ __r: 'leave', id: me.id, cause: 'removed', reason: 'be nice' }) // kicked, told why
     fake.emit({ __r: 'closed' })
@@ -2546,13 +2507,13 @@ describe('typed metadata', () => {
 
 describe('snapshot() and onChange()', () => {
   it('the reference is stable until something changes, then every change class invalidates it', async () => {
-    const room = await Room.create('viewstore', { meta: { topic: 'a' }, size: 5 })
+    const room = await Room.create('viewstore', { meta: { topic: 'a' } })
     const changes: number[] = []
     room.onChange(() => changes.push(1))
 
     const s0 = room.snapshot()
     expect(room.snapshot()).toBe(s0) // cached — uSES contract
-    expect(s0).toMatchObject({ id: 'viewstore', meta: { topic: 'a' }, size: 5, count: 0, isClosed: false })
+    expect(s0).toMatchObject({ id: 'viewstore', meta: { topic: 'a' }, count: 0, isClosed: false })
     expect(Object.isFrozen(s0)).toBe(true)
 
     const me = await room.join({ meta: { name: 'Alice' }, identity: 'u1' })
@@ -2566,7 +2527,7 @@ describe('snapshot() and onChange()', () => {
     expect(s2.participants[0]!.meta).toEqual({ name: 'Alicia' })
     expect(s1.participants[0]!.meta).toEqual({ name: 'Alice' }) // old snapshots stay immutable
 
-    await Room.update('viewstore', { meta: { topic: 'b' } })
+    await Room.setMeta('viewstore', { topic: 'b' })
     const s3 = room.snapshot()
     expect(s3.meta).toEqual({ topic: 'b' })
 

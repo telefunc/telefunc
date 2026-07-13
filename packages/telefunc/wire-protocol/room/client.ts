@@ -10,7 +10,6 @@ import {
   hasRoomTag,
   mergeAttributes,
   normalizeJoinOptions,
-  sizeFromWire,
   unframeMemberId,
   type BinaryWants,
   type MemberWants,
@@ -91,7 +90,6 @@ class ClientRoom implements Room {
     this._state = new RoomState({
       roomId: snapshot.roomId,
       meta: snapshot.meta,
-      size: sizeFromWire(snapshot.size),
       seed: { count: snapshot.count }, // the roster itself streams right behind the response
       updateStamp: snapshot.stamp,
       closed: snapshot.closed,
@@ -119,17 +117,11 @@ class ClientRoom implements Room {
   get meta(): RoomMeta {
     return this._state.meta
   }
-  get size(): number {
-    return this._state.size
-  }
   get count(): number {
     return this._state.count
   }
   get isEmpty(): boolean {
     return this._state.count === 0
-  }
-  get isFull(): boolean {
-    return this._state.isFull
   }
   get isClosed(): boolean {
     return this._state.closed
@@ -231,9 +223,6 @@ class ClientRoom implements Room {
   onEmpty(callback: () => void): () => void {
     return this._state.onEmpty(callback)
   }
-  onFull(callback: () => void): () => void {
-    return this._state.onFull(callback)
-  }
   onClose(callback: () => void): () => void {
     return this._state.onClose(callback)
   }
@@ -332,7 +321,7 @@ class ClientRoom implements Room {
         return
       }
       case 'update':
-        this._state.applyRoomUpdate(event.meta, event.prev, sizeFromWire(event.size), event.at, event.by)
+        this._state.applyRoomUpdate(event.meta, event.prev, event.at, event.by)
         return
       case 'closed':
         this._applyClosed('closed')

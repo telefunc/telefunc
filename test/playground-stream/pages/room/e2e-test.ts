@@ -297,7 +297,7 @@ function testRoom() {
     })
   })
 
-  test('room: Room.update propagates; list and getOrCreate resolve', async () => {
+  test('room: Room.setMeta propagates; list and getOrCreate resolve', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-reconfig')
 
@@ -305,14 +305,12 @@ function testRoom() {
       const r = await getResult<{
         updates: string[]
         topic: string | null
-        size: number
         listed: string[]
         sameId: boolean
         sameCount: number
       }>('#room-result')
       expect(r.updates).toContain('updated') // room.onUpdate fired
       expect(r.topic).toBe('updated') // room.meta reflects it
-      expect(r.size).toBe(20) // capacity reconfigured
       expect(r.listed.length).toBe(2) // both prefixed rooms enumerated by Room.list
       expect(r.sameId).toBe(true) // getOrCreate returned the existing room
       expect(r.sameCount).greaterThanOrEqual(1) // ...with its member preserved

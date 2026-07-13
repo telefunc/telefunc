@@ -38,8 +38,6 @@ import {
   roomRetainedBinaryPrefix,
   bytesToBase64,
   base64ToBytes,
-  sizeFromWire,
-  sizeToWire,
   unframeMemberId,
   uuidToBytes,
   DEFAULT_TRACK,
@@ -103,7 +101,7 @@ assertIsNotBrowser()
  *  event stream — small: the heartbeat writes a member at most once per tick, so one re-assert wins. */
 const MEMBER_META_WRITE_MAX_ATTEMPTS = 3
 
-/** This process's identity as an LWW writer — breaks `Room.update()` timestamp ties.
+/** This process's identity as an LWW writer — breaks `Room.setMeta()` timestamp ties.
  *  Minted lazily: Cloudflare Workers forbid crypto RNG in module scope (this module loads at
  *  worker startup via the serializer registry), and inside a request it's always available. */
 let _writerId: string | undefined
@@ -173,11 +171,11 @@ type RoomStatic = {
   /** List all rooms — optionally only those whose ID starts with `prefix`. `M` types the returned
    *  `meta` (`Room.list<MatchMeta>()`), replacing a `r.meta as MatchMeta` cast at the call site. */
   list<M extends RoomMeta = RoomMeta>(options?: { prefix?: string }): Promise<RoomInfo<M>[]>
-  /** Admin: update the room's configuration — provided fields replace, omitted fields keep
-   *  their current value (`isolated` is fixed at creation). */
-  update(id: string, options: RoomOptions): Promise<void>
+  /** Admin: replace the room's metadata wholesale (`isolated` is fixed at creation). The
+   *  room-level counterpart to `LocalParticipant.setMeta`. */
+  setMeta(id: string, meta: RoomMeta): Promise<void>
   /** Admin: merge the room's metadata per key — provided keys replace, omitted keys keep their
-   *  value, a key set to `undefined` is removed (`size`/`isolated` untouched). The room-level
+   *  value, a key set to `undefined` is removed (`isolated` untouched). The room-level
    *  counterpart to `LocalParticipant.setAttributes`. */
   setAttributes(id: string, attributes: RoomMeta): Promise<void>
   /** Admin: close the room — disconnects all participants and removes the room. */
@@ -212,7 +210,7 @@ type RoomStatic = {
  * ```ts
  * import { Room } from 'telefunc'
  *
- * await Room.create('lobby', { meta: { topic: 'general' }, size: 100 })
+ * await Room.create('lobby', { meta: { topic: 'general' } })
  * const lobby = await Room.get('lobby')
  * const me = await lobby.join({ meta: { name: 'Alice' } })
  * await me.publish({ text: 'hello' })
@@ -227,7 +225,7 @@ const Room: RoomStatic = {
   guard: guardRoom as RoomStatic['guard'],
   join: joinRoom as RoomStatic['join'],
   list: listRooms as RoomStatic['list'],
-  update: updateRoom,
+  setMeta: setRoomMeta,
   setAttributes: setRoomAttributes,
   close: closeRoom,
   removeParticipant,
@@ -238,12 +236,11 @@ const Room: RoomStatic = {
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
-  const { meta, size } = normalizeOptions(options)
+  const { meta } = normalizeOptions(options)
   const kv = getRoomKV()
   if ((await readConfig(kv, id)) !== null) throw new Error(`Room already exists: ${id}`)
   const config: RoomConfigRecord = {
     meta,
-    size: sizeToWire(size),
     isolated: options?.isolated === true,
     at: Date.now(),
     by: writerId(),
@@ -254,8 +251,8 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   const { kv, config } = await requireRoom(id)
-  // One keys scan for the count — `isFull` capacity gates stay correct — but no per-member
-  // reads: the roster itself loads lazily, on the first observation that needs it.
+  // One keys scan for the count — but no per-member reads: the roster itself loads lazily,
+  // on the first observation that needs it.
   const count = (await listMemberKeys(kv, id)).length
   const room = new ServerRoom(id, config, { count })
   room._tail = options?.tail === true
@@ -333,60 +330,37 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
     const config = await readConfig(kv, id)
     if (config === null) continue // closed concurrently
     const count = (await listMemberKeys(kv, id)).length // scan only — no per-member reads
-    const size = sizeFromWire(config.size)
-    rooms.push({ id, meta: config.meta, size, count, isEmpty: count === 0, isFull: count >= size })
+    rooms.push({ id, meta: config.meta, count, isEmpty: count === 0 })
   }
   return rooms
 }
 
-async function updateRoom(id: string, options: RoomOptions): Promise<void> {
-  assertUsage(isObject(options), 'Room.update() options should be an object')
+async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
+  assertUsage(isObject(meta), 'Room.setMeta() meta should be an object')
   const { kv, config } = await requireRoom(id)
-  assertUsage(
-    options.isolated === undefined || options.isolated === config.isolated,
-    "A room's `isolated` mode is fixed at creation — room.update() cannot change it",
-  )
-  // Per-field replace — an omitted field keeps its current value, so updating the topic can
-  // never silently reset a capacity (and vice versa).
-  const meta = options.meta === undefined ? config.meta : options.meta
-  assertUsage(isObject(meta), 'options.meta should be an object')
-  let sizeWire = config.size
-  if (options.size !== undefined) {
-    assertUsage(
-      typeof options.size === 'number' && options.size > 0 && !Number.isNaN(options.size),
-      'options.size should be a positive number',
-    )
-    sizeWire = sizeToWire(options.size)
-  }
-  await writeRoomConfig(id, kv, config, meta, sizeWire)
+  await writeRoomConfig(id, kv, config, meta)
 }
 
 /** Merge into the room's metadata per key — provided keys replace, omitted keys keep their value,
- *  a key set to `undefined` is removed (`size`/`isolated` untouched). The admin counterpart to
+ *  a key set to `undefined` is removed (`isolated` untouched). The admin counterpart to
  *  `LocalParticipant.setAttributes`: one changed field is one small write, not a whole-`meta` resend. */
 async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
   assertUsage(isObject(attributes), 'Room.setAttributes() attributes should be an object')
   const { kv, config } = await requireRoom(id)
-  await writeRoomConfig(id, kv, config, mergeAttributes(config.meta, attributes), config.size)
+  await writeRoomConfig(id, kv, config, mergeAttributes(config.meta, attributes))
 }
 
 /** Commit a room-config change and converge it. The stamp is strictly after the config it derives
  *  from (hybrid-clock): one writer's back-to-back writes always order, cross-writer ties break
  *  wall-clock last-writer-wins. Everywhere the `update` event reaches converges on the `(at, by)`
  *  stamp; the KV *write*, though, races — so read back and, if a stamp-losing write landed on top,
- *  re-assert (only the winner rewrites, so the exchange terminates). Shared by `update()` (replace)
+ *  re-assert (only the winner rewrites, so the exchange terminates). Shared by `setMeta()` (replace)
  *  and `setAttributes()` (merge). */
-async function writeRoomConfig(
-  id: string,
-  kv: RoomKV,
-  config: RoomConfigRecord,
-  meta: RoomMeta,
-  sizeWire: number | null,
-): Promise<void> {
+async function writeRoomConfig(id: string, kv: RoomKV, config: RoomConfigRecord, meta: RoomMeta): Promise<void> {
   const at = Math.max(Date.now(), config.at + 1)
-  const next: RoomConfigRecord = { meta, size: sizeWire, isolated: config.isolated, at, by: writerId() }
+  const next: RoomConfigRecord = { meta, isolated: config.isolated, at, by: writerId() }
   await kv.set(roomConfigKvKey(id), stringify(next))
-  await publishCtrl(id, { __r: 'update', meta, prev: config.meta, size: sizeWire, at: next.at, by: next.by })
+  await publishCtrl(id, { __r: 'update', meta, prev: config.meta, at: next.at, by: next.by })
   const readBack = await readConfig(kv, id)
   if (readBack !== null && stampNewer(next, readBack)) await kv.set(roomConfigKvKey(id), stringify(next))
 }
@@ -538,7 +512,6 @@ class ServerRoom implements Room {
     this._state = new RoomState({
       roomId,
       meta: config.meta,
-      size: sizeFromWire(config.size),
       seed,
       updateStamp: { at: config.at, by: config.by },
       onListenersChanged: () => this._syncSubs(),
@@ -573,17 +546,11 @@ class ServerRoom implements Room {
   get meta(): RoomMeta {
     return this._state.meta
   }
-  get size(): number {
-    return this._state.size
-  }
   get count(): number {
     return this._state.count
   }
   get isEmpty(): boolean {
     return this._state.count === 0
-  }
-  get isFull(): boolean {
-    return this._state.isFull
   }
   get isClosed(): boolean {
     return this._state.closed
@@ -638,9 +605,6 @@ class ServerRoom implements Room {
   }
   onEmpty(callback: () => void): () => void {
     return this._state.onEmpty(callback)
-  }
-  onFull(callback: () => void): () => void {
-    return this._state.onFull(callback)
   }
   onClose(callback: () => void): () => void {
     return this._state.onClose(callback)
@@ -784,7 +748,7 @@ class ServerRoom implements Room {
     // Read-back re-assert: a concurrent `_heartbeatTick` rewrites the whole record to bump `seenAt`
     // and, if it read the record before this write, its write carries a stale `meta`/`metaSeq` that
     // reverts ours in KV. Re-assert until a record at least this revision is present (bounded — the
-    // `updateRoom`/`_ensureTrackAnnounced` discipline). The `p-meta` event below is the real
+    // `writeRoomConfig`/`_ensureTrackAnnounced` discipline). The `p-meta` event below is the real
     // convergence; this keeps the KV record from serving stale meta to a fresh loader.
     for (let attempt = 0; attempt < MEMBER_META_WRITE_MAX_ATTEMPTS; attempt++) {
       const readBack = await kv.get(memberKey)
@@ -905,7 +869,7 @@ class ServerRoom implements Room {
       const next: RoomMemberRecord = { ...record, tracks: [...(record.tracks ?? []), track], seenAt: Date.now() }
       await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
       // Read back: a concurrent record write (setMeta, heartbeat) may have clobbered the
-      // append — loop until it sticks (the `updateRoom` read-back discipline).
+      // append — loop until it sticks (the `writeRoomConfig` read-back discipline).
       const readBack = await kv.get(memberKey)
       if (readBack !== null && (parse(readBack) as RoomMemberRecord).tracks?.includes(track)) {
         await publishCtrl(this.id, { __r: 'track', id: from, track })
@@ -1188,7 +1152,7 @@ class ServerRoom implements Room {
         return
       }
       case 'update':
-        this._state.applyRoomUpdate(event.meta, event.prev, sizeFromWire(event.size), event.at, event.by)
+        this._state.applyRoomUpdate(event.meta, event.prev, event.at, event.by)
         return
       case 'closed':
         this._state.applyClosed()
@@ -1422,7 +1386,7 @@ class ServerRoom implements Room {
 
     // Roster loads are need-driven: a resident roster refreshes on the observe transition
     // (events between its KV read and this subscription were missed); a lazy one loads once
-    // something actually needs the member view — room-level listeners (onLeave/onEmpty/onFull
+    // something actually needs the member view — room-level listeners (onLeave/onEmpty
     // and live senders are only correct against it) or a member-keyed lane. A holder that only
     // joins attaches neither, so `Room.join()` never loads a roster at all —
     // `getParticipants()`/serialization go through `_ensureRoster` on their own.
@@ -1905,13 +1869,11 @@ function normalizeHidden(options: JoinOptions | undefined): boolean {
   return options.hidden
 }
 
-function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta; size: number } {
+function normalizeOptions(options: RoomOptions | undefined): { meta: RoomMeta } {
   assertUsage(options === undefined || isObject(options), 'Room options should be an object')
   const meta = options?.meta ?? {}
   assertUsage(isObject(meta), 'options.meta should be an object')
-  const size = options?.size ?? Infinity
-  assertUsage(typeof size === 'number' && size > 0 && !Number.isNaN(size), 'options.size should be a positive number')
-  return { meta, size }
+  return { meta }
 }
 
 function reportRoomError(err: unknown): void {

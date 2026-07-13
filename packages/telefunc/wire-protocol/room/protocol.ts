@@ -21,8 +21,6 @@ export {
   roomIdentityMemberKvKey,
   roomIdentityKvPrefix,
   roomIdentityRoomKvPrefix,
-  sizeToWire,
-  sizeFromWire,
   stampNewer,
   uuidToBytes,
   frameWithMemberId,
@@ -187,11 +185,10 @@ function roomIdentityRoomKvPrefix(roomId: string): string {
   return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:`
 }
 
-/** Stored at `roomConfigKvKey`. `size: null` encodes `Infinity` (not JSON-safe). `at`/`by` is
- *  the last-writer-wins stamp of the latest `Room.update()` (see `applyRoomUpdate`). */
+/** Stored at `roomConfigKvKey`. `at`/`by` is the last-writer-wins stamp of the latest
+ *  `Room.setMeta()`/`Room.setAttributes()` (see `applyRoomUpdate`). */
 type RoomConfigRecord = {
   meta: RoomMeta
-  size: number | null
   isolated: boolean
   at: number
   by: string
@@ -221,13 +218,6 @@ type RoomMemberRecord = {
   hidden?: boolean
 }
 
-function sizeToWire(size: number): number | null {
-  return Number.isFinite(size) ? size : null
-}
-function sizeFromWire(size: number | null): number {
-  return size ?? Infinity
-}
-
 // ---------------------------------------------------------------------------
 // Wire shapes
 // ---------------------------------------------------------------------------
@@ -253,7 +243,6 @@ type RoomSnapshotMetadata = {
   channelId: string
   roomId: string
   meta: RoomMeta
-  size: number | null
   isolated: boolean
   closed: boolean
   count: number
@@ -285,7 +274,7 @@ type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string; hidden?: boolean }
   | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected'; reason?: unknown }
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; prev: ParticipantMeta; seq: number }
-  | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; at: number; by: string }
+  | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; at: number; by: string }
   // A member's first publish on a new named track — announced before the frame, so live
   // all-track subscribers bring up the track-key subscription (idempotent, like join).
   | { __r: 'track'; id: string; track: string }

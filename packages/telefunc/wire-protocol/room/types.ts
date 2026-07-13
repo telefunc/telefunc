@@ -140,9 +140,6 @@ type ParticipantRef = { id: string } | { identity: string }
 type RoomOptions<M extends RoomMeta = RoomMeta> = {
   /** Room metadata, visible to all observers. Default: `{}`. */
   meta?: M
-  /** Capacity hint (default: `Infinity`). Tracked (`count`, `isFull`, `onFull`) but not
-   *  enforced — reject joins yourself, e.g. `if (room.isFull) throw new Error(...)`. */
-  size?: number
   /** Give each member their own upstream pub/sub key (default: `false`). Removes publish
    *  contention on platforms that map each key to a separate coordinator (e.g. Cloudflare
    *  Durable Objects). Clients don't see the difference. Fixed at creation. */
@@ -172,7 +169,7 @@ type JoinOptions<P extends ParticipantMeta = ParticipantMeta> = {
   identity?: string
   /** Join without appearing in the room's presence (default: `false`) — a full participant
    *  (publish, `publishBinary`, `send`, `listen`, `onDemand`) that is excluded from `count`,
-   *  `isFull`, `getParticipants()`, `snapshot()`, and `onJoin`/`onLeave`/`onEmpty`. For a server
+   *  `getParticipants()`, `snapshot()`, and `onJoin`/`onLeave`/`onEmpty`. For a server
    *  that acts in a room — authoritative game state, a bot, a command sink — or a recorder or a
    *  moderator observing unseen. Any number per room; read them with `getParticipants({ hidden:
    *  true })`. Server-side `join()` only (like `identity`); a client-side `join()` rejects it. */
@@ -192,7 +189,6 @@ type ParticipantSnapshotView<P extends ParticipantMeta = ParticipantMeta> = {
 type RoomSnapshotView<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta> = {
   readonly id: string
   readonly meta: M
-  readonly size: number
   readonly count: number
   readonly isClosed: boolean
   readonly participants: readonly ParticipantSnapshotView<P>[]
@@ -203,10 +199,8 @@ type RoomSnapshotView<M extends RoomMeta = RoomMeta, P extends ParticipantMeta =
 type RoomInfo<M extends RoomMeta = RoomMeta> = {
   readonly id: string
   readonly meta: M
-  readonly size: number
   readonly count: number
   readonly isEmpty: boolean
-  readonly isFull: boolean
 }
 
 /** Per-frame binary metadata, straight from the frame header. */
@@ -271,11 +265,8 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** The ID the room was created with. */
   readonly id: string
   readonly meta: M
-  /** Capacity hint — not enforced by Telefunc. `Infinity` when unset. */
-  readonly size: number
   readonly count: number
   readonly isEmpty: boolean
-  readonly isFull: boolean
   readonly isClosed: boolean
 
   /** Join the room, optionally with your participant `meta`. Returns your own participant handle. */
@@ -305,14 +296,12 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
   /** Any participant's metadata changed — `member` is who, with the new and previous meta. One
    *  subscription covering every member (vs. wiring `onUpdate` on each handle from `onJoin`). */
   onParticipantUpdate(callback: (member: RemoteParticipant<P, Pub>, meta: P, prev: P) => void): () => void
-  /** The room was reconfigured via `Room.update()`. */
+  /** The room's metadata was replaced (`Room.setMeta()`) or merged (`Room.setAttributes()`). */
   onUpdate(callback: (meta: M, prev: M) => void): () => void
   /** A room-authored message arrived (`Room.announce()`) — e.g. system notices. */
   onAnnounce(callback: (data: unknown, info: ChannelPublishInfo) => void): () => void
   /** The last participant left. */
   onEmpty(callback: () => void): () => void
-  /** The room reached capacity (`count >= size`). */
-  onFull(callback: () => void): () => void
   /** The room was closed via `Room.close()` (on the client, also: the connection is gone). */
   onClose(callback: () => void): () => void
 

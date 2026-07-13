@@ -25,7 +25,7 @@ import { Room } from 'telefunc'
 
 /** Room IDs are generated client-side per scenario run — the in-memory KV outlives page
  *  loads, so a fixed ID would leak members and seq counters across runs. */
-async function onCreateRoom(roomId: string, opts?: { size?: number; isolated?: boolean }) {
+async function onCreateRoom(roomId: string, opts?: { isolated?: boolean }) {
   return await Room.create(roomId, { meta: { topic: 'e2e' }, ...opts })
 }
 
@@ -155,9 +155,9 @@ async function onSystemSend(roomId: string, participantId: string, data: unknown
   await Room.send(roomId, { id: participantId }, data)
 }
 
-/** Reconfigure a room's metadata and capacity — propagates to observers via `room.onUpdate()`. */
-async function onUpdateRoom(roomId: string, meta: Record<string, unknown>, size?: number) {
-  await Room.update(roomId, { meta, ...(size === undefined ? {} : { size }) })
+/** Replace a room's metadata — propagates to observers via `room.onUpdate()`. */
+async function onUpdateRoom(roomId: string, meta: Record<string, unknown>) {
+  await Room.setMeta(roomId, meta)
 }
 
 /** Enumerate rooms by ID prefix. */

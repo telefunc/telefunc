@@ -48,7 +48,7 @@ function Room() {
         onClick={async () => {
           setResult('')
           const roomId = `e2e-chat:${crypto.randomUUID()}`
-          await onCreateRoom(roomId, { size: 10 })
+          await onCreateRoom(roomId)
           const lobby = await onGetRoom(roomId)
 
           const events: string[] = []
@@ -634,13 +634,13 @@ function Room() {
           setResult('')
           const base = `e2e-reconfig:${crypto.randomUUID()}`
           const roomId = `${base}:a`
-          await onCreateRoom(roomId, { size: 10 })
+          await onCreateRoom(roomId)
           const room = await onGetRoom(roomId)
           const me = await room.join({ meta: { name: 'R' } })
           const updates: string[] = []
           room.onUpdate((meta) => updates.push((meta as { topic?: string }).topic ?? ''))
 
-          await onUpdateRoom(roomId, { topic: 'updated' }, 20)
+          await onUpdateRoom(roomId, { topic: 'updated' })
           await onCreateRoom(`${base}:b`) // a second room under the same prefix, for list()
           const same = await onGetOrCreateRoom(roomId) // idempotent — returns the existing room
           const listed = await onListRooms(base)
@@ -650,7 +650,6 @@ function Room() {
               JSON.stringify({
                 updates,
                 topic: (room.meta as { topic?: string }).topic ?? null,
-                size: room.size,
                 listed,
                 sameId: same.id === roomId,
                 sameCount: same.count,

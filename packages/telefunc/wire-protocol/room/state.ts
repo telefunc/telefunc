@@ -58,11 +58,10 @@ type MemberEntry = {
 type RoomStateOptions = {
   roomId: string
   meta: RoomMeta
-  size: number
-  /** Either the authoritative roster, or just its size — a lazy view seeds with `{ count }`
-   *  and learns the members from its first `reconcile()` (KV read / streamed roster). */
+  /** Either the authoritative roster, or just its member count — a lazy view seeds with
+   *  `{ count }` and learns the members from its first `reconcile()` (KV read / streamed roster). */
   seed: { members: MemberSnapshot[] } | { count: number }
-  /** The LWW stamp of the config `meta`/`size` were read from (see `applyRoomUpdate`). */
+  /** The LWW stamp of the config `meta` was read from (see `applyRoomUpdate`). */
   updateStamp: { at: number; by: string }
   closed?: boolean
   /** Fired whenever the number of attached listeners changes — lets the owner
@@ -99,7 +98,6 @@ class RoomState {
   _owner: unknown = null
   readonly roomId: string
   meta: RoomMeta
-  size: number
   closed: boolean
   /** Bumped on every membership change — guards async KV reconciles against going stale. */
   membershipVersion = 0
@@ -125,14 +123,12 @@ class RoomState {
   > = []
   private readonly _updateCbs: Array<(meta: RoomMeta, prev: RoomMeta) => void> = []
   private readonly _emptyCbs: Array<() => void> = []
-  private readonly _fullCbs: Array<() => void> = []
   private readonly _closeCbs: Array<() => void> = []
   private readonly _announceCbs: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
 
   private _eventListenerCount = 0
   private _dataListenerCount = 0
   private _binaryListenerCount = 0
-  private _wasFull: boolean
   private _updateStamp: { at: number; by: string }
   private _rosterKnown: boolean
   private _seedCount = 0
@@ -140,7 +136,6 @@ class RoomState {
   constructor(opts: RoomStateOptions) {
     this.roomId = opts.roomId
     this.meta = opts.meta
-    this.size = opts.size
     this.closed = opts.closed === true
     this._updateStamp = opts.updateStamp
     this._onListenersChanged = opts.onListenersChanged
@@ -152,7 +147,6 @@ class RoomState {
       this._rosterKnown = false
       this._seedCount = opts.seed.count
     }
-    this._wasFull = this.isFull
   }
 
   // ── Reads ──
@@ -181,10 +175,6 @@ class RoomState {
   /** Whether this view holds the authoritative member list (vs just a count). */
   get rosterKnown(): boolean {
     return this._rosterKnown
-  }
-
-  get isFull(): boolean {
-    return this.count >= this.size
   }
 
   /** Listeners needing the control stream (presence, lifecycle). */
@@ -297,9 +287,6 @@ class RoomState {
   onEmpty(cb: () => void): () => void {
     return this._register(this._emptyCbs, cb, 'event')
   }
-  onFull(cb: () => void): () => void {
-    return this._register(this._fullCbs, cb, 'event')
-  }
   onClose(cb: () => void): () => void {
     return this._register(this._closeCbs, cb, 'event')
   }
@@ -327,7 +314,6 @@ class RoomState {
     const value = Object.freeze({
       id: this.roomId,
       meta: this.meta,
-      size: this.size,
       count: this.count,
       isClosed: this.closed,
       participants,
@@ -374,7 +360,6 @@ class RoomState {
     this._seedCount++ // pre-reconcile, `count` tracks the seed adjusted by applied events
     this._bumpMembership()
     this._fireAll(this._joinCbs, entry.remote)
-    this._checkFull()
   }
 
   applyLeave(id: string, cause?: LeaveCause): void {
@@ -390,7 +375,6 @@ class RoomState {
     if (!entry.hidden) this._fireAll(this._leaveCbs, entry.remote, cause)
     this._releaseEntryListeners(entry)
     if (entry.hidden) return
-    this._wasFull = this.isFull
     if (!this._hasParticipants()) this._fireAll(this._emptyCbs)
   }
 
@@ -413,16 +397,14 @@ class RoomState {
     this._fireAll(this._participantUpdateCbs, entry.remote, meta, prev)
   }
 
-  /** Last-writer-wins by `(at, by)`: concurrent `Room.update()`s converge to the same winner on
+  /** Last-writer-wins by `(at, by)`: concurrent `Room.setMeta()`s converge to the same winner on
    *  every node regardless of arrival order, and the origin's echo (same stamp) is absorbed. */
-  applyRoomUpdate(meta: RoomMeta, prev: RoomMeta, size: number, at: number, by: string): void {
+  applyRoomUpdate(meta: RoomMeta, prev: RoomMeta, at: number, by: string): void {
     if (!stampNewer({ at, by }, this._updateStamp)) return
     this._updateStamp = { at, by }
     this.meta = meta
-    this.size = size
     this._bumpState()
     this._fireAll(this._updateCbs, meta, prev)
-    this._checkFull()
   }
 
   /** The stamp of the config this view currently reflects (serialized into room snapshots). */
@@ -551,7 +533,6 @@ class RoomState {
       // reads `snapshot()` (the `useSyncExternalStore` contract) would otherwise cache an empty
       // roster under the new version, and the silent `_createEntry`s above never re-invalidate it.
       this._bumpMembership()
-      this._wasFull = this.isFull
       return false
     }
 
@@ -590,12 +571,6 @@ class RoomState {
   }
 
   // ── Private ──
-
-  private _checkFull(): void {
-    const full = this.isFull
-    if (full && !this._wasFull) this._fireAll(this._fullCbs)
-    this._wasFull = full
-  }
 
   private _createEntry(entrySeed: MemberSnapshot): MemberEntry {
     const { id, meta, joinedAt } = entrySeed
