@@ -521,9 +521,7 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
 }
 
 /** Split a binary relay frame into sender, track, per-frame meta, and payload. `null` on truncation. */
-function unframeMemberId(
-  data: Uint8Array,
-): {
+function unframeMemberId(data: Uint8Array): {
   from: string
   payload: Uint8Array
   track: string | null
