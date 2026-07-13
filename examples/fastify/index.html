@@ -1,0 +1,17 @@
+<html>
+  <body>
+    <p>Message: <span id="hello">Loading...</span></p>
+    <p>Countdown: <span id="countdown">Loading...</span></p>
+    <script type="module">
+      import { hello } from './hello.telefunc.js'
+      import { onCountdown } from './countdown.telefunc.js'
+
+      const { message } = await hello({ name: 'Eva' })
+      document.querySelector('#hello').textContent = message
+
+      for await (const n of onCountdown(3)) {
+        document.querySelector('#countdown').textContent = n
+      }
+    </script>
+  </body>
+</html>

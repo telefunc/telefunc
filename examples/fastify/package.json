@@ -1,0 +1,11 @@
+{
+  "type": "module",
+  "scripts": {
+    "dev": "node ./server.js"
+  },
+  "dependencies": {
+    "fastify": "^5.10.0",
+    "telefunc": "0.2.22",
+    "vite": "^8.1.4"
+  }
+}
