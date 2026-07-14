@@ -32,6 +32,7 @@ export {
   isRoomError,
   toRoomFailure,
   roomFailureError,
+  roomAckError,
   ROOM_BUG_MESSAGE,
   leaveCauseFromWire,
   leaveCauseToWire,
@@ -65,10 +66,6 @@ export type {
   RoomStubRequest,
   ParticipantStubRequest,
   ParticipantStubNotice,
-  ReqOkAck,
-  ReqJoinAck,
-  ReqPublishAck,
-  ReqDmAck,
   MemberWants,
   TrackWants,
   BinaryWants,
@@ -80,6 +77,8 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { isAbort, createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
+import { ACK_STATUS } from '../shared-ws.js'
+import type { AckResultStatus } from '../shared-ws.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import type {
   BinaryPublishOptions,
@@ -377,13 +376,6 @@ type ParticipantStubNotice =
  *  or a specific member set for participant-scoped ones. */
 type MemberWants = { all: boolean; members: string[] }
 
-type ReqOkAck = { ok: true } | RoomFailure
-type ReqJoinAck = { ok: true; id: string; joinedAt: number } | RoomFailure
-type ReqPublishAck = { ok: true; ack: ChannelPublishInfo } | RoomFailure
-/** The stub's answer to a client `req-dm`: a delivery receipt for a plain send, or the recipient's
- *  reply for `{ ack: true }`, or a failure. */
-type ReqDmAck = { ok: true; ack: RoomSendReceipt } | { ok: true; reply: unknown } | RoomFailure
-
 /** Decode a leave event's cause — an absent wire cause means a voluntary leave. */
 function leaveCauseFromWire(event: { cause?: 'removed' | 'disconnected'; reason?: unknown }): LeaveCause {
   if (event.cause === 'removed') {
@@ -464,8 +456,10 @@ const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server lo
  *  throwing side and replaced with `ROOM_BUG_MESSAGE`, so nothing internal leaks. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
 
-/** Classify a caught error into its wire failure. `report` is the throwing side's bug pipeline
- *  (server: `handleTelefunctionBug`; client: console) — invoked only for genuine bugs. */
+/** Classify a caught error for the one place a failure can't ride a channel ack — a DM handler's
+ *  outcome, relayed to the sender as published data (`DmReply`, `roomDmKey`). `report` is the
+ *  throwing side's bug pipeline (server: `handleTelefunctionBug`; client: console), invoked only
+ *  for genuine bugs. Everything that *does* ride an ack uses `roomAckError` instead. */
 function toRoomFailure(err: unknown, report: (err: unknown) => void): RoomFailure {
   if (isAbort(err)) return { ok: false, abort: true, abortValue: err.abortValue }
   if (isRoomError(err)) return { ok: false, err: err.message }
@@ -473,11 +467,26 @@ function toRoomFailure(err: unknown, report: (err: unknown) => void): RoomFailur
   return { ok: false, err: ROOM_BUG_MESSAGE }
 }
 
-/** Rebuild, on the caller's side, the error a `RoomFailure` stands for — an `AbortError` carrying
- *  the value (so `instanceof Abort` works), or a plain `Error` with the safe/generic message. */
+/** Rebuild the error a relayed `RoomFailure` stands for, to throw it at the sender boundary — where
+ *  the channel's ack encoder (`roomAckError`) re-classifies it. An `Abort` value rebuilds an
+ *  `AbortError` (so `instanceof Abort` / `abortValue` hold); an operational reason rebuilds a
+ *  `RoomError` so its message is surfaced (not re-reported as a fresh bug). */
 function roomFailureError(res: RoomFailure): Error {
   if ('abort' in res) return createAbortError(res.abortValue)
-  return new Error(res.err)
+  return new RoomError(res.err)
+}
+
+/** Map a caught room error onto the channel's native ack status — the wire form of the same
+ *  three-way contract as `toRoomFailure`, for every operation that rides a channel ack (all stub
+ *  requests + publishes). A carried `Abort` → `ABORT` (value); a `RoomError` → `ERROR` (its safe
+ *  message); anything else is a bug → reported here, replaced with `ROOM_BUG_MESSAGE`. The client
+ *  channel rebuilds an `AbortError`/`Error` from the status, so no `{ ok: false }` envelope is
+ *  needed — the awaiting request promise simply rejects. */
+function roomAckError(err: unknown, report: (err: unknown) => void): { text: string; status: AckResultStatus } {
+  if (isAbort(err)) return { text: stringify(err.abortValue), status: ACK_STATUS.ABORT }
+  if (isRoomError(err)) return { text: err.message, status: ACK_STATUS.ERROR }
+  report(err)
+  return { text: ROOM_BUG_MESSAGE, status: ACK_STATUS.ERROR }
 }
 
 // ---------------------------------------------------------------------------

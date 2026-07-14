@@ -14,7 +14,6 @@ import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '..
 import {
   ROOM_KEY_NAMESPACE,
   RoomError,
-  toRoomFailure,
   roomFailureError,
   leaveCauseFromWire,
   leaveCauseToWire,
@@ -52,9 +51,6 @@ import {
   type MemberWants,
   type TrackWants,
   type MemberSnapshot,
-  type ReqJoinAck,
-  type ReqOkAck,
-  type ReqDmAck,
   type RoomConfigRecord,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
@@ -1225,82 +1221,88 @@ class ServerRoom implements Room {
   }
 
   /** @internal — requests arriving on a room stub channel. The return value is the ack. */
-  async _handleStubRequest(stub: RoomStubChannel, msg: unknown): Promise<ReqJoinAck | ReqOkAck | ReqDmAck | undefined> {
+  /** Handle a client request on a `Room` stub. The ack-bearing requests (join/leave/set-meta/
+   *  set-attrs/dm) return their raw success value or *throw*: the stub's ack encoder (`roomAckError`,
+   *  set in `RoomStubChannel`) maps the throw onto the channel's native `ABORT`/`ERROR` status, so
+   *  the client's awaiting request rejects with the reconstructed `AbortError`/`Error` — no envelope.
+   *  The fire-and-forget requests (dm-reply, sub-binary, sub-text) ride no ack and must never throw. */
+  async _handleStubRequest(stub: RoomStubChannel, msg: unknown): Promise<unknown> {
     if (!hasRoomTag(msg)) return undefined
     const req = msg as RoomStubRequest
-    try {
-      switch (req.__r) {
-        case 'req-join': {
-          const meta = isObject(req.meta) ? req.meta : {}
-          // Identity is trusted and therefore server-assigned — a client join never carries one.
-          const { id, joinedAt } = await this._admitMember(meta, null, (id) => {
-            stub._stubMembers.add(id)
-            if (req.selfDelivery === false) stub._selfSuppressed.add(id)
-          })
-          return { ok: true, id, joinedAt }
-        }
-        case 'req-leave':
-          this._assertStubMember(stub, req.id)
-          stub._stubMembers.delete(req.id)
-          await this._removeMember(req.id, { type: 'left' })
-          return { ok: true }
-        case 'req-set-meta':
-          this._assertStubMember(stub, req.id)
-          await this._setMemberMeta(req.id, isObject(req.meta) ? req.meta : {})
-          return { ok: true }
-        case 'req-set-attrs':
-          this._assertStubMember(stub, req.id)
-          await this._mergeMemberMeta(req.id, isObject(req.attrs) ? req.attrs : {})
-          return { ok: true }
-        case 'req-dm': {
-          this._assertStubMember(stub, req.id)
-          if (!req.ack) return { ok: true, ack: await this._sendDm(req.id, req.to, req.data) }
-          const { receipt, reply } = await this._sendDmAck(req.id, req.to, req.data)
-          // Forward the recipient's failure to the client verbatim — re-catching it here would
-          // reclassify a carried `Abort`/`RoomError` as an opaque bug.
-          return reply.ok ? { ok: true, reply: { ...receipt, response: reply.result } } : reply
-        }
-        case 'dm-reply': {
-          // A client-held member replied to an ack DM we relayed it — route the reply to the sender.
-          // We only honor an `ackId` we actually relayed to this stub (forged ones match nothing).
-          this._assertStubMember(stub, req.id)
-          const sender = stub._pendingAckDms.get(req.ackId)
-          if (sender !== undefined) {
-            stub._pendingAckDms.delete(req.ackId)
-            // Rebuild a clean `DmReply` from the spread fields (dropping `__r`/`id`/`ackId`),
-            // preserving whether it's a value, a carried `Abort`, or an operational error.
-            const reply: DmReply = req.ok
-              ? { ok: true, result: req.result }
-              : 'abort' in req
-                ? { ok: false, abort: true, abortValue: req.abortValue }
-                : { ok: false, err: req.err }
-            await this._publishDmAck(sender, req.ackId, reply)
-          }
-          return { ok: true }
-        }
-        case 'sub-binary': {
-          const wants = sanitizeBinaryWants(req.wants)
-          if (!wants) throw new RoomError('Malformed sub-binary declaration')
-          const prev = stub._binaryWants
-          stub._binaryWants = wants
-          this._syncSubs()
-          await this._replayRetainedBinary(stub, prev)
-          return { ok: true }
-        }
-        case 'sub-text': {
-          // Member-scoped text wants — the room-level (all) want rides the broadcast-sub ctrl.
-          const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
-          const prev = stub._textMemberWants
-          stub._textMemberWants = new Set(members)
-          this._syncSubs()
-          await this._replayRetainedText(stub, stub._wantsText, prev)
-          return { ok: true }
-        }
-        default:
-          return undefined
+    switch (req.__r) {
+      case 'req-join': {
+        const meta = isObject(req.meta) ? req.meta : {}
+        // Identity is trusted and therefore server-assigned — a client join never carries one.
+        const { id, joinedAt } = await this._admitMember(meta, null, (id) => {
+          stub._stubMembers.add(id)
+          if (req.selfDelivery === false) stub._selfSuppressed.add(id)
+        })
+        return { id, joinedAt }
       }
-    } catch (err) {
-      return toRoomFailure(err, reportRoomError)
+      case 'req-leave':
+        this._assertStubMember(stub, req.id)
+        stub._stubMembers.delete(req.id)
+        await this._removeMember(req.id, { type: 'left' })
+        return undefined
+      case 'req-set-meta':
+        this._assertStubMember(stub, req.id)
+        await this._setMemberMeta(req.id, isObject(req.meta) ? req.meta : {})
+        return undefined
+      case 'req-set-attrs':
+        this._assertStubMember(stub, req.id)
+        await this._mergeMemberMeta(req.id, isObject(req.attrs) ? req.attrs : {})
+        return undefined
+      case 'req-dm': {
+        this._assertStubMember(stub, req.id)
+        if (!req.ack) return await this._sendDm(req.id, req.to, req.data)
+        const { receipt, reply } = await this._sendDmAck(req.id, req.to, req.data)
+        // The recipient's failure rides home too — throw it so the ack encoder emits the native
+        // ABORT/ERROR (a re-catch here would reclassify a carried Abort/RoomError as an opaque bug).
+        if (!reply.ok) throw roomFailureError(reply)
+        return { ...receipt, response: reply.result }
+      }
+      case 'dm-reply': {
+        // A client-held member replied to an ack DM we relayed it — route the reply to the sender.
+        // Fire-and-forget: only an `ackId` we actually relayed to this stub is honored (forged ones
+        // match nothing), which is the guard, so nothing here throws onto the (unacked) wire.
+        const sender = stub._pendingAckDms.get(req.ackId)
+        if (sender !== undefined) {
+          stub._pendingAckDms.delete(req.ackId)
+          // Rebuild a clean `DmReply` from the spread fields (dropping `__r`/`id`/`ackId`),
+          // preserving whether it's a value, a carried `Abort`, or an operational error.
+          const reply: DmReply = req.ok
+            ? { ok: true, result: req.result }
+            : 'abort' in req
+              ? { ok: false, abort: true, abortValue: req.abortValue }
+              : { ok: false, err: req.err }
+          void this._publishDmAck(sender, req.ackId, reply).catch(reportRoomError)
+        }
+        return undefined
+      }
+      case 'sub-binary': {
+        const wants = sanitizeBinaryWants(req.wants)
+        // Fire-and-forget: a malformed declaration is a client bug — report it, don't act on it.
+        if (!wants) {
+          reportRoomError(new RoomError('Malformed sub-binary declaration'))
+          return undefined
+        }
+        const prev = stub._binaryWants
+        stub._binaryWants = wants
+        this._syncSubs()
+        void this._replayRetainedBinary(stub, prev).catch(reportRoomError)
+        return undefined
+      }
+      case 'sub-text': {
+        // Member-scoped text wants — the room-level (all) want rides the broadcast-sub ctrl.
+        const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
+        const prev = stub._textMemberWants
+        stub._textMemberWants = new Set(members)
+        this._syncSubs()
+        void this._replayRetainedText(stub, stub._wantsText, prev).catch(reportRoomError)
+        return undefined
+      }
+      default:
+        return undefined
     }
   }
 

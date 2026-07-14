@@ -1521,16 +1521,20 @@ describe('room stub channel', () => {
   async function joinViaStub(stub: RoomStubChannel, peer: { decoded: () => any[] }, seq: number) {
     await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: { name: 'Remote' } }), seq)
     const ack = peer.decoded().find((f) => f.tag === TAG.ACK_RES && f.ackedSeq === seq)
-    return JSON.parse(ack.text) as { ok: true; id: string; joinedAt: number }
+    // The join success rides an OK ack carrying the raw identity — no `{ ok: true }` envelope.
+    return JSON.parse(ack.text) as { id: string; joinedAt: number }
   }
 
   it('req-join creates a member and acks its identity', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('served')
-    const ack = await joinViaStub(stub, peer, 1)
+    await stub._onPeerAckReqMessage(JSON.stringify({ __r: 'req-join', meta: { name: 'Remote' } }), 1)
+    const ack = peer.decoded().find((f) => f.tag === TAG.ACK_RES && f.ackedSeq === 1)
 
-    expect(ack.ok).toBe(true)
+    expect(ack.status).toBe(ACK_STATUS.OK)
+    const { id } = JSON.parse(ack.text) as { id: string; joinedAt: number }
+    expect(typeof id).toBe('string')
     expect(serverRoom.count).toBe(1)
-    expect((await serverRoom.getParticipant(ack.id))!.meta).toEqual({ name: 'Remote' })
+    expect((await serverRoom.getParticipant(id))!.meta).toEqual({ name: 'Remote' })
   })
 
   it('room events are relayed to the client as PUBLISH frames, behind the streamed roster', async () => {
@@ -1570,30 +1574,30 @@ describe('room stub channel', () => {
         if (m.meta.secret === 'abort') throw Abort({ code: 'BANNED', until: 2030 })
       },
     })
-    const reply = async (req: object, seq: number): Promise<Record<string, unknown>> => {
+    // Every failure rides the channel's own ack status — no `{ ok: false }` envelope. The client
+    // channel rebuilds an `AbortError` from ABORT and a plain `Error` from ERROR (see `roomAckError`).
+    const reply = async (req: object, seq: number): Promise<{ status: number; text: string }> => {
       await stub._onPeerAckReqMessage(JSON.stringify(req), seq)
       await settle()
       const ack = peer.decoded().find((f) => f.tag === TAG.ACK_RES && f.ackedSeq === seq)
-      return parse(ack.text) as Record<string, unknown>
+      return { status: ack.status, text: ack.text }
     }
 
-    // A plain guard throw is a bug: hidden behind the generic message, the real detail never sent.
-    expect(await reply({ __r: 'req-join', meta: { secret: 'bug' } }, 1)).toEqual({
-      ok: false,
-      err: 'Internal Server Error — see server logs',
-    })
-    // An Abort guard throw is carried — value and all — so the client rebuilds an `AbortError`.
-    expect(await reply({ __r: 'req-join', meta: { secret: 'abort' } }, 2)).toEqual({
-      ok: false,
-      abort: true,
-      abortValue: { code: 'BANNED', until: 2030 },
-    })
-    // A framework `RoomError` (a DM to a non-member) shows its operational message, like a channel's.
+    // A plain guard throw is a bug: an ERROR ack with the generic message — the real detail never sent.
+    const bug = await reply({ __r: 'req-join', meta: { secret: 'bug' } }, 1)
+    expect(bug.status).toBe(ACK_STATUS.ERROR)
+    expect(bug.text).toBe('Internal Server Error — see server logs')
+    expect(bug.text).not.toContain('policy-table')
+    // An Abort guard throw is carried — an ABORT ack with the value serialized, so the client rebuilds
+    // an `AbortError` whose `abortValue` is intact.
+    const aborted = await reply({ __r: 'req-join', meta: { secret: 'abort' } }, 2)
+    expect(aborted.status).toBe(ACK_STATUS.ABORT)
+    expect(parse(aborted.text)).toEqual({ code: 'BANNED', until: 2030 })
+    // A framework `RoomError` (a DM to a non-member) is an ERROR ack showing its operational message.
     const { id } = await joinViaStub(stub, peer, 3)
     const dm = await reply({ __r: 'req-dm', id, to: crypto.randomUUID(), data: 'x', ack: true }, 4)
-    expect(dm.ok).toBe(false)
-    expect(dm.abort).toBeUndefined()
-    expect(String(dm.err)).toContain('Participant not found')
+    expect(dm.status).toBe(ACK_STATUS.ERROR)
+    expect(dm.text).toContain('Participant not found')
 
     expect(serverRoom.count).toBe(1) // both rejected joins admitted nothing
   })
@@ -1693,8 +1697,8 @@ describe('room stub channel', () => {
 
     expect(inbox).toEqual([['hi', id]])
     const acks = peer.decoded().filter((f) => f.tag === TAG.ACK_RES)
-    expect(JSON.parse(acks.find((f) => f.ackedSeq === 2).text).ok).toBe(true)
-    expect(JSON.parse(acks.find((f) => f.ackedSeq === 3).text).ok).toBe(false)
+    expect(acks.find((f) => f.ackedSeq === 2).status).toBe(ACK_STATUS.OK) // valid send
+    expect(acks.find((f) => f.ackedSeq === 3).status).toBe(ACK_STATUS.ERROR) // impersonation rejected
   })
 
   it('text is relayed only after the client subscribes; control always flows', async () => {
@@ -1976,10 +1980,12 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
     },
     send: async (msg: { __r: string; ack?: boolean }) => {
       sent.push(msg)
-      if (msg.__r === 'req-join') return { ok: true, id: joinAck?.id ?? crypto.randomUUID(), joinedAt: 1 }
+      // The server returns raw values on an OK ack (no `{ ok: true }` envelope); a failure would
+      // reject the request via the channel ack instead.
+      if (msg.__r === 'req-join') return { id: joinAck?.id ?? crypto.randomUUID(), joinedAt: 1 }
       if (msg.__r === 'req-dm')
-        return msg.ack ? { ok: true, reply: 'fake-reply' } : { ok: true, ack: { seq: ++seq, timestamp: 1 } }
-      return { ok: true }
+        return msg.ack ? { seq: ++seq, timestamp: 1, response: 'fake-reply' } : { seq: ++seq, timestamp: 1 }
+      return undefined
     },
     publish: async (envelope: unknown) => {
       published.push(envelope)
@@ -2313,7 +2319,7 @@ describe('ClientRoom', () => {
       _subscribeBinaryLocal: () => () => {},
       _setWireTextSubscribed: () => {},
       send: async (msg: { __r: string }) =>
-        msg.__r === 'req-join' ? { ok: true, id: crypto.randomUUID(), joinedAt: 1 } : { ok: true },
+        msg.__r === 'req-join' ? { id: crypto.randomUUID(), joinedAt: 1 } : undefined,
       publish: (envelope: { data: unknown }) => {
         published.push(envelope.data)
         return new Promise((resolve) => gates.push(() => resolve(info())))

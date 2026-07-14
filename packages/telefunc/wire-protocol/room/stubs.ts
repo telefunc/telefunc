@@ -3,20 +3,18 @@ export { RoomStubChannel, bindParticipantStubChannel }
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
-import { isAbort } from '../../shared/Abort.js'
 import type { ChannelPublishAck } from '../channel.js'
 import type { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
-import { ACK_STATUS, encodePublishText } from '../shared-ws.js'
+import { encodePublishText } from '../shared-ws.js'
 import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from './server.js'
 import type { ParticipantMeta, RoomSendReceipt } from './types.js'
 import {
   binaryWantsCovers,
   emptyTrackWants,
   RoomError,
-  isRoomError,
-  toRoomFailure,
-  ROOM_BUG_MESSAGE,
+  roomAckError,
+  roomFailureError,
   hasRoomTag,
   roomCtrlKey,
   unframeMemberId,
@@ -24,9 +22,6 @@ import {
   type DmReply,
   type MemberSnapshot,
   type ParticipantStubRequest,
-  type ReqOkAck,
-  type ReqPublishAck,
-  type ReqDmAck,
   type RoomDemandEvent,
   type RoomRosterEvent,
 } from './protocol.js'
@@ -82,6 +77,9 @@ class RoomStubChannel extends ServerBroadcast {
   constructor(serverRoom: ServerRoom) {
     super({ key: roomCtrlKey(serverRoom.id) })
     this._room = serverRoom
+    // A throwing stub request maps onto the channel's native ack status (see `roomAckError`), so a
+    // rejected join/dm/etc. rejects the client's request without an envelope or tearing the channel.
+    this.setAckErrorEncoder((err) => roomAckError(err, reportRoomError))
     // Stub requests (join/leave/set-meta/dm/sub-binary/sub-text) arrive as channel messages.
     this._listen((msg: unknown) => this._room._handleStubRequest(this, msg))
   }
@@ -95,17 +93,15 @@ class RoomStubChannel extends ServerBroadcast {
   }
 
   private _ackPublish(publishing: Promise<ChannelPublishAck>, seq: number): Promise<void> {
-    // The publish rides the channel's own ack, so its failure maps onto the channel ack statuses
-    // (the client rebuilds an `AbortError` from ABORT, a plain `Error` from ERROR) — the same
-    // three-way split as `toRoomFailure`: carried `Abort`, visible `RoomError`, or hidden bug.
+    // A publish rides its own ack frame (not the request dispatch), so it maps the room error onto
+    // the channel's native status here — the same `roomAckError` classification every stub request
+    // gets through `setAckErrorEncoder`.
     return this._trackAck(
       publishing.then(
         (ack) => this._sendAckRes(seq, stringify(ack)),
         (err: unknown) => {
-          if (isAbort(err)) return this._sendAckRes(seq, stringify(err.abortValue), ACK_STATUS.ABORT)
-          if (isRoomError(err)) return this._sendAckRes(seq, err.message, ACK_STATUS.ERROR)
-          reportRoomError(err)
-          return this._sendAckRes(seq, ROOM_BUG_MESSAGE, ACK_STATUS.ERROR)
+          const { text, status } = roomAckError(err, reportRoomError)
+          this._sendAckRes(seq, text, status)
         },
       ),
     )
@@ -163,48 +159,40 @@ function bindParticipantStubChannel(
   channel: ServerChannel<unknown, unknown>,
   participant: ServerLocalParticipant,
 ): void {
+  // A throwing request maps onto the channel's native ack status (see `roomAckError`) — identical to
+  // the shared room stub. Every request here is ack-bearing, so a throw rejects the client's request.
+  channel.setAckErrorEncoder((err) => roomAckError(err, reportRoomError))
   channel.listen(async (msg: unknown) => {
     if (!hasRoomTag(msg)) return undefined
     const req = msg as ParticipantStubRequest
-    try {
-      switch (req.__r) {
-        case 'req-publish':
-          return {
-            ok: true,
-            ack: await participant.publish(req.data, req.retain ? { retain: true } : undefined),
-          } satisfies ReqPublishAck
-        case 'req-set-meta':
-          await participant.setMeta(isObject(req.meta) ? req.meta : {})
-          return { ok: true } satisfies ReqOkAck
-        case 'req-set-attrs':
-          await participant.setAttributes(isObject(req.attrs) ? req.attrs : {})
-          return { ok: true } satisfies ReqOkAck
-        case 'req-dm': {
-          if (!req.ack) return { ok: true, ack: (await participant.send(req.to, req.data)) as RoomSendReceipt }
-          // Forward the recipient's `DmReply` verbatim (like the shared room stub), rather than
-          // routing through `participant.send`'s throw — re-catching that would reclassify a
-          // carried `Abort` or an operational `RoomError` as an opaque bug.
-          const { receipt, reply } = await participant._room._sendDmAck(participant.id, req.to, req.data)
-          return reply.ok ? { ok: true, reply: { ...receipt, response: reply.result } } : reply
-        }
-        case 'req-leave':
-          await participant.leave()
-          return { ok: true } satisfies ReqOkAck
-        default:
-          return undefined
+    switch (req.__r) {
+      case 'req-publish':
+        return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
+      case 'req-set-meta':
+        await participant.setMeta(isObject(req.meta) ? req.meta : {})
+        return undefined
+      case 'req-set-attrs':
+        await participant.setAttributes(isObject(req.attrs) ? req.attrs : {})
+        return undefined
+      case 'req-dm': {
+        if (!req.ack) return (await participant.send(req.to, req.data)) as RoomSendReceipt
+        // The recipient's failure rides home too — throw it so the ack encoder emits the native
+        // ABORT/ERROR (a re-catch would reclassify a carried Abort/RoomError as an opaque bug).
+        const { receipt, reply } = await participant._room._sendDmAck(participant.id, req.to, req.data)
+        if (!reply.ok) throw roomFailureError(reply)
+        return { ...receipt, response: reply.result }
       }
-    } catch (err) {
-      return toRoomFailure(err, reportRoomError)
+      case 'req-leave':
+        await participant.leave()
+        return undefined
+      default:
+        return undefined
     }
   })
 
   channel.listenBinary(async (framed: Uint8Array) => {
-    try {
-      if (unframeMemberId(framed)?.from !== participant.id) throw new RoomError('Malformed room binary publish')
-      return { ok: true, ack: await participant._publishFramed(framed) }
-    } catch (err) {
-      return toRoomFailure(err, reportRoomError)
-    }
+    if (unframeMemberId(framed)?.from !== participant.id) throw new RoomError('Malformed room binary publish')
+    return await participant._publishFramed(framed)
   })
 
   // Keep the client-side `participant.meta` fresh. Serializing a participant that already left

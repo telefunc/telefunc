@@ -1,12 +1,9 @@
 export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant }
 
-import { assert } from '../../utils/assert.js'
-import { isObject } from '../../utils/isObject.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import {
   leaveCauseFromWire,
-  roomFailureError,
   frameWithMemberId,
   hasRoomTag,
   mergeAttributes,
@@ -17,10 +14,6 @@ import {
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
   type ParticipantStubRequest,
-  type ReqJoinAck,
-  type ReqOkAck,
-  type ReqPublishAck,
-  type ReqDmAck,
   type RoomDataEnvelope,
   type RoomDemandEvent,
   type RoomDataPublish,
@@ -140,12 +133,16 @@ class ClientRoom implements Room {
       )
     }
     const { meta, selfDelivery } = normalizeJoinOptions(options)
-    const ack = (await this._request({ __r: 'req-join', meta, selfDelivery })) as ReqJoinAck
-    if (!ack.ok) throw roomFailureError(ack)
-    const participant = new ClientRoomParticipant(this, ack.id, meta, selfDelivery)
-    this._localParticipants.set(ack.id, participant)
-    this._state.applyJoin(ack.id, meta, ack.joinedAt) // the relayed event is absorbed
-    this._flushPendingDms(ack.id, participant)
+    // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request
+    // natively via the channel ack — no envelope to unwrap.
+    const { id, joinedAt } = (await this._request({ __r: 'req-join', meta, selfDelivery })) as {
+      id: string
+      joinedAt: number
+    }
+    const participant = new ClientRoomParticipant(this, id, meta, selfDelivery)
+    this._localParticipants.set(id, participant)
+    this._state.applyJoin(id, meta, joinedAt) // the relayed event is absorbed
+    this._flushPendingDms(id, participant)
     return participant
   }
 
@@ -242,11 +239,10 @@ class ClientRoom implements Room {
 
   // ── Requests & publishes (used by ClientRoomParticipant) ──
 
-  /** @internal */
-  async _request(req: RoomStubRequest): Promise<ReqJoinAck | ReqOkAck | ReqDmAck> {
-    const ack = await this._stub.send(req, { ack: true })
-    assert(isObject(ack) && typeof ack.ok === 'boolean')
-    return ack as ReqJoinAck | ReqOkAck
+  /** @internal — an ack-bearing stub request. Resolves with the handler's raw return, or rejects
+   *  natively (the channel rebuilds an `AbortError`/`Error` from the ack status) — no envelope. */
+  _request(req: RoomStubRequest): Promise<unknown> {
+    return this._stub.send(req, { ack: true })
   }
 
   /** @internal — the envelope sent upward is a claim: the server validates `from` against this
@@ -501,28 +497,29 @@ class ClientRoomParticipant extends ClientParticipantBase {
   }
 
   // Impl of the overloaded `LocalParticipant.send`; callers get precise result types via the interface.
+  // A rejected send rejects the request natively via the channel ack (guard/recipient `Abort` or an
+  // operational `RoomError`) — no envelope to unwrap.
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
     const toId = typeof to === 'string' ? to : to.id
-    const res = await this._room._request({
+    return await this._room._request({
       __r: 'req-dm',
       id: this.id,
       to: toId,
       data,
       ...(options?.ack ? { ack: true } : {}),
     })
-    return options?.ack ? unwrapDmReply(res) : unwrapDmAck(res)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
-    unwrapOkAck(await this._room._request({ __r: 'req-set-meta', id: this.id, meta }))
+    await this._room._request({ __r: 'req-set-meta', id: this.id, meta })
     this._meta = meta
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
-    unwrapOkAck(await this._room._request({ __r: 'req-set-attrs', id: this.id, attrs }))
+    await this._room._request({ __r: 'req-set-attrs', id: this.id, attrs })
     this._meta = mergeAttributes(this._meta, attrs)
   }
 
@@ -530,7 +527,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
     if (this._left) return
     this._left = true
     try {
-      unwrapOkAck(await this._room._request({ __r: 'req-leave', id: this.id }))
+      await this._room._request({ __r: 'req-leave', id: this.id })
     } finally {
       // Local cleanup even when the wire is gone — the server reaps the member on stub death.
       this._room._dropParticipant(this.id)
@@ -570,31 +567,34 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return unwrapPublishAck(await this._request({ __r: 'req-publish', data, ...(retain ? { retain: true } : {}) }))
+    return (await this._request({ __r: 'req-publish', data, ...(retain ? { retain: true } : {}) })) as ChannelPublishAck
   }
 
   async publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     this._assertActive()
-    return unwrapPublishAck(await this._channel.sendBinary(frameWithMemberId(this.id, data, options), { ack: true }))
+    return (await this._channel.sendBinary(frameWithMemberId(this.id, data, options), {
+      ack: true,
+    })) as ChannelPublishAck
   }
 
   // Impl of the overloaded `LocalParticipant.send`; callers get precise result types via the interface.
+  // A rejected send (guard `Abort`, recipient's `Abort`, or an operational `RoomError`) rejects the
+  // request natively via the channel ack — no envelope to unwrap.
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
     const toId = typeof to === 'string' ? to : to.id
-    const res = await this._request({ __r: 'req-dm', to: toId, data, ...(options?.ack ? { ack: true } : {}) })
-    return options?.ack ? unwrapDmReply(res) : unwrapDmAck(res)
+    return await this._request({ __r: 'req-dm', to: toId, data, ...(options?.ack ? { ack: true } : {}) })
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
-    unwrapOkAck(await this._request({ __r: 'req-set-meta', meta }))
+    await this._request({ __r: 'req-set-meta', meta })
     this._meta = meta
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
-    unwrapOkAck(await this._request({ __r: 'req-set-attrs', attrs }))
+    await this._request({ __r: 'req-set-attrs', attrs })
     this._meta = mergeAttributes(this._meta, attrs)
   }
 
@@ -602,7 +602,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     if (this._left) return
     this._left = true
     try {
-      unwrapOkAck(await this._request({ __r: 'req-leave' }))
+      await this._request({ __r: 'req-leave' })
     } finally {
       // Local cleanup even when the wire is gone — the server reaps the member on stub death.
       this._onLeft({ type: 'left' })
@@ -618,37 +618,6 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function unwrapOkAck(ack: unknown): void {
-  assert(isObject(ack) && typeof ack.ok === 'boolean')
-  const res = ack as ReqOkAck
-  if (!res.ok) throw roomFailureError(res)
-}
-
-function unwrapPublishAck(ack: unknown): ChannelPublishAck {
-  assert(isObject(ack) && typeof ack.ok === 'boolean')
-  const res = ack as ReqPublishAck
-  if (!res.ok) throw roomFailureError(res)
-  return res.ack
-}
-
-function unwrapDmAck(ack: unknown): RoomSendReceipt {
-  assert(isObject(ack) && typeof ack.ok === 'boolean')
-  const res = ack as ReqDmAck
-  if (!res.ok) throw roomFailureError(res)
-  assert('ack' in res)
-  return res.ack
-}
-
-/** Unwrap a `send(…, { ack: true })` response — the recipient's reply, or their failure rethrown
- *  (an `AbortError` carrying the handler's `Abort` value, or an operational/generic error). */
-function unwrapDmReply(ack: unknown): unknown {
-  assert(isObject(ack) && typeof ack.ok === 'boolean')
-  const res = ack as ReqDmAck
-  if (!res.ok) throw roomFailureError(res)
-  assert('reply' in res)
-  return res.reply
-}
 
 /** A standalone participant's `left` notice carries the server-side cause verbatim. */
 function standaloneLeftCause(msg: { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }): LeaveCause {

@@ -93,6 +93,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
+  /** When set, a throwing ack-request handler is answered with a *scoped* ack (this status + body)
+   *  instead of the default (an `Abort` tears down the whole channel; anything else is a hidden bug
+   *  with a generic body). Lets a multiplexed request/response channel reject one request without
+   *  killing the connection — the room stubs classify `Abort`/`RoomError`/bug (see `roomAckError`). */
+  private _ackErrorEncoder?: (err: unknown) => { text: string; status: AckResultStatus }
   private _shutdownCallback: (() => void) | null = null
   private _pendingCloseAck = false
 
@@ -658,8 +663,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       try {
         lastResult = await cb(data)
       } catch (err) {
-        if (this._handleCallbackError(err)) return
-        this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+        this._answerAckError(err, seq)
         return
       }
     }
@@ -676,8 +680,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       try {
         lastResult = await cb(data)
       } catch (err) {
-        if (this._handleCallbackError(err)) return
-        this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+        this._answerAckError(err, seq)
         return
       }
     }
@@ -777,6 +780,23 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     reportServerChannelError(err)
     return false
+  }
+
+  /** @internal — opt into scoped ack-request errors (see `_ackErrorEncoder`). */
+  setAckErrorEncoder(encoder: (err: unknown) => { text: string; status: AckResultStatus }): void {
+    this._ackErrorEncoder = encoder
+  }
+
+  /** Answer a throwing ack-req handler: a scoped ack when an encoder opted in, else the default —
+   *  an `Abort` tears down the channel (or aborts the response), anything else is a hidden bug. */
+  private _answerAckError(err: unknown, seq: number): void {
+    const scoped = this._ackErrorEncoder?.(err)
+    if (scoped) {
+      this._sendAckRes(seq, scoped.text, scoped.status)
+      return
+    }
+    if (this._handleCallbackError(err)) return
+    this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }
 
   private _clearTimer(name: '_ttlTimer' | '_reconnectTimer'): void {
