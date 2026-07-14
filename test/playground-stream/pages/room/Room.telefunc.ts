@@ -21,7 +21,7 @@ export {
   onCloseRoom,
 }
 
-import { Room } from 'telefunc'
+import { Room, Abort } from 'telefunc'
 
 /** Room IDs are generated client-side per scenario run — the in-memory KV outlives page
  *  loads, so a fixed ID would leak members and seq counters across runs. */
@@ -67,13 +67,13 @@ async function onGetGuardedRoom(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
     onBeforeJoin: (member) => {
-      if (member.meta.name === 'Banned') throw new Error(`blocked join of ${member.meta.name}`)
+      if (member.meta.name === 'Banned') throw Abort(`blocked join of ${member.meta.name}`)
     },
     onBeforePublish: (from, data) => {
-      if (data === 'forbidden') throw new Error(`blocked publish from ${from.meta.name}`)
+      if (data === 'forbidden') throw Abort(`blocked publish from ${from.meta.name}`)
     },
     onBeforeSend: (from, _to, data) => {
-      if (data === 'forbidden') throw new Error(`blocked send from ${from.meta.name}`)
+      if (data === 'forbidden') throw Abort(`blocked send from ${from.meta.name}`)
     },
   })
   return room
