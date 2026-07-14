@@ -1,5 +1,6 @@
 export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant }
 
+import { assertUsage } from '../../utils/assert.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import {
@@ -122,16 +123,14 @@ class ClientRoom implements Room {
   }
 
   async join(options?: JoinOptions): Promise<LocalParticipant> {
-    if (options?.identity !== undefined) {
-      throw new Error(
-        'join() options.identity is server-assigned: identity is trusted, so set it where trust lives — in the granting telefunction (server-side join()), not on the client.',
-      )
-    }
-    if (options?.hidden !== undefined) {
-      throw new Error(
-        'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
-      )
-    }
+    assertUsage(
+      options?.identity === undefined,
+      'join() options.identity is server-assigned: identity is trusted, so set it where trust lives — in the granting telefunction (server-side join()), not on the client.',
+    )
+    assertUsage(
+      options?.hidden === undefined,
+      'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
+    )
     const { meta, selfDelivery } = normalizeJoinOptions(options)
     // A rejected join (guard `Abort`, or a `RoomError` like a closed room) rejects this request
     // natively via the channel ack — no envelope to unwrap.
