@@ -172,7 +172,7 @@ const { seq, timestamp } = await bob.send(aliceId, 'meet me in room 2')
 
 `send()` resolves once the message is sequenced onto the recipient's inbox, so awaiting it waits for the hand-off, not just the local enqueue. Delivery is best-effort: the pub/sub underneath is at-most-once.
 
-**Need a reply, or a delivery guarantee?** Pass `{ ack: true }`. It waits for the recipient's handler and returns its reply; the receipt gains a `response`, and it rejects if the handler throws or the recipient leaves first:
+**Need a reply, or a delivery guarantee?** Pass `{ ack: true }`. It waits for the recipient's handler and returns its reply; the receipt gains a `response`, and it rejects if the recipient leaves first — or with the handler's `Abort` if it raises one (a plain throw is hidden as a bug, like any telefunction):
 
 ```js
 const { response, seq, timestamp } = await bob.send(aliceId, { move: 'e4' }, { ack: true })
@@ -201,15 +201,15 @@ export async function onJoinChat(roomId) {
   const { user } = getContext()
   const room = await Room.get(roomId)
   Room.guard(room, {
-    onBeforeJoin: (member) => { if (banned.has(member.identity)) throw new Error('banned') },
-    onBeforePublish: (from, data) => { if (isSpam(data)) throw new Error('blocked') },
-    onBeforeSend: async (from, to) => { if (!(await areFriends(from.identity, to.identity))) throw new Error('not friends') },
+    onBeforeJoin: (member) => { if (banned.has(member.identity)) throw Abort('banned') },
+    onBeforePublish: (from, data) => { if (isSpam(data)) throw Abort('blocked') },
+    onBeforeSend: async (from, to) => { if (!(await areFriends(from.identity, to.identity))) throw Abort('not friends') },
   })
   return { room, me: await room.join({ meta: { name: user.name }, identity: user.id }) }
 }
 ```
 
-Each `onBefore*` runs before the operation commits; throwing rejects the caller with that error, on the client too. Each `onAfter*` (`onAfterJoin`, `onAfterSend`, `onAfterPublish`) runs once it commits, with the receipt (`{ seq, timestamp }`): the place to persist a message in its server-assigned order (see <Link href="#history-live-tail">History</Link>).
+Each `onBefore*` runs before the operation commits, and rejects the caller — on the client too — following Telefunc's usual <Link href="/error-handling">error contract</Link>: `throw Abort(value)` rejects with an `Abort` carrying `value` (the caller inspects `err.abortValue` / `err instanceof Abort`), the way to surface a reason a client can act on; any other throw is treated as a bug — the caller gets a generic error and the real one is logged server-side. Each `onAfter*` (`onAfterJoin`, `onAfterSend`, `onAfterPublish`) runs once it commits, with the receipt (`{ seq, timestamp }`): the place to persist a message in its server-assigned order (see <Link href="#history-live-tail">History</Link>).
 
 <Warning>Guards ride the specific instance you called `Room.guard()` on. Retrieve the same room twice and you have two instances; a guard on one does not apply to the other. Attach guards in the telefunction that hands the room to clients, so every membership a client opens rides that returned instance. A plain server-side `Room.get()` elsewhere is unguarded by design, like `Room.announce()`: it is your own trusted code.</Warning>
 
@@ -363,7 +363,7 @@ Telefunc doesn't cap membership; you decide, in the telefunction. Store the cap 
 ```js
 export async function onJoinLobby(name) {
   const lobby = await Room.get('lobby') // created with meta: { max: 100 }
-  if (lobby.count >= lobby.meta.max) throw new Error('room is full')
+  if (lobby.count >= lobby.meta.max) throw Abort('room is full')
   return await lobby.join({ meta: { name } })
 }
 ```
@@ -380,7 +380,7 @@ Players join, ready up through their own `meta`, and the server starts the match
 export async function onJoinLobby(lobbyId, name) {
   const { user } = getContext()
   const room = await Room.getOrCreate(lobbyId, { meta: { max: 4 } })
-  if (room.count >= room.meta.max) throw new Error('lobby full')
+  if (room.count >= room.meta.max) throw Abort('lobby full')
   return { room, me: await room.join({ meta: { name, ready: false }, identity: user.id }) }
 }
 
@@ -499,8 +499,8 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 | `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst; `retain` keeps it as the room's last message for late subscribers. |
 | `publishBinary(data, { track?, meta?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers. The receipt's `receivers` is the live subscription count (`0` = nobody anywhere). |
 | `send(to, data)` | Private message to one participant (or their id). Resolves with the receipt `{ seq, timestamp }` (best-effort). |
-| `send(to, data, { ack: true })` | Confirmed send: waits for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting if it throws or the recipient leaves. |
-| `listen(cb)` | Receive private messages: `(data, from)`, `from` is `null` for room-authored. Return a value to reply to a `send(…, { ack: true })` sender. |
+| `send(to, data, { ack: true })` | Confirmed send: waits for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting if the recipient leaves — or with the handler's `Abort` (a plain throw is hidden as a bug). |
+| `listen(cb)` | Receive private messages: `(data, from)`, `from` is `null` for room-authored. Return a value to reply to a `send(…, { ack: true })` sender; `throw Abort(value)` to reject them with it. |
 | `setMeta(meta)` / `setAttributes(partial)` | Replace / merge your metadata. |
 | `onDemand(cb)` | `(track, count)` when demand for one of your tracks changes; `count === 0` means nobody watching. |
 | `leave()` / `onLeave(cb)` | Leave / observe your own departure: `cause.type` is `'left' \| 'removed' \| 'closed' \| 'disconnected'`. |

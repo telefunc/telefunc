@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
+import { Abort } from '../../shared/Abort.js'
 import { Broadcast } from '../server/server-broadcast.js'
 import {
   DefaultBroadcastAdapter,
@@ -1347,15 +1348,38 @@ describe('direct message acks', () => {
     expect(typeof receipt.timestamp).toBe('number')
   })
 
-  it('rejects with the recipient handler’s error', async () => {
+  it('carries a recipient handler’s Abort to the sender — value and identity intact', async () => {
+    const room = await Room.create('dm-ack-abort')
+    const authority = await room.join()
+    const player = await room.join()
+    authority.listen(() => {
+      throw Abort({ code: 'ILLEGAL_MOVE', detail: 'e5' })
+    })
+
+    const err = await player.send(authority.id, 'x', { ack: true }).then(
+      () => null,
+      (e) => e,
+    )
+    expect(err instanceof Abort).toBe(true) // an Abort, exactly like a rejected telefunction
+    expect(err.abortValue).toEqual({ code: 'ILLEGAL_MOVE', detail: 'e5' })
+  })
+
+  it('hides a recipient handler’s plain error (a bug) behind the generic message', async () => {
     const room = await Room.create('dm-ack-throw')
     const authority = await room.join()
     const player = await room.join()
     authority.listen(() => {
-      throw new Error('illegal move')
+      throw new Error('secret server detail')
     })
 
-    await expect(player.send(authority.id, 'x', { ack: true })).rejects.toThrow('illegal move')
+    // Matches telefunc: a non-Abort throw is a bug — hidden from the caller, logged on the server.
+    const err = await player.send(authority.id, 'x', { ack: true }).then(
+      () => null,
+      (e) => e,
+    )
+    expect(err instanceof Abort).toBe(false)
+    expect(err.message).toBe('Internal Server Error — see server logs')
+    expect(err.message).not.toContain('secret server detail')
   })
 
   it('replies with the last listener’s return, like a channel', async () => {
@@ -1536,6 +1560,42 @@ describe('room stub channel', () => {
     expect(acks.find((f) => f.ackedSeq === 2).status).toBe(ACK_STATUS.OK)
     expect(acks.find((f) => f.ackedSeq === 3).status).toBe(ACK_STATUS.ERROR)
     expect(serverRoom.count).toBe(1)
+  })
+
+  it('the error contract matches telefunc across the wire: bug hidden, RoomError shown, Abort carried', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('wire-errors')
+    Room.guard(serverRoom, {
+      onBeforeJoin: (m) => {
+        if (m.meta.secret === 'bug') throw new Error('internal policy-table detail')
+        if (m.meta.secret === 'abort') throw Abort({ code: 'BANNED', until: 2030 })
+      },
+    })
+    const reply = async (req: object, seq: number): Promise<Record<string, unknown>> => {
+      await stub._onPeerAckReqMessage(JSON.stringify(req), seq)
+      await settle()
+      const ack = peer.decoded().find((f) => f.tag === TAG.ACK_RES && f.ackedSeq === seq)
+      return parse(ack.text) as Record<string, unknown>
+    }
+
+    // A plain guard throw is a bug: hidden behind the generic message, the real detail never sent.
+    expect(await reply({ __r: 'req-join', meta: { secret: 'bug' } }, 1)).toEqual({
+      ok: false,
+      err: 'Internal Server Error — see server logs',
+    })
+    // An Abort guard throw is carried — value and all — so the client rebuilds an `AbortError`.
+    expect(await reply({ __r: 'req-join', meta: { secret: 'abort' } }, 2)).toEqual({
+      ok: false,
+      abort: true,
+      abortValue: { code: 'BANNED', until: 2030 },
+    })
+    // A framework `RoomError` (a DM to a non-member) shows its operational message, like a channel's.
+    const { id } = await joinViaStub(stub, peer, 3)
+    const dm = await reply({ __r: 'req-dm', id, to: crypto.randomUUID(), data: 'x', ack: true }, 4)
+    expect(dm.ok).toBe(false)
+    expect(dm.abort).toBeUndefined()
+    expect(String(dm.err)).toContain('Participant not found')
+
+    expect(serverRoom.count).toBe(1) // both rejected joins admitted nothing
   })
 
   it('a client-forged `fromMeta` never reaches the room — the server stamps the verified one', async () => {

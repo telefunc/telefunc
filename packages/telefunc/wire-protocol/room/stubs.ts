@@ -3,6 +3,7 @@ export { RoomStubChannel, bindParticipantStubChannel }
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
+import { isAbort } from '../../shared/Abort.js'
 import type { ChannelPublishAck } from '../channel.js'
 import type { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
@@ -12,7 +13,10 @@ import type { ParticipantMeta, RoomSendReceipt } from './types.js'
 import {
   binaryWantsCovers,
   emptyTrackWants,
-  errorMessage,
+  RoomError,
+  isRoomError,
+  toRoomFailure,
+  ROOM_BUG_MESSAGE,
   hasRoomTag,
   roomCtrlKey,
   unframeMemberId,
@@ -91,10 +95,18 @@ class RoomStubChannel extends ServerBroadcast {
   }
 
   private _ackPublish(publishing: Promise<ChannelPublishAck>, seq: number): Promise<void> {
+    // The publish rides the channel's own ack, so its failure maps onto the channel ack statuses
+    // (the client rebuilds an `AbortError` from ABORT, a plain `Error` from ERROR) — the same
+    // three-way split as `toRoomFailure`: carried `Abort`, visible `RoomError`, or hidden bug.
     return this._trackAck(
       publishing.then(
         (ack) => this._sendAckRes(seq, stringify(ack)),
-        (err: unknown) => this._sendAckRes(seq, errorMessage(err), ACK_STATUS.ERROR),
+        (err: unknown) => {
+          if (isAbort(err)) return this._sendAckRes(seq, stringify(err.abortValue), ACK_STATUS.ABORT)
+          if (isRoomError(err)) return this._sendAckRes(seq, err.message, ACK_STATUS.ERROR)
+          reportRoomError(err)
+          return this._sendAckRes(seq, ROOM_BUG_MESSAGE, ACK_STATUS.ERROR)
+        },
       ),
     )
   }
@@ -167,12 +179,14 @@ function bindParticipantStubChannel(
         case 'req-set-attrs':
           await participant.setAttributes(isObject(req.attrs) ? req.attrs : {})
           return { ok: true } satisfies ReqOkAck
-        case 'req-dm':
-          return (
-            req.ack
-              ? { ok: true, reply: await participant.send(req.to, req.data, { ack: true }) }
-              : { ok: true, ack: (await participant.send(req.to, req.data)) as RoomSendReceipt }
-          ) satisfies ReqDmAck
+        case 'req-dm': {
+          if (!req.ack) return { ok: true, ack: (await participant.send(req.to, req.data)) as RoomSendReceipt }
+          // Forward the recipient's `DmReply` verbatim (like the shared room stub), rather than
+          // routing through `participant.send`'s throw — re-catching that would reclassify a
+          // carried `Abort` or an operational `RoomError` as an opaque bug.
+          const { receipt, reply } = await participant._room._sendDmAck(participant.id, req.to, req.data)
+          return reply.ok ? { ok: true, reply: { ...receipt, response: reply.result } } : reply
+        }
         case 'req-leave':
           await participant.leave()
           return { ok: true } satisfies ReqOkAck
@@ -180,16 +194,16 @@ function bindParticipantStubChannel(
           return undefined
       }
     } catch (err) {
-      return { ok: false, err: errorMessage(err) } satisfies ReqOkAck
+      return toRoomFailure(err, reportRoomError)
     }
   })
 
   channel.listenBinary(async (framed: Uint8Array) => {
     try {
-      if (unframeMemberId(framed)?.from !== participant.id) throw new Error('Malformed room binary publish')
+      if (unframeMemberId(framed)?.from !== participant.id) throw new RoomError('Malformed room binary publish')
       return { ok: true, ack: await participant._publishFramed(framed) }
     } catch (err) {
-      return { ok: false, err: errorMessage(err) } satisfies ReqOkAck
+      return toRoomFailure(err, reportRoomError)
     }
   })
 
@@ -218,7 +232,9 @@ function bindParticipantStubChannel(
     }
     return channel.send(notice, { ack: true }).then(
       (reply) => reply as DmReply,
-      (err) => ({ ok: false, err: errorMessage(err) }) as DmReply,
+      // The channel ack only rejects on transport failure (a handler throw comes back encoded in
+      // the resolved `DmReply`), so a rejection means the holder's stub died — it has left.
+      () => ({ ok: false, err: 'Participant left the room' }) as DmReply,
     )
   })
 

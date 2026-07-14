@@ -13,7 +13,9 @@ import { getBroadcastAdapter, type BroadcastAdapter, type BroadcastPublishResult
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
   ROOM_KEY_NAMESPACE,
-  errorMessage,
+  RoomError,
+  toRoomFailure,
+  roomFailureError,
   leaveCauseFromWire,
   leaveCauseToWire,
   stampNewer,
@@ -238,7 +240,7 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
   const { meta } = normalizeOptions(options)
   const kv = getRoomKV()
-  if ((await readConfig(kv, id)) !== null) throw new Error(`Room already exists: ${id}`)
+  if ((await readConfig(kv, id)) !== null) throw new RoomError(`Room already exists: ${id}`)
   const config: RoomConfigRecord = {
     meta,
     isolated: options?.isolated === true,
@@ -392,7 +394,7 @@ async function resolveParticipantRef(
       'The participant { id } should be a non-empty string',
     )
     const raw = await kv.get(roomMemberKvKey(roomId, target.id))
-    if (raw === null) throw new Error(`Participant not found: ${target.id}`)
+    if (raw === null) throw new RoomError(`Participant not found: ${target.id}`)
     return [{ memberId: target.id, identity: (parse(raw) as RoomMemberRecord).identity }]
   }
   assertUsage(
@@ -482,10 +484,7 @@ class ServerRoom implements Room {
   private _hasRetainedBinary = false
   /** In-flight `send(…, { ack: true })`s awaiting the recipient's reply, keyed by `ackId`. `to` is
    *  the recipient, so a leave/close can fail the ones it strands. Empty at steady state. */
-  private readonly _pendingDmAcks = new Map<
-    string,
-    { to: string; resolve: (reply: unknown) => void; reject: (err: Error) => void }
-  >()
+  private readonly _pendingDmAcks = new Map<string, { to: string; settle: (reply: DmReply) => void }>()
   private _guards: RoomGuards | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _stubs = new Set<RoomStubChannel>()
@@ -690,7 +689,7 @@ class ServerRoom implements Room {
     if ((await readConfig(kv, this.id)) === null) {
       await kv.delete(roomMemberKvKey(this.id, id))
       if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
-      throw new Error(`Room is closed: ${this.id}`)
+      throw new RoomError(`Room is closed: ${this.id}`)
     }
     return joinedAt
   }
@@ -737,7 +736,7 @@ class ServerRoom implements Room {
     await this._assertOpen(kv)
     const memberKey = roomMemberKvKey(this.id, id)
     const raw = await kv.get(memberKey)
-    if (raw === null) throw new Error(`Participant not found (left?): ${id}`)
+    if (raw === null) throw new RoomError(`Participant not found (left?): ${id}`)
     const record = parse(raw) as RoomMemberRecord
     const prev = this._state.getRemote(id)?.meta ?? record.meta
     const meta = computeMeta(record.meta)
@@ -817,7 +816,7 @@ class ServerRoom implements Room {
 
   /** Shared publish prologue: open check + `onBeforePublish` guard, on the verified sender. */
   private async _admitPublish(from: string, payload: unknown): Promise<Sender> {
-    if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
+    if (this._state.closed) throw new RoomError(`Room is closed: ${this.id}`)
     const sender = this._memberSender(from)
     const onBeforePublish = this._guards?.onBeforePublish
     if (onBeforePublish) await onBeforePublish(sender, payload)
@@ -863,7 +862,7 @@ class ServerRoom implements Room {
     const memberKey = roomMemberKvKey(this.id, from)
     while (true) {
       const raw = await kv.get(memberKey)
-      if (raw === null) throw new Error(`Participant not found (left?): ${from}`)
+      if (raw === null) throw new RoomError(`Participant not found (left?): ${from}`)
       const record = parse(raw) as RoomMemberRecord
       if (record.tracks?.includes(track)) break // a previous owner incarnation recorded it
       const next: RoomMemberRecord = { ...record, tracks: [...(record.tracks ?? []), track], seenAt: Date.now() }
@@ -898,10 +897,12 @@ class ServerRoom implements Room {
 
   /** @internal — `send(…, { ack: true })`: publish the DM tagged with an `ackId`, then wait for the
    *  recipient's node to route the handler's reply back on our own inbox (`_onDm` → `_resolveDmAck`).
-   *  Rejects if the recipient's handler throws, or the recipient leaves / the room closes first. */
-  async _sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
+   *  Returns the send receipt plus the recipient's `DmReply` — a success value, or a failure the
+   *  caller surfaces (the handler's `Abort`, the recipient leaving, the room closing). The outbound
+   *  publish itself still throws (an invalid send never reaches a recipient to reply). */
+  async _sendDmAck(from: string, to: string, data: unknown): Promise<{ receipt: RoomSendReceipt; reply: DmReply }> {
     const ackId = crypto.randomUUID()
-    const reply = new Promise<unknown>((resolve, reject) => this._pendingDmAcks.set(ackId, { to, resolve, reject }))
+    const reply = new Promise<DmReply>((settle) => this._pendingDmAcks.set(ackId, { to, settle }))
     let receipt: RoomSendReceipt
     try {
       receipt = await this._publishDm(from, to, data, ackId)
@@ -909,16 +910,15 @@ class ServerRoom implements Room {
       this._pendingDmAcks.delete(ackId)
       throw err
     }
-    // Superset of the plain-send receipt: the outbound DM's sequencing plus the recipient's reply.
-    return { ...receipt, response: await reply }
+    return { receipt, reply: await reply }
   }
 
   /** Shared DM publish: validate the target, run the send guards, stamp the verified sender, and
    *  publish on the target's inbox key. `ackId` rides the envelope when a reply is awaited. */
   private async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
-    if (this._state.closed) throw new Error(`Room is closed: ${this.id}`)
+    if (this._state.closed) throw new RoomError(`Room is closed: ${this.id}`)
     const target = await this._resolveMember(to)
-    if (!target) throw new Error(`Participant not found: ${to}`)
+    if (!target) throw new RoomError(`Participant not found: ${to}`)
     const sender = this._memberSender(from)
     const onBeforeSend = this._guards?.onBeforeSend
     if (onBeforeSend) await onBeforeSend(sender, target, data)
@@ -944,21 +944,22 @@ class ServerRoom implements Room {
     await getBroadcastAdapter().publish(roomDmKey(this.id, to), stringify(envelope))
   }
 
-  /** @internal — the recipient replied: settle the matching pending `send(…, { ack: true })`. */
+  /** @internal — the recipient replied: settle the matching pending `send(…, { ack: true })` with
+   *  its `DmReply`, verbatim — the sender's caller reconstructs success or failure from it. */
   private _resolveDmAck(envelope: RoomDmAckEnvelope): void {
     const pending = this._pendingDmAcks.get(envelope.ackId)
     if (!pending) return
     this._pendingDmAcks.delete(envelope.ackId)
-    if (envelope.ok) pending.resolve(envelope.result)
-    else pending.reject(new Error(envelope.err))
+    pending.settle(envelope)
   }
 
-  /** @internal — fail any pending ack whose recipient just left (or, on close, all of them). */
+  /** @internal — fail any pending ack whose recipient just left (or, on close, all of them). This
+   *  is an expected operational outcome, not a bug, so it carries a visible reason (`err`). */
   private _rejectDmAcks(message: string, to?: string): void {
     for (const [ackId, pending] of this._pendingDmAcks) {
       if (to !== undefined && pending.to !== to) continue
       this._pendingDmAcks.delete(ackId)
-      pending.reject(new Error(message))
+      pending.settle({ ok: false, err: message })
     }
   }
 
@@ -976,7 +977,7 @@ class ServerRoom implements Room {
 
   private async _assertOpen(kv: RoomKV): Promise<void> {
     if (this._state.closed || (await readConfig(kv, this.id)) === null) {
-      throw new Error(`Room is closed: ${this.id}`)
+      throw new RoomError(`Room is closed: ${this.id}`)
     }
   }
 
@@ -1251,11 +1252,14 @@ class ServerRoom implements Room {
           this._assertStubMember(stub, req.id)
           await this._mergeMemberMeta(req.id, isObject(req.attrs) ? req.attrs : {})
           return { ok: true }
-        case 'req-dm':
+        case 'req-dm': {
           this._assertStubMember(stub, req.id)
-          return req.ack
-            ? { ok: true, reply: await this._sendDmAck(req.id, req.to, req.data) }
-            : { ok: true, ack: await this._sendDm(req.id, req.to, req.data) }
+          if (!req.ack) return { ok: true, ack: await this._sendDm(req.id, req.to, req.data) }
+          const { receipt, reply } = await this._sendDmAck(req.id, req.to, req.data)
+          // Forward the recipient's failure to the client verbatim — re-catching it here would
+          // reclassify a carried `Abort`/`RoomError` as an opaque bug.
+          return reply.ok ? { ok: true, reply: { ...receipt, response: reply.result } } : reply
+        }
         case 'dm-reply': {
           // A client-held member replied to an ack DM we relayed it — route the reply to the sender.
           // We only honor an `ackId` we actually relayed to this stub (forged ones match nothing).
@@ -1263,17 +1267,20 @@ class ServerRoom implements Room {
           const sender = stub._pendingAckDms.get(req.ackId)
           if (sender !== undefined) {
             stub._pendingAckDms.delete(req.ackId)
-            await this._publishDmAck(
-              sender,
-              req.ackId,
-              req.ok ? { ok: true, result: req.result } : { ok: false, err: req.err },
-            )
+            // Rebuild a clean `DmReply` from the spread fields (dropping `__r`/`id`/`ackId`),
+            // preserving whether it's a value, a carried `Abort`, or an operational error.
+            const reply: DmReply = req.ok
+              ? { ok: true, result: req.result }
+              : 'abort' in req
+                ? { ok: false, abort: true, abortValue: req.abortValue }
+                : { ok: false, err: req.err }
+            await this._publishDmAck(sender, req.ackId, reply)
           }
           return { ok: true }
         }
         case 'sub-binary': {
           const wants = sanitizeBinaryWants(req.wants)
-          if (!wants) throw new Error('Malformed sub-binary declaration')
+          if (!wants) throw new RoomError('Malformed sub-binary declaration')
           const prev = stub._binaryWants
           stub._binaryWants = wants
           this._syncSubs()
@@ -1293,7 +1300,7 @@ class ServerRoom implements Room {
           return undefined
       }
     } catch (err) {
-      return { ok: false, err: errorMessage(err) }
+      return toRoomFailure(err, reportRoomError)
     }
   }
 
@@ -1306,7 +1313,7 @@ class ServerRoom implements Room {
   ): Promise<ChannelPublishAck> {
     if ('text' in payload) {
       const envelope = parse(payload.text) as unknown
-      if (!hasRoomTag(envelope) || envelope.__r !== 'data') throw new Error('Malformed room publish')
+      if (!hasRoomTag(envelope) || envelope.__r !== 'data') throw new RoomError('Malformed room publish')
       const publish = envelope as RoomDataPublish
       this._assertStubMember(stub, publish.from)
       return await this._publishText(publish.from, publish.data, publish.retain)
@@ -1318,7 +1325,7 @@ class ServerRoom implements Room {
 
   private _assertStubMember(stub: RoomStubChannel, id: unknown): asserts id is string {
     if (typeof id !== 'string' || !stub._stubMembers.has(id)) {
-      throw new Error('Not a participant of this room (joined through this connection)')
+      throw new RoomError('Not a participant of this room (joined through this connection)')
     }
   }
 
@@ -1682,7 +1689,11 @@ class ServerLocalParticipant extends ParticipantBase {
   async send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     this._assertActive()
     const toId = typeof to === 'string' ? to : to.id
-    return options?.ack ? this._room._sendDmAck(this.id, toId, data) : this._room._sendDm(this.id, toId, data)
+    if (!options?.ack) return this._room._sendDm(this.id, toId, data)
+    const { receipt, reply } = await this._room._sendDmAck(this.id, toId, data)
+    if (!reply.ok) throw roomFailureError(reply)
+    // Superset of the plain-send receipt: the outbound DM's sequencing plus the recipient's reply.
+    return { ...receipt, response: reply.result } satisfies RoomAckReceipt
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -1735,7 +1746,7 @@ async function requireRoom(id: string): Promise<{ kv: RoomKV; config: RoomConfig
   assertRoomId(id)
   const kv = getRoomKV()
   const config = await readConfig(kv, id)
-  if (config === null) throw new Error(`Room not found: ${id}`)
+  if (config === null) throw new RoomError(`Room not found: ${id}`)
   return { kv, config }
 }
 

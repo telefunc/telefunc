@@ -28,7 +28,11 @@ export {
   hasRoomTag,
   normalizeJoinOptions,
   mergeAttributes,
-  errorMessage,
+  RoomError,
+  isRoomError,
+  toRoomFailure,
+  roomFailureError,
+  ROOM_BUG_MESSAGE,
   leaveCauseFromWire,
   leaveCauseToWire,
   DEFAULT_TRACK,
@@ -57,6 +61,7 @@ export type {
   RoomDmEnvelope,
   RoomDmAckEnvelope,
   DmReply,
+  RoomFailure,
   RoomStubRequest,
   ParticipantStubRequest,
   ParticipantStubNotice,
@@ -73,6 +78,8 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
+import { isAbort, createAbortError } from '../../shared/Abort.js'
+import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import type {
   BinaryPublishOptions,
@@ -329,8 +336,9 @@ type RoomDmEnvelope = {
  *  correlates it to the pending `send`. Carries the recipient's handler return, or its error. */
 type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
 
-/** The result of handling an `{ ack: true }` DM: the recipient's `listen` return, or its throw. */
-type DmReply = { ok: true; result: unknown } | { ok: false; err: string }
+/** The result of handling an `{ ack: true }` DM: the recipient's `listen` return, or its failure
+ *  (an `Abort` value the handler raised, or an operational/generic error — see `RoomFailure`). */
+type DmReply = { ok: true; result: unknown } | RoomFailure
 
 /** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
  *  `sub-binary` declares the client's binary wants (full replace, see `BinaryWants`);
@@ -369,12 +377,12 @@ type ParticipantStubNotice =
  *  or a specific member set for participant-scoped ones. */
 type MemberWants = { all: boolean; members: string[] }
 
-type ReqOkAck = { ok: true } | { ok: false; err: string }
-type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }
-type ReqPublishAck = { ok: true; ack: ChannelPublishInfo } | { ok: false; err: string }
+type ReqOkAck = { ok: true } | RoomFailure
+type ReqJoinAck = { ok: true; id: string; joinedAt: number } | RoomFailure
+type ReqPublishAck = { ok: true; ack: ChannelPublishInfo } | RoomFailure
 /** The stub's answer to a client `req-dm`: a delivery receipt for a plain send, or the recipient's
- *  reply for `{ ack: true }`, or an error. */
-type ReqDmAck = { ok: true; ack: RoomSendReceipt } | { ok: true; reply: unknown } | { ok: false; err: string }
+ *  reply for `{ ack: true }`, or a failure. */
+type ReqDmAck = { ok: true; ack: RoomSendReceipt } | { ok: true; reply: unknown } | RoomFailure
 
 /** Decode a leave event's cause — an absent wire cause means a voluntary leave. */
 function leaveCauseFromWire(event: { cause?: 'removed' | 'disconnected'; reason?: unknown }): LeaveCause {
@@ -416,9 +424,60 @@ function normalizeJoinOptions(options: JoinOptions | undefined): { meta: Partici
   return { meta, selfDelivery: options?.selfDelivery !== false }
 }
 
-/** How errors travel inside `ok: false` acks. */
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
+// ---------------------------------------------------------------------------
+// Error contract — mirrors telefunc's own: `Abort` carries its value to the caller,
+// framework-level rejections (`RoomError`) show their message, and any other throw is a
+// hidden bug (reported on the throwing side, generic to the caller). See `RoomFailure`.
+// ---------------------------------------------------------------------------
+
+const roomErrorBrand = Symbol.for('telefunc.RoomError')
+
+/** An expected, caller-facing room rejection — the room is closed, a participant left, a DM
+ *  target isn't a member. Its message is safe to surface to the caller, exactly like a channel's
+ *  framework ack error (e.g. `'No listener registered for ack request'`). This is what separates
+ *  an operational "no, you can't do that" from an unexpected bug, which is hidden. The
+ *  `Symbol.for` brand survives bundling and cross-realm boundaries where `instanceof` wouldn't. */
+class RoomError extends Error {
+  readonly [roomErrorBrand] = true as const
+  constructor(message: string) {
+    super(message)
+    this.name = 'RoomError'
+    // Restore the prototype chain across the down-levelled `extends Error`.
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+function isRoomError(thing: unknown): thing is RoomError {
+  return typeof thing === 'object' && thing !== null && roomErrorBrand in thing
+}
+
+/** The generic error a bug becomes on the caller — identical to telefunc's top-level bug message,
+ *  so a hidden room error reads the same as a hidden telefunction error. */
+const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`
+
+/** How a failed room operation crosses back to its awaiting caller. Room mirrors telefunc's error
+ *  contract exactly:
+ *   - `abort` — the guard/handler raised `Abort(value)`: the value rides home and the caller's
+ *     promise rejects with an `AbortError`, so `err instanceof Abort` and `err.abortValue` hold.
+ *   - `err` — a safe, human-facing reason for an expected operational rejection (a `RoomError`).
+ *  A throw that is neither never reaches the caller as itself: it's a bug — reported on the
+ *  throwing side and replaced with `ROOM_BUG_MESSAGE`, so nothing internal leaks. */
+type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
+
+/** Classify a caught error into its wire failure. `report` is the throwing side's bug pipeline
+ *  (server: `handleTelefunctionBug`; client: console) — invoked only for genuine bugs. */
+function toRoomFailure(err: unknown, report: (err: unknown) => void): RoomFailure {
+  if (isAbort(err)) return { ok: false, abort: true, abortValue: err.abortValue }
+  if (isRoomError(err)) return { ok: false, err: err.message }
+  report(err)
+  return { ok: false, err: ROOM_BUG_MESSAGE }
+}
+
+/** Rebuild, on the caller's side, the error a `RoomFailure` stands for — an `AbortError` carrying
+ *  the value (so `instanceof Abort` works), or a plain `Error` with the safe/generic message. */
+function roomFailureError(res: RoomFailure): Error {
+  if ('abort' in res) return createAbortError(res.abortValue)
+  return new Error(res.err)
 }
 
 // ---------------------------------------------------------------------------

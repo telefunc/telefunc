@@ -6,6 +6,7 @@ import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import {
   leaveCauseFromWire,
+  roomFailureError,
   frameWithMemberId,
   hasRoomTag,
   mergeAttributes,
@@ -140,7 +141,7 @@ class ClientRoom implements Room {
     }
     const { meta, selfDelivery } = normalizeJoinOptions(options)
     const ack = (await this._request({ __r: 'req-join', meta, selfDelivery })) as ReqJoinAck
-    if (!ack.ok) throw new Error(ack.err)
+    if (!ack.ok) throw roomFailureError(ack)
     const participant = new ClientRoomParticipant(this, ack.id, meta, selfDelivery)
     this._localParticipants.set(ack.id, participant)
     this._state.applyJoin(ack.id, meta, ack.joinedAt) // the relayed event is absorbed
@@ -621,29 +622,30 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 function unwrapOkAck(ack: unknown): void {
   assert(isObject(ack) && typeof ack.ok === 'boolean')
   const res = ack as ReqOkAck
-  if (!res.ok) throw new Error(res.err)
+  if (!res.ok) throw roomFailureError(res)
 }
 
 function unwrapPublishAck(ack: unknown): ChannelPublishAck {
   assert(isObject(ack) && typeof ack.ok === 'boolean')
   const res = ack as ReqPublishAck
-  if (!res.ok) throw new Error(res.err)
+  if (!res.ok) throw roomFailureError(res)
   return res.ack
 }
 
 function unwrapDmAck(ack: unknown): RoomSendReceipt {
   assert(isObject(ack) && typeof ack.ok === 'boolean')
   const res = ack as ReqDmAck
-  if (!res.ok) throw new Error(res.err)
+  if (!res.ok) throw roomFailureError(res)
   assert('ack' in res)
   return res.ack
 }
 
-/** Unwrap a `send(…, { ack: true })` response — the recipient's reply, or their error rethrown. */
+/** Unwrap a `send(…, { ack: true })` response — the recipient's reply, or their failure rethrown
+ *  (an `AbortError` carrying the handler's `Abort` value, or an operational/generic error). */
 function unwrapDmReply(ack: unknown): unknown {
   assert(isObject(ack) && typeof ack.ok === 'boolean')
   const res = ack as ReqDmAck
-  if (!res.ok) throw new Error(res.err)
+  if (!res.ok) throw roomFailureError(res)
   assert('reply' in res)
   return res.reply
 }

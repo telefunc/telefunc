@@ -2,7 +2,7 @@ export { ParticipantBase }
 export type { InboxMessage }
 
 import type { ChannelPublishAck } from '../channel.js'
-import type { DmReply } from './protocol.js'
+import { RoomError, toRoomFailure, type DmReply } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -158,7 +158,9 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   /** Run every listener (channel semantics: the last non-throwing return is the reply); a throw
-   *  short-circuits to an error reply. */
+   *  short-circuits to a failure reply. The handler is user code, so it obeys telefunc's contract:
+   *  `throw Abort(value)` sends the value to the sender, any other throw is a hidden bug (reported
+   *  on this — the recipient's — side). */
   private async _fireInboxAck(msg: InboxMessage): Promise<DmReply> {
     const sender = this._senderOf(msg)
     let result: unknown
@@ -166,7 +168,7 @@ abstract class ParticipantBase implements LocalParticipant {
       try {
         result = await cb(msg.data, sender)
       } catch (err) {
-        return { ok: false, err: err instanceof Error ? err.message : String(err) }
+        return toRoomFailure(err, (e) => this._reportError(e))
       }
     }
     return { ok: true, result }
@@ -225,7 +227,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   protected _assertActive(): void {
-    if (this._left) throw new Error('Participant has left the room')
+    if (this._left) throw new RoomError('Participant has left the room')
   }
 
   private _invoke(cb: (cause: LeaveCause) => void, cause: LeaveCause): void {
