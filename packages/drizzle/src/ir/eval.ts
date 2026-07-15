@@ -1,29 +1,26 @@
-export { eval3, rowView, compareValues }
+export { evalK, eval3, collapseQuad, rowView, compareValues }
 
-import type { CompareOp, Predicate, RowView, ScalarExpr, Tri } from './types.js'
+import type { CompareOp, Predicate, Quad, RowView, ScalarExpr, Tri, UnknownCause } from './types.js'
 
-/** Evaluate a predicate against one row in SQL three-valued (Kleene) logic.
- *  `undefined` is the unknown truth value.
- *
- *  This is the faithful SQL semantics — every comparison touching NULL is unknown,
- *  not false — which is what makes NNF a truth-preserving rewrite (`eval3(nnf(p))
- *  === eval3(p)`). A NULL and a not-captured column (MISSING) are both unknown to a
- *  comparison, but only NULL is a definite value to `is null`; that is the whole
- *  distinction between them. How unknown folds into a keep/drop decision — NULL
- *  excludes like a real WHERE, MISSING widens to a match — is the σ layer's policy,
- *  not this evaluator's. */
-function eval3(pred: Predicate, row: RowView): Tri {
+/** Evaluate a predicate against one row in four-valued Kleene logic, keeping the
+ *  *cause* of an unknown: `'null'` (a captured SQL NULL — a definite value a WHERE
+ *  excludes) vs `'missing'` (a not-captured column or opaque operand — which a
+ *  σ-filter must widen to a match). This is the signal the compile layer needs to
+ *  apply NULL-excludes / MISSING-widens without re-deriving cause. When two unknown
+ *  causes meet, `'missing'` dominates (widening is always sound). `eval3` is the
+ *  faithful three-valued collapse used by the NNF equivalence property. */
+function evalK(pred: Predicate, row: RowView): Quad {
   switch (pred.kind) {
     case 'true':
       return true
     case 'false':
       return false
     case 'and':
-      return and3(pred.parts.map((p) => eval3(p, row)))
+      return andK(pred.parts.map((p) => evalK(p, row)))
     case 'or':
-      return or3(pred.parts.map((p) => eval3(p, row)))
+      return orK(pred.parts.map((p) => evalK(p, row)))
     case 'not':
-      return invert(eval3(pred.operand, row))
+      return notK(evalK(pred.operand, row))
     case 'compare':
       return cmp(scalar(pred.left, row), scalar(pred.right, row), COMPARATORS[pred.op])
     case 'in':
@@ -34,37 +31,51 @@ function eval3(pred: Predicate, row: RowView): Tri {
       return evalIsNull(pred, row)
     case 'between': {
       const value = scalar(pred.expr, row)
-      return and3([cmp(value, scalar(pred.low, row), gte), cmp(value, scalar(pred.high, row), lte)])
+      return andK([cmp(value, scalar(pred.low, row), gte), cmp(value, scalar(pred.high, row), lte)])
     }
     case 'exists':
       // Correlated existence is decorrelated into a semi/anti join at compile time
-      // and can't be judged from a single captured row.
-      return undefined
+      // and can't be judged from a single captured row; widen.
+      return 'missing'
     case 'unknown':
-      return undefined
+      return 'missing'
   }
 }
 
+/** Faithful SQL three-valued logic: `undefined` is the unknown truth value. NNF is a
+ *  truth-preserving rewrite here (`eval3(nnf(p)) === eval3(p)`), which is exactly why
+ *  the compiler can push negations to the leaves. */
+function eval3(pred: Predicate, row: RowView): Tri {
+  return collapseQuad(evalK(pred, row))
+}
+
+function collapseQuad(q: Quad): Tri {
+  return q === true || q === false ? q : undefined
+}
+
 /** A `RowView` over a plain record keyed by database column name; an absent key is
- *  a not-captured column (MISSING), a present `null` is a real SQL NULL. */
+ *  a not-captured column (MISSING), a present `null` is a real SQL NULL. Presence is
+ *  own-property only — an inherited name like `toString` is MISSING, never a match. */
 function rowView(record: Record<string, unknown>): RowView {
-  return { get: (column) => (column in record ? { present: true, value: record[column] } : { present: false }) }
+  return {
+    get: (column) => (Object.hasOwn(record, column) ? { present: true, value: record[column] } : { present: false }),
+  }
 }
 
 // ── Scalar operands ─────────────────────────────────────────────────
 
-/** An operand value, or UNKNOWN for a not-captured column or opaque operand. */
-const UNKNOWN: unique symbol = Symbol('unknown-operand')
-type Operand = unknown | typeof UNKNOWN
+/** A not-captured column or opaque operand, tagged so comparisons yield `'missing'`. */
+const MISSING: unique symbol = Symbol('missing-operand')
+type Operand = unknown | typeof MISSING
 
 function scalar(expr: ScalarExpr, row: RowView): Operand {
   if (expr.kind === 'col') {
     const cell = row.get(expr.ref.column)
-    return cell.present ? cell.value : UNKNOWN
+    return cell.present ? cell.value : MISSING
   }
   if (expr.kind === 'lit') return expr.value
-  // Placeholders are unknown at row-eval time (the graph resolves them per instance).
-  return UNKNOWN
+  // Placeholders are unknown at row-eval time (the graph resolves them per instance) → widen.
+  return MISSING
 }
 
 // ── Atoms ───────────────────────────────────────────────────────────
@@ -81,71 +92,81 @@ const COMPARATORS: Record<CompareOp, (order: number) => boolean> = {
 const gte = (o: number) => o >= 0
 const lte = (o: number) => o <= 0
 
-function cmp(a: Operand, b: Operand, f: (order: number) => boolean): Tri {
-  if (a === UNKNOWN || b === UNKNOWN) return undefined
-  if (a === null || b === null) return undefined // comparison with NULL is unknown, not false
+function cmp(a: Operand, b: Operand, f: (order: number) => boolean): Quad {
+  if (a === MISSING || b === MISSING) return 'missing'
+  if (a === null || b === null) return 'null' // comparison with NULL is unknown-by-null
   const order = compareValues(a, b)
-  return order === undefined ? undefined : f(order)
+  return order === undefined ? 'missing' : f(order) // incomparable types → widen
 }
 
-function evalIn(pred: Extract<Predicate, { kind: 'in' }>, row: RowView): Tri {
+function evalIn(pred: Extract<Predicate, { kind: 'in' }>, row: RowView): Quad {
   const value = scalar(pred.expr, row)
-  if (value === UNKNOWN || value === null) return undefined
-  let sawUnknown = false
+  if (value === MISSING) return maybeNegate('missing', pred.negated)
+  if (value === null) return maybeNegate('null', pred.negated)
+  let sawMissing = false
+  let sawNull = false
   let matched = false
   for (const candidate of pred.values) {
     const c = scalar(candidate, row)
-    if (c === UNKNOWN || c === null) {
-      sawUnknown = true
-      continue
-    }
-    if (compareValues(value, c) === 0) {
+    if (c === MISSING) sawMissing = true
+    else if (c === null) sawNull = true
+    else if (compareValues(value, c) === 0) {
       matched = true
       break
     }
   }
-  const base: Tri = matched ? true : sawUnknown ? undefined : false
-  return pred.negated ? invert(base) : base
+  const base: Quad = matched ? true : sawMissing ? 'missing' : sawNull ? 'null' : false
+  return maybeNegate(base, pred.negated)
 }
 
-function evalLike(pred: Extract<Predicate, { kind: 'like' }>, row: RowView): Tri {
+function evalLike(pred: Extract<Predicate, { kind: 'like' }>, row: RowView): Quad {
   const value = scalar(pred.expr, row)
-  if (value === UNKNOWN || value === null) return undefined
-  if (pred.pattern === null) return undefined // opaque / placeholder pattern
-  if (typeof value !== 'string') return undefined
-  const matched = regexFor(pred, pred.pattern).test(value)
-  return pred.negated ? !matched : matched
+  if (value === MISSING) return maybeNegate('missing', pred.negated)
+  if (value === null) return maybeNegate('null', pred.negated)
+  if (pred.pattern === null) return maybeNegate('missing', pred.negated) // opaque / placeholder pattern
+  if (typeof value !== 'string') return maybeNegate('missing', pred.negated)
+  const matched: Quad = regexFor(pred, pred.pattern).test(value)
+  return maybeNegate(matched, pred.negated)
 }
 
-function evalIsNull(pred: Extract<Predicate, { kind: 'isNull' }>, row: RowView): Tri {
+function evalIsNull(pred: Extract<Predicate, { kind: 'isNull' }>, row: RowView): Quad {
   const value = scalar(pred.expr, row)
-  if (value === UNKNOWN) return undefined // MISSING: we can't tell whether it's null
+  if (value === MISSING) return 'missing' // can't tell whether it's null
   const isNull = value === null
-  return pred.negated ? !isNull : isNull
+  return pred.negated ? !isNull : isNull // NULL is a definite value to `is null`
 }
 
-// ── Three-valued combinators ────────────────────────────────────────
+// ── Four-valued Kleene combinators ──────────────────────────────────
 
-function and3(values: Tri[]): Tri {
-  let result: Tri = true
+function andK(values: Quad[]): Quad {
+  let cause: UnknownCause | undefined
   for (const value of values) {
     if (value === false) return false
-    if (value === undefined) result = undefined
+    if (value !== true) cause = mergeCause(cause, value)
   }
-  return result
+  return cause ?? true
 }
 
-function or3(values: Tri[]): Tri {
-  let result: Tri = false
+function orK(values: Quad[]): Quad {
+  let cause: UnknownCause | undefined
   for (const value of values) {
     if (value === true) return true
-    if (value === undefined) result = undefined
+    if (value !== false) cause = mergeCause(cause, value)
   }
-  return result
+  return cause ?? false
 }
 
-function invert(value: Tri): Tri {
-  return value === undefined ? undefined : !value
+function notK(value: Quad): Quad {
+  return value === true ? false : value === false ? true : value // cause preserved
+}
+
+function maybeNegate(value: Quad, negated: boolean): Quad {
+  return negated ? notK(value) : value
+}
+
+/** `'missing'` dominates `'null'`: if any uncertainty could widen, the whole result widens. */
+function mergeCause(a: UnknownCause | undefined, b: UnknownCause): UnknownCause {
+  return a === 'missing' || b === 'missing' ? 'missing' : 'null'
 }
 
 // ── Value comparison across producers ───────────────────────────────
@@ -211,22 +232,37 @@ function toNumber(value: unknown): number | undefined {
 
 // ── LIKE ────────────────────────────────────────────────────────────
 // Patterns compile to a RegExp once per predicate node (cached by node identity).
+// The SQL escape character makes an escaped %/_ a literal; without an escape char
+// (sqlite default) %/_ are always wildcards.
 
 const likeRegexCache = new WeakMap<Predicate, RegExp>()
 
 function regexFor(node: Extract<Predicate, { kind: 'like' }>, pattern: string): RegExp {
   let regex = likeRegexCache.get(node)
   if (!regex) {
-    regex = likeToRegExp(pattern, node.caseInsensitive)
+    regex = likeToRegExp(pattern, node.caseInsensitive, node.escapeChar)
     likeRegexCache.set(node, regex)
   }
   return regex
 }
 
-function likeToRegExp(pattern: string, caseInsensitive: boolean): RegExp {
-  const escaped = pattern
-    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    .replace(/%/g, '.*')
-    .replace(/_/g, '.')
-  return new RegExp(`^${escaped}$`, caseInsensitive ? 'is' : 's')
+function likeToRegExp(pattern: string, caseInsensitive: boolean, escapeChar: string | null): RegExp {
+  let out = ''
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]!
+    if (escapeChar !== null && ch === escapeChar && i + 1 < pattern.length) {
+      out += escapeRegexLiteral(pattern[++i]!) // the next char is a literal (e.g. \% → literal %)
+    } else if (ch === '%') {
+      out += '.*'
+    } else if (ch === '_') {
+      out += '.'
+    } else {
+      out += escapeRegexLiteral(ch)
+    }
+  }
+  return new RegExp(`^${out}$`, caseInsensitive ? 'is' : 's')
+}
+
+function escapeRegexLiteral(ch: string): string {
+  return ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }

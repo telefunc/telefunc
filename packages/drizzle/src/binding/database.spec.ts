@@ -3,24 +3,24 @@ import { drizzle as pgDrizzle } from 'drizzle-orm/node-postgres'
 import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
 import { drizzle as pjDrizzle } from 'drizzle-orm/postgres-js'
 import { createPool } from 'mysql2'
-import { Pool } from 'pg'
+import { Client, Pool } from 'pg'
 import postgres from 'postgres'
 import { afterAll, describe, expect, it } from 'vitest'
-import { clientOf, dialectOf, driverOf, rlsEnabledOf, semanticEnvironmentKeyOf } from './database.js'
+import { type RowRunner, clientOf, dialectOf, driverOf, rlsEnabledOf, semanticEnvironmentKeyOf } from './database.js'
 
-// Real driver db instances (never connected — construction is enough to read dialect,
-// driver and $client). Cleaned up so vitest exits without open handles.
+// Real driver db instances (never connected). Authority discovery runs through injected
+// fake runners; only provably single-session clients (sqlite, a single pg Client) probe.
 const cleanups: Array<() => Promise<unknown>> = []
 
 const sqliteDb = sqliteDrizzle(':memory:')
 
 const pgPool = new Pool({ host: 'pg.example', port: 5433, database: 'app', user: 'svc' })
-const pgDb = pgDrizzle({ client: pgPool })
+const pgPoolDb = pgDrizzle({ client: pgPool })
 cleanups.push(() => pgPool.end())
 
-const pgPool2 = new Pool({ host: 'pg.example', port: 5433, database: 'app', user: 'svc' }) // identical config
-const pgDb2 = pgDrizzle({ client: pgPool2 })
-cleanups.push(() => pgPool2.end())
+const pgClient = new Client({ host: 'pg.example', port: 5433, database: 'app', user: 'svc' })
+const pgClientDb = pgDrizzle({ client: pgClient })
+cleanups.push(() => pgClient.end().catch(() => {}))
 
 const pjSql = postgres({ host: 'pj.example', port: 6000, database: 'pjdb', user: 'pjuser' })
 const pjDb = pjDrizzle({ client: pjSql })
@@ -34,46 +34,81 @@ afterAll(async () => {
   await Promise.allSettled(cleanups.map((c) => c()))
 })
 
+const authority =
+  (role: string, sp = '"$user", public'): RowRunner =>
+  async () => [{ database: 'app', role, search_path: sp }]
+const runReturning =
+  (rows: Record<string, unknown>[]): RowRunner =>
+  async () =>
+    rows
+const runThrows: RowRunner = async () => {
+  throw new Error('probe failed')
+}
+
 describe('dialect & driver detection', () => {
   it('reads the dialect off each driver', () => {
     expect(dialectOf(sqliteDb)).toBe('sqlite')
-    expect(dialectOf(pgDb)).toBe('pg')
+    expect(dialectOf(pgPoolDb)).toBe('pg')
     expect(dialectOf(pjDb)).toBe('pg')
     expect(dialectOf(myDb)).toBe('mysql')
   })
 
   it('reads the concrete driver entityKind', () => {
     expect(driverOf(sqliteDb)).toBe('NodeSQLiteDatabase')
-    expect(driverOf(pgDb)).toBe('NodePgDatabase')
+    expect(driverOf(pgPoolDb)).toBe('NodePgDatabase')
     expect(driverOf(pjDb)).toBe('PostgresJsDatabase')
     expect(driverOf(myDb)).toBe('MySql2Database')
   })
 
   it('exposes the raw $client', () => {
-    expect(clientOf(pgDb)).toBe(pgPool)
+    expect(clientOf(pgPoolDb)).toBe(pgPool)
   })
 })
 
-describe('semanticEnvironmentKeyOf — fail-closed', () => {
-  it('is stable for one session', () => {
-    expect(semanticEnvironmentKeyOf(pgDb)).toBe(semanticEnvironmentKeyOf(pgDb))
+describe('semanticEnvironmentKeyOf — pinned to a provable session (T3.Q4)', () => {
+  it('a single-session client (pg Client) probes and reflects the actual authority', async () => {
+    const asSvc = await semanticEnvironmentKeyOf(pgClientDb, { run: authority('svc') })
+    const asAdmin = await semanticEnvironmentKeyOf(pgClientDb, { run: authority('admin') })
+    expect(asSvc).not.toBe(asAdmin) // role change → different key
+    expect(await semanticEnvironmentKeyOf(pgClientDb, { run: authority('svc', 'app, public') })).not.toBe(asSvc)
+    expect(asSvc).toContain('role=svc')
   })
 
-  it('never shares across sessions, even with identical connection config', () => {
-    expect(semanticEnvironmentKeyOf(pgDb)).not.toBe(semanticEnvironmentKeyOf(pgDb2))
+  it('a single-session client shares a key when the proven authority is identical', async () => {
+    const a = await semanticEnvironmentKeyOf(pgClientDb, { run: authority('svc') })
+    const b = await semanticEnvironmentKeyOf(pgClientDb, { run: authority('svc') })
+    expect(a).toBe(b)
   })
 
-  it('carries the dialect and driver as a hint', () => {
-    expect(semanticEnvironmentKeyOf(pgDb)).toContain('pg')
-    expect(semanticEnvironmentKeyOf(sqliteDb)).toContain('sqlite')
-    expect(semanticEnvironmentKeyOf(myDb)).toContain('mysql')
+  it('a POOLED client fails closed to a unique key — even with an injected runner', async () => {
+    const a = await semanticEnvironmentKeyOf(pgPoolDb, { run: authority('svc') })
+    const b = await semanticEnvironmentKeyOf(pgPoolDb, { run: authority('svc') })
+    expect(a).not.toBe(b) // the probe cannot be proven to share the query's connection
+    expect(a).toContain('failclosed')
+    // postgres.js is likewise pooled
+    expect(await semanticEnvironmentKeyOf(pjDb, { run: authority('svc') })).toContain('failclosed')
+  })
+
+  it('probes a real single-session sqlite connection for a stable shareable key', async () => {
+    const a = await semanticEnvironmentKeyOf(sqliteDb)
+    const b = await semanticEnvironmentKeyOf(sqliteDb)
+    expect(a).toBe(b)
+    expect(a).toContain('sqlite')
+    expect(a).not.toContain('failclosed')
   })
 })
 
-describe('rlsEnabledOf — never defaults RLS off', () => {
-  it('reports unknown for Postgres (needs a live catalog query)', async () => {
-    await expect(rlsEnabledOf(pgDb, 'users')).resolves.toBe('unknown')
-    await expect(rlsEnabledOf(pjDb, 'users')).resolves.toBe('unknown')
+describe('rlsEnabledOf — real catalog path, never assumes off', () => {
+  it('reads pg_class.relrowsecurity: true / false', async () => {
+    await expect(rlsEnabledOf(pgPoolDb, 'users', { run: runReturning([{ rls: true }]) })).resolves.toBe(true)
+    await expect(rlsEnabledOf(pgPoolDb, 'users', { run: runReturning([{ rls: false }]) })).resolves.toBe(false)
+    await expect(rlsEnabledOf(pgPoolDb, 'users', { run: runReturning([{ rls: 't' }]) })).resolves.toBe(true)
+    await expect(rlsEnabledOf(pgPoolDb, 'users', { run: runReturning([{ rls: 'f' }]) })).resolves.toBe(false)
+  })
+
+  it('reports unknown when the catalog row is missing or the query fails', async () => {
+    await expect(rlsEnabledOf(pgPoolDb, 'ghost', { run: runReturning([]) })).resolves.toBe('unknown')
+    await expect(rlsEnabledOf(pgPoolDb, 'users', { run: runThrows })).resolves.toBe('unknown')
   })
 
   it('reports false for engines without per-table RLS', async () => {

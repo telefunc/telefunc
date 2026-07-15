@@ -1,10 +1,9 @@
 import { eq } from 'drizzle-orm'
 import { QueryBuilder, integer, pgTable } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
-import { isPartialSelect, selectConfigOf, usedTablesOf } from './drizzleShape.js'
+import { isPartialSelect, selectConfigOf } from './drizzleShape.js'
 
 const users = pgTable('users', { id: integer('id').primaryKey(), teamId: integer('team_id') })
-const teams = pgTable('teams', { id: integer('id').primaryKey() })
 const qb = new QueryBuilder()
 
 describe('selectConfigOf', () => {
@@ -20,17 +19,6 @@ describe('selectConfigOf', () => {
     expect(selectConfigOf({ config: { totally: 'wrong' } })).toBeNull()
     expect(selectConfigOf({})).toBeNull()
     expect(selectConfigOf({ config: { table: {}, joins: 'not-an-array', fields: {} } })).toBeNull()
-  })
-})
-
-describe('usedTablesOf', () => {
-  it('returns bare relation names from drizzle’s Set of schema-qualified names', () => {
-    const joined = qb.select().from(users).innerJoin(teams, eq(teams.id, users.teamId))
-    expect(new Set(usedTablesOf(joined))).toEqual(new Set(['users', 'teams']))
-  })
-
-  it('is empty when no usedTables are present', () => {
-    expect(usedTablesOf({})).toEqual([])
   })
 })
 

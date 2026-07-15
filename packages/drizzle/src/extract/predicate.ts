@@ -8,7 +8,7 @@ import { type SqlToken, isText, splitOn, stripParens, textOf, tokenize } from '.
 
 type PredicateResult = { predicate: Predicate; tables: string[]; exact: boolean }
 
-type ParseContext = { tables: Set<string>; exact: boolean; caseInsensitiveLike: boolean }
+type ParseContext = { tables: Set<string>; exact: boolean; caseInsensitiveLike: boolean; escapeChar: string | null }
 
 /** Parse a drizzle WHERE/ON condition into predicate IR, then push negations to the
  *  leaves (NNF). After NNF every leaf is positive, so a compiler can widen an
@@ -21,10 +21,12 @@ function extractPredicate(condition: SQL | undefined, opts?: { dialect?: Dialect
 
 function parsePredicate(condition: SQL | undefined, opts?: { dialect?: Dialect }): PredicateResult {
   if (!condition) return { predicate: { kind: 'true' }, tables: [], exact: true }
+  const dialect = opts?.dialect ?? 'pg'
   const ctx: ParseContext = {
     tables: new Set(),
     exact: true,
-    caseInsensitiveLike: (opts?.dialect ?? 'pg') !== 'pg', // pg LIKE is case-sensitive; mysql/sqlite are not
+    caseInsensitiveLike: dialect !== 'pg', // pg LIKE is case-sensitive; mysql/sqlite are not
+    escapeChar: dialect === 'sqlite' ? null : '\\', // pg/mysql LIKE default-escape with backslash; sqlite has none
   }
   const predicate = parseExpression(tokenize(condition.queryChunks), ctx, condition)
   return { predicate, tables: [...ctx.tables], exact: ctx.exact }
@@ -91,21 +93,32 @@ function parseAtom(tokens: SqlToken[], ctx: ParseContext, src: SqlSource): Predi
   if (first?.kind !== 'column') return null
   const op = textOf(tokens[1])?.trim()
   if (op === undefined) return null
-  const left: ScalarExpr = { kind: 'col', ref: colRefOf(first.column) }
+  const leftRef = colRefOf(first.column)
+  const left: ScalarExpr = { kind: 'col', ref: leftRef }
   ctx.tables.add(realTableNameOf(tableOf(first.column)))
 
   const compareOp = COMPARE_OPS[op]
   if (compareOp && tokens.length === 3) {
     const right = readScalar(tokens[2]!, ctx)
-    if (!right) return unknownLeaf(tokens, ctx, src)
+    if (!right) return unknownLeaf(tokens, ctx, src) // a scalar-subquery / raw operand — inner recovered by the extractor
     return { kind: 'compare', op: compareOp, left, right, src }
   }
 
   if ((op === 'in' || op === 'not in') && tokens.length === 3) {
-    const list = tokens[2]!
-    if (list.kind !== 'list') return unknownLeaf(tokens, ctx, src) // `in (subquery)` — decorrelation deferred to compile
-    const values = list.items.map((item) => readScalar(item, ctx) ?? ({ kind: 'unknown' } as ScalarExpr))
-    return { kind: 'in', expr: left, values, negated: op === 'not in', src }
+    const operand = tokens[2]!
+    if (operand.kind === 'list') {
+      const values = operand.items.map((item) => readScalar(item, ctx) ?? ({ kind: 'unknown' } as ScalarExpr))
+      return { kind: 'in', expr: left, values, negated: op === 'not in', src }
+    }
+    if (operand.kind === 'opaque') {
+      // col IN (subquery) → a semi/anti-join; carry the subquery + the outer column so the
+      // extractor can fill the inner shape and the IN correlation.
+      const tables = new Set<string>()
+      collectTables(operand.value, tables)
+      for (const name of tables) ctx.tables.add(name)
+      return { kind: 'exists', negated: op === 'not in', tables: [...tables], src: operand.value, inColumn: leftRef }
+    }
+    return unknownLeaf(tokens, ctx, src)
   }
 
   if (LIKE_OPS.has(op) && tokens.length === 3) {
@@ -114,7 +127,15 @@ function parseAtom(tokens: SqlToken[], ctx: ParseContext, src: SqlSource): Predi
     if (patternToken.kind === 'param' && typeof patternToken.value === 'string') pattern = patternToken.value
     else if (patternToken.kind !== 'placeholder') ctx.exact = false // opaque pattern
     const caseInsensitive = op.includes('ilike') || ctx.caseInsensitiveLike
-    return { kind: 'like', expr: left, pattern, caseInsensitive, negated: op.startsWith('not '), src }
+    return {
+      kind: 'like',
+      expr: left,
+      pattern,
+      caseInsensitive,
+      escapeChar: ctx.escapeChar,
+      negated: op.startsWith('not '),
+      src,
+    }
   }
 
   if ((op === 'between' || op === 'not between') && tokens.length === 5 && isText(tokens[3], ' and ')) {
@@ -164,10 +185,19 @@ function existsLeaf(tokens: SqlToken[], negated: boolean, ctx: ParseContext, src
 
 function unknownLeaf(tokens: SqlToken[], ctx: ParseContext, src: SqlSource): Predicate {
   const tables = new Set<string>()
-  for (const token of tokens) collectTokenTables(token, tables)
+  let subquery: SqlSource | undefined
+  for (const token of tokens) {
+    collectTokenTables(token, tables)
+    if (token.kind === 'opaque' && isSelectBuilder(token.value)) subquery = token.value
+  }
   for (const name of tables) ctx.tables.add(name)
   ctx.exact = false
-  return { kind: 'unknown', tables: [...tables], src }
+  return { kind: 'unknown', tables: [...tables], src, subquery }
+}
+
+/** A drizzle select query builder (has a `toSQL()`), as opposed to a raw SQL fragment. */
+function isSelectBuilder(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && typeof (value as { toSQL?: unknown }).toSQL === 'function'
 }
 
 function collectTokenTables(token: SqlToken, into: Set<string>): void {

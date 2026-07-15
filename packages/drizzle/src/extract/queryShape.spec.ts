@@ -1,11 +1,30 @@
-import { count, desc, eq, gt, sql } from 'drizzle-orm'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { count, desc, eq, exists, gt, inArray, sql } from 'drizzle-orm'
 import * as mysqlCore from 'drizzle-orm/mysql-core'
 import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
 import * as pgCore from 'drizzle-orm/pg-core'
 import * as sqliteCore from 'drizzle-orm/sqlite-core'
-import { describe, expect, it } from 'vitest'
-import type { SelectShape } from '../ir/types.js'
-import { crossCheckRenderedTables, extractQueryShape } from './queryShape.js'
+import { describe, expect, it, vi } from 'vitest'
+import type { CoarseShape, Predicate, ProjItem, SelectShape } from '../ir/types.js'
+import { crossCheckRenderedTables, extractQueryShape, renderedRelationsFromSQL } from './queryShape.js'
+
+const requireFrom = createRequire(import.meta.url)
+
+/** The resolved installed drizzle-orm version, so a golden names the pinned rc. */
+function drizzleVersion(): string {
+  let dir = dirname(requireFrom.resolve('drizzle-orm'))
+  for (let i = 0; i < 8; i++) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+      if (pkg.name === 'drizzle-orm') return pkg.version
+    } catch {}
+    dir = dirname(dir)
+  }
+  throw new Error('drizzle-orm package.json not found')
+}
 
 // ── pg fixtures (driver-free core QueryBuilder) ─────────────────────
 const pgUsers = pgCore.pgTable('users', {
@@ -15,6 +34,7 @@ const pgUsers = pgCore.pgTable('users', {
   done: pgCore.boolean('done'),
 })
 const pgTeams = pgCore.pgTable('teams', { id: pgCore.integer('id').primaryKey(), ownerId: pgCore.integer('owner_id') })
+const pgTags = pgCore.pgTable('tags', { id: pgCore.integer('id').primaryKey(), teamId: pgCore.integer('team_id') })
 const pgQb = new pgCore.QueryBuilder()
 
 const asSelect = (shape: ReturnType<typeof extractQueryShape>): SelectShape => {
@@ -47,6 +67,20 @@ describe('extractQueryShape — pg mechanics', () => {
     const cross = asSelect(pg(pgQb.select().from(pgUsers).crossJoin(pgTeams)))
     expect(cross.joins[0]!.type).toBe('cross')
     expect(cross.joins[0]!.on).toBeUndefined()
+  })
+
+  it('three-table join', () => {
+    const s = asSelect(
+      pg(
+        pgQb
+          .select()
+          .from(pgUsers)
+          .innerJoin(pgTeams, eq(pgTeams.id, pgUsers.teamId))
+          .leftJoin(pgTags, eq(pgTags.teamId, pgTeams.id)),
+      ),
+    )
+    expect(s.joins.map((j) => j.type)).toEqual(['inner', 'left'])
+    expect(new Set(s.tables)).toEqual(new Set(['users', 'teams', 'tags']))
   })
 
   it('self-join via alias resolves alias→real name', () => {
@@ -106,6 +140,117 @@ describe('extractQueryShape — pg mechanics', () => {
   })
 })
 
+describe('extractQueryShape — subquery correlation (L9)', () => {
+  const orders = pgCore.pgTable('orders', { id: pgCore.integer('id').primaryKey(), userId: pgCore.integer('user_id') })
+
+  it('EXISTS fills the recursive inner shape and the outer↔inner equi-correlation', () => {
+    const s = asSelect(
+      pg(
+        pgQb
+          .select()
+          .from(pgUsers)
+          .where(exists(pgQb.select().from(orders).where(eq(orders.userId, pgUsers.id)))),
+      ),
+    )
+    const where = s.where as Extract<Predicate, { kind: 'exists' }>
+    expect(where.kind).toBe('exists')
+    expect((where.inner as SelectShape).from.name).toBe('orders')
+    expect(where.correlations).toEqual([
+      { outer: { table: 'users', column: 'id' }, inner: { table: 'orders', column: 'user_id' } },
+    ])
+  })
+
+  it('IN (subquery) fills the inner shape and the semi-join correlation', () => {
+    const s = asSelect(
+      pg(
+        pgQb
+          .select()
+          .from(pgUsers)
+          .where(inArray(pgUsers.teamId, pgQb.select({ id: pgTeams.id }).from(pgTeams))),
+      ),
+    )
+    const where = s.where as Extract<Predicate, { kind: 'exists' }>
+    expect(where.kind).toBe('exists')
+    expect(where.inColumn).toEqual({ table: 'users', column: 'team_id' })
+    expect((where.inner as SelectShape).from.name).toBe('teams')
+    expect(where.correlations).toEqual([
+      { outer: { table: 'users', column: 'team_id' }, inner: { table: 'teams', column: 'id' } },
+    ])
+  })
+
+  it('a scalar subquery in WHERE fills the unknown-leaf inner shape', () => {
+    const s = asSelect(
+      pg(
+        pgQb
+          .select()
+          .from(pgUsers)
+          .where(eq(pgUsers.teamId, pgQb.select({ id: pgTeams.id }).from(pgTeams))),
+      ),
+    )
+    const where = s.where as Extract<Predicate, { kind: 'unknown' }>
+    expect(where.kind).toBe('unknown')
+    expect((where.inner as SelectShape).from.name).toBe('teams')
+    expect(new Set(s.tables)).toEqual(new Set(['users', 'teams']))
+  })
+
+  it('a scalar subquery in the projection fills the opaque item inner shape', () => {
+    const s = asSelect(
+      pg(
+        pgQb
+          .select({ id: pgUsers.id, teamCount: sql`(${pgQb.select({ id: pgTeams.id }).from(pgTeams)})` })
+          .from(pgUsers),
+      ),
+    )
+    const opaque = s.projection.items.find((item) => item.kind === 'opaque') as Extract<ProjItem, { kind: 'opaque' }>
+    expect(opaque).toBeDefined()
+    expect((opaque.inner as SelectShape).from.name).toBe('teams')
+    expect(new Set(s.tables)).toEqual(new Set(['users', 'teams']))
+  })
+
+  const correlation = { outer: { table: 'users', column: 'id' }, inner: { table: 'teams', column: 'owner_id' } }
+
+  it('a CORRELATED scalar subquery in WHERE attaches the outer↔inner correlation', () => {
+    const s = asSelect(
+      pg(
+        pgQb
+          .select()
+          .from(pgUsers)
+          .where(
+            eq(pgUsers.teamId, pgQb.select({ id: pgTeams.id }).from(pgTeams).where(eq(pgTeams.ownerId, pgUsers.id))),
+          ),
+      ),
+    )
+    expect((s.where as Extract<Predicate, { kind: 'unknown' }>).correlations).toEqual([correlation])
+  })
+
+  it('a CORRELATED scalar subquery in the projection attaches the correlation', () => {
+    const s = asSelect(
+      pg(
+        pgQb
+          .select({
+            id: pgUsers.id,
+            owned: sql`(${pgQb.select({ id: pgTeams.id }).from(pgTeams).where(eq(pgTeams.ownerId, pgUsers.id))})`,
+          })
+          .from(pgUsers),
+      ),
+    )
+    const opaque = s.projection.items.find((item) => item.kind === 'opaque') as Extract<ProjItem, { kind: 'opaque' }>
+    expect(opaque.correlations).toEqual([correlation])
+  })
+
+  it('an UNCORRELATED scalar subquery has no correlations (no false positives)', () => {
+    const s = asSelect(
+      pg(
+        pgQb
+          .select()
+          .from(pgUsers)
+          .where(eq(pgUsers.teamId, pgQb.select({ id: pgTeams.id }).from(pgTeams))),
+      ),
+    )
+    expect((s.where as Extract<Predicate, { kind: 'unknown' }>).correlations).toEqual([])
+  })
+})
+
 describe('extractQueryShape — coarse fallback', () => {
   it('a subquery/CTE FROM degrades to a CoarseShape recovering its tables', () => {
     const sub = pgQb.select({ id: pgUsers.id, teamId: pgUsers.teamId }).from(pgUsers).as('sub')
@@ -114,18 +259,53 @@ describe('extractQueryShape — coarse fallback', () => {
     expect(shape.tables).toContain('users')
   })
 
-  it('an unreadable select config degrades to a CoarseShape via recovered used tables', () => {
+  it('an unreadable select config degrades to a CoarseShape recovered from the rendered SQL', () => {
     const real = pgQb.select().from(pgUsers).innerJoin(pgTeams, eq(pgTeams.id, pgUsers.teamId))
-    const broken = Object.create(Object.getPrototypeOf(real))
-    Object.assign(broken, real)
-    broken.config = { not: 'a real config' } // mutate the pinned shape
-    broken._ = undefined
+    // config fails the pinned-shape assertion, but the SQL still renders both relations
+    const broken = { config: { table: {}, fields: {}, joins: 'not-an-array' }, toSQL: () => real.toSQL() }
     const shape = extractQueryShape(broken, { dialect: 'pg' })
     expect(shape.kind).toBe('coarse')
     expect(new Set(shape.tables)).toEqual(new Set(['users', 'teams']))
   })
 
-  it('cross-check: a rendered relation missing from extraction degrades (rendered A JOIN B, extracted A)', () => {
+  it('production cross-check discovers a pg join the config underreports but the SQL renders (O13)', () => {
+    // A pinned-shape wrapper hides the join in config.joins, but toSQL still renders
+    // A INNER JOIN B — the cross-check reads the rendered SQL, so it degrades.
+    const wrapper = {
+      config: { table: pgUsers, fields: { id: pgUsers.id }, joins: [] },
+      toSQL: () => ({
+        sql: 'select "users"."id" from "users" inner join "teams" on "teams"."id" = "users"."team_id"',
+        params: [],
+      }),
+    }
+    const shape = extractQueryShape(wrapper, { dialect: 'pg' })
+    expect(shape.kind).toBe('coarse')
+    expect(new Set(shape.tables)).toEqual(new Set(['users', 'teams']))
+  })
+
+  it('production cross-check discovers a MySQL backtick join the config underreports (O13)', () => {
+    const wrapper = {
+      config: { table: pgUsers, fields: { id: pgUsers.id }, joins: [] },
+      toSQL: () => ({
+        sql: 'select `users`.`id` from `users` inner join `teams` on `teams`.`id` = `users`.`team_id`',
+        params: [],
+      }),
+    }
+    const shape = extractQueryShape(wrapper, { dialect: 'mysql' })
+    expect(shape.kind).toBe('coarse')
+    expect(new Set(shape.tables)).toEqual(new Set(['users', 'teams']))
+  })
+
+  it('an untrackable read with no recoverable relation is a typed untrackable coarse shape (M3)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const shape = extractQueryShape({ config: undefined, _: undefined }, { dialect: 'pg' })
+    expect(shape.kind).toBe('coarse')
+    expect(shape as CoarseShape).toMatchObject({ tables: [], untrackable: true })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('untrackable read'))
+    warn.mockRestore()
+  })
+
+  it('unit cross-check: rendered A JOIN B, extracted A → coarse; complete extraction passes', () => {
     const onlyA: SelectShape = {
       kind: 'select',
       dialect: 'pg',
@@ -143,8 +323,30 @@ describe('extractQueryShape — coarse fallback', () => {
     const degraded = crossCheckRenderedTables(onlyA, ['A', 'B'])
     expect(degraded.kind).toBe('coarse')
     expect(new Set(degraded.tables)).toEqual(new Set(['A', 'B']))
-    // a complete extraction passes the cross-check unchanged
     expect(crossCheckRenderedTables(onlyA, ['A'])).toBe(onlyA)
+  })
+})
+
+describe('renderedRelationsFromSQL — every dialect quoting (O13)', () => {
+  const rel = (sqlText: string) => renderedRelationsFromSQL({ toSQL: () => ({ sql: sqlText, params: [] }) })
+
+  it('double-quoted (pg/sqlite) identifiers, schema-qualified and aliased', () => {
+    expect(rel('select * from "users" inner join "teams" on 1=1')).toEqual(['users', 'teams'])
+    expect(rel('select * from "a"."users"')).toEqual(['users'])
+    expect(rel('select * from "users" "u"')).toEqual(['users']) // alias not captured
+  })
+
+  it('backtick (mysql) identifiers, schema-qualified', () => {
+    expect(rel('select * from `users` inner join `teams` on 1=1')).toEqual(['users', 'teams'])
+    expect(rel('select * from `db`.`users`')).toEqual(['users'])
+  })
+
+  it('bracket quoting is never recognized — drizzle emits none', () => {
+    expect(rel('select * from [users] join [teams] on 1=1')).toEqual([])
+  })
+
+  it('the word "from" inside a string literal is not a relation', () => {
+    expect(rel(`select * from "users" where note = 'from here'`)).toEqual(['users'])
   })
 })
 
@@ -170,10 +372,19 @@ describe('extractQueryShape — mysql goldens', () => {
     const grouped = asSelect(my(qb.select({ team: users.teamId, n: count() }).from(users).groupBy(users.teamId)))
     expect(grouped.groupBy).toEqual([{ table: 'users', column: 'team_id' }])
   })
+
+  it('ordering, limit/offset and placeholder rows carry through', () => {
+    const ordered = asSelect(my(qb.select().from(users).orderBy(desc(users.id)).limit(10).offset(5)))
+    expect(ordered.orderBy[0]).toMatchObject({ direction: 'desc' })
+    expect(ordered.limit).toEqual({ kind: 'value', value: 10 })
+    expect(ordered.offset).toEqual({ kind: 'value', value: 5 })
+    const dyn = asSelect(my(qb.select().from(users).limit(sql.placeholder('lim'))))
+    expect(dyn.limit).toEqual({ kind: 'placeholder', name: 'lim' })
+  })
 })
 
-// ── sqlite fixtures (real node:sqlite DatabaseSync via node-sqlite) ──
-describe('extractQueryShape — sqlite goldens (node-sqlite driver)', () => {
+// ── sqlite fixtures (explicit node:sqlite DatabaseSync via node-sqlite) ──
+describe('extractQueryShape — sqlite goldens (explicit node:sqlite DatabaseSync)', () => {
   const todos = sqliteCore.sqliteTable('todos', {
     id: sqliteCore.integer('id').primaryKey(),
     text: sqliteCore.text('text'),
@@ -181,10 +392,15 @@ describe('extractQueryShape — sqlite goldens (node-sqlite driver)', () => {
     userId: sqliteCore.integer('user_id'),
   })
   const users = sqliteCore.sqliteTable('users', { id: sqliteCore.integer('id').primaryKey() })
-  const db = sqliteDrizzle(':memory:') // constructs a real node:sqlite DatabaseSync internally
+  const client = new DatabaseSync(':memory:') // the contract-mandated explicit construction
+  const db = sqliteDrizzle({ client })
   const lite = (b: Parameters<typeof extractQueryShape>[0]) => extractQueryShape(b, { dialect: 'sqlite' })
 
-  it('builds and extracts shapes through the node-sqlite driver on the pinned rc', () => {
+  it('is built on the pinned drizzle-orm@1.0.0-rc.4', () => {
+    expect(drizzleVersion()).toBe('1.0.0-rc.4')
+  })
+
+  it('builds and extracts shapes through node-sqlite + node:sqlite DatabaseSync', () => {
     const filtered = asSelect(lite(db.select().from(todos).where(eq(todos.done, true)).limit(3)))
     expect(filtered.dialect).toBe('sqlite')
     expect(filtered.from.name).toBe('todos')
@@ -207,5 +423,9 @@ describe('extractQueryShape — sqlite goldens (node-sqlite driver)', () => {
     const ordered = asSelect(lite(db.select().from(todos).orderBy(desc(todos.id)).limit(5)))
     expect(ordered.orderBy[0]).toMatchObject({ direction: 'desc' })
     expect(ordered.limit).toEqual({ kind: 'value', value: 5 })
+
+    const paginated = asSelect(lite(db.select().from(todos).limit(sql.placeholder('n')).offset(2)))
+    expect(paginated.limit).toEqual({ kind: 'placeholder', name: 'n' })
+    expect(paginated.offset).toEqual({ kind: 'value', value: 2 })
   })
 })

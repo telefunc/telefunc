@@ -324,15 +324,18 @@ importers:
 
   packages/drizzle:
     devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.10.1
       '@types/pg':
         specifier: ^8.11.10
         version: 8.20.0
       drizzle-orm:
         specifier: 1.0.0-rc.4
-        version: 1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@24.0.10))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76)
+        version: 1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@22.10.1))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76)
       mysql2:
         specifier: ^3.11.0
-        version: 3.23.0(@types/node@24.0.10)
+        version: 3.23.0(@types/node@22.10.1)
       pg:
         specifier: ^8.13.1
         version: 8.22.0
@@ -10897,11 +10900,11 @@ snapshots:
     dependencies:
       is-obj: 2.0.0
 
-  drizzle-orm@1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@24.0.10))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76):
+  drizzle-orm@1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@22.10.1))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76):
     optionalDependencies:
       '@cloudflare/workers-types': 4.20260615.1
       '@types/pg': 8.20.0
-      mysql2: 3.23.0(@types/node@24.0.10)
+      mysql2: 3.23.0(@types/node@22.10.1)
       pg: 8.22.0
       postgres: 3.4.9
       zod: 3.25.76
@@ -12818,9 +12821,9 @@ snapshots:
       duplexer2: 0.1.4
       object-assign: 4.1.1
 
-  mysql2@3.23.0(@types/node@24.0.10):
+  mysql2@3.23.0(@types/node@22.10.1):
     dependencies:
-      '@types/node': 24.0.10
+      '@types/node': 22.10.1
       aws-ssl-profiles: 1.1.2
       denque: 2.1.0
       generate-function: 2.3.1

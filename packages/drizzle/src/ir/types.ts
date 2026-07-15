@@ -10,6 +10,16 @@ export type Dialect = 'pg' | 'mysql' | 'sqlite'
  *  NULL, a not-yet-captured column, or an operand the compiler could not read). */
 export type Tri = true | false | undefined
 
+/** Why a Kleene result is unknown: a captured SQL `NULL` (a definite value that a
+ *  WHERE excludes) versus a not-captured column or opaque operand (`missing`, which
+ *  a σ-filter must widen to a match). The compile layer needs this cause to apply
+ *  the NULL-excludes / MISSING-widens policy — see {@link Quad}. */
+export type UnknownCause = 'null' | 'missing'
+
+/** Four-valued Kleene truth that keeps the *cause* of unknown. Collapses to {@link Tri}
+ *  by mapping both unknown causes to `undefined`. */
+export type Quad = true | false | UnknownCause
+
 /** Opaque handle to the producer's source node (a drizzle `SQL`), carried for
  *  later residual reconstruction. Typed `unknown` to keep ir/ drizzle-free. */
 export type SqlSource = unknown
@@ -57,13 +67,40 @@ export type Predicate =
       expr: ScalarExpr
       pattern: string | null
       caseInsensitive: boolean
+      /** SQL escape character (`\` on pg/mysql; `null` on sqlite, which has no default
+       *  escape). An escaped `%`/`_` is a literal, not a wildcard. */
+      escapeChar: string | null
       negated: boolean
       src?: SqlSource
     }
   | { kind: 'isNull'; expr: ScalarExpr; negated: boolean; src?: SqlSource }
   | { kind: 'between'; expr: ScalarExpr; low: ScalarExpr; high: ScalarExpr; src?: SqlSource }
-  | { kind: 'exists'; negated: boolean; tables: string[]; src?: SqlSource } // decorrelated at compile; unknown per row
-  | { kind: 'unknown'; tables: string[]; src?: SqlSource } // an atom the parser couldn't read
+  | {
+      kind: 'exists'
+      negated: boolean
+      tables: string[]
+      src?: SqlSource
+      /** Present for `col IN (subquery)` — the outer column of the semi-join. */
+      inColumn?: ColRef
+      /** The recursively-extracted inner query shape (filled by the shape extractor). */
+      inner?: QueryShape
+      /** Equi-correlations linking an outer column to an inner column. */
+      correlations?: Correlation[]
+    }
+  | {
+      kind: 'unknown'
+      tables: string[]
+      src?: SqlSource
+      /** An embedded scalar-subquery builder, if this leaf wraps one. */
+      subquery?: SqlSource
+      /** The recursively-extracted inner shape of `subquery` (filled by the extractor). */
+      inner?: QueryShape
+      /** Equi-correlations linking an outer column to an inner column, for a correlated subquery. */
+      correlations?: Correlation[]
+    }
+
+/** An equi-correlation between an outer-query column and an inner-subquery column. */
+export type Correlation = { outer: ColRef; inner: ColRef }
 
 // ── Query shape ─────────────────────────────────────────────────────
 
@@ -73,7 +110,17 @@ export type AggCall = { fn: AggFn; arg?: ColRef; star: boolean; distinct: boolea
 export type ProjItem =
   | { kind: 'col'; ref: ColRef; as?: string }
   | { kind: 'agg'; call: AggCall; as?: string }
-  | { kind: 'opaque'; columns: ColRef[]; tables: string[]; window: boolean; as?: string }
+  | {
+      kind: 'opaque'
+      columns: ColRef[]
+      tables: string[]
+      window: boolean
+      /** The recursively-extracted inner shape when the expression wraps a scalar subquery. */
+      inner?: QueryShape
+      /** Equi-correlations linking an outer column to an inner column, for a correlated subquery. */
+      correlations?: Correlation[]
+      as?: string
+    }
 
 /** `star` marks a whole-row select (no explicit projection list). */
 export type Projection = { items: ProjItem[]; star: boolean }
@@ -124,11 +171,14 @@ export type SelectShape = {
 }
 
 /** The sound fallback: the shape could not be read precisely, so anything touching
- *  one of `tables` invalidates. Produced on shape-assertion failure or untrackable reads. */
+ *  one of `tables` invalidates. `untrackable` is set when no relation could be
+ *  recovered — a typed signal that the read has NO routing inputs, so consumers must
+ *  reject it rather than treat it as an unscoped/global subscription. */
 export type CoarseShape = {
   kind: 'coarse'
   tables: string[]
   reason: string
+  untrackable?: boolean
 }
 
 export type QueryShape = SelectShape | CoarseShape

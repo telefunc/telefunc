@@ -22,6 +22,11 @@ export type { ChannelBase, ClientChannel } from '../../wire-protocol/channel.js'
 export { DefaultBroadcastAdapter } from '../../wire-protocol/server/broadcast.js'
 export type { BroadcastAdapter, BroadcastTransport } from '../../wire-protocol/server/broadcast.js'
 export type { TelefuncServerExtension } from './extensions.js'
+export { liveTag, invalidateTag, runWithLiveBatch } from './live/tags.js'
+export { addLiveSource } from './live/source.js'
+export type { LiveSource } from './live/source.js'
+export { incrementCounter, snapshotCounters } from './live/telemetry.js'
+export type { LiveCounterName } from './live/telemetry.js'
 export type {
   TypeContract,
   ReplacerType,

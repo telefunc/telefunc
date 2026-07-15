@@ -1,11 +1,12 @@
-export { extractQueryShape, crossCheckRenderedTables }
+export { extractQueryShape, crossCheckRenderedTables, renderedRelationsFromSQL }
 
 import { Column, Placeholder, SQL, is, isTable } from 'drizzle-orm'
-import { isPartialSelect, selectConfigOf, usedTablesOf } from '../binding/drizzleShape.js'
+import { isPartialSelect, selectConfigOf } from '../binding/drizzleShape.js'
 import type {
   Bound,
   ColRef,
   CoarseShape,
+  Correlation,
   Dialect,
   Distinct,
   JoinShape,
@@ -14,6 +15,7 @@ import type {
   ProjItem,
   Projection,
   QueryShape,
+  SelectShape,
   SetOp,
   SetOpKind,
 } from '../ir/types.js'
@@ -24,13 +26,12 @@ import { type SqlToken, readAggCall, tokenize } from './sqlChunks.js'
 /** Read a drizzle select builder into a QueryShape. Every mechanic the compiler
  *  understands (from/joins/where/projection/group/having/distinct/set-ops/order/
  *  limit) is captured precisely; a shape that can't be read — an unreadable config,
- *  a subquery/CTE in FROM or a join — degrades to a CoarseShape whose recovered
- *  table set still invalidates soundly. */
+ *  a subquery/CTE in FROM or a join — degrades to a CoarseShape whose relations are
+ *  recovered from the rendered SQL, or to an untrackable rejection when none can be. */
 function extractQueryShape(builder: unknown, opts: { dialect: Dialect }): QueryShape {
   const config = selectConfigOf(builder)
-  if (!config) return coarse(usedTablesOf(builder), 'select config could not be read')
-  if (!isTable(config.table))
-    return coarse(recoverTables(config.table, usedTablesOf(builder)), 'non-table FROM (subquery/CTE/raw SQL)')
+  if (!config) return coarse(renderedRelationsFromSQL(builder), 'select config could not be read')
+  if (!isTable(config.table)) return coarse(renderedRelationsFromSQL(builder), 'non-table FROM (subquery/CTE/raw SQL)')
 
   const dialect = opts.dialect
   const tables = new Set<string>()
@@ -39,8 +40,7 @@ function extractQueryShape(builder: unknown, opts: { dialect: Dialect }): QueryS
 
   const joins: JoinShape[] = []
   for (const join of config.joins ?? []) {
-    if (!isTable(join.table))
-      return coarse(recoverTables(join.table, [...tables, ...usedTablesOf(builder)]), 'non-table join')
+    if (!isTable(join.table)) return coarse(renderedRelationsFromSQL(builder), 'non-table join')
     const table = tableRefOf(join.table)
     tables.add(table.name)
     joins.push({ type: joinType(join.joinType), table, on: predicateInto(join.on, dialect, tables) })
@@ -48,7 +48,7 @@ function extractQueryShape(builder: unknown, opts: { dialect: Dialect }): QueryS
 
   const where = predicateInto(config.where, dialect, tables)
   const having = predicateInto(config.having, dialect, tables)
-  const { projection, window } = extractProjection(config.fields, isPartialSelect(builder), tables)
+  const { projection, window } = extractProjection(config.fields, isPartialSelect(builder), dialect, tables)
 
   const groupBy: ColRef[] = []
   let groupByOpaque = false
@@ -74,7 +74,7 @@ function extractQueryShape(builder: unknown, opts: { dialect: Dialect }): QueryS
     })
   }
 
-  const shape: QueryShape = {
+  const shape: SelectShape = {
     kind: 'select',
     dialect,
     from,
@@ -92,14 +92,16 @@ function extractQueryShape(builder: unknown, opts: { dialect: Dialect }): QueryS
     window,
     tables: [...tables],
   }
-  return crossCheckRenderedTables(shape, usedTablesOf(builder))
+  enrichSubqueries(shape, dialect)
+  return crossCheckRenderedTables(shape, renderedRelationsFromSQL(builder))
 }
 
-/** Soundness cross-check: every base relation the rendered SQL references must appear
- *  in the extracted table set. The direction matters — extraction may over-cover
- *  (extra tables only over-invalidate), but omitting a rendered relation would miss
- *  invalidations, so any omission degrades to a CoarseShape over the union of both
- *  sets rather than shipping an unsound precise shape. */
+/** Soundness cross-check: every relation the *rendered SQL* references must appear in
+ *  the extracted table set. The rendered set is read from `builder.toSQL().sql`, not
+ *  drizzle's internal `usedTables` — a builder whose config underreports its joins
+ *  still renders them, and this catches that. Direction matters: extraction may
+ *  over-cover (extra tables only over-invalidate), but omitting a rendered relation
+ *  would miss invalidations, so any omission degrades to a CoarseShape. */
 function crossCheckRenderedTables(shape: QueryShape, rendered: string[]): QueryShape {
   if (shape.kind !== 'select') return shape
   const extracted = new Set(shape.tables)
@@ -108,16 +110,113 @@ function crossCheckRenderedTables(shape: QueryShape, rendered: string[]): QueryS
   return coarse([...shape.tables, ...rendered], `extraction omitted rendered relation(s): ${missing.join(', ')}`)
 }
 
+/** Relations named after FROM/JOIN in the rendered SQL, across every dialect's identifier
+ *  quoting: double quotes (pg/sqlite) and backticks (mysql). Requiring a quoted name
+ *  avoids matching the word "from" inside a string literal; drizzle never emits bracket
+ *  quoting, so brackets are (correctly) not recognized. The relation is the last quoted
+ *  segment of a possibly schema-qualified reference. */
+function renderedRelationsFromSQL(builder: unknown): string[] {
+  const toSQL = (builder as { toSQL?: () => { sql: string } }).toSQL
+  if (typeof toSQL !== 'function') return []
+  let sqlText: string
+  try {
+    sqlText = toSQL.call(builder).sql
+  } catch {
+    return []
+  }
+  const quoted = '(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`)'
+  const relationRe = new RegExp(`\\b(?:from|join)\\s+(${quoted}(?:\\s*\\.\\s*${quoted})?)`, 'gi')
+  const segmentRe = new RegExp(quoted, 'g')
+  const names = new Set<string>()
+  for (let m = relationRe.exec(sqlText); m !== null; m = relationRe.exec(sqlText)) {
+    const segments = m[1]!.match(segmentRe) ?? []
+    const last = segments[segments.length - 1]
+    if (last) names.add(unquote(last))
+  }
+  return [...names]
+}
+
+function unquote(segment: string): string {
+  const q = segment[0]!
+  return segment
+    .slice(1, -1)
+    .split(q + q)
+    .join(q)
+}
+
 // ── Coarse fallback ─────────────────────────────────────────────────
 
 function coarse(tables: string[], reason: string): CoarseShape {
-  return { kind: 'coarse', tables: [...new Set(tables)], reason }
+  const unique = [...new Set(tables)]
+  // A coarse shape that recovered no relations has no routing inputs — flag it
+  // untrackable (a typed rejection) and warn, so downstream rejects it rather than
+  // silently treating it as an unscoped/global subscription.
+  if (unique.length === 0) {
+    console.warn(`[@telefunc/drizzle] untrackable read, no relations recovered: ${reason}`)
+    return { kind: 'coarse', tables: [], reason, untrackable: true }
+  }
+  return { kind: 'coarse', tables: unique, reason }
 }
 
-function recoverTables(value: unknown, extra: string[]): string[] {
-  const set = new Set(extra)
-  collectTables(value, set)
-  return [...set]
+// ── Subquery correlation ────────────────────────────────────────────
+// Fill each subquery-bearing node with its recursively-extracted inner shape (and, for
+// EXISTS / IN, the equi-correlations linking an outer column to an inner column) so the
+// compiler can decorrelate into a semi/anti join. Predicates are freshly built, so
+// mutating the nodes in place is safe.
+
+function enrichSubqueries(shape: SelectShape, dialect: Dialect): void {
+  const outerAliases = new Set([shape.from.alias, ...shape.joins.map((join) => join.table.alias)])
+  const walk = (pred?: Predicate): void => {
+    if (!pred) return
+    if (pred.kind === 'and' || pred.kind === 'or') pred.parts.forEach(walk)
+    else if (pred.kind === 'not') walk(pred.operand)
+    else if (pred.kind === 'exists' && pred.src !== undefined) {
+      const inner = extractQueryShape(pred.src, { dialect })
+      pred.inner = inner
+      pred.correlations = correlationsOf(inner, outerAliases, pred.inColumn)
+    } else if (pred.kind === 'unknown' && pred.subquery !== undefined) {
+      const inner = extractQueryShape(pred.subquery, { dialect })
+      pred.inner = inner
+      pred.correlations = correlationsOf(inner, outerAliases) // correlated scalar subquery in WHERE
+    }
+  }
+  walk(shape.where)
+  walk(shape.having)
+  for (const join of shape.joins) walk(join.on)
+  // correlated scalar subqueries in the projection
+  for (const item of shape.projection.items) {
+    if (item.kind === 'opaque' && item.inner) item.correlations = correlationsOf(item.inner, outerAliases)
+  }
+}
+
+function correlationsOf(inner: QueryShape, outerAliases: Set<string>, inColumn?: ColRef): Correlation[] {
+  if (inner.kind !== 'select') return []
+  const innerAliases = new Set([inner.from.alias, ...inner.joins.map((join) => join.table.alias)])
+  const out: Correlation[] = []
+  // `col IN (subquery)`: the outer column semi-joins the inner's projected column.
+  if (inColumn) {
+    const projected = firstProjectedColumn(inner)
+    if (projected) out.push({ outer: inColumn, inner: projected })
+  }
+  const visit = (pred?: Predicate): void => {
+    if (!pred) return
+    if (pred.kind === 'and' || pred.kind === 'or') pred.parts.forEach(visit)
+    else if (pred.kind === 'not') visit(pred.operand)
+    else if (pred.kind === 'compare' && pred.op === '=' && pred.left.kind === 'col' && pred.right.kind === 'col') {
+      const l = pred.left.ref
+      const r = pred.right.ref
+      if (outerAliases.has(l.table) && innerAliases.has(r.table)) out.push({ outer: l, inner: r })
+      else if (outerAliases.has(r.table) && innerAliases.has(l.table)) out.push({ outer: r, inner: l })
+    }
+  }
+  visit(inner.where)
+  for (const join of inner.joins) visit(join.on)
+  return out
+}
+
+function firstProjectedColumn(inner: SelectShape): ColRef | undefined {
+  for (const item of inner.projection.items) if (item.kind === 'col') return item.ref
+  return undefined
 }
 
 // ── Clauses ─────────────────────────────────────────────────────────
@@ -196,6 +295,7 @@ function boundOf(value: unknown): Bound | undefined {
 function extractProjection(
   fields: Record<string, unknown>,
   partial: boolean,
+  dialect: Dialect,
   tables: Set<string>,
 ): { projection: Projection; window: boolean } {
   const items: ProjItem[] = []
@@ -227,7 +327,16 @@ function extractProjection(
       for (const name of local) tables.add(name)
       const isWindow = containsWindow(value)
       window = window || isWindow
-      items.push({ kind: 'opaque', columns, tables: [...local], window: isWindow, as })
+      const sub = embeddedSubquery(value) // a scalar subquery wrapped in sql`(...)`
+      const inner = sub !== undefined ? extractQueryShape(sub, { dialect }) : undefined
+      items.push({ kind: 'opaque', columns, tables: [...local], window: isWindow, inner, as })
+      return
+    }
+    if (isSelectBuilder(value)) {
+      // a bare scalar-subquery builder used directly as a projected field
+      const inner = extractQueryShape(value, { dialect })
+      for (const name of inner.tables) tables.add(name)
+      items.push({ kind: 'opaque', columns: [], tables: [...inner.tables], window: false, inner, as })
       return
     }
     if (value && typeof value === 'object') {
@@ -240,6 +349,23 @@ function extractProjection(
 
   for (const [key, value] of Object.entries(fields)) visit(key, value)
   return { projection: { items, star: !partial }, window }
+}
+
+/** A drizzle select query builder (has a `toSQL()`), as opposed to a plain object. */
+function isSelectBuilder(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && typeof (value as { toSQL?: unknown }).toSQL === 'function'
+}
+
+/** The first select-builder embedded in an SQL expression (a wrapped scalar subquery). */
+function embeddedSubquery(sql: SQL): unknown | undefined {
+  let found: unknown
+  walkTokens(tokenize(sql.queryChunks), {
+    onColumn: () => {},
+    onOpaque: (value) => {
+      if (found === undefined && isSelectBuilder(value)) found = value
+    },
+  })
+  return found
 }
 
 // ── SQL walking ─────────────────────────────────────────────────────

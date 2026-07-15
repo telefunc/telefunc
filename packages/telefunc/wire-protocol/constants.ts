@@ -129,6 +129,10 @@ export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
 
+/** Max live-query channels one client connection may hold. A client-controlled axis, so it's a hard
+ *  per-connection cap (reserved before acquisition, released on permanent close). */
+export const LIVE_QUERY_PER_CONNECTION_DEFAULT = 100
+
 /** How long a channel waits for a peer to connect after the server→client
  *  HTTP response carrying `channel.client` has been serialized. */
 export const CHANNEL_CONNECT_TTL_MS = 5_000

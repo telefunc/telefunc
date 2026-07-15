@@ -1,4 +1,4 @@
-export { selectConfigOf, usedTablesOf, isPartialSelect }
+export { selectConfigOf, isPartialSelect }
 export type { DrizzleSelect, SelectConfig, JoinConfig, SetOperatorConfig }
 
 import type { SQL } from 'drizzle-orm'
@@ -14,7 +14,6 @@ import type { SQL } from 'drizzle-orm'
 type DrizzleSelect = {
   config?: unknown
   _?: { config?: unknown }
-  usedTables?: unknown
   isPartialSelect?: boolean
   toSQL?: () => { sql: string; params: unknown[] }
 }
@@ -55,23 +54,6 @@ function selectConfigOf(builder: unknown): SelectConfig | null {
   if ('joins' in config && config.joins !== undefined && !Array.isArray(config.joins)) return null
   if ('setOperators' in config && config.setOperators !== undefined && !Array.isArray(config.setOperators)) return null
   return config as SelectConfig
-}
-
-/** Base relations (FROM + JOINs) the rendered SQL references, as bare names —
- *  drizzle records them `schema.name` in a Set. Used both for coarse-shape recovery
- *  and as the authoritative rendered-table set the extraction is cross-checked
- *  against. Note: subquery relations are NOT included here (drizzle omits them);
- *  extraction captures those separately, so it always covers a superset. */
-function usedTablesOf(builder: unknown): string[] {
-  const used = (builder as DrizzleSelect).usedTables
-  const names = used == null ? [] : isIterable(used) ? [...used] : []
-  return names
-    .filter((name): name is string => typeof name === 'string')
-    .map((name) => name.slice(name.indexOf('.') + 1))
-}
-
-function isIterable(value: unknown): value is Iterable<unknown> {
-  return typeof (value as { [Symbol.iterator]?: unknown })?.[Symbol.iterator] === 'function'
 }
 
 /** Whether the builder projects an explicit field map (`select({...})`) rather than

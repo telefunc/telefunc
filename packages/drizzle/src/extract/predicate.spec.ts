@@ -22,11 +22,27 @@ import {
   or,
   sql,
 } from 'drizzle-orm'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 import { QueryBuilder, alias, boolean, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { eval3, rowView } from '../ir/eval.js'
 import type { CompareOp, Predicate, ScalarExpr, Tri } from '../ir/types.js'
 import { conjunctsOf, extractPredicate, parsePredicate, toNNF } from './predicate.js'
+
+const requireFrom = createRequire(import.meta.url)
+function drizzleVersion(): string {
+  let dir = dirname(requireFrom.resolve('drizzle-orm'))
+  for (let i = 0; i < 8; i++) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+      if (pkg.name === 'drizzle-orm') return pkg.version
+    } catch {}
+    dir = dirname(dir)
+  }
+  throw new Error('drizzle-orm package.json not found')
+}
 
 const todos = pgTable('todos', {
   id: integer('id').primaryKey(),
@@ -100,6 +116,20 @@ describe('extractPredicate — operators', () => {
     expect(r.predicate).toMatchObject({ kind: 'exists', negated: true })
     expect(r.tables).toContain('users')
     expect(eval3(r.predicate, rowView({ user_id: 1 }))).toBeUndefined()
+  })
+
+  it('positive exists(subquery) records the inner tables and is unknown per row (J1)', () => {
+    const r = extractPredicate(exists(qb.select().from(users).where(eq(users.id, todos.userId))))
+    expect(r.predicate).toMatchObject({ kind: 'exists', negated: false })
+    expect(r.tables).toContain('users')
+    expect(eval3(r.predicate, rowView({ user_id: 1 }))).toBeUndefined()
+  })
+
+  it('an escaped %/_ in a LIKE pattern is a literal (T3.J8; pg default backslash escape)', () => {
+    expect(ev(like(todos.text, 'a\\%b'), { text: 'a%b' })).toBe(true)
+    expect(ev(like(todos.text, 'a\\%b'), { text: 'axyzb' })).toBe(false)
+    // sqlite has no default escape: the backslash is literal, % stays a wildcard
+    expect(ev(like(todos.text, 'a\\%b'), { text: 'a\\zzb' }, 'sqlite')).toBe(true)
   })
 
   it('like / ilike with % and _ wildcards', () => {
@@ -176,12 +206,23 @@ describe('extractPredicate — operators', () => {
     expect(ev(and(eq(todos.userId, 1), sql`char_length(${todos.text}) > 3`), { user_id: 1, text: 'x' })).toBeUndefined()
   })
 
-  it('a subquery operand is opaque but its tables are recorded', () => {
+  it('col IN (subquery) becomes a correlated semi-join leaf recording both tables', () => {
     const sub = qb.select({ id: users.id }).from(users).where(eq(users.name, 'a'))
     const r = extractPredicate(inArray(todos.userId, sub))
-    expect(r.exact).toBe(false)
-    expect(r.tables).toContain('todos')
-    expect(r.tables).toContain('users')
+    expect(r.predicate).toMatchObject({
+      kind: 'exists',
+      negated: false,
+      inColumn: { table: 'todos', column: 'user_id' },
+    })
+    expect(r.tables).toEqual(expect.arrayContaining(['todos', 'users']))
+  })
+
+  it('a scalar subquery operand becomes an unknown leaf carrying the subquery', () => {
+    const sub = qb.select({ id: users.id }).from(users)
+    const r = extractPredicate(eq(todos.userId, sub))
+    expect(r.predicate).toMatchObject({ kind: 'unknown' })
+    expect((r.predicate as Extract<Predicate, { kind: 'unknown' }>).subquery).toBeDefined()
+    expect(r.tables).toEqual(expect.arrayContaining(['todos', 'users']))
   })
 
   it('aliased tables resolve to their original name', () => {
@@ -204,13 +245,17 @@ describe('extractPredicate — operators', () => {
 // ── NNF equivalence property ────────────────────────────────────────
 // eval3(nnf(p)) === eval3(p) for every predicate and row. This is why NNF is safe:
 // the transform preserves the Kleene truth value (including NULL-comparison unknowns).
+// The run asserts coverage so a "passing" seed can't silently skip truth values,
+// NULL/MISSING rows, deep NOT nesting, or any native negation pair.
 
-describe('toNNF — truth-preserving', () => {
+const NNF_SEED = 0x5eed
+
+describe(`toNNF — truth-preserving (seed=0x${NNF_SEED.toString(16)})`, () => {
   const OPS: CompareOp[] = ['=', '<>', '>', '>=', '<', '<=']
   const COLS = ['a', 'b', 'c']
   const LITS = [0, 1, 2, null]
 
-  const rng = mulberry32(0x5eed)
+  const rng = mulberry32(NNF_SEED)
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rng() * xs.length)]!
   const col = (): ScalarExpr => ({ kind: 'col', ref: { table: 't', column: pick(COLS) } })
   const operand = (): ScalarExpr => (rng() < 0.7 ? { kind: 'lit', value: pick(LITS) } : col())
@@ -225,8 +270,9 @@ describe('toNNF — truth-preserving', () => {
       return {
         kind: 'like',
         expr: col(),
-        pattern: pick(['a%', '%b', '_c', null]),
+        pattern: pick(['a%', '%b', '_c', 'x\\%y', null]),
         caseInsensitive: rng() < 0.5,
+        escapeChar: rng() < 0.5 ? '\\' : null,
         negated: rng() < 0.5,
       }
     if (r < 0.96) return { kind: 'exists', negated: rng() < 0.5, tables: ['x'] }
@@ -247,15 +293,88 @@ describe('toNNF — truth-preserving', () => {
       const v = pick(['__missing__', null, 0, 1, 2, 'x'])
       if (v !== '__missing__') record[c] = v
     }
-    return rowView(record)
+    return {
+      row: rowView(record),
+      hasNull: Object.values(record).includes(null),
+      hasMissing: Object.keys(record).length < COLS.length,
+    }
+  }
+
+  // What each generated predicate exercises, to assert real coverage after the run.
+  const truths = new Set<string>()
+  const negatedKinds = new Set<string>()
+  let sawNullRow = false
+  let sawMissingRow = false
+  let maxNotDepth = 0
+
+  const recordNegations = (p: Predicate, notDepth: number): void => {
+    if (p.kind === 'not') {
+      const target = p.operand.kind === 'compare' ? `compare:${p.operand.op}` : p.operand.kind
+      negatedKinds.add(target)
+      maxNotDepth = Math.max(maxNotDepth, notDepth + 1)
+      recordNegations(p.operand, notDepth + 1)
+    } else {
+      maxNotDepth = Math.max(maxNotDepth, notDepth)
+      if (p.kind === 'and' || p.kind === 'or') for (const part of p.parts) recordNegations(part, 0)
+    }
   }
 
   it('eval3(nnf(p)) === eval3(p) over randomized predicates × rows', () => {
-    for (let i = 0; i < 3000; i++) {
+    for (let i = 0; i < 4000; i++) {
       const p = gen(4)
-      const row = genRow()
-      expect(eval3(toNNF(p), row)).toBe(eval3(p, row))
+      const { row, hasNull, hasMissing } = genRow()
+      const result = eval3(p, row)
+      expect(eval3(toNNF(p), row)).toBe(result)
+      truths.add(String(result))
+      sawNullRow ||= hasNull
+      sawMissingRow ||= hasMissing
+      recordNegations(p, 0)
     }
+  })
+
+  it('the run exercised every truth value, NULL and MISSING rows, deep NOT nesting, and each native negation', () => {
+    expect(truths).toEqual(new Set(['true', 'false', 'undefined']))
+    expect(sawNullRow).toBe(true)
+    expect(sawMissingRow).toBe(true)
+    expect(maxNotDepth).toBeGreaterThanOrEqual(2) // nested NOT (double negation and beyond)
+    // every native negation the NNF rewrite handles was actually hit
+    for (const op of OPS) expect(negatedKinds).toContain(`compare:${op}`) // eq↔ne, lt↔gte, …
+    for (const kind of ['in', 'like', 'isNull', 'between', 'exists', 'unknown', 'and', 'or', 'not']) {
+      expect(negatedKinds).toContain(kind)
+    }
+  })
+})
+
+describe('predicate goldens are built on the pinned rc', () => {
+  it('resolves drizzle-orm@1.0.0-rc.4', () => {
+    expect(drizzleVersion()).toBe('1.0.0-rc.4')
+  })
+})
+
+// Named composition cases for an unknown leaf (T3.K4), and that NNF preserves them.
+describe('unknown-leaf composition (T3.K4)', () => {
+  const A: Predicate = {
+    kind: 'compare',
+    op: '=',
+    left: { kind: 'col', ref: { table: 't', column: 'a' } },
+    right: { kind: 'lit', value: 1 },
+  }
+  const U: Predicate = { kind: 'unknown', tables: [] }
+  const both = (p: Predicate, record: Record<string, unknown>, expected: Tri) => {
+    expect(eval3(p, rowView(record))).toBe(expected)
+    expect(eval3(toNNF(p), rowView(record))).toBe(expected)
+  }
+
+  it('A AND unknown: true∧unknown = unknown, false∧unknown = false', () => {
+    both({ kind: 'and', parts: [A, U] }, { a: 1 }, undefined)
+    both({ kind: 'and', parts: [A, U] }, { a: 2 }, false)
+  })
+  it('A OR unknown: true∨unknown = true, false∨unknown = unknown', () => {
+    both({ kind: 'or', parts: [A, U] }, { a: 1 }, true)
+    both({ kind: 'or', parts: [A, U] }, { a: 2 }, undefined)
+  })
+  it('NOT unknown = unknown', () => {
+    both({ kind: 'not', operand: U }, {}, undefined)
   })
 })
 

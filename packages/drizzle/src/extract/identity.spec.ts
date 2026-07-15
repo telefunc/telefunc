@@ -1,13 +1,13 @@
 import { eq, sql } from 'drizzle-orm'
 import { QueryBuilder, integer, pgTable, text } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
-import { canonicalValue, type IdentityEnv, identityOf, instanceKeyOf, planKeyOf } from './identity.js'
+import { COMPILER_ABI, canonicalValue, type IdentityEnv, identityOf, instanceKeyOf, planKeyOf } from './identity.js'
 
 const users = pgTable('users', { id: integer('id').primaryKey(), name: text('name'), teamId: integer('team_id') })
 const qb = new QueryBuilder()
 const env: IdentityEnv = {
   dialect: 'pg',
-  semanticEnvironmentKey: 'sess:0|pg|NodePgDatabase|host',
+  semanticEnvironmentKey: 'env|pg|NodePgDatabase|db=app|role=svc|sp=public',
   schemaFingerprint: 'fp',
 }
 
@@ -44,23 +44,79 @@ describe('identityOf — two-level identity', () => {
   })
 })
 
-describe('planKeyOf / instanceKeyOf / canonicalValue', () => {
-  it('planKey is value-free; instanceKey appends canonicalized params', () => {
-    const pk = planKeyOf({
-      dialect: 'pg',
-      semanticEnvironmentKey: 's',
-      schemaFingerprint: 'f',
-      sql: 'select 1 where a = $1',
-    })
-    expect(instanceKeyOf(pk, [5])).not.toBe(instanceKeyOf(pk, [6]))
-    expect(instanceKeyOf(pk, [5])).toBe(instanceKeyOf(pk, [5]))
-    expect(instanceKeyOf(pk, [5]).startsWith(pk)).toBe(true)
+describe('planKeyOf / instanceKeyOf', () => {
+  const pk = planKeyOf({
+    dialect: 'pg',
+    semanticEnvironmentKey: 's',
+    schemaFingerprint: 'f',
+    sql: 'select 1 where a = $1',
   })
 
-  it('canonicalValue is stable and collapses structurally-equal values', () => {
-    expect(canonicalValue(5)).not.toBe(canonicalValue(6))
-    expect(canonicalValue(null)).toBe('null')
-    expect(canonicalValue({ a: 1, b: 2 })).toBe(canonicalValue({ b: 2, a: 1 })) // key order
+  it('instanceKey is deterministic and value-sensitive', () => {
+    expect(instanceKeyOf(pk, [5])).toBe(instanceKeyOf(pk, [5]))
+    expect(instanceKeyOf(pk, [5])).not.toBe(instanceKeyOf(pk, [6]))
+  })
+
+  it('component boundaries cannot be forged by moving a delimiter (O11)', () => {
+    // planKey: a char shifted across the env/sql boundary must not collide
+    const a = planKeyOf({ dialect: 'pg', semanticEnvironmentKey: 'ab', schemaFingerprint: 'f', sql: 'c' })
+    const b = planKeyOf({ dialect: 'pg', semanticEnvironmentKey: 'a', schemaFingerprint: 'f', sql: 'bc' })
+    expect(a).not.toBe(b)
+  })
+
+  it('param-list boundaries cannot collide (O11)', () => {
+    expect(instanceKeyOf(pk, ['a', 'b'])).not.toBe(instanceKeyOf(pk, ['a,b']))
+    expect(instanceKeyOf(pk, ['a', 'b'])).not.toBe(instanceKeyOf(pk, ['ab']))
+    expect(instanceKeyOf(pk, [1])).not.toBe(instanceKeyOf(pk, [BigInt(1)]))
+  })
+
+  it('number 1 and string "1" produce distinct instance keys (O11)', () => {
+    expect(instanceKeyOf(pk, [1])).not.toBe(instanceKeyOf(pk, ['1']))
+  })
+})
+
+describe('planKey named gates (T3.O6/O7/O8)', () => {
+  const base = { dialect: 'pg', semanticEnvironmentKey: 'env', schemaFingerprint: 'fp', sql: 'select 1' }
+
+  it('O6: a database-authority (semantic environment) change changes the planKey', () => {
+    expect(planKeyOf({ ...base, semanticEnvironmentKey: 'env2' })).not.toBe(planKeyOf(base))
+  })
+  it('O7: a dialect change changes the planKey', () => {
+    expect(planKeyOf({ ...base, dialect: 'mysql' })).not.toBe(planKeyOf(base))
+  })
+  it('O8: the compiler ABI is embedded, so a bump invalidates every planKey', () => {
+    expect(planKeyOf(base).includes(COMPILER_ABI)).toBe(true)
+  })
+})
+
+describe('canonicalValue — collision-free (O11)', () => {
+  it('numbers and bigints are distinct', () => {
+    expect(canonicalValue(1)).not.toBe(canonicalValue(BigInt(1)))
+    expect(canonicalValue(10)).not.toBe(canonicalValue(BigInt(10)))
+  })
+
+  it('number 1 and string "1" are distinct (O11)', () => {
+    expect(canonicalValue(1)).not.toBe(canonicalValue('1'))
+  })
+
+  it('array element boundaries cannot collide', () => {
+    expect(canonicalValue(['a', 'b'])).not.toBe(canonicalValue(['a,b']))
+    expect(canonicalValue(['a', 'b'])).not.toBe(canonicalValue(['ab']))
+    expect(canonicalValue(['a', 'b'])).not.toBe(canonicalValue([['a', 'b']]))
+    // the finding's exact case: ['a','b'] vs ['a,s:b']
+    expect(canonicalValue(['a', 'b'])).not.toBe(canonicalValue(['a,s:b']))
+  })
+
+  it('null vs the string "null", Date vs its numeric/string form', () => {
+    expect(canonicalValue(null)).not.toBe(canonicalValue('null'))
+    expect(canonicalValue(undefined)).not.toBe(canonicalValue('undef'))
+    expect(canonicalValue(new Date(0))).not.toBe(canonicalValue('0'))
+    expect(canonicalValue(new Date(0))).not.toBe(canonicalValue(0))
+  })
+
+  it('structurally-equal values collapse (Date epoch, object key order)', () => {
     expect(canonicalValue(new Date('2026-01-01T00:00:00Z'))).toBe(canonicalValue(new Date(Date.UTC(2026, 0, 1))))
+    expect(canonicalValue({ a: 1, b: 2 })).toBe(canonicalValue({ b: 2, a: 1 }))
+    expect(canonicalValue(5)).not.toBe(canonicalValue(6))
   })
 })

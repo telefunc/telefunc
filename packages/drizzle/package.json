@@ -15,8 +15,18 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
     }
   },
+  "telefunc": {
+    "server": "@telefunc/drizzle/server"
+  },
+  "sideEffects": [
+    "./dist/server.js"
+  ],
   "files": [
     "dist"
   ],
@@ -29,6 +39,7 @@
     "telefunc": ">=0.2.0"
   },
   "devDependencies": {
+    "@types/node": "^22.10.0",
     "@types/pg": "^8.11.10",
     "drizzle-orm": "1.0.0-rc.4",
     "mysql2": "^3.11.0",

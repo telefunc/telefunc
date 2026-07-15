@@ -6,13 +6,15 @@ export {
   primaryKeyOf,
   tableFingerprint,
   schemaFingerprint,
+  relationKeyOf,
   collectTables,
   demandedColumns,
 }
 
 import { Column, type SQL, Subquery, type Table, getTableColumns, getTableName, is, isTable } from 'drizzle-orm'
-import { entityKindOf } from '../binding/database.js'
+import { entityKindOf, type RlsStatus } from '../binding/database.js'
 import type { ColRef, ProjItem, Predicate, QueryShape, ScalarExpr, TableRef } from '../ir/types.js'
+import { frame } from '../utils/canonical.js'
 
 // drizzle's per-table metadata lives under globally-registered symbols; the public
 // types don't surface them, so read them directly.
@@ -77,31 +79,67 @@ function primaryKeyOf(table: Table): string[] {
   return []
 }
 
-/** Structural fingerprint of a relation, keyed by its real name so aliases
- *  fingerprint identically. Feeds planKey so a schema change to a referenced relation
- *  bumps the cached plan (a referenced-relation epoch). Canonical inputs, stably
- *  ordered: relation identity, then per-column name/type/nullability (column-sorted),
- *  the PK shape, and the schema-declared RLS bit. */
-function tableFingerprint(table: Table): string {
-  const ref = tableRefOf(table)
-  const cols = Object.values(getTableColumns(table))
-    .map((column) => `${column.name}:${column.columnType}:${(column as { notNull?: boolean }).notNull ? 1 : 0}`)
-    .sort()
-  const rls = (table as unknown as Record<symbol, unknown>)[EnableRLS] ? 1 : 0
-  return `rel=${ref.schema ?? ''}.${ref.name}|cols=${cols.join(',')}|pk=${[...ref.primaryKey].sort().join(',')}|rls=${rls}`
+/** The schema-qualified relation identity — what distinguishes `a.users` from
+ *  `b.users`. Injectively encoded (schema and name each length-framed) so legal quoted
+ *  identifiers containing dots (`a` + `b.c` vs `a.b` + `c`) never collide. Aliases share
+ *  it (they resolve to the real name). Also the key for the per-relation RLS map. */
+function relationKeyOf(table: Table): string {
+  return relationIdentity(tableRefOf(table))
 }
 
-/** Combined fingerprint of every distinct relation a query references. */
-function schemaFingerprint(tables: Table[]): string {
-  const byName = new Map<string, string>()
-  for (const table of tables) {
-    const name = realTableNameOf(table)
-    if (!byName.has(name)) byName.set(name, tableFingerprint(table))
-  }
-  return [...byName.keys()]
+function relationIdentity(ref: TableRef): string {
+  return frame(ref.schema ?? '') + frame(ref.name)
+}
+
+/** The full SQL type including parameters (`varchar(10)`, `numeric(10, 2)`), so a
+ *  width/precision change is a distinct fingerprint. */
+function sqlTypeOf(column: Column): string {
+  return (column as { getSQLType?: () => string }).getSQLType?.() ?? column.columnType
+}
+
+function schemaDeclaredRls(table: Table): boolean {
+  return Boolean((table as unknown as Record<symbol, unknown>)[EnableRLS])
+}
+
+function encodeRls(rls: RlsStatus): string {
+  return rls === 'unknown' ? 'u' : rls ? '1' : '0'
+}
+
+/** Structural fingerprint of a relation, keyed by its schema-qualified identity so
+ *  aliases fingerprint identically but distinct schemas do not collide. Feeds planKey
+ *  so a schema change to a referenced relation bumps the cached plan. Canonical inputs,
+ *  stably ordered and injectively encoded (every field length-framed, so no unescaped
+ *  separator can be forged): relation identity, per-column name/SQL-type/nullability
+ *  (column-sorted), the PK shape, and the RLS bit — the schema-declared bit by default,
+ *  or an actual/`unknown` bit supplied by the caller. */
+function tableFingerprint(table: Table, rls?: RlsStatus): string {
+  const ref = tableRefOf(table)
+  const cols = Object.values(getTableColumns(table))
+    .map(
+      (column) =>
+        frame(column.name) + frame(sqlTypeOf(column)) + ((column as { notNull?: boolean }).notNull ? '1' : '0'),
+    )
     .sort()
-    .map((name) => byName.get(name))
-    .join('|')
+    .map(frame)
+    .join('')
+  const pk = [...ref.primaryKey].sort().map(frame).join('')
+  return relationIdentity(ref) + frame(cols) + frame(pk) + encodeRls(rls ?? schemaDeclaredRls(table))
+}
+
+/** Combined fingerprint of every distinct relation a query references, deduped by
+ *  schema-qualified identity and ordered by it (input-order-independent, and never drops
+ *  a same-named relation from another schema). Framed throughout so it is injective. An
+ *  optional per-relation RLS map (keyed by `relationKeyOf`) folds actual/`unknown` bits in. */
+function schemaFingerprint(tables: Table[], rlsByRelation?: Map<string, RlsStatus>): string {
+  const byRelation = new Map<string, string>()
+  for (const table of tables) {
+    const id = relationKeyOf(table)
+    if (!byRelation.has(id)) byRelation.set(id, tableFingerprint(table, rlsByRelation?.get(id)))
+  }
+  return [...byRelation.keys()]
+    .sort()
+    .map((id) => frame(byRelation.get(id)!))
+    .join('')
 }
 
 /** Real table names reachable from any drizzle SQL-ish value (conditions,
