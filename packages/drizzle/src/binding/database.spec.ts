@@ -6,7 +6,15 @@ import { createPool } from 'mysql2'
 import { Client, Pool } from 'pg'
 import postgres from 'postgres'
 import { afterAll, describe, expect, it } from 'vitest'
+import { StatementSync } from 'node:sqlite'
 import { type RowRunner, clientOf, dialectOf, driverOf, rlsEnabledOf, semanticEnvironmentKeyOf } from './database.js'
+
+// drizzle-orm rc.4 node-sqlite calls StatementSync.setReturnArrays() (added Node 22.16 / 24.0; ABSENT
+// in 23.x). Where it is missing, the real sqlite authority probe fail-closes (production-correct) and
+// the stable-shareable-key assertion below no longer holds — skip just that case there. Requires Node
+// >= 22.16 or >= 24.
+const SQLITE_PROBE_SUPPORTED =
+  typeof (StatementSync.prototype as { setReturnArrays?: unknown }).setReturnArrays === 'function'
 
 // Real driver db instances (never connected). Authority discovery runs through injected
 // fake runners; only provably single-session clients (sqlite, a single pg Client) probe.
@@ -89,7 +97,7 @@ describe('semanticEnvironmentKeyOf — pinned to a provable session (T3.Q4)', ()
     expect(await semanticEnvironmentKeyOf(pjDb, { run: authority('svc') })).toContain('failclosed')
   })
 
-  it('probes a real single-session sqlite connection for a stable shareable key', async () => {
+  it.skipIf(!SQLITE_PROBE_SUPPORTED)('probes a real single-session sqlite connection for a stable shareable key', async () => {
     const a = await semanticEnvironmentKeyOf(sqliteDb)
     const b = await semanticEnvironmentKeyOf(sqliteDb)
     expect(a).toBe(b)

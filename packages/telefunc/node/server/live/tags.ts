@@ -1,6 +1,6 @@
 export { liveTag, invalidateTag, runWithLiveBatch, stampRequestStartFence, publishQueuedTags }
 
-import { AsyncLocalStorage } from 'node:async_hooks'
+import type { AsyncLocalStorage } from 'node:async_hooks'
 import { assertUsage } from '../../../utils/assert.js'
 import { getRawContext } from '../context/context.js'
 import { addLiveSource } from './source.js'
@@ -23,8 +23,19 @@ type TagState = {
 }
 
 // Per-async-scope active batch (runWithLiveBatch). AsyncLocalStorage isolates concurrent job batches
-// from each other and from request state — no process-global mutable owner to corrupt.
-const batchStore = new AsyncLocalStorage<Set<string>>()
+// from each other and from request state. `node:async_hooks` is loaded LAZILY (dynamic import on the
+// first batch use) and is never statically imported nor instantiated at module load — so this file
+// does not pull node:async_hooks into non-Node bundles (e.g. a Cloudflare worker booted without
+// nodejs_compat), and the request hot path (stampRequestStartFence/liveTag/the request side of
+// invalidateTag) never touches it. See client/poisen-pills/async_hooks.ts for the maintainers' fence.
+let batchStore: AsyncLocalStorage<Set<string>> | null = null
+
+async function getBatchStore(): Promise<AsyncLocalStorage<Set<string>>> {
+  if (batchStore) return batchStore
+  const { AsyncLocalStorage } = await import('node:async_hooks')
+  batchStore ??= new AsyncLocalStorage<Set<string>>()
+  return batchStore
+}
 
 /** Stamp the request-start fence and await the hub's readiness barrier once — runs before the body
  *  (core START step) so a tag published between the read and a later `liveTag()` still replays. */
@@ -94,7 +105,8 @@ function liveTag(tag: string): void {
  *  `runWithLiveBatch` scope it queues into that batch; inside a request, into request state;
  *  otherwise it's a usage error. */
 function invalidateTag(tag: string): void {
-  const batch = batchStore.getStore()
+  // The ALS exists only once a batch has run; before that `batchStore` is null → the request path.
+  const batch = batchStore?.getStore()
   if (batch) {
     batch.add(tag)
     return
@@ -120,8 +132,9 @@ async function publishQueuedTags(): Promise<void> {
 async function runWithLiveBatch(cb: () => Promise<void> | void): Promise<void> {
   const hub = getTagHub()
   await hub.ready()
+  const store = await getBatchStore() // lazily loads node:async_hooks on the first batch/cron use only
   const batch = new Set<string>()
-  await batchStore.run(batch, async () => {
+  await store.run(batch, async () => {
     try {
       await cb()
     } finally {

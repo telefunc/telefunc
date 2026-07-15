@@ -253,12 +253,12 @@ const NNF_SEED = 0x5eed
 describe(`toNNF — truth-preserving (seed=0x${NNF_SEED.toString(16)})`, () => {
   const OPS: CompareOp[] = ['=', '<>', '>', '>=', '<', '<=']
   const COLS = ['a', 'b', 'c']
-  const LITS = [0, 1, 2, null]
+  const LITERALS = [0, 1, 2, null]
 
   const rng = mulberry32(NNF_SEED)
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rng() * xs.length)]!
   const col = (): ScalarExpr => ({ kind: 'col', ref: { table: 't', column: pick(COLS) } })
-  const operand = (): ScalarExpr => (rng() < 0.7 ? { kind: 'lit', value: pick(LITS) } : col())
+  const operand = (): ScalarExpr => (rng() < 0.7 ? { kind: 'lit', value: pick(LITERALS) } : col())
 
   const leaf = (): Predicate => {
     const r = rng()

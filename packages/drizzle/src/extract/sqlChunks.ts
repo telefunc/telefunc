@@ -82,7 +82,7 @@ function splitOn(tokens: SqlToken[], separator: string): SqlToken[][] {
 
 /** Peel one balanced wrapping paren pair (`( … )`, or `not ( … )`) off a token list.
  *  Only strips when the parens are dedicated markers, so a fused `is null)` is left
- *  for the atom parser and `(a) or (b)` is not mis-stripped. */
+ *  for the atom parser and `(a) or (b)` is not wrongly stripped. */
 function stripParens(tokens: SqlToken[]): SqlToken[] {
   const first = tokens[0]
   const last = tokens[tokens.length - 1]
