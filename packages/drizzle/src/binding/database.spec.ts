@@ -97,13 +97,16 @@ describe('semanticEnvironmentKeyOf — pinned to a provable session (T3.Q4)', ()
     expect(await semanticEnvironmentKeyOf(pjDb, { run: authority('svc') })).toContain('failclosed')
   })
 
-  it.skipIf(!SQLITE_PROBE_SUPPORTED)('probes a real single-session sqlite connection for a stable shareable key', async () => {
-    const a = await semanticEnvironmentKeyOf(sqliteDb)
-    const b = await semanticEnvironmentKeyOf(sqliteDb)
-    expect(a).toBe(b)
-    expect(a).toContain('sqlite')
-    expect(a).not.toContain('failclosed')
-  })
+  it.skipIf(!SQLITE_PROBE_SUPPORTED)(
+    'probes a real single-session sqlite connection for a stable shareable key',
+    async () => {
+      const a = await semanticEnvironmentKeyOf(sqliteDb)
+      const b = await semanticEnvironmentKeyOf(sqliteDb)
+      expect(a).toBe(b)
+      expect(a).toContain('sqlite')
+      expect(a).not.toContain('failclosed')
+    },
+  )
 })
 
 describe('rlsEnabledOf — real catalog path, never assumes off', () => {

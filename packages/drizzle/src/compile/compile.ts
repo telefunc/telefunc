@@ -9,7 +9,15 @@
 // delta. Stages that cannot be evaluated exactly tap the dirty witness (over-fire, never
 // miss); a whole-plan structural degradation falls back to the live coarse graph.
 
-export { type GraphPlan, type CompiledGraph, type FireResult, type Change, compileQuery }
+export {
+  type GraphPlan,
+  type CompiledGraph,
+  type StatefulGraph,
+  type FireResult,
+  type SeedDescriptor,
+  type Change,
+  compileQuery,
+}
 
 import { conjunctsOf } from '../extract/predicate.js'
 import {
@@ -36,7 +44,37 @@ import { type SetOpBranch, applySetOps } from './setOpsStage.js'
 import { applyWindow } from './windowStage.js'
 
 type FireResult = { data: boolean; dirty: boolean; invalidated: boolean }
+
+/** The ticket-5 runtime seam (T5.A0): everything the graph runtime needs to hydrate ONE
+ *  stateful input — a stable id, the real relation + alias, its PK (retraction key), the
+ *  demanded columns, and the σ residual as the opaque hydration handle (its predicate
+ *  leaves still carry the drizzle `src`, which the binding layer re-emits as WHERE). */
+type SeedDescriptor = {
+  inputId: string
+  table: string
+  alias: string
+  primaryKey: string[]
+  columns: string[] | '*'
+  residual: Predicate
+  shadowNeed: boolean
+}
+
+/** A compiled graph — the ticket-4 surface, unchanged (coarse/stateless graphs are exactly
+ *  this). `apply` feeds a whole commit and reports invalidation. */
 type CompiledGraph = { apply(commit: Change[]): FireResult }
+
+/** The ticket-5 seam on a STATEFUL compiled graph. `seeds` lists the inputs to hydrate;
+ *  `seedInput` + `flushSeed` feed a σ-pruned baseline with notifications MUTED (state, not
+ *  change); `feedInput` + `runBatch` give the live graph per-input control (so a self-join
+ *  feeds each alias exactly once, never fanning across aliases). `apply` remains the
+ *  table-fanned floor path — `feedInput`/`runBatch` compose from the same primitives. */
+type StatefulGraph = CompiledGraph & {
+  readonly seeds: SeedDescriptor[]
+  seedInput(inputId: string, rows: Row[]): void
+  flushSeed(): void
+  feedInput(inputId: string, change: Change): void
+  runBatch(): FireResult
+}
 type GraphPlan = {
   tables: string[]
   stateless: boolean
@@ -150,13 +188,15 @@ function statefulPlan(shape: SelectShape): GraphPlan {
 }
 
 type FeedInput = { plan: InputPlan; builder: RootStreamBuilder<Row> }
+type SeedInput = { descriptor: SeedDescriptor; plan: InputPlan; builder: RootStreamBuilder<Row> }
 
-function statefulGraph(shape: SelectShape): CompiledGraph {
+function statefulGraph(shape: SelectShape): StatefulGraph {
   const graph = new D2()
   const dirty = createDirtySink()
   const registry = new Map<string, FeedInput[]>()
   const genesis: RootStreamBuilder<Row>[] = []
   let dataFired = false
+  let pendingDirty = false
 
   const combined =
     shape.setOps.length > 0
@@ -186,23 +226,78 @@ function statefulGraph(shape: SelectShape): CompiledGraph {
   dataFired = false
   dirty.reset()
 
+  // The seedable inputs are every real db-backed feed (a self-join yields one per alias); the
+  // dirty-only DISCARD feeds and the internal aggregate genesis inputs hold no hydrated state.
+  const seedable = new Map<string, SeedInput>()
+  for (const feeds of registry.values())
+    for (const feed of feeds)
+      if (feed.builder !== DISCARD) {
+        assertUsage(!seedable.has(feed.plan.alias), `duplicate seed input id: ${feed.plan.alias}`)
+        seedable.set(feed.plan.alias, { descriptor: descriptorOf(feed.plan), plan: feed.plan, builder: feed.builder })
+      }
+
+  // The one place a captured change becomes an engine feed: project + σ-filter via the input
+  // adapter, buffer the pruned delta, and remember any row-space dirty. `apply` fans a whole
+  // commit table-wise; `feedInput` gives the live graph per-alias control (no cross-alias fan).
+  const pump = (plan: InputPlan, builder: RootStreamBuilder<Row>, change: Change): void => {
+    const delta = applyChange(plan, change)
+    if (delta.dirty) pendingDirty = true
+    if (delta.data.length > 0) builder.sendData(new MultiSet(delta.data))
+  }
+  const runBatch = (): FireResult => {
+    graph.run()
+    if (pendingDirty) dirty.signal()
+    const d = dirty.fired()
+    const result = { data: dataFired, dirty: d, invalidated: dataFired || d }
+    dataFired = false
+    pendingDirty = false
+    dirty.reset()
+    return result
+  }
+
   return {
     apply(commit) {
-      dataFired = false
-      dirty.reset()
-      let rowSpaceDirty = false
-      for (const change of commit) {
-        for (const feed of registry.get(change.table) ?? []) {
-          const delta = applyChange(feed.plan, change)
-          if (delta.dirty) rowSpaceDirty = true
-          if (delta.data.length > 0) feed.builder.sendData(new MultiSet(delta.data))
-        }
-      }
-      graph.run()
-      if (rowSpaceDirty) dirty.signal()
-      const d = dirty.fired()
-      return { data: dataFired, dirty: d, invalidated: dataFired || d }
+      for (const change of commit)
+        for (const feed of registry.get(change.table) ?? []) pump(feed.plan, feed.builder, change)
+      return runBatch()
     },
+    seeds: [...seedable.values()].map((input) => input.descriptor),
+    // A MUTED baseline feed for ONE input: raw rows are projected + σ-filtered exactly like a
+    // captured insert (reusing the input adapter), then buffered — no `run`, no notification.
+    seedInput(inputId, rows) {
+      const input = seedable.get(inputId)
+      assertUsage(input, `seedInput: unknown input id ${inputId}`)
+      const data: Array<[Row, number]> = []
+      for (const raw of rows)
+        for (const entry of applyChange(input.plan, { table: input.plan.table, kind: 'insert', new: raw }).data)
+          data.push(entry)
+      if (data.length > 0) input.builder.sendData(new MultiSet(data))
+    },
+    // Drain the buffered baselines into operator state, still muted (state, not change).
+    flushSeed() {
+      graph.run()
+      dataFired = false
+      pendingDirty = false
+      dirty.reset()
+    },
+    feedInput(inputId, change) {
+      const input = seedable.get(inputId)
+      assertUsage(input, `feedInput: unknown input id ${inputId}`)
+      pump(input.plan, input.builder, change)
+    },
+    runBatch,
+  }
+}
+
+function descriptorOf(plan: InputPlan): SeedDescriptor {
+  return {
+    inputId: plan.alias,
+    table: plan.table,
+    alias: plan.alias,
+    primaryKey: plan.primaryKey,
+    columns: plan.columns,
+    residual: plan.residual,
+    shadowNeed: plan.shadowNeed,
   }
 }
 

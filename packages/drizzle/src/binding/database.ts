@@ -1,4 +1,4 @@
-export { dialectOf, driverOf, clientOf, semanticEnvironmentKeyOf, rlsEnabledOf, rowRunnerFor, entityKindOf }
+export { dialectOf, driverOf, clientOf, semanticEnvironmentKeyOf, rlsEnabledOf, rowRunnerFor, executeSql, entityKindOf }
 export type { RlsStatus, RowRunner }
 
 import { type SQL, entityKind, sql } from 'drizzle-orm'
@@ -151,6 +151,14 @@ function rowRunnerFor(db: AnyDb): RowRunner {
     const raw = dialect === 'sqlite' ? await runner.all!(query) : await runner.execute!(query)
     return normalizeRows(raw)
   }
+}
+
+/** Execute a built drizzle `SQL` (not raw text) against the connection and normalize the
+ *  result rows — the hydration executor's read primitive. */
+async function executeSql(db: AnyDb, query: SQL): Promise<Record<string, unknown>[]> {
+  const runner = db as { execute?: (q: SQL) => unknown; all?: (q: SQL) => unknown }
+  const raw = dialectOf(db) === 'sqlite' ? await runner.all!(query) : await runner.execute!(query)
+  return normalizeRows(raw)
 }
 
 function normalizeRows(raw: unknown): Record<string, unknown>[] {
