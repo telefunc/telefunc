@@ -93,22 +93,23 @@ function LocalTodos() {
 function GlobalTodos() {
   const [text, setText] = useState('')
 
+  // Plain key (no `global:` prefix): liveness is server-owned via `liveTag`, not client-driven.
   const { data: todos, isLoading } = useQuery({
-    queryKey: ['global:todos'],
+    queryKey: ['global-todos'],
     queryFn: () => onGetGlobalTodos(),
     staleTime: Infinity,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
   })
 
+  // No `meta.invalidates`: the server invalidates the global tag (`invalidateTag`), which reaches
+  // every connected client through its live-query channel.
   const addTodo = useMutation({
     mutationFn: (text: string) => onAddGlobalTodo(text),
-    meta: { invalidates: [['global:todos']] },
   })
 
   const clearTodos = useMutation({
     mutationFn: () => onClearGlobalTodos(),
-    meta: { invalidates: [['global:todos']] },
   })
 
   return (

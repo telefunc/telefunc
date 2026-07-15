@@ -1,6 +1,9 @@
 export { onGetLocalTodos, onAddLocalTodo, onClearLocalTodos, onGetGlobalTodos, onAddGlobalTodo, onClearGlobalTodos }
 
 import IORedis from 'ioredis'
+import { invalidateTag, liveTag } from 'telefunc'
+
+const GLOBAL_TAG = 'todos:global'
 
 type Todo = { id: string; text: string }
 type State = { todos: Todo[]; nextId: number }
@@ -49,6 +52,9 @@ async function onClearLocalTodos() {
 }
 
 async function onGetGlobalTodos() {
+  // Server-owned liveness: register this read against the global tag. Telefunc wraps the result
+  // with an invalidation channel; the client refetches whenever the tag is invalidated.
+  liveTag(GLOBAL_TAG)
   return (await read(GLOBAL_KEY, globalFallback)).todos
 }
 
@@ -56,8 +62,10 @@ async function onAddGlobalTodo(text: string) {
   const state = await read(GLOBAL_KEY, globalFallback)
   state.todos.push({ id: String(state.nextId++), text })
   await write(GLOBAL_KEY, globalFallback, state)
+  invalidateTag(GLOBAL_TAG)
 }
 
 async function onClearGlobalTodos() {
   await write(GLOBAL_KEY, globalFallback, { todos: [], nextId: 1 })
+  invalidateTag(GLOBAL_TAG)
 }

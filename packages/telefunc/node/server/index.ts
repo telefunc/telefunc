@@ -23,10 +23,14 @@ export { DefaultBroadcastAdapter } from '../../wire-protocol/server/broadcast.js
 export type { BroadcastAdapter, BroadcastTransport } from '../../wire-protocol/server/broadcast.js'
 export type { TelefuncServerExtension } from './extensions.js'
 export { liveTag, invalidateTag, runWithLiveBatch } from './live/tags.js'
-export { addLiveSource } from './live/source.js'
+export { addLiveSource, takeLiveSources } from './live/source.js'
 export type { LiveSource } from './live/source.js'
 export { incrementCounter, snapshotCounters } from './live/telemetry.js'
 export type { LiveCounterName } from './live/telemetry.js'
+// Consumed by @telefunc/tanstack-query's result hook (Sprint 2, ruling A) — the live-query
+// reservation + source-take seam that ships the channel wrapper.
+export { reserveLiveQuery, LiveQuotaExceededError } from '../../wire-protocol/server/resource-limiter.js'
+export type { Reservation } from '../../wire-protocol/server/resource-limiter.js'
 export type {
   TypeContract,
   ReplacerType,

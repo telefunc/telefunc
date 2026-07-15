@@ -323,7 +323,14 @@ importers:
         version: 8.0.16(@types/node@24.0.10)(esbuild@0.27.3)(jiti@2.7.0)
 
   packages/drizzle:
+    dependencies:
+      '@tanstack/db-ivm':
+        specifier: 0.1.18
+        version: 0.1.18(typescript@5.9.3)
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: 0.5.4
+        version: 0.5.4
       '@types/node':
         specifier: ^22.10.0
         version: 22.10.1
@@ -332,7 +339,7 @@ importers:
         version: 8.20.0
       drizzle-orm:
         specifier: 1.0.0-rc.4
-        version: 1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@22.10.1))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76)
+        version: 1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.4)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@22.10.1))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76)
       mysql2:
         specifier: ^3.11.0
         version: 3.23.0(@types/node@22.10.1)
@@ -1533,6 +1540,9 @@ packages:
         optional: true
       search-insights:
         optional: true
+
+  '@electric-sql/pglite@0.5.4':
+    resolution: {integrity: sha512-yYZUyyXrHU7tPlCjwZQJ6hIG9DscdCCn7Uk0mYKwC1FeHX286AbcmFveMiRBEak8e9iPupjsoVImN3yJZVed2g==}
 
   '@emnapi/core@1.10.0':
     resolution: {integrity: sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw==}
@@ -3373,6 +3383,11 @@ packages:
     resolution: {integrity: sha512-4M0wBvi4Mhc50mpQmmJuT31C5ROGfh8FOQIAzHzc8qQs14ziHDh9Wx1hjDeezGnlqjCTJVGTExFpPGOFOLRz1A==}
     engines: {node: '>=18'}
 
+  '@tanstack/db-ivm@0.1.18':
+    resolution: {integrity: sha512-+pZJiRKdoKRM5Epq9T7otD9ZJl82pRFauo7LKuJGrarjVKQ7r+QQlPe3kGdN9LEKSnuNGIWjX9OOY4M8kH4eLw==}
+    peerDependencies:
+      typescript: '>=4.7'
+
   '@tanstack/devtools-event-client@0.4.3':
     resolution: {integrity: sha512-OZI6QyULw0FI0wjgmeYzCIfbgPsOEzwJtCpa69XrfLMtNXLGnz3d/dIabk7frg0TmHo+Ah49w5I4KC7Tufwsvw==}
     engines: {node: '>=18'}
@@ -4929,6 +4944,10 @@ packages:
   forwarded@0.2.0:
     resolution: {integrity: sha512-buRG0fpBtRHSTCOASe6hD258tEubFoRLb4ZNA6NxMVHNw2gOcwHo9wyablzMzOA5z9xA9L1KNjk/Nt6MT9aYow==}
     engines: {node: '>= 0.6'}
+
+  fractional-indexing@3.4.0:
+    resolution: {integrity: sha512-8J3glhz2rrpKG6KmI7wmJo3zH1VjeOpN+vTJSw1fOyO+Viqq3zX6/5NGh6oaZB2qIAYdOYuu5Dz9xp4faOO0Pg==}
+    engines: {node: ^14.13.1 || >=16.0.0}
 
   fresh@0.5.2:
     resolution: {integrity: sha512-zJ2mQYM18rEFOudeV4GShTGIQ7RbzA7ozbU9I/XBpm7kqgMywgmylMwXHxZJmkVoYkna9d2pVXVXPdYTP9ej8Q==}
@@ -6500,6 +6519,9 @@ packages:
   sirv@3.0.2:
     resolution: {integrity: sha512-2wcC/oGxHis/BoHkkPwldgiPSYcpZK3JU28WoMVv55yHJgcZ8rlXvuG9iZggz+sU1d4bRgIGASwyWqjxu3FM0g==}
     engines: {node: '>=18'}
+
+  sorted-btree@1.8.1:
+    resolution: {integrity: sha512-395+XIP+wqNn3USkFSrNz7G3Ss/MXlZEqesxvzCRFwL14h6e8LukDHdLBePn5pwbm5OQ9vGu8mDyz2lLDIqamQ==}
 
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
@@ -8431,6 +8453,8 @@ snapshots:
     transitivePeerDependencies:
       - '@algolia/client-search'
 
+  '@electric-sql/pglite@0.5.4': {}
+
   '@emnapi/core@1.10.0':
     dependencies:
       '@emnapi/wasi-threads': 1.2.1
@@ -9754,6 +9778,12 @@ snapshots:
       '@tanstack/ai-event-client': 0.2.7(@tanstack/ai@0.13.0)
       partial-json: 0.1.7
 
+  '@tanstack/db-ivm@0.1.18(typescript@5.9.3)':
+    dependencies:
+      fractional-indexing: 3.4.0
+      sorted-btree: 1.8.1
+      typescript: 5.9.3
+
   '@tanstack/devtools-event-client@0.4.3': {}
 
   '@tanstack/query-core@5.101.0': {}
@@ -10900,9 +10930,10 @@ snapshots:
     dependencies:
       is-obj: 2.0.0
 
-  drizzle-orm@1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@22.10.1))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76):
+  drizzle-orm@1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.4)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@22.10.1))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76):
     optionalDependencies:
       '@cloudflare/workers-types': 4.20260615.1
+      '@electric-sql/pglite': 0.5.4
       '@types/pg': 8.20.0
       mysql2: 3.23.0(@types/node@22.10.1)
       pg: 8.22.0
@@ -11621,6 +11652,8 @@ snapshots:
       is-callable: 1.2.7
 
   forwarded@0.2.0: {}
+
+  fractional-indexing@3.4.0: {}
 
   fresh@0.5.2: {}
 
@@ -13704,6 +13737,8 @@ snapshots:
       '@polka/url': 1.0.0-next.25
       mrmime: 2.0.1
       totalist: 3.0.1
+
+  sorted-btree@1.8.1: {}
 
   source-map-js@1.2.1: {}
 

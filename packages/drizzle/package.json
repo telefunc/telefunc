@@ -34,11 +34,15 @@
     "build": "tsc --build",
     "dev": "tsc --watch"
   },
+  "dependencies": {
+    "@tanstack/db-ivm": "0.1.18"
+  },
   "peerDependencies": {
     "drizzle-orm": ">=1.0.0-rc.4 <2",
     "telefunc": ">=0.2.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.4",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.11.10",
     "drizzle-orm": "1.0.0-rc.4",

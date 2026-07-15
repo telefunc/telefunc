@@ -11,6 +11,10 @@ describe('telefunc live exports (§3.G)', () => {
       'addLiveSource',
       'incrementCounter',
       'snapshotCounters',
+      // Sprint 2 ruling A — the live-query seam @telefunc/tanstack-query consumes:
+      'takeLiveSources',
+      'reserveLiveQuery',
+      'LiveQuotaExceededError',
     ]) {
       expect(typeof (telefunc as Record<string, unknown>)[name]).toBe('function')
     }
