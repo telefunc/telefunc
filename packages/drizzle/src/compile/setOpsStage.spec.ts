@@ -55,14 +55,14 @@ describe('setOpsStage — mixed UNION / UNION ALL global distinct is wrong SQL s
 describe('setOpsStage — INTERSECT / EXCEPT dirty from either branch (T4.B7)', () => {
   it('INTERSECT taps dirty from a change in either branch', () => {
     const graph = run(pg.intersect(memberArm(), adminArm()))
-    expect(graph.apply([insM({ id: 1, name: 'm' })]).dirty).toBe(true)
-    expect(graph.apply([insA({ id: 2, name: 'a' })]).dirty).toBe(true)
+    expect(graph.apply([insM({ id: 1, name: 'm' })]).invalidated).toBe(true)
+    expect(graph.apply([insA({ id: 2, name: 'a' })]).invalidated).toBe(true)
   })
 
   it('EXCEPT taps dirty from either branch', () => {
     const graph = run(pg.except(memberArm(), adminArm()))
-    expect(graph.apply([insM({ id: 1, name: 'm' })]).dirty).toBe(true)
-    expect(graph.apply([insA({ id: 2, name: 'a' })]).dirty).toBe(true)
+    expect(graph.apply([insM({ id: 1, name: 'm' })]).invalidated).toBe(true)
+    expect(graph.apply([insA({ id: 2, name: 'a' })]).invalidated).toBe(true)
   })
 
   it('classifies the set-op kinds', () => {

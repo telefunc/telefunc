@@ -85,8 +85,9 @@ describe('D1 — unknown-predicate membership transition under DISTINCT/consolid
         new: { id: 1, team_id: 5, name: 'y1' },
       },
     ])
-    expect(result.data).toBe(false) // proves the data path missed it (the D1 cancellation)
-    expect(result.invalidated).toBe(true) // the dirty witness rescues the change
+    // the data path alone misses the D1 cancellation (proven at the primitive level in the first `it`);
+    // here the compiled graph still fires — the dirty witness rescues it. Remove the tap → this flips.
+    expect(result.invalidated).toBe(true)
   })
 })
 

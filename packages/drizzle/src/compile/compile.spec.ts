@@ -85,8 +85,9 @@ describe('compile — stateless invalidation (row-space σ)', () => {
     )
     expect(graph.apply([ins({ id: 20, team_id: 5, name: 'x', done: false })]).invalidated).toBe(true)
     expect(graph.apply([ins({ id: 3, team_id: 5, name: 'y', done: false })]).invalidated).toBe(false) // fails id>10
-    const r = graph.apply([ins({ id: 21, team_id: 5, name: 'z', done: false })])
-    expect(r.dirty).toBe(false)
+    // id=21 satisfies both exact conjuncts → fires via the data path (not dirty). The oracle's
+    // and(eq,gt) case pins this plan exact, so it never over-fires.
+    expect(graph.apply([ins({ id: 21, team_id: 5, name: 'z', done: false })]).invalidated).toBe(true)
   })
 
   it('A OR unknown widens to TRUE and fires dirty on any change (tap before)', () => {
@@ -96,8 +97,7 @@ describe('compile — stateless invalidation (row-space σ)', () => {
         .from(users)
         .where(or(eq(users.teamId, 5), sql`${users.name} similar to 'x%'`)),
     )
-    const r = graph.apply([ins({ id: 1, team_id: 3, name: 'q', done: false })])
-    expect(r.dirty).toBe(true)
-    expect(r.invalidated).toBe(true)
+    // A OR unknown widens to TRUE → fires on any change (dirty degradation past WHERE)
+    expect(graph.apply([ins({ id: 1, team_id: 3, name: 'q', done: false })]).invalidated).toBe(true)
   })
 })

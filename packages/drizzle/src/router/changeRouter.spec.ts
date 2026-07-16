@@ -96,7 +96,7 @@ describe('T5.G2 — notify ≤1 per graph AND per identity; a throwing apply is 
     expect(notified).toEqual(['M']) // deduped to one identity notification, not two
   })
 
-  it('a throwing apply is isolated AND surfaced: identity coarse-notified, error counted + logged, co-batched graph applies', () => {
+  it('a throwing apply is isolated AND surfaced: identity coarse-notified, error logged, co-batched graph applies', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const notified: string[] = []
     const router = createRouter({ notify: (k) => notified.push(k) })
@@ -108,8 +108,7 @@ describe('T5.G2 — notify ≤1 per graph AND per identity; a throwing apply is 
     expect(bad.applyLog.length).toBe(1) // attempted
     expect(good.applyLog.length).toBe(1) // NOT skipped by the other graph's throw
     expect(notified.sort()).toEqual(['B', 'G']) // the thrower is coarse-notified; the healthy graph fires normally
-    expect(router.inspect().applyErrors).toBe(1) // SURFACED: counted, never swallowed
-    expect(errorSpy).toHaveBeenCalledTimes(1) // SURFACED: structured log
+    expect(errorSpy).toHaveBeenCalledTimes(1) // SURFACED: structured log, never swallowed
     errorSpy.mockRestore()
   })
 
@@ -122,7 +121,6 @@ describe('T5.G2 — notify ≤1 per graph AND per identity; a throwing apply is 
     const g = fakeGraph(['users'], 'X', { throwOnce: true, invalidated: false })
     router.register(g.graph)
     router.ingest(batch([ins('users', 1)])) // first apply throws → router faults it to coarse
-    expect(router.inspect().applyErrors).toBe(1)
     notified.length = 0
     router.ingest(batch([ins('users', 2)])) // a later SQL-changing batch
     expect(g.applyLog.length).toBe(2) // applied again (not skipped)
@@ -134,7 +132,7 @@ describe('T5.G2 — notify ≤1 per graph AND per identity; a throwing apply is 
 // ── G3 — in-batch coarse marker ─────────────────────────────────────
 
 describe('T5.G3 — an in-batch coarse marker demotes the graph, never feeds it a row', () => {
-  it('a coarse marker calls coarsen (not apply), coarse-notifies the identity, and counts the coarse event', () => {
+  it('a coarse marker calls coarsen (not apply) and coarse-notifies the identity', () => {
     const notified: string[] = []
     const router = createRouter({ notify: (k) => notified.push(k) })
     const g = fakeGraph(['users'], 'C')
@@ -143,7 +141,6 @@ describe('T5.G3 — an in-batch coarse marker demotes the graph, never feeds it 
     expect(g.coarsenCalls.n).toBe(1) // demoted to coarse via the labelled coarsen()
     expect(g.applyLog.length).toBe(0) // NEVER fed the image-less change — no fabrication reaches apply
     expect(notified).toEqual(['C']) // coarse-notified so its subscribers re-read
-    expect(router.inspect().coarseEvents).toBe(1) // SURFACED
   })
 
   it('a mixed batch (coarse + precise for the same graph) demotes once and never applies the precise slice', () => {

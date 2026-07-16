@@ -1,9 +1,9 @@
-// T5.B2a / C / E1 / G2 / I2 — the live-graph state machine. Real compiled join graphs are seeded
+// T5.B2a / C / E1 / G2 — the live-graph state machine. Real compiled join graphs are seeded
 // through a controllable executor, then driven live: an old-inline retraction resolves without a
 // shadow consult (B2a), a change routed DURING the scan is buffered and replayed exactly once as a
-// PK-upsert (the one-shot seed-race guard, C), RLS-gated stateful graphs are born coarse (E1), a
-// graph fires at most once per batch (G2), and inspect() is bounded with one reason per transition
-// (I2). Deterministic — deferred/immediate promises drive the seed, never timers.
+// PK-upsert (the one-shot seed-race guard, C), RLS-gated stateful graphs are born coarse (E1), and a
+// graph fires at most once per batch (G2). Deterministic — deferred/immediate promises drive the
+// seed, never timers.
 
 import { eq } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
@@ -33,7 +33,7 @@ function fakeSeed(inputId: string, table: string, primaryKey: string[] = ['id'])
   return { inputId, table, alias: inputId, primaryKey, columns: '*', residual: { kind: 'true' } }
 }
 function statefulFake(seeds: SeedDescriptor[]): StatefulGraph {
-  const noFire = { data: false, dirty: false, invalidated: false }
+  const noFire = { invalidated: false }
   return { seeds, seedInput() {}, flushSeed() {}, feedInput() {}, runBatch: () => noFire, apply: () => noFire }
 }
 
@@ -148,13 +148,12 @@ describe('fault() permanently demotes a corrupt graph to coarse', () => {
   })
 })
 
-describe('coarsen(reason) intentionally demotes a graph to coarse with a labelled reason', () => {
-  it('an explicit coarse event demotes a live graph to coarse (labelled) and every subsequent change coarse-fires', async () => {
+describe('coarsen() intentionally demotes a graph to coarse', () => {
+  it('an explicit coarse event demotes a live graph to coarse and every subsequent change coarse-fires', async () => {
     const graph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     expect(graph.state()).toBe('live')
-    graph.coarsen('coarse-event') // the router calls this for an image-less mutation it can't represent precisely
+    graph.coarsen() // the router calls this for an image-less mutation it can't represent precisely
     expect(graph.state()).toBe('coarse')
-    expect(graph.inspect().reason).toBe('coarse-event') // labelled — distinct from fault's 'apply-fault'
     // the precise state is abandoned; any watched change now coarse-fires → no post-demote miss
     expect(graph.apply([{ table: 'users', kind: 'insert', new: { id: 99, team_id: 5 } }]).invalidated).toBe(true)
   })
@@ -162,12 +161,12 @@ describe('coarsen(reason) intentionally demotes a graph to coarse with a labelle
   it('coarsen on a terminal (retired/destroyed) graph is inert', async () => {
     const retired = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     retired.retire()
-    retired.coarsen('coarse-event') // terminal wins → no-op
+    retired.coarsen() // terminal wins → no-op
     expect(retired.state()).toBe('retired')
 
     const destroyed = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     destroyed.destroy()
-    destroyed.coarsen('coarse-event')
+    destroyed.coarsen()
     expect(destroyed.state()).toBe('destroyed')
   })
 })
@@ -232,26 +231,5 @@ describe('T5.G2 — a graph fires at most once per batch', () => {
     ])
     expect(out.invalidated).toBe(true)
     expect(graph.invalidationSeq() - before).toBe(1) // ≤1 fire per batch
-  })
-})
-
-// ── I2 — bounded inspect ────────────────────────────────────────────
-
-describe('T5.I2 — inspect() is bounded (one reason per transition, counters do not grow with events)', () => {
-  it('the snapshot shape is fixed regardless of event volume; reason reflects only the last transition', async () => {
-    const graph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
-    const snap1 = graph.inspect()
-    expect(snap1.state).toBe('live')
-    const keys = ['coarseFires', 'demotions', 'dirtyFires', 'exactFires', 'seeds', 'stateRows']
-    expect(Object.keys(snap1.counters).sort()).toEqual(keys)
-
-    for (let i = 0; i < 50; i++) graph.apply([{ table: 'users', kind: 'insert', new: { id: 100 + i, team_id: 5 } }])
-    const snap2 = graph.inspect()
-    expect(Object.keys(snap2.counters).sort()).toEqual(keys) // no per-event growth
-    expect(typeof snap2.reason).toBe('string') // ONE reason, not a growing log
-    expect(snap2.counters.exactFires).toBeGreaterThan(snap1.counters.exactFires)
-
-    graph.retire()
-    expect(graph.inspect().reason).toBe('drift') // reason = last transition only
   })
 })

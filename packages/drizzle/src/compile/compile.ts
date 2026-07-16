@@ -44,7 +44,10 @@ import { type Row, qualifiedKey, rowChanged } from './rowSpace.js'
 import { type SetOpBranch, applySetOps } from './setOpsStage.js'
 import { applyWindow } from './windowStage.js'
 
-type FireResult = { data: boolean; dirty: boolean; invalidated: boolean }
+/** The outward fire signal. The dirty witness still computes data-delta vs dirty-delta INTERNALLY
+ *  (that is how `invalidated` is decided and is what the oracle differential pins); only the split is
+ *  not exposed — the caller acts on `invalidated` alone. */
+type FireResult = { invalidated: boolean }
 
 /** Everything the runtime needs to hydrate ONE stateful input. `residual` is the σ as an opaque
  *  hydration handle — its predicate leaves still carry the drizzle `src`, which the binding layer
@@ -114,8 +117,8 @@ function coarsePlan(tables: string[]): GraphPlan {
     coarse: true,
     instantiate: () => ({
       apply(commit) {
-        const dirty = commit.some((change) => watched.has(change.table) && rowChanged(change))
-        return { data: false, dirty, invalidated: dirty }
+        const invalidated = commit.some((change) => watched.has(change.table) && rowChanged(change))
+        return { invalidated }
       },
     }),
   }
@@ -165,8 +168,7 @@ function statelessEvaluator(
           }
         }
       }
-      const data = acc.size > 0
-      return { data, dirty, invalidated: data || dirty }
+      return { invalidated: acc.size > 0 || dirty }
     },
   }
 }
@@ -243,7 +245,7 @@ function statefulGraph(shape: SelectShape): StatefulGraph {
     graph.run()
     if (pendingDirty) dirty.signal()
     const d = dirty.fired()
-    const result = { data: dataFired, dirty: d, invalidated: dataFired || d }
+    const result = { invalidated: dataFired || d }
     dataFired = false
     pendingDirty = false
     dirty.reset()

@@ -70,17 +70,17 @@ describe('windowStage — topK precision (T4.B6)', () => {
 describe('windowStage — dirty degradations (T4.B6)', () => {
   it('a placeholder LIMIT bound taps dirty on any change', () => {
     const graph = run(qb.select().from(users).orderBy(asc(users.id)).limit(sql.placeholder('n')))
-    expect(graph.apply([ins({ id: 1, score: 10, name: 'a' })]).dirty).toBe(true)
+    expect(graph.apply([ins({ id: 1, score: 10, name: 'a' })]).invalidated).toBe(true)
   })
 
   it('OFFSET without ORDER BY is dirty on any matching change', () => {
     const graph = run(qb.select().from(users).offset(2))
-    expect(graph.apply([ins({ id: 1, score: 10, name: 'a' })]).dirty).toBe(true)
+    expect(graph.apply([ins({ id: 1, score: 10, name: 'a' })]).invalidated).toBe(true)
   })
 
   it('an opaque ORDER expression degrades to dirty (non-total order)', () => {
     const p = plan(qb.select().from(users).orderBy(sql`${users.score} + ${users.id}`).limit(2))
     const graph = p.instantiate()
-    expect(graph.apply([ins({ id: 1, score: 10, name: 'a' })]).dirty).toBe(true)
+    expect(graph.apply([ins({ id: 1, score: 10, name: 'a' })]).invalidated).toBe(true)
   })
 })

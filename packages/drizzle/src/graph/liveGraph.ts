@@ -10,7 +10,7 @@
 // (sound over-fire); schema drift RETIRES (terminal). Firing is reported to the caller (the router
 // owns per-identity notification).
 
-export { type LiveGraph, type LiveGraphSpec, type GraphState, type ApplyOutcome, type Inspection, createLiveGraph }
+export { type LiveGraph, type LiveGraphSpec, type GraphState, type ApplyOutcome, createLiveGraph }
 
 import type { Change, CompiledGraph, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
 import type { RowChange, TableChange } from '../router/events.js'
@@ -20,22 +20,6 @@ import { type ShadowIndex, matchesResidual, pkOf, pruneRow } from './shadow.js'
 
 type GraphState = 'seeding' | 'live' | 'coarse' | 'retired' | 'destroyed'
 type ApplyOutcome = { invalidated: boolean }
-
-/** A fired invalidation's precision — the one stable reason `inspect()` reports. */
-type FireKind = 'exact' | 'dirty' | 'coarse'
-
-type Inspection = {
-  state: GraphState
-  reason: string
-  counters: {
-    seeds: number
-    demotions: number
-    exactFires: number
-    dirtyFires: number
-    coarseFires: number
-    stateRows: number
-  }
-}
 
 type LiveGraphSpec =
   | { kind: 'coarse'; instanceKey: string; tables: string[]; reason?: string }
@@ -64,20 +48,17 @@ type LiveGraph = {
    *  coarse so every subsequent change coarse-fires (sound over-fire); the router surfaces the error. */
   fault(): void
   /** An explicit coarse event (an image-less mutation the source can't represent precisely) →
-   *  intentionally demote to coarse with a caller-supplied reason (distinct from fault's apply-throw). */
-  coarsen(reason: string): void
+   *  intentionally demote to coarse (distinct from fault's apply-throw, same coarse outcome). */
+  coarsen(): void
   /** Schema/relation drift → terminal; the registry recompiles on the next read. */
   retire(): void
   /** Refcount 0 → terminal; frees state immediately. */
   destroy(): void
-  inspect(): Inspection
 }
 
 function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
   let state: GraphState = 'coarse'
-  let reason = 'born'
   let seq = 0
-  const counters = { seeds: 0, demotions: 0, exactFires: 0, dirtyFires: 0, coarseFires: 0 }
   const watched = new Set(spec.tables)
 
   let resolveSeed!: () => void
@@ -95,12 +76,10 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
   // Stateless-only runtime.
   const stateless = spec.kind === 'stateless' ? spec.instantiate() : undefined
 
-  function fire(kind: FireKind): void {
+  // Advance the invalidation sequence — the redeem fence's cursor. Every fire (exact, dirty, or a
+  // coarse/fault/coarsen demotion) must bump it so a demotion landing in a read window is caught.
+  function fire(): void {
     seq++
-    if (kind === 'exact') counters.exactFires++
-    else if (kind === 'dirty') counters.dirtyFires++
-    else counters.coarseFires++
-    reason = kind
   }
 
   function startSeeding(): void {
@@ -111,7 +90,6 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     if (graph.seeds.some((descriptor) => descriptor.primaryKey.length === 0)) {
       graph = undefined
       state = 'coarse'
-      reason = 'no-pk'
       resolveSeed()
       return
     }
@@ -141,21 +119,18 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
           for (const [inputId, shadow] of built) shadows.set(inputId, shadow)
           oneShot = []
           state = 'live'
-          reason = 'seed-complete'
           resolveSeed()
         },
-        onDemote(why) {
-          demote(why)
+        onDemote() {
+          demote()
         },
       },
     })
     state = 'seeding'
-    reason = 'seeding'
-    counters.seeds++
     seed.start()
   }
 
-  function demote(why: string): void {
+  function demote(): void {
     seed?.abort()
     seed = undefined
     graph = undefined
@@ -163,8 +138,6 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     byTable.clear()
     oneShot = []
     state = 'coarse'
-    reason = why
-    counters.demotions++
     resolveSeed()
   }
 
@@ -172,7 +145,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
 
   function coarseApply(changes: TableChange[]): ApplyOutcome {
     const hit = changes.some((change) => watched.has(change.table) && rowChanged(change))
-    if (hit) fire('coarse')
+    if (hit) fire()
     return { invalidated: hit }
   }
 
@@ -193,9 +166,9 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       if (change.kind !== 'insert' && change.old === undefined) coarse = true
       else commit.push({ table: change.table, kind: change.kind, old: change.old, new: change.new })
     }
-    const result = commit.length > 0 ? stateless!.apply(commit) : { data: false, dirty: false, invalidated: false }
+    const result = commit.length > 0 ? stateless!.apply(commit) : { invalidated: false }
     const invalidated = result.invalidated || coarse
-    if (invalidated) fire(coarse ? 'coarse' : result.data ? 'exact' : 'dirty')
+    if (invalidated) fire()
     return { invalidated }
   }
 
@@ -207,8 +180,8 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
           // A key-only retraction whose key lacks resolvable PK columns can't be applied without
           // guessing (shadow.resolve is never 'coarse' post-seed — state is complete). Fire coarse
           // once and demote: skipping it would leave the shadow/engine stale (unsound).
-          fire('coarse')
-          demote('unresolvable-retraction')
+          fire()
+          demote()
           return { invalidated: true }
         }
         if (resolved.kind === 'drop') continue
@@ -218,8 +191,8 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       }
     }
     const result = graph!.runBatch()
-    if (result.invalidated) fire(result.data ? 'exact' : 'dirty')
-    if (overStateBound()) demote('state-row-limit')
+    if (result.invalidated) fire()
+    if (overStateBound()) demote()
     return { invalidated: result.invalidated }
   }
 
@@ -233,15 +206,12 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
 
   if (spec.kind === 'stateless') {
     state = 'live'
-    reason = 'born-live'
     resolveSeed()
   } else if (spec.kind === 'coarse') {
     state = 'coarse'
-    reason = spec.reason ?? 'coarse-plan'
     resolveSeed()
   } else if (spec.bornCoarse) {
     state = 'coarse'
-    reason = spec.bornCoarse
     resolveSeed()
   } else {
     startSeeding()
@@ -264,19 +234,18 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     fault() {
       // A routed apply() threw (a latent bug left state possibly corrupt): permanently demote to
       // coarse so every subsequent change coarse-fires (sound over-fire) — the precise state can no
-      // longer be trusted. The router surfaces the error (applyErrors counter + structured log).
+      // longer be trusted. The router surfaces the error (structured log).
       if (state === 'retired' || state === 'destroyed') return
-      fire('coarse') // advance seq so a fault landing in the read window is caught by the redeem fence
-      demote('apply-fault')
+      fire() // advance seq so a fault landing in the read window is caught by the redeem fence
+      demote()
     },
-    coarsen(reason) {
+    coarsen() {
       // An explicit coarse event (an image-less mutation the source can't represent precisely):
-      // intentionally demote to coarse via the SAME path as fault(), but with a caller-supplied
-      // reason so inspect() distinguishes an intentional coarse-demote from an apply-throw. Feeds no
-      // row — the router calls this INSTEAD of apply(), so precise state is never fed a fabrication.
+      // intentionally demote to coarse via the SAME path as fault(). Feeds no row — the router calls
+      // this INSTEAD of apply(), so precise state is never fed a fabrication.
       if (state === 'retired' || state === 'destroyed') return
-      fire('coarse') // advance seq so a coarse event in the read window is caught by the redeem fence
-      demote(reason)
+      fire() // advance seq so a coarse event in the read window is caught by the redeem fence
+      demote()
     },
     retire() {
       seed?.abort()
@@ -284,7 +253,6 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       graph = undefined
       shadows.clear()
       state = 'retired'
-      reason = 'drift'
       resolveSeed()
     },
     destroy() {
@@ -293,13 +261,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       graph = undefined
       shadows.clear()
       state = 'destroyed'
-      reason = 'refcount-zero'
       resolveSeed()
-    },
-    inspect() {
-      let stateRows = 0
-      for (const shadow of shadows.values()) stateRows += shadow.size
-      return { state, reason, counters: { ...counters, stateRows } }
     },
   }
 }

@@ -43,7 +43,7 @@ function fakeSeed(): SeedDescriptor {
   }
 }
 function statefulFake(): StatefulGraph {
-  const noFire = { data: false, dirty: false, invalidated: false }
+  const noFire = { invalidated: false }
   return {
     seeds: [fakeSeed()],
     seedInput() {},
@@ -122,17 +122,14 @@ async function drive(driven: { graph: LiveGraph; resolveScan: (rows: Row[]) => v
 /** Invariants that must hold in EVERY reachable state before the next transition. */
 function probe(graph: LiveGraph, model: S): void {
   const before = graph.invalidationSeq()
-  const beforeExact = graph.inspect().counters.exactFires
   const out = graph.apply([{ table: 'users', kind: 'insert', new: { id: 999_999 } }]) // fixed id → adds ≤1 shadow row
   const delta = graph.invalidationSeq() - before
   expect(delta).toBeLessThanOrEqual(1) // ≤1 fire per graph per batch
   if (model === 'seeding') {
     expect(out.invalidated).toBe(false) // buffered precisely — not coarse, and NOT dropped (replayed at the cut)
-    expect(graph.inspect().counters.exactFires).toBe(beforeExact) // a seeding graph never claims exactness
   }
   if (model === 'coarse') {
     expect(out.invalidated).toBe(true) // coarse over-fire is licensed (never a silent drop)
-    expect(graph.inspect().counters.exactFires).toBe(beforeExact) // a coarse graph never claims exactness
   }
   if (model === 'retired' || model === 'destroyed') {
     expect(out.invalidated).toBe(false) // terminal — inert, never rehydrated

@@ -145,8 +145,8 @@ describe('aggregateStage — opaque GROUP BY witnessed at the input adapter (blo
     const result = graph.apply([
       upd({ id: 1, team_id: 5, score: 2, name: 'a' }, { id: 1, team_id: 5, score: 5, name: 'a' }),
     ])
-    expect(result.data).toBe(false) // the data path genuinely misses the move (reduce cancellation)
-    expect(result.dirty).toBe(true) // the pre-reduce dirty witness (input adapter) catches it
+    // the data path alone misses the move (reduce cancellation); the pre-reduce dirty witness (input
+    // adapter) rescues it → fires. The oracle differential pins that this move is never missed.
     expect(result.invalidated).toBe(true)
   })
 })
@@ -157,8 +157,8 @@ describe('aggregateStage — HAVING + DISTINCT (T4.B5)', () => {
       qb.select({ team: users.teamId, n: count() }).from(users).groupBy(users.teamId).having(gt(count(), 2)),
     )
     seed(graph, [ins({ id: 1, team_id: 5, score: 10, name: 'a' })])
-    // a group-touching change taps dirty after the aggregate (HAVING over count() is unprovable)
-    expect(graph.apply([ins({ id: 2, team_id: 5, score: 20, name: 'b' })]).dirty).toBe(true)
+    // a group-touching change fires after the aggregate (HAVING over count() is unprovable → dirty)
+    expect(graph.apply([ins({ id: 2, team_id: 5, score: 20, name: 'b' })]).invalidated).toBe(true)
   })
 
   it('count(DISTINCT col) is exact — a duplicate value does not change it, a new one does', () => {

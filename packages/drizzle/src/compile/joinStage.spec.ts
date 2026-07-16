@@ -70,8 +70,8 @@ describe('joinStage — degradation to live coarse (T4.B4)', () => {
     const plan = compileQuery(extractQueryShape(qb.select().from(users).crossJoin(teams), { dialect: 'pg' }))
     expect(plan.coarse).toBe(true)
     const graph = plan.instantiate()
-    expect(graph.apply([insUser({ id: 1, team_id: 5, name: 'a' })]).dirty).toBe(true)
-    expect(graph.apply([insTeam({ id: 5, region: 'eu' })]).dirty).toBe(true)
+    expect(graph.apply([insUser({ id: 1, team_id: 5, name: 'a' })]).invalidated).toBe(true)
+    expect(graph.apply([insTeam({ id: 5, region: 'eu' })]).invalidated).toBe(true)
   })
 
   it('an OUTER join with a non-equi ON residual degrades (not a plain filter that drops null-extensions)', () => {

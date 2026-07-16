@@ -59,8 +59,8 @@ describe('existsStage — NOT IN + NULL and scalar subqueries (T4.B8)', () => {
         .where(notInArray(users.teamId, qb.select({ id: teams.id }).from(teams))),
     )
     seed(graph, [insUser({ id: 1, team_id: 1 })])
-    expect(graph.apply([{ table: 'teams', kind: 'insert', new: { id: null } }]).dirty).toBe(true)
-    expect(graph.apply([{ table: 'teams', kind: 'delete', old: { id: null } }]).dirty).toBe(true)
+    expect(graph.apply([{ table: 'teams', kind: 'insert', new: { id: null } }]).invalidated).toBe(true)
+    expect(graph.apply([{ table: 'teams', kind: 'delete', old: { id: null } }]).invalidated).toBe(true)
   })
 
   it('a scalar subquery registers its inner table and fires dirty on an inner change', () => {
@@ -69,6 +69,6 @@ describe('existsStage — NOT IN + NULL and scalar subqueries (T4.B8)', () => {
     )
     seed(graph, [insUser({ id: 1, team_id: 5 })])
     // a change to the scalar subquery's inner table `teams` must invalidate
-    expect(graph.apply([{ table: 'teams', kind: 'insert', new: { id: 7 } }]).dirty).toBe(true)
+    expect(graph.apply([{ table: 'teams', kind: 'insert', new: { id: 7 } }]).invalidated).toBe(true)
   })
 })

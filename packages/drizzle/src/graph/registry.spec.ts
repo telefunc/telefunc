@@ -25,7 +25,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 
-const NO_FIRE: FireResult = { data: false, dirty: false, invalidated: false }
+const NO_FIRE: FireResult = { invalidated: false }
 
 function fakeExecutor(over: Partial<HydrationExecutor> = {}): HydrationExecutor {
   // acquire BLOCKS on the seed, so the scan must resolve for the graph to reach live.
@@ -196,11 +196,9 @@ describe('T5.A5 — refcount = leases + unredeemed tokens; immediate destroy on 
     const registry = registryOf()
     const r = await registry.acquire(req({ compilePlan: () => coarsePlan(['users']) }))
     expect(registry.inspect().graphs).toBe(1)
-    expect(registry.router.inspect().graphs).toBe(1)
     r.token.release()
     expect(r.graph.state()).toBe('destroyed')
     expect(registry.inspect().graphs).toBe(0)
-    expect(registry.router.inspect().graphs).toBe(0)
   })
 
   it('token→lease redeem is an atomic transfer with no transient zero (no destroy-then-recreate)', async () => {

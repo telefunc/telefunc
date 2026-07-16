@@ -210,7 +210,7 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
       apply: (changes) => graph.apply(changes),
       notifyKey: () => request.instanceKey,
       fault: () => graph.fault(),
-      coarsen: () => graph.coarsen('coarse-event'),
+      coarsen: () => graph.coarsen(),
     }
     // Register inputs with the router BEFORE the graph's seed reads (activate-before-read):
     // no event window can slip between the read and registration.
