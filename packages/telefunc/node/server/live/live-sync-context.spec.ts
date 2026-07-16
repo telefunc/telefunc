@@ -9,6 +9,7 @@ import { restoreContext, getRawContext } from '../context/context.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
 import { Live } from './live.js'
+import { _activationStateForTesting, _listenerCountForTesting } from './testing.js'
 import { invalidateTag, stampRequestStartFence } from './tags.js'
 import { getTagHub, _resetTagHubsForTesting } from './tagHub.js'
 import {
@@ -127,10 +128,10 @@ describe('sync context mode — tag usage must survive a macrotask (real-I/O) aw
       await stampRequestStartFence()
       const live = new Live<string[]>([])
       Live.onInvalidate('t', live) // captures the fence, but the handle is NEVER serialized (no _activate)
-      expect(getTagHub()._listenerCountForTesting('t')).toBe(0) // capture touched no hub listener
-      expect(live._activationStateForTesting().sourceActive).toBe(false) // and nothing activated on the cell
+      expect(_listenerCountForTesting(getTagHub(), 't')).toBe(0) // capture touched no hub listener
+      expect(_activationStateForTesting(live).sourceActive).toBe(false) // and nothing activated on the cell
     })
-    expect(getTagHub()._listenerCountForTesting('t')).toBe(0) // still zero after the request — nothing to leak
+    expect(_listenerCountForTesting(getTagHub(), 't')).toBe(0) // still zero after the request — nothing to leak
   })
 
   it('READ fix: Live.onInvalidate BEFORE the await + live.set after → the serialized handle fires on a later publish', async () => {

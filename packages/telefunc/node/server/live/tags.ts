@@ -50,9 +50,8 @@ function getRequestTagState(): TagState {
 }
 
 /** A request's tag fence, captured while the sync context is live. Holds ONLY stable per-request refs
- *  (the hub, the request-start seq, the own-batchId set) — it registers NOTHING on the hub — so a later
- *  `subscribeCapturedTag` needs NO context. That is what lets a `Live` handle bind a tag BEFORE an I/O
- *  await yet subscribe at serialize time, after telefunc's default sync context mode nulled the context. */
+ *  (hub, request-start seq, own-batchId set) and registers NOTHING on the hub, so `subscribeCapturedTag`
+ *  can run context-free at serialize (rationale on `captureTagFence`). */
 type TagFence = { tag: string; hub: TagHub; requestStartSeq: number; ownBatchIds: Set<string> }
 
 /** Capture the fence for `tag`. MUST run inside the request context — BEFORE any real-I/O await (which,

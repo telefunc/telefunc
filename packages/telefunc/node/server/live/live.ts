@@ -213,21 +213,6 @@ class Live<T> {
     void this.close()
   }
 
-  /** @internal test-only — activation snapshot: lease count, tap counts, whether the source is live. */
-  _activationStateForTesting(): {
-    lease: number
-    invalidateListeners: number
-    dataListeners: number
-    sourceActive: boolean
-  } {
-    return {
-      lease: this.lease,
-      invalidateListeners: this.invalidateTaps.length,
-      dataListeners: this.dataTaps.length,
-      sourceActive: this.sourceTeardowns.length > 0,
-    }
-  }
-
   private scheduleFlush(): void {
     if (this.flushScheduled) return
     this.flushScheduled = true

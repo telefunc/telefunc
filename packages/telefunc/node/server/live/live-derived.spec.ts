@@ -3,6 +3,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
 import { Live } from './live.js'
+import { _activationStateForTesting } from './testing.js'
 
 // A macrotask flush drains the whole microtask chain (a dep's coalesced flush → derived.invalidate →
 // the derived's own coalesced flush → channel send).
@@ -58,9 +59,9 @@ describe('Live.derived — deferred cascade activation + cell-local leasing (§3
     const derived = Live.derived(() => `${a.data}|${b.data}`) // reads a.data + b.data → tracks {a,b}
     // Nothing serialized → zero listeners added on the deps, and the derived holds zero leases.
     const empty = { lease: 0, invalidateListeners: 0, dataListeners: 0, sourceActive: false }
-    expect(a._activationStateForTesting()).toEqual(empty)
-    expect(b._activationStateForTesting()).toEqual(empty)
-    expect(asLive(derived)._activationStateForTesting().lease).toBe(0)
+    expect(_activationStateForTesting(a)).toEqual(empty)
+    expect(_activationStateForTesting(b)).toEqual(empty)
+    expect(_activationStateForTesting(asLive(derived)).lease).toBe(0)
   })
 
   it('T12.B2 multi-dep invalidate forwarding once serialized', async () => {
@@ -82,7 +83,7 @@ describe('Live.derived — deferred cascade activation + cell-local leasing (§3
     const derived = Live.derived(() => 42) // reads no handle
     server.serialize(derived)
     expect(server.created).toHaveLength(1)
-    expect(asLive(derived)._activationStateForTesting().lease).toBe(1) // its own channel's lease, no cascade
+    expect(_activationStateForTesting(asLive(derived)).lease).toBe(1) // its own channel's lease, no cascade
   })
 
   it('shared-dep-activated-once — a dep both returned and read by a derived activates its source ONCE', () => {
@@ -94,7 +95,7 @@ describe('Live.derived — deferred cascade activation + cell-local leasing (§3
     server.serialize({ a: a.client, summary: Live.derived(() => `sum:${a.data}`) })
     expect(server.created).toHaveLength(2) // a's channel + the derived's channel
     expect(subscribe).toHaveBeenCalledTimes(1) // idempotent _activate: the shared source subscribes once
-    expect(a._activationStateForTesting().lease).toBe(2) // one lease per owning channel
+    expect(_activationStateForTesting(a).lease).toBe(2) // one lease per owning channel
   })
 
   it('both close orders — the survivor stays live; the shared source tears down exactly once', async () => {

@@ -5,6 +5,7 @@ import { restoreContext } from '../context/context.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
 import { Live } from './live.js'
+import { _activationStateForTesting } from './testing.js'
 import { stampRequestStartFence, publishQueuedTags } from './tags.js'
 import { getTagHub, _resetTagHubsForTesting } from './tagHub.js'
 import {
@@ -139,7 +140,7 @@ describe('Live tag statics — Live.onInvalidate / Live.invalidate over TagHub (
       const live = new Live('rows')
       Live.onInvalidate('t', live)
       // Not serialized → the fenced source is never subscribed.
-      expect(live._activationStateForTesting()).toEqual({
+      expect(_activationStateForTesting(live)).toEqual({
         lease: 0,
         invalidateListeners: 0,
         dataListeners: 0,
