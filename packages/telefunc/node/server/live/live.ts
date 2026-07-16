@@ -1,10 +1,11 @@
-export { Live, LIVE_BRAND }
+export { Live }
 export type { ClientLive, LiveEvent }
 
 import { subscribeTagFenced, invalidateTagStatic } from './tags.js'
 
-// A private brand (global-registry symbol, like SERVER_CHANNEL_BRAND) so the wire replacer can
-// detect a returned Live across module boundaries. Never exported as a public surface.
+// A PRIVATE brand (global-registry symbol, like SERVER_CHANNEL_BRAND). Detection is internal only —
+// never a public surface — so this is neither exported nor exposed via a static; the wire replacer
+// reconstructs it locally via the same `Symbol.for('telefunc.Live')`.
 const LIVE_BRAND = Symbol.for('telefunc.Live')
 
 /** What travels once a Live crosses the wire: a stale signal, or a pushed value. Phase 1 rides
@@ -134,10 +135,6 @@ class Live<T> {
    *  `ServerChannel.client`. */
   get client(): ClientLive<T> {
     return this as unknown as ClientLive<T>
-  }
-
-  static isLive(value: unknown): value is Live<unknown> {
-    return typeof value === 'object' && value !== null && LIVE_BRAND in value
   }
 
   /** Computed sugar: run `fn` once (tracking which deps' `.data` were read), snapshot the value, and

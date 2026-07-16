@@ -68,8 +68,10 @@ function subscribeTagFenced(tag: string, onInvalidate: () => void): () => void {
     lastDeliveredSeq = hub.currentSeq()
     onInvalidate()
   } else {
-    const matchSeq = hub.scanSince(requestStartSeq, hub.currentSeq(), tag)
-    if (matchSeq > 0) emit(matchSeq, undefined)
+    // Carry the matched publish's batchId so `emit` can skip this request's OWN echo (self-write ≠
+    // self-refetch) — the same suppression the index path gets via `_notify`.
+    const match = hub.scanSince(requestStartSeq, hub.currentSeq(), tag)
+    if (match.seq > 0) emit(match.seq, match.batchId)
   }
   return teardown
 }

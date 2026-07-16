@@ -100,6 +100,19 @@ describe('Live tag statics — Live.onInvalidate / Live.invalidate over TagHub (
       expect(server.created[0]!.sends).toEqual([{ kind: 'invalidate' }])
     }))
 
+  it("T12.C1 a request's OWN Live.invalidate does not self-invalidate its own returned handle (ZERO)", () =>
+    inRequest(async () => {
+      await stampRequestStartFence()
+      const live = new Live('rows')
+      Live.onInvalidate('t', live) // the handle is live under 't'...
+      Live.invalidate('t') // ...and the SAME request invalidates 't'
+      await publishQueuedTags() // settle publishes 't' under the request's OWN batchId
+      const server = createServerHarness()
+      server.serialize(live.client) // activation's scanSince catches 't' — but it's this request's own echo
+      await flush()
+      expect(server.created[0]!.sends).toEqual([]) // self-write ≠ self-refetch: ZERO self-invalidation
+    }))
+
   it('T12.C3 Live.invalidate in-request queues; publishes one deduped batch at settle', () =>
     inRequest(async () => {
       await stampRequestStartFence()

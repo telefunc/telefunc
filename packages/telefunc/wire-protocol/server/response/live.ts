@@ -2,15 +2,18 @@ export { liveReplacer }
 
 import type { LiveContract, ReplacerType, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_LIVE } from '../../constants.js'
-import { Live } from '../../../node/server/live/live.js'
 import type { LiveEvent } from '../../../node/server/live/live.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
+// Reconstruct the PRIVATE Live brand locally (global-registry symbol) — detection is internal, never
+// a public surface, so the brand is neither imported nor exported.
+const LIVE_BRAND = Symbol.for('telefunc.Live')
+
 const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_LIVE,
   detect(value): value is LiveContract['value'] {
-    return Live.isLive(value)
+    return typeof value === 'object' && value !== null && LIVE_BRAND in value
   },
   replace(live, context) {
     // Serialize-time single activation (quota deleted — no reservation step): the channel is created

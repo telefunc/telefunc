@@ -115,12 +115,10 @@ describe('Live core cell (§3.A)', () => {
     expect(live.data).toBe('a')
   })
 
-  it('T12.A1/A4 close fires onClose once (idempotent); a late onClose fires immediately; brand detect', async () => {
+  it('T12.A1/A4 close fires onClose once (idempotent); a late onClose fires immediately', async () => {
     const live = new Live('a')
     const onClose = vi.fn()
     live.onClose(onClose)
-    expect(Live.isLive(live)).toBe(true)
-    expect(Live.isLive({})).toBe(false)
     await live.close()
     expect(onClose).toHaveBeenCalledTimes(1)
     await live.close() // idempotent — no second fire

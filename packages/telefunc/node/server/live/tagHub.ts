@@ -20,7 +20,10 @@ const BARRIER_MAX_ATTEMPTS = 50
 let barrierMaxAttempts = BARRIER_MAX_ATTEMPTS
 
 type TagBatch = { batchId?: string; tags?: string[]; barrier?: string }
-type JournalEntry = { seq: number; tags: Set<string> }
+// The batchId is retained so the fence catch-up (scanSince) can suppress a request's OWN echo — the
+// index path already gets it via `_notify`, but a self-publish caught by the scan would otherwise
+// self-invalidate (self-write ≠ self-refetch).
+type JournalEntry = { seq: number; tags: Set<string>; batchId: string | undefined }
 /** Delivered with the publish's seq and originating batchId, so a subscriber can dedupe by seq and
  *  skip its own request's echo. */
 type TagListener = (seq: number, batchId: string | undefined) => void
@@ -105,17 +108,20 @@ class TagHub {
     return fromExclusive < this.evictedUpTo
   }
 
-  /** The highest seq in `(fromExclusive, toInclusive]` at which `tag` was published, or 0 if none.
-   *  The caller captures `toInclusive = currentSeq()` right after registering its index listener, so
-   *  a publish landing after that boundary is delivered by the index and NOT re-counted by the scan. */
-  scanSince(fromExclusive: number, toInclusive: number, tag: string): number {
+  /** The highest-seq publish of `tag` in `(fromExclusive, toInclusive]` as `{ seq, batchId }`, or
+   *  `{ seq: 0 }` if none. The batchId lets the caller skip its own request's echo (self-write ≠
+   *  self-refetch). The caller captures `toInclusive = currentSeq()` right after registering its index
+   *  listener, so a publish landing after that boundary is delivered by the index and NOT re-counted. */
+  scanSince(fromExclusive: number, toInclusive: number, tag: string): { seq: number; batchId: string | undefined } {
     let best = 0
+    let bestBatchId: string | undefined
     for (const entry of this.journal) {
       if (entry.seq > fromExclusive && entry.seq <= toInclusive && entry.seq > best && entry.tags.has(tag)) {
         best = entry.seq
+        bestBatchId = entry.batchId
       }
     }
-    return best
+    return { seq: best, batchId: bestBatchId }
   }
 
   private async _establishBarrier(): Promise<void> {
@@ -151,7 +157,7 @@ class TagHub {
       return
     }
     const tags = batch.tags ?? []
-    this.journal.push({ seq, tags: new Set(tags) })
+    this.journal.push({ seq, tags: new Set(tags), batchId: batch.batchId })
     if (this.journal.length > JOURNAL_LIMIT) {
       const evicted = this.journal.shift()!
       this.evictedUpTo = evicted.seq
