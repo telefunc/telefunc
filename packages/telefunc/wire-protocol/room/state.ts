@@ -151,10 +151,9 @@ class RoomState {
 
   // ── Reads ──
 
-  /** Exact once the roster is known (seeded or reconciled); before that, the seeded count
-   *  adjusted by the events this view applied since. Excludes hidden participants — they're members
-   *  for routing, never counted (the seeded count may still include them until the roster loads,
-   *  like any other pre-roster fact). */
+  /** Exact once the roster is known (seeded or reconciled), and presence-accurate before that too:
+   *  the seed (`Room.get`/`Room.list`) already excludes hidden participants — members for routing,
+   *  never counted — so the pre-roster count is that seed adjusted by the events applied since. */
   get count(): number {
     if (!this._rosterKnown) return this._seedCount
     return this._members.size - this._hiddenCount()

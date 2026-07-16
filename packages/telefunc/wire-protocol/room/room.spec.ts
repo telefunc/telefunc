@@ -111,7 +111,7 @@ describe('Room entry point', () => {
     await expect(Room.join('nope')).rejects.toThrow('Room not found: nope')
   })
 
-  it('Room.get() never reads member records up front — one scan for the count, roster lazy', async () => {
+  it('Room.get() never reads member records up front — prefix scans for the count, roster lazy', async () => {
     await Room.create('scan')
     await Room.join('scan', { meta: { n: 1 } })
     await Room.join('scan', { meta: { n: 2 } })
@@ -121,9 +121,9 @@ describe('Room entry point', () => {
     const scans = vi.spyOn(getBroadcastAdapter(), 'keys')
     const room = await Room.get('scan')
 
-    expect(room.count).toBe(2) // exact, from the scan
-    expect(scans.mock.calls.length).toBe(1)
-    expect(reads.mock.calls.filter((c) => String(c[0]).includes(':m:'))).toEqual([]) // no member reads
+    expect(room.count).toBe(2) // exact, from the scans
+    expect(scans.mock.calls.length).toBe(2) // two prefix scans — member keys, then hidden markers to exclude
+    expect(reads.mock.calls.filter((c) => String(c[0]).includes(':m:'))).toEqual([]) // still no member reads
     expect((await room.getParticipants()).length).toBe(2) // the roster loads on first need
     reads.mockRestore()
     scans.mockRestore()
@@ -524,6 +524,28 @@ describe('hidden participants', () => {
     expect(participants.map((m) => m.meta)).toEqual([{ name: 'P1' }]) // hidden excluded
     expect(b.count).toBe(1)
     expect((await b.getParticipants({ hidden: true })).map((p) => p.id)).toEqual([authority.id]) // reachable on the sibling
+  })
+
+  it('the lazy seed count (Room.get / Room.list) excludes hidden members before any roster loads', async () => {
+    const a = await Room.create('hidden-seed')
+    await a.join({ hidden: true })
+    await a.join({ hidden: true })
+    await a.join({ meta: { name: 'P1' } })
+
+    // Room.get seeds `count` from KV with no per-member reads — the hidden-marker index keeps the
+    // two off-presence members out of the seed, so the count is right the instant it resolves, not
+    // only after a roster reconcile heals it.
+    expect((await Room.get('hidden-seed')).count).toBe(1)
+
+    // Room.list has no roster to heal it, so its count/isEmpty must be presence-only at the source.
+    const info = (await Room.list()).find((r) => r.id === 'hidden-seed')!
+    expect(info).toMatchObject({ count: 1, isEmpty: false })
+
+    // A room holding only hidden members reads as empty.
+    const botOnly = await Room.create('bot-only')
+    await botOnly.join({ hidden: true })
+    expect((await Room.list()).find((r) => r.id === 'bot-only')!).toMatchObject({ count: 0, isEmpty: true })
+    expect((await Room.get('bot-only')).count).toBe(0)
   })
 
   it('an already-connected observer learns of a hidden join live (announced on the control lane)', async () => {

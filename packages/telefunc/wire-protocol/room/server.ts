@@ -31,6 +31,8 @@ import {
   roomMemberTrackKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
+  roomHiddenMemberKvKey,
+  roomHiddenMemberKvPrefix,
   roomIdentityMemberKvKey,
   roomIdentityKvPrefix,
   roomIdentityRoomKvPrefix,
@@ -249,9 +251,9 @@ async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   const { kv, config } = await requireRoom(id)
-  // One keys scan for the count — but no per-member reads: the roster itself loads lazily,
-  // on the first observation that needs it.
-  const count = (await listMemberKeys(kv, id)).length
+  // Scan-only count — no per-member reads: the roster itself loads lazily, on the first observation
+  // that needs it. Hidden members are excluded via their marker index (see presenceCount).
+  const count = await presenceCount(kv, id)
   const room = new ServerRoom(id, config, { count })
   room._tail = options?.tail === true
   return room
@@ -327,7 +329,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
     if (id === null) continue
     const config = await readConfig(kv, id)
     if (config === null) continue // closed concurrently
-    const count = (await listMemberKeys(kv, id)).length // scan only — no per-member reads
+    const count = await presenceCount(kv, id) // scan-only — no per-member reads, hidden excluded
     rooms.push({ id, meta: config.meta, count, isEmpty: count === 0 })
   }
   return rooms
@@ -369,6 +371,7 @@ async function closeRoom(id: string): Promise<void> {
   // cleanup re-checks the config after writing its member record and rolls back.
   await publishCtrl(id, { __r: 'closed' })
   for (const { key } of await listMemberKeys(kv, id)) await kv.delete(key)
+  for (const key of await kv.keys(roomHiddenMemberKvPrefix(id))) await kv.delete(key)
   for (const key of await kv.keys(roomIdentityRoomKvPrefix(id))) await kv.delete(key)
   for (const key of await kv.keys(roomRetainedBinaryPrefix(id))) await kv.delete(key)
   await kv.delete(roomRetainedTextKey(id))
@@ -676,15 +679,19 @@ class ServerRoom implements Room {
       ...(hidden ? { hidden: true } : {}),
     }
     // Index the membership before writing its record — never after, so a reader can't miss a live
-    // member (an orphan marker is harmless; see resolveIdentityMembers).
+    // member (an orphan marker is harmless; see resolveIdentityMembers). The hidden marker follows
+    // the same discipline: in place before the record, so the presence count never counts a hidden
+    // member (a stale marker is ignored — presenceCount only excludes present member ids).
     if (identity !== null) {
       await kv.set(roomIdentityMemberKvKey(this.id, identity, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
     }
+    if (hidden) await kv.set(roomHiddenMemberKvKey(this.id, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
     await kv.set(roomMemberKvKey(this.id, id), stringify(record), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
     // The room may have been closed between the check and the write — roll back.
     if ((await readConfig(kv, this.id)) === null) {
       await kv.delete(roomMemberKvKey(this.id, id))
       if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
+      if (hidden) await kv.delete(roomHiddenMemberKvKey(this.id, id))
       throw new RoomError(`Room is closed: ${this.id}`)
     }
     return joinedAt
@@ -695,8 +702,10 @@ class ServerRoom implements Room {
     if (this._state.closed) return // close() already removed everyone
     const kv = getRoomKV()
     const identity = this._state.getRemote(id)?.identity ?? null
+    const hidden = this._state.isHidden(id)
     await kv.delete(roomMemberKvKey(this.id, id)) // record first — a lingering marker resolves to nothing
     if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
+    if (hidden) await kv.delete(roomHiddenMemberKvKey(this.id, id))
     // A leaving member's per-track streams end, so their retained frames go too — read before the
     // leave applies, while the member's track set is still known. Room close prefix-sweeps the rest.
     if (this._hasRetainedBinary) await this._dropRetainedBinary(id)
@@ -1798,6 +1807,29 @@ async function listMemberKeys(kv: RoomKV, roomId: string): Promise<Array<{ key: 
   return memberKeys
 }
 
+/** Presence member count for a lazy seed (`Room.get`, `Room.list`): total members minus the
+ *  off-presence ones (`join({ hidden })`). Scan-only — the hidden-marker index lets it exclude
+ *  hidden members without reading a single record. Leak-robust: a stale marker whose member is
+ *  already gone is ignored (only present member ids are excluded), and a member not yet marked
+ *  counts as present (the safe direction). */
+async function presenceCount(kv: RoomKV, roomId: string): Promise<number> {
+  const members = await listMemberKeys(kv, roomId)
+  if (members.length === 0) return 0
+  const hidden = await listHiddenMemberIds(kv, roomId)
+  if (hidden.size === 0) return members.length
+  let count = 0
+  for (const { id } of members) if (!hidden.has(id)) count++
+  return count
+}
+
+/** The member IDs a room currently marks off-presence (`join({ hidden })`). */
+async function listHiddenMemberIds(kv: RoomKV, roomId: string): Promise<Set<string>> {
+  const prefix = roomHiddenMemberKvPrefix(roomId)
+  const ids = new Set<string>()
+  for (const key of await kv.keys(prefix)) ids.add(key.slice(prefix.length))
+  return ids
+}
+
 // ── Identity index ──────────────────────────────────────────────────────────
 // The (room, identity)→members index is a hint: one marker key per membership (so concurrent
 // same-identity joins never clobber — the KV has no compare-and-set), written before the member
@@ -1830,6 +1862,9 @@ async function evictMember(
 ): Promise<void> {
   await kv.delete(roomMemberKvKey(roomId, memberId))
   if (identity !== undefined) await kv.delete(roomIdentityMemberKvKey(roomId, identity, memberId))
+  // No local state here to tell whether the member was hidden — delete the marker unconditionally
+  // (a no-op when it was a presence member).
+  await kv.delete(roomHiddenMemberKvKey(roomId, memberId))
   await publishCtrl(roomId, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
 }
 
