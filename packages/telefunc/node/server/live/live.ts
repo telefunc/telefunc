@@ -1,7 +1,7 @@
 export { Live }
 export type { ClientLive, LiveEvent }
 
-import { subscribeTagFenced, invalidateTagStatic } from './tags.js'
+import { captureTagFence, subscribeCapturedTag, invalidateTagStatic } from './tags.js'
 
 // A PRIVATE brand (global-registry symbol, like SERVER_CHANNEL_BRAND). Detection is internal only —
 // never a public surface — so this is neither exported nor exposed via a static; the wire replacer
@@ -161,7 +161,13 @@ class Live<T> {
    *  read and serialization is still caught) that the replacer activates at serialization and uses to
    *  `invalidate` the handle; the cell-local lease refcounts a handle held by more than one channel. */
   static onInvalidate(key: string, live: Live<unknown>): void {
-    live._attachSource({ subscribe: (onInvalidate) => subscribeTagFenced(key, onInvalidate) })
+    // Capture the tag fence NOW — inside the request context, BEFORE any real-I/O await (which, in the
+    // default sync context mode, nulls the context at the next macrotask). The subscription itself is
+    // deferred to serialization (leak-safe: a never-serialized handle registers nothing on the hub) but
+    // replays through the captured, context-free fence — so it survives an I/O await. Call before any
+    // await; a post-await call throws the "inside a telefunction" assert (enforces subscribe-before-fetch).
+    const fence = captureTagFence(key)
+    live._attachSource({ subscribe: (onInvalidate) => subscribeCapturedTag(fence, onInvalidate) })
   }
 
   /** Publish a stale signal for `key`. Inside a request it is queued and published at settle; outside

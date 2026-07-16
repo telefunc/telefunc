@@ -175,6 +175,12 @@ class TagHub {
   _retainedBarrierTokenCountForTesting(): number {
     return this.pendingBarrier === null ? 0 : 1
   }
+
+  /** @internal test-only — registered index listeners for `tag` (0 proves a captured-but-never-subscribed
+   *  fence leaked nothing on the hub). */
+  _listenerCountForTesting(tag: string): number {
+    return this.index.get(tag)?.size ?? 0
+  }
 }
 
 const globalObject = getGlobalObject<{ hubs: Map<string, TagHub>; namespace: string }>('tagHub.ts', () => ({

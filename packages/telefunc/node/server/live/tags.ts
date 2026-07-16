@@ -1,4 +1,6 @@
-export { liveTag, invalidateTag, stampRequestStartFence, publishQueuedTags, subscribeTagFenced, invalidateTagStatic }
+export { liveTag, invalidateTag, stampRequestStartFence, publishQueuedTags }
+export { subscribeTagFenced, captureTagFence, subscribeCapturedTag, invalidateTagStatic }
+export type { TagFence }
 
 import { assertUsage } from '../../../utils/assert.js'
 import { getRawContext } from '../context/context.js'
@@ -47,17 +49,31 @@ function getRequestTagState(): TagState {
   return state
 }
 
-/** Subscribe `onInvalidate` to `tag` under the request fence: register the index listener FIRST, then
- *  scan the journal from the request-start fence to catch a publish that landed between the acquiring
- *  read and now — delivered exactly once (seq-deduped; the request's own echo is skipped by batchId; a
- *  journal overflow replays unconditionally). Returns the teardown. Shared by `liveTag` (bag source)
- *  and `Live.onInvalidate` (handle-bound source). */
-function subscribeTagFenced(tag: string, onInvalidate: () => void): () => void {
-  const state = getRequestTagState()
-  const { hub, requestStartSeq } = state
+/** A request's tag fence, captured while the sync context is live. Holds ONLY stable per-request refs
+ *  (the hub, the request-start seq, the own-batchId set) — it registers NOTHING on the hub — so a later
+ *  `subscribeCapturedTag` needs NO context. That is what lets a `Live` handle bind a tag BEFORE an I/O
+ *  await yet subscribe at serialize time, after telefunc's default sync context mode nulled the context. */
+type TagFence = { tag: string; hub: TagHub; requestStartSeq: number; ownBatchIds: Set<string> }
+
+/** Capture the fence for `tag`. MUST run inside the request context — BEFORE any real-I/O await (which,
+ *  in the default sync context mode, nulls the context at the next macrotask) — else `getRequestTagState()`
+ *  throws the "inside a telefunction" assert (the guard that enforces subscribe-before-fetch). Reads only
+ *  stable refs and registers no hub listener → leak-safe by construction until an actual subscribe.
+ *  `ownBatchIds` is captured BY REFERENCE, so a same-request settle publish still self-suppresses. */
+function captureTagFence(tag: string): TagFence {
+  const { hub, requestStartSeq, ownBatchIds } = getRequestTagState()
+  return { tag, hub, requestStartSeq, ownBatchIds }
+}
+
+/** Subscribe a captured fence — CONTEXT-FREE. Register the index listener FIRST, then scan the journal
+ *  from the request-start fence to catch a publish that landed between capture and now — delivered
+ *  exactly once (seq-deduped; the request's own echo skipped by batchId; a journal overflow replays
+ *  unconditionally). Returns the teardown. Runs at serialization, after the context may be gone. */
+function subscribeCapturedTag(fence: TagFence, onInvalidate: () => void): () => void {
+  const { tag, hub, requestStartSeq, ownBatchIds } = fence
   let lastDeliveredSeq = requestStartSeq
   const emit = (seq: number, batchId: string | undefined): void => {
-    if (batchId !== undefined && state.ownBatchIds.has(batchId)) return
+    if (batchId !== undefined && ownBatchIds.has(batchId)) return
     if (seq <= lastDeliveredSeq) return
     lastDeliveredSeq = seq
     onInvalidate()
@@ -74,6 +90,12 @@ function subscribeTagFenced(tag: string, onInvalidate: () => void): () => void {
     if (match.seq > 0) emit(match.seq, match.batchId)
   }
   return teardown
+}
+
+/** Eager capture + subscribe in one context-dependent call — the `liveTag` (bag-source) convenience,
+ *  where the subscription is established synchronously within the request body. */
+function subscribeTagFenced(tag: string, onInvalidate: () => void): () => void {
+  return subscribeCapturedTag(captureTagFence(tag), onInvalidate)
 }
 
 /** Declare the current telefunction's result live under `tag`. Identity is server-owned
