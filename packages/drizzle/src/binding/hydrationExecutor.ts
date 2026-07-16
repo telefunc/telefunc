@@ -21,7 +21,10 @@ function hydrationExecutorOf(db: unknown): HydrationExecutor {
 
 function scanQuery(descriptor: SeedDescriptor): SQL {
   const alias = sql.identifier(descriptor.alias)
-  const from = sql`${sql.identifier(descriptor.table)} ${alias}`
+  const relation = descriptor.schema
+    ? sql`${sql.identifier(descriptor.schema)}.${sql.identifier(descriptor.table)}`
+    : sql.identifier(descriptor.table)
+  const from = sql`${relation} ${alias}`
   const projection =
     descriptor.columns === '*'
       ? sql`${alias}.*`

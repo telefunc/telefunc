@@ -17,6 +17,8 @@ import { type Row, projectRaw, qualifiedRowView, requalify, rowString, sigmaMatc
 type InputPlan = {
   alias: string
   table: string
+  /** Schema of a schema-qualified relation (pgSchema); rendered into the seed's read SQL. */
+  schema?: string
   primaryKey: string[]
   /** The demanded db columns (pruned), or `'*'` when the whole row is observable
    *  (SELECT *) so any column change must be seen. */
@@ -74,6 +76,7 @@ function pushdownOf(shape: SelectShape): { inputs: InputPlan[]; crossResidual?: 
     return {
       alias: ref.alias,
       table: ref.name,
+      schema: ref.schema,
       primaryKey: ref.primaryKey,
       columns,
       residual: requalify(residual),

@@ -52,6 +52,9 @@ type FireResult = { data: boolean; dirty: boolean; invalidated: boolean }
 type SeedDescriptor = {
   inputId: string
   table: string
+  /** The relation's schema when the query names a schema-qualified table (pgSchema): the seed reads
+   *  `"schema"."table"`, so a same-named relation in another schema is never read via the search path. */
+  schema?: string
   alias: string
   primaryKey: string[]
   columns: string[] | '*'
@@ -293,6 +296,7 @@ function descriptorOf(plan: InputPlan): SeedDescriptor {
   return {
     inputId: plan.alias,
     table: plan.table,
+    schema: plan.schema,
     alias: plan.alias,
     primaryKey: plan.primaryKey,
     columns: plan.columns,
