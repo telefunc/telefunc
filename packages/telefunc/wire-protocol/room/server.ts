@@ -9,7 +9,12 @@ import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
-import { getBroadcastAdapter, type BroadcastAdapter, type BroadcastPublishResult } from '../server/broadcast.js'
+import {
+  getBroadcastAdapter,
+  KV_KEEP,
+  type BroadcastAdapter,
+  type BroadcastPublishResult,
+} from '../server/broadcast.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
   ROOM_KEY_NAMESPACE,
@@ -96,10 +101,6 @@ import type {
   Sender,
 } from './types.js'
 assertIsNotBrowser()
-
-/** How many times a member-meta write re-asserts against a racing heartbeat before deferring to the
- *  event stream — small: the heartbeat writes a member at most once per tick, so one re-assert wins. */
-const MEMBER_META_WRITE_MAX_ATTEMPTS = 3
 
 /** This process's identity as an LWW writer — breaks `Room.setMeta()` timestamp ties.
  *  Minted lazily: Cloudflare Workers forbid crypto RNG in module scope (this module loads at
@@ -234,19 +235,21 @@ const Room: RoomStatic = {
   getParticipants: getRoomParticipants as RoomStatic['getParticipants'],
 }
 
+/** Atomically create a room's config, returning the fresh room if this call won the create, or
+ *  `null` if the room already existed. `setIfAbsent` makes the create race-free — exactly one of
+ *  any number of concurrent callers writes the config; the rest observe it present. */
+async function tryCreateRoom(id: string, options: RoomOptions | undefined, kv: RoomKV): Promise<Room | null> {
+  const { meta } = normalizeOptions(options)
+  const config: RoomConfigRecord = { meta, isolated: options?.isolated === true, at: Date.now(), by: writerId() }
+  const created = await kv.setIfAbsent(roomConfigKvKey(id), stringify(config))
+  return created ? new ServerRoom(id, config, { members: [] }) : null // fresh room — the roster is known: empty
+}
+
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
-  const { meta } = normalizeOptions(options)
-  const kv = getRoomKV()
-  if ((await readConfig(kv, id)) !== null) throw new RoomError(`Room already exists: ${id}`)
-  const config: RoomConfigRecord = {
-    meta,
-    isolated: options?.isolated === true,
-    at: Date.now(),
-    by: writerId(),
-  }
-  await kv.set(roomConfigKvKey(id), stringify(config))
-  return new ServerRoom(id, config, { members: [] }) // fresh room — the roster is known: empty
+  const room = await tryCreateRoom(id, options, getRoomKV())
+  if (room === null) throw new RoomError(`Room already exists: ${id}`)
+  return room
 }
 
 async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
@@ -261,14 +264,8 @@ async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
 
 async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
-  if ((await readConfig(getRoomKV(), id)) !== null) return await getRoom(id)
-  try {
-    return await createRoom(id, options)
-  } catch (err) {
-    // Lost the create race — the room exists now. Anything else (KV failure) rethrows.
-    if ((await readConfig(getRoomKV(), id)) === null) throw err
-    return await getRoom(id)
-  }
+  // Won the atomic create → the fresh room; lost it (or it already existed) → load the existing one.
+  return (await tryCreateRoom(id, options, getRoomKV())) ?? (await getRoom(id))
 }
 
 const ROOM_GUARD_KEYS = [
@@ -353,16 +350,17 @@ async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void
 /** Commit a room-config change and converge it. The stamp is strictly after the config it derives
  *  from (hybrid-clock): one writer's back-to-back writes always order, cross-writer ties break
  *  wall-clock last-writer-wins. Everywhere the `update` event reaches converges on the `(at, by)`
- *  stamp; the KV *write*, though, races — so read back and, if a stamp-losing write landed on top,
- *  re-assert (only the winner rewrites, so the exchange terminates). Shared by `setMeta()` (replace)
- *  and `setAttributes()` (merge). */
+ *  stamp; the KV write is a stamp-wins compare-and-set — `next` lands unless a strictly-newer config
+ *  already sits there, so the winner's value is final in one atomic step (no read-back re-assert).
+ *  Shared by `setMeta()` (replace) and `setAttributes()` (merge). */
 async function writeRoomConfig(id: string, kv: RoomKV, config: RoomConfigRecord, meta: RoomMeta): Promise<void> {
   const at = Math.max(Date.now(), config.at + 1)
   const next: RoomConfigRecord = { meta, isolated: config.isolated, at, by: writerId() }
-  await kv.set(roomConfigKvKey(id), stringify(next))
+  await kv.update(roomConfigKvKey(id), (raw) => {
+    const current = raw === null ? null : (parse(raw) as RoomConfigRecord)
+    return current !== null && !stampNewer(next, current) ? KV_KEEP : stringify(next)
+  })
   await publishCtrl(id, { __r: 'update', meta, prev: config.meta, at: next.at, by: next.by })
-  const readBack = await readConfig(kv, id)
-  if (readBack !== null && stampNewer(next, readBack)) await kv.set(roomConfigKvKey(id), stringify(next))
 }
 
 async function closeRoom(id: string): Promise<void> {
@@ -739,28 +737,27 @@ class ServerRoom implements Room {
   ): Promise<void> {
     const kv = getRoomKV()
     await this._assertOpen(kv)
-    const memberKey = roomMemberKvKey(this.id, id)
-    const raw = await kv.get(memberKey)
-    if (raw === null) throw new RoomError(`Participant not found (left?): ${id}`)
-    const record = parse(raw) as RoomMemberRecord
-    const prev = this._state.getRemote(id)?.meta ?? record.meta
-    const meta = computeMeta(record.meta)
-    // The member's single owner serializes its meta writes, so the KV record doubles as
-    // the revision counter — no separate sequencer needed.
-    const next: RoomMemberRecord = { ...record, meta, metaSeq: record.metaSeq + 1, seenAt: Date.now() }
-    await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
-    // Read-back re-assert: a concurrent `_heartbeatTick` rewrites the whole record to bump `seenAt`
-    // and, if it read the record before this write, its write carries a stale `meta`/`metaSeq` that
-    // reverts ours in KV. Re-assert until a record at least this revision is present (bounded — the
-    // `writeRoomConfig`/`_ensureTrackAnnounced` discipline). The `p-meta` event below is the real
-    // convergence; this keeps the KV record from serving stale meta to a fresh loader.
-    for (let attempt = 0; attempt < MEMBER_META_WRITE_MAX_ATTEMPTS; attempt++) {
-      const readBack = await kv.get(memberKey)
-      if (readBack === null || (parse(readBack) as RoomMemberRecord).metaSeq >= next.metaSeq) break
-      await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
-    }
-    this._state.applyParticipantMeta(id, meta, prev, next.metaSeq)
-    await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, seq: next.metaSeq })
+    // One atomic read-modify-write: `computeMeta` merges/replaces onto the record actually present,
+    // bumping the owner-issued revision. If a concurrent write lands first (a heartbeat, a racing
+    // meta change), the compare-and-set re-runs the mutator on that fresh record — so a `setAttributes`
+    // merges onto the latest meta and nothing is lost. Captured out for the convergence event.
+    let prev!: ParticipantMeta
+    let meta!: ParticipantMeta
+    let seq!: number
+    await kv.update(
+      roomMemberKvKey(this.id, id),
+      (raw) => {
+        if (raw === null) throw new RoomError(`Participant not found (left?): ${id}`)
+        const record = parse(raw) as RoomMemberRecord
+        prev = this._state.getRemote(id)?.meta ?? record.meta
+        meta = computeMeta(record.meta)
+        seq = record.metaSeq + 1
+        return stringify({ ...record, meta, metaSeq: seq, seenAt: Date.now() } satisfies RoomMemberRecord)
+      },
+      { ttlMs: ROOM_MEMBER_KV_TTL_MS },
+    )
+    this._state.applyParticipantMeta(id, meta, prev, seq)
+    await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, seq })
   }
 
   /** @internal — publish a member's text message. The sender's verified meta/identity are
@@ -864,22 +861,26 @@ class ServerRoom implements Room {
       this._announcedTracks.set(from, announced)
     }
     const kv = getRoomKV()
-    const memberKey = roomMemberKvKey(this.id, from)
-    while (true) {
-      const raw = await kv.get(memberKey)
-      if (raw === null) throw new RoomError(`Participant not found (left?): ${from}`)
-      const record = parse(raw) as RoomMemberRecord
-      if (record.tracks?.includes(track)) break // a previous owner incarnation recorded it
-      const next: RoomMemberRecord = { ...record, tracks: [...(record.tracks ?? []), track], seenAt: Date.now() }
-      await kv.set(memberKey, stringify(next), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
-      // Read back: a concurrent record write (setMeta, heartbeat) may have clobbered the
-      // append — loop until it sticks (the `writeRoomConfig` read-back discipline).
-      const readBack = await kv.get(memberKey)
-      if (readBack !== null && (parse(readBack) as RoomMemberRecord).tracks?.includes(track)) {
-        await publishCtrl(this.id, { __r: 'track', id: from, track })
-        break
-      }
-    }
+    // Atomic append: record the track on the member's record unless it's already there (a previous
+    // owner incarnation recorded it). The compare-and-set re-runs on a concurrent record write, so the
+    // append is never clobbered. Announce on the control lane only when this call actually added it.
+    let appended = false
+    await kv.update(
+      roomMemberKvKey(this.id, from),
+      (raw) => {
+        if (raw === null) throw new RoomError(`Participant not found (left?): ${from}`)
+        const record = parse(raw) as RoomMemberRecord
+        if (record.tracks?.includes(track)) {
+          appended = false
+          return KV_KEEP
+        }
+        appended = true
+        const tracks = [...(record.tracks ?? []), track]
+        return stringify({ ...record, tracks, seenAt: Date.now() } satisfies RoomMemberRecord)
+      },
+      { ttlMs: ROOM_MEMBER_KV_TTL_MS },
+    )
+    if (appended) await publishCtrl(this.id, { __r: 'track', id: from, track })
     this._state.applyTrack(from, track)
     announced.add(track)
   }
@@ -1628,26 +1629,34 @@ class ServerRoom implements Room {
     try {
       const kv = getRoomKV()
       for (const id of this._ownedMemberIds()) {
-        const memberKey = roomMemberKvKey(this.id, id)
-        const raw = await kv.get(memberKey)
-        if (raw === null) {
+        // Bump `seenAt` with a read-modify-write, not a whole-record `set`: the update only touches
+        // `seenAt` on the record actually present, so a heartbeat can never clobber a concurrent
+        // meta or track write. (That clobber is why the meta/track writers used to re-assert; with
+        // the heartbeat off the collision course, those loops are gone.)
+        let record: RoomMemberRecord | null = null
+        const stored = await kv.update(
+          roomMemberKvKey(this.id, id),
+          (raw) => {
+            if (raw === null) return KV_KEEP // reaped/kicked — nothing to refresh
+            record = { ...(parse(raw) as RoomMemberRecord), seenAt: Date.now() }
+            return stringify(record)
+          },
+          { ttlMs: ROOM_MEMBER_KV_TTL_MS },
+        )
+        if (stored === null) {
           // Reaped or kicked while this node wasn't listening — the reaper already
           // published the leave event; only the local view needs to catch up.
           this._applyLeave(id)
           continue
         }
-        const record = parse(raw) as RoomMemberRecord
-        await kv.set(memberKey, stringify({ ...record, seenAt: Date.now() } satisfies RoomMemberRecord), {
-          ttlMs: ROOM_MEMBER_KV_TTL_MS,
-        })
         // Refresh the member's sibling index keys on the same cadence — they carry the record's TTL,
         // so without this a member that outlives one TTL window would keep its record (heartbeated)
         // yet lose its identity marker (breaking `removeParticipant(id, { identity })` sweeps) and,
         // if hidden, its off-presence marker (the count would drift back to counting it).
-        if (record.identity !== undefined) {
-          await kv.set(roomIdentityMemberKvKey(this.id, record.identity, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
+        if (record!.identity !== undefined) {
+          await kv.set(roomIdentityMemberKvKey(this.id, record!.identity, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
         }
-        if (record.hidden) await kv.set(roomHiddenMemberKvKey(this.id, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
+        if (record!.hidden) await kv.set(roomHiddenMemberKvKey(this.id, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
       }
       await readMembers(kv, this.id)
     } finally {
@@ -1747,12 +1756,16 @@ class ServerLocalParticipant extends ParticipantBase {
 // KV access
 // ---------------------------------------------------------------------------
 
-/** Room state lives in the broadcast adapter's KV so every server node sees the same rooms. */
-type RoomKV = Required<Pick<BroadcastAdapter, 'get' | 'set' | 'delete' | 'keys'>>
+/** Room state lives in the broadcast adapter's KV so every server node sees the same rooms.
+ *  `setIfAbsent`/`update` are the atomic writes that keep concurrent room mutations from clobbering
+ *  each other (see the room-state discipline: create, config, member meta, tracks, heartbeat). */
+type RoomKV = Required<Pick<BroadcastAdapter, 'get' | 'set' | 'delete' | 'keys' | 'setIfAbsent' | 'update'>>
 
 function getRoomKV(): RoomKV {
   const adapter = getBroadcastAdapter()
-  const missing = (['get', 'set', 'delete', 'keys'] as const).filter((method) => !adapter[method])
+  const missing = (['get', 'set', 'delete', 'keys', 'setIfAbsent', 'update'] as const).filter(
+    (method) => !adapter[method],
+  )
   assertUsage(
     missing.length === 0,
     `The installed broadcast adapter doesn't implement ${missing.map((m) => `\`${m}()\``).join(', ')} — the KV methods required by \`Room\`.`,
