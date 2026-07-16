@@ -1,6 +1,8 @@
 export { Live, LIVE_BRAND }
 export type { ClientLive, LiveEvent }
 
+import { subscribeTagFenced, invalidateTagStatic } from './tags.js'
+
 // A private brand (global-registry symbol, like SERVER_CHANNEL_BRAND) so the wire replacer can
 // detect a returned Live across module boundaries. Never exported as a public surface.
 const LIVE_BRAND = Symbol.for('telefunc.Live')
@@ -61,9 +63,9 @@ class Live<T> {
   // ── serialize-time activation (deferred, cell-local lease-refcounted) ──
   /** Deps read during a `Live.derived` callback, held INERT — subscribed only at serialization. */
   private pendingDeps: Array<Live<unknown>> = []
-  /** A server-owned invalidation source (engine/tag), subscribed on the first lease. */
-  private source: LiveActivationSource | undefined
-  private sourceTeardown: (() => void) | undefined
+  /** Server-owned invalidation sources (engine graph, tag subscriptions), subscribed on the first lease. */
+  private sources: LiveActivationSource[] = []
+  private sourceTeardowns: Array<() => void> = []
   /** Teardowns for activated pending deps (unsubscribe + cascade release). */
   private activationTeardowns: Array<() => void> = []
   /** One lease per owning channel; the source + deps activate on 0→1 and tear down on 1→0. */
@@ -157,10 +159,24 @@ class Live<T> {
     return derived.client
   }
 
+  /** Subscribe this handle to a server-owned tag (manual liveness). Attaches a FENCED tag source (the
+   *  existing TagHub `requestStartSeq`/`scanSince` catch-up — a tag published between the acquiring
+   *  read and serialization is still caught) that the replacer activates at serialization and uses to
+   *  `invalidate` the handle; the cell-local lease refcounts a handle held by more than one channel. */
+  static onInvalidate(key: string, live: Live<unknown>): void {
+    live._attachSource({ subscribe: (onInvalidate) => subscribeTagFenced(key, onInvalidate) })
+  }
+
+  /** Publish a stale signal for `key`. Inside a request it is queued and published at settle; outside
+   *  a request it publishes immediately. Fire-and-forget (`void`); publication is failure-safe. */
+  static invalidate(key: string): void {
+    invalidateTagStatic(key)
+  }
+
   /** @internal — attach a server-owned invalidation source (the ticket-6 engine seam / tag wiring).
    *  Inert until the first `_activate`. */
   _attachSource(source: LiveActivationSource): void {
-    this.source = source
+    this.sources.push(source)
   }
 
   /** @internal — serialize-time activation, refcounted by cell-local leases (one per owning channel).
@@ -170,7 +186,7 @@ class Live<T> {
   _activate(): void {
     this.lease++
     if (this.lease !== 1) return
-    if (this.source) this.sourceTeardown = this.source.subscribe(() => this.invalidate())
+    for (const source of this.sources) this.sourceTeardowns.push(source.subscribe(() => this.invalidate()))
     for (const dep of this.pendingDeps) {
       dep._activate()
       const off = dep.onInvalidate(() => this.invalidate())
@@ -187,10 +203,8 @@ class Live<T> {
     if (this.lease === 0) return
     this.lease--
     if (this.lease !== 0) return // a shared cell stays live while any owning channel remains
-    if (this.sourceTeardown) {
-      this.sourceTeardown()
-      this.sourceTeardown = undefined
-    }
+    for (const teardown of this.sourceTeardowns) teardown()
+    this.sourceTeardowns = []
     for (const teardown of this.activationTeardowns) teardown()
     this.activationTeardowns = []
     void this.close()
@@ -207,7 +221,7 @@ class Live<T> {
       lease: this.lease,
       invalidateListeners: this.invalidateTaps.length,
       dataListeners: this.dataTaps.length,
-      sourceActive: this.sourceTeardown !== undefined,
+      sourceActive: this.sourceTeardowns.length > 0,
     }
   }
 
