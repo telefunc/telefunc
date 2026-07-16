@@ -368,21 +368,26 @@ function buildSetOps(
 ): IStreamBuilder<string> | undefined {
   const main = buildBranch(graph, { ...shape, setOps: [] }, registry, genesis, dirty)
   const branches: SetOpBranch[] = []
+  let degrade = false
   for (const op of shape.setOps) {
-    const right = op.right
-    if (right.kind !== 'select') return dirtyOnly(main, dirty)
-    const stream = buildBranch(graph, right, registry, genesis, dirty)
-    if (!stream) return dirtyOnly(main, dirty)
-    branches.push({ kind: op.type, stream })
+    // Non-select arms are already coarse-planned upstream; here every arm is a select. An arm that
+    // can't be built exactly, or one carrying per-arm ORDER/LIMIT/OFFSET (which selects WHICH rows
+    // the arm contributes — unsound to ignore under a downstream UNION distinct, where a bounded
+    // arm's row swap can add a value new to the union), forces a dirty degradation.
+    const stream = op.right.kind === 'select' ? buildBranch(graph, op.right, registry, genesis, dirty) : undefined
+    if (stream) branches.push({ kind: op.type, stream })
+    if (!stream || op.orderBy.length > 0 || op.limit !== undefined || op.offset !== undefined) degrade = true
   }
   if (!main) return undefined
+  if (degrade) return dirtyOnly(main, branches, dirty)
   return applySetOps(main, branches, dirty)
 }
 
-/** A dirty-only fallback: the union already tapped the branches it could build; tap the
- *  main branch too so any change invalidates. */
-function dirtyOnly(main: IStreamBuilder<string> | undefined, dirty: DirtySink): undefined {
+/** A dirty-only fallback: tap the main branch and every built set-op branch so any change
+ *  invalidates (a branch that degraded internally already tapped its own streams). */
+function dirtyOnly(main: IStreamBuilder<string> | undefined, branches: SetOpBranch[], dirty: DirtySink): undefined {
   if (main) dirty.tap(main)
+  for (const branch of branches) dirty.tap(branch.stream)
   return undefined
 }
 

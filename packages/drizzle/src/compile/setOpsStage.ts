@@ -1,9 +1,12 @@
-// Set operations over the projected-row streams of the branches. UNION ALL is a concat;
-// UNION is a concat then a distinct. INTERSECT / INTERSECT ALL / EXCEPT / EXCEPT ALL are
-// not computed exactly — a row's membership in the result depends on BOTH branches at once
-// — so they degrade to a live coarse (dirty) plan whose witness fires from a change in
-// EITHER branch (§5.4, T4.B7). A branch is a stream of canonical projected strings; the
-// caller compiles each branch (its own inputs and projection) and hands them here.
+// Set operations over the projected-row streams of the branches. Exact evaluation covers only a
+// HOMOGENEOUS chain of the two concat-from-one-branch operators: all UNION ALL (pure concat) or
+// all UNION (concat then ONE global distinct — UNION is associative/commutative w.r.t. dedup).
+// INTERSECT / EXCEPT (and their ALL variants) need BOTH branches at once, and a MIX of UNION and
+// UNION ALL breaks a single global distinct — SQL set ops are LEFT-ASSOCIATIVE, so a duplicate a
+// trailing UNION ALL must preserve would be wrongly dropped (a false negative). Both cases degrade
+// to a live coarse (dirty) plan whose witness fires from a change in ANY branch (§5.4, T4.B7). A
+// branch is a stream of canonical projected strings; the caller compiles each branch (its own
+// inputs and projection) and hands them here.
 
 export { type SetOpBranch, applySetOps, isDirtySetOp }
 
@@ -21,14 +24,17 @@ function applySetOps(
   branches: SetOpBranch[],
   dirty: DirtySink,
 ): IStreamBuilder<string> | undefined {
-  if (branches.some((branch) => isDirtySetOp(branch.kind))) {
+  // Exact only for a HOMOGENEOUS chain of the non-dirty operators (all UNION, or all UNION ALL).
+  // INTERSECT/EXCEPT (any) or a MIX of UNION and UNION ALL degrades to dirty: tap every arm.
+  const kinds = new Set(branches.map((branch) => branch.kind))
+  if (kinds.size !== 1 || isDirtySetOp([...kinds][0]!)) {
     dirty.tap(main)
     for (const branch of branches) dirty.tap(branch.stream)
     return undefined
   }
   let combined = main
   for (const branch of branches) combined = combined.pipe(concat(branch.stream))
-  if (branches.some((branch) => branch.kind === 'union')) {
+  if ([...kinds][0] === 'union') {
     combined = combined.pipe(
       keyBy((value: string) => value),
       distinct(),
