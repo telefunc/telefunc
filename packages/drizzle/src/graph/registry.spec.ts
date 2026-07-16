@@ -429,3 +429,56 @@ describe('§6.6 — redeem transfers with no transient zero; double-redeem throw
     expect(r.graph.state()).toBe('destroyed')
   })
 })
+
+describe('§6.4b — a dead redeem does not resurrect the sink for a re-acquired identity', () => {
+  it('after a dead redeem, a fresh acquire of the SAME instanceKey notifies ONLY the fresh subscriber', async () => {
+    const registry = registryOf()
+    const oldNotify = vi.fn()
+    const first = await registry.acquire(
+      req({ planKey: 'q@e1', instanceKey: 'I', compilePlan: () => coarsePlan(['users']), notify: oldNotify }),
+    )
+    registry.retirePlan('q@e1') // drift: the entry is finalized (dead) and its sink dropped
+    first.token.redeem() // dead branch: one catch-up notify, MUST NOT subscribe (no sink resurrection)
+    expect(oldNotify).toHaveBeenCalledTimes(1)
+
+    // Re-acquire the SAME instanceKey under a new epoch → a fresh instance + fresh subscriber.
+    const freshNotify = vi.fn()
+    const second = await registry.acquire(
+      req({ planKey: 'q@e2', instanceKey: 'I', compilePlan: () => coarsePlan(['users']), notify: freshNotify }),
+    )
+    second.token.redeem() // a wired subscriber for the fresh instance
+    registry.router.ingest({ changes: [{ table: 'users', kind: 'insert', new: { id: 1 } }] })
+    expect(freshNotify).toHaveBeenCalledTimes(1) // the fresh subscriber hears the change
+    expect(oldNotify).toHaveBeenCalledTimes(1) // STILL 1 — the dead-redeemed notify was NOT resurrected into the sink
+  })
+})
+
+describe('§6.6b — leases refcount: a non-last close does not dispose while another owner holds', () => {
+  it('two redeemed owners of one instance — closing EITHER first keeps the graph live + the survivor notifying; last close disposes', async () => {
+    for (const closeFirst of ['A', 'B'] as const) {
+      const registry = registryOf()
+      const nA = vi.fn()
+      const nB = vi.fn()
+      const a = await registry.acquire(
+        req({ instanceKey: 'shared', compilePlan: () => coarsePlan(['users']), notify: nA }),
+      )
+      const b = await registry.acquire(
+        req({ instanceKey: 'shared', compilePlan: () => coarsePlan(['users']), notify: nB }),
+      )
+      expect(a.graph).toBe(b.graph) // one shared graph, two owners
+      const leaseA = a.token.redeem()
+      const leaseB = b.token.redeem()
+      const [firstClose, survivorNotify, lastClose] =
+        closeFirst === 'A' ? ([leaseA, nB, leaseB] as const) : ([leaseB, nA, leaseA] as const)
+
+      firstClose.release() // a NON-last close
+      expect(registry.inspect().graphs).toBe(1) // graph SURVIVES — the other owner still holds a lease
+      expect(a.graph.state()).not.toBe('destroyed')
+      registry.router.ingest({ changes: [{ table: 'users', kind: 'insert', new: { id: 1 } }] })
+      expect(survivorNotify).toHaveBeenCalledTimes(1) // the survivor still notifies
+
+      lastClose.release() // the last close
+      expect(registry.inspect().graphs).toBe(0) // disposed only at zero refs
+    }
+  })
+})
