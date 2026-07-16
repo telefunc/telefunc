@@ -126,6 +126,27 @@ describe('aggregateStage — empty-set + GROUP BY NULL (T4.B5)', () => {
   })
 })
 
+describe('aggregateStage — opaque GROUP BY dirty tap is downstream of cancellation (BLOCKER #3)', () => {
+  it('a row moving between hidden groups (parity flip) changes the SQL bag but emits no dirty event (MISS)', () => {
+    // GROUP BY (score % 2): the parser cannot reduce the expression to a column → groupByOpaque, so
+    // the stage keys ALL rows into ONE fake group and taps `reduced` (AFTER the reduce). A row moving
+    // between real groups leaves the single fake group's count(*) unchanged, so the tap emits nothing.
+    const graph = run(qb.select({ n: count() }).from(users).groupBy(sql`${users.score} % 2`))
+    seed(
+      graph,
+      [ins({ id: 1, team_id: 5, score: 2, name: 'a' })], // even
+      [ins({ id: 2, team_id: 5, score: 4, name: 'b' })], // even → even group = 2
+      [ins({ id: 3, team_id: 5, score: 1, name: 'c' })], // odd
+      [ins({ id: 4, team_id: 5, score: 3, name: 'd' })], // odd  → odd group  = 2
+    )
+    // Move id=1 even→odd (score 2→5): SQL per-group count(*) bag {2,2} → {1,3} → result changes → must fire.
+    const fired = graph.apply([
+      upd({ id: 1, team_id: 5, score: 2, name: 'a' }, { id: 1, team_id: 5, score: 5, name: 'a' }),
+    ]).invalidated
+    expect(fired).toBe(true) // FAILS today: total row count unchanged → fake single-group count unchanged → silent
+  })
+})
+
 describe('aggregateStage — HAVING + DISTINCT (T4.B5)', () => {
   it('unknown HAVING (aggregate comparison) widens and taps dirty after the aggregate', () => {
     const graph = run(

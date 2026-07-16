@@ -58,7 +58,12 @@ function applyAggregate(graph: D2, shape: SelectShape, stream: IStreamBuilder<Ro
       return [[groupRecord(outputItems, orderCols, present), 1]]
     }),
   )
-  if (havingDirty || shape.groupByOpaque) dirty.tap(reduced)
+  // HAVING over an aggregate is unprovable from the column IR, so it widens and taps dirty AFTER
+  // the reduce — the reduced record carries the aggregate value HAVING filters. An opaque GROUP BY
+  // is witnessed UPSTREAM at the input adapter instead (its base inputs are dirtyActive — see
+  // opaqueAliases): a membership move between hidden groups cancels inside the reduce, so it cannot
+  // be caught from the post-grouping stream (column pruning also folds the group column away here).
+  if (havingDirty) dirty.tap(reduced)
 
   let records = reduced.pipe(map(([, record]) => record))
   if (havingExact) records = records.pipe(filter((row: Row) => sigmaMatch(havingExact, qualifiedRowView(row))))

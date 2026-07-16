@@ -173,6 +173,10 @@ function opaqueAliases(shape: SelectShape, realToAliases: Map<string, string[]>)
     if (key.expr.kind === 'opaque') for (const ref of key.expr.columns) set.add(ref.table)
   }
   if (shape.window) for (const ref of [shape.from, ...shape.joins.map((j) => j.table)]) set.add(ref.alias)
+  // Opaque GROUP BY: the parser could not recover which columns the group expression reads, so a
+  // row moving between hidden groups cancels in the reduce (the single fake group's aggregate is
+  // unchanged). Mark every base input dirtyActive so the input adapter witnesses the full-row change.
+  if (shape.groupByOpaque) for (const ref of [shape.from, ...shape.joins.map((j) => j.table)]) set.add(ref.alias)
   return set
 }
 
