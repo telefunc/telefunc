@@ -1,5 +1,5 @@
 // One compiled query as a live runtime object: the seeding / live / coarse / retired / destroyed
-// state machine (final-plan §5.5). A stateful graph SEEDS synchronously-from-the-caller's-view —
+// state machine. A stateful graph SEEDS synchronously-from-the-caller's-view —
 // the registry blocks acquire on the seed — so it is PRECISE from its first live tick; there is no
 // warming tier and no coarse-during-seed window. `seeding` is internal and transient: it exists
 // only while the initial scan is in flight (before acquire returns), during which routed changes

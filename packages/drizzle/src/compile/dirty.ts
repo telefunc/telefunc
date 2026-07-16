@@ -1,6 +1,6 @@
-// The single authority for the dirty witness (T4.G6). Two responsibilities live here and
+// The single authority for the dirty witness. Two responsibilities live here and
 // nowhere else: (1) deciding, from a predicate, WHERE the dirty tap sits — the exact
-// necessary filter above the relaxation (the §5.4 composition rule) — and (2) collecting
+// necessary filter above the relaxation (the composition rule) — and (2) collecting
 // every dirty stream into one terminal that fires when anything flows, guaranteeing the
 // BYPASS: dirty reaches the terminal through concat only, never a distinct/consolidate/
 // filter that could cancel a witnessed change. Over-firing is sound; a miss never is.

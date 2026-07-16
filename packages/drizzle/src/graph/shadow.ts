@@ -1,4 +1,4 @@
-// The σ-scoped shadow (final-plan §5.5, T5.B): for one stateful input, a PK → pruned-tuple
+// The σ-scoped shadow: for one stateful input, a PK → pruned-tuple
 // index over EXACTLY the σ-matching rows, maintained in lockstep with operator state by the
 // same deltas. It is what resolves a key-only CDC retraction without guessing: a hit yields
 // the exact old tuple to retract; a miss on COMPLETE state proves the row never σ-matched
@@ -24,7 +24,7 @@ type ShadowIndex = {
   resolve(pk: string): ShadowMatch
   /** Remove a key (no resolution needed — the old row was inline). */
   remove(pk: string): void
-  /** The bare pruned rows to feed the engine as the baseline (T5.C4 step 3). */
+  /** The bare pruned rows to feed the engine as the baseline. */
   rows(): Row[]
   readonly size: number
   complete: boolean
@@ -73,7 +73,7 @@ function pruneRow(descriptor: SeedDescriptor, raw: Row): Row {
 }
 
 /** The canonical PK key for a row, or `undefined` when a PK column is absent (no PK →
- *  the input cannot shadow-resolve, so its graph is born coarse — T5.A6). */
+ *  the input cannot shadow-resolve, so its graph is born coarse). */
 function pkOf(descriptor: SeedDescriptor, raw: Row): string | undefined {
   if (descriptor.primaryKey.length === 0) return undefined
   const values: unknown[] = []

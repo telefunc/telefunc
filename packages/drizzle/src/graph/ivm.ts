@@ -1,5 +1,5 @@
 // The one and only module that imports @tanstack/db-ivm. Every compile stage reaches
-// the engine through this facade, so a single grep proves the seam (T4.A1/F1): the
+// the engine through this facade, so a single grep proves the seam: the
 // operator set, the MultiSet/D2 primitives, and the reader types the stages need are
 // re-exported here and nowhere else. `assertIvmContract` exercises the documented
 // engine behaviours we depend on — join retractions, retraction-correct reduce, the

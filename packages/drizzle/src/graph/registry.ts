@@ -1,4 +1,4 @@
-// The graph registry (final-plan §5.5; T5.A/D): two-level identity + leases/tokens. A PlanKey's
+// The graph registry: two-level identity + leases/tokens. A PlanKey's
 // compiled plan is cached while ≥1 InstanceKey references it (reference-scoped — dropped when the
 // last instance of that plan disposes; a later re-acquire recompiles); graph STATE is keyed by
 // InstanceKey. `acquire` dedups on the canonical instance string; two concurrent acquires of a
@@ -24,7 +24,7 @@ type AcquireRequest = {
    *  cache), recompiled if re-acquired after the last instance of the plan disposed. */
   compilePlan: () => GraphPlan | Promise<GraphPlan>
   executor: HydrationExecutor
-  /** The identity's invalidation sink (ticket 6 wires the channel; ticket 5 observes it). */
+  /** The identity's invalidation sink (wired to the channel later). */
   notify: () => void
 }
 
@@ -126,7 +126,7 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
   /** Tear an instance entry down EXACTLY ONCE: drop the router registration, the identity maps, and
    *  its plan-cache reference. Idempotent via `entry.dead`, so whichever path fires first — a
    *  refcount-zero dispose or a drift `retirePlan` — owns the teardown, and any still-open token
-   *  releasing afterward is inert (T5.A5/D3). */
+   *  releasing afterward is inert. */
   function finalizeInstance(entry: Entry, identityKey: string): void {
     if (entry.dead) return
     entry.dead = true
@@ -139,7 +139,7 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
   function mintToken(entries: Entry[], identityKey: string, seqAtRead: number, notify: () => void): ReadToken {
     for (const entry of entries) entry.tokens++
     // Join the subscriber set at MINT (not redeem): an unredeemed read token whose plan drifts
-    // (retirePlan) must still be told to re-read (T5.D3).
+    // (retirePlan) must still be told to re-read.
     const unsubscribe = subscribe(identityKey, notify)
     let phase: 'open' | 'redeemed' | 'released' = 'open'
     return {
@@ -195,7 +195,7 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
       notifyKeys: () => notifyKeys,
       fault: () => graph.fault(),
     }
-    // Register inputs with the router BEFORE the graph's seed reads (activate-before-read, T5.A3):
+    // Register inputs with the router BEFORE the graph's seed reads (activate-before-read):
     // no event window can slip between the read and registration.
     router.register(routable)
     graph = createLiveGraph(specOf(plan, request, config.maxStateRowsPerInput))
@@ -209,7 +209,7 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
       dead: false,
       dispose: () => {
         if (entry.dead) return // already finalized (e.g. by retirePlan) — this late release is inert
-        graph.destroy() // free state so a late completion is inert (T5.A5/C7)
+        graph.destroy() // free state so a late completion is inert
         finalizeInstance(entry, request.instanceKey)
       },
     }

@@ -1,4 +1,4 @@
-// The change router (final-plan §5.6; T5.G). A ChangeSource emits ordered, atomic TableChange
+// The change router. A ChangeSource emits ordered, atomic TableChange
 // batches; the router fans each batch to every affected graph's `apply(union-slice)` EXACTLY ONCE,
 // synchronously, in order — one commit = one graph tick, never merged across batches — then notifies
 // ≤1 per graph AND per attached identity. Delivery reliability — ordering and de-duplication — is

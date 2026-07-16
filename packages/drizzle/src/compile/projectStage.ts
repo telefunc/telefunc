@@ -1,6 +1,6 @@
 // The terminal stage: project each row to a canonical string, optionally DISTINCT it,
 // consolidate, and observe. The projected string ALWAYS carries the ORDER BY columns and
-// every opaque-contributing column (final-plan §5.3) — so a reorder or an opaque value
+// every opaque-contributing column — so a reorder or an opaque value
 // change emits a delta instead of cancelling. Invalidation = the consolidated data delta
 // is non-empty. The primary-key rides through the stateful operators for retraction
 // identity but is dropped here unless it is actually selected, so a plain SELECT of a
@@ -13,7 +13,7 @@ import type { SelectShape } from '../ir/types.js'
 import { type Row, qualifiedKey, rowString } from './rowSpace.js'
 
 /** The observable projection keys in output ORDER: projected columns + opaque-contributing
- *  columns, then the ORDER BY columns (so a reorder rides in the tuple, §5.3/T4.D2).
+ *  columns, then the ORDER BY columns (so a reorder rides in the tuple).
  *  `'*'` means the whole row is observable (SELECT *). */
 function projectionKeysOf(shape: SelectShape): string[] | '*' {
   if (shape.projection.star) return '*'

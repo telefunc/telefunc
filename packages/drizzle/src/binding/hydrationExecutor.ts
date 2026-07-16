@@ -1,4 +1,4 @@
-// The injected HydrationExecutor (R1, T5.A0), built HERE in the binding layer so `graph/` stays
+// The injected HydrationExecutor, built HERE in the binding layer so `graph/` stays
 // drizzle-free. It re-emits each input's σ residual as a real WHERE from the opaque `src` handles
 // the extractor retained on the predicate leaves, and scans the σ-scoped, column-pruned baseline. A
 // residual the codec cannot safely reconstruct (an OR / NOT / a leaf missing its `src`) degrades the

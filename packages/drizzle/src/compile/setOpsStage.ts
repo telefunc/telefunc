@@ -4,7 +4,7 @@
 // INTERSECT / EXCEPT (and their ALL variants) need BOTH branches at once, and a MIX of UNION and
 // UNION ALL breaks a single global distinct — SQL set ops are LEFT-ASSOCIATIVE, so a duplicate a
 // trailing UNION ALL must preserve would be wrongly dropped (a false negative). Both cases degrade
-// to a live coarse (dirty) plan whose witness fires from a change in ANY branch (§5.4, T4.B7). A
+// to a live coarse (dirty) plan whose witness fires from a change in ANY branch. A
 // branch is a stream of canonical projected strings; the caller compiles each branch (its own
 // inputs and projection) and hands them here.
 

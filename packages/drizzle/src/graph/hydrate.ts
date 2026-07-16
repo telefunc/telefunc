@@ -1,4 +1,4 @@
-// Synchronous-cut hydration (final-plan §5.5). The registry BLOCKS acquire on the seed, so a
+// Synchronous-cut hydration. The registry BLOCKS acquire on the seed, so a
 // stateful graph is PRECISE from its first live tick — there is no warming tier and no
 // coarse-during-seed window. Activation registers the graph with the router BEFORE the scan
 // (activate-before-read), so any change routed during the async scan is buffered by the live graph
@@ -16,7 +16,7 @@ import type { Row } from '../compile/rowSpace.js'
 import { type ShadowIndex, createShadow, matchesResidual, pkOf, pruneRow } from './shadow.js'
 
 /** Injected in the binding layer from the σ residual's opaque `src` handles + raw execution;
- *  `graph/` imports only this interface (R1 — zero drizzle here). */
+ *  `graph/` imports only this interface (zero drizzle here). */
 type HydrationExecutor = {
   /** The σ-scoped, column-pruned baseline for one input. */
   scan(descriptor: SeedDescriptor): Promise<Row[]>

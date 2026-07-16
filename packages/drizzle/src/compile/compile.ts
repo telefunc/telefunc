@@ -45,7 +45,7 @@ import { applyWindow } from './windowStage.js'
 
 type FireResult = { data: boolean; dirty: boolean; invalidated: boolean }
 
-/** The ticket-5 runtime seam (T5.A0): everything the graph runtime needs to hydrate ONE
+/** The runtime seam: everything the graph runtime needs to hydrate ONE
  *  stateful input — a stable id, the real relation + alias, its PK (retraction key), the
  *  demanded columns, and the σ residual as the opaque hydration handle (its predicate
  *  leaves still carry the drizzle `src`, which the binding layer re-emits as WHERE). */
@@ -330,7 +330,7 @@ function buildBranch(
 
   const existsSpecs = specs.map((leaf) => buildExistsSpec(graph, leaf, registry, covered))
   // Scalar/negated-subquery inner tables (not a base input, not a set-op branch) fire dirty
-  // on any change — the §5.4 scalar-subquery row.
+  // on any change — the scalar-subquery row.
   for (const table of subqueryInnerTables(trimmed)) if (!covered.has(table)) registerDirtyTable(registry, table)
 
   const joined = applyJoins(trimmed, streams, crossResidual, dirty)
@@ -454,7 +454,7 @@ function register(registry: Map<string, FeedInput[]>, plan: InputPlan, builder: 
 }
 
 /** Register an inner subquery / scalar-subquery table as a dirty-only input: it has no
- *  dataflow sink, but a change to it fires the dirty witness (§5.4 scalar-subquery row). */
+ *  dataflow sink, but a change to it fires the dirty witness (the scalar-subquery row). */
 function registerDirtyTable(registry: Map<string, FeedInput[]>, table: string): void {
   const plan: InputPlan = {
     alias: table,

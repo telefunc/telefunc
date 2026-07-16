@@ -3,7 +3,7 @@
 // appears among the inner rows' keys (db-ivm `filterBy`). A SQL NULL correlation key is
 // sent to a per-content sentinel that never matches, so `NULL IN (…)` correctly excludes.
 // A NEGATED exists (`NOT EXISTS` / `NOT IN`) cannot be a plain anti-join without the
-// T4.B8 NULL counterexample — removing an inner NULL flips SQL from excluded to included —
+// NULL counterexample — removing an inner NULL flips SQL from excluded to included —
 // so it degrades to a live coarse (dirty) plan whose witness fires on any inner OR outer
 // change. Scalar subqueries are handled the same way by the caller: their inner tables are
 // registered as inputs and any inner change taps dirty.

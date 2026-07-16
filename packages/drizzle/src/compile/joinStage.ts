@@ -7,7 +7,7 @@
 // or any join with no equi key at all, cannot be a plain keyed-join-plus-filter without
 // wrongly dropping null-extended rows — so it degrades to a live coarse (dirty) plan
 // rather than silently miss. INNER equi-joins keep their non-equi residual as a widening
-// filter with the dirty tap on the candidate pairs (§5.4).
+// filter with the dirty tap on the candidate pairs.
 
 export { type JoinResult, applyJoins, joinsExact }
 
@@ -78,7 +78,7 @@ function joinsExact(shape: SelectShape): boolean {
 
 /** Filter the joined rows by the residual (unknown leaves widen to a match), tapping the
  *  candidate pairs that pass the exact conjuncts into the dirty witness when the residual
- *  carries an unprovable leaf (§5.4: A AND unknown → tap after A). */
+ *  carries an unprovable leaf (A AND unknown → tap after A). */
 function applyResidual(stream: IStreamBuilder<Row>, residual: Predicate, dirty: DirtySink): IStreamBuilder<Row> {
   const qualified = requalify(residual)
   if (containsUnknown(residual)) {

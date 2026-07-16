@@ -1,4 +1,4 @@
-// The change envelope (final-plan §5.6). A ChangeSource emits `ChangeBatch`es — ordered, atomic sets
+// The change envelope. A ChangeSource emits `ChangeBatch`es — ordered, atomic sets
 // of TableChanges from one committed transaction. Ordering and delivery reliability are the SOURCE's
 // own concern, so the shared shape carries NO transport position (no LSN, no cursor). ORM mode is
 // fully in-process (no wire); a future wire-based CDC source (ticket 7) restores a value codec when

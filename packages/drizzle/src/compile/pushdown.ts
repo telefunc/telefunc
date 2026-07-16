@@ -1,4 +1,4 @@
-// σ-pushdown and the per-input adapter (final-plan §5.2). Top-level AND conjuncts of
+// σ-pushdown and the per-input adapter. Top-level AND conjuncts of
 // WHERE that reference exactly one input push down to that input's residual and are
 // evaluated in ROW SPACE before the dataflow — both old and new tuples visible, so an
 // update crossing the σ boundary resolves exactly. Column pruning demands only what a
