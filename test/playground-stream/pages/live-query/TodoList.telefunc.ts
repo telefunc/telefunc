@@ -1,7 +1,7 @@
 export { onGetLocalTodos, onAddLocalTodo, onClearLocalTodos, onGetGlobalTodos, onAddGlobalTodo, onClearGlobalTodos }
 
 import IORedis from 'ioredis'
-import { invalidateTag, liveTag } from 'telefunc'
+import { Live } from 'telefunc'
 
 const GLOBAL_TAG = 'todos:global'
 
@@ -52,20 +52,25 @@ async function onClearLocalTodos() {
 }
 
 async function onGetGlobalTodos() {
-  // Server-owned liveness: register this read against the global tag. Telefunc wraps the result
-  // with an invalidation channel; the client refetches whenever the tag is invalidated.
-  liveTag(GLOBAL_TAG)
-  return (await read(GLOBAL_KEY, globalFallback)).todos
+  // Server-owned liveness (manual path). SUBSCRIBE BEFORE FETCH: bind the tag while the request context
+  // is still live — in telefunc's default sync context mode the redis await below is a macrotask that
+  // nulls the context, so `Live.onInvalidate` (which captures the tag fence) MUST run before it. The
+  // `live.set` after the await is a context-free handle op. The Live crosses the wire via telefunc's core
+  // serializer; the client refetches whenever the tag is invalidated.
+  const live = new Live<Todo[]>([])
+  Live.onInvalidate(GLOBAL_TAG, live)
+  live.set((await read(GLOBAL_KEY, globalFallback)).todos)
+  return live.client
 }
 
 async function onAddGlobalTodo(text: string) {
   const state = await read(GLOBAL_KEY, globalFallback)
   state.todos.push({ id: String(state.nextId++), text })
   await write(GLOBAL_KEY, globalFallback, state)
-  invalidateTag(GLOBAL_TAG)
+  Live.invalidate(GLOBAL_TAG)
 }
 
 async function onClearGlobalTodos() {
   await write(GLOBAL_KEY, globalFallback, { todos: [], nextId: 1 })
-  invalidateTag(GLOBAL_TAG)
+  Live.invalidate(GLOBAL_TAG)
 }

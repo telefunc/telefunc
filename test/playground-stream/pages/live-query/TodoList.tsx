@@ -1,7 +1,8 @@
 export { TodoList }
 
 import React, { useEffect, useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { createLiveQuery } from '@telefunc/tanstack-query'
 import {
   onGetLocalTodos,
   onAddLocalTodo,
@@ -11,7 +12,9 @@ import {
   onClearGlobalTodos,
 } from './TodoList.telefunc'
 
-function TodoList() {
+type LiveQuery = ReturnType<typeof createLiveQuery>
+
+function TodoList({ liveQuery }: { liveQuery: LiveQuery }) {
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
 
@@ -19,13 +22,14 @@ function TodoList() {
     <div className="grid grid-cols-2 gap-8">
       {hydrated && <span id="hydrated" />}
       <LocalTodos />
-      <GlobalTodos />
+      <GlobalTodos liveQuery={liveQuery} />
     </div>
   )
 }
 
 function LocalTodos() {
   const [text, setText] = useState('')
+  const queryClient = useQueryClient()
 
   const { data: todos, isLoading } = useQuery({
     queryKey: ['local-todos'],
@@ -35,14 +39,18 @@ function LocalTodos() {
     refetchOnWindowFocus: false,
   })
 
+  // Local liveness is purely client-side (the local column never crosses the wire live): refetch this
+  // tab's query on mutation success. No server `Live` primitive — plain TanStack invalidation.
+  const invalidateLocal = () => queryClient.invalidateQueries({ queryKey: ['local-todos'] })
+
   const addTodo = useMutation({
     mutationFn: (text: string) => onAddLocalTodo(text),
-    meta: { invalidates: [['local-todos']] },
+    onSuccess: invalidateLocal,
   })
 
   const clearTodos = useMutation({
     mutationFn: () => onClearLocalTodos(),
-    meta: { invalidates: [['local-todos']] },
+    onSuccess: invalidateLocal,
   })
 
   return (
@@ -90,20 +98,23 @@ function LocalTodos() {
   )
 }
 
-function GlobalTodos() {
+function GlobalTodos({ liveQuery }: { liveQuery: LiveQuery }) {
   const [text, setText] = useState('')
 
-  // Plain key (no `global:` prefix): liveness is server-owned via `liveTag`, not client-driven.
-  const { data: todos, isLoading } = useQuery({
-    queryKey: ['global-todos'],
-    queryFn: () => onGetGlobalTodos(),
-    staleTime: Infinity,
-    refetchOnMount: false,
-    refetchOnWindowFocus: false,
-  })
+  // Server-owned liveness: the telefunction returns a `ClientLive<Todo[]>`; `liveQuery` unwraps its
+  // data and refetches whenever the server invalidates the global tag. No client-side invalidation.
+  const { data: todos, isLoading } = useQuery(
+    liveQuery({
+      queryKey: ['global-todos'],
+      queryFn: () => onGetGlobalTodos(),
+      staleTime: Infinity,
+      refetchOnMount: false,
+      refetchOnWindowFocus: false,
+    }),
+  )
 
-  // No `meta.invalidates`: the server invalidates the global tag (`invalidateTag`), which reaches
-  // every connected client through its live-query channel.
+  // No client-side invalidation: the server calls `Live.invalidate(GLOBAL_TAG)`, which reaches every
+  // connected client through its live channel.
   const addTodo = useMutation({
     mutationFn: (text: string) => onAddGlobalTodo(text),
   })

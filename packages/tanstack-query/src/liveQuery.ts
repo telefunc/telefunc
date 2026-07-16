@@ -1,13 +1,19 @@
 export { createLiveQuery }
 export type { LiveQueryOptions }
 
-import { hashKey, type QueryClient } from '@tanstack/query-core'
+import { hashKey, type QueryClient, type QueryKey, type QueryObserverOptions } from '@tanstack/query-core'
 import type { ClientLive } from 'telefunc'
 import { createInvalidationScheduler } from './client/invalidationScheduler.js'
 
-type LiveQueryOptions<T> = {
-  queryKey: readonly unknown[]
-  queryFn: () => Promise<ClientLive<T>>
+/** The full TanStack query-options seam (staleTime, gcTime, refetchOnMount, …) with ONE override: the
+ *  user's `queryFn` returns a `ClientLive<T>`, which the adapter unwraps to `T`. Every other option is
+ *  forwarded verbatim, so `liveQuery({ queryKey, queryFn, staleTime: Infinity })` type-checks inline.
+ *  Framework-agnostic — `QueryObserverOptions` is query-core's base for every framework's `useQuery`. */
+type LiveQueryOptions<TData = unknown, TError = Error, TQueryKey extends QueryKey = QueryKey> = Omit<
+  QueryObserverOptions<TData, TError, TData, TData, TQueryKey>,
+  'queryFn'
+> & {
+  queryFn: () => ClientLive<TData> | Promise<ClientLive<TData>>
 }
 
 /** Wire a `QueryClient` for live queries and return the `liveQuery` options adapter.
@@ -69,14 +75,17 @@ function createLiveQuery(queryClient: QueryClient) {
     return clientLive.data
   }
 
-  return function liveQuery<T>(options: LiveQueryOptions<T>): {
-    queryKey: readonly unknown[]
-    queryFn: () => Promise<T>
-  } {
-    const { queryKey, queryFn } = options
+  // Forward every TanStack option (the §3.F rest seam) and re-type only `queryFn`: TanStack infers
+  // `data` from `queryFn`, so unwrapping `ClientLive<T>` → `T` here is the single honest re-typing point.
+  return function liveQuery<TData, TError = Error, TQueryKey extends QueryKey = QueryKey>(
+    options: LiveQueryOptions<TData, TError, TQueryKey>,
+  ): QueryObserverOptions<TData, TError, TData, TData, TQueryKey> {
+    const { queryFn, queryKey, ...rest } = options
+    const key = (queryKey ?? []) as TQueryKey
     return {
+      ...rest,
       queryKey,
-      queryFn: async () => wire(queryKey, await queryFn()),
-    }
+      queryFn: async () => wire(key, await queryFn()),
+    } as QueryObserverOptions<TData, TError, TData, TData, TQueryKey>
   }
 }

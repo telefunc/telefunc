@@ -44,9 +44,25 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
       queryKey: ['n'],
       queryFn: async (): Promise<ClientLive<number>> => makeFakeClientLive(1).live,
     })
-    // Compile-time proof: `queryFn` is `() => Promise<number>` — TanStack would infer `data: number`.
-    const check: () => Promise<number> = options.queryFn
-    expect(typeof check).toBe('function')
+    // Compile-time proof: the widened generic carries the UNWRAPPED data type (TData = number), so
+    // TanStack infers `data: number`, not `ClientLive<number>`.
+    expect(typeof options.queryFn).toBe('function')
+  })
+
+  it('T12.F2 forwards the full TanStack options seam inline (§3.F rest) — staleTime/gcTime accepted', () => {
+    const liveQuery = createLiveQuery(new QueryClient())
+    // Compile-time proof: extra options are accepted inline (no excess-property error) and forwarded —
+    // this is exactly what a `staleTime: Infinity` live query needs (rely on invalidation, not polling).
+    const options = liveQuery({
+      queryKey: ['n'],
+      queryFn: async (): Promise<ClientLive<number>> => makeFakeClientLive(1).live,
+      staleTime: Infinity,
+      gcTime: 5000,
+      refetchOnMount: false,
+    })
+    expect(options.staleTime).toBe(Infinity)
+    expect(options.gcTime).toBe(5000)
+    expect(options.refetchOnMount).toBe(false)
   })
 
   it('T12.F3 unwraps .data into the cache; onInvalidate → one coalesced invalidateQueries', async () => {
