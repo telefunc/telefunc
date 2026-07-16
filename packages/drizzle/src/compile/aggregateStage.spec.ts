@@ -126,11 +126,13 @@ describe('aggregateStage — empty-set + GROUP BY NULL (T4.B5)', () => {
   })
 })
 
-describe('aggregateStage — opaque GROUP BY dirty tap is downstream of cancellation (BLOCKER #3)', () => {
-  it('a row moving between hidden groups (parity flip) changes the SQL bag but emits no dirty event (MISS)', () => {
-    // GROUP BY (score % 2): the parser cannot reduce the expression to a column → groupByOpaque, so
-    // the stage keys ALL rows into ONE fake group and taps `reduced` (AFTER the reduce). A row moving
-    // between real groups leaves the single fake group's count(*) unchanged, so the tap emits nothing.
+describe('aggregateStage — opaque GROUP BY witnessed at the input adapter (blocker #3)', () => {
+  it('a row moving between hidden groups (parity flip) fires the pre-reduce dirty witness, not the data path', () => {
+    // GROUP BY (score % 2) → groupByOpaque: all rows collapse into ONE fake group, so a move between
+    // real groups leaves the fake group's count(*) unchanged and the post-grouping DATA path cannot
+    // observe it (data === false — the reduce cancellation). The base input is marked dirtyActive, so
+    // the input adapter witnesses the full-row change (dirty === true). Asserting data === false pins
+    // the counterexample: an unrelated data over-fire cannot false-green this test.
     const graph = run(qb.select({ n: count() }).from(users).groupBy(sql`${users.score} % 2`))
     seed(
       graph,
@@ -140,10 +142,12 @@ describe('aggregateStage — opaque GROUP BY dirty tap is downstream of cancella
       [ins({ id: 4, team_id: 5, score: 3, name: 'd' })], // odd  → odd group  = 2
     )
     // Move id=1 even→odd (score 2→5): SQL per-group count(*) bag {2,2} → {1,3} → result changes → must fire.
-    const fired = graph.apply([
+    const result = graph.apply([
       upd({ id: 1, team_id: 5, score: 2, name: 'a' }, { id: 1, team_id: 5, score: 5, name: 'a' }),
-    ]).invalidated
-    expect(fired).toBe(true) // FAILS today: total row count unchanged → fake single-group count unchanged → silent
+    ])
+    expect(result.data).toBe(false) // the data path genuinely misses the move (reduce cancellation)
+    expect(result.dirty).toBe(true) // the pre-reduce dirty witness (input adapter) catches it
+    expect(result.invalidated).toBe(true)
   })
 })
 
