@@ -468,17 +468,48 @@ describe('§6.6b — leases refcount: a non-last close does not dispose while an
       expect(a.graph).toBe(b.graph) // one shared graph, two owners
       const leaseA = a.token.redeem()
       const leaseB = b.token.redeem()
-      const [firstClose, survivorNotify, lastClose] =
-        closeFirst === 'A' ? ([leaseA, nB, leaseB] as const) : ([leaseB, nA, leaseA] as const)
+      const [firstClose, survivorNotify, closedNotify, lastClose] =
+        closeFirst === 'A' ? ([leaseA, nB, nA, leaseB] as const) : ([leaseB, nA, nB, leaseA] as const)
 
       firstClose.release() // a NON-last close
       expect(registry.inspect().graphs).toBe(1) // graph SURVIVES — the other owner still holds a lease
       expect(a.graph.state()).not.toBe('destroyed')
       registry.router.ingest({ changes: [{ table: 'users', kind: 'insert', new: { id: 1 } }] })
       expect(survivorNotify).toHaveBeenCalledTimes(1) // the survivor still notifies
+      expect(closedNotify).toHaveBeenCalledTimes(0) // the CLOSED owner unsubscribed on release → silent (kills remove-unsubscribe)
 
       lastClose.release() // the last close
       expect(registry.inspect().graphs).toBe(0) // disposed only at zero refs
     }
+  })
+})
+
+// ── §6 fence × router-owned demotions (fault/coarsen must advance seq) ──
+
+describe('§6.2b — a coarse event during the read window is caught by the redeem fence', () => {
+  it('a coarse marker routed after the σ-read (before redeem) fires notify exactly once at redeem', async () => {
+    const registry = registryOf()
+    const notify = vi.fn()
+    const r = await registry.acquire(
+      req({ instanceKey: 'inst-coarse', compilePlan: () => coarsePlan(['users']), notify }),
+    )
+    registry.router.ingest({ changes: [{ table: 'users', kind: 'coarse' }] }) // read window: coarsen() demotes; the inert token isn't subscribed
+    expect(notify).toHaveBeenCalledTimes(0) // seam 1: nothing fires into the not-yet-wired channel
+    r.token.redeem()
+    expect(notify).toHaveBeenCalledTimes(1) // fence caught the coarsen — coarsen()'s fire('coarse') advanced seq past seqAtRead
+  })
+})
+
+describe('§6.2c — an apply-fault during the read window is caught by the redeem fence', () => {
+  it('a fault (what the router does on an apply-throw) after the σ-read fires notify exactly once at redeem', async () => {
+    const registry = registryOf()
+    const notify = vi.fn()
+    const r = await registry.acquire(
+      req({ instanceKey: 'inst-fault', compilePlan: () => coarsePlan(['users']), notify }),
+    )
+    r.graph.fault() // the router faults a throwing graph during the read window; the inert token isn't subscribed
+    expect(notify).toHaveBeenCalledTimes(0) // seam 1: inert token
+    r.token.redeem()
+    expect(notify).toHaveBeenCalledTimes(1) // fence caught the fault — fault()'s fire('coarse') advanced seq past seqAtRead
   })
 })

@@ -55,7 +55,6 @@ type Entry = {
   planKey: string
   graph: LiveGraph
   routable: RoutableGraph
-  notifyKeys: Set<string>
   tokens: number
   leases: number
   /** Set the instant this entry's teardown is owned (refcount-zero dispose OR drift retire), so a
@@ -204,14 +203,14 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
   // ── instance construction ─────────────────────────────────────────
 
   function buildInstance(plan: GraphPlan, request: AcquireRequest): Entry {
-    const notifyKeys = new Set([request.instanceKey])
     let graph!: LiveGraph
     let entry!: Entry
     const routable: RoutableGraph = {
       tables: request.tables,
       apply: (changes) => graph.apply(changes),
-      notifyKeys: () => notifyKeys,
+      notifyKey: () => request.instanceKey,
       fault: () => graph.fault(),
+      coarsen: () => graph.coarsen('coarse-event'),
     }
     // Register inputs with the router BEFORE the graph's seed reads (activate-before-read):
     // no event window can slip between the read and registration.
@@ -221,7 +220,6 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
       planKey: request.planKey,
       graph,
       routable,
-      notifyKeys,
       tokens: 0,
       leases: 0,
       dead: false,

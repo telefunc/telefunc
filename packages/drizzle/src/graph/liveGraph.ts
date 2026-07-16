@@ -13,7 +13,7 @@
 export { type LiveGraph, type LiveGraphSpec, type GraphState, type ApplyOutcome, type Inspection, createLiveGraph }
 
 import type { Change, CompiledGraph, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
-import type { TableChange } from '../router/events.js'
+import type { RowChange, TableChange } from '../router/events.js'
 import { canonicalValue } from '../utils/canonical.js'
 import { type HydrationExecutor, type Seed, createSeed } from './hydrate.js'
 import { type ShadowIndex, matchesResidual, pkOf, pruneRow } from './shadow.js'
@@ -63,6 +63,9 @@ type LiveGraph = {
   /** A routed apply() threw (a latent bug left state possibly corrupt) → permanently demote to
    *  coarse so every subsequent change coarse-fires (sound over-fire); the router surfaces the error. */
   fault(): void
+  /** An explicit coarse event (an image-less mutation the source can't represent precisely) →
+   *  intentionally demote to coarse with a caller-supplied reason (distinct from fault's apply-throw). */
+  coarsen(reason: string): void
   /** Schema/relation drift → terminal; the registry recompiles on the next read. */
   retire(): void
   /** Refcount 0 → terminal; frees state immediately. */
@@ -181,7 +184,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     return { invalidated: false }
   }
 
-  function statelessApply(changes: TableChange[]): ApplyOutcome {
+  function statelessApply(changes: RowChange[]): ApplyOutcome {
     // A key-only retraction cannot be decided without state → coarse (sound); everything else
     // resolves in row space via the compiled stateless evaluator.
     const commit: Change[] = []
@@ -196,7 +199,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     return { invalidated }
   }
 
-  function statefulApply(changes: TableChange[]): ApplyOutcome {
+  function statefulApply(changes: RowChange[]): ApplyOutcome {
     for (const change of changes) {
       for (const descriptor of byTable.get(change.table) ?? []) {
         const resolved = resolveOld(descriptor, shadows.get(descriptor.inputId)!, change)
@@ -254,14 +257,26 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       if (state === 'retired' || state === 'destroyed') return { invalidated: false }
       if (state === 'coarse') return coarseApply(changes)
       if (state === 'seeding') return seedingApply(changes)
-      return stateless ? statelessApply(changes) : statefulApply(changes)
+      // The router routes coarse markers to coarsen(), never to apply; the row-space state machine is
+      // coarse-free (a coarse marker reaching here would be a router bug).
+      return stateless ? statelessApply(changes as RowChange[]) : statefulApply(changes as RowChange[])
     },
     fault() {
       // A routed apply() threw (a latent bug left state possibly corrupt): permanently demote to
       // coarse so every subsequent change coarse-fires (sound over-fire) — the precise state can no
       // longer be trusted. The router surfaces the error (applyErrors counter + structured log).
       if (state === 'retired' || state === 'destroyed') return
+      fire('coarse') // advance seq so a fault landing in the read window is caught by the redeem fence
       demote('apply-fault')
+    },
+    coarsen(reason) {
+      // An explicit coarse event (an image-less mutation the source can't represent precisely):
+      // intentionally demote to coarse via the SAME path as fault(), but with a caller-supplied
+      // reason so inspect() distinguishes an intentional coarse-demote from an apply-throw. Feeds no
+      // row — the router calls this INSTEAD of apply(), so precise state is never fed a fabrication.
+      if (state === 'retired' || state === 'destroyed') return
+      fire('coarse') // advance seq so a coarse event in the read window is caught by the redeem fence
+      demote(reason)
     },
     retire() {
       seed?.abort()

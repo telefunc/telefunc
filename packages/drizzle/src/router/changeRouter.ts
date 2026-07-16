@@ -3,21 +3,27 @@
 // commit = one graph tick, never merged across batches — then notifies ≤1 per graph AND per attached
 // identity. A graph whose `apply` throws is isolated: its identity is coarse-notified so its
 // subscribers re-read while the other graphs in the batch are unaffected — the error is SURFACED
-// (counter + structured log), never swallowed.
+// (counter + structured log), never swallowed. A batch may also carry an in-batch `kind:'coarse'`
+// marker for a table (an image-less mutation the source can't represent precisely): every graph on
+// that table is demoted to coarse and notified, never fed a row — precise state is never corrupted
+// by a fabricated image.
 
 export { type RoutableGraph, type ChangeSource, type Router, type RouterInspection, createRouter }
 
 import type { ApplyOutcome } from '../graph/liveGraph.js'
 import type { ChangeBatch, TableChange } from './events.js'
 
-/** What the router indexes and drives. Each graph yields its own identity key(s); a batch that
- *  touches one graph through several tables still notifies its identity ≤1. */
+/** What the router indexes and drives. Each graph yields its own identity key; a batch that touches
+ *  one graph through several tables still notifies it ≤1. */
 type RoutableGraph = {
   readonly tables: readonly string[]
   apply(changes: TableChange[]): ApplyOutcome
-  notifyKeys(): Iterable<string>
+  notifyKey(): string
   /** A caught apply() throw permanently demotes this graph to coarse — its precise state is corrupt. */
   fault(): void
+  /** An in-batch coarse marker for one of this graph's tables → intentionally demote to coarse
+   *  (an image-less mutation the source can't represent precisely); never fed a row. */
+  coarsen(): void
 }
 
 /** Ordered atomic TableChange batches; the source owns its reliability — a CDC source's
@@ -28,7 +34,7 @@ type ChangeSource = {
   subscribe(onBatch: (batch: ChangeBatch) => void): () => void
 }
 
-type RouterInspection = { graphs: number; notifies: number; applyErrors: number }
+type RouterInspection = { graphs: number; notifies: number; applyErrors: number; coarseEvents: number }
 
 type Router = {
   register(graph: RoutableGraph): void
@@ -42,6 +48,7 @@ function createRouter(config: { notify: (identityKey: string) => void }): Router
   const all = new Set<RoutableGraph>()
   let notifies = 0
   let applyErrors = 0
+  let coarseEvents = 0
 
   return {
     register(graph) {
@@ -63,25 +70,35 @@ function createRouter(config: { notify: (identityKey: string) => void }): Router
       for (const graph of touched) {
         const slice = batch.changes.filter((change) => graph.tables.includes(change.table))
         let invalidated: boolean
-        try {
-          invalidated = graph.apply(slice).invalidated
-        } catch (error) {
-          // A routed apply threw (a latent bug leaving state possibly corrupt): PERMANENTLY demote
-          // this graph to coarse (fault) so no LATER batch can miss over corrupt precise state,
-          // coarse-notify its identity so it re-reads, and SURFACE the error (counter + structured
-          // log) — never swallow, or the degrade would be operator-invisible.
-          applyErrors++
-          console.error('[@telefunc/drizzle] a routed graph apply threw; faulting it to coarse:', error)
-          graph.fault()
+        if (slice.some((change) => change.kind === 'coarse')) {
+          // An image-less marker for one of this graph's tables: the source can't represent the
+          // mutation precisely, so demote this graph to coarse and feed it NO row (applying a
+          // fabricated/partial row would corrupt exact operator/shadow state). One commit = one tick:
+          // any precise changes in the same slice are moot once the graph is coarse.
+          coarseEvents++
+          graph.coarsen()
           invalidated = true
+        } else {
+          try {
+            invalidated = graph.apply(slice).invalidated
+          } catch (error) {
+            // A routed apply threw (a latent bug leaving state possibly corrupt): PERMANENTLY demote
+            // this graph to coarse (fault) so no LATER batch can miss over corrupt precise state,
+            // coarse-notify its identity so it re-reads, and SURFACE the error (counter + structured
+            // log) — never swallow, or the degrade would be operator-invisible.
+            applyErrors++
+            console.error('[@telefunc/drizzle] a routed graph apply threw; faulting it to coarse:', error)
+            graph.fault()
+            invalidated = true
+          }
         }
-        if (invalidated) for (const key of graph.notifyKeys()) keys.add(key)
+        if (invalidated) keys.add(graph.notifyKey())
       }
       for (const key of keys) {
         notifies++
         config.notify(key)
       }
     },
-    inspect: () => ({ graphs: all.size, notifies, applyErrors }),
+    inspect: () => ({ graphs: all.size, notifies, applyErrors, coarseEvents }),
   }
 }

@@ -148,6 +148,30 @@ describe('fault() permanently demotes a corrupt graph to coarse', () => {
   })
 })
 
+describe('coarsen(reason) intentionally demotes a graph to coarse with a labelled reason', () => {
+  it('an explicit coarse event demotes a live graph to coarse (labelled) and every subsequent change coarse-fires', async () => {
+    const graph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    expect(graph.state()).toBe('live')
+    graph.coarsen('coarse-event') // the router calls this for an image-less mutation it can't represent precisely
+    expect(graph.state()).toBe('coarse')
+    expect(graph.inspect().reason).toBe('coarse-event') // labelled — distinct from fault's 'apply-fault'
+    // the precise state is abandoned; any watched change now coarse-fires → no post-demote miss
+    expect(graph.apply([{ table: 'users', kind: 'insert', new: { id: 99, team_id: 5 } }]).invalidated).toBe(true)
+  })
+
+  it('coarsen on a terminal (retired/destroyed) graph is inert', async () => {
+    const retired = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    retired.retire()
+    retired.coarsen('coarse-event') // terminal wins → no-op
+    expect(retired.state()).toBe('retired')
+
+    const destroyed = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    destroyed.destroy()
+    destroyed.coarsen('coarse-event')
+    expect(destroyed.state()).toBe('destroyed')
+  })
+})
+
 // ── E1 — RLS-gated stateful born coarse ─────────────────────────────
 
 describe('T5.E1 — RLS-gated stateful graphs are born coarse', () => {
