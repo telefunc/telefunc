@@ -15,7 +15,6 @@ export {
   tableFingerprint,
   schemaFingerprint,
   relationKeyOf,
-  demandedColumns,
 } from './extract/columns.js'
 export { identityOf, planKeyOf, instanceKeyOf, canonicalValue, COMPILER_ABI } from './extract/identity.js'
 export type { Identity, IdentityEnv } from './extract/identity.js'

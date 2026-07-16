@@ -8,12 +8,11 @@ export {
   schemaFingerprint,
   relationKeyOf,
   collectTables,
-  demandedColumns,
 }
 
 import { Column, type SQL, Subquery, type Table, getTableColumns, getTableName, is, isTable } from 'drizzle-orm'
 import { entityKindOf, type RlsStatus } from '../binding/database.js'
-import type { ColRef, ProjItem, Predicate, QueryShape, ScalarExpr, TableRef } from '../ir/types.js'
+import type { ColRef, TableRef } from '../ir/types.js'
 import { frame } from '../utils/canonical.js'
 
 // drizzle's per-table metadata lives under globally-registered symbols; the public
@@ -168,80 +167,4 @@ function collectSqlChunks(sql: SQL, into: Set<string>, seen: Set<object>): void 
   if (Array.isArray(chunks)) for (const chunk of chunks) collectTables(chunk, into, seen)
 }
 
-// ── Pruned-column demand ────────────────────────────────────────────
-// The database columns each relation must supply for change capture: everything a
-// predicate, join key, projection, grouping or ordering reads. Keyed by real table
-// name via the shape's alias→relation map. Coarse shapes demand nothing here
-// (they invalidate at table granularity).
-
-function demandedColumns(shape: QueryShape): Map<string, Set<string>> {
-  const demand = new Map<string, Set<string>>()
-  if (shape.kind !== 'select') return demand
-
-  const aliasToName = new Map<string, string>()
-  const register = (ref: TableRef) => {
-    aliasToName.set(ref.alias, ref.name)
-    for (const pk of ref.primaryKey) add(demand, ref.name, pk) // PK always needed for retraction
-  }
-  register(shape.from)
-  for (const join of shape.joins) register(join.table)
-
-  const want = (ref: ColRef) => add(demand, aliasToName.get(ref.table) ?? ref.table, ref.column)
-
-  if (shape.where) forEachColRef(shape.where, want)
-  for (const join of shape.joins) if (join.on) forEachColRef(join.on, want)
-  if (shape.having) forEachColRef(shape.having, want)
-  for (const item of shape.projection.items) forEachProjColRef(item, want)
-  for (const ref of shape.groupBy) want(ref)
-  for (const key of shape.orderBy)
-    if (key.expr.kind === 'col') want(key.expr.ref)
-    else for (const ref of key.expr.columns) want(ref)
-  return demand
-}
-
-function add(demand: Map<string, Set<string>>, table: string, column: string): void {
-  let set = demand.get(table)
-  if (!set) demand.set(table, (set = new Set()))
-  set.add(column)
-}
-
-function forEachProjColRef(item: ProjItem, visit: (ref: ColRef) => void): void {
-  if (item.kind === 'col') visit(item.ref)
-  else if (item.kind === 'agg') {
-    if (item.call.arg) visit(item.call.arg)
-  } else for (const ref of item.columns) visit(ref)
-}
-
-function forEachColRef(pred: Predicate, visit: (ref: ColRef) => void): void {
-  const scalar = (expr: ScalarExpr) => {
-    if (expr.kind === 'col') visit(expr.ref)
-  }
-  switch (pred.kind) {
-    case 'and':
-    case 'or':
-      for (const part of pred.parts) forEachColRef(part, visit)
-      return
-    case 'not':
-      forEachColRef(pred.operand, visit)
-      return
-    case 'compare':
-      scalar(pred.left)
-      scalar(pred.right)
-      return
-    case 'in':
-      scalar(pred.expr)
-      for (const value of pred.values) scalar(value)
-      return
-    case 'like':
-    case 'isNull':
-      scalar(pred.expr)
-      return
-    case 'between':
-      scalar(pred.expr)
-      scalar(pred.low)
-      scalar(pred.high)
-      return
-    default:
-      return
-  }
-}
+// Column demand + σ pushdown is owned solely by `compile/pushdown.ts` (the runtime authority).

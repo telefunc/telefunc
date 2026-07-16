@@ -4,7 +4,6 @@ import { describe, expect, it } from 'vitest'
 import { extractQueryShape } from './queryShape.js'
 import {
   colRefOf,
-  demandedColumns,
   primaryKeyOf,
   realTableNameOf,
   relationKeyOf,
@@ -137,22 +136,5 @@ describe('schemaFingerprint', () => {
     const rlsUnknown = new Map<string, 'unknown'>([[key, 'unknown']])
     expect(schemaFingerprint([t], rlsOn)).not.toBe(schemaFingerprint([t]))
     expect(schemaFingerprint([t], rlsOn)).not.toBe(schemaFingerprint([t], rlsUnknown))
-  })
-})
-
-describe('demandedColumns', () => {
-  it('demands every read column plus each relation primary key, keyed by real name', () => {
-    const qb = new QueryBuilder()
-    const shape = extractQueryShape(
-      qb.select({ id: users.id }).from(users).innerJoin(teams, eq(teams.id, users.teamId)).where(eq(users.name, 'a')),
-      { dialect: 'pg' },
-    )
-    const demand = demandedColumns(shape)
-    expect(demand.get('users')).toEqual(new Set(['id', 'team_id', 'name']))
-    expect(demand.get('teams')).toEqual(new Set(['id']))
-  })
-
-  it('is empty for a coarse shape', () => {
-    expect(demandedColumns({ kind: 'coarse', tables: ['x'], reason: 'r' }).size).toBe(0)
   })
 })
