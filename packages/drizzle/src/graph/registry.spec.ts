@@ -97,6 +97,33 @@ const registryOf = (over: Partial<Parameters<typeof createRegistry>[0]> = {}) =>
     factoryCacheLimit: over.factoryCacheLimit ?? 10,
   })
 
+// ── BLOCKER #5a — multi-subscriber notify ownership ─────────────────
+
+describe('registry — multiple subscribers to one shared graph must all be notified', () => {
+  it('a second acquire of the identical query overwrites (silences) the first subscriber (dropped notify)', async () => {
+    const registry = registryOf()
+    const n1 = vi.fn()
+    const n2 = vi.fn()
+    const a = await registry.acquire(
+      req({ instanceKey: 'shared', compilePlan: () => coarsePlan(['users']), notify: n1 }),
+    )
+    const b = await registry.acquire(
+      req({ instanceKey: 'shared', compilePlan: () => coarsePlan(['users']), notify: n2 }),
+    )
+    expect(a.graph).toBe(b.graph) // deduped to one shared graph — both callers subscribe to it
+    a.token.redeem() // both clients are live subscribers holding leases
+    b.token.redeem()
+    registry.router.ingest({
+      sourceId: 's',
+      position: 1,
+      predecessor: null,
+      changes: [{ table: 'users', kind: 'insert', new: { id: 1 } }],
+    })
+    expect(n2).toHaveBeenCalledTimes(1) // the second subscriber hears the invalidation
+    expect(n1).toHaveBeenCalledTimes(1) // FAILS today: `sinks` holds ONE callback per instanceKey → n1 was overwritten
+  })
+})
+
 // ── A1 / A2 — dedup + concurrent creation ───────────────────────────
 
 describe('T5.A1 — canonical acquire dedup', () => {

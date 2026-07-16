@@ -70,8 +70,28 @@ function createRegistry(config: {
   maxStateRowsPerInput: number
   factoryCacheLimit: number
 }): Registry {
-  const sinks = new Map<string, () => void>()
-  const router = createRouter({ notify: (key) => sinks.get(key)?.() })
+  // Per-identity subscriber sets: several acquires of the SAME instanceKey are distinct live
+  // subscribers of ONE shared graph (independent channels), so an invalidation must notify EVERY
+  // one — a single callback per key would silence all but the last. A subscriber joins when its read
+  // token is minted and leaves on that token/lease's final release; refcount is unchanged (leases +
+  // tokens), so the last subscriber out still disposes the graph.
+  const sinks = new Map<string, Set<() => void>>()
+  const subscribe = (key: string, notify: () => void): (() => void) => {
+    let set = sinks.get(key)
+    if (!set) sinks.set(key, (set = new Set()))
+    set.add(notify)
+    return () => {
+      const current = sinks.get(key)
+      if (!current) return
+      current.delete(notify)
+      if (current.size === 0) sinks.delete(key)
+    }
+  }
+  const router = createRouter({
+    notify: (key) => {
+      for (const notify of sinks.get(key) ?? []) notify()
+    },
+  })
   const factories = new Map<string, GraphPlan>()
   const instances = new Map<string, Entry>()
   const sentinels = new Map<string, Entry>()
@@ -116,8 +136,11 @@ function createRegistry(config: {
     activeCount--
   }
 
-  function mintToken(entries: Entry[], identityKey: string, seqAtRead: number): ReadToken {
+  function mintToken(entries: Entry[], identityKey: string, seqAtRead: number, notify: () => void): ReadToken {
     for (const entry of entries) entry.tokens++
+    // Join the subscriber set at MINT (not redeem): an unredeemed read token whose plan drifts
+    // (retirePlan) or whose coarse sentinel fires must still be told to re-read (T5.D3/F1).
+    const unsubscribe = subscribe(identityKey, notify)
     let phase: 'open' | 'redeemed' | 'released' = 'open'
     return {
       instanceKey: identityKey,
@@ -134,6 +157,7 @@ function createRegistry(config: {
           release() {
             if (released) return
             released = true
+            unsubscribe() // this subscriber leaves; other subscribers of the shared graph stay notified
             for (const entry of entries) {
               entry.leases--
               sweep(entry, identityKey)
@@ -145,6 +169,7 @@ function createRegistry(config: {
         if (phase === 'released') return // idempotent
         assertUsage(phase === 'open', 'read token already redeemed')
         phase = 'released'
+        unsubscribe()
         for (const entry of entries) {
           entry.tokens--
           sweep(entry, identityKey)
@@ -154,8 +179,7 @@ function createRegistry(config: {
   }
 
   function attach(entry: Entry, request: AcquireRequest): AcquireResult {
-    sinks.set(request.instanceKey, request.notify)
-    const token = mintToken([entry], request.instanceKey, entry.graph.invalidationSeq())
+    const token = mintToken([entry], request.instanceKey, entry.graph.invalidationSeq(), request.notify)
     return { graph: entry.graph, token, sentinel: entry.kind === 'sentinel' }
   }
 
@@ -197,9 +221,12 @@ function createRegistry(config: {
     const entries: Entry[] = []
     for (const table of request.tables) entries.push(ensureSentinel(table))
     for (const entry of entries) entry.notifyKeys.add(request.instanceKey)
-    sinks.set(request.instanceKey, request.notify)
     const seqAtRead = entries[0] ? entries[0].graph.invalidationSeq() : 0
-    return { graph: entries[0]!.graph, token: mintToken(entries, request.instanceKey, seqAtRead), sentinel: true }
+    return {
+      graph: entries[0]!.graph,
+      token: mintToken(entries, request.instanceKey, seqAtRead, request.notify),
+      sentinel: true,
+    }
   }
 
   function ensureSentinel(table: string): Entry {
@@ -276,7 +303,7 @@ function createRegistry(config: {
       for (const [key, entry] of [...instances]) {
         if (entry.planKey !== planKey) continue
         entry.graph.retire() // → 'retired' (terminal): frees state, aborts any in-flight warming
-        sinks.get(key)?.() // exactly one coarse invalidation to the identity, BEFORE finalize drops the sink
+        for (const notify of sinks.get(key) ?? []) notify() // one coarse invalidation per subscriber, BEFORE finalize drops the sink
         finalizeInstance(entry, key) // single-owner teardown: a residual token release stays inert
       }
     },
