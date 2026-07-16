@@ -1,0 +1,82 @@
+export { createLiveQuery }
+export type { LiveQueryOptions }
+
+import { hashKey, type QueryClient } from '@tanstack/query-core'
+import type { ClientLive } from 'telefunc'
+import { createInvalidationScheduler } from './client/invalidationScheduler.js'
+
+type LiveQueryOptions<T> = {
+  queryKey: readonly unknown[]
+  queryFn: () => Promise<ClientLive<T>>
+}
+
+/** Wire a `QueryClient` for live queries and return the `liveQuery` options adapter.
+ *
+ *  Framework-agnostic (works with `useQuery` across the React/Solid/Vue TanStack adapters): the input
+ *  `queryFn` returns `Promise<ClientLive<T>>`, and the adapter re-types the surfaced `data` to `T`
+ *  (TanStack infers `data` from `queryFn`, so this owned seam is the only honest re-typing point).
+ *
+ *  The `QueryClient` is supplied here rather than read from `QueryFunctionContext.client` (which is not
+ *  guaranteed at the declared `@tanstack/query-core >=5.0.0` floor). The adapter reaches ONLY into
+ *  `ClientLive`'s public surface (`data`/`onInvalidate`/`onData`/`close`) — no telefunc core internals. */
+function createLiveQuery(queryClient: QueryClient) {
+  const scheduler = createInvalidationScheduler(queryClient)
+  // Per-query live subscription (the ClientLive + its teardown), keyed by `hashKey`.
+  const subs = new Map<string, { close: () => Promise<void> }>()
+  let cacheUnsub: (() => void) | null = null
+
+  function ensureCacheWatch(): void {
+    if (cacheUnsub) return
+    // Tear a subscription down when its query LEAVES the cache (GC, removeQueries, clear). A query that
+    // merely loses its observers on unmount STAYS wired — otherwise a `staleTime: Infinity` query would
+    // go dead on remount, since nothing refetches to re-establish the channel.
+    cacheUnsub = queryClient.getQueryCache().subscribe((event) => {
+      if (event.type === 'removed') teardown(event.query.queryKey)
+    })
+  }
+
+  function teardown(queryKey: readonly unknown[]): void {
+    const hash = hashKey(queryKey)
+    const sub = subs.get(hash)
+    if (!sub) return
+    subs.delete(hash)
+    void sub.close().catch(() => {})
+    scheduler.dispose(queryKey)
+    if (subs.size === 0 && cacheUnsub) {
+      cacheUnsub()
+      cacheUnsub = null
+    }
+  }
+
+  function wire<T>(queryKey: readonly unknown[], clientLive: ClientLive<T>): T {
+    const hash = hashKey(queryKey)
+    // Replace-on-resubscribe: a refetch mints a new ClientLive — close the previous one for this key.
+    const previous = subs.get(hash)
+    if (previous) void previous.close().catch(() => {})
+    ensureCacheWatch()
+    const offInvalidate = clientLive.onInvalidate(() => scheduler.schedule(queryKey)) // coalesced refetch
+    const offData = clientLive.onData((data) => queryClient.setQueryData(queryKey, data)) // direct cache write
+    let closed = false
+    subs.set(hash, {
+      close: () => {
+        if (closed) return Promise.resolve()
+        closed = true
+        offInvalidate()
+        offData()
+        return clientLive.close()
+      },
+    })
+    return clientLive.data
+  }
+
+  return function liveQuery<T>(options: LiveQueryOptions<T>): {
+    queryKey: readonly unknown[]
+    queryFn: () => Promise<T>
+  } {
+    const { queryKey, queryFn } = options
+    return {
+      queryKey,
+      queryFn: async () => wire(queryKey, await queryFn()),
+    }
+  }
+}

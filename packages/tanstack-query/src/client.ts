@@ -1,4 +1,6 @@
 export { withTelefunc }
+export { createLiveQuery } from './liveQuery.js'
+export type { LiveQueryOptions } from './liveQuery.js'
 
 import { hashKey, type MutationOptions, type QueryClient, type QueryPersister } from '@tanstack/query-core'
 import { __TQ__CHANNEL_KEY, __TQ__DATA_KEY, isWrapper } from './shared.js'
