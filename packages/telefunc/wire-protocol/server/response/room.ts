@@ -43,6 +43,8 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
     // Adopt this response's echo drop-set for the room: any co-returned self-suppressing member
     // (either serialization order) lands in the same set, and the relay gate reads it at source.
     stub._adoptSelfSuppressed(roomSelfSuppressSet(context, serverRoom))
+    // Capture the tail flag before attaching — `_attachStub` flushes the pre-attach hold and clears it.
+    const tail = serverRoom._tail
     // Attach before snapshotting: events from this point on are relayed to the client,
     // earlier state is in the snapshot — overlaps are absorbed by idempotent application.
     serverRoom._attachStub(stub)
@@ -58,7 +60,7 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
         // serialization is O(1) in member count.
         count: serverRoom.count,
         // Tail mode: the client holds relayed text until its first subscribe() (see `_tailHold`).
-        ...(serverRoom._tail ? { tail: true } : {}),
+        ...(tail ? { tail: true } : {}),
       },
       async close() {
         await stub.close()

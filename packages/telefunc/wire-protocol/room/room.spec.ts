@@ -1773,23 +1773,27 @@ describe('room stub channel', () => {
     expect(relayedData()).toEqual(['from-alice', 'bob-now-flows', 'alice-still-flows'])
   })
 
-  it('tail mode relays text from serialization, before any client subscription', async () => {
+  it('tail mode relays text from Room.get — a message published before serialization is held, then flushed', async () => {
     const serverRoom = (await Room.create('tail-relay')) as ServerRoom
     const alice = await serverRoom.join({ meta: { name: 'A' } })
-    serverRoom._tail = true // set by Room.get(id, { tail: true }); read by roomReplacer/_attachStub
+    serverRoom._startTail() // Room.get(id, { tail: true }): ingestion opens now, before any stub exists
+
+    await alice.publish({ text: 'early' }) // published before the stub attaches — held, not lost
+
     const stub = new RoomStubChannel(serverRoom)
     stub._registerChannel()
-    serverRoom._attachStub(stub) // no BROADCAST_SUB sent — tail alone opens the text relay
+    serverRoom._attachStub(stub) // flushes the held message; no BROADCAST_SUB needed — tail opens the relay
     const peer = attachPeer(stub)
 
-    await alice.publish({ text: 'early' })
+    await alice.publish({ text: 'live' }) // relayed live from here
+
     const relayed = peer
       .decoded()
       .filter((f) => f.tag === TAG.PUBLISH)
       .map((f) => JSON.parse(f.text) as { __r: string; data?: unknown })
       .filter((m) => m.__r === 'data')
       .map((m) => m.data)
-    expect(relayed).toEqual([{ text: 'early' }])
+    expect(relayed).toEqual([{ text: 'early' }, { text: 'live' }]) // the pre-serialization message is not missed
   })
 
   it('a stub member joined with selfDelivery=false gets no echo of its own publishes', async () => {
