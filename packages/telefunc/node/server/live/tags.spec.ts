@@ -1,10 +1,10 @@
 import '../context/async.js' // install AsyncLocalStorage mode so context survives macrotask awaits
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { restoreContext } from '../context/context.js'
-import { getTagHub, configureLiveNamespace, _resetTagHubsForTesting, _setBarrierBudgetForTesting } from './tagHub.js'
+import { getTagHub, _resetTagHubsForTesting, _setBarrierBudgetForTesting } from './tagHub.js'
 import { liveTag, invalidateTag, stampRequestStartFence, publishQueuedTags } from './tags.js'
 import { takeLiveSources } from './source.js'
-import { snapshotCounters, _resetCountersForTesting } from './telemetry.js'
+import { _snapshotCountersForTesting, _resetCountersForTesting } from './telemetry.js'
 import {
   getBroadcastAdapter,
   _resetBroadcastAdapterForTesting,
@@ -111,7 +111,7 @@ describe('tag fences (§3.E)', () => {
       const onInvalidate = vi.fn()
       subscribeFirstSource(onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(1)
-      expect(snapshotCounters()['live.tagHub.journalOverflow']).toBe(1)
+      expect(_snapshotCountersForTesting()['live.tagHub.journalOverflow']).toBe(1)
     }))
 
   it('T1.E5 live tag after subscribe fires via the index; non-matching does not', () =>
@@ -189,34 +189,6 @@ describe('tag settle + publish (§3.D / §3.E)', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(() => invalidateTag('t')).toThrow()
   })
-
-  it('T1.E14 configureLiveNamespace — single-key law and isolation', () =>
-    inRequest(async () => {
-      configureLiveNamespace('tenant-a')
-      const subscribeSpy = vi.spyOn(getBroadcastAdapter(), 'subscribe')
-      const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-      await getTagHub().ready()
-      await getTagHub().publish(['t1'])
-      await getTagHub().publish(['t2'])
-      await getTagHub().publish(['t3'])
-      expect(new Set(publishSpy.mock.calls.map((c) => c[0]))).toEqual(new Set(['__tf_tags__:tenant-a']))
-      expect(new Set(subscribeSpy.mock.calls.map((c) => c[0]))).toEqual(new Set(['__tf_tags__:tenant-a']))
-      expect(() => configureLiveNamespace('tenant-b')).toThrow()
-    }))
-})
-
-describe('tag namespace isolation (§3.E T1.E14)', () => {
-  it('two namespaces do not cross-deliver', () =>
-    inRequest(async () => {
-      const hubA = getTagHub('ns-a')
-      const hubB = getTagHub('ns-b')
-      await hubA.ready()
-      await hubB.ready()
-      const firedInB = vi.fn()
-      hubB.registerTag('t', firedInB)
-      await hubA.publish(['t'])
-      expect(firedInB).toHaveBeenCalledTimes(0)
-    }))
 })
 
 describe('tag readiness barrier (§3.E T1.E10)', () => {
@@ -371,7 +343,7 @@ describe('tag publish failure (§3.D T1.D2 / T1.J4)', () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       invalidateTag('t')
       await expect(publishQueuedTags()).resolves.toBeUndefined() // never throws
-      expect(snapshotCounters()['live.tagHub.publishFailure']).toBe(1)
+      expect(_snapshotCountersForTesting()['live.tagHub.publishFailure']).toBe(1)
       expect(localListener).toHaveBeenCalledTimes(1) // fired locally despite the failure
       expect(errorSpy).toHaveBeenCalled()
       errorSpy.mockRestore()

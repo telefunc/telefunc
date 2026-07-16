@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import * as telefunc from '../index.js'
 
-// The audit-mandated live/tag/telemetry surface must be exported from 'telefunc' (§3.G G1/G4).
+// The live/tag surface must be exported from 'telefunc' (§3.G G1/G4). Telemetry is INTERNAL-only — the
+// public telemetry surface was removed as speculative bloat for an unreleased subsystem (owner MVP-lean
+// ruling superseding the earlier §3.G telemetry-export mandate).
 describe('telefunc live exports (§3.G)', () => {
-  it('T1.G1/G4 exports the live seam, tag API, and typed telemetry seam', () => {
+  it('T1.G1/G4 exports the live seam + tag API (telemetry is internal-only)', () => {
     for (const name of [
       'liveTag',
       'invalidateTag',
       'addLiveSource',
-      'incrementCounter',
-      'snapshotCounters',
       // Sprint 2 ruling A — the source-take seam @telefunc/tanstack-query consumes:
       'takeLiveSources',
     ]) {

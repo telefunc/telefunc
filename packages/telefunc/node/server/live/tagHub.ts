@@ -1,9 +1,9 @@
-export { getTagHub, configureLiveNamespace, _resetTagHubsForTesting, _setBarrierBudgetForTesting }
+export { getTagHub, _resetTagHubsForTesting, _setBarrierBudgetForTesting }
 export type { TagHub }
 
 import { Broadcast } from '../../../wire-protocol/server/server-broadcast.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
-import { assertUsage, getProjectError } from '../../../utils/assert.js'
+import { getProjectError } from '../../../utils/assert.js'
 
 // One app-scoped Broadcast key per namespace bounds authority-DO/KV cardinality regardless of how
 // many distinct tags exist. Each server keeps a bounded (seq, tags) journal of what it observed on
@@ -177,34 +177,18 @@ class TagHub {
   }
 }
 
-const globalObject = getGlobalObject<{ hubs: Map<string, TagHub>; namespace: string }>('tagHub.ts', () => ({
-  hubs: new Map(),
-  namespace: DEFAULT_NAMESPACE,
-}))
+// One app-scoped tag hub on the default namespace. (The multi-namespace generality was speculative and
+// test-only, so it was removed; a single-tenant app needs exactly one hub.)
+const globalObject = getGlobalObject<{ hub: TagHub | null }>('tagHub.ts', () => ({ hub: null }))
 
-/** Set the app's live namespace. Must be called before any tag activity — reconfiguring once a hub
- *  exists would silently re-key live subscriptions, so it asserts. */
-function configureLiveNamespace(namespace: string): void {
-  assertUsage(
-    globalObject.hubs.size === 0,
-    'configureLiveNamespace() must be called before any liveTag()/invalidateTag() activity.',
-  )
-  globalObject.namespace = namespace
-}
-
-function getTagHub(namespace: string = globalObject.namespace): TagHub {
-  let hub = globalObject.hubs.get(namespace)
-  if (!hub) {
-    hub = new TagHub(namespace)
-    globalObject.hubs.set(namespace, hub)
-  }
-  return hub
+function getTagHub(): TagHub {
+  if (!globalObject.hub) globalObject.hub = new TagHub(DEFAULT_NAMESPACE)
+  return globalObject.hub
 }
 
 /** @internal test-only reset. */
 function _resetTagHubsForTesting(): void {
-  globalObject.hubs = new Map()
-  globalObject.namespace = DEFAULT_NAMESPACE
+  globalObject.hub = null
   barrierMaxAttempts = BARRIER_MAX_ATTEMPTS
 }
 
