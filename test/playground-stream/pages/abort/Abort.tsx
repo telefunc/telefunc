@@ -1,6 +1,6 @@
 export { Abort }
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   onSlowAIGenerator,
   onSlowStreamForAbort,
@@ -13,6 +13,9 @@ import { Abort as TelefuncAbort, abort, withContext } from 'telefunc/client'
 function Abort() {
   const [hydrated, setHydrated] = useState(false)
   const [result, setResult] = useState<string>('')
+  // The in-flight non-streaming call, stashed so the e2e test can abort it deterministically once it has
+  // confirmed (by polling server cleanup-state) that the telefunc is running — see the button below.
+  const slowNormalCall = useRef<ReturnType<typeof onSlowNormalTelefunc> | null>(null)
   useEffect(() => setHydrated(true), [])
 
   return (
@@ -169,19 +172,31 @@ function Abort() {
 
       <button
         id="test-slow-normal-telefunc"
-        onClick={async () => {
+        onClick={() => {
           setResult('')
+          // Fire the call and stash it. The abort is triggered separately (button below), driven by the
+          // e2e test AFTER it confirms the telefunc is running server-side. The old fixed
+          // `setTimeout(() => abort(promise), 1500)` raced call-establishment on slow preview variants:
+          // when the abort fired before/around server start it was effectively lost, the call ran to
+          // normal completion, and `isAbort` came back undefined ("expected undefined to equal true").
           const promise = onSlowNormalTelefunc()
-          setTimeout(() => abort(promise), 1500)
-          try {
-            const res = await promise
-            setResult(JSON.stringify({ result: res, error: null }))
-          } catch (e: any) {
-            setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort }))
-          }
+          slowNormalCall.current = promise
+          promise.then(
+            (res) => setResult(JSON.stringify({ result: res, error: null })),
+            (e: any) => setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort })),
+          )
         }}
       >
         Slow normal telefunc
+      </button>
+
+      <button
+        id="test-slow-normal-abort"
+        onClick={() => {
+          if (slowNormalCall.current) abort(slowNormalCall.current)
+        }}
+      >
+        Abort slow normal telefunc
       </button>
 
       <h2>Upload abort tests</h2>
