@@ -180,8 +180,7 @@ describe('withTelefunc client (§3.B)', () => {
   it('T2.B7 withTelefunc attaches no request wrapper — persister passthrough + unwrapped mutationFn', () => {
     // The only client seam that can stage per-call request extension bytes is telefunc's per-call
     // context wrapper. withTelefunc never wraps the query call or the mutationFn in it, so nothing
-    // live is ever serialized. Here we pin the structural guarantee (no wrapping); the actual
-    // outgoing request body is inspected on the real wire in the browser Ce2e (live-query.e2e.cjs).
+    // live is ever serialized. Here we pin the structural guarantee (no wrapping) at the unit level.
     const q = makeFakeQueryClient()
     withTelefunc(q.client)
 
