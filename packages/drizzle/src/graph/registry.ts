@@ -193,6 +193,7 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
       tables: request.tables,
       apply: (changes) => graph.apply(changes),
       notifyKeys: () => notifyKeys,
+      fault: () => graph.fault(),
     }
     // Register inputs with the router BEFORE the graph's seed reads (activate-before-read, T5.A3):
     // no event window can slip between the read and registration.

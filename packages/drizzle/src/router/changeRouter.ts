@@ -18,6 +18,8 @@ type RoutableGraph = {
   readonly tables: readonly string[]
   apply(changes: TableChange[]): ApplyOutcome
   notifyKeys(): Iterable<string>
+  /** A caught apply() throw permanently demotes this graph to coarse — its precise state is corrupt. */
+  fault(): void
 }
 
 /** ChangeSource: ordered atomic TableChange batches; the source owns its own reliability — a CDC
@@ -69,14 +71,13 @@ function createRouter(config: { notify: (identityKey: string) => void }): Router
         try {
           invalidated = graph.apply(slice).invalidated
         } catch (error) {
-          // A routed apply threw (a latent graph bug): isolate it — coarse-notify this identity so it
-          // re-reads — but SURFACE it (counter + structured log), never swallow, or the query would
-          // degrade to coarse forever with no operator-visible signal.
+          // A routed apply threw (a latent bug leaving state possibly corrupt): PERMANENTLY demote
+          // this graph to coarse (fault) so no LATER batch can miss over corrupt precise state,
+          // coarse-notify its identity so it re-reads, and SURFACE the error (counter + structured
+          // log) — never swallow, or the degrade would be operator-invisible.
           applyErrors++
-          console.error(
-            '[@telefunc/drizzle] a routed graph apply threw; coarse-notifying its identity to re-read:',
-            error,
-          )
+          console.error('[@telefunc/drizzle] a routed graph apply threw; faulting it to coarse:', error)
+          graph.fault()
           invalidated = true
         }
         if (invalidated) for (const key of graph.notifyKeys()) keys.add(key)

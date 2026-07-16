@@ -14,17 +14,22 @@ type FakeGraph = { graph: RoutableGraph; applyLog: TableChange[][] }
 function fakeGraph(
   tables: string[],
   keys: string[],
-  opts: { throwOnApply?: boolean; invalidated?: boolean } = {},
+  opts: { throwOnApply?: boolean; throwOnce?: boolean; invalidated?: boolean } = {},
 ): FakeGraph {
   const applyLog: TableChange[][] = []
+  let faulted = false
   const graph: RoutableGraph = {
     tables,
     apply: (changes): ApplyOutcome => {
       applyLog.push(changes)
-      if (opts.throwOnApply) throw new Error('boom')
+      if (faulted) return { invalidated: true } // after a fault the graph is permanently coarse
+      if (opts.throwOnApply || (opts.throwOnce && applyLog.length === 1)) throw new Error('boom')
       return { invalidated: opts.invalidated ?? true }
     },
     notifyKeys: () => keys,
+    fault: () => {
+      faulted = true
+    },
   }
   return { graph, applyLog }
 }
@@ -97,6 +102,23 @@ describe('T5.G2 — notify ≤1 per graph AND per identity; a throwing apply is 
     expect(notified.sort()).toEqual(['B', 'G']) // the thrower is coarse-notified; the healthy graph fires normally
     expect(router.inspect().applyErrors).toBe(1) // SURFACED: counted, never swallowed
     expect(errorSpy).toHaveBeenCalledTimes(1) // SURFACED: structured log
+    errorSpy.mockRestore()
+  })
+
+  it('a throwing apply PERMANENTLY demotes the graph: a LATER SQL-changing batch still fires (no post-fault miss)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const notified: string[] = []
+    const router = createRouter({ notify: (k) => notified.push(k) })
+    // Throws on the FIRST apply, then (were it not faulted) would return invalidated:false — i.e. a
+    // corrupt-precise graph that would MISS a later change. The permanent demote makes it coarse-fire.
+    const g = fakeGraph(['users'], ['X'], { throwOnce: true, invalidated: false })
+    router.register(g.graph)
+    router.ingest(batch([ins('users', 1)])) // first apply throws → router faults it to coarse
+    expect(router.inspect().applyErrors).toBe(1)
+    notified.length = 0
+    router.ingest(batch([ins('users', 2)])) // a later SQL-changing batch
+    expect(g.applyLog.length).toBe(2) // applied again (not skipped)
+    expect(notified).toEqual(['X']) // STILL fires via the permanent demote (coarse over-fire) — no miss
     errorSpy.mockRestore()
   })
 })

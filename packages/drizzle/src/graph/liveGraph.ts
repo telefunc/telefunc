@@ -13,7 +13,6 @@ export { type LiveGraph, type LiveGraphSpec, type GraphState, type ApplyOutcome,
 
 import type { Change, CompiledGraph, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
 import type { TableChange } from '../router/events.js'
-import { assertUsage } from '../utils/assert.js'
 import { canonicalValue } from '../utils/canonical.js'
 import { type HydrationExecutor, type Seed, createSeed } from './hydrate.js'
 import { type ShadowIndex, matchesResidual, pkOf, pruneRow } from './shadow.js'
@@ -60,8 +59,9 @@ type LiveGraph = {
    *  awaits this so acquire returns a precise graph. Terminal transitions resolve it too. */
   ready(): Promise<void>
   apply(changes: TableChange[]): ApplyOutcome
-  /** Source resync (gap) → demote to coarse (a synchronous seed cannot be re-run from here). */
-  rewarm(): void
+  /** A routed apply() threw (a latent bug left state possibly corrupt) → permanently demote to
+   *  coarse so every subsequent change coarse-fires (sound over-fire); the router surfaces the error. */
+  fault(): void
   /** Schema/relation drift → terminal; the registry recompiles on the next read. */
   retire(): void
   /** Refcount 0 → terminal; frees state immediately. */
@@ -255,10 +255,12 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       if (state === 'seeding') return seedingApply(changes)
       return stateless ? statelessApply(changes) : statefulApply(changes)
     },
-    rewarm() {
-      // Unreachable: a ChangeSource delivers ordered, gap-free batches (reliability lives inside the
-      // source), so nothing triggers a resync. Kept as an assertion of that invariant, not a branch.
-      assertUsage(false, 'liveGraph.rewarm is unreachable: a ChangeSource owns its own reliability (no gap/resync)')
+    fault() {
+      // A routed apply() threw (a latent bug left state possibly corrupt): permanently demote to
+      // coarse so every subsequent change coarse-fires (sound over-fire) — the precise state can no
+      // longer be trusted. The router surfaces the error (applyErrors counter + structured log).
+      if (state === 'retired' || state === 'destroyed') return
+      demote('apply-fault')
     },
     retire() {
       seed?.abort()
@@ -319,18 +321,23 @@ function updateShadow(descriptor: SeedDescriptor, shadow: ShadowIndex, change: C
 }
 
 /** One-shot seed-race guard — NOT warming; do not add passes. A change routed during the scan may
- *  or may not already be reflected in the scan's consistent snapshot; replay it as a PK-keyed UPSERT
- *  against the seeded shadow (retract whatever the snapshot holds for this PK, insert the change's
- *  new tuple if it σ-matches) so the outcome is idempotent regardless. Reconciles the SHADOW only —
- *  the engine is seeded once from the final shadow, so it never sees the intermediate retract/insert
- *  and a net-zero replay is invisible. */
+ *  or may not already be reflected in the scan's consistent snapshot; replay it against the seeded
+ *  shadow so the outcome is idempotent regardless. Retract whatever the snapshot holds for the OLD-
+ *  image PK (the change's OWN old key — NOT the new PK, or a PK-CHANGING update would strand the old
+ *  row), then insert the new tuple under its OWN PK if it σ-matches. Per op: INSERT → insert new;
+ *  DELETE → retract old; UPDATE → retract old.pk + insert new.pk (correct even when the PK changes).
+ *  Reconciles the SHADOW only — the engine is seeded once from the final shadow, so it never sees an
+ *  intermediate retract/insert and a net-zero replay is invisible. */
 function replaySeedRace(descriptor: SeedDescriptor, shadow: ShadowIndex, change: TableChange): void {
-  const keyRow = change.new ?? change.old ?? change.key
-  const pk = keyRow ? pkOf(descriptor, keyRow) : undefined
-  if (pk === undefined) return
-  shadow.remove(pk)
-  if (change.new !== undefined && matchesResidual(descriptor, change.new))
-    shadow.put(pk, pruneRow(descriptor, change.new))
+  const oldKeyRow = change.old ?? change.key
+  if (oldKeyRow !== undefined) {
+    const oldPk = pkOf(descriptor, oldKeyRow)
+    if (oldPk !== undefined) shadow.remove(oldPk)
+  }
+  if (change.new !== undefined && matchesResidual(descriptor, change.new)) {
+    const newPk = pkOf(descriptor, change.new)
+    if (newPk !== undefined) shadow.put(newPk, pruneRow(descriptor, change.new))
+  }
 }
 
 /** Whether a change actually changes anything (a pure replay update never invalidates). */

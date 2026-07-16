@@ -109,6 +109,43 @@ describe('T5.C — a change routed during the scan is buffered and replayed exac
     // Deleting id 2 removes the only team-9 row → distinct {9}→{} FIRES (proves the buffered id 2 landed).
     expect(graph.apply([{ table: 'users', kind: 'delete', old: { id: 2, team_id: 9 } }]).invalidated).toBe(true)
   })
+
+  it('a PK-changing update replayed during the seed does not strand the old-PK row', async () => {
+    let resolveScan!: (rows: Row[]) => void
+    const scanPromise = new Promise<Row[]>((resolve) => (resolveScan = resolve))
+    const build = () => qb.selectDistinct({ team: users.teamId }).from(users)
+    const graph = createLiveGraph({
+      kind: 'stateful',
+      instanceKey: 'pk',
+      tables: ['users'],
+      instantiate: () => compileQuery(extractQueryShape(build(), { dialect: 'pg' })).instantiate() as StatefulGraph,
+      executor: { scan: () => scanPromise },
+      maxStateRows: 1e9,
+    })
+    expect(graph.state()).toBe('seeding')
+
+    // A PK-CHANGING update routed during the scan: id 1 (team 5) → id 2 (team 9). The OLD row must be
+    // retracted by its OWN pk (id 1), not by the new pk (id 2), or id 1 strands in the completed shadow.
+    graph.apply([{ table: 'users', kind: 'update', old: { id: 1, team_id: 5 }, new: { id: 2, team_id: 9 } }])
+    resolveScan([{ id: 1, team_id: 5 }]) // the snapshot SAW the old row (id 1, team 5)
+    await graph.ready()
+    expect(graph.state()).toBe('live')
+
+    // The engine must hold ONLY {id 2, team 9}. An insert of a team-5 row introduces a NEW distinct
+    // value → FIRES. If id 1 stranded (team 5 still present), team 5 would not be new → no fire.
+    expect(graph.apply([{ table: 'users', kind: 'insert', new: { id: 3, team_id: 5 } }]).invalidated).toBe(true)
+  })
+})
+
+describe('fault() permanently demotes a corrupt graph to coarse', () => {
+  it('a faulted live graph goes coarse and every subsequent change coarse-fires (sound over-fire)', async () => {
+    const graph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    expect(graph.state()).toBe('live')
+    graph.fault() // the router calls this after a caught apply() throw — the precise state is corrupt
+    expect(graph.state()).toBe('coarse')
+    // the corrupt precise state is abandoned; any watched change now coarse-fires → no post-fault miss
+    expect(graph.apply([{ table: 'users', kind: 'insert', new: { id: 99, team_id: 5 } }]).invalidated).toBe(true)
+  })
 })
 
 // ── E1 — RLS-gated stateful born coarse ─────────────────────────────
