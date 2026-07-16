@@ -475,6 +475,12 @@ const ROOM_TAIL_ATTACH_TIMEOUT_MS = 60_000
 /** Max messages held between `Room.get({ tail })` and the stub attaching (bounds the pre-attach hold). */
 const ROOM_TAIL_HOLD_MAX = 256
 
+/** Safety net for `send(…, { ack: true })`. The normal outcomes settle promptly — the recipient
+ *  replies, leaves, or its inbox overflows — but a recipient that joined yet never `listen()`s and
+ *  never leaves would strand the sender forever, so an ack unanswered this long rejects. Generous, so
+ *  a legitimately slow `listen` handler is not cut off. */
+const ROOM_DM_ACK_TIMEOUT_MS = 60_000
+
 /**
  * Server-side `Room`.
  *
@@ -931,15 +937,27 @@ class ServerRoom implements Room {
    *  publish itself still throws (an invalid send never reaches a recipient to reply). */
   async _sendDmAck(from: string, to: string, data: unknown): Promise<{ receipt: RoomSendReceipt; reply: DmReply }> {
     const ackId = crypto.randomUUID()
-    const reply = new Promise<DmReply>((settle) => this._pendingDmAcks.set(ackId, { to, settle }))
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const reply = new Promise<DmReply>((settle) => {
+      this._pendingDmAcks.set(ackId, { to, settle })
+      // The recipient replying/leaving/overflowing settles this promptly; this bounds the one case
+      // none of those cover — a recipient that joined but never listens and never leaves.
+      timer = setTimeout(() => {
+        if (this._pendingDmAcks.delete(ackId))
+          settle({ ok: false, err: 'send({ ack: true }) timed out — the recipient never handled the message' })
+      }, ROOM_DM_ACK_TIMEOUT_MS)
+    })
     let receipt: RoomSendReceipt
     try {
       receipt = await this._publishDm(from, to, data, ackId)
     } catch (err) {
       this._pendingDmAcks.delete(ackId)
+      clearTimeout(timer)
       throw err
     }
-    return { receipt, reply: await reply }
+    const settled = await reply
+    clearTimeout(timer)
+    return { receipt, reply: settled }
   }
 
   /** Shared DM publish: validate the target, run the send guards, stamp the verified sender, and

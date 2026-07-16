@@ -1438,6 +1438,26 @@ describe('direct message acks', () => {
     await expect(pending).rejects.toThrow(/left the room/)
   })
 
+  it('rejects after a timeout when the recipient joined but never handles it (and never leaves)', async () => {
+    vi.useFakeTimers()
+    try {
+      const room = await Room.create('dm-ack-timeout')
+      const authority = await room.join()
+      const player = await room.join()
+
+      const pending = player.send(authority.id, 'x', { ack: true }) // authority never listens, never leaves
+      const outcome = pending.then(
+        () => 'resolved',
+        (err: unknown) => (err as Error).message,
+      )
+      await vi.advanceTimersByTimeAsync(600_000) // well past the ack safety timeout
+
+      expect(await outcome).toMatch(/timed out/)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('a plain send() (no ack) still resolves with a delivery receipt, ignoring any handler return', async () => {
     const room = await Room.create('dm-noack')
     const a = await room.join()
