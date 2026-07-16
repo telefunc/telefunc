@@ -66,7 +66,7 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
     expect(options.refetchOnMount).toBe(false)
   })
 
-  it('T12.F3 unwraps .data into the cache; onInvalidate → one coalesced invalidateQueries', async () => {
+  it('T12.F3 unwraps .data into the cache; onInvalidate calls invalidateQueries directly (idempotent, no coalescing)', async () => {
     const queryClient = new QueryClient()
     const liveQuery = createLiveQuery(queryClient)
     const fake = makeFakeClientLive('v1')
@@ -75,11 +75,10 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
     expect(queryClient.getQueryData(['todos'])).toBe('v1')
 
     const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
-    fake.fireInvalidate()
-    fake.fireInvalidate() // coalesced
-    await tick()
-    expect(invalidateSpy).toHaveBeenCalledTimes(1)
+    fake.fireInvalidate() // direct: each signal invalidates immediately (TanStack owns fetch; invalidation is idempotent)
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['todos'], exact: true }, { cancelRefetch: false })
+    fake.fireInvalidate() // no per-key coalescing scheduler — a second signal is a second (harmless) invalidate
+    expect(invalidateSpy).toHaveBeenCalledTimes(2)
   })
 
   it('T12.F3 onData writes the cache directly and does NOT refetch', async () => {

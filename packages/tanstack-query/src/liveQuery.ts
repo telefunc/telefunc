@@ -3,7 +3,6 @@ export type { LiveQueryOptions }
 
 import { hashKey, type QueryClient, type QueryKey, type QueryObserverOptions } from '@tanstack/query-core'
 import type { ClientLive } from 'telefunc'
-import { createInvalidationScheduler } from './client/invalidationScheduler.js'
 
 /** The full TanStack query-options seam (staleTime, gcTime, refetchOnMount, …) with ONE override: the
  *  user's `queryFn` returns a `ClientLive<T>`, which the adapter unwraps to `T`. Every other option is
@@ -34,7 +33,6 @@ type LiveQueryResult<TData, TError, TQueryKey extends QueryKey> = Omit<
  *  guaranteed at the declared `@tanstack/query-core >=5.0.0` floor). The adapter reaches ONLY into
  *  `ClientLive`'s public surface (`data`/`onInvalidate`/`onData`/`close`) — no telefunc core internals. */
 function createLiveQuery(queryClient: QueryClient) {
-  const scheduler = createInvalidationScheduler(queryClient)
   // Per-query live subscription (the ClientLive + its teardown), keyed by `hashKey`.
   const subs = new Map<string, { close: () => Promise<void> }>()
   let cacheUnsub: (() => void) | null = null
@@ -55,7 +53,6 @@ function createLiveQuery(queryClient: QueryClient) {
     if (!sub) return
     subs.delete(hash)
     void sub.close().catch(() => {})
-    scheduler.dispose(queryKey)
     if (subs.size === 0 && cacheUnsub) {
       cacheUnsub()
       cacheUnsub = null
@@ -68,7 +65,12 @@ function createLiveQuery(queryClient: QueryClient) {
     const previous = subs.get(hash)
     if (previous) void previous.close().catch(() => {})
     ensureCacheWatch()
-    const offInvalidate = clientLive.onInvalidate(() => scheduler.schedule(queryKey)) // coalesced refetch
+    // Direct refetch on invalidation. TanStack owns fetch behavior and client-side invalidation is
+    // idempotent, so no per-key coalescing scheduler is needed; `cancelRefetch: false` never restarts an
+    // in-flight fetch. A rejected refetch is swallowed so it can't surface as an unhandled rejection.
+    const offInvalidate = clientLive.onInvalidate(() => {
+      void queryClient.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: false }).catch(() => {})
+    })
     const offData = clientLive.onData((data) => queryClient.setQueryData(queryKey, data)) // direct cache write
     let closed = false
     subs.set(hash, {
