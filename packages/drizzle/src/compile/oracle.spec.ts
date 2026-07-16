@@ -23,6 +23,10 @@ const users = pg.pgTable('users', {
   name: pg.text('name'),
   score: pg.integer('score'),
 })
+// Distinct aliases of `users` so a set-op can chain several arms over the one table the generator
+// mutates (distinct aliases avoid the duplicate-seed-input id; all route from real table `users`).
+const u2 = pg.alias(users, 'u2')
+const u3 = pg.alias(users, 'u3')
 
 let client: PGlite
 let db: ReturnType<typeof drizzle>
@@ -239,6 +243,25 @@ describe('E1 oracle — licensed degradations (never miss)', () => {
     oracle({
       name: 'opaque',
       build: () => db.select().from(users).where(sql`${users.name} similar to 'a%'`),
+      exact: false,
+    }))
+  it('mixed UNION / UNION ALL chain (dirty — SQL is left-associative, so the mixed distinct boundary degrades)', () =>
+    oracle({
+      name: 'mixedSetOp',
+      build: () =>
+        pg.unionAll(
+          pg.union(
+            db.select({ id: users.id }).from(users).where(gt(users.score, 3)),
+            db.select({ id: u2.id }).from(u2).where(eq(u2.teamId, 2)),
+          ),
+          db.select({ id: u3.id }).from(u3),
+        ),
+      exact: false,
+    }))
+  it('opaque GROUP BY (score % 2) — a membership move between hidden groups must never be missed', () =>
+    oracle({
+      name: 'opaqueGroup',
+      build: () => db.select({ n: count() }).from(users).groupBy(sql`${users.score} % 2`),
       exact: false,
     }))
 })

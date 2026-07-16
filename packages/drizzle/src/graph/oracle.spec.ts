@@ -9,7 +9,7 @@
 // bag-correct (no ORDER BY) or ordered + tie-canonical (with it).
 
 import { PGlite } from '@electric-sql/pglite'
-import { eq, max, min, sql, sum } from 'drizzle-orm'
+import { count, eq, gt, max, min, sql, sum } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -27,6 +27,10 @@ const users = pg.pgTable('users', {
   score: pg.integer('score'),
 })
 const teams = pg.pgTable('teams', { id: pg.integer('id').primaryKey(), region: pg.text('region') })
+// Distinct aliases of `users` so a set-op can chain several arms over the one table the generator
+// mutates (distinct aliases avoid the duplicate-seed-input id; all route from real table `users`).
+const u2 = pg.alias(users, 'u2')
+const u3 = pg.alias(users, 'u3')
 
 let client: PGlite
 let db: ReturnType<typeof drizzle>
@@ -366,6 +370,46 @@ describe('T5.H — differential oracle against LIVE-HYDRATED stateful graphs', (
             .groupBy(users.teamId)
             .having(sql`sum(${users.score}) > 10`),
         sigSql: 'select team_id, sum(score) s from users group by team_id having sum(score) > 10',
+        exact: false,
+        newState: usersState,
+        mutate: mutateUsers,
+        reset: resetUsers,
+      }),
+    30_000,
+  )
+
+  it(
+    'H2 mixed UNION / UNION ALL chain (dirty — never miss): live-hydrated',
+    () =>
+      runLive({
+        name: 'mixedSetOp',
+        tables: ['users'],
+        build: () =>
+          pg.unionAll(
+            pg.union(
+              db.select({ id: users.id }).from(users).where(gt(users.score, 3)),
+              db.select({ id: u2.id }).from(u2).where(eq(u2.teamId, 2)),
+            ),
+            db.select({ id: u3.id }).from(u3),
+          ),
+        sigSql:
+          '(select users.id from users where score > 3 union select u2.id from users u2 where u2.team_id = 2) union all select u3.id from users u3',
+        exact: false,
+        newState: usersState,
+        mutate: mutateUsers,
+        reset: resetUsers,
+      }),
+    30_000,
+  )
+
+  it(
+    'H2 opaque GROUP BY (score % 2) membership move (dirty — never miss): live-hydrated',
+    () =>
+      runLive({
+        name: 'opaqueGroup',
+        tables: ['users'],
+        build: () => db.select({ n: count() }).from(users).groupBy(sql`${users.score} % 2`),
+        sigSql: 'select count(*) n from users group by (score % 2)',
         exact: false,
         newState: usersState,
         mutate: mutateUsers,
