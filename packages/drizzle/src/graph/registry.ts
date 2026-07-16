@@ -260,7 +260,7 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
 }
 
 /** The live-graph spec for a compiled plan: coarse plans and RLS-gated stateful plans are
- *  born coarse; stateless plans are born live; other stateful plans warm. */
+ *  born coarse; stateless plans are born live; other stateful plans seed. */
 function specOf(plan: GraphPlan, request: AcquireRequest, maxStateRows: number): Parameters<typeof createLiveGraph>[0] {
   const base = { instanceKey: request.instanceKey, tables: request.tables }
   if (plan.coarse) return { kind: 'coarse', ...base, reason: 'coarse-plan' }

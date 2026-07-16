@@ -5,9 +5,10 @@
 // only while the initial scan is in flight (before acquire returns), during which routed changes
 // are BUFFERED and replayed once, as a PK-keyed upsert against the seeded shadow, in the synchronous
 // cut. Once live, each routed change is classified through the escalation ladder — inline old >
-// shadow resolve > provably-irrelevant drop — and fires AT MOST ONCE per batch. A source resync
-// (gap) or a seed error/overflow DEMOTES to coarse (sound over-fire); schema drift RETIRES
-// (terminal). Firing is reported to the caller (the router owns per-identity notification).
+// shadow resolve > provably-irrelevant drop — and fires AT MOST ONCE per batch. A seed error, a
+// state-row overflow, or a caught apply-fault (the router faults a throwing graph) DEMOTES to coarse
+// (sound over-fire); schema drift RETIRES (terminal). Firing is reported to the caller (the router
+// owns per-identity notification).
 
 export { type LiveGraph, type LiveGraphSpec, type GraphState, type ApplyOutcome, type Inspection, createLiveGraph }
 
