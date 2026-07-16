@@ -38,11 +38,6 @@ describe('pushdown — column pruning (T4.B1)', () => {
   it('SELECT * demands every column', () => {
     expect(inputOf(qb.select().from(users)).columns).toBe('*')
   })
-
-  it('shadowNeed is false for a predicate-only input and true under a join', () => {
-    expect(inputOf(qb.select().from(users).where(eq(users.teamId, 5))).shadowNeed).toBe(false)
-    expect(inputOf(qb.select().from(users).innerJoin(teams, eq(teams.id, users.teamId))).shadowNeed).toBe(true)
-  })
 })
 
 describe('pushdown — σ conjunct partition (T4.B1)', () => {

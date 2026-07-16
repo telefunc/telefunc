@@ -59,7 +59,6 @@ type SeedDescriptor = {
   primaryKey: string[]
   columns: string[] | '*'
   residual: Predicate
-  shadowNeed: boolean
 }
 
 /** A compiled graph: `apply` feeds a whole commit and reports invalidation (coarse/stateless
@@ -294,7 +293,6 @@ function descriptorOf(plan: InputPlan): SeedDescriptor {
     primaryKey: plan.primaryKey,
     columns: plan.columns,
     residual: plan.residual,
-    shadowNeed: plan.shadowNeed,
   }
 }
 
@@ -331,7 +329,7 @@ function buildBranch(
     for (const stream of streams.values()) dirty.tap(stream)
     return undefined
   }
-  const afterExists = applyExists(joined.stream, existsSpecs, dirty)
+  const afterExists = applyExists(joined.stream, existsSpecs)
 
   // Aggregate output flows THROUGH the shared window → projection pipeline in SQL order —
   // there is no aggregate-specific terminal, so GROUP BY … ORDER BY … LIMIT is a topK over
@@ -431,7 +429,7 @@ function buildExistsSpec(
   covered.add(innerPlan.table)
   const innerKeyName = qualifiedKey(correlation.inner.table, correlation.inner.column)
   const innerKeys = builder.pipe(keyBy((row: Row) => correlationKey(row, innerKeyName)))
-  return { negated: false, outerKey: qualifiedKey(correlation.outer.table, correlation.outer.column), innerKeys }
+  return { outerKey: qualifiedKey(correlation.outer.table, correlation.outer.column), innerKeys }
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────
@@ -453,7 +451,6 @@ function registerDirtyTable(registry: Map<string, FeedInput[]>, table: string): 
     residual: { kind: 'true' },
     gate: { kind: 'true' },
     dirtyActive: true,
-    shadowNeed: false,
   }
   register(registry, plan) // no builder: a dirty-only input has no dataflow sink; only its adapter's dirty flag matters
 }

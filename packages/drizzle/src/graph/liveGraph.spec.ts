@@ -30,7 +30,7 @@ const neverExecutor = (): HydrationExecutor => ({
 })
 
 function fakeSeed(inputId: string, table: string, primaryKey: string[] = ['id']): SeedDescriptor {
-  return { inputId, table, alias: inputId, primaryKey, columns: '*', residual: { kind: 'true' }, shadowNeed: true }
+  return { inputId, table, alias: inputId, primaryKey, columns: '*', residual: { kind: 'true' } }
 }
 function statefulFake(seeds: SeedDescriptor[]): StatefulGraph {
   const noFire = { data: false, dirty: false, invalidated: false }

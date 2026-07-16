@@ -40,7 +40,6 @@ function fakeSeed(): SeedDescriptor {
     primaryKey: ['id'],
     columns: '*',
     residual: { kind: 'true' },
-    shadowNeed: true,
   }
 }
 function statefulFake(): StatefulGraph {

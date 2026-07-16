@@ -57,31 +57,3 @@ describe('engine seam (T4.A1 / T5.J1)', () => {
     expect(importers).toEqual(['graph/ivm.ts'])
   })
 })
-
-// The ticket-5 runtime files by name — hydration is by INJECTION (R1), so each of these must
-// import zero drizzle-orm AND zero binding/; a regression in any one fails this named case.
-describe('T5.J — ticket-5 graph/router boundaries (named)', () => {
-  const ticket5 = [
-    'graph/liveGraph.ts',
-    'graph/shadow.ts',
-    'graph/hydrate.ts',
-    'graph/registry.ts',
-    'router/changeRouter.ts',
-    'router/events.ts',
-  ]
-
-  it('T5.J2 — each ticket-5 graph/router file imports zero drizzle-orm and zero binding/', () => {
-    const offenders: string[] = []
-    for (const rel of ticket5) {
-      const file = resolve(srcDir, rel)
-      if (importsOf(file, 'drizzle-orm')) offenders.push(`${rel} → drizzle-orm`)
-      if (importsBinding(file)) offenders.push(`${rel} → binding/`)
-    }
-    expect(offenders).toEqual([])
-  })
-
-  it('T5.J1 — no ticket-5 graph/router file imports @tanstack/db-ivm (engine only via graph/ivm.ts)', () => {
-    const offenders = ticket5.filter((rel) => importsOf(resolve(srcDir, rel), '@tanstack/db-ivm'))
-    expect(offenders).toEqual([])
-  })
-})

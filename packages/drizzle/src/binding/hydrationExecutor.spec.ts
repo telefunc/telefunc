@@ -37,7 +37,6 @@ describe('#12 — the seed reads the schema-qualified relation', () => {
       primaryKey: ['id'],
       columns: '*',
       residual: { kind: 'true' },
-      shadowNeed: true,
     }
     const rows = await hydrationExecutorOf(db).scan(descriptor)
     expect(rows).toEqual([{ id: 1, tag: 'analytics' }]) // NOT { tag: 'public' } from the search path

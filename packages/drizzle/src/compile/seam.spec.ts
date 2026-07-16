@@ -38,7 +38,6 @@ describe('T5.A0 — runtime seam (per-input muted seed, self-join)', () => {
     for (const seed of graph.seeds) {
       expect(seed.table).toBe('users')
       expect(seed.primaryKey).toEqual(['id'])
-      expect(seed.shadowNeed).toBe(true)
     }
     // The two aliases carry DIFFERENT σ residuals (compared without the opaque `src` handle).
     const noSrc = (_key: string, value: unknown) => (_key === 'src' ? undefined : value)

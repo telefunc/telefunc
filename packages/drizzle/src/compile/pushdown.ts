@@ -30,9 +30,6 @@ type InputPlan = {
   /** This input carries an unprovable leaf (opaque predicate/projection/order), so a
    *  dirty witness is tapped here. */
   dirtyActive: boolean
-  /** A stateful operator downstream will keep pre-existing rows for this input — the
-   *  ticket-5 shadow signal. */
-  shadowNeed: boolean
 }
 
 type Change = { table: string; kind: 'insert' | 'update' | 'delete'; old?: Row; new?: Row }
@@ -51,7 +48,6 @@ function pushdownOf(shape: SelectShape): { inputs: InputPlan[]; crossResidual?: 
 
   const demand = demandOf(shape)
   const opaque = opaqueAliases(shape, realToAliases)
-  const stateful = isStateful(shape)
 
   const perAlias = new Map<string, Predicate[]>()
   const cross: Predicate[] = []
@@ -82,7 +78,6 @@ function pushdownOf(shape: SelectShape): { inputs: InputPlan[]; crossResidual?: 
       residual: requalify(residual),
       gate: requalify(frontier.gate),
       dirtyActive: frontier.active || opaque.has(ref.alias),
-      shadowNeed: stateful,
     }
   })
   return { inputs, crossResidual: cross.length ? { kind: 'and', parts: cross } : undefined }

@@ -33,7 +33,7 @@ function fakeExecutor(over: Partial<HydrationExecutor> = {}): HydrationExecutor 
 }
 
 function seed(inputId: string, table: string, primaryKey: string[] = ['id']): SeedDescriptor {
-  return { inputId, table, alias: inputId, primaryKey, columns: '*', residual: { kind: 'true' }, shadowNeed: true }
+  return { inputId, table, alias: inputId, primaryKey, columns: '*', residual: { kind: 'true' } }
 }
 
 function statefulFake(seeds: SeedDescriptor[]): StatefulGraph {

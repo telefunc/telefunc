@@ -11,28 +11,22 @@
 export { type ExistsSpec, applyExists, correlationKey }
 
 import { type IStreamBuilder, filterBy, keyBy, map } from '../graph/ivm.js'
-import type { DirtySink } from './dirty.js'
 import type { Row } from './rowSpace.js'
 import { canonicalValue } from '../utils/canonical.js'
 
 type ExistsSpec = {
-  negated: boolean
   /** The outer correlation column (qualified key) whose value keys the semi-join. */
   outerKey: string
   /** The inner rows, already σ-filtered, keyed by their correlation value. */
   innerKeys: IStreamBuilder<[string, Row]>
 }
 
-/** Apply each decorrelated EXISTS/IN as a semi-join (positive) or a dirty degradation
- *  (negated), threading the surviving outer rows through. */
-function applyExists(outer: IStreamBuilder<Row>, specs: ExistsSpec[], dirty: DirtySink): IStreamBuilder<Row> {
+/** Apply each decorrelated positive EXISTS/IN as a semi-join, threading the surviving outer rows
+ *  through. Negated EXISTS / NOT IN are NOT decorrelated here — the extractor leaves them in the
+ *  residual predicate, which taps dirty (the inner-NULL counterexample never misses). */
+function applyExists(outer: IStreamBuilder<Row>, specs: ExistsSpec[]): IStreamBuilder<Row> {
   let stream = outer
   for (const spec of specs) {
-    if (spec.negated) {
-      dirty.tap(stream)
-      dirty.tap(spec.innerKeys)
-      continue
-    }
     stream = stream
       .pipe(keyBy((row: Row) => correlationKey(row, spec.outerKey)))
       .pipe(filterBy(spec.innerKeys))
