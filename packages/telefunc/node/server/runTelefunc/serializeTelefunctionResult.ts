@@ -24,7 +24,6 @@ import { uint8ArrayToBase64url } from '../../../wire-protocol/base64url.js'
 import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/types.js'
 import { type RequestContext } from '../context/requestContext.js'
 import type { Context } from '../context/context.js'
-import { drainPostSerializeDisposers } from '../context/postSerialize.js'
 import type { ReplacerType, TypeContract, ServerReplacerContext } from '../../../wire-protocol/types.js'
 import type { Readable } from 'node:stream'
 
@@ -132,6 +131,9 @@ function serializeTelefunctionResult(runContext: {
     extensionResponseTypes,
   )
 
+  // The post-serialize disposer-drain (Ticket 6, R1) is driven by runTelefunc's OUTER finally around the
+  // whole execute→serialize pipeline — NOT here — so it also runs when a body/shield throw skips this
+  // function entirely (a serialize failure below still reaches it: the throw propagates to that finally).
   let httpResponseBody: string
   try {
     httpResponseBody = stringify(bodyValue, { forbidReactElements: true, replacer })
@@ -145,11 +147,6 @@ function serializeTelefunctionResult(runContext: {
         `Serialization error: ${lowercaseFirstLetter(err.message)}`,
       ].join(' '),
     )
-  } finally {
-    // Post-serialize disposer-drain (Ticket 6, R1): runs on BOTH the success and the serialize-failure
-    // path, after every activated handle redeemed its token during `stringify` — so e.g. the reactive-
-    // drizzle sweep can release read tokens that were minted but never activated. DB.live-agnostic.
-    drainPostSerializeDisposers(runContext.context)
   }
 
   if (useChannelPump || streamingValues.length === 0) {

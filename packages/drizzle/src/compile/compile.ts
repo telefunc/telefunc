@@ -17,6 +17,7 @@ export {
   type SeedDescriptor,
   type Change,
   compileQuery,
+  coarsePlan,
 }
 
 import { conjunctsOf } from '../extract/predicate.js'

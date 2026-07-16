@@ -1,4 +1,14 @@
-export { dialectOf, driverOf, clientOf, semanticEnvironmentKeyOf, rlsEnabledOf, rowRunnerFor, executeSql, entityKindOf }
+export {
+  dialectOf,
+  driverOf,
+  clientOf,
+  semanticEnvironmentKeyOf,
+  rlsEnabledOf,
+  rowRunnerFor,
+  executeSql,
+  entityKindOf,
+  isSingleSession,
+}
 export type { RlsStatus, RowRunner }
 
 import { type SQL, entityKind, sql } from 'drizzle-orm'

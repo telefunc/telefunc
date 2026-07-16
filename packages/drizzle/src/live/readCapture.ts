@@ -8,20 +8,21 @@
 // (disposeUnredeemedReads) releases it — net-zero, no leak. All engine complexity hides behind this
 // DbLiveRuntime seam; the reactiveDrizzle proxy is a thin typed consumer.
 
-export { wrapLiveSelect, disposeUnredeemedReads }
+export { wrapLiveSelect, disposeUnredeemedReads, compilePlanFor }
 export type { MintedToken, ReadCarrier }
 
 import { type Table, isTable } from 'drizzle-orm'
 import { Live } from 'telefunc'
 import type { ClientLive } from 'telefunc'
-import { compileQuery } from '../compile/compile.js'
+import { type GraphPlan, coarsePlan, compileQuery } from '../compile/compile.js'
 import type { Row } from '../compile/rowSpace.js'
-import { selectConfigOf } from './../binding/drizzleShape.js'
-import { dialectOf, rlsEnabledOf, semanticEnvironmentKeyOf } from '../binding/database.js'
+import { selectConfigOf } from '../binding/drizzleShape.js'
+import { dialectOf, isSingleSession, rlsEnabledOf, semanticEnvironmentKeyOf } from '../binding/database.js'
 import { hydrationExecutorOf } from '../binding/hydrationExecutor.js'
 import { schemaFingerprint } from '../extract/columns.js'
 import { identityOf } from '../extract/identity.js'
 import { extractQueryShape } from '../extract/queryShape.js'
+import type { QueryShape } from '../ir/types.js'
 import { type Registry, type ReadToken, createRegistry } from '../graph/registry.js'
 
 /** The per-input state cap: a stateful graph whose shadow exceeds it demotes to coarse (bounded,
@@ -93,16 +94,19 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
     instanceKey,
     tables: shape.tables,
     rlsEnabled,
-    compilePlan: () => compileQuery(shape),
+    compilePlan: compilePlanFor(db, shape),
     executor: hydrationExecutorOf(db),
     notify: () => live?.invalidate(),
   })
   void graph // the graph drives invalidation through `notify`; the handle needs no direct reference
 
+  // OWN the token on the carrier IMMEDIATELY — BEFORE the fallible σ-read — so a rejecting read still
+  // leaves a sweepable (un-redeemed) entry: the request finally-sweep releases it → net-zero, no leak.
+  const entry: MintedToken = { token, redeemed: false }
+  carrier.mintedTokens.push(entry)
+
   const initialRows = (await builder) as Row[] // Phase 1: the initial result is a plain read; the graph signals staleness
   live = new Live<Row[]>(initialRows)
-
-  const entry: MintedToken = { token, redeemed: false }
   live._attachSource({
     subscribe: () => {
       // Serialize-time activation (SYNC): redeem the token — subscribe its notify to the graph's sink
@@ -113,8 +117,15 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
       return () => lease.release()
     },
   })
-  carrier.mintedTokens.push(entry)
   return live.client
+}
+
+/** The plan compiler for one query, gated on session provability: a single-session connection (a
+ *  pinned pg Client / node:sqlite / single mysql Connection) compiles precisely; a POOLED-UNPINNED
+ *  connection can't prove the executing session's authority (role/search_path/RLS), so precise state
+ *  could hydrate from a mismatched session — force it COARSE (invalidate-on-any-change, sound). */
+function compilePlanFor(db: object, shape: QueryShape): () => GraphPlan {
+  return isSingleSession(db) ? () => compileQuery(shape) : () => coarsePlan(shape.tables)
 }
 
 /** Release every read token the request minted but never activated (a handle that was created but

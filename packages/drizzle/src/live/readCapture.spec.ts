@@ -6,12 +6,14 @@
 // registry.spec §6.2b/§6.2c — here we exercise the real redeem/lease wiring behind the seam.
 
 import { PGlite } from '@electric-sql/pglite'
+import { sql } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
 import type { ClientLive } from 'telefunc'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { extractQueryShape } from '../extract/queryShape.js'
 import type { ReadToken } from '../graph/registry.js'
-import { type ReadCarrier, disposeUnredeemedReads, wrapLiveSelect } from './readCapture.js'
+import { type ReadCarrier, compilePlanFor, disposeUnredeemedReads, wrapLiveSelect } from './readCapture.js'
 
 type UserRow = { id: number; tag: string }
 const users = pg.pgTable('users', { id: pg.integer('id').primaryKey(), tag: pg.text('tag') })
@@ -49,12 +51,37 @@ describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydra
     expect(carrier.mintedTokens[0]!.redeemed).toBe(false) // inert until serialize-time activation
   })
 
-  it('serialize-time _activate redeems the token (flips redeemed=true) — the source subscribe path', async () => {
+  it('serialize-time _activate REDEEMS the token — proven by a second redeem throwing (not just the flag)', async () => {
     const carrier = carrierOf()
     const live = await liveSelect(db.select().from(users), carrier)
-    expect(carrier.mintedTokens[0]!.redeemed).toBe(false)
+    const token = carrier.mintedTokens[0]!.token
     activate(live) // the wire replacer's _activate → the Live source subscribe → token.redeem()
     expect(carrier.mintedTokens[0]!.redeemed).toBe(true)
+    expect(() => token.redeem()).toThrow() // REAL registry consequence: actually redeemed (double-redeem rejected) — not the co-set flag
+  })
+
+  it('#1 — a rejecting σ-read still leaves a sweepable token on the carrier (net-zero, no leak)', async () => {
+    const carrier = carrierOf()
+    // acquire succeeds (born-coarse for the pooled PGlite conn → no scan); the initial read then throws (1/0).
+    await expect(liveSelect(db.select().from(users).where(sql`1 / 0 = 1`), carrier)).rejects.toThrow()
+    expect(carrier.mintedTokens).toHaveLength(1) // OWNED before the fallible read → sweepable (buggy push-after-await gave 0)
+    expect(carrier.mintedTokens[0]!.redeemed).toBe(false)
+    expect(() => disposeUnredeemedReads(carrier)).not.toThrow() // released → net-zero
+  })
+
+  it('#5 — a pooled-unpinned connection compiles a COARSE plan (no precise hydration from a mismatched session)', () => {
+    // PGlite's $client is not a pinned pg Client → isSingleSession=false → pooled-unpinned.
+    const shape = extractQueryShape(db.select().from(users), { dialect: 'pg' })
+    expect(compilePlanFor(db as object, shape)().coarse).toBe(true) // forced coarse; a precise plan would be .coarse=false
+  })
+
+  it('#2 (engine half) — an activated handle releases its lease on _release (channel close); the sweep then skips it, no double-release', async () => {
+    const carrier = carrierOf()
+    const live = await liveSelect(db.select().from(users), carrier)
+    activate(live) // _activate → redeem → lease
+    ;(live as unknown as { _release(): void })._release() // channel close/abort → source teardown → lease.release()
+    expect(carrier.mintedTokens[0]!.redeemed).toBe(true) // activated (channel-owned)
+    expect(() => disposeUnredeemedReads(carrier)).not.toThrow() // sweep skips the redeemed entry — lease already released, no double
   })
 })
 

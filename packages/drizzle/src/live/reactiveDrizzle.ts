@@ -21,19 +21,29 @@ import type { ClientLive } from 'telefunc'
 
 /** A live query: the SAME Drizzle select-builder chain, but awaiting it yields `ClientLive<T[]>` instead
  *  of `T[]`. Every chain method (`from`/`where`/`innerJoin`/…) returns another `LiveOf<…>`, carrying the
- *  live-ness to the terminal `await`; non-await surface (`toSQL`, `getSQL`) is preserved. */
+ *  live-ness to the terminal `await`; non-await surface (`toSQL`, `getSQL`) is preserved. A member that
+ *  returns a plain `Promise<rows>` rather than a builder — `.execute()`, `.catch`, `.finally` — is NOT
+ *  remapped: `.execute()` runs the query and resolves to PLAIN rows (it is never token-captured), so its
+ *  type must stay `Promise<rows>`, not `ClientLive`. db.live tracks ONLY the awaited-builder path. */
 type LiveOf<B> = B extends PromiseLike<infer R>
-  ? {
-      [K in keyof B]: B[K] extends (...args: infer A) => infer Ret ? (...args: A) => LiveOf<Ret> : B[K]
-    } & {
+  ? { [K in keyof B]: LiveMember<B[K]> } & {
       then<TResult1 = ClientLive<R>, TResult2 = never>(
         onfulfilled?: ((value: ClientLive<R>) => TResult1 | PromiseLike<TResult1>) | null,
         onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
       ): Promise<TResult1 | TResult2>
     }
-  : {
-      [K in keyof B]: B[K] extends (...args: infer A) => infer Ret ? (...args: A) => LiveOf<Ret> : B[K]
-    }
+  : { [K in keyof B]: LiveMember<B[K]> }
+
+/** Remap ONE builder member for `LiveOf`. A method whose return is a live-carrying drizzle query builder
+ *  — identified structurally by the builder's own `.execute()` method (drizzle's `QueryPromise`) — chains
+ *  to `LiveOf<…>`; everything else is preserved AS-IS: `.execute()` itself and the Promise methods
+ *  (`.catch`/`.finally`) return a plain `Promise`, `toSQL()` a plain object. So the type never falsely
+ *  claims liveness for a terminal db.live never captures. */
+type LiveMember<M> = M extends (...args: infer A) => infer Ret
+  ? Ret extends { execute: (...args: any[]) => any }
+    ? (...args: A) => LiveOf<Ret>
+    : M
+  : M
 
 /** The `.live` namespace: the query-producing methods of `TDb` (`select`; `db.query.*` is a fast-follow),
  *  each remapped so its terminal builder awaits to `ClientLive<T[]>`. Mutations are NOT here — writes go
