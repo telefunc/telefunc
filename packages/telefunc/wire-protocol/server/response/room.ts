@@ -92,6 +92,10 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteContract, ServerReplacerContext
         meta: entry.meta,
         joinedAt: entry.joinedAt,
         metaSeq: entry.metaSeq,
+        // App identity rides the snapshot: a directly-returned RemoteParticipant reports the trusted
+        // `identity` immediately, not `null`-until-roster (a reconcile won't re-stamp an already-
+        // revived entry). The local-participant replacer does the same.
+        identity: entry.identity,
         // The hidden flag rides the snapshot so a directly-returned hidden participant revives
         // off-presence (unlike the roster, a reconcile won't re-flag an already-revived entry).
         ...(entry.hidden ? { hidden: true } : {}),

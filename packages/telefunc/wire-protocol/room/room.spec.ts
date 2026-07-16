@@ -2745,7 +2745,7 @@ describe('returnable RemoteParticipant', () => {
 
   it('returns on its own — the backing room rides along and keeps the view live', async () => {
     const server = await Room.create('solo-view')
-    const bob = await server.join({ meta: { name: 'Bob' } })
+    const bob = await server.join({ meta: { name: 'Bob' }, identity: 'user:bob' })
     const member = (await server.getParticipant(bob.id))!
 
     const { serialize, parseBody, fakes } = makeRoundTrip()
@@ -2753,6 +2753,9 @@ describe('returnable RemoteParticipant', () => {
     expect(fakes.length).toBe(1) // the embedded room minted its (one) client stub
     expect(out.solo.id).toBe(bob.id)
     expect(out.solo.meta).toEqual({ name: 'Bob' })
+    // App identity rides the snapshot — a directly-returned view reports it immediately, not
+    // `null`-until-roster (there is no roster here to heal it).
+    expect(out.solo.identity).toBe('user:bob')
 
     // Live: the member's events flow through the embedded room's stub into the view.
     fakes[0]!.emit({ __r: 'p-meta', id: bob.id, meta: { name: 'Bobby' }, prev: { name: 'Bob' }, seq: 1 })

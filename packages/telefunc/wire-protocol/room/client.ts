@@ -192,6 +192,7 @@ class ClientRoom implements Room {
     meta: ParticipantMeta
     joinedAt: number
     metaSeq: number
+    identity: string | null
     hidden?: boolean
   }): RemoteParticipant {
     return this._state.ensureRemoteFromSnapshot(snap)
