@@ -247,7 +247,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined, kv: R
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
-  const room = await tryCreateRoom(id, options, getRoomKV())
+  const room = await tryCreateRoom(id, options, getRoomKV(id))
   if (room === null) throw new RoomError(`Room already exists: ${id}`)
   return room
 }
@@ -265,7 +265,7 @@ async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
 async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
   // Won the atomic create → the fresh room; lost it (or it already existed) → load the existing one.
-  return (await tryCreateRoom(id, options, getRoomKV())) ?? (await getRoom(id))
+  return (await tryCreateRoom(id, options, getRoomKV(id))) ?? (await getRoom(id))
 }
 
 const ROOM_GUARD_KEYS = [
@@ -319,11 +319,14 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
       (isObject(options) && (options.prefix === undefined || typeof options.prefix === 'string')),
     'Room.list() options.prefix should be a string',
   )
-  const kv = getRoomKV()
+  // The room enumeration is cross-room, so it reads from the unscoped (listable) store; each room's
+  // config and count then read from that room's own authority.
+  const index = getRoomKV()
   const rooms: RoomInfo[] = []
-  for (const key of await kv.keys(ROOM_KEY_NAMESPACE + (options?.prefix ?? ''))) {
+  for (const key of await index.keys(ROOM_KEY_NAMESPACE + (options?.prefix ?? ''))) {
     const id = roomIdFromConfigKey(key)
     if (id === null) continue
+    const kv = getRoomKV(id)
     const config = await readConfig(kv, id)
     if (config === null) continue // closed concurrently
     const count = await presenceCount(kv, id) // scan-only — no per-member reads, hidden excluded
@@ -665,7 +668,7 @@ class ServerRoom implements Room {
     identity: string | null,
     hidden = false,
   ): Promise<number> {
-    const kv = getRoomKV()
+    const kv = getRoomKV(this.id)
     await this._assertOpen(kv)
     const joinedAt = Date.now()
     const record: RoomMemberRecord = {
@@ -698,7 +701,7 @@ class ServerRoom implements Room {
   /** @internal */
   async _removeMember(id: string, cause: LeaveCause): Promise<void> {
     if (this._state.closed) return // close() already removed everyone
-    const kv = getRoomKV()
+    const kv = getRoomKV(this.id)
     const identity = this._state.getRemote(id)?.identity ?? null
     const hidden = this._state.isHidden(id)
     await kv.delete(roomMemberKvKey(this.id, id)) // record first — a lingering marker resolves to nothing
@@ -714,7 +717,7 @@ class ServerRoom implements Room {
   /** Delete a member's retained binary frames — the default lane plus every named track they
    *  published (from the live track set, no KV read). Deleting an absent key is a no-op. */
   private async _dropRetainedBinary(id: string): Promise<void> {
-    const kv = getRoomKV()
+    const kv = getRoomKV(this.id)
     await kv.delete(roomRetainedBinaryKey(this.id, id, DEFAULT_TRACK))
     for (const track of this._state.memberTracks(id)) await kv.delete(roomRetainedBinaryKey(this.id, id, track))
   }
@@ -735,7 +738,7 @@ class ServerRoom implements Room {
     id: string,
     computeMeta: (current: ParticipantMeta) => ParticipantMeta,
   ): Promise<void> {
-    const kv = getRoomKV()
+    const kv = getRoomKV(this.id)
     await this._assertOpen(kv)
     // One atomic read-modify-write: `computeMeta` merges/replaces onto the record actually present,
     // bumping the owner-issued revision. If a concurrent write lands first (a heartbeat, a racing
@@ -777,7 +780,7 @@ class ServerRoom implements Room {
     // Store before publishing live, so a subscriber that arrives around now is never left with a
     // gap: it either receives the live message (subscribed in time) or replays it (subscribed after
     // the store). The reverse order could drop it in the window between publish and store.
-    if (retain) await getRoomKV().set(roomRetainedTextKey(this.id), serialized)
+    if (retain) await getRoomKV(this.id).set(roomRetainedTextKey(this.id), serialized)
     return this._finishPublish(
       sender,
       data,
@@ -804,7 +807,10 @@ class ServerRoom implements Room {
     // expiry, so text and binary retention behave identically.
     if (frame.retain) {
       this._hasRetainedBinary = true
-      await getRoomKV().set(roomRetainedBinaryKey(this.id, from, frame.track ?? DEFAULT_TRACK), bytesToBase64(framed))
+      await getRoomKV(this.id).set(
+        roomRetainedBinaryKey(this.id, from, frame.track ?? DEFAULT_TRACK),
+        bytesToBase64(framed),
+      )
     }
     return this._finishPublish(
       sender,
@@ -860,7 +866,7 @@ class ServerRoom implements Room {
       announced = new Set()
       this._announcedTracks.set(from, announced)
     }
-    const kv = getRoomKV()
+    const kv = getRoomKV(this.id)
     // Atomic append: record the track on the member's record unless it's already there (a previous
     // owner incarnation recorded it). The compare-and-set re-runs on a concurrent record write, so the
     // append is never clobbered. Announce on the control lane only when this call actually added it.
@@ -975,7 +981,7 @@ class ServerRoom implements Room {
   private async _resolveMember(id: string): Promise<Sender | null> {
     const remote = this._state.getRemote(id)
     if (remote) return remote
-    const raw = await getRoomKV().get(roomMemberKvKey(this.id, id))
+    const raw = await getRoomKV(this.id).get(roomMemberKvKey(this.id, id))
     if (raw === null) return null
     const record = parse(raw) as RoomMemberRecord
     return { id, meta: record.meta, identity: record.identity ?? null }
@@ -1350,7 +1356,7 @@ class ServerRoom implements Room {
     prevWantsText: boolean,
     prevMemberWants: ReadonlySet<string>,
   ): Promise<void> {
-    const stored = await getRoomKV().get(roomRetainedTextKey(this.id))
+    const stored = await getRoomKV(this.id).get(roomRetainedTextKey(this.id))
     if (stored === null) return
     const from = (parse(stored) as RoomDataEnvelope).from
     if (prevWantsText || prevMemberWants.has(from) || !stub._wantsTextFrom(from)) return
@@ -1363,7 +1369,7 @@ class ServerRoom implements Room {
    *  frame is self-describing, so the sender/track come from the frame itself, not the key. */
   async _replayRetainedBinary(stub: RoomStubChannel, prevWants: BinaryWants): Promise<void> {
     if (!wantsAnyBinary(stub._binaryWants)) return
-    const kv = getRoomKV()
+    const kv = getRoomKV(this.id)
     for (const key of await kv.keys(roomRetainedBinaryPrefix(this.id))) {
       const stored = await kv.get(key)
       if (stored === null) continue
@@ -1581,7 +1587,7 @@ class ServerRoom implements Room {
       try {
         while (!this._state.closed) {
           const version = this._state.membershipVersion
-          const members = await readMembers(getRoomKV(), this.id)
+          const members = await readMembers(getRoomKV(this.id), this.id)
           if (this._state.membershipVersion !== version) continue
           const drifted = this._state.reconcile(members)
           this._syncSubs() // per-member lanes may need subscriptions for the members just learned
@@ -1627,7 +1633,7 @@ class ServerRoom implements Room {
     if (this._heartbeatBusy) return // a slow KV must not pile up overlapping ticks
     this._heartbeatBusy = true
     try {
-      const kv = getRoomKV()
+      const kv = getRoomKV(this.id)
       for (const id of this._ownedMemberIds()) {
         // Bump `seenAt` with a read-modify-write, not a whole-record `set`: the update only touches
         // `seenAt` on the record actually present, so a heartbeat can never clobber a concurrent
@@ -1761,7 +1767,7 @@ class ServerLocalParticipant extends ParticipantBase {
  *  each other (see the room-state discipline: create, config, member meta, tracks, heartbeat). */
 type RoomKV = Required<Pick<BroadcastAdapter, 'get' | 'set' | 'delete' | 'keys' | 'setIfAbsent' | 'update'>>
 
-function getRoomKV(): RoomKV {
+function getRoomKV(roomId?: string): RoomKV {
   const adapter = getBroadcastAdapter()
   const missing = (['get', 'set', 'delete', 'keys', 'setIfAbsent', 'update'] as const).filter(
     (method) => !adapter[method],
@@ -1770,13 +1776,27 @@ function getRoomKV(): RoomKV {
     missing.length === 0,
     `The installed broadcast adapter doesn't implement ${missing.map((m) => `\`${m}()\``).join(', ')} — the KV methods required by \`Room\`.`,
   )
-  return adapter as RoomKV
+  const kv = adapter as RoomKV
+  // Unscoped: a cross-room read (`Room.list`) has no single partition. On a sharded backend it lands
+  // on the shared, listable store rather than any one room's authority.
+  if (roomId === undefined) return kv
+  // Scoped: tag every op with the room's control-lane key, so a sharded backend routes all of one
+  // room's state to the single authority that already sequences that room (see `KvWriteOptions`).
+  const partitionKey = roomCtrlKey(roomId)
+  return {
+    get: (key) => kv.get(key, { partitionKey }),
+    set: (key, value, options) => kv.set(key, value, { ...options, partitionKey }),
+    delete: (key) => kv.delete(key, { partitionKey }),
+    keys: (prefix) => kv.keys(prefix, { partitionKey }),
+    setIfAbsent: (key, value, options) => kv.setIfAbsent(key, value, { ...options, partitionKey }),
+    update: (key, mutate, options) => kv.update(key, mutate, { ...options, partitionKey }),
+  }
 }
 
 /** Statics prologue: validate the ID and load the room's config — or throw `Room not found`. */
 async function requireRoom(id: string): Promise<{ kv: RoomKV; config: RoomConfigRecord }> {
   assertRoomId(id)
-  const kv = getRoomKV()
+  const kv = getRoomKV(id)
   const config = await readConfig(kv, id)
   if (config === null) throw new RoomError(`Room not found: ${id}`)
   return { kv, config }

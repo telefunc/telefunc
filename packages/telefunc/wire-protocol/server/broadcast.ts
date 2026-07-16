@@ -13,6 +13,8 @@ export type {
   BroadcastOnMessage,
   BroadcastBinaryOnMessage,
   KvMutate,
+  KvReadOptions,
+  KvWriteOptions,
 }
 
 import { assertUsage } from '../../utils/assert.js'
@@ -30,6 +32,13 @@ const KV_KEEP: unique symbol = Symbol('telefunc.kv.keep')
  *  MUST be pure and re-runnable: a compare-and-set backend may invoke it more than once (retry on
  *  a concurrent write). It may throw to abort the update (the error propagates to the caller). */
 type KvMutate = (current: string | null) => string | null | typeof KV_KEEP
+
+/** `partitionKey` groups keys that must share a home so a backend can co-locate and linearize them.
+ *  `Room` tags all of one room's keys with the room's control-lane key, so a sharded backend
+ *  (Cloudflare) routes them to the single Durable Object that already sequences that room — same
+ *  optimal location, one authority per room. Backends that don't shard (in-memory, Redis) ignore it. */
+type KvReadOptions = { partitionKey?: string }
+type KvWriteOptions = { ttlMs?: number; partitionKey?: string }
 
 /** Transport-level publish result. `receivers` is the key's live subscription count at the
  *  transport hop — `0` means nobody anywhere is subscribed (see `ChannelPublishAck.receivers`);
@@ -49,24 +58,24 @@ type BroadcastAdapter = {
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
   /** KV — required by `Room`. Reads the value stored at `key`, or `null` if absent. */
-  get?(key: string): string | null | Promise<string | null>
+  get?(key: string, options?: KvReadOptions): string | null | Promise<string | null>
   /** KV — required by `Room`. Stores `value` at `key` (upsert). `ttlMs` asks the store to
    *  expire the record on its own — the backstop that bounds crash leftovers even when no
    *  reader ever runs. Best-effort: stores without native expiry may ignore it. */
-  set?(key: string, value: string, options?: { ttlMs?: number }): void | Promise<void>
+  set?(key: string, value: string, options?: KvWriteOptions): void | Promise<void>
   /** KV — required by `Room`. Removes the value stored at `key` (no-op if absent). */
-  delete?(key: string): void | Promise<void>
+  delete?(key: string, options?: KvReadOptions): void | Promise<void>
   /** KV — required by `Room`. Lists all stored keys starting with `prefix`. */
-  keys?(prefix: string): string[] | Promise<string[]>
+  keys?(prefix: string, options?: KvReadOptions): string[] | Promise<string[]>
   /** KV — required by `Room`. Atomic create-if-absent: stores `value` only if `key` is absent,
    *  returning `true` when this call wrote (won the create) and `false` when the key already held a
    *  value. The race-free primitive behind `Room.create`. */
-  setIfAbsent?(key: string, value: string, options?: { ttlMs?: number }): boolean | Promise<boolean>
+  setIfAbsent?(key: string, value: string, options?: KvWriteOptions): boolean | Promise<boolean>
   /** KV — required by `Room`. Linearizable read-modify-write on one key: `mutate` sees the current
    *  value and returns the next (`null` deletes, `KV_KEEP` leaves it), with no other writer
    *  interleaving. Returns the stored value (`null` if deleted or kept-absent). The race-free
    *  primitive behind every room-state mutation (config, member meta, tracks, heartbeat). */
-  update?(key: string, mutate: KvMutate, options?: { ttlMs?: number }): string | null | Promise<string | null>
+  update?(key: string, mutate: KvMutate, options?: KvWriteOptions): string | null | Promise<string | null>
 }
 
 /**
@@ -91,20 +100,20 @@ type BroadcastTransport = {
     onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
   ): () => void
   /** Optional KV — required by `Room` when a transport is installed. Reads the value at `key`, or `null`. */
-  get?(key: string): string | null | Promise<string | null>
+  get?(key: string, options?: KvReadOptions): string | null | Promise<string | null>
   /** Optional KV — required by `Room` when a transport is installed. Stores `value` at `key`
    *  (upsert), expiring it after `ttlMs` when the backing store supports native expiry. */
-  set?(key: string, value: string, options?: { ttlMs?: number }): void | Promise<void>
+  set?(key: string, value: string, options?: KvWriteOptions): void | Promise<void>
   /** Optional KV — required by `Room` when a transport is installed. Removes the value at `key`. */
-  delete?(key: string): void | Promise<void>
+  delete?(key: string, options?: KvReadOptions): void | Promise<void>
   /** Optional KV — required by `Room` when a transport is installed. Lists stored keys starting with `prefix`. */
-  keys?(prefix: string): string[] | Promise<string[]>
+  keys?(prefix: string, options?: KvReadOptions): string[] | Promise<string[]>
   /** Optional KV — atomic create-if-absent (see `BroadcastAdapter.setIfAbsent`). A transport that
    *  backs `Room` state across nodes must implement this for race-free room creation. */
-  setIfAbsent?(key: string, value: string, options?: { ttlMs?: number }): boolean | Promise<boolean>
+  setIfAbsent?(key: string, value: string, options?: KvWriteOptions): boolean | Promise<boolean>
   /** Optional KV — linearizable read-modify-write (see `BroadcastAdapter.update`). A transport that
    *  backs `Room` state across nodes must implement this so concurrent writers converge without loss. */
-  update?(key: string, mutate: KvMutate, options?: { ttlMs?: number }): string | null | Promise<string | null>
+  update?(key: string, mutate: KvMutate, options?: KvWriteOptions): string | null | Promise<string | null>
 }
 
 // ---------------------------------------------------------------------------
@@ -207,27 +216,27 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   // the transport has to bring its own KV; silently falling back to the local Map
   // would split room state across nodes.
 
-  get(key: string): string | null | Promise<string | null> {
+  get(key: string, options?: KvReadOptions): string | null | Promise<string | null> {
     const transport = this.kvTransport('get')
-    if (transport) return transport.get!(key)
+    if (transport) return transport.get!(key, options)
     return this._readInMemory(key)
   }
 
-  set(key: string, value: string, options?: { ttlMs?: number }): void | Promise<void> {
+  set(key: string, value: string, options?: KvWriteOptions): void | Promise<void> {
     const transport = this.kvTransport('set')
     if (transport) return transport.set!(key, value, options)
     this._writeInMemory(key, value, options)
   }
 
-  delete(key: string): void | Promise<void> {
+  delete(key: string, options?: KvReadOptions): void | Promise<void> {
     const transport = this.kvTransport('delete')
-    if (transport) return transport.delete!(key)
+    if (transport) return transport.delete!(key, options)
     this.kvStore.delete(key)
   }
 
-  keys(prefix: string): string[] | Promise<string[]> {
+  keys(prefix: string, options?: KvReadOptions): string[] | Promise<string[]> {
     const transport = this.kvTransport('keys')
-    if (transport) return transport.keys!(prefix)
+    if (transport) return transport.keys!(prefix, options)
     const now = Date.now()
     const result: string[] = []
     for (const [key, entry] of this.kvStore) {
@@ -240,7 +249,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     return result
   }
 
-  setIfAbsent(key: string, value: string, options?: { ttlMs?: number }): boolean | Promise<boolean> {
+  setIfAbsent(key: string, value: string, options?: KvWriteOptions): boolean | Promise<boolean> {
     const transport = this.kvTransport('setIfAbsent')
     if (transport) return transport.setIfAbsent!(key, value, options)
     // Single isolate: read-then-write with no await between is atomic.
@@ -249,7 +258,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     return true
   }
 
-  update(key: string, mutate: KvMutate, options?: { ttlMs?: number }): string | null | Promise<string | null> {
+  update(key: string, mutate: KvMutate, options?: KvWriteOptions): string | null | Promise<string | null> {
     const transport = this.kvTransport('update')
     if (transport) return transport.update!(key, mutate, options)
     // Single isolate: read-mutate-write with no await between is atomic, so `mutate` runs exactly once.
