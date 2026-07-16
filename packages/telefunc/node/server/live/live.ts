@@ -24,6 +24,23 @@ type ClientLive<T> = {
   readonly isClosed: boolean
 }
 
+/** A server-owned source of invalidations for one Live (the engine graph, a tag subscription, …).
+ *  Attached before serialization via `_attachSource`; the replacer subscribes it only when the handle
+ *  crosses the wire, and releases it on the last owning channel's close. */
+type LiveActivationSource = {
+  subscribe(onInvalidate: () => void): () => void
+}
+
+// Callback-scoped dependency tracking for `Live.derived`: each `Live.derived(fn)` pushes a frame, and
+// every `Live.data` getter read during `fn` records its cell on the top frame (the Solid/Vue computed
+// idiom — synchronous, nothing request-global). Popped in `finally`, so a throwing `fn` never poisons
+// a later derivation.
+const trackingStack: Array<Set<Live<unknown>>> = []
+
+function track(cell: Live<unknown>): void {
+  trackingStack[trackingStack.length - 1]?.add(cell)
+}
+
 /** The producer end of a live value: construct it around a snapshot, drive it (`set`/`update`/
  *  `invalidate`), and return `.client`. Liveness is serialize-time — the wire replacer creates the
  *  channel only if this crosses the wire — so `.client` is a side-effect-free re-type. This module
@@ -41,12 +58,24 @@ class Live<T> {
   private hasPendingData = false
   private pendingInvalidate = false
   private flushScheduled = false
+  // ── serialize-time activation (deferred, cell-local lease-refcounted) ──
+  /** Deps read during a `Live.derived` callback, held INERT — subscribed only at serialization. */
+  private pendingDeps: Array<Live<unknown>> = []
+  /** A server-owned invalidation source (engine/tag), subscribed on the first lease. */
+  private source: LiveActivationSource | undefined
+  private sourceTeardown: (() => void) | undefined
+  /** Teardowns for activated pending deps (unsubscribe + cascade release). */
+  private activationTeardowns: Array<() => void> = []
+  /** One lease per owning channel; the source + deps activate on 0→1 and tear down on 1→0. */
+  private lease = 0
 
   constructor(data: T) {
     this.currentData = data
   }
 
   get data(): T {
+    // `Live<T>` is invariant in T (its tap arrays), so widen to the tracking type as `.client` does.
+    track(this as unknown as Live<unknown>)
     return this.currentData
   }
 
@@ -107,6 +136,79 @@ class Live<T> {
 
   static isLive(value: unknown): value is Live<unknown> {
     return typeof value === 'object' && value !== null && LIVE_BRAND in value
+  }
+
+  /** Computed sugar: run `fn` once (tracking which deps' `.data` were read), snapshot the value, and
+   *  record the deps as INERT pending descriptors — NO subscriptions at call time. The replacer
+   *  activates them at serialization (cascade `_activate`); a derived that never serializes subscribes
+   *  nothing. Invalidate-only forwarding (a dep's invalidation forwards to the derived; re-derivation
+   *  is the client's refetch re-running the telefunction). */
+  static derived<R>(fn: () => R): ClientLive<R> {
+    const frame = new Set<Live<unknown>>()
+    trackingStack.push(frame)
+    let value: R
+    try {
+      value = fn()
+    } finally {
+      trackingStack.pop()
+    }
+    const derived = new Live(value)
+    derived.pendingDeps = [...frame]
+    return derived.client
+  }
+
+  /** @internal — attach a server-owned invalidation source (the ticket-6 engine seam / tag wiring).
+   *  Inert until the first `_activate`. */
+  _attachSource(source: LiveActivationSource): void {
+    this.source = source
+  }
+
+  /** @internal — serialize-time activation, refcounted by cell-local leases (one per owning channel).
+   *  On the first lease it subscribes the source and cascade-activates each pending dep — idempotent,
+   *  so a dep also returned elsewhere activates EXACTLY ONCE — wiring each dep's `onInvalidate` to this
+   *  cell's `invalidate` (invalidate-only forwarding). */
+  _activate(): void {
+    this.lease++
+    if (this.lease !== 1) return
+    if (this.source) this.sourceTeardown = this.source.subscribe(() => this.invalidate())
+    for (const dep of this.pendingDeps) {
+      dep._activate()
+      const off = dep.onInvalidate(() => this.invalidate())
+      this.activationTeardowns.push(() => {
+        off()
+        dep._release()
+      })
+    }
+  }
+
+  /** @internal — release one lease (an owning channel closed). On the LAST release it tears down the
+   *  source subscription and cascade-releases each pending dep — exactly once, order-independent. */
+  _release(): void {
+    if (this.lease === 0) return
+    this.lease--
+    if (this.lease !== 0) return // a shared cell stays live while any owning channel remains
+    if (this.sourceTeardown) {
+      this.sourceTeardown()
+      this.sourceTeardown = undefined
+    }
+    for (const teardown of this.activationTeardowns) teardown()
+    this.activationTeardowns = []
+    void this.close()
+  }
+
+  /** @internal test-only — activation snapshot: lease count, tap counts, whether the source is live. */
+  _activationStateForTesting(): {
+    lease: number
+    invalidateListeners: number
+    dataListeners: number
+    sourceActive: boolean
+  } {
+    return {
+      lease: this.lease,
+      invalidateListeners: this.invalidateTaps.length,
+      dataListeners: this.dataTaps.length,
+      sourceActive: this.sourceTeardown !== undefined,
+    }
   }
 
   private scheduleFlush(): void {
