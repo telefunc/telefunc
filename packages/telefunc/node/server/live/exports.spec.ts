@@ -7,7 +7,6 @@ describe('telefunc live exports (§3.G)', () => {
     for (const name of [
       'liveTag',
       'invalidateTag',
-      'runWithLiveBatch',
       'addLiveSource',
       'incrementCounter',
       'snapshotCounters',

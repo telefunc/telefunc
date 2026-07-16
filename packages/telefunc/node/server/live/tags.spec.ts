@@ -2,7 +2,7 @@ import '../context/async.js' // install AsyncLocalStorage mode so context surviv
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { restoreContext } from '../context/context.js'
 import { getTagHub, configureLiveNamespace, _resetTagHubsForTesting, _setBarrierBudgetForTesting } from './tagHub.js'
-import { liveTag, invalidateTag, runWithLiveBatch, stampRequestStartFence, publishQueuedTags } from './tags.js'
+import { liveTag, invalidateTag, stampRequestStartFence, publishQueuedTags } from './tags.js'
 import { takeLiveSources } from './source.js'
 import { snapshotCounters, _resetCountersForTesting } from './telemetry.js'
 import {
@@ -185,55 +185,7 @@ describe('tag settle + publish (§3.D / §3.E)', () => {
       expect(new Set(batch.tags)).toEqual(new Set(['t', 'u']))
     }))
 
-  it('T1.E8 runWithLiveBatch publishes one deduped batch, awaited', async () => {
-    const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-    await runWithLiveBatch(async () => {
-      invalidateTag('report:42')
-      invalidateTag('report:42')
-    })
-    const batches = tagBatchCalls(publishSpy)
-    expect(batches).toHaveLength(1)
-    expect((parse(batches[0]![1] as string) as { tags: string[] }).tags).toEqual(['report:42'])
-  })
-
-  it('T1.E13 runWithLiveBatch rethrows the callback error; still publishes queued tags', async () => {
-    const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-    const boom = new Error('job failed')
-    await expect(
-      runWithLiveBatch(async () => {
-        invalidateTag('t')
-        throw boom
-      }),
-    ).rejects.toBe(boom)
-    expect(tagBatchCalls(publishSpy)).toHaveLength(1) // published in finally
-  })
-
-  it('T1.E8/E13 concurrent runWithLiveBatch scopes do not corrupt each other', async () => {
-    const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-    let releaseA: () => void = () => {}
-    let releaseB: () => void = () => {}
-    const gateA = new Promise<void>((resolve) => (releaseA = resolve))
-    const gateB = new Promise<void>((resolve) => (releaseB = resolve))
-    // Both batches enter their scope and pause BEFORE invalidating. With a process-global owner, B
-    // (entered last) would own the mutable state, so A's later invalidate would land in B's batch.
-    const a = runWithLiveBatch(async () => {
-      await gateA
-      invalidateTag('a')
-    })
-    const b = runWithLiveBatch(async () => {
-      await gateB
-      invalidateTag('b')
-    })
-    releaseA() // A invalidates first — under a global it would corrupt B's batch
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    releaseB()
-    await Promise.all([a, b])
-    const published = tagBatchCalls(publishSpy).map((c) => (parse(c[1] as string) as { tags: string[] }).tags)
-    expect(published).toContainEqual(['a']) // A's tag stayed in A's scope
-    expect(published).toContainEqual(['b']) // B's tag stayed in B's scope
-  })
-
-  it('T1.E9 invalidateTag outside a request / batch asserts', async () => {
+  it('T1.E9 invalidateTag outside a request asserts', async () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(() => invalidateTag('t')).toThrow()
   })

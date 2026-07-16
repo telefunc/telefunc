@@ -1,6 +1,5 @@
-export { liveTag, invalidateTag, runWithLiveBatch, stampRequestStartFence, publishQueuedTags }
+export { liveTag, invalidateTag, stampRequestStartFence, publishQueuedTags }
 
-import type { AsyncLocalStorage } from 'node:async_hooks'
 import { assertUsage } from '../../../utils/assert.js'
 import { getRawContext } from '../context/context.js'
 import { addLiveSource } from './source.js'
@@ -22,21 +21,6 @@ type TagState = {
   ownBatchIds: Set<string>
 }
 
-// Per-async-scope active batch (runWithLiveBatch). AsyncLocalStorage isolates concurrent job batches
-// from each other and from request state. `node:async_hooks` is loaded LAZILY (dynamic import on the
-// first batch use) and is never statically imported nor instantiated at module load — so this file
-// does not pull node:async_hooks into non-Node bundles (e.g. a Cloudflare worker booted without
-// nodejs_compat), and the request hot path (stampRequestStartFence/liveTag/the request side of
-// invalidateTag) never touches it. See client/poisen-pills/async_hooks.ts for the maintainers' fence.
-let batchStore: AsyncLocalStorage<Set<string>> | null = null
-
-async function getBatchStore(): Promise<AsyncLocalStorage<Set<string>>> {
-  if (batchStore) return batchStore
-  const { AsyncLocalStorage } = await import('node:async_hooks')
-  batchStore ??= new AsyncLocalStorage<Set<string>>()
-  return batchStore
-}
-
 /** Stamp the request-start fence and await the hub's readiness barrier once — runs before the body
  *  (core START step) so a tag published between the read and a later `liveTag()` still replays. */
 async function stampRequestStartFence(): Promise<void> {
@@ -54,10 +38,7 @@ async function stampRequestStartFence(): Promise<void> {
 
 function getRequestTagState(): TagState {
   const context = getRawContext()
-  assertUsage(
-    context,
-    'liveTag()/invalidateTag() can only be used inside a telefunction; use runWithLiveBatch() outside a request.',
-  )
+  assertUsage(context, 'liveTag()/invalidateTag() can only be used inside a telefunction.')
   const existing = context[TAGS] as TagState | undefined
   if (existing) return existing
   const hub = getTagHub()
@@ -101,16 +82,9 @@ function liveTag(tag: string): void {
   addLiveSource(source)
 }
 
-/** Queue an invalidation for `tag`, published as one deduped batch at settle. Inside a
- *  `runWithLiveBatch` scope it queues into that batch; inside a request, into request state;
- *  otherwise it's a usage error. */
+/** Queue an invalidation for `tag`, published as one deduped batch at settle. Inside a request it
+ *  queues into request state; outside a request it's a usage error. */
 function invalidateTag(tag: string): void {
-  // The ALS exists only once a batch has run; before that `batchStore` is null → the request path.
-  const batch = batchStore?.getStore()
-  if (batch) {
-    batch.add(tag)
-    return
-  }
   getRequestTagState().queued.add(tag)
 }
 
@@ -124,23 +98,6 @@ async function publishQueuedTags(): Promise<void> {
   const batchId = crypto.randomUUID()
   state.ownBatchIds.add(batchId)
   await publishTags(state.hub, tags, batchId)
-}
-
-/** Publish tags outside a request (jobs/cron). Awaitable — resolves after the batch is published.
- *  The callback's own error is rethrown; a publish failure is logged/counted, never masking it. The
- *  batch scope is an AsyncLocalStorage frame, so concurrent calls never corrupt each other. */
-async function runWithLiveBatch(cb: () => Promise<void> | void): Promise<void> {
-  const hub = getTagHub()
-  await hub.ready()
-  const store = await getBatchStore() // lazily loads node:async_hooks on the first batch/cron use only
-  const batch = new Set<string>()
-  await store.run(batch, async () => {
-    try {
-      await cb()
-    } finally {
-      await publishTags(hub, [...batch], crypto.randomUUID())
-    }
-  })
 }
 
 /** Publish one Broadcast batch. A transport failure is detected (counter + structured log) and the
