@@ -12,6 +12,7 @@ export {
   roomRetainedTextKey,
   roomRetainedBinaryKey,
   roomRetainedBinaryPrefix,
+  roomRetainedBinaryMemberPrefix,
   bytesToBase64,
   base64ToBytes,
   roomConfigKvKey,
@@ -140,6 +141,12 @@ function roomRetainedBinaryKey(roomId: string, memberId: string, track: string):
 /** KV prefix under which all of a room's retained binary frames live (`keys()` enumerates them). */
 function roomRetainedBinaryPrefix(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:rb:`
+}
+/** KV prefix under which one member's retained binary frames live — every track they retained. The
+ *  member ID is a delimiter-free UUID, so the trailing `:` makes it an unambiguous per-member scan
+ *  (used to drop a departed member's retained frames wherever they were stored). */
+function roomRetainedBinaryMemberPrefix(roomId: string, memberId: string): string {
+  return `${roomRetainedBinaryPrefix(roomId)}${memberId}:`
 }
 
 /** Uint8Array ⇄ base64, for stashing binary frames in string-only KV. `btoa`/`atob` are global on

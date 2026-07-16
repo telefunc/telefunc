@@ -1930,6 +1930,22 @@ describe('room stub channel', () => {
     expect(binaryFramesOf(peer)).toEqual([]) // reaped on leave — the stream is over
   })
 
+  it('kicking a member drops their retained frames too — including ones this node never stored', async () => {
+    const owner = (await Room.create('retain-kick')) as ServerRoom
+    const cam = await owner.join({ meta: { name: 'cam' } })
+    await cam.publishBinary(new Uint8Array([2]), { retain: true }) // default lane
+    await cam.publishBinary(new Uint8Array([9]), { track: 'screen', retain: true }) // named track
+    const adapter = getBroadcastAdapter()
+    const prefix = `telefunc:room:retain-kick:rb:${cam.id}:`
+    expect((await adapter.keys!(prefix)).length).toBe(2) // both lanes retained
+
+    // A kick goes through evictMember, which has no local track state for the member — cleanup must
+    // scan the member's retained keys, not rely on knowing its tracks.
+    await Room.removeParticipant('retain-kick', { id: cam.id })
+
+    expect(await adapter.keys!(prefix)).toEqual([]) // swept — no retained frame left behind
+  })
+
   it('replays a retained lane once — growing the want set never resends an already-covered lane', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('retain-once')
     const a = await serverRoom.join({ meta: { name: 'a' } })

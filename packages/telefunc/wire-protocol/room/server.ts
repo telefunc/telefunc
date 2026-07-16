@@ -45,6 +45,7 @@ import {
   roomRetainedTextKey,
   roomRetainedBinaryKey,
   roomRetainedBinaryPrefix,
+  roomRetainedBinaryMemberPrefix,
   bytesToBase64,
   base64ToBytes,
   unframeMemberId,
@@ -498,9 +499,6 @@ class ServerRoom implements Room {
    *  fetched-with-tail room that is never serialized (misuse) can't grow it without limit. */
   private readonly _tailHold: Array<{ serialized: string; rawInfo: WirePublishInfo; from: string }> = []
   private _tailTimer: ReturnType<typeof setTimeout> | null = null
-  /** Set once this node stores any retained binary frame, so a member's leave only pays the
-   *  retained-frame cleanup in rooms that actually use `publishBinary(…, { retain: true })`. */
-  private _hasRetainedBinary = false
   /** In-flight `send(…, { ack: true })`s awaiting the recipient's reply, keyed by `ackId`. `to` is
    *  the recipient, so a leave/close can fail the ones it strands. Empty at steady state. */
   private readonly _pendingDmAcks = new Map<string, { to: string; settle: (reply: DmReply) => void }>()
@@ -726,19 +724,20 @@ class ServerRoom implements Room {
     await kv.delete(roomMemberKvKey(this.id, id)) // record first — a lingering marker resolves to nothing
     if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
     if (hidden) await kv.delete(roomHiddenMemberKvKey(this.id, id))
-    // A leaving member's per-track streams end, so their retained frames go too — read before the
-    // leave applies, while the member's track set is still known. Room close prefix-sweeps the rest.
-    if (this._hasRetainedBinary) await this._dropRetainedBinary(id)
+    // A leaving member's per-track streams end, so their retained frames go too. Room close
+    // prefix-sweeps whatever a leave races past.
+    await this._dropRetainedBinary(id)
     this._applyLeave(id, cause)
     await publishCtrl(this.id, { __r: 'leave', id, ...leaveCauseToWire(cause) })
   }
 
-  /** Delete a member's retained binary frames — the default lane plus every named track they
-   *  published (from the live track set, no KV read). Deleting an absent key is a no-op. */
+  /** Delete a member's retained binary frames — every track, wherever stored. Scans the member's
+   *  retained-binary keys rather than this node's known track set, so a frame retained on another
+   *  node is still cleaned up (the set is instance-local; the keys are the source of truth).
+   *  Deleting an absent key is a no-op, so a member that retained nothing just pays one empty scan. */
   private async _dropRetainedBinary(id: string): Promise<void> {
     const kv = getRoomKV(this.id)
-    await kv.delete(roomRetainedBinaryKey(this.id, id, DEFAULT_TRACK))
-    for (const track of this._state.memberTracks(id)) await kv.delete(roomRetainedBinaryKey(this.id, id, track))
+    for (const key of await kv.keys(roomRetainedBinaryMemberPrefix(this.id, id))) await kv.delete(key)
   }
 
   /** @internal — full replace (`setMeta`). */
@@ -825,7 +824,6 @@ class ServerRoom implements Room {
     // retained-text slot, it's reaped by lifecycle (the publisher's leave, or room close), never by
     // expiry, so text and binary retention behave identically.
     if (frame.retain) {
-      this._hasRetainedBinary = true
       await getRoomKV(this.id).set(
         roomRetainedBinaryKey(this.id, from, frame.track ?? DEFAULT_TRACK),
         bytesToBase64(framed),
@@ -1961,6 +1959,8 @@ async function evictMember(
   // No local state here to tell whether the member was hidden — delete the marker unconditionally
   // (a no-op when it was a presence member).
   await kv.delete(roomHiddenMemberKvKey(roomId, memberId))
+  // Drop the kicked member's retained binary frames too (a kick doesn't run `_removeMember`).
+  for (const key of await kv.keys(roomRetainedBinaryMemberPrefix(roomId, memberId))) await kv.delete(key)
   await publishCtrl(roomId, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
 }
 
