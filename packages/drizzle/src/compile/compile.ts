@@ -39,7 +39,7 @@ import { type ExistsSpec, applyExists, correlationKey } from './existsStage.js'
 import { applyJoins, joinsExact } from './joinStage.js'
 import { type Change, type InputPlan, applyChange, pushdownOf } from './pushdown.js'
 import { projectFnOf, wholeRowFn } from './projectStage.js'
-import { type Row, qualifiedKey } from './rowSpace.js'
+import { type Row, qualifiedKey, rowChanged } from './rowSpace.js'
 import { type SetOpBranch, applySetOps } from './setOpsStage.js'
 import { applyWindow } from './windowStage.js'
 
@@ -79,7 +79,6 @@ type GraphPlan = {
   tables: string[]
   stateless: boolean
   coarse: boolean
-  inputs: Array<{ alias: string; table: string; columns: string[] | '*'; shadowNeed: boolean }>
   instantiate(): CompiledGraph
 }
 
@@ -113,10 +112,9 @@ function coarsePlan(tables: string[]): GraphPlan {
     tables,
     stateless: true,
     coarse: true,
-    inputs: tables.map((table) => ({ alias: table, table, columns: '*' as const, shadowNeed: false })),
     instantiate: () => ({
       apply(commit) {
-        const dirty = commit.some((change) => watched.has(change.table) && changed(change))
+        const dirty = commit.some((change) => watched.has(change.table) && rowChanged(change))
         return { data: false, dirty, invalidated: dirty }
       },
     }),
@@ -135,7 +133,6 @@ function statelessPlan(shape: SelectShape): GraphPlan {
     tables: shape.tables,
     stateless: true,
     coarse: false,
-    inputs: inputs.map(descriptor),
     instantiate: () => statelessEvaluator(inputs, extraTables, windowDirty, projectFn),
   }
 }
@@ -151,7 +148,7 @@ function statelessEvaluator(
       const acc = new Map<string, number>()
       let dirty = false
       for (const change of commit) {
-        if (extraTables.has(change.table) && changed(change)) dirty = true
+        if (extraTables.has(change.table) && rowChanged(change)) dirty = true
         for (const plan of inputs) {
           if (plan.table !== change.table) continue
           const delta = applyChange(plan, change)
@@ -177,17 +174,15 @@ function statelessEvaluator(
 // ── Stateful (dataflow) plan ────────────────────────────────────────
 
 function statefulPlan(shape: SelectShape): GraphPlan {
-  const { inputs } = pushdownOf(shape)
   return {
     tables: shape.tables,
     stateless: false,
     coarse: false,
-    inputs: inputs.map(descriptor),
     instantiate: () => statefulGraph(shape),
   }
 }
 
-type FeedInput = { plan: InputPlan; builder: RootStreamBuilder<Row> }
+type FeedInput = { plan: InputPlan; builder?: RootStreamBuilder<Row> }
 type SeedInput = { descriptor: SeedDescriptor; plan: InputPlan; builder: RootStreamBuilder<Row> }
 
 function statefulGraph(shape: SelectShape): StatefulGraph {
@@ -231,7 +226,7 @@ function statefulGraph(shape: SelectShape): StatefulGraph {
   const seedable = new Map<string, SeedInput>()
   for (const feeds of registry.values())
     for (const feed of feeds)
-      if (feed.builder !== DISCARD) {
+      if (feed.builder !== undefined) {
         assertUsage(!seedable.has(feed.plan.alias), `duplicate seed input id: ${feed.plan.alias}`)
         seedable.set(feed.plan.alias, { descriptor: descriptorOf(feed.plan), plan: feed.plan, builder: feed.builder })
       }
@@ -239,10 +234,10 @@ function statefulGraph(shape: SelectShape): StatefulGraph {
   // The one place a captured change becomes an engine feed: project + σ-filter via the input
   // adapter, buffer the pruned delta, and remember any row-space dirty. `apply` fans a whole
   // commit table-wise; `feedInput` gives the live graph per-alias control (no cross-alias fan).
-  const pump = (plan: InputPlan, builder: RootStreamBuilder<Row>, change: Change): void => {
+  const pump = (plan: InputPlan, builder: RootStreamBuilder<Row> | undefined, change: Change): void => {
     const delta = applyChange(plan, change)
     if (delta.dirty) pendingDirty = true
-    if (delta.data.length > 0) builder.sendData(new MultiSet(delta.data))
+    if (builder && delta.data.length > 0) builder.sendData(new MultiSet(delta.data))
   }
   const runBatch = (): FireResult => {
     graph.run()
@@ -440,11 +435,7 @@ function buildExistsSpec(
 
 // ── Shared helpers ──────────────────────────────────────────────────
 
-function descriptor(plan: InputPlan): GraphPlan['inputs'][number] {
-  return { alias: plan.alias, table: plan.table, columns: plan.columns, shadowNeed: plan.shadowNeed }
-}
-
-function register(registry: Map<string, FeedInput[]>, plan: InputPlan, builder: RootStreamBuilder<Row>): void {
+function register(registry: Map<string, FeedInput[]>, plan: InputPlan, builder?: RootStreamBuilder<Row>): void {
   const list = registry.get(plan.table) ?? []
   list.push({ plan, builder })
   registry.set(plan.table, list)
@@ -463,12 +454,8 @@ function registerDirtyTable(registry: Map<string, FeedInput[]>, table: string): 
     dirtyActive: true,
     shadowNeed: false,
   }
-  register(registry, plan, DISCARD)
+  register(registry, plan) // no builder: a dirty-only input has no dataflow sink; only its adapter's dirty flag matters
 }
-
-// A dirty-only input needs no dataflow sink; feeding it sends no data (the adapter yields
-// data rows, but they are discarded), only the adapter's dirty flag matters.
-const DISCARD = { sendData() {} } as unknown as RootStreamBuilder<Row>
 
 /** The inner tables of scalar / negated / non-decorrelatable subqueries referenced by this
  *  branch (opaque or exists leaves in WHERE/HAVING/ON, opaque projection items). Excludes
@@ -517,17 +504,6 @@ function hasPositiveExists(where: Predicate | undefined): boolean {
   return conjunctsOf(where).some(
     (conjunct) => conjunct.kind === 'exists' && !conjunct.negated && semiJoinable(conjunct),
   )
-}
-
-function changed(change: Change): boolean {
-  if (!change.old || !change.new) return true
-  return JSON.stringify(sortedEntries(change.old)) !== JSON.stringify(sortedEntries(change.new))
-}
-
-function sortedEntries(row: Row): Array<[string, unknown]> {
-  return Object.keys(row)
-    .sort()
-    .map((key) => [key, row[key]])
 }
 
 function conjunction(parts: Predicate[]): Predicate {

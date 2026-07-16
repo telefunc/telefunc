@@ -204,7 +204,6 @@ describe('T5.E1 — RLS-gated stateful graphs are born coarse', () => {
       tables: ['users'],
       stateless: false,
       coarse: false,
-      inputs: [{ alias: 'users', table: 'users', columns: '*' as const, shadowNeed: true }],
       instantiate: () => statefulFake([fakeSeed('users', 'users')]),
     }
     const r = await registry.acquire({

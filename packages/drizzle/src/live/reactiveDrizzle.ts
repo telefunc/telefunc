@@ -56,8 +56,10 @@ type DbLiveRuntime = {
   /** Per-request carrier acquisition — MUST run before the body's first await (reads the start-hook Set). */
   acquireCarrier(): DbLiveCarrier
   /** Wrap a live SELECT builder: engine acquire (eager hydrate + inert token → carrier) + await-builder
-   *  σ-seed → `ClientLive<T[]>`. Returns a live builder whose chain forwards + terminal await captures. */
-  wrapLiveSelect(baseBuilder: unknown, carrier: DbLiveCarrier): unknown
+   *  σ-seed → `ClientLive<T[]>`. Returns a live builder whose chain forwards + terminal await captures.
+   *  `db` (the acquired-db proxy target, constant per request) is threaded because acquire needs the DB
+   *  handle for the identity/RLS probes + the σ-scan executor + the per-DB registry — not just the builder. */
+  wrapLiveSelect(baseBuilder: unknown, carrier: DbLiveCarrier, db: unknown): unknown
   /** Auto-capture a plain mutation for the tx-scoped accumulator → `router.ingest` → Broadcast. */
   captureMutation(
     op: 'insert' | 'update' | 'delete',
@@ -106,7 +108,7 @@ function liveNamespace<TDb extends object>(db: TDb, carrier: DbLiveCarrier): Liv
   return {
     select(...args: unknown[]) {
       const baseBuilder = (db as { select: (...a: unknown[]) => unknown }).select(...args)
-      return requireRuntime().wrapLiveSelect(baseBuilder, carrier)
+      return requireRuntime().wrapLiveSelect(baseBuilder, carrier, db)
     },
   } as unknown as LiveNamespace<TDb>
 }

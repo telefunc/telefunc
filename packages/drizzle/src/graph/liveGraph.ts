@@ -14,7 +14,7 @@ export { type LiveGraph, type LiveGraphSpec, type GraphState, type ApplyOutcome,
 
 import type { Change, CompiledGraph, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
 import type { RowChange, TableChange } from '../router/events.js'
-import { canonicalValue } from '../utils/canonical.js'
+import { rowChanged } from '../compile/rowSpace.js'
 import { type HydrationExecutor, type Seed, createSeed } from './hydrate.js'
 import { type ShadowIndex, matchesResidual, pkOf, pruneRow } from './shadow.js'
 
@@ -171,7 +171,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
   // ── apply per state ───────────────────────────────────────────────
 
   function coarseApply(changes: TableChange[]): ApplyOutcome {
-    const hit = changes.some((change) => watched.has(change.table) && substantive(change))
+    const hit = changes.some((change) => watched.has(change.table) && rowChanged(change))
     if (hit) fire('coarse')
     return { invalidated: hit }
   }
@@ -180,7 +180,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     // Precise buffer, NOT coarse-invalidate: no subscriber exists yet (attach follows acquire's
     // blocked seed), and the read-in-progress is covered by the initial-read fence. Each buffered
     // change is replayed exactly once in the synchronous cut.
-    for (const change of changes) if (watched.has(change.table) && substantive(change)) oneShot.push(change)
+    for (const change of changes) if (watched.has(change.table) && rowChanged(change)) oneShot.push(change)
     return { invalidated: false }
   }
 
@@ -354,17 +354,4 @@ function replaySeedRace(descriptor: SeedDescriptor, shadow: ShadowIndex, change:
     const newPk = pkOf(descriptor, change.new)
     if (newPk !== undefined) shadow.put(newPk, pruneRow(descriptor, change.new))
   }
-}
-
-/** Whether a change actually changes anything (a pure replay update never invalidates). */
-function substantive(change: TableChange): boolean {
-  if (change.kind !== 'update') return true
-  if (!change.old || !change.new) return true
-  return canonicalValue(sorted(change.old)) !== canonicalValue(sorted(change.new))
-}
-
-function sorted(row: Record<string, unknown>): Array<[string, unknown]> {
-  return Object.keys(row)
-    .sort()
-    .map((key) => [key, row[key]])
 }

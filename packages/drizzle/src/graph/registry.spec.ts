@@ -47,15 +47,11 @@ function statefulFake(seeds: SeedDescriptor[]): StatefulGraph {
   }
 }
 
-const inputsOf = (tables: string[]): GraphPlan['inputs'] =>
-  tables.map((table) => ({ alias: table, table, columns: '*' as const, shadowNeed: false }))
-
 function coarsePlan(tables: string[]): GraphPlan {
   return {
     tables,
     stateless: true,
     coarse: true,
-    inputs: inputsOf(tables),
     instantiate: () => ({ apply: () => NO_FIRE }),
   }
 }
@@ -64,12 +60,11 @@ function statelessPlan(tables: string[]): GraphPlan {
     tables,
     stateless: true,
     coarse: false,
-    inputs: inputsOf(tables),
     instantiate: () => ({ apply: () => NO_FIRE }),
   }
 }
 function statefulPlan(tables: string[], seeds: SeedDescriptor[]): GraphPlan {
-  return { tables, stateless: false, coarse: false, inputs: inputsOf(tables), instantiate: () => statefulFake(seeds) }
+  return { tables, stateless: false, coarse: false, instantiate: () => statefulFake(seeds) }
 }
 
 function req(over: Partial<AcquireRequest> & { compilePlan: AcquireRequest['compilePlan'] }): AcquireRequest {
