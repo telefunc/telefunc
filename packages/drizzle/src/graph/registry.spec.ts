@@ -1,9 +1,10 @@
-// T5.A/D/F — the registry: canonical acquire dedup (A1), concurrent-share + failure recovery
-// (A2), activate-before-read spy order (A3), born-state by plan class (A4), refcount =
-// leases + unredeemed tokens with atomic redeem-transfer + immediate destroy (A5/A7),
-// state-row + no-PK born-coarse (A6), two-level identity with a bounded factory cache
-// (D1/D2), drift-retire (D3), and per-table coarse sentinels at cap (F1/F2/F3). All fakes are
-// deterministic — pending promises drive the async paths, never timers.
+// T5.A/D + §6 reopen — the registry: canonical acquire dedup (A1), concurrent-share + failure
+// recovery (A2), activate-before-read spy order (A3), born-state by plan class (A4), refcount =
+// leases + unredeemed tokens with atomic redeem-transfer + immediate destroy (A5/A7), state-row +
+// no-PK born-coarse (A6), two-level identity with a reference-scoped plan cache (D1/D2),
+// drift-retire (D3), and the db.live registry reopen (§6): subscribe-at-redeem (un-redeemed tokens
+// inert), the seqAtRead activation fence, and the dead-entry catch-up. All fakes are deterministic —
+// pending promises drive the async paths, never timers.
 
 import { describe, expect, it, vi } from 'vitest'
 import type { FireResult, GraphPlan, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
@@ -307,13 +308,14 @@ describe('T5.D2 — schema epoch in PlanKey', () => {
 
 // ── D3 — drift retires ──────────────────────────────────────────────
 
-describe('T5.D3 — drift retires (destroy + one coarse invalidation + recompile-on-next-read)', () => {
-  it('retirePlan destroys the instance, fires exactly one coarse invalidation, evicts the factory, and recompiles under the new epoch', async () => {
+describe('T5.D3 — drift retires (destroy + one coarse invalidation to wired subscribers + recompile-on-next-read)', () => {
+  it('retirePlan destroys the instance, fires one coarse invalidation to a redeemed subscriber, evicts the factory, and recompiles under the new epoch', async () => {
     const registry = registryOf()
     const notify = vi.fn()
     const r = await registry.acquire(
       req({ planKey: 'q@e1', instanceKey: 'I1', compilePlan: () => coarsePlan(['users']), notify }),
     )
+    r.token.redeem() // a wired subscriber (leased) — retire must coarse-notify it (subscribe-at-redeem)
     registry.retirePlan('q@e1')
     expect(r.graph.state()).toBe('retired')
     expect(notify).toHaveBeenCalledTimes(1)
@@ -325,19 +327,105 @@ describe('T5.D3 — drift retires (destroy + one coarse invalidation + recompile
     expect(r2.graph.state()).toBe('coarse')
   })
 
-  it('retire transfers teardown ownership: a still-open token released after retire is inert (torn down once)', async () => {
+  it('teardown-once: a redeemed lease released after retire is inert (no double teardown, no re-notify)', async () => {
     const registry = registryOf()
     const notify = vi.fn()
     const r = await registry.acquire(
       req({ planKey: 'p', instanceKey: 'I0', compilePlan: () => coarsePlan(['users']), notify }),
     )
-    registry.retirePlan('p') // retire owns the single teardown
+    const lease = r.token.redeem() // wired subscriber
+    registry.retirePlan('p') // retire owns the single teardown; fires one coarse invalidation
     expect(r.graph.state()).toBe('retired')
     expect(registry.inspect().graphs).toBe(0)
     expect(registry.inspect().factories).toBe(0) // plan dropped exactly once
-    r.token.release() // the token was still open at retire; its late release MUST be inert (no double teardown)
+    lease.release() // the lease was open at retire; its late release MUST be inert (no double teardown)
     expect(registry.inspect().graphs).toBe(0) // still gone — no resurrection, no negative accounting
     expect(registry.inspect().factories).toBe(0)
     expect(notify).toHaveBeenCalledTimes(1) // retire fired one coarse invalidation; the late release did not re-notify
+  })
+})
+
+// ── §6 — db.live registry reopen re-certification (seams 1+2) ────────
+// Each case discriminates a seam: reverting subscribe-mint→redeem (seam 1) breaks the inert-token
+// assertions; reverting the seqAtRead/dead-entry fence (seam 2) breaks the catch-up assertions.
+
+describe('§6.1/6.2 — un-redeemed token is inert; the redeem fence replays exactly once', () => {
+  it('a change routed during the read window does not notify the inert token, then redeem fires it once', async () => {
+    const registry = registryOf()
+    const notify = vi.fn()
+    const r = await registry.acquire(
+      req({ instanceKey: 'inst-fence', compilePlan: () => coarsePlan(['users']), notify }),
+    )
+    // Read window: minted but NOT redeemed → the token has joined no sink (seam 1).
+    registry.router.ingest({ changes: [{ table: 'users', kind: 'insert', new: { id: 1 } }] })
+    expect(notify).toHaveBeenCalledTimes(0) // seam 1: nothing fires into the not-yet-wired channel
+    r.token.redeem()
+    expect(notify).toHaveBeenCalledTimes(1) // seam 2: the fence replays the missed change exactly once
+  })
+})
+
+describe('§6.3 — a clean redeem fires no notify', () => {
+  it('redeem with no change since the σ-read does not spuriously fire', async () => {
+    const registry = registryOf()
+    const notify = vi.fn()
+    const r = await registry.acquire(req({ compilePlan: () => coarsePlan(['users']), notify }))
+    r.token.redeem() // seqAtRead === invalidationSeq() → fence dormant
+    expect(notify).toHaveBeenCalledTimes(0)
+  })
+})
+
+describe('§6.4 — drift during the read window reaches the token at redeem', () => {
+  it('retirePlan before redeem: the dead-entry redeem fires one catch-up notify and takes no lease/subscription', async () => {
+    const registry = registryOf()
+    const notify = vi.fn()
+    const r = await registry.acquire(
+      req({ planKey: 'q@e1', instanceKey: 'I1', compilePlan: () => coarsePlan(['users']), notify }),
+    )
+    registry.retirePlan('q@e1') // drift during the read window: the entry is finalized (dead), its sink dropped
+    expect(notify).toHaveBeenCalledTimes(0) // the un-redeemed token was never subscribed → retire fired nothing to it
+    const lease = r.token.redeem() // dead-entry branch: one catch-up notify, no lease/subscription
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(registry.inspect().graphs).toBe(0) // no resurrection — the dead identity stays torn down
+    lease.release() // the no-op lease is inert
+    expect(registry.inspect().graphs).toBe(0)
+  })
+
+  it('retirePlan before release: releasing the un-redeemed token after drift is inert', async () => {
+    const registry = registryOf()
+    const notify = vi.fn()
+    const r = await registry.acquire(
+      req({ planKey: 'q@e2', instanceKey: 'I2', compilePlan: () => coarsePlan(['users']), notify }),
+    )
+    registry.retirePlan('q@e2')
+    r.token.release() // un-redeemed, entry already dead → inert, no throw, no re-notify
+    expect(registry.inspect().graphs).toBe(0)
+    expect(notify).toHaveBeenCalledTimes(0) // never subscribed → retire and release both silent
+  })
+})
+
+describe('§6.5 — a never-redeemed token disposes net-zero', () => {
+  it('the eagerly-hydrated graph is created then fully disposed on release; zero fires', async () => {
+    const registry = registryOf()
+    const notify = vi.fn()
+    const r = await registry.acquire(
+      req({ compilePlan: () => statefulPlan(['users'], [seed('users', 'users')]), notify }),
+    )
+    expect(registry.inspect().graphs).toBe(1) // eager hydrate (synchronous seed) allocated the graph
+    r.token.release() // never serialized → release the un-redeemed token
+    expect(r.graph.state()).toBe('destroyed')
+    expect(registry.inspect().graphs).toBe(0) // NET-ZERO: created-then-disposed, back to baseline
+    expect(notify).toHaveBeenCalledTimes(0) // never wired → zero fires
+  })
+})
+
+describe('§6.6 — redeem transfers with no transient zero; double-redeem throws', () => {
+  it('redeem keeps the graph alive across the token→lease transfer and rejects a second redeem', async () => {
+    const registry = registryOf()
+    const r = await registry.acquire(req({ compilePlan: () => coarsePlan(['users']) }))
+    const lease = r.token.redeem()
+    expect(r.graph.state()).not.toBe('destroyed') // never dipped to zero during the transfer
+    expect(() => r.token.redeem()).toThrow() // double redeem rejected
+    lease.release()
+    expect(r.graph.state()).toBe('destroyed')
   })
 })

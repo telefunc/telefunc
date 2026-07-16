@@ -68,8 +68,9 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
   // Per-identity subscriber sets: several acquires of the SAME instanceKey are distinct live
   // subscribers of ONE shared graph (independent channels), so an invalidation must notify EVERY
   // one — a single callback per key would silence all but the last. A subscriber joins when its read
-  // token is minted and leaves on that token/lease's final release; refcount is unchanged (leases +
-  // tokens), so the last subscriber out still disposes the graph.
+  // token is REDEEMED (serialize-time activation, NOT mint — an un-redeemed token is inert) and
+  // leaves on that lease's final release; refcount (leases + tokens) is independent, so the last
+  // subscriber out still disposes the graph.
   const sinks = new Map<string, Set<() => void>>()
   const subscribe = (key: string, notify: () => void): (() => void) => {
     let set = sinks.get(key)
@@ -138,20 +139,36 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
 
   function mintToken(entries: Entry[], identityKey: string, seqAtRead: number, notify: () => void): ReadToken {
     for (const entry of entries) entry.tokens++
-    // Join the subscriber set at MINT (not redeem): an unredeemed read token whose plan drifts
-    // (retirePlan) must still be told to re-read.
-    const unsubscribe = subscribe(identityKey, notify)
+    // Seam 1 (db.live serialize-time activation): an un-redeemed token joins NO sink — it is INERT.
+    // The subscription is made at REDEEM (activation), when the channel that consumes `notify` exists.
+    // Any invalidation during the read window (mint→redeem) would fire into a not-yet-wired channel;
+    // the redeem fence (seam 2) replays it exactly once against the just-wired channel, so nothing is
+    // lost and nothing fires prematurely.
     let phase: 'open' | 'redeemed' | 'released' = 'open'
     return {
       instanceKey: identityKey,
       seqAtRead,
       redeem() {
         assertUsage(phase === 'open', 'read token already redeemed or released')
+        phase = 'redeemed'
+        // Seam 2 — the σ-read→activation fence, dead branch: the plan drifted (retirePlan finalized
+        // this entry during the read window), so the graph is gone. Fire ONE catch-up notify so the
+        // just-wired channel re-reads (a fresh acquire recompiles under the new epoch), and take NO
+        // lease / subscription on the dead identity — subscribing would resurrect a sink for a
+        // torn-down entry. The mint-time token++ is balanced here; the dead entry's sweep is inert.
+        if (entries.some((entry) => entry.dead)) {
+          for (const entry of entries) entry.tokens--
+          notify()
+          return { release() {} }
+        }
         for (const entry of entries) {
           entry.leases++ // add the lease BEFORE dropping the token — refcount never dips to zero
           entry.tokens--
         }
-        phase = 'redeemed'
+        const unsubscribe = subscribe(identityKey, notify) // seam 1: join the sink AT activation
+        // Seam 2 — the fence, live branch: a change landed between the σ-read (seqAtRead, captured at
+        // mint) and this activation, so the just-wired channel would miss it. Replay exactly once.
+        if (entries.some((entry) => entry.graph.invalidationSeq() > seqAtRead)) notify()
         let released = false
         return {
           release() {
@@ -169,7 +186,8 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
         if (phase === 'released') return // idempotent
         assertUsage(phase === 'open', 'read token already redeemed')
         phase = 'released'
-        unsubscribe()
+        // Un-redeemed release: the token never joined a sink (seam 1), so there is nothing to
+        // unsubscribe — drop the ref and sweep (net-zero: the eagerly-hydrated graph is disposed).
         for (const entry of entries) {
           entry.tokens--
           sweep(entry)
