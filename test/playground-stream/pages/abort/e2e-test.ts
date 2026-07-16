@@ -123,6 +123,15 @@ function testAbort() {
     await resetCleanupState()
 
     await page.click('#test-slow-normal-telefunc')
+    // Deterministic in-flight gate: abort only once the server telefunc is actually running (its
+    // `onClose` is registered, so the abort is guaranteed to land mid-flight and break the loop). This
+    // replaces the client's old fixed 1500ms abort timer, which raced call-establishment on slow preview
+    // variants and intermittently let the call complete normally (isAbort undefined).
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.slowNormal).toBe('running')
+    })
+    await page.click('#test-slow-normal-abort')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
       expect(result.isAbort).toBe(true)
