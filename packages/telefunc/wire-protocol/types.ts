@@ -33,6 +33,7 @@ export type {
   FileDownloadMetadata,
   BlobDownloadMetadata,
   ChannelContract,
+  LiveContract,
   BroadcastContract,
   FunctionContract,
   FileDownload,
@@ -43,6 +44,7 @@ export type {
 import type { ServerChannel } from './server/channel.js'
 import type { ServerBroadcast } from './server/server-broadcast.js'
 import type { ClientChannel, ClientBroadcast } from './client/channel.js'
+import type { Live, ClientLive } from '../node/server/live/live.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
 import type { FileDownload, BlobDownload } from './client/response/DownloadClasses.js'
@@ -239,6 +241,10 @@ type BlobDownloadResponseContract = TypeContract<BlobDownload, BlobDownload, Blo
 type DownloadProgress = (loaded: number, total: number | undefined) => void
 
 type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
+
+/** A live value on the wire: the initial snapshot `data` + the opaque channel ref. Serialize-time
+ *  activation creates the channel only when a `ClientLive` crosses the wire (no tags/identities). */
+type LiveContract = TypeContract<Live<unknown>, ClientLive<unknown>, { data: unknown; channelId: string }>
 
 type BroadcastContract = TypeContract<ServerBroadcast, ClientBroadcast, { channelId: string; key: string }>
 
