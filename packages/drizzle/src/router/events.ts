@@ -1,20 +1,12 @@
-// The positioned change envelope (final-plan §5.6, audit switch #7; T5.G5). A source emits
-// `ChangeBatch`es carrying predecessor linkage (R4) so the router can detect duplicates and
-// gaps deterministically; ticket 5 ships the SHAPE + (de)serialization + the heartbeat
-// contract, not a live source (tickets 6–7). Serialization round-trips every ordinary SQL
-// value (BigInt, Date, byte arrays, NULL, composite PKs) via explicit type tags — a value is
-// never silently corrupted — and degrades to a coarse resync ONLY for genuinely unserializable
-// payloads (cyclic / function) or a batch past the configurable size bound.
+// The change envelope + value codec (final-plan §5.6). A ChangeSource emits `ChangeBatch`es —
+// ordered, atomic sets of TableChanges from one committed transaction. Ordering and delivery
+// reliability are the SOURCE's own concern, so the shared shape carries NO transport position
+// (no LSN, no cursor). The codec round-trips every ordinary SQL value (BigInt, Date, byte arrays,
+// NULL, composite PKs) via explicit type tags so a value is never silently corrupted, and returns a
+// typed failure ONLY for genuinely unserializable payloads (cyclic / function). A wire-based source
+// (CDC) uses the codec; the in-process ORM source needs no wire.
 
-export {
-  type Row,
-  type TableChange,
-  type ChangeBatch,
-  type SerializeResult,
-  DEFAULT_MAX_BATCH_BYTES,
-  serializeBatch,
-  deserializeBatch,
-}
+export { type Row, type TableChange, type ChangeBatch, type SerializeResult, serializeBatch, deserializeBatch }
 
 type Row = Record<string, unknown>
 
@@ -29,27 +21,14 @@ type TableChange = {
   key?: Row
 }
 
-/** A positioned batch. `predecessor` is the position of the immediately-preceding frame on
- *  this source (`null` for the first) — CDC `{ lsn, prevLsn }`, or a per-source/per-writer
- *  contiguous ordinal. `heartbeat` frames carry no changes and advance liveness only. */
-type ChangeBatch = {
-  sourceId: string
-  position: number
-  predecessor: number | null
-  heartbeat?: boolean
-  changes: TableChange[]
-}
+/** An ordered, atomic set of changes from one committed transaction. */
+type ChangeBatch = { changes: TableChange[] }
 
-/** ~1 MB default; a source may configure a different bound. */
-const DEFAULT_MAX_BATCH_BYTES = 1_000_000
+type SerializeResult = { ok: true; wire: string; bytes: number } | { ok: false; reason: 'cyclic' | 'function' }
 
-type SerializeResult =
-  | { ok: true; wire: string; bytes: number }
-  | { ok: false; reason: 'cyclic' | 'function' | 'oversize' }
-
-/** Encode a batch to a wire string. Returns a typed failure (never throws, never silently
- *  drops) so the router can degrade the batch to a coarse resync. */
-function serializeBatch(batch: ChangeBatch, maxBytes: number = DEFAULT_MAX_BATCH_BYTES): SerializeResult {
+/** Encode a batch to a wire string. Returns a typed failure (never throws, never silently drops) so
+ *  a wire-based source can degrade rather than corrupt. */
+function serializeBatch(batch: ChangeBatch): SerializeResult {
   let node: unknown
   try {
     node = encode(batch, new Set())
@@ -57,9 +36,7 @@ function serializeBatch(batch: ChangeBatch, maxBytes: number = DEFAULT_MAX_BATCH
     return { ok: false, reason: (error as EncodeError).reason }
   }
   const wire = JSON.stringify(node)
-  const bytes = wire.length
-  if (bytes > maxBytes) return { ok: false, reason: 'oversize' }
-  return { ok: true, wire, bytes }
+  return { ok: true, wire, bytes: wire.length }
 }
 
 function deserializeBatch(wire: string): ChangeBatch {

@@ -182,7 +182,7 @@ describe('T5.I2 — inspect() is bounded (one reason per transition, counters do
     const graph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     const snap1 = graph.inspect()
     expect(snap1.state).toBe('live')
-    const keys = ['coarseFires', 'demotions', 'dirtyFires', 'exactFires', 'resyncs', 'seeds', 'stateRows']
+    const keys = ['coarseFires', 'demotions', 'dirtyFires', 'exactFires', 'seeds', 'stateRows']
     expect(Object.keys(snap1.counters).sort()).toEqual(keys)
 
     for (let i = 0; i < 50; i++) graph.apply([{ table: 'users', kind: 'insert', new: { id: 100 + i, team_id: 5 } }])

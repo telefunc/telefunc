@@ -1,33 +1,37 @@
-// The positioned change router (final-plan §5.6, audit switch #7; T5.G). One `ingest` per
-// positioned batch: a predecessor-linked cursor per source suppresses duplicates and detects
-// gaps (a non-adjacent-but-LINKED position is NOT a gap). An accepted batch fans to each
-// affected graph's `apply(union-slice)` EXACTLY ONCE, synchronously, in source order — never
-// merged across batches — then notifies ≤1 per graph AND per attached identity (a multi-table
-// identity reached through two per-table sentinels is deduped to one). A detected gap, a
-// throwing apply, or an unserializable/oversize batch fails closed to a coarse resync
-// (invalidate once + re-warm stateful); the cursor advances ONLY after successful routing, so
-// loss is always converted to sound coarse recovery, never silence.
+// The change router (final-plan §5.6; T5.G). A ChangeSource emits ordered, atomic TableChange
+// batches; the router fans each batch to every affected graph's `apply(union-slice)` EXACTLY ONCE,
+// synchronously, in order — one commit = one graph tick, never merged across batches — then notifies
+// ≤1 per graph AND per attached identity. Transport reliability (in-order delivery, gap/duplicate
+// handling, LSN positions, reconnect) is each SOURCE's own concern behind the ChangeSource
+// interface; the shared router carries NONE of it. A graph whose `apply` throws is isolated: its
+// identity is coarse-notified so its subscribers re-read, and the other graphs in the batch are
+// unaffected — the error is SURFACED (counter + structured log), never swallowed.
 
-export { type RoutableGraph, type Router, type RouterInspection, createRouter }
+export { type RoutableGraph, type ChangeSource, type Router, type RouterInspection, createRouter }
 
 import type { ApplyOutcome } from '../graph/liveGraph.js'
-import { type ChangeBatch, type SerializeResult, type TableChange, serializeBatch } from './events.js'
+import type { ChangeBatch, TableChange } from './events.js'
 
-/** What the router indexes and drives. A normal graph yields its own identity key; a coarse
- *  sentinel yields every attached identity key (so the batch-level dedup fires each once). */
+/** What the router indexes and drives. Each graph yields its own identity key(s); a batch that
+ *  touches one graph through several tables still notifies its identity ≤1. */
 type RoutableGraph = {
   readonly tables: readonly string[]
   apply(changes: TableChange[]): ApplyOutcome
   notifyKeys(): Iterable<string>
-  /** gap / resync → re-warm stateful graphs (coarse graphs no-op). */
-  resync(): void
 }
 
-type RouterInspection = {
-  sources: number
-  graphs: number
-  counters: { accepted: number; duplicates: number; gaps: number; degraded: number; notifies: number }
+/** ChangeSource: ordered atomic TableChange batches; the source owns its own reliability — a CDC
+ *  source's LSN, gap detection, resync and reconnect all live INSIDE it, never here. The
+ *  `@telefunc/postgres` integration point — duplicated there for CDC; the ORM binding implements it
+ *  in-process. `watchTables` tells the source which relations to observe; `subscribe` delivers each
+ *  committed batch and returns an unsubscribe. (Ticket 5 defines the contract; sources arrive in
+ *  tickets 6–7.) */
+type ChangeSource = {
+  watchTables(tables: string[]): void
+  subscribe(onBatch: (batch: ChangeBatch) => void): () => void
 }
+
+type RouterInspection = { graphs: number; notifies: number; applyErrors: number }
 
 type Router = {
   register(graph: RoutableGraph): void
@@ -36,41 +40,11 @@ type Router = {
   inspect(): RouterInspection
 }
 
-function createRouter(config: {
-  notify: (identityKey: string) => void
-  maxBatchBytes?: number
-}): Router {
+function createRouter(config: { notify: (identityKey: string) => void }): Router {
   const index = new Map<string, Set<RoutableGraph>>()
   const all = new Set<RoutableGraph>()
-  const cursors = new Map<string, number>()
-  const counters = { accepted: 0, duplicates: 0, gaps: 0, degraded: 0, notifies: 0 }
-
-  const notifyAll = (keys: Set<string>): void => {
-    for (const key of keys) {
-      counters.notifies++
-      config.notify(key)
-    }
-  }
-
-  const resyncAll = (): void => {
-    const keys = new Set<string>()
-    for (const graph of all) {
-      graph.resync()
-      for (const key of graph.notifyKeys()) keys.add(key)
-    }
-    notifyAll(keys)
-  }
-
-  const routeBatch = (batch: ChangeBatch): void => {
-    const touched = new Set<RoutableGraph>()
-    for (const change of batch.changes) for (const graph of index.get(change.table) ?? []) touched.add(graph)
-    const keys = new Set<string>()
-    for (const graph of touched) {
-      const slice = batch.changes.filter((change) => graph.tables.includes(change.table))
-      if (graph.apply(slice).invalidated) for (const key of graph.notifyKeys()) keys.add(key)
-    }
-    notifyAll(keys)
-  }
+  let notifies = 0
+  let applyErrors = 0
 
   return {
     register(graph) {
@@ -86,48 +60,32 @@ function createRouter(config: {
       for (const table of graph.tables) index.get(table)?.delete(graph)
     },
     ingest(batch) {
-      const last = cursors.get(batch.sourceId)
-      if (last !== undefined) {
-        // duplicate / stale: already at or behind the cursor → drop, no apply, no advance.
-        if (batch.position <= last || (batch.predecessor !== null && batch.predecessor < last)) {
-          counters.duplicates++
-          return
+      const touched = new Set<RoutableGraph>()
+      for (const change of batch.changes) for (const graph of index.get(change.table) ?? []) touched.add(graph)
+      const keys = new Set<string>()
+      for (const graph of touched) {
+        const slice = batch.changes.filter((change) => graph.tables.includes(change.table))
+        let invalidated: boolean
+        try {
+          invalidated = graph.apply(slice).invalidated
+        } catch (error) {
+          // A routed apply threw (a latent graph bug): isolate it — coarse-notify this identity so it
+          // re-reads — but SURFACE it (counter + structured log), never swallow, or the query would
+          // degrade to coarse forever with no operator-visible signal.
+          applyErrors++
+          console.error(
+            '[@telefunc/drizzle] a routed graph apply threw; coarse-notifying its identity to re-read:',
+            error,
+          )
+          invalidated = true
         }
-        // gap: the frame does not link to the last accepted position → coarse resync.
-        if (batch.predecessor !== last) {
-          counters.gaps++
-          resyncAll()
-          cursors.set(batch.sourceId, batch.position)
-          return
-        }
+        if (invalidated) for (const key of graph.notifyKeys()) keys.add(key)
       }
-      // Oversize / unserializable payloads degrade to a coarse resync (never a silent drop).
-      if (!batch.heartbeat && batch.changes.length > 0) {
-        const encoded: SerializeResult = serializeBatch(batch, config.maxBatchBytes)
-        if (!encoded.ok) {
-          counters.degraded++
-          resyncAll()
-          cursors.set(batch.sourceId, batch.position)
-          return
-        }
+      for (const key of keys) {
+        notifies++
+        config.notify(key)
       }
-      // Heartbeat: liveness only — advance the cursor, never apply or notify.
-      if (batch.heartbeat) {
-        counters.accepted++
-        cursors.set(batch.sourceId, batch.position)
-        return
-      }
-      // Accepted data batch: a throwing apply fails closed to coarse and does NOT advance.
-      try {
-        routeBatch(batch)
-      } catch {
-        counters.degraded++
-        resyncAll()
-        return
-      }
-      counters.accepted++
-      cursors.set(batch.sourceId, batch.position)
     },
-    inspect: () => ({ sources: cursors.size, graphs: all.size, counters: { ...counters } }),
+    inspect: () => ({ graphs: all.size, notifies, applyErrors }),
   }
 }

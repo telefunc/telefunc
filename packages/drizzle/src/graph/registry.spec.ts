@@ -102,12 +102,7 @@ describe('registry — multiple subscribers to one shared graph must all be noti
     expect(a.graph).toBe(b.graph) // deduped to one shared graph — both callers subscribe to it
     a.token.redeem() // both clients are live subscribers holding leases
     b.token.redeem()
-    registry.router.ingest({
-      sourceId: 's',
-      position: 1,
-      predecessor: null,
-      changes: [{ table: 'users', kind: 'insert', new: { id: 1 } }],
-    })
+    registry.router.ingest({ changes: [{ table: 'users', kind: 'insert', new: { id: 1 } }] })
     expect(n2).toHaveBeenCalledTimes(1) // the second subscriber hears the invalidation
     expect(n1).toHaveBeenCalledTimes(1) // and so does the first — `sinks` holds a SET per instanceKey, not one callback
   })
@@ -258,15 +253,13 @@ describe('T5.A6 — state-row bound → demote; no-PK input born coarse', () => 
     expect(r.graph.state()).toBe('coarse')
   })
 
-  it('a seed exceeding maxStateRowsPerInput demotes to coarse and stays coarse (no rewarm loop)', async () => {
+  it('a seed exceeding maxStateRowsPerInput demotes to coarse', async () => {
     const registry = registryOf({ maxStateRowsPerInput: 2 })
     const executor = fakeExecutor({ scan: () => Promise.resolve([{ id: 1 }, { id: 2 }, { id: 3 }]) })
     const r = await registry.acquire(
       req({ compilePlan: () => statefulPlan(['users'], [seed('users', 'users')]), executor }),
     )
     expect(r.graph.state()).toBe('coarse') // acquire blocked on the seed, which demoted over the bound
-    r.graph.rewarm() // coarse is a sink — a resync request does NOT rewarm it
-    expect(r.graph.state()).toBe('coarse')
   })
 })
 

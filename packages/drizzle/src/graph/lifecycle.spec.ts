@@ -3,8 +3,9 @@
 // state equals the legal target (no illegal transition is reachable), ≤1 fire per graph per batch, a
 // SEEDING graph buffers a substantive change precisely (never coarse, never dropped) while a coarse
 // graph over-fires and never claims exactness, and retired/destroyed graphs are inert (never
-// rehydrated). Separate cases pin the sinks (coarse→live via resync is unreachable — a gap demotes
-// to coarse; drift→re-seed is unreachable). Deterministic — a fixed PRNG + deferred scans, never timers.
+// rehydrated). A separate case pins the sinks (coarse is left only by drift/destroy; rewarm() asserts —
+// a ChangeSource is gap-free, so nothing resyncs; drift→re-seed is unreachable). Deterministic — a
+// fixed PRNG + deferred scans, never timers.
 
 import { describe, expect, it } from 'vitest'
 import type { SeedDescriptor, StatefulGraph } from '../compile/compile.js'
@@ -90,8 +91,7 @@ const TT: Record<S, Edge[]> = {
     { trigger: 'destroy', to: 'destroyed' },
   ],
   live: [
-    { trigger: 'gap', to: 'coarse' }, // a resync can't re-seed synchronously → coarse (no live→seeding)
-    { trigger: 'state-limit', to: 'coarse' },
+    { trigger: 'state-limit', to: 'coarse' }, // live shadow overflows → coarse (no live→seeding; a gap can't re-seed)
     { trigger: 'drift', to: 'retired' },
     { trigger: 'destroy', to: 'destroyed' },
   ],
@@ -111,8 +111,6 @@ async function drive(driven: { graph: LiveGraph; resolveScan: (rows: Row[]) => v
   } else if (trigger === 'demote-seed') {
     driven.resolveScan(manyRows(MAX_STATE_ROWS + 50)) // scan overflows the state bound → demote
     await settle(g)
-  } else if (trigger === 'gap') {
-    g.rewarm()
   } else if (trigger === 'state-limit') {
     g.apply(manyChanges(MAX_STATE_ROWS + 50)) // live shadow overflows → demote
   } else if (trigger === 'drift') {
@@ -162,22 +160,25 @@ describe('T5.I1 — model-based lifecycle invariants (legal transitions only)', 
     }
   })
 
-  it('illegal transitions are unreachable: coarse and drift are sinks, terminals are inert', async () => {
-    // coarse is a sink — a resync request does NOT re-seed it (no coarse→live)
+  it('coarse and drift are sinks; rewarm asserts unreachable; terminals are inert', async () => {
+    // coarse is a sink — reached by a seed over the bound, left only by drift/destroy
     const c = makeDriven()
     c.resolveScan(manyRows(MAX_STATE_ROWS + 50))
     await settle(c.graph)
     expect(c.graph.state()).toBe('coarse')
-    c.graph.rewarm()
-    expect(c.graph.state()).toBe('coarse')
+
+    // rewarm is unreachable: a ChangeSource delivers ordered, gap-free batches, so nothing resyncs
+    const live = makeDriven()
+    live.resolveScan([{ id: 1 }])
+    await settle(live.graph)
+    expect(live.graph.state()).toBe('live')
+    expect(() => live.graph.rewarm()).toThrow()
 
     // drift retires terminally — there is NO drift→re-seed path
     const r = makeDriven()
     r.resolveScan([{ id: 1 }])
     await settle(r.graph)
     r.graph.retire()
-    expect(r.graph.state()).toBe('retired')
-    r.graph.rewarm()
     expect(r.graph.state()).toBe('retired')
     expect(r.graph.apply([{ table: 'users', kind: 'insert', new: { id: 1 } }]).invalidated).toBe(false) // never rehydrated
 

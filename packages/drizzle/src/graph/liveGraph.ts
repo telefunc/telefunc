@@ -13,6 +13,7 @@ export { type LiveGraph, type LiveGraphSpec, type GraphState, type ApplyOutcome,
 
 import type { Change, CompiledGraph, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
 import type { TableChange } from '../router/events.js'
+import { assertUsage } from '../utils/assert.js'
 import { canonicalValue } from '../utils/canonical.js'
 import { type HydrationExecutor, type Seed, createSeed } from './hydrate.js'
 import { type ShadowIndex, matchesResidual, pkOf, pruneRow } from './shadow.js'
@@ -29,7 +30,6 @@ type Inspection = {
   counters: {
     seeds: number
     demotions: number
-    resyncs: number
     exactFires: number
     dirtyFires: number
     coarseFires: number
@@ -73,7 +73,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
   let state: GraphState = 'coarse'
   let reason = 'born'
   let seq = 0
-  const counters = { seeds: 0, demotions: 0, resyncs: 0, exactFires: 0, dirtyFires: 0, coarseFires: 0 }
+  const counters = { seeds: 0, demotions: 0, exactFires: 0, dirtyFires: 0, coarseFires: 0 }
   const watched = new Set(spec.tables)
 
   let resolveSeed!: () => void
@@ -256,11 +256,9 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       return stateless ? statelessApply(changes) : statefulApply(changes)
     },
     rewarm() {
-      // Only a stateful graph resyncs; a synchronous seed can't be re-run from here, so a source
-      // gap demotes to coarse (sound over-fire). Coarse is a sink; terminals ignore it.
-      if (spec.kind !== 'stateful' || state === 'retired' || state === 'destroyed' || state === 'coarse') return
-      counters.resyncs++
-      demote('resync')
+      // Unreachable: a ChangeSource delivers ordered, gap-free batches (reliability lives inside the
+      // source), so nothing triggers a resync. Kept as an assertion of that invariant, not a branch.
+      assertUsage(false, 'liveGraph.rewarm is unreachable: a ChangeSource owns its own reliability (no gap/resync)')
     },
     retire() {
       seed?.abort()
