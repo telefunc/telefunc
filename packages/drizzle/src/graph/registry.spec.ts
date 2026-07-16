@@ -91,11 +91,7 @@ function req(over: Partial<AcquireRequest> & { compilePlan: AcquireRequest['comp
 }
 
 const registryOf = (over: Partial<Parameters<typeof createRegistry>[0]> = {}) =>
-  createRegistry({
-    maxGraphs: over.maxGraphs ?? 10,
-    maxStateRowsPerInput: over.maxStateRowsPerInput ?? 100,
-    factoryCacheLimit: over.factoryCacheLimit ?? 10,
-  })
+  createRegistry({ maxStateRowsPerInput: over.maxStateRowsPerInput ?? 100 })
 
 // ── BLOCKER #5a — multi-subscriber notify ownership ─────────────────
 
@@ -120,7 +116,7 @@ describe('registry — multiple subscribers to one shared graph must all be noti
       changes: [{ table: 'users', kind: 'insert', new: { id: 1 } }],
     })
     expect(n2).toHaveBeenCalledTimes(1) // the second subscriber hears the invalidation
-    expect(n1).toHaveBeenCalledTimes(1) // FAILS today: `sinks` holds ONE callback per instanceKey → n1 was overwritten
+    expect(n1).toHaveBeenCalledTimes(1) // and so does the first — `sinks` holds a SET per instanceKey, not one callback
   })
 })
 
@@ -282,10 +278,10 @@ describe('T5.A6 — state-row bound → demote; no-PK input born coarse', () => 
   })
 })
 
-// ── D1 / D2 — two-level identity + bounded factory cache ────────────
+// ── D1 / D2 — two-level identity + reference-scoped plan cache ──────
 
-describe('T5.D1 — PlanKey factory cache (bounded) vs InstanceKey state', () => {
-  it('two instances of one plan share the compiled factory but hold independent state', async () => {
+describe('T5.D1 — PlanKey plan cache vs InstanceKey state', () => {
+  it('two instances of one plan share the compiled plan but hold independent state', async () => {
     const registry = registryOf()
     const compile = vi.fn(() => coarsePlan(['users']))
     const a = await registry.acquire(req({ planKey: 'P', instanceKey: 'I1', compilePlan: compile }))
@@ -295,15 +291,19 @@ describe('T5.D1 — PlanKey factory cache (bounded) vs InstanceKey state', () =>
     expect(registry.inspect().graphs).toBe(2)
   })
 
-  it('the factory cache is bounded/evicted; re-acquiring an evicted plan recompiles', async () => {
-    const registry = registryOf({ factoryCacheLimit: 2 })
-    const compileA2 = vi.fn(() => coarsePlan(['users']))
-    await registry.acquire(req({ planKey: 'A', instanceKey: 'A', compilePlan: () => coarsePlan(['users']) }))
-    await registry.acquire(req({ planKey: 'B', instanceKey: 'B', compilePlan: () => coarsePlan(['users']) }))
-    await registry.acquire(req({ planKey: 'C', instanceKey: 'C', compilePlan: () => coarsePlan(['users']) })) // evicts A (LRU)
-    expect(registry.inspect().factories).toBe(2)
-    await registry.acquire(req({ planKey: 'A', instanceKey: 'A2', compilePlan: compileA2 }))
-    expect(compileA2).toHaveBeenCalledTimes(1) // A's factory was evicted → recompiled
+  it('the plan cache is reference-scoped: dropped when the last instance disposes, recompiled on re-acquire', async () => {
+    const registry = registryOf()
+    const compile = vi.fn(() => coarsePlan(['users']))
+    const a = await registry.acquire(req({ planKey: 'P', instanceKey: 'I1', compilePlan: compile }))
+    const b = await registry.acquire(req({ planKey: 'P', instanceKey: 'I2', compilePlan: compile }))
+    expect(compile).toHaveBeenCalledTimes(1)
+    expect(registry.inspect().factories).toBe(1)
+    a.token.release() // one instance still references the plan → plan retained
+    expect(registry.inspect().factories).toBe(1)
+    b.token.release() // last instance gone → plan dropped
+    expect(registry.inspect().factories).toBe(0)
+    await registry.acquire(req({ planKey: 'P', instanceKey: 'I3', compilePlan: compile }))
+    expect(compile).toHaveBeenCalledTimes(2) // re-acquire after the last dispose recompiles
   })
 })
 
@@ -340,84 +340,19 @@ describe('T5.D3 — drift retires (destroy + one coarse invalidation + recompile
     expect(r2.graph.state()).toBe('coarse')
   })
 
-  it('retire transfers teardown ownership: a still-open token released after retire is inert, so maxGraphs stays binding (no capacity double-free)', async () => {
-    const registry = registryOf({ maxGraphs: 1 })
-    const r = await registry.acquire(req({ planKey: 'p', instanceKey: 'I0', compilePlan: () => coarsePlan(['users']) }))
-    registry.retirePlan('p') // owns the single capacity slot's teardown: activeCount 1 → 0
-    r.token.release() // the token was still open at retire; its late release MUST NOT decrement again
-
-    // Under maxGraphs=1 exactly one of the next two identities may be a full graph; the other is a
-    // sentinel. With the retire/release double-decrement, activeCount would be -1 and BOTH would be
-    // full graphs — the cap silently stops binding.
-    const a = await registry.acquire(req({ planKey: 'a', instanceKey: 'I1', compilePlan: () => coarsePlan(['users']) }))
-    const b = await registry.acquire(req({ planKey: 'b', instanceKey: 'I2', compilePlan: () => coarsePlan(['users']) }))
-    expect([a.sentinel, b.sentinel].filter((s) => !s)).toHaveLength(1)
-    expect(a.sentinel).toBe(false)
-    expect(b.sentinel).toBe(true)
-    expect(registry.inspect().graphs).toBe(1) // only `a` is a live full graph; the retired `p` is gone
-  })
-})
-
-// ── F1 / F2 / F3 — sentinels at cap ─────────────────────────────────
-
-describe('T5.F1 — maxGraphs → per-table coarse sentinels', () => {
-  it('beyond the cap, identities attach to a shared per-table sentinel that coarse-invalidates every attached identity', async () => {
-    const registry = registryOf({ maxGraphs: 1 })
-    const n2 = vi.fn()
-    const n3 = vi.fn()
-    const r1 = await registry.acquire(
-      req({ planKey: 'A', instanceKey: 'I1', compilePlan: () => coarsePlan(['users']) }),
+  it('retire transfers teardown ownership: a still-open token released after retire is inert (torn down once)', async () => {
+    const registry = registryOf()
+    const notify = vi.fn()
+    const r = await registry.acquire(
+      req({ planKey: 'p', instanceKey: 'I0', compilePlan: () => coarsePlan(['users']), notify }),
     )
-    const r2 = await registry.acquire(
-      req({ planKey: 'B', instanceKey: 'I2', compilePlan: () => coarsePlan(['users']), notify: n2 }),
-    )
-    const r3 = await registry.acquire(
-      req({ planKey: 'C', instanceKey: 'I3', compilePlan: () => coarsePlan(['users']), notify: n3 }),
-    )
-    expect(r1.sentinel).toBe(false)
-    expect(r2.sentinel).toBe(true)
-    expect(r3.sentinel).toBe(true)
-    expect(r2.graph).toBe(r3.graph) // shared per-table sentinel
-    registry.router.ingest({
-      sourceId: 's',
-      position: 1,
-      predecessor: null,
-      changes: [{ table: 'users', kind: 'insert', new: { id: 1 } }],
-    })
-    expect(n2).toHaveBeenCalledTimes(1)
-    expect(n3).toHaveBeenCalledTimes(1)
-  })
-})
-
-describe('T5.F2 — sentinel zero-ref eviction', () => {
-  it('a sentinel with zero attached refs is evicted; a later identity re-creates it', async () => {
-    const registry = registryOf({ maxGraphs: 1 })
-    await registry.acquire(req({ planKey: 'A', instanceKey: 'I1', compilePlan: () => coarsePlan(['users']) }))
-    const s = await registry.acquire(req({ planKey: 'B', instanceKey: 'I2', compilePlan: () => coarsePlan(['users']) }))
-    expect(s.sentinel).toBe(true)
-    expect(registry.inspect().sentinels).toBe(1)
-    s.token.release()
-    expect(registry.inspect().sentinels).toBe(0)
-    const s2 = await registry.acquire(
-      req({ planKey: 'C', instanceKey: 'I3', compilePlan: () => coarsePlan(['users']) }),
-    )
-    expect(s2.sentinel).toBe(true)
-    expect(registry.inspect().sentinels).toBe(1)
-  })
-})
-
-describe('T5.F3 — capacity reserved before the async compile', () => {
-  it('N creations at the cap + an N+1th racing creation: the N+1th deterministically gets a sentinel', async () => {
-    const registry = registryOf({ maxGraphs: 2 })
-    const plan = deferred<GraphPlan>()
-    const compile = () => plan.promise // all compiles race (pending) while capacity is reserved
-    const p1 = registry.acquire(req({ planKey: 'A', instanceKey: 'I1', compilePlan: compile }))
-    const p2 = registry.acquire(req({ planKey: 'B', instanceKey: 'I2', compilePlan: compile }))
-    const p3 = registry.acquire(req({ planKey: 'C', instanceKey: 'I3', compilePlan: compile }))
-    plan.resolve(coarsePlan(['users']))
-    const [r1, r2, r3] = await Promise.all([p1, p2, p3])
-    expect(r1.sentinel).toBe(false)
-    expect(r2.sentinel).toBe(false)
-    expect(r3.sentinel).toBe(true)
+    registry.retirePlan('p') // retire owns the single teardown
+    expect(r.graph.state()).toBe('retired')
+    expect(registry.inspect().graphs).toBe(0)
+    expect(registry.inspect().factories).toBe(0) // plan dropped exactly once
+    r.token.release() // the token was still open at retire; its late release MUST be inert (no double teardown)
+    expect(registry.inspect().graphs).toBe(0) // still gone — no resurrection, no negative accounting
+    expect(registry.inspect().factories).toBe(0)
+    expect(notify).toHaveBeenCalledTimes(1) // retire fired one coarse invalidation; the late release did not re-notify
   })
 })

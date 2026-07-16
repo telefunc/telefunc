@@ -170,7 +170,7 @@ async function warmToLive(graph: LiveGraph, where: string): Promise<void> {
 }
 
 async function acquireLive<St>(m: Mechanic<St>, key: string): Promise<LiveGraph> {
-  const registry = createRegistry({ maxGraphs: 100, maxStateRowsPerInput: 1e9, factoryCacheLimit: 100 })
+  const registry = createRegistry({ maxStateRowsPerInput: 1e9 })
   const acquired = await registry.acquire({
     planKey: key,
     instanceKey: key,
@@ -397,7 +397,7 @@ describe('T5.H4 — an SQL-changing event injected during warming is caught thro
       scanGate.promise = new Promise<void>((resolve) => (scanGate.release = resolve))
       let graph!: LiveGraph
       let injectedFired: boolean | undefined
-      const registry = createRegistry({ maxGraphs: 10, maxStateRowsPerInput: 1e9, factoryCacheLimit: 10 })
+      const registry = createRegistry({ maxStateRowsPerInput: 1e9 })
       const executor = {
         // Gate the scan so the pre-drain event is provably journaled while still warming.
         scan: async (descriptor: Parameters<typeof real.scan>[0]) => {

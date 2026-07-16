@@ -147,7 +147,7 @@ describe('T5.E1 — RLS-gated stateful graphs are born coarse', () => {
   })
 
   it('the registry maps a truthy rlsEnabled to the born-coarse gate', async () => {
-    const registry = createRegistry({ maxGraphs: 10, maxStateRowsPerInput: 100, factoryCacheLimit: 10 })
+    const registry = createRegistry({ maxStateRowsPerInput: 100 })
     const plan = {
       tables: ['users'],
       stateless: false,

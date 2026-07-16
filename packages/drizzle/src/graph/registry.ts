@@ -1,12 +1,11 @@
-// The graph registry (final-plan §5.5; T5.A/D/F): two-level identity, leases/tokens, caps and
-// sentinels. Compiled factories are cached by PlanKey (bounded, evicted); graph STATE is keyed
-// by InstanceKey. `acquire` dedups on the canonical instance string; two concurrent acquires of
-// a not-yet-created identity share ONE in-flight creation, and a failed creation clears the
-// entry so a later acquire retries (no poisoned cache). Refcount = channel leases + unredeemed
-// read tokens; a read token holds the initial-read fence and REDEEMS into a lease by atomic
-// transfer (no transient zero); refcount 0 destroys immediately (no grace). Capacity is
-// reserved BEFORE the async compile, so beyond `maxGraphs` new identities deterministically
-// attach to shared per-table coarse sentinels rather than racing into unbounded full graphs.
+// The graph registry (final-plan §5.5; T5.A/D): two-level identity + leases/tokens. A PlanKey's
+// compiled plan is cached while ≥1 InstanceKey references it (reference-scoped — dropped when the
+// last instance of that plan disposes; a later re-acquire recompiles); graph STATE is keyed by
+// InstanceKey. `acquire` dedups on the canonical instance string; two concurrent acquires of a
+// not-yet-created identity share ONE in-flight creation, and a failed creation clears the entry so
+// a later acquire retries (no poisoned cache). Refcount = channel leases + unredeemed read tokens;
+// a read token holds the initial-read fence and REDEEMS into a lease by atomic transfer (no
+// transient zero); refcount 0 destroys immediately and synchronously (no grace, no cap, no pool).
 
 export { type Registry, type AcquireRequest, type AcquireResult, type ReadToken, type Lease, createRegistry }
 
@@ -21,7 +20,8 @@ type AcquireRequest = {
   instanceKey: string
   tables: string[]
   rlsEnabled: boolean
-  /** Compile this query to a plan; run AT MOST ONCE per PlanKey (factory cache). */
+  /** Compile this query to a plan; run once per PlanKey while it is referenced (reference-scoped
+   *  cache), recompiled if re-acquired after the last instance of the plan disposed. */
   compilePlan: () => GraphPlan | Promise<GraphPlan>
   executor: HydrationExecutor
   /** The identity's invalidation sink (ticket 6 wires the channel; ticket 5 observes it). */
@@ -40,36 +40,31 @@ type ReadToken = {
   release(): void
 }
 
-type AcquireResult = { graph: LiveGraph; token: ReadToken; sentinel: boolean }
+type AcquireResult = { graph: LiveGraph; token: ReadToken }
 
 type Registry = {
   acquire(request: AcquireRequest): Promise<AcquireResult>
   /** Relation drift (epoch change): retire every instance of a plan (destroy + one coarse
-   *  invalidation each) and evict its factory, so the next read recompiles under the new epoch. */
+   *  invalidation each) and drop its cached plan, so the next read recompiles under the new epoch. */
   retirePlan(planKey: string): void
   readonly router: Router
-  inspect(): { graphs: number; sentinels: number; factories: number; sentinelActivations: number }
+  inspect(): { graphs: number; factories: number }
 }
 
 type Entry = {
-  kind: 'instance' | 'sentinel'
   planKey: string
   graph: LiveGraph
   routable: RoutableGraph
   notifyKeys: Set<string>
   tokens: number
   leases: number
-  /** Set the instant this entry's teardown is owned (refcount-zero dispose OR drift retire), so
-   *  a later token/lease release on the SAME entry is inert — capacity is freed exactly once. */
+  /** Set the instant this entry's teardown is owned (refcount-zero dispose OR drift retire), so a
+   *  later token/lease release on the SAME entry is inert — the graph is torn down exactly once. */
   dead: boolean
   dispose: () => void
 }
 
-function createRegistry(config: {
-  maxGraphs: number
-  maxStateRowsPerInput: number
-  factoryCacheLimit: number
-}): Registry {
+function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
   // Per-identity subscriber sets: several acquires of the SAME instanceKey are distinct live
   // subscribers of ONE shared graph (independent channels), so an invalidation must notify EVERY
   // one — a single callback per key would silence all but the last. A subscriber joins when its read
@@ -92,54 +87,59 @@ function createRegistry(config: {
       for (const notify of sinks.get(key) ?? []) notify()
     },
   })
+  // Reference-scoped plan cache: the compiled plan for a PlanKey, held while ≥1 instance references
+  // it (`planRefs` counts them). No size cap, no LRU — the last instance of a plan drops it.
   const factories = new Map<string, GraphPlan>()
+  const planRefs = new Map<string, number>()
   const instances = new Map<string, Entry>()
-  const sentinels = new Map<string, Entry>()
   const inflight = new Map<string, Promise<Entry>>()
-  let activeCount = 0
-  let sentinelActivations = 0
 
-  // ── factory cache (bounded, LRU) ──────────────────────────────────
+  // ── reference-scoped plan cache ───────────────────────────────────
 
-  async function compileCached(planKey: string, compile: AcquireRequest['compilePlan']): Promise<GraphPlan> {
+  async function planFor(planKey: string, compile: AcquireRequest['compilePlan']): Promise<GraphPlan> {
     const hit = factories.get(planKey)
-    if (hit) {
-      factories.delete(planKey)
-      factories.set(planKey, hit) // touch → most-recent
-      return hit
-    }
-    const plan = await Promise.resolve(compile())
+    return hit ?? Promise.resolve(compile())
+  }
+
+  function retainPlan(planKey: string, plan: GraphPlan): void {
     factories.set(planKey, plan)
-    if (factories.size > config.factoryCacheLimit) factories.delete(factories.keys().next().value!)
-    return plan
+    planRefs.set(planKey, (planRefs.get(planKey) ?? 0) + 1)
+  }
+
+  function releasePlan(planKey: string): void {
+    const remaining = (planRefs.get(planKey) ?? 1) - 1
+    if (remaining <= 0) {
+      planRefs.delete(planKey)
+      factories.delete(planKey) // last instance of this plan gone → drop the cached plan
+    } else {
+      planRefs.set(planKey, remaining)
+    }
   }
 
   // ── refcount tokens/leases ────────────────────────────────────────
 
-  function sweep(entry: Entry, identityKey: string): void {
+  function sweep(entry: Entry): void {
     if (entry.dead) return // teardown already owned (retire/destroy) — a residual release is inert
-    if (entry.kind === 'sentinel') entry.notifyKeys.delete(identityKey)
     if (entry.tokens + entry.leases === 0) entry.dispose()
   }
 
-  /** Retire an instance entry's registry accounting EXACTLY ONCE: drop the router registration,
-   *  the identity maps, and its `maxGraphs` slot. Idempotent via `entry.dead`, so whichever path
-   *  fires first — a refcount-zero dispose or a drift `retirePlan` — owns the single `activeCount`
-   *  decrement, and any still-open token releasing afterward can never decrement it again
-   *  (T5.A5/D3/F3: capacity can't be pushed below the true live count). */
+  /** Tear an instance entry down EXACTLY ONCE: drop the router registration, the identity maps, and
+   *  its plan-cache reference. Idempotent via `entry.dead`, so whichever path fires first — a
+   *  refcount-zero dispose or a drift `retirePlan` — owns the teardown, and any still-open token
+   *  releasing afterward is inert (T5.A5/D3). */
   function finalizeInstance(entry: Entry, identityKey: string): void {
     if (entry.dead) return
     entry.dead = true
     router.unregister(entry.routable)
     instances.delete(identityKey)
     sinks.delete(identityKey)
-    activeCount--
+    releasePlan(entry.planKey)
   }
 
   function mintToken(entries: Entry[], identityKey: string, seqAtRead: number, notify: () => void): ReadToken {
     for (const entry of entries) entry.tokens++
     // Join the subscriber set at MINT (not redeem): an unredeemed read token whose plan drifts
-    // (retirePlan) or whose coarse sentinel fires must still be told to re-read (T5.D3/F1).
+    // (retirePlan) must still be told to re-read (T5.D3).
     const unsubscribe = subscribe(identityKey, notify)
     let phase: 'open' | 'redeemed' | 'released' = 'open'
     return {
@@ -160,7 +160,7 @@ function createRegistry(config: {
             unsubscribe() // this subscriber leaves; other subscribers of the shared graph stay notified
             for (const entry of entries) {
               entry.leases--
-              sweep(entry, identityKey)
+              sweep(entry)
             }
           },
         }
@@ -172,7 +172,7 @@ function createRegistry(config: {
         unsubscribe()
         for (const entry of entries) {
           entry.tokens--
-          sweep(entry, identityKey)
+          sweep(entry)
         }
       },
     }
@@ -180,7 +180,7 @@ function createRegistry(config: {
 
   function attach(entry: Entry, request: AcquireRequest): AcquireResult {
     const token = mintToken([entry], request.instanceKey, entry.graph.invalidationSeq(), request.notify)
-    return { graph: entry.graph, token, sentinel: entry.kind === 'sentinel' }
+    return { graph: entry.graph, token }
   }
 
   // ── instance construction ─────────────────────────────────────────
@@ -195,12 +195,11 @@ function createRegistry(config: {
       notifyKeys: () => notifyKeys,
       resync: () => graph.rewarm(),
     }
-    // Register inputs with the router BEFORE the graph's warming scan reads (activate-before-read,
-    // T5.A3): no event window can slip between the read and registration.
+    // Register inputs with the router BEFORE the graph's seed reads (activate-before-read, T5.A3):
+    // no event window can slip between the read and registration.
     router.register(routable)
     graph = createLiveGraph(specOf(plan, request, config.maxStateRowsPerInput))
     entry = {
-      kind: 'instance',
       planKey: request.planKey,
       graph,
       routable,
@@ -210,62 +209,10 @@ function createRegistry(config: {
       dead: false,
       dispose: () => {
         if (entry.dead) return // already finalized (e.g. by retirePlan) — this late release is inert
-        graph.destroy() // free state + abort any in-flight warming so a late completion is inert (T5.A5/C7)
+        graph.destroy() // free state so a late completion is inert (T5.A5/C7)
         finalizeInstance(entry, request.instanceKey)
       },
     }
-    return entry
-  }
-
-  function acquireSentinel(request: AcquireRequest): AcquireResult {
-    const entries: Entry[] = []
-    for (const table of request.tables) entries.push(ensureSentinel(table))
-    for (const entry of entries) entry.notifyKeys.add(request.instanceKey)
-    const seqAtRead = entries[0] ? entries[0].graph.invalidationSeq() : 0
-    return {
-      graph: entries[0]!.graph,
-      token: mintToken(entries, request.instanceKey, seqAtRead, request.notify),
-      sentinel: true,
-    }
-  }
-
-  function ensureSentinel(table: string): Entry {
-    const existing = sentinels.get(table)
-    if (existing) return existing
-    const notifyKeys = new Set<string>()
-    const dispose = (): void => {
-      if (entry.dead) return
-      entry.dead = true
-      graph.destroy()
-      router.unregister(entry.routable)
-      sentinels.delete(table)
-    }
-    const graph = createLiveGraph({
-      kind: 'coarse',
-      instanceKey: `sentinel:${table}`,
-      tables: [table],
-      reason: 'sentinel',
-    })
-    const routable: RoutableGraph = {
-      tables: [table],
-      apply: (changes) => graph.apply(changes),
-      notifyKeys: () => notifyKeys,
-      resync: () => {},
-    }
-    const entry: Entry = {
-      kind: 'sentinel',
-      planKey: `sentinel:${table}`,
-      graph,
-      routable,
-      notifyKeys,
-      tokens: 0,
-      leases: 0,
-      dead: false,
-      dispose,
-    }
-    sentinels.set(table, entry)
-    router.register(routable)
-    sentinelActivations++
     return entry
   }
 
@@ -277,22 +224,17 @@ function createRegistry(config: {
       const pending = inflight.get(request.instanceKey)
       if (pending) return attach(await pending, request)
 
-      // Reserve capacity synchronously, BEFORE the async compile, so the N+1th concurrent
-      // unique creation deterministically gets a sentinel even while compiles race (T5.F3).
-      if (activeCount >= config.maxGraphs) return acquireSentinel(request)
-      activeCount++
-
       const creation = (async () => {
         try {
-          const plan = await compileCached(request.planKey, request.compilePlan)
+          const plan = await planFor(request.planKey, request.compilePlan)
           const entry = buildInstance(plan, request)
           instances.set(request.instanceKey, entry)
+          retainPlan(request.planKey, plan) // reference-scoped cache: this instance holds the plan
           inflight.delete(request.instanceKey)
           return entry
         } catch (error) {
           inflight.delete(request.instanceKey)
-          activeCount-- // release the reservation — no poisoned cache entry
-          throw error
+          throw error // no cache write on failure → no poisoned entry; a later acquire retries
         }
       })()
       inflight.set(request.instanceKey, creation)
@@ -300,20 +242,16 @@ function createRegistry(config: {
     },
     retirePlan(planKey) {
       factories.delete(planKey)
+      planRefs.delete(planKey)
       for (const [key, entry] of [...instances]) {
         if (entry.planKey !== planKey) continue
-        entry.graph.retire() // → 'retired' (terminal): frees state, aborts any in-flight warming
+        entry.graph.retire() // → 'retired' (terminal): frees state
         for (const notify of sinks.get(key) ?? []) notify() // one coarse invalidation per subscriber, BEFORE finalize drops the sink
         finalizeInstance(entry, key) // single-owner teardown: a residual token release stays inert
       }
     },
     router,
-    inspect: () => ({
-      graphs: instances.size,
-      sentinels: sentinels.size,
-      factories: factories.size,
-      sentinelActivations,
-    }),
+    inspect: () => ({ graphs: instances.size, factories: factories.size }),
   }
 }
 
