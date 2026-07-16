@@ -13,20 +13,12 @@
     "server": "@telefunc/tanstack-query/server"
   },
   "type": "module",
-  "sideEffects": [
-    "./dist/server.js"
-  ],
   "exports": {
     "./package.json": "./package.json",
     ".": {
       "types": "./dist/client.d.ts",
       "browser": "./dist/client.js",
       "default": "./dist/client.js"
-    },
-    "./server": {
-      "types": "./dist/server.d.ts",
-      "worker": "./dist/server.js",
-      "default": "./dist/server.js"
     }
   },
   "files": [

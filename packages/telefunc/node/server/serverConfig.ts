@@ -34,7 +34,6 @@ import {
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-  LIVE_QUERY_PER_CONNECTION_DEFAULT,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
@@ -121,11 +120,6 @@ type ChannelConfigUser = {
   /** Maximum number of bytes buffered per channel for binary messages while no client peer is attached. */
   bufferLimitBinary?: number
   /**
-   * Maximum number of live-query channels a single client connection may hold. Reserved before the
-   * channel is acquired and released on permanent close; the 101st (by default) is a hard rejection.
-   */
-  liveQueryPerConnection?: number
-  /**
    * When using SSE channels, upstream client-to-server frames are batched for at
    * most this many milliseconds before Telefunc sends a POST.
    *
@@ -155,7 +149,6 @@ type ChannelConfigResolved = {
   connectTtl: number
   bufferLimit: number
   bufferLimitBinary: number
-  liveQueryPerConnection: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
 }
@@ -364,7 +357,6 @@ function getServerConfig(): ConfigResolved {
       connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
       bufferLimit: configState.channel.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
       bufferLimitBinary: configState.channel.bufferLimitBinary ?? CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-      liveQueryPerConnection: configState.channel.liveQueryPerConnection ?? LIVE_QUERY_PER_CONNECTION_DEFAULT,
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
       ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
@@ -500,7 +492,6 @@ function applyChannelConfig(val: unknown): void {
       case 'connectTtl':
       case 'bufferLimit':
       case 'bufferLimitBinary':
-      case 'liveQueryPerConnection':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
         assertUsage(typeof value === 'number', `\`${configPath}\` should be a number`)

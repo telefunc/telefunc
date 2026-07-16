@@ -6,10 +6,10 @@ afterEach(() => _resetCountersForTesting())
 
 describe('telemetry counter registry (§3.J)', () => {
   it('T1.J1 increment accumulates known names; an out-of-set name asserts and does not allocate', () => {
-    expect(snapshotCounters()['live.limiter.rejected']).toBe(0)
-    incrementCounter('live.limiter.rejected')
-    incrementCounter('live.limiter.rejected', 2)
-    expect(snapshotCounters()['live.limiter.rejected']).toBe(3)
+    expect(snapshotCounters()['live.tagHub.publishFailure']).toBe(0)
+    incrementCounter('live.tagHub.publishFailure')
+    incrementCounter('live.tagHub.publishFailure', 2)
+    expect(snapshotCounters()['live.tagHub.publishFailure']).toBe(3)
 
     const keysBefore = Object.keys(snapshotCounters()).length
     expect(() => incrementCounter('made.up.name' as unknown as LiveCounterName)).toThrow()
@@ -22,17 +22,16 @@ describe('telemetry counter registry (§3.J)', () => {
 
   it('T1.J2 snapshot is a bounded copy of a fixed-size record', () => {
     const snap = snapshotCounters()
-    snap['live.limiter.rejected'] = 999
-    expect(snapshotCounters()['live.limiter.rejected']).toBe(0) // mutating the copy never leaks
+    snap['live.tagHub.publishFailure'] = 999
+    expect(snapshotCounters()['live.tagHub.publishFailure']).toBe(0) // mutating the copy never leaks
 
     incrementCounter('live.tagHub.publishFailure', 5)
     incrementCounter('live.tagHub.journalOverflow', 7)
-    expect(Object.keys(snapshotCounters()).length).toBe(3) // key set never grows at runtime
+    expect(Object.keys(snapshotCounters()).length).toBe(2) // key set never grows at runtime
   })
 
-  it('T1.J6 the closed name set is exactly the three Sprint-1 counters', () => {
+  it('T1.J6 the closed name set is exactly the two tagHub counters', () => {
     expect(Object.keys(snapshotCounters()).sort()).toEqual([
-      'live.limiter.rejected',
       'live.tagHub.journalOverflow',
       'live.tagHub.publishFailure',
     ])

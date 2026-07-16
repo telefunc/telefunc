@@ -8,7 +8,6 @@ import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 // the type level — never minted at runtime — so the registry stays bounded (application code
 // can't grow it by passing arbitrary strings). `@telefunc/drizzle` widens this union later.
 const LIVE_COUNTER_NAMES = [
-  'live.limiter.rejected', // a per-connection live-query reservation was refused (cap hit)
   'live.tagHub.publishFailure', // a settled tag batch failed to publish (detected, never silent)
   'live.tagHub.journalOverflow', // the tag journal overflowed → unconditional fence replay
 ] as const
