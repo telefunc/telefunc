@@ -14,17 +14,24 @@ export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/chann
 export type {
   Room,
   RoomInfo,
-  RoomOptions,
   RoomMeta,
   JoinOptions,
+  PublishOptions,
   ParticipantMeta,
   LocalParticipant,
   RemoteParticipant,
   Sender,
+  RoomSendReceipt,
+  RoomAckReceipt,
   LeaveCause,
+  BinaryFrameInfo,
+  BinaryPublishOptions,
   RoomSnapshotView,
   ParticipantSnapshotView,
-  BinaryFrameInfo,
+  RoomListener,
+  RoomBinaryListener,
+  ParticipantListener,
+  ParticipantBinaryListener,
 } from '../wire-protocol/room/types.js'
 
 export type { TelefuncClientExtension } from './extensions.js'
