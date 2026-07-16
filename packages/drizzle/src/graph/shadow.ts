@@ -17,14 +17,12 @@ import { canonicalValue } from '../utils/canonical.js'
 type ShadowMatch = { kind: 'hit'; old: Row } | { kind: 'drop' } | { kind: 'coarse' }
 
 type ShadowIndex = {
-  /** Add/replace the pruned tuple for a σ-matching row. */
   put(pk: string, pruned: Row): void
-  /** Resolve a retraction by PK: hit → the stored tuple (and it is removed); miss →
-   *  drop when complete, coarse when incomplete. */
+  /** Resolve a retraction by PK: hit → stored tuple (removed); miss → drop when complete, coarse when incomplete. */
   resolve(pk: string): ShadowMatch
   /** Remove a key (no resolution needed — the old row was inline). */
   remove(pk: string): void
-  /** The bare pruned rows to feed the engine as the baseline. */
+  /** The pruned rows to feed the engine as the baseline. */
   rows(): Row[]
   readonly size: number
   complete: boolean

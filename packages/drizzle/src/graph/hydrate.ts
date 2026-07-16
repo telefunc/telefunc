@@ -15,23 +15,21 @@ import type { SeedDescriptor } from '../compile/compile.js'
 import type { Row } from '../compile/rowSpace.js'
 import { type ShadowIndex, createShadow, matchesResidual, pkOf, pruneRow } from './shadow.js'
 
-/** Injected in the binding layer from the σ residual's opaque `src` handles + raw execution;
- *  `graph/` imports only this interface (zero drizzle here). */
+/** Injected in the binding layer from the σ residual's opaque `src` handles; `graph/` imports only
+ *  this interface (zero drizzle here). */
 type HydrationExecutor = {
-  /** The σ-scoped, column-pruned baseline for one input. */
   scan(descriptor: SeedDescriptor): Promise<Row[]>
 }
 
 type SeedHooks = {
-  /** The synchronous cut: the completed shadows are handed over; the implementer replays its
-   *  one-shot buffer and seeds the engine WITHOUT awaiting. */
+  /** The synchronous cut: completed shadows handed over; the implementer replays its one-shot
+   *  buffer and seeds the engine WITHOUT awaiting. */
   onComplete(shadows: Map<string, ShadowIndex>): void
-  /** State-row overflow or a scan error → demote to coarse (bounded, sound). Never after abort. */
+  /** State overflow or scan error → demote to coarse (bounded, sound). Never after abort. */
   onDemote(reason: string): void
 }
 
 type Seed = {
-  /** Kick off the background scan (fire-and-forget; the registry awaits `ready()` on the graph). */
   start(): void
   /** Supersede this generation — a later scan completion becomes inert. */
   abort(): void

@@ -45,10 +45,9 @@ import { applyWindow } from './windowStage.js'
 
 type FireResult = { data: boolean; dirty: boolean; invalidated: boolean }
 
-/** The runtime seam: everything the graph runtime needs to hydrate ONE
- *  stateful input — a stable id, the real relation + alias, its PK (retraction key), the
- *  demanded columns, and the σ residual as the opaque hydration handle (its predicate
- *  leaves still carry the drizzle `src`, which the binding layer re-emits as WHERE). */
+/** Everything the runtime needs to hydrate ONE stateful input. `residual` is the σ as an opaque
+ *  hydration handle — its predicate leaves still carry the drizzle `src`, which the binding layer
+ *  re-emits as WHERE. */
 type SeedDescriptor = {
   inputId: string
   table: string
@@ -62,15 +61,13 @@ type SeedDescriptor = {
   shadowNeed: boolean
 }
 
-/** A compiled graph — the ticket-4 surface, unchanged (coarse/stateless graphs are exactly
- *  this). `apply` feeds a whole commit and reports invalidation. */
+/** A compiled graph: `apply` feeds a whole commit and reports invalidation (coarse/stateless
+ *  graphs are exactly this). */
 type CompiledGraph = { apply(commit: Change[]): FireResult }
 
-/** The ticket-5 seam on a STATEFUL compiled graph. `seeds` lists the inputs to hydrate;
- *  `seedInput` + `flushSeed` feed a σ-pruned baseline with notifications MUTED (state, not
- *  change); `feedInput` + `runBatch` give the live graph per-input control (so a self-join
- *  feeds each alias exactly once, never fanning across aliases). `apply` remains the
- *  table-fanned floor path — `feedInput`/`runBatch` compose from the same primitives. */
+/** The stateful seam. `seedInput` + `flushSeed` feed a σ-pruned baseline with notifications MUTED
+ *  (state, not change); `feedInput` + `runBatch` give per-input control so a self-join feeds each
+ *  alias exactly once, never fanning across aliases. */
 type StatefulGraph = CompiledGraph & {
   readonly seeds: SeedDescriptor[]
   seedInput(inputId: string, rows: Row[]): void

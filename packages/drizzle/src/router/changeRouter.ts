@@ -1,11 +1,9 @@
-// The change router. A ChangeSource emits ordered, atomic TableChange
-// batches; the router fans each batch to every affected graph's `apply(union-slice)` EXACTLY ONCE,
-// synchronously, in order — one commit = one graph tick, never merged across batches — then notifies
-// ≤1 per graph AND per attached identity. Delivery reliability — ordering and de-duplication — is
-// each SOURCE's own concern behind the ChangeSource interface; the shared router carries none of it.
-// A graph whose `apply` throws is isolated: its
-// identity is coarse-notified so its subscribers re-read, and the other graphs in the batch are
-// unaffected — the error is SURFACED (counter + structured log), never swallowed.
+// The change router: a ChangeSource emits ordered, atomic TableChange batches; the router fans each
+// batch to every affected graph's `apply(union-slice)` EXACTLY ONCE, synchronously, in order — one
+// commit = one graph tick, never merged across batches — then notifies ≤1 per graph AND per attached
+// identity. A graph whose `apply` throws is isolated: its identity is coarse-notified so its
+// subscribers re-read while the other graphs in the batch are unaffected — the error is SURFACED
+// (counter + structured log), never swallowed.
 
 export { type RoutableGraph, type ChangeSource, type Router, type RouterInspection, createRouter }
 
@@ -22,12 +20,9 @@ type RoutableGraph = {
   fault(): void
 }
 
-/** ChangeSource: ordered atomic TableChange batches; the source owns its own reliability — a CDC
- *  source's positioning, ordering and reconnect all live INSIDE it, never here. The
- *  `@telefunc/postgres` integration point — duplicated there for CDC; the ORM binding implements it
- *  in-process. `watchTables` tells the source which relations to observe; `subscribe` delivers each
- *  committed batch and returns an unsubscribe. (Ticket 5 defines the contract; sources arrive in
- *  tickets 6–7.) */
+/** Ordered atomic TableChange batches; the source owns its reliability — a CDC source's
+ *  positioning, ordering and reconnect all live INSIDE it, never here. The `@telefunc/postgres`
+ *  integration point (CDC there; the ORM binding implements it in-process). */
 type ChangeSource = {
   watchTables(tables: string[]): void
   subscribe(onBatch: (batch: ChangeBatch) => void): () => void

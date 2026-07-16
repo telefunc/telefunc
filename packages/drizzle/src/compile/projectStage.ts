@@ -1,10 +1,8 @@
-// The terminal stage: project each row to a canonical string, optionally DISTINCT it,
-// consolidate, and observe. The projected string ALWAYS carries the ORDER BY columns and
-// every opaque-contributing column — so a reorder or an opaque value
-// change emits a delta instead of cancelling. Invalidation = the consolidated data delta
-// is non-empty. The primary-key rides through the stateful operators for retraction
-// identity but is dropped here unless it is actually selected, so a plain SELECT of a
-// non-key column collapses duplicates into bag multiplicity exactly as SQL does.
+// The terminal stage: project each row to a canonical string, optionally DISTINCT, consolidate,
+// observe. The projected string ALWAYS carries the ORDER BY + opaque-contributing columns, so a
+// reorder or opaque-value change emits a delta instead of cancelling. The PK rides through the
+// stateful operators for retraction identity but is dropped here unless actually selected — so a
+// plain SELECT of a non-key column collapses duplicates into bag multiplicity exactly as SQL does.
 
 export { projectionKeysOf, projectFnOf, wholeRowFn }
 
@@ -12,9 +10,8 @@ import { canonicalValue } from '../utils/canonical.js'
 import type { SelectShape } from '../ir/types.js'
 import { type Row, qualifiedKey, rowString } from './rowSpace.js'
 
-/** The observable projection keys in output ORDER: projected columns + opaque-contributing
- *  columns, then the ORDER BY columns (so a reorder rides in the tuple).
- *  `'*'` means the whole row is observable (SELECT *). */
+/** The observable projection keys in output ORDER: projected + opaque-contributing columns, then
+ *  the ORDER BY columns (so a reorder rides in the tuple). `'*'` = whole row (SELECT *). */
 function projectionKeysOf(shape: SelectShape): string[] | '*' {
   if (shape.projection.star) return '*'
   const keys: string[] = []
@@ -32,10 +29,9 @@ function projectionKeysOf(shape: SelectShape): string[] | '*' {
   return keys
 }
 
-/** The projection function for a non-aggregate SELECT: a row → its canonical projected
- *  string. The encoding is POSITIONAL (values in output order, not keyed by source column)
- *  so UNION-compatible branches over different source columns dedupe by value tuple exactly
- *  as SQL does. */
+/** The projection function for a non-aggregate SELECT. The encoding is POSITIONAL (values in
+ *  output order, not keyed by source column) so UNION-compatible branches over different source
+ *  columns dedupe by value tuple exactly as SQL does. */
 function projectFnOf(shape: SelectShape): (row: Row) => string {
   const keys = projectionKeysOf(shape)
   return keys === '*' ? wholeRowFn : (row) => positional(row, keys)
