@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join as joinPath } from 'node:path'
+import { antiJoin } from '@tanstack/db-ivm'
 import { describe, expect, it } from 'vitest'
 import {
   D2,
@@ -8,8 +9,9 @@ import {
   type KeyValue,
   MultiSet,
   type MultiSetArray,
-  assertIvmContract,
+  concat,
   distinct,
+  filterBy,
   join,
   output,
   reduce,
@@ -49,12 +51,6 @@ describe('graph/ivm — engine pin (T4.A1)', () => {
   it('db-ivm is installed at the exact pinned engine golden 0.1.18', () => {
     expect(IVM_ENGINE_VERSION).toBe('0.1.18')
     expect(ivmVersion()).toBe(IVM_ENGINE_VERSION)
-  })
-})
-
-describe('graph/ivm — assertIvmContract (T4.A2)', () => {
-  it('passes on the pinned engine (all documented behaviours exercised)', () => {
-    expect(() => assertIvmContract()).not.toThrow()
   })
 })
 
@@ -167,5 +163,56 @@ describe('graph/ivm — engine contract tests (T4.A3)', () => {
     const promoted = net(collected)
     expect(promoted.get(JSON.stringify([null, 40]))).toBe(1)
     expect(promoted.get(JSON.stringify([null, 20]))).toBeUndefined()
+  })
+
+  it('concat carries both branches', () => {
+    const graph = new D2()
+    const a = graph.newInput<string>()
+    const b = graph.newInput<string>()
+    const collected: MultiSetArray<unknown> = []
+    a.pipe(
+      concat(b),
+      output((data) => {
+        for (const e of data.getInner()) collected.push(e)
+      }),
+    )
+    graph.finalize()
+    a.sendData(new MultiSet([['a', 1]]))
+    b.sendData(new MultiSet([['b', 1]]))
+    graph.run()
+    const result = net(collected)
+    expect(result.get(JSON.stringify('a'))).toBe(1)
+    expect(result.get(JSON.stringify('b'))).toBe(1)
+  })
+
+  it('filterBy admits the correlated outer row; antiJoin emits the uncorrelated one', () => {
+    const graph = new D2()
+    const outer = graph.newInput<KeyValue<number, string>>()
+    const inner = graph.newInput<KeyValue<number, null>>()
+    const semi: MultiSetArray<unknown> = []
+    const anti: MultiSetArray<unknown> = []
+    outer.pipe(
+      filterBy<number, string, KeyValue<number, string>>(inner),
+      output((data) => {
+        for (const e of data.getInner()) semi.push(e)
+      }),
+    )
+    outer.pipe(
+      antiJoin<number, string, null, KeyValue<number, string>>(inner),
+      output((data) => {
+        for (const e of data.getInner()) anti.push(e)
+      }),
+    )
+    graph.finalize()
+    outer.sendData(
+      new MultiSet([
+        [[1, 'a'], 1],
+        [[2, 'b'], 1],
+      ]),
+    )
+    inner.sendData(new MultiSet([[[1, null], 1]]))
+    graph.run()
+    expect(net(semi).get(JSON.stringify([1, 'a']))).toBe(1) // outer key 1 correlated → kept
+    expect(net(anti).get(JSON.stringify([2, ['b', null]]))).toBe(1) // outer key 2 uncorrelated → anti-emitted
   })
 })
