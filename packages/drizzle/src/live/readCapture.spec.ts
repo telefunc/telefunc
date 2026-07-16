@@ -6,7 +6,7 @@
 // registry.spec §6.2b/§6.2c — here we exercise the real redeem/lease wiring behind the seam.
 
 import { PGlite } from '@electric-sql/pglite'
-import { sql } from 'drizzle-orm'
+import { entityKind, sql } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
 import type { ClientLive } from 'telefunc'
@@ -37,6 +37,14 @@ const liveSelect = (builder: unknown, carrier: ReadCarrier): Promise<ClientLive<
 /** Drive the wire replacer's serialize-time activation path (the Live source's subscribe). */
 const activate = (live: ClientLive<unknown>): void => (live as unknown as { _activate(): void })._activate()
 
+/** A fake POOLED pg connection for the coarse control: pg dialect (stable entity kind) + a raw client
+ *  that is a `Pool` (not a pinned `Client`) + NOT a PgliteDatabase → isSingleSession=false ⇒ coarse. */
+class FakePgDialect {
+  static [entityKind] = 'PgDialect'
+}
+class Pool {}
+const poolFake = { dialect: new FakePgDialect(), $client: new Pool() } as object
+
 // ── the real pipeline ───────────────────────────────────────────────
 
 describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydrate) → ClientLive', () => {
@@ -62,17 +70,24 @@ describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydra
 
   it('#1 — a rejecting σ-read still leaves a sweepable token on the carrier (net-zero, no leak)', async () => {
     const carrier = carrierOf()
-    // acquire succeeds (born-coarse for the pooled PGlite conn → no scan); the initial read then throws (1/0).
+    // PGlite is single-session ⇒ PRECISE: the predicate-only plan is stateless (no scan), acquire
+    // succeeds, then the initial read throws (1/0) — proving eager ownership before the fallible read.
     await expect(liveSelect(db.select().from(users).where(sql`1 / 0 = 1`), carrier)).rejects.toThrow()
     expect(carrier.mintedTokens).toHaveLength(1) // OWNED before the fallible read → sweepable (buggy push-after-await gave 0)
     expect(carrier.mintedTokens[0]!.redeemed).toBe(false)
     expect(() => disposeUnredeemedReads(carrier)).not.toThrow() // released → net-zero
   })
 
-  it('#5 — a pooled-unpinned connection compiles a COARSE plan (no precise hydration from a mismatched session)', () => {
-    // PGlite's $client is not a pinned pg Client → isSingleSession=false → pooled-unpinned.
+  it('#5 — PGlite (single-session) compiles a PRECISE plan (NOT over-coarsed)', () => {
+    // PGlite is an in-process single connection ⇒ isSingleSession=true ⇒ precise; a plain SELECT is stateless.
     const shape = extractQueryShape(db.select().from(users), { dialect: 'pg' })
-    expect(compilePlanFor(db as object, shape)().coarse).toBe(true) // forced coarse; a precise plan would be .coarse=false
+    expect(compilePlanFor(db as object, shape)().coarse).toBe(false) // the Evaluator's probe: real PGlite plan must be coarse=false
+  })
+
+  it('#5 — a pooled-unpinned connection (a real pg Pool) forces a COARSE plan (no precise hydration from a mismatched session)', () => {
+    // The genuine coarse control: a Pool can serve the probe on one connection and the query on another.
+    const shape = extractQueryShape(db.select().from(users), { dialect: 'pg' })
+    expect(compilePlanFor(poolFake, shape)().coarse).toBe(true) // pooled ⇒ coarse; a never-coarse mutant gives false → RED
   })
 
   it('#2 (engine half) — an activated handle releases its lease on _release (channel close); the sweep then skips it, no double-release', async () => {

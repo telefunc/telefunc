@@ -84,12 +84,15 @@ async function semanticEnvironmentKeyOf(db: AnyDb, opts?: { run?: RowRunner }): 
   }
 }
 
-/** Whether the connection is provably one session. node:sqlite is a single connection;
- *  a node-postgres `Client` is single (a `Pool`'s bound client is `BoundPool`), as is a
- *  single mysql `Connection`. Pools and postgres.js are treated as pooled. */
+/** Whether the connection is provably one session. sqlite is a single connection; PGlite is an
+ *  in-process single connection; a node-postgres `Client` is single (a `Pool`'s bound client is
+ *  `BoundPool`), as is a single mysql `Connection`. Pools and postgres.js are treated as pooled.
+ *  PGlite is classified by its STABLE drizzle entity kind, NOT the raw client's constructor.name —
+ *  PGlite's bundled client minifies (e.g. to `'O'`), which a name check misreads as pooled. */
 function isSingleSession(db: AnyDb): boolean {
   const dialect = dialectOf(db)
   if (dialect === 'sqlite') return true
+  if (entityKindOf(db) === 'PgliteDatabase') return true // single in-process connection ⇒ precise
   const clientKind = (db.$client as { constructor?: { name?: string } } | null)?.constructor?.name
   if (dialect === 'pg') return clientKind === 'Client'
   return clientKind === 'Connection' || clientKind === 'PromiseConnection'
