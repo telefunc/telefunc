@@ -2,7 +2,7 @@ export { installRedis, RedisTransport }
 export type { InstallRedisOptions, RedisBroadcastOptions }
 
 import type { Cluster, Redis } from 'ioredis'
-import { config, type BroadcastTransport } from 'telefunc'
+import { config, KV_KEEP, type BroadcastTransport, type KvMutate } from 'telefunc'
 import { assert } from './assert.js'
 import { callDefinedCommand } from './callDefinedCommand.js'
 
@@ -49,6 +49,27 @@ return {seq, ts, receivers}
 
 const PUBLISH_CMD = 'tfPublish'
 
+// Compare-and-set for `update()`: apply the caller's next value only if the key still holds the
+// value `mutate` saw (`ARGV[1]`), so a concurrent writer's change is never lost — the transport
+// loops and re-runs `mutate` on the fresh value. Single-key, so Cluster-safe with no hash tag.
+// `ARGV[1]` is `\0NIL` when the key was absent (room JSON never starts with a NUL byte).
+const CAS_LUA = `
+local cur = redis.call('GET', KEYS[1])
+local matched = (cur == false and ARGV[1] == '\\0NIL') or (cur ~= false and cur == ARGV[1])
+if not matched then return 0 end
+if ARGV[2] == 'del' then
+  redis.call('DEL', KEYS[1])
+elseif ARGV[4] == '' then
+  redis.call('SET', KEYS[1], ARGV[3])
+else
+  redis.call('SET', KEYS[1], ARGV[3], 'PX', tonumber(ARGV[4]))
+end
+return 1
+`.trim()
+
+const CAS_CMD = 'tfCas'
+const NIL_SENTINEL = '\0NIL'
+
 class RedisTransport implements BroadcastTransport {
   private readonly publisher: Redis | Cluster
   private readonly subscriber: Redis | Cluster
@@ -61,6 +82,7 @@ class RedisTransport implements BroadcastTransport {
     this.subscriber = options.redis.duplicate()
     this.prefix = options.prefix ?? DEFAULT_PREFIX
     this.publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
+    this.publisher.defineCommand(CAS_CMD, { numberOfKeys: 1, lua: CAS_LUA })
     this.subscriber.on('messageBuffer', this._onMessage)
   }
 
@@ -162,6 +184,38 @@ class RedisTransport implements BroadcastTransport {
       } while (cursor !== '0')
     }
     return keys
+  }
+
+  async setIfAbsent(key: string, value: string, options?: { ttlMs?: number }): Promise<boolean> {
+    const k = this.kvKey(key)
+    // `SET key value NX` (with `PX` when a TTL is given) writes iff the key is absent — Redis's
+    // native create-if-absent — and replies `OK` only when it wrote.
+    const res =
+      options?.ttlMs === undefined
+        ? await this.publisher.set(k, value, 'NX')
+        : await this.publisher.set(k, value, 'PX', options.ttlMs, 'NX')
+    return res === 'OK'
+  }
+
+  async update(key: string, mutate: KvMutate, options?: { ttlMs?: number }): Promise<string | null> {
+    const k = this.kvKey(key)
+    const ttl = options?.ttlMs === undefined ? '' : String(options.ttlMs)
+    // Optimistic CAS loop: GET, run `mutate` in JS, then apply via the Lua script only if the key
+    // is unchanged. A lost race re-runs `mutate` on the fresh value, so it converges without holding
+    // a WATCH/MULTI transaction open on the shared connection.
+    for (;;) {
+      const current = await this.publisher.get(k)
+      const next = mutate(current)
+      if (next === KV_KEEP) return current
+      const applied = await callDefinedCommand(this.publisher, CAS_CMD, [
+        k,
+        current === null ? NIL_SENTINEL : current,
+        next === null ? 'del' : 'set',
+        next ?? '',
+        ttl,
+      ])
+      if (applied === 1) return next
+    }
   }
 
   private scanTargets(): Array<Redis | Cluster> {

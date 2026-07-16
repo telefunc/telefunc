@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Redis } from 'ioredis'
-import { config, DefaultBroadcastAdapter, Room } from 'telefunc'
+import { config, DefaultBroadcastAdapter, KV_KEEP, Room } from 'telefunc'
 import { RedisTransport } from './index.js'
 
 // Fake `ioredis` — `defineCommand` + `duplicate()` + broadcast subscribe/dispatch. Lua
@@ -10,8 +10,8 @@ class FakeIoredis {
   /** `seqKey → counter` for the in-script `INCR`. */
   private readonly counters = new Map<string, number>()
   private readonly listeners: Array<(channel: Uint8Array, message: Uint8Array) => void> = []
-  /** Backs GET/SET/DEL/SCAN. */
-  private readonly store = new Map<string, string>()
+  /** Backs GET/SET/DEL/SCAN. Public so a test can simulate a concurrent writer. */
+  readonly store = new Map<string, string>()
   /** Mocked clock so tests can assert deterministic ts. */
   private clockMs = 1_700_000_000_000
 
@@ -25,9 +25,13 @@ class FakeIoredis {
 
   readonly ttls = new Map<string, number>()
 
-  async set(key: string, value: string, px?: 'PX', ttlMs?: number): Promise<'OK'> {
+  // Emulates the option tokens the transport emits: `PX <ms>` and/or `NX`. `NX` (create-if-absent)
+  // replies `null` when the key already exists.
+  async set(key: string, value: string, ...opts: unknown[]): Promise<'OK' | null> {
+    if (opts.includes('NX') && this.store.has(key)) return null
+    const pxIndex = opts.indexOf('PX')
     this.store.set(key, value)
-    if (px === 'PX' && typeof ttlMs === 'number') this.ttls.set(key, ttlMs)
+    if (pxIndex >= 0 && typeof opts[pxIndex + 1] === 'number') this.ttls.set(key, opts[pxIndex + 1] as number)
     return 'OK'
   }
 
@@ -55,9 +59,29 @@ class FakeIoredis {
   }
 
   defineCommand(name: string, _def: { numberOfKeys: number; lua: string }): void {
+    const run =
+      name === 'tfCas' ? (args: unknown[]) => this.runCasScript(args) : (args: unknown[]) => this.runPublishScript(args)
     ;(this as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[name] = (
       ...args: unknown[]
-    ): Promise<unknown> => Promise.resolve(this.runPublishScript(args))
+    ): Promise<unknown> => Promise.resolve(run(args))
+  }
+
+  /** Emulate the compare-and-set Lua: apply only if the current value matches `expected`
+   *  (`\0NIL` = absent). Returns 1 on apply, 0 on mismatch. */
+  private runCasScript(args: unknown[]): number {
+    const [key, expected, op, next, ttl] = args as [string, string, string, string, string]
+    const cur = this.store.has(key) ? this.store.get(key)! : null
+    const matched = (cur === null && expected === '\0NIL') || cur === expected
+    if (!matched) return 0
+    if (op === 'del') {
+      this.store.delete(key)
+      this.ttls.delete(key)
+    } else {
+      this.store.set(key, next)
+      if (ttl === '') this.ttls.delete(key)
+      else this.ttls.set(key, Number(ttl))
+    }
+    return 1
   }
 
   /** Channels the (shared) subscriber connection is subscribed to — backs PUBLISH's receiver count. */
@@ -212,6 +236,54 @@ describe('Redis adapter — KV (backs `Room` state)', () => {
     await adapter.set('telefunc:room:axb:config', '{}')
 
     expect(await adapter.keys('telefunc:room:a*b')).toEqual(['telefunc:room:a*b:config'])
+  })
+})
+
+describe('Redis adapter — atomic KV primitives (back race-free room state)', () => {
+  it('setIfAbsent writes once via SET NX — the first caller wins, the rest see it present', async () => {
+    const { fake, adapter } = newAdapter()
+
+    expect(await adapter.setIfAbsent!('telefunc:room:x:config', 'first')).toBe(true)
+    expect(await adapter.setIfAbsent!('telefunc:room:x:config', 'second')).toBe(false)
+    expect(await adapter.get('telefunc:room:x:config')).toBe('first')
+    expect(await fake.get('tf:kv:telefunc:room:x:config')).toBe('first') // untouched by the loser
+  })
+
+  it('setIfAbsent passes the TTL through as PX', async () => {
+    const { fake, adapter } = newAdapter()
+    await adapter.setIfAbsent!('telefunc:room:x:m:1', '{}', { ttlMs: 180_000 })
+    expect(fake.ttls.get('tf:kv:telefunc:room:x:m:1')).toBe(180_000)
+  })
+
+  it('update seeds an absent key, read-modify-writes a present one, keeps on KEEP, deletes on null', async () => {
+    const { adapter } = newAdapter()
+    const key = 'telefunc:room:x:m:1'
+
+    expect(await adapter.update!(key, (cur) => (cur === null ? '{"n":1}' : cur))).toBe('{"n":1}')
+    expect(await adapter.update!(key, (cur) => JSON.stringify({ n: JSON.parse(cur!).n + 1 }))).toBe('{"n":2}')
+    expect(await adapter.update!(key, () => KV_KEEP)).toBe('{"n":2}')
+    expect(await adapter.get(key)).toBe('{"n":2}')
+    expect(await adapter.update!(key, () => null)).toBe(null)
+    expect(await adapter.get(key)).toBe(null)
+  })
+
+  it('update retries when the key changed between its read and its write, re-running the mutator', async () => {
+    const { fake, adapter } = newAdapter()
+    const key = 'telefunc:room:x:c'
+    await adapter.set(key, '0')
+
+    let calls = 0
+    const result = await adapter.update!(key, (cur) => {
+      calls++
+      // On the first pass, a concurrent writer lands between this mutator's read and its CAS,
+      // so the CAS mismatches and the mutator re-runs on the fresh value.
+      if (calls === 1) fake.store.set('tf:kv:telefunc:room:x:c', '9')
+      return String(Number(cur) + 1)
+    })
+
+    expect(calls).toBe(2) // first CAS saw '0' but the store is '9' → retry
+    expect(result).toBe('10') // mutator re-ran on the winner's '9'
+    expect(await adapter.get(key)).toBe('10')
   })
 })
 
