@@ -16,6 +16,14 @@ type LiveQueryOptions<TData = unknown, TError = Error, TQueryKey extends QueryKe
   queryFn: () => ClientLive<TData> | Promise<ClientLive<TData>>
 }
 
+/** The RETURNED options: every forwarded TanStack option, with `queryFn` pinned to the PRECISE unwrapped
+ *  thunk `() => Promise<TData>` — NOT QueryObserverOptions' `skipToken | QueryFunction<TData>` union — so
+ *  callers statically see the honest re-typed data function (§3.F2). Still assignable to `useQuery`. */
+type LiveQueryResult<TData, TError, TQueryKey extends QueryKey> = Omit<
+  QueryObserverOptions<TData, TError, TData, TData, TQueryKey>,
+  'queryFn'
+> & { queryFn: () => Promise<TData> }
+
 /** Wire a `QueryClient` for live queries and return the `liveQuery` options adapter.
  *
  *  Framework-agnostic (works with `useQuery` across the React/Solid/Vue TanStack adapters): the input
@@ -79,13 +87,13 @@ function createLiveQuery(queryClient: QueryClient) {
   // `data` from `queryFn`, so unwrapping `ClientLive<T>` → `T` here is the single honest re-typing point.
   return function liveQuery<TData, TError = Error, TQueryKey extends QueryKey = QueryKey>(
     options: LiveQueryOptions<TData, TError, TQueryKey>,
-  ): QueryObserverOptions<TData, TError, TData, TData, TQueryKey> {
+  ): LiveQueryResult<TData, TError, TQueryKey> {
     const { queryFn, queryKey, ...rest } = options
     const key = (queryKey ?? []) as TQueryKey
     return {
       ...rest,
       queryKey,
       queryFn: async () => wire(key, await queryFn()),
-    } as QueryObserverOptions<TData, TError, TData, TData, TQueryKey>
+    } as LiveQueryResult<TData, TError, TQueryKey>
   }
 }

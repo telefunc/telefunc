@@ -44,9 +44,10 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
       queryKey: ['n'],
       queryFn: async (): Promise<ClientLive<number>> => makeFakeClientLive(1).live,
     })
-    // Compile-time proof: the widened generic carries the UNWRAPPED data type (TData = number), so
-    // TanStack infers `data: number`, not `ClientLive<number>`.
-    expect(typeof options.queryFn).toBe('function')
+    // Compile-time proof (§3.F2): `queryFn` is PRECISELY `() => Promise<number>` (not QueryObserverOptions'
+    // `skipToken | QueryFunction` union), so TanStack infers `data: number`, not `ClientLive<number>`.
+    const check: () => Promise<number> = options.queryFn
+    expect(typeof check).toBe('function')
   })
 
   it('T12.F2 forwards the full TanStack options seam inline (§3.F rest) — staleTime/gcTime accepted', () => {
