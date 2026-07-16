@@ -1,13 +1,12 @@
-// T5.H — the differential oracle upgraded to LIVE HYDRATION. Every stateful mechanic runs
+// T5.H — the differential oracle over LIVE-SEEDED stateful graphs. Every stateful mechanic runs
 // through the REAL registry + real compiled StatefulGraph seam + a real PGlite-backed
-// HydrationExecutor: the graph SEEDS from PGlite (σ-scoped, pruned) and WARMS via the real
-// drain loop (no hand-feed). H1 = hydrates through the real seam; H2 = per-mechanic invalidation
-// decisions (each join type, aggregate crossings incl. MIN/MAX retraction, HAVING, distinct,
-// below-window insert, unselected-column update); H3 = once LIVE, graph fired IFF SQL result
-// changed (both directions; a post-flip false negative OR false positive is a hard fail) over
-// ≥5 replayable seeds × 30 commits per exact mechanic — during warming only changed⇒fired is
-// required (coarse over-fire licensed, R3); H4 = an SQL-changing event injected mid-drain is not
-// lost to limbo. Comparison is bag-correct (no ORDER BY) or ordered + tie-canonical (with it).
+// HydrationExecutor: the graph SEEDS synchronously from PGlite (σ-scoped, pruned) — acquire BLOCKS
+// on the seed, so it is PRECISE from tick one (no warming tier, no over-fire carve-out). H1 = seeds
+// through the real seam; H2 = per-mechanic invalidation decisions (each join type, aggregate
+// crossings incl. MIN/MAX retraction, HAVING, distinct, below-window insert, unselected-column
+// update); H3 = graph fired IFF the SQL result changed (both directions; a false negative OR false
+// positive is a hard fail) over ≥5 replayable seeds × 30 commits per exact mechanic. Comparison is
+// bag-correct (no ORDER BY) or ordered + tie-canonical (with it).
 
 import { PGlite } from '@electric-sql/pglite'
 import { eq, max, min, sql, sum } from 'drizzle-orm'
@@ -163,10 +162,9 @@ type Mechanic<St> = {
   reset: () => Promise<void>
 }
 
-const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
-async function warmToLive(graph: LiveGraph, where: string): Promise<void> {
-  for (let i = 0; i < 5000 && graph.state() === 'warming'; i++) await flush()
-  expect(graph.state(), `${where}: graph must hydrate through the real seam to live`).toBe('live')
+async function seedToLive(graph: LiveGraph, where: string): Promise<void> {
+  await graph.ready() // acquire already blocked on the synchronous seed; this is instant
+  expect(graph.state(), `${where}: graph must seed through the real seam to live`).toBe('live')
 }
 
 async function acquireLive<St>(m: Mechanic<St>, key: string): Promise<LiveGraph> {
@@ -195,7 +193,7 @@ async function runLive<St>(m: Mechanic<St>): Promise<void> {
     for (let i = 0; i < 12; i++) await m.mutate(rng, st)
     // 2. Acquire → seed from PGlite → warm through the real drain loop → live.
     const graph = await acquireLive(m, `${m.name}-${seed}`)
-    await warmToLive(graph, `${m.name} seed=${seed}`)
+    await seedToLive(graph, `${m.name} seed=${seed}`)
     // 3. Post-flip differential: fired IFF the SQL result changed (both directions).
     const sig = async (): Promise<string> => {
       const rows = rowsOf(await client.query(m.sigSql))
@@ -377,78 +375,5 @@ describe('T5.H — differential oracle against LIVE-HYDRATED stateful graphs', (
   )
 })
 
-// ── H4 — SQL-changing event injected mid-drain is not lost ──────────
-
-describe('T5.H4 — an SQL-changing event injected during warming is caught through the atomic cut', () => {
-  it('changed ⇒ fired for the pre-drain and mid-drain events, then exact iff once live', async () => {
-    for (const seed of [1, 7, 42]) {
-      await resetUsers()
-      const rng = prng(seed)
-      const st = usersState()
-      for (let i = 0; i < 8; i++) await mutateUsers(rng, st) // baseline
-
-      const build = () =>
-        db
-          .select({ team: users.teamId, s: sum(users.score) })
-          .from(users)
-          .groupBy(users.teamId)
-      const real = hydrationExecutorOf(db)
-      const scanGate = { promise: Promise.resolve<void>(undefined), release: () => {} }
-      scanGate.promise = new Promise<void>((resolve) => (scanGate.release = resolve))
-      let graph!: LiveGraph
-      let injectedFired: boolean | undefined
-      const registry = createRegistry({ maxStateRowsPerInput: 1e9 })
-      const executor = {
-        // Gate the scan so the pre-drain event is provably journaled while still warming.
-        scan: async (descriptor: Parameters<typeof real.scan>[0]) => {
-          await scanGate.promise
-          return real.scan(descriptor)
-        },
-        // Inject an SQL-changing event DURING the first drain re-fetch (the limbo window).
-        fetchByKeys: async (
-          descriptor: Parameters<typeof real.fetchByKeys>[0],
-          keys: Parameters<typeof real.fetchByKeys>[1],
-        ) => {
-          const rows = await real.fetchByKeys(descriptor, keys)
-          if (injectedFired === undefined) {
-            const mid = await mutateUsers(rng, st) // real DB mutation + a change the graph must not miss
-            injectedFired = graph.apply([mid]).invalidated // journalled while warming
-          }
-          return rows
-        },
-      }
-      graph = (
-        await registry.acquire({
-          planKey: `h4-${seed}`,
-          instanceKey: `h4-${seed}`,
-          tables: ['users'],
-          rlsEnabled: false,
-          compilePlan: () => compileQuery(extractQueryShape(build(), { dialect: 'pg' })),
-          executor,
-          notify: () => {},
-        })
-      ).graph
-
-      expect(graph.state(), `h4 seed=${seed}: scan gated → still warming`).toBe('warming')
-      const pre = await mutateUsers(rng, st) // pre-drain event → non-empty first drain swap
-      const preFired = graph.apply([pre]).invalidated
-      expect(preFired, `h4 seed=${seed}: pre-drain change ⇒ fired (coarse over-fire during warming)`).toBe(true)
-      scanGate.release() // let warming proceed → drain → fetchByKeys injects the mid-drain event
-      await warmToLive(graph, `h4 seed=${seed}`)
-      expect(injectedFired, `h4 seed=${seed}: mid-drain change ⇒ fired`).toBe(true)
-
-      // Once live, exact iff resumes — a correct baseline (incl. the mid-drain event) is proven by
-      // every subsequent commit agreeing; a limbo miss would surface as an iff violation here.
-      const sig = async () =>
-        bagSignature(rowsOf(await client.query('select team_id, sum(score) s from users group by team_id')))
-      let prev = await sig()
-      for (let step = 0; step < 20; step++) {
-        const change = await mutateUsers(rng, st)
-        const fired = graph.apply([change]).invalidated
-        const next = await sig()
-        expect(fired, `h4 seed=${seed} step=${step}: exact iff once live`).toBe(next !== prev)
-        prev = next
-      }
-    }
-  }, 30_000)
-})
+// The one-shot seed-race guard (a change routed during the scan lands exactly once, precise from
+// tick one) is proven directly in liveGraph.spec against a real compiled graph + gated scan.

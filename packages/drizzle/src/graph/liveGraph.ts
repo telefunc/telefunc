@@ -1,21 +1,23 @@
-// One compiled query as a live runtime object: the warming / live / coarse / retired /
-// destroyed state machine (final-plan §5.5; the ONLY legal transitions are §3.C-TT). It
-// classifies each routed change through the escalation ladder — inline old > shadow resolve >
-// provably-irrelevant drop > coarse — feeds the engine per input (so a self-join feeds each
-// alias exactly once), keeps each shadow in lockstep, and fires AT MOST ONCE per batch. Two
-// triggers, two responses: a gap / shadow discontinuity RE-WARMS (new generation, same plan);
-// schema drift RETIRES (terminal, never rehydrated). Firing is reported to the caller (the
-// router owns per-identity notification); `inspect()` is a bounded snapshot with one reason.
+// One compiled query as a live runtime object: the seeding / live / coarse / retired / destroyed
+// state machine (final-plan §5.5). A stateful graph SEEDS synchronously-from-the-caller's-view —
+// the registry blocks acquire on the seed — so it is PRECISE from its first live tick; there is no
+// warming tier and no coarse-during-seed window. `seeding` is internal and transient: it exists
+// only while the initial scan is in flight (before acquire returns), during which routed changes
+// are BUFFERED and replayed once, as a PK-keyed upsert against the seeded shadow, in the synchronous
+// cut. Once live, each routed change is classified through the escalation ladder — inline old >
+// shadow resolve > provably-irrelevant drop — and fires AT MOST ONCE per batch. A source resync
+// (gap) or a seed error/overflow DEMOTES to coarse (sound over-fire); schema drift RETIRES
+// (terminal). Firing is reported to the caller (the router owns per-identity notification).
 
 export { type LiveGraph, type LiveGraphSpec, type GraphState, type ApplyOutcome, type Inspection, createLiveGraph }
 
 import type { Change, CompiledGraph, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
 import type { TableChange } from '../router/events.js'
 import { canonicalValue } from '../utils/canonical.js'
-import { type HydrationExecutor, type Warming, createWarming } from './hydrate.js'
+import { type HydrationExecutor, type Seed, createSeed } from './hydrate.js'
 import { type ShadowIndex, matchesResidual, pkOf, pruneRow } from './shadow.js'
 
-type GraphState = 'warming' | 'live' | 'coarse' | 'retired' | 'destroyed'
+type GraphState = 'seeding' | 'live' | 'coarse' | 'retired' | 'destroyed'
 type ApplyOutcome = { invalidated: boolean }
 
 /** A fired invalidation's precision — the one stable reason `inspect()` reports. */
@@ -25,7 +27,7 @@ type Inspection = {
   state: GraphState
   reason: string
   counters: {
-    warms: number
+    seeds: number
     demotions: number
     resyncs: number
     exactFires: number
@@ -54,8 +56,11 @@ type LiveGraph = {
   readonly tables: string[]
   state(): GraphState
   invalidationSeq(): number
+  /** Resolves when the initial seed has landed (→ live) or demoted (→ coarse); the registry
+   *  awaits this so acquire returns a precise graph. Terminal transitions resolve it too. */
+  ready(): Promise<void>
   apply(changes: TableChange[]): ApplyOutcome
-  /** Gap / source resync / shadow discontinuity → re-warm the SAME plan (new generation). */
+  /** Source resync (gap) → demote to coarse (a synchronous seed cannot be re-run from here). */
   rewarm(): void
   /** Schema/relation drift → terminal; the registry recompiles on the next read. */
   retire(): void
@@ -68,14 +73,20 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
   let state: GraphState = 'coarse'
   let reason = 'born'
   let seq = 0
-  const counters = { warms: 0, demotions: 0, resyncs: 0, exactFires: 0, dirtyFires: 0, coarseFires: 0 }
+  const counters = { seeds: 0, demotions: 0, resyncs: 0, exactFires: 0, dirtyFires: 0, coarseFires: 0 }
   const watched = new Set(spec.tables)
+
+  let resolveSeed!: () => void
+  const seedDone = new Promise<void>((resolve) => {
+    resolveSeed = resolve
+  })
 
   // Stateful-only runtime.
   const shadows = new Map<string, ShadowIndex>()
   const byTable = new Map<string, SeedDescriptor[]>()
   let graph: StatefulGraph | undefined
-  let warming: Warming | undefined
+  let seed: Seed | undefined
+  let oneShot: TableChange[] = [] // changes routed during the scan (the seed-race buffer)
 
   // Stateless-only runtime.
   const stateless = spec.kind === 'stateless' ? spec.instantiate() : undefined
@@ -88,10 +99,8 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     reason = kind
   }
 
-  function startWarming(): void {
-    // Supersede any prior generation first (T5.C7): a re-warm replaces `warming`, so the old
-    // one's late scan/fetch/onComplete must be made inert or it would seed the NEW graph.
-    warming?.abort()
+  function startSeeding(): void {
+    seed?.abort() // supersede any prior generation (defensive — there is only the initial seed)
     const stateful = spec as Extract<LiveGraphSpec, { kind: 'stateful' }>
     graph = stateful.instantiate()
     // A no-PK input can never shadow-resolve a key-only retraction → born coarse (T5.A6).
@@ -99,55 +108,60 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       graph = undefined
       state = 'coarse'
       reason = 'no-pk'
+      resolveSeed()
       return
     }
     shadows.clear()
     byTable.clear()
+    oneShot = []
     for (const descriptor of graph.seeds) {
       const list = byTable.get(descriptor.table) ?? []
       list.push(descriptor)
       byTable.set(descriptor.table, list)
     }
-    warming = createWarming({
+    seed = createSeed({
       descriptors: graph.seeds,
       executor: stateful.executor,
       maxStateRows: stateful.maxStateRows,
       hooks: {
         onComplete(built) {
-          // The atomic cut (T5.C4 steps 3–4): seed each input from its reconciled baseline,
-          // then flip live — synchronous, no await.
+          // The synchronous cut (T5.C4): reconcile the one-shot seed-race buffer against the
+          // freshly-scanned shadows, then seed the engine from the final baseline in ONE muted
+          // flush — NO await anywhere between here and `state = 'live'`.
+          for (const change of oneShot)
+            for (const descriptor of byTable.get(change.table) ?? [])
+              replaySeedRace(descriptor, built.get(descriptor.inputId)!, change)
           for (const descriptor of graph!.seeds)
             graph!.seedInput(descriptor.inputId, built.get(descriptor.inputId)!.rows())
           graph!.flushSeed()
           for (const [inputId, shadow] of built) shadows.set(inputId, shadow)
+          oneShot = []
           state = 'live'
-          reason = 'warm-complete'
+          reason = 'seed-complete'
+          resolveSeed()
         },
         onDemote(why) {
           demote(why)
         },
       },
     })
-    state = 'warming'
-    reason = 'warming'
-    counters.warms++
-    warming.start()
-  }
-
-  function resyncNow(): void {
-    counters.resyncs++
-    startWarming()
+    state = 'seeding'
+    reason = 'seeding'
+    counters.seeds++
+    seed.start()
   }
 
   function demote(why: string): void {
-    warming?.abort()
-    warming = undefined
+    seed?.abort()
+    seed = undefined
     graph = undefined
     shadows.clear()
     byTable.clear()
+    oneShot = []
     state = 'coarse'
     reason = why
     counters.demotions++
+    resolveSeed()
   }
 
   // ── apply per state ───────────────────────────────────────────────
@@ -158,16 +172,12 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     return { invalidated: hit }
   }
 
-  function warmingApply(changes: TableChange[]): ApplyOutcome {
-    let hit = false
-    for (const change of changes) {
-      if (!watched.has(change.table) || !substantive(change)) continue
-      warming!.journal(change)
-      hit = true
-    }
-    // Every warming-window change coarse-invalidates AND is journaled (T5.C2) — no silent drop.
-    if (hit) fire('coarse')
-    return { invalidated: hit }
+  function seedingApply(changes: TableChange[]): ApplyOutcome {
+    // Precise buffer, NOT coarse-invalidate: no subscriber exists yet (attach follows acquire's
+    // blocked seed), and the read-in-progress is covered by the initial-read fence. Each buffered
+    // change is replayed exactly once in the synchronous cut.
+    for (const change of changes) if (watched.has(change.table) && substantive(change)) oneShot.push(change)
+    return { invalidated: false }
   }
 
   function statelessApply(changes: TableChange[]): ApplyOutcome {
@@ -190,9 +200,11 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       for (const descriptor of byTable.get(change.table) ?? []) {
         const resolved = resolveOld(descriptor, shadows.get(descriptor.inputId)!, change)
         if (resolved.kind === 'coarse') {
-          // Shadow discontinuity: coarse-invalidate once, then re-warm to restore exact state.
+          // A key-only retraction whose key lacks resolvable PK columns can't be applied without
+          // guessing (shadow.resolve is never 'coarse' post-seed — state is complete). Fire coarse
+          // once and demote: skipping it would leave the shadow/engine stale (unsound).
           fire('coarse')
-          resyncNow()
+          demote('unresolvable-retraction')
           return { invalidated: true }
         }
         if (resolved.kind === 'drop') continue
@@ -218,14 +230,17 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
   if (spec.kind === 'stateless') {
     state = 'live'
     reason = 'born-live'
+    resolveSeed()
   } else if (spec.kind === 'coarse') {
     state = 'coarse'
     reason = spec.reason ?? 'coarse-plan'
+    resolveSeed()
   } else if (spec.bornCoarse) {
     state = 'coarse'
     reason = spec.bornCoarse
+    resolveSeed()
   } else {
-    startWarming()
+    startSeeding()
   }
 
   return {
@@ -233,32 +248,37 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     tables: spec.tables,
     state: () => state,
     invalidationSeq: () => seq,
+    ready: () => seedDone,
     apply(changes) {
       if (state === 'retired' || state === 'destroyed') return { invalidated: false }
       if (state === 'coarse') return coarseApply(changes)
-      if (state === 'warming') return warmingApply(changes)
+      if (state === 'seeding') return seedingApply(changes)
       return stateless ? statelessApply(changes) : statefulApply(changes)
     },
     rewarm() {
-      // Only a stateful graph re-warms; stateless/coarse graphs hold no state to refresh.
+      // Only a stateful graph resyncs; a synchronous seed can't be re-run from here, so a source
+      // gap demotes to coarse (sound over-fire). Coarse is a sink; terminals ignore it.
       if (spec.kind !== 'stateful' || state === 'retired' || state === 'destroyed' || state === 'coarse') return
-      resyncNow()
+      counters.resyncs++
+      demote('resync')
     },
     retire() {
-      warming?.abort()
-      warming = undefined
+      seed?.abort()
+      seed = undefined
       graph = undefined
       shadows.clear()
       state = 'retired'
       reason = 'drift'
+      resolveSeed()
     },
     destroy() {
-      warming?.abort()
-      warming = undefined
+      seed?.abort()
+      seed = undefined
       graph = undefined
       shadows.clear()
       state = 'destroyed'
       reason = 'refcount-zero'
+      resolveSeed()
     },
     inspect() {
       let stateRows = 0
@@ -298,6 +318,21 @@ function updateShadow(descriptor: SeedDescriptor, shadow: ShadowIndex, change: C
     const pk = pkOf(descriptor, change.new)
     if (pk !== undefined) shadow.put(pk, pruneRow(descriptor, change.new))
   }
+}
+
+/** One-shot seed-race guard — NOT warming; do not add passes. A change routed during the scan may
+ *  or may not already be reflected in the scan's consistent snapshot; replay it as a PK-keyed UPSERT
+ *  against the seeded shadow (retract whatever the snapshot holds for this PK, insert the change's
+ *  new tuple if it σ-matches) so the outcome is idempotent regardless. Reconciles the SHADOW only —
+ *  the engine is seeded once from the final shadow, so it never sees the intermediate retract/insert
+ *  and a net-zero replay is invisible. */
+function replaySeedRace(descriptor: SeedDescriptor, shadow: ShadowIndex, change: TableChange): void {
+  const keyRow = change.new ?? change.old ?? change.key
+  const pk = keyRow ? pkOf(descriptor, keyRow) : undefined
+  if (pk === undefined) return
+  shadow.remove(pk)
+  if (change.new !== undefined && matchesResidual(descriptor, change.new))
+    shadow.put(pk, pruneRow(descriptor, change.new))
 }
 
 /** Whether a change actually changes anything (a pure replay update never invalidates). */

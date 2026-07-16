@@ -219,7 +219,10 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
   return {
     async acquire(request) {
       const existing = instances.get(request.instanceKey)
-      if (existing) return attach(existing, request)
+      if (existing) {
+        await existing.graph.ready() // a concurrent acquire during the initial seed blocks until precise
+        return attach(existing, request)
+      }
 
       const pending = inflight.get(request.instanceKey)
       if (pending) return attach(await pending, request)
@@ -230,6 +233,7 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
           const entry = buildInstance(plan, request)
           instances.set(request.instanceKey, entry)
           retainPlan(request.planKey, plan) // reference-scoped cache: this instance holds the plan
+          await entry.graph.ready() // block acquire on the seed → a precise (live) or demoted (coarse) graph
           inflight.delete(request.instanceKey)
           return entry
         } catch (error) {

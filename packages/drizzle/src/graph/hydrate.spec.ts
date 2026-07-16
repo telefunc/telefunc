@@ -1,9 +1,9 @@
-// T5.C — non-blocking warming + the atomic drain-loop cut. Deterministic paused injection
-// (deferred promises), never timers. C1 (response never awaits + σ-bounded state), C3 (seed
-// scan is the σ-pruned in-memory baseline; single + composite PK), C4 (THE BLOCKER — one muted
-// feed, loop-until-empty drain, a mid-fetch event is not lost to limbo — failing-then-passing),
-// C5 (journal overflow → coarse), C6 (resync re-warms a new generation, drift retires), and C7
-// (a late async completion after destroy / demote / retire / supersede is inert).
+// T5.C — synchronous-cut hydration: the seed module. C1 (start() does not await the scan and state
+// is σ-bounded, not table size), C3 (the seed scan is the σ-pruned in-memory baseline; single +
+// composite PK), a seed exceeding the per-input state bound → coarse, a scan error → coarse (never a
+// partial seed), and abort — a late scan completion after destroy / retire is inert (never seeds a
+// dead graph). The one-shot seed-race replay is proven in liveGraph.spec; the drain-loop / journal
+// it replaced are gone. Deterministic — deferred promises, never timers.
 
 import { gt, sql } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
@@ -11,21 +11,15 @@ import { describe, expect, it } from 'vitest'
 import { type SeedDescriptor, type StatefulGraph, compileQuery } from '../compile/compile.js'
 import type { Row } from '../compile/rowSpace.js'
 import { extractQueryShape } from '../extract/queryShape.js'
-import { JOURNAL_LIMIT, type HydrationExecutor, createWarming } from './hydrate.js'
+import { type HydrationExecutor, createSeed } from './hydrate.js'
 import { type LiveGraphSpec, createLiveGraph } from './liveGraph.js'
 import type { ShadowIndex } from './shadow.js'
 
-// ── deterministic async plumbing ────────────────────────────────────
-
-type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void }
+type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void }
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void
-  let reject!: (error: unknown) => void
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res
-    reject = rej
-  })
-  return { promise, resolve, reject }
+  const promise = new Promise<T>((res) => (resolve = res))
+  return { promise, resolve }
 }
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
 
@@ -47,8 +41,8 @@ function usersDescriptor(): SeedDescriptor {
   const graph = compileQuery(extractQueryShape(q, { dialect: 'pg' })).instantiate() as StatefulGraph
   return graph.seeds.find((seed) => seed.table === 'users')!
 }
-/** A composite-PK input (hand-built: the drain-loop key logic — pkOf over several columns —
- *  is what C3's composite case exercises, independent of the compiler's PK extraction). */
+/** A composite-PK input (hand-built: the shadow key logic — pkOf over several columns — is what
+ *  C3's composite case exercises, independent of the compiler's PK extraction). */
 function compositeDescriptor(): SeedDescriptor {
   return {
     inputId: 'memberships',
@@ -61,7 +55,7 @@ function compositeDescriptor(): SeedDescriptor {
   }
 }
 
-// ── liveGraph fakes (for the state-machine cases C6/C7) ─────────────
+// ── liveGraph fakes (for the abort/inert cases) ─────────────────────
 
 function fakeSeed(inputId: string, table: string, primaryKey: string[] = ['id']): SeedDescriptor {
   return { inputId, table, alias: inputId, primaryKey, columns: '*', residual: { kind: 'true' }, shadowNeed: true }
@@ -70,14 +64,14 @@ function statefulFake(seeds: SeedDescriptor[]): StatefulGraph {
   const noFire = { data: false, dirty: false, invalidated: false }
   return { seeds, seedInput() {}, flushSeed() {}, feedInput() {}, runBatch: () => noFire, apply: () => noFire }
 }
-function statefulSpec(executor: HydrationExecutor, over: { maxStateRows?: number } = {}): LiveGraphSpec {
+function statefulSpec(executor: HydrationExecutor): LiveGraphSpec {
   return {
     kind: 'stateful',
     instanceKey: 'k',
     tables: ['users'],
     instantiate: () => statefulFake([fakeSeed('users', 'users')]),
     executor,
-    maxStateRows: over.maxStateRows ?? 1_000_000,
+    maxStateRows: 1_000_000,
   }
 }
 function scanQueue(): { executor: HydrationExecutor; calls: Deferred<Row[]>[] } {
@@ -90,14 +84,13 @@ function scanQueue(): { executor: HydrationExecutor; calls: Deferred<Row[]>[] } 
         calls.push(d)
         return d.promise
       },
-      fetchByKeys: () => Promise.resolve([]),
     },
   }
 }
 
 // ── C1 — non-blocking + σ-bounded ───────────────────────────────────
 
-describe('T5.C1 — response never awaits hydration; state is σ-bounded (not table size)', () => {
+describe('T5.C1 — start() does not await the scan; state is σ-bounded (not table size)', () => {
   it('start() returns before the scan resolves, and only σ-matching rows enter state', async () => {
     const descriptor = usersDescriptor() // σ = score > 0
     const scanRows: Row[] = []
@@ -109,13 +102,13 @@ describe('T5.C1 — response never awaits hydration; state is σ-bounded (not ta
     }
     const scanDef = deferred<Row[]>()
     let built: Map<string, ShadowIndex> | undefined
-    const warming = createWarming({
+    const seed = createSeed({
       descriptors: [descriptor],
-      executor: { scan: () => scanDef.promise, fetchByKeys: () => Promise.resolve([]) },
+      executor: { scan: () => scanDef.promise },
       maxStateRows: 1e9,
       hooks: { onComplete: (shadows) => (built = shadows), onDemote: () => expect.unreachable('unexpected demote') },
     })
-    warming.start()
+    seed.start()
     expect(built).toBeUndefined() // non-blocking: start() did not await the scan
     scanDef.resolve(scanRows)
     await flush()
@@ -129,16 +122,15 @@ describe('T5.C1 — response never awaits hydration; state is σ-bounded (not ta
 
 describe('T5.C3 — seed scan = σ-scoped pruned baseline, single + composite PK', () => {
   it('single-PK: prunes to demanded columns and admits only σ-matching rows', async () => {
-    const descriptor = usersDescriptor()
     const scanDef = deferred<Row[]>()
     let built: Map<string, ShadowIndex> | undefined
-    const warming = createWarming({
-      descriptors: [descriptor],
-      executor: { scan: () => scanDef.promise, fetchByKeys: () => Promise.resolve([]) },
+    const seed = createSeed({
+      descriptors: [usersDescriptor()],
+      executor: { scan: () => scanDef.promise },
       maxStateRows: 1e9,
       hooks: { onComplete: (shadows) => (built = shadows), onDemote: () => expect.unreachable('unexpected demote') },
     })
-    warming.start()
+    seed.start()
     scanDef.resolve([
       { id: 1, team_id: 5, score: 10, extra: 'drop-me' },
       { id: 2, team_id: 5, score: 0 }, // σ-excluded (0 > 0 is false)
@@ -155,13 +147,13 @@ describe('T5.C3 — seed scan = σ-scoped pruned baseline, single + composite PK
     expect(descriptor.primaryKey).toEqual(['user_id', 'team_id'])
     const scanDef = deferred<Row[]>()
     let built: Map<string, ShadowIndex> | undefined
-    const warming = createWarming({
+    const seed = createSeed({
       descriptors: [descriptor],
-      executor: { scan: () => scanDef.promise, fetchByKeys: () => Promise.resolve([]) },
+      executor: { scan: () => scanDef.promise },
       maxStateRows: 1e9,
       hooks: { onComplete: (shadows) => (built = shadows), onDemote: () => expect.unreachable('unexpected demote') },
     })
-    warming.start()
+    seed.start()
     scanDef.resolve([
       { user_id: 1, team_id: 5, role: 'admin' },
       { user_id: 1, team_id: 6, role: 'member' }, // same user, different team → distinct composite key
@@ -171,163 +163,69 @@ describe('T5.C3 — seed scan = σ-scoped pruned baseline, single + composite PK
   })
 })
 
-// ── C4 — THE BLOCKER: atomic cut, no limbo miss ─────────────────────
+// ── bounded state + fail-closed ─────────────────────────────────────
 
-describe('T5.C4 — drain loop atomic cut (single muted feed; mid-fetch event not lost)', () => {
-  it('reconcile: a key still σ-matching is replaced, one that fell out of σ is retracted', async () => {
-    const descriptor = usersDescriptor()
-    let built: Map<string, ShadowIndex> | undefined
-    const warming = createWarming({
-      descriptors: [descriptor],
-      executor: {
-        scan: async () => [
-          { id: 1, team_id: 5, score: 4 },
-          { id: 2, team_id: 5, score: 4 },
-        ],
-        // id=1 now scores 9 (replace); id=2 now scores 0 → σ-excluded (retract).
-        fetchByKeys: async () => [
-          { id: 1, team_id: 5, score: 9 },
-          { id: 2, team_id: 5, score: 0 },
-        ],
-      },
-      maxStateRows: 1e9,
-      hooks: { onComplete: (shadows) => (built = shadows), onDemote: () => expect.unreachable('unexpected demote') },
+describe('T5.C — a seed exceeding the per-input state bound demotes to coarse', () => {
+  it('onDemote fires with state-row-limit and onComplete does not', async () => {
+    let demoted: string | undefined
+    let completed = false
+    const seed = createSeed({
+      descriptors: [usersDescriptor()],
+      executor: { scan: async () => Array.from({ length: 5 }, (_, i) => ({ id: i, team_id: 1, score: i + 1 })) },
+      maxStateRows: 3,
+      hooks: { onComplete: () => (completed = true), onDemote: (reason) => (demoted = reason) },
     })
-    // Two key-only touches so the drain re-fetches both, then reconciles.
-    warming.journal({ table: 'users', kind: 'update', key: { id: 1 } })
-    warming.journal({ table: 'users', kind: 'update', key: { id: 2 } })
-    warming.start()
+    seed.start()
     await flush()
-    const rows = built!
-      .get('users')!
-      .rows()
-      .map((r) => ({ id: r.id, score: r.score }))
-    expect(rows).toEqual([{ id: 1, score: 9 }]) // id=1 replaced to 9; id=2 retracted (fell out of σ)
-  })
-
-  // The discriminating counterexample, run for real against BOTH drain strategies through the
-  // SAME paused-injection scenario: E1 (id=2) is journaled before warm start (so the first swap is
-  // non-empty), then E2 (id=3) is injected DURING the id=2 re-fetch await. The only difference is
-  // `drainMode`. `'single-pass'` is the naive drain-once→flip form that provably LOSES E2 to limbo;
-  // `'loop-until-empty'` is production and catches it. Returns the flipped multiset + the fetch log.
-  async function midFetchScenario(
-    drainMode: 'loop-until-empty' | 'single-pass',
-  ): Promise<{ ids: number[]; fetchKeyLog: number[][] }> {
-    const descriptor = usersDescriptor()
-    const dbState = new Map<number, Row>([[1, { id: 1, team_id: 5, score: 5 }]])
-    const fetchDeferreds: Deferred<Row[]>[] = []
-    const fetchKeyLog: number[][] = []
-    const executor: HydrationExecutor = {
-      scan: async () => [...dbState.values()],
-      fetchByKeys: (_descriptor, keys) => {
-        fetchKeyLog.push(keys.map((k) => k.id as number))
-        const def = deferred<Row[]>()
-        fetchDeferreds.push(def)
-        return def.promise
-      },
-    }
-    let built: Map<string, ShadowIndex> | undefined
-    const warming = createWarming({
-      descriptors: [descriptor],
-      executor,
-      maxStateRows: 1e9,
-      drainMode,
-      hooks: { onComplete: (shadows) => (built = shadows), onDemote: () => expect.unreachable('unexpected demote') },
-    })
-
-    // E1 arrives before warm start → the first swapped journal is non-empty.
-    dbState.set(2, { id: 2, team_id: 5, score: 8 })
-    warming.journal({ table: 'users', kind: 'insert', new: { id: 2, team_id: 5, score: 8 }, key: { id: 2 } })
-    warming.start()
-    await flush() // scan resolves; drain pass 1 issues fetchByKeys([2]) and awaits (paused)
-    expect(fetchKeyLog).toEqual([[2]])
-    expect(built).toBeUndefined() // still draining — not yet flipped
-
-    // E2 injected DURING the fetch await — the limbo event.
-    dbState.set(3, { id: 3, team_id: 5, score: 9 })
-    warming.journal({ table: 'users', kind: 'insert', new: { id: 3, team_id: 5, score: 9 }, key: { id: 3 } })
-    fetchDeferreds[0]!.resolve([{ id: 2, team_id: 5, score: 8 }])
-    await flush() // single-pass: flips now (E2 stranded). loop: swaps E2 → issues fetchByKeys([3]).
-
-    // The loop form issued a second re-fetch that must be released; the single-pass form flipped
-    // after one pass and issued none.
-    if (fetchDeferreds[1]) {
-      fetchDeferreds[1].resolve([{ id: 3, team_id: 5, score: 9 }])
-      await flush() // drain swaps empty → onComplete → synchronous flip
-    }
-
-    const ids = built!
-      .get('users')!
-      .rows()
-      .map((r) => r.id as number)
-      .sort((a, b) => a - b)
-    return { ids, fetchKeyLog }
-  }
-
-  it('the naive single-pass drain (TEST-ONLY seam) LOSES the mid-fetch event to limbo', async () => {
-    const { ids, fetchKeyLog } = await midFetchScenario('single-pass')
-    expect(fetchKeyLog).toEqual([[2]]) // flipped after ONE swap — E2 (id=3) never re-fetched
-    expect(ids).not.toContain(3) // the discriminating miss
-    expect(ids).toEqual([1, 2]) // scan {1} + the one drained batch {E1:2}; E2 stranded in the journal
-  })
-
-  it('the production loop-until-empty drain CATCHES the same mid-fetch event', async () => {
-    const { ids, fetchKeyLog } = await midFetchScenario('loop-until-empty')
-    expect(fetchKeyLog).toEqual([[2], [3]]) // the next swap re-fetched E2 (id=3)
-    expect(ids).toContain(3)
-    expect(ids).toEqual([1, 2, 3]) // reconciled multiset, NOT the single-pass {1,2}
+    expect(demoted).toBe('state-row-limit')
+    expect(completed).toBe(false)
   })
 })
 
-// ── C5 — journal overflow ───────────────────────────────────────────
-
-describe('T5.C5 — journal overflow demotes to coarse', () => {
-  it('the (JOURNAL_LIMIT + 1)th journalled event demotes, earlier ones do not', () => {
+describe('T5.C — a scan error demotes to coarse (never a partial seed)', () => {
+  it('onDemote fires with hydration-error', async () => {
     let demoted: string | undefined
-    const warming = createWarming({
+    const seed = createSeed({
       descriptors: [usersDescriptor()],
-      executor: { scan: () => new Promise<Row[]>(() => {}), fetchByKeys: () => Promise.resolve([]) },
+      executor: {
+        scan: async () => {
+          throw new Error('boom')
+        },
+      },
       maxStateRows: 1e9,
       hooks: { onComplete: () => expect.unreachable('unexpected complete'), onDemote: (reason) => (demoted = reason) },
     })
-    warming.start()
-    for (let i = 0; i < JOURNAL_LIMIT; i++) warming.journal({ table: 'users', kind: 'insert', new: { id: i } })
-    expect(demoted).toBeUndefined()
-    warming.journal({ table: 'users', kind: 'insert', new: { id: JOURNAL_LIMIT } })
-    expect(demoted).toBe('journal-overflow')
-  })
-})
-
-// ── C6 — re-warm vs retire ──────────────────────────────────────────
-
-describe('T5.C6 — resync re-warms a new generation; drift retires (no re-warm)', () => {
-  it('a resync re-runs seed+drain as a new generation; a retired graph never re-warms', async () => {
-    const { executor, calls } = scanQueue()
-    const graph = createLiveGraph(statefulSpec(executor))
-    expect(graph.state()).toBe('warming')
-    calls[0]!.resolve([{ id: 1 }])
+    seed.start()
     await flush()
-    expect(graph.state()).toBe('live')
-
-    const warms = graph.inspect().counters.warms
-    graph.rewarm() // gap / source resync / shadow discontinuity
-    expect(graph.state()).toBe('warming')
-    expect(graph.inspect().counters.warms).toBe(warms + 1) // new generation
-    expect(calls.length).toBe(2) // re-scanned
-
-    graph.retire() // schema drift → terminal
-    expect(graph.state()).toBe('retired')
-    graph.rewarm() // there is NO drift → re-warm path
-    expect(graph.state()).toBe('retired')
+    expect(demoted).toBe('hydration-error')
   })
 })
 
-// ── C7 — generation/abort token makes late async inert ──────────────
+// ── abort — a late completion is inert ──────────────────────────────
 
-describe('T5.C7 — a late async completion is inert (destroy / demote / retire / supersede)', () => {
-  it('destroy: a late scan never flips a destroyed graph live (a zero-ref destroy is never undone)', async () => {
+describe('T5.C — a late scan completion after abort is inert (never seeds a dead graph)', () => {
+  it('the seed module: abort() before the scan resolves → neither hook fires', async () => {
+    const scanDef = deferred<Row[]>()
+    let completed = false
+    let demoted = false
+    const seed = createSeed({
+      descriptors: [usersDescriptor()],
+      executor: { scan: () => scanDef.promise },
+      maxStateRows: 1e9,
+      hooks: { onComplete: () => (completed = true), onDemote: () => (demoted = true) },
+    })
+    seed.start()
+    seed.abort()
+    scanDef.resolve([{ id: 1, team_id: 1, score: 5 }])
+    await flush()
+    expect(completed).toBe(false)
+    expect(demoted).toBe(false)
+  })
+
+  it('destroy during the seed: a late scan never flips a destroyed graph live', async () => {
     const { executor, calls } = scanQueue()
     const graph = createLiveGraph(statefulSpec(executor))
+    expect(graph.state()).toBe('seeding')
     graph.destroy()
     expect(graph.state()).toBe('destroyed')
     calls[0]!.resolve([{ id: 1 }])
@@ -335,35 +233,12 @@ describe('T5.C7 — a late async completion is inert (destroy / demote / retire 
     expect(graph.state()).toBe('destroyed')
   })
 
-  it('retire: a late scan never flips a retired graph live', async () => {
+  it('retire during the seed: a late scan never flips a retired graph live', async () => {
     const { executor, calls } = scanQueue()
     const graph = createLiveGraph(statefulSpec(executor))
     graph.retire()
     calls[0]!.resolve([{ id: 1 }])
     await flush()
     expect(graph.state()).toBe('retired')
-  })
-
-  it('supersede: the superseded generation is inert; only the newer one flips live', async () => {
-    const { executor, calls } = scanQueue()
-    const graph = createLiveGraph(statefulSpec(executor))
-    graph.rewarm() // gen2 supersedes gen1
-    expect(calls.length).toBe(2)
-    calls[0]!.resolve([{ id: 1 }]) // gen1 (superseded) resolves late
-    await flush()
-    expect(graph.state()).toBe('warming') // NOT flipped by the stale generation
-    calls[1]!.resolve([{ id: 2 }]) // gen2 completes
-    await flush()
-    expect(graph.state()).toBe('live')
-  })
-
-  it('demote: after a journal-overflow demote, a late scan does not resurrect the graph', async () => {
-    const { executor, calls } = scanQueue()
-    const graph = createLiveGraph(statefulSpec(executor))
-    for (let i = 0; i <= JOURNAL_LIMIT; i++) graph.apply([{ table: 'users', kind: 'insert', new: { id: i } }])
-    expect(graph.state()).toBe('coarse')
-    calls[0]!.resolve([{ id: 1 }])
-    await flush()
-    expect(graph.state()).toBe('coarse')
   })
 })

@@ -1,10 +1,10 @@
-// T5.I1 — model-based lifecycle traces. A seeded walk enumerates trigger sequences generated
-// ONLY from the §3.C-TT transition table and drives a real liveGraph, asserting at every step:
-// the real state equals the legal target (no illegal transition is reachable), ≤1 fire per graph
-// per batch, a warming/coarse graph never silently drops a substantive change and never claims
-// exactness, and retired/destroyed graphs are inert (never rehydrated). Separate cases pin the
-// unreachable edges (coarse→warming via resync, drift→re-warm). Deterministic — a fixed PRNG +
-// deferred scans, never timers.
+// T5.I1 — model-based lifecycle traces. A seeded walk enumerates trigger sequences generated ONLY
+// from the §3.C-TT transition table and drives a real liveGraph, asserting at every step: the real
+// state equals the legal target (no illegal transition is reachable), ≤1 fire per graph per batch, a
+// SEEDING graph buffers a substantive change precisely (never coarse, never dropped) while a coarse
+// graph over-fires and never claims exactness, and retired/destroyed graphs are inert (never
+// rehydrated). Separate cases pin the sinks (coarse→live via resync is unreachable — a gap demotes
+// to coarse; drift→re-seed is unreachable). Deterministic — a fixed PRNG + deferred scans, never timers.
 
 import { describe, expect, it } from 'vitest'
 import type { SeedDescriptor, StatefulGraph } from '../compile/compile.js'
@@ -12,10 +12,7 @@ import type { Row } from '../compile/rowSpace.js'
 import type { HydrationExecutor } from './hydrate.js'
 import { type LiveGraph, createLiveGraph } from './liveGraph.js'
 
-const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
-async function settle(graph: LiveGraph): Promise<void> {
-  for (let i = 0; i < 1000 && graph.state() === 'warming'; i++) await flush()
-}
+const settle = (graph: LiveGraph): Promise<void> => graph.ready() // resolves when the seed lands (→ live / coarse)
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void }
 function deferred<T>(): Deferred<T> {
@@ -69,7 +66,6 @@ function makeDriven(): { graph: LiveGraph; resolveScan: (rows: Row[]) => void } 
       calls.push(d)
       return d.promise
     },
-    fetchByKeys: async () => [],
   }
   const graph = createLiveGraph({
     kind: 'stateful',
@@ -82,19 +78,19 @@ function makeDriven(): { graph: LiveGraph; resolveScan: (rows: Row[]) => void } 
   return { graph, resolveScan: (rows) => calls[calls.length - 1]?.resolve(rows) }
 }
 
-type S = 'warming' | 'live' | 'coarse' | 'retired' | 'destroyed'
+type S = 'seeding' | 'live' | 'coarse' | 'retired' | 'destroyed'
 type Edge = { trigger: string; to: S }
 
 // §3.C-TT — the complete legal transition set (the walk only ever fires triggers from here).
 const TT: Record<S, Edge[]> = {
-  warming: [
-    { trigger: 'warm-complete', to: 'live' },
-    { trigger: 'demote-warming', to: 'coarse' },
+  seeding: [
+    { trigger: 'seed-complete', to: 'live' },
+    { trigger: 'demote-seed', to: 'coarse' },
     { trigger: 'drift', to: 'retired' },
     { trigger: 'destroy', to: 'destroyed' },
   ],
   live: [
-    { trigger: 'gap', to: 'warming' },
+    { trigger: 'gap', to: 'coarse' }, // a resync can't re-seed synchronously → coarse (no live→seeding)
     { trigger: 'state-limit', to: 'coarse' },
     { trigger: 'drift', to: 'retired' },
     { trigger: 'destroy', to: 'destroyed' },
@@ -109,11 +105,11 @@ const TT: Record<S, Edge[]> = {
 
 async function drive(driven: { graph: LiveGraph; resolveScan: (rows: Row[]) => void }, trigger: string): Promise<void> {
   const g = driven.graph
-  if (trigger === 'warm-complete') {
+  if (trigger === 'seed-complete') {
     driven.resolveScan([{ id: 1 }])
     await settle(g)
-  } else if (trigger === 'demote-warming') {
-    driven.resolveScan(manyRows(MAX_STATE_ROWS + 50)) // scan overflows the state bound
+  } else if (trigger === 'demote-seed') {
+    driven.resolveScan(manyRows(MAX_STATE_ROWS + 50)) // scan overflows the state bound → demote
     await settle(g)
   } else if (trigger === 'gap') {
     g.rewarm()
@@ -133,9 +129,13 @@ function probe(graph: LiveGraph, model: S): void {
   const out = graph.apply([{ table: 'users', kind: 'insert', new: { id: 999_999 } }]) // fixed id → adds ≤1 shadow row
   const delta = graph.invalidationSeq() - before
   expect(delta).toBeLessThanOrEqual(1) // ≤1 fire per graph per batch
-  if (model === 'warming' || model === 'coarse') {
-    expect(out.invalidated).toBe(true) // never a silent drop (coarse over-fire is licensed)
-    expect(graph.inspect().counters.exactFires).toBe(beforeExact) // a coarse/warming graph never claims exactness
+  if (model === 'seeding') {
+    expect(out.invalidated).toBe(false) // buffered precisely — not coarse, and NOT dropped (replayed at the cut)
+    expect(graph.inspect().counters.exactFires).toBe(beforeExact) // a seeding graph never claims exactness
+  }
+  if (model === 'coarse') {
+    expect(out.invalidated).toBe(true) // coarse over-fire is licensed (never a silent drop)
+    expect(graph.inspect().counters.exactFires).toBe(beforeExact) // a coarse graph never claims exactness
   }
   if (model === 'retired' || model === 'destroyed') {
     expect(out.invalidated).toBe(false) // terminal — inert, never rehydrated
@@ -148,8 +148,8 @@ describe('T5.I1 — model-based lifecycle invariants (legal transitions only)', 
     const rng = prng(0x51c5)
     for (let trace = 0; trace < 25; trace++) {
       const driven = makeDriven()
-      let model: S = 'warming'
-      expect(driven.graph.state()).toBe('warming') // born stateful → warming
+      let model: S = 'seeding'
+      expect(driven.graph.state()).toBe('seeding') // born stateful → seeding until the scan lands
       for (let step = 0; step < 14; step++) {
         probe(driven.graph, model)
         const legal: Edge[] = TT[model]
@@ -163,7 +163,7 @@ describe('T5.I1 — model-based lifecycle invariants (legal transitions only)', 
   })
 
   it('illegal transitions are unreachable: coarse and drift are sinks, terminals are inert', async () => {
-    // coarse is a sink — a resync request does NOT re-warm it (no coarse→warming)
+    // coarse is a sink — a resync request does NOT re-seed it (no coarse→live)
     const c = makeDriven()
     c.resolveScan(manyRows(MAX_STATE_ROWS + 50))
     await settle(c.graph)
@@ -171,7 +171,7 @@ describe('T5.I1 — model-based lifecycle invariants (legal transitions only)', 
     c.graph.rewarm()
     expect(c.graph.state()).toBe('coarse')
 
-    // drift retires terminally — there is NO drift→re-warm path
+    // drift retires terminally — there is NO drift→re-seed path
     const r = makeDriven()
     r.resolveScan([{ id: 1 }])
     await settle(r.graph)

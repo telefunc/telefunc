@@ -24,18 +24,11 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 
-const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
-async function settle(graph: { state(): string }): Promise<void> {
-  for (let i = 0; i < 1000 && graph.state() === 'warming'; i++) await flush()
-}
-
 const NO_FIRE: FireResult = { data: false, dirty: false, invalidated: false }
 
 function fakeExecutor(over: Partial<HydrationExecutor> = {}): HydrationExecutor {
-  return {
-    scan: over.scan ?? (() => new Promise<Row[]>(() => {})), // never resolves → stays warming
-    fetchByKeys: over.fetchByKeys ?? (() => Promise.resolve([])),
-  }
+  // acquire BLOCKS on the seed, so the scan must resolve for the graph to reach live.
+  return { scan: over.scan ?? (() => Promise.resolve<Row[]>([])) }
 }
 
 function seed(inputId: string, table: string, primaryKey: string[] = ['id']): SeedDescriptor {
@@ -171,7 +164,7 @@ describe('T5.A2 — concurrent acquire shares one creation + failure recovery', 
 // ── A3 — activate before read ───────────────────────────────────────
 
 describe('T5.A3 — inputs registered before the acquiring read', () => {
-  it('router.register runs synchronously before the warming scan (spy order)', async () => {
+  it('router.register runs synchronously before the seed scan (spy order)', async () => {
     const registry = registryOf()
     const order: string[] = []
     const orig = registry.router.register.bind(registry.router)
@@ -182,7 +175,7 @@ describe('T5.A3 — inputs registered before the acquiring read', () => {
     const executor = fakeExecutor({
       scan: () => {
         order.push('scan')
-        return new Promise<Row[]>(() => {})
+        return Promise.resolve<Row[]>([])
       },
     })
     await registry.acquire(req({ compilePlan: () => statefulPlan(['users'], [seed('users', 'users')]), executor }))
@@ -199,9 +192,9 @@ describe('T5.A4 — born-state by plan class', () => {
     const r = await registryOf().acquire(req({ compilePlan: () => statelessPlan(['users']) }))
     expect(r.graph.state()).toBe('live')
   })
-  it('a stateful plan is born warming', async () => {
+  it('a stateful plan is born LIVE after the synchronous seed (acquire blocks on it)', async () => {
     const r = await registryOf().acquire(req({ compilePlan: () => statefulPlan(['users'], [seed('users', 'users')]) }))
-    expect(r.graph.state()).toBe('warming')
+    expect(r.graph.state()).toBe('live')
   })
 })
 
@@ -265,14 +258,13 @@ describe('T5.A6 — state-row bound → demote; no-PK input born coarse', () => 
     expect(r.graph.state()).toBe('coarse')
   })
 
-  it('exceeding maxStateRowsPerInput during warming demotes to coarse and stays coarse (no rewarm loop)', async () => {
+  it('a seed exceeding maxStateRowsPerInput demotes to coarse and stays coarse (no rewarm loop)', async () => {
     const registry = registryOf({ maxStateRowsPerInput: 2 })
     const executor = fakeExecutor({ scan: () => Promise.resolve([{ id: 1 }, { id: 2 }, { id: 3 }]) })
     const r = await registry.acquire(
       req({ compilePlan: () => statefulPlan(['users'], [seed('users', 'users')]), executor }),
     )
-    await settle(r.graph)
-    expect(r.graph.state()).toBe('coarse')
+    expect(r.graph.state()).toBe('coarse') // acquire blocked on the seed, which demoted over the bound
     r.graph.rewarm() // coarse is a sink — a resync request does NOT rewarm it
     expect(r.graph.state()).toBe('coarse')
   })
