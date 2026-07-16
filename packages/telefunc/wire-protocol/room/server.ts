@@ -17,7 +17,6 @@ import {
 } from '../server/broadcast.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
-  ROOM_KEY_NAMESPACE,
   RoomError,
   roomFailureError,
   leaveCauseFromWire,
@@ -29,13 +28,15 @@ import {
   normalizeJoinOptions,
   roomConfigKvKey,
   roomDmKey,
-  roomIdFromConfigKey,
   roomCtrlKey,
   roomTextKey,
   roomMemberDataKey,
   roomMemberTrackKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
+  roomIndexKvKey,
+  roomIndexKvPrefix,
+  roomIdFromIndexKey,
   roomHiddenMemberKvKey,
   roomHiddenMemberKvPrefix,
   roomIdentityMemberKvKey,
@@ -242,7 +243,11 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined, kv: R
   const { meta } = normalizeOptions(options)
   const config: RoomConfigRecord = { meta, isolated: options?.isolated === true, at: Date.now(), by: writerId() }
   const created = await kv.setIfAbsent(roomConfigKvKey(id), stringify(config))
-  return created ? new ServerRoom(id, config, { members: [] }) : null // fresh room — the roster is known: empty
+  if (!created) return null
+  // Register the room in the cross-room index (unscoped — enumeration spans rooms, so it can't live
+  // in this one room's shard; see `listRooms`).
+  await getRoomKV().set(roomIndexKvKey(id), '')
+  return new ServerRoom(id, config, { members: [] }) // fresh room — the roster is known: empty
 }
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
@@ -323,12 +328,12 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
   // config and count then read from that room's own authority.
   const index = getRoomKV()
   const rooms: RoomInfo[] = []
-  for (const key of await index.keys(ROOM_KEY_NAMESPACE + (options?.prefix ?? ''))) {
-    const id = roomIdFromConfigKey(key)
+  for (const key of await index.keys(roomIndexKvPrefix(options?.prefix ?? ''))) {
+    const id = roomIdFromIndexKey(key)
     if (id === null) continue
     const kv = getRoomKV(id)
     const config = await readConfig(kv, id)
-    if (config === null) continue // closed concurrently
+    if (config === null) continue // closed concurrently — a stale index entry, skip
     const count = await presenceCount(kv, id) // scan-only — no per-member reads, hidden excluded
     rooms.push({ id, meta: config.meta, count, isEmpty: count === 0 })
   }
@@ -377,6 +382,7 @@ async function closeRoom(id: string): Promise<void> {
   for (const key of await kv.keys(roomRetainedBinaryPrefix(id))) await kv.delete(key)
   await kv.delete(roomRetainedTextKey(id))
   await kv.delete(roomConfigKvKey(id))
+  await getRoomKV().delete(roomIndexKvKey(id)) // deregister from the cross-room index (unscoped)
 }
 
 /** The `(memberId, identity)` pairs a `ParticipantRef` addresses — shared by `Room.send()` and

@@ -18,6 +18,9 @@ export {
   roomIdFromConfigKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
+  roomIndexKvKey,
+  roomIndexKvPrefix,
+  roomIdFromIndexKey,
   roomHiddenMemberKvKey,
   roomHiddenMemberKvPrefix,
   roomIdentityMemberKvKey,
@@ -169,6 +172,26 @@ function roomMemberKvKey(roomId: string, memberId: string): string {
  *  how member records are told apart from keys of other rooms whose ID shares the prefix. */
 function roomMemberKvPrefix(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:m:`
+}
+
+/** Reserved KV namespace for the room-existence index — a flat set of room IDs (`Room.list()`). A
+ *  room's own state can live in a per-room shard (Cloudflare), but *enumerating* rooms is
+ *  inherently cross-room, so the index lives in the one shared, listable store instead. Kept off
+ *  `ROOM_KEY_NAMESPACE` so a room-state scan never sweeps it. */
+const ROOM_INDEX_KEY_NAMESPACE = 'telefunc:roomindex:'
+
+/** KV key registering a room's existence in the cross-room index (value is empty — the key is the
+ *  record). The raw room ID is the suffix, so `Room.list({ prefix })` scans by ID prefix directly. */
+function roomIndexKvKey(roomId: string): string {
+  return `${ROOM_INDEX_KEY_NAMESPACE}${roomId}`
+}
+/** KV prefix enumerating the room index, optionally narrowed by a room-ID prefix. */
+function roomIndexKvPrefix(idPrefix: string): string {
+  return `${ROOM_INDEX_KEY_NAMESPACE}${idPrefix}`
+}
+/** The room ID a room-index key registers, or `null` if the key isn't one. */
+function roomIdFromIndexKey(key: string): string | null {
+  return key.startsWith(ROOM_INDEX_KEY_NAMESPACE) ? key.slice(ROOM_INDEX_KEY_NAMESPACE.length) : null
 }
 
 /** KV key marking one membership as off-presence (`join({ hidden })`). A tiny index — written next

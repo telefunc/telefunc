@@ -140,6 +140,32 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
       broadcast.deliverToLocal(request)
     }
+
+    // Room state RPC — a room's authority DO (the one that sequences its control lane) also owns its
+    // strongly-consistent KV state. See `CloudflareBroadcastAuthorityState`'s room-state methods.
+    telefuncRoomStateGet(key: string) {
+      return this.authorityState.roomStateGet(key)
+    }
+    telefuncRoomStateKeys(prefix: string) {
+      return this.authorityState.roomStateKeys(prefix)
+    }
+    telefuncRoomStateSet(key: string, value: string, ttlMs?: number) {
+      return this.authorityState.roomStateSet(key, value, ttlMs)
+    }
+    telefuncRoomStateDelete(key: string) {
+      return this.authorityState.roomStateDelete(key)
+    }
+    telefuncRoomStateSetIfAbsent(key: string, value: string, ttlMs?: number) {
+      return this.authorityState.roomStateSetIfAbsent(key, value, ttlMs)
+    }
+    telefuncRoomStateCompareAndSet(key: string, expected: string | null, next: string | null, ttlMs?: number) {
+      return this.authorityState.roomStateCompareAndSet(key, expected, next, ttlMs)
+    }
+
+    /** Storage alarm: reclaim expired room-state entries (DO storage has no native TTL). */
+    alarm() {
+      return this.authorityState.reapExpiredRoomState()
+    }
   }
 
   return {

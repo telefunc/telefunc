@@ -6,20 +6,36 @@ import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert, assertUsage } from '../../../../utils/assert.js'
 import { utf8ByteLength } from '../../../../utils/utf8ByteLength.js'
+import { KV_KEEP } from '../../broadcast.js'
 import type {
   BroadcastBinaryOnMessage,
   BroadcastOnMessage,
   BroadcastPublishResult,
   BroadcastAdapter,
   BroadcastUnsubscribe,
+  KvMutate,
+  KvReadOptions,
+  KvWriteOptions,
 } from '../../broadcast.js'
 import type { WirePublishInfo } from '../../../shared-ws.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
-/** Namespace of the adapter's KV store (`get`/`set`/`delete`/`keys`) within the Workers KV binding. */
+/** Namespace of the adapter's KV store (`get`/`set`/`delete`/`keys`) within the Workers KV binding.
+ *  Used only for cross-room, listable state (the room-existence index); a room's own state lives in
+ *  its authority Durable Object (see the room-state methods on `CloudflareBroadcastAuthorityState`). */
 const KV_STORE_PREFIX = 'tfkv:'
+
+/** DO-storage prefix for room-state entries, isolating them from the authority's broadcast bookkeeping
+ *  (`broadcast:*`) in the same Durable Object. */
+const ROOM_STATE_STORAGE_PREFIX = 'rs:'
+/** How often a room-state authority sweeps expired entries. DO storage has no native TTL, so this
+ *  alarm does what Workers KV expiry did before — bounding a crashed owner's leftover member records. */
+const ROOM_STATE_REAP_INTERVAL_MS = 60_000
+
+/** One room-state entry in DO storage: the raw value and its absolute expiry (`null` = never). */
+type RoomStateEntry = { v: string; e: number | null }
 
 /** Unwrap Cloudflare DO RPC proxy into a plain object.
  *  RPC properties are lazy stubs that must be awaited to resolve their values. */
@@ -246,6 +262,118 @@ class CloudflareBroadcastAuthorityState {
     await this.state.storage.put(storageKey, authorityBucket)
     return authorityBucket
   }
+
+  // --- Room state (backs `Room` on Cloudflare) ---
+  //
+  // A room's config/members/tracks/retained state lives here, in the same Durable Object that
+  // already sequences the room's control lane — one strongly-consistent authority per room, at the
+  // room's optimal location. The atomic operations run through `runInAuthorityChain`, so they
+  // linearize against each other and against the publish path. Entries carry the caller's TTL; reads
+  // drop expired ones lazily and `reapExpiredRoomState` (the alarm) sweeps the rest — standing in for
+  // the native expiry DO storage lacks.
+
+  private roomStateStorageKey(key: string): string {
+    return ROOM_STATE_STORAGE_PREFIX + key
+  }
+
+  private liveRoomStateValue(entry: RoomStateEntry | undefined, now: number): string | null {
+    if (!entry) return null
+    return entry.e !== null && entry.e <= now ? null : entry.v
+  }
+
+  private async putRoomState(key: string, value: string, ttlMs: number | undefined): Promise<void> {
+    await this.state.storage.put<RoomStateEntry>(this.roomStateStorageKey(key), {
+      v: value,
+      e: ttlMs === undefined ? null : Date.now() + ttlMs,
+    })
+    // A TTL entry (a member record) needs sweeping even if the room is never read again — arm the
+    // alarm once. Entries without a TTL (config, retained) don't, so they never start the sweep.
+    if (ttlMs !== undefined && (await this.state.storage.getAlarm()) === null) {
+      await this.state.storage.setAlarm(Date.now() + ROOM_STATE_REAP_INTERVAL_MS)
+    }
+  }
+
+  async roomStateGet(key: string): Promise<string | null> {
+    return this.liveRoomStateValue(
+      await this.state.storage.get<RoomStateEntry>(this.roomStateStorageKey(key)),
+      Date.now(),
+    )
+  }
+
+  async roomStateKeys(prefix: string): Promise<string[]> {
+    const entries = await this.state.storage.list<RoomStateEntry>({ prefix: this.roomStateStorageKey(prefix) })
+    const now = Date.now()
+    const keys: string[] = []
+    for (const [storageKey, entry] of entries) {
+      if (this.liveRoomStateValue(entry, now) !== null) keys.push(storageKey.slice(ROOM_STATE_STORAGE_PREFIX.length))
+    }
+    return keys
+  }
+
+  async roomStateSet(key: string, value: string, ttlMs?: number): Promise<void> {
+    await this.putRoomState(key, value, ttlMs)
+  }
+
+  async roomStateDelete(key: string): Promise<void> {
+    await this.state.storage.delete(this.roomStateStorageKey(key))
+  }
+
+  roomStateSetIfAbsent(key: string, value: string, ttlMs?: number): Promise<boolean> {
+    return this.runInAuthorityChain(async () => {
+      const current = this.liveRoomStateValue(
+        await this.state.storage.get<RoomStateEntry>(this.roomStateStorageKey(key)),
+        Date.now(),
+      )
+      if (current !== null) return false
+      await this.putRoomState(key, value, ttlMs)
+      return true
+    })
+  }
+
+  roomStateCompareAndSet(key: string, expected: string | null, next: string | null, ttlMs?: number): Promise<boolean> {
+    return this.runInAuthorityChain(async () => {
+      const current = this.liveRoomStateValue(
+        await this.state.storage.get<RoomStateEntry>(this.roomStateStorageKey(key)),
+        Date.now(),
+      )
+      if (current !== expected) return false
+      if (next === null) await this.state.storage.delete(this.roomStateStorageKey(key))
+      else await this.putRoomState(key, next, ttlMs)
+      return true
+    })
+  }
+
+  /** Alarm handler: drop every expired room-state entry, and re-arm while un-expired TTL entries
+   *  remain so a busy room keeps getting swept and an emptied one lets the alarm lapse. */
+  async reapExpiredRoomState(): Promise<void> {
+    const entries = await this.state.storage.list<RoomStateEntry>({ prefix: ROOM_STATE_STORAGE_PREFIX })
+    const now = Date.now()
+    const expired: string[] = []
+    let hasLiveTtl = false
+    for (const [storageKey, entry] of entries) {
+      if (entry.e === null) continue
+      if (entry.e <= now) expired.push(storageKey)
+      else hasLiveTtl = true
+    }
+    if (expired.length > 0) await this.state.storage.delete(expired)
+    if (hasLiveTtl) await this.state.storage.setAlarm(Date.now() + ROOM_STATE_REAP_INTERVAL_MS)
+  }
+}
+
+/** The authority stub extended with the room-state RPC surface — the same Durable Object that
+ *  sequences a room's control lane also owns that room's KV state. */
+type TelefuncRoomStateStub = DurableObjectStub & {
+  telefuncRoomStateGet(key: string): Promise<string | null>
+  telefuncRoomStateKeys(prefix: string): Promise<string[]>
+  telefuncRoomStateSet(key: string, value: string, ttlMs?: number): Promise<void>
+  telefuncRoomStateDelete(key: string): Promise<void>
+  telefuncRoomStateSetIfAbsent(key: string, value: string, ttlMs?: number): Promise<boolean>
+  telefuncRoomStateCompareAndSet(
+    key: string,
+    expected: string | null,
+    next: string | null,
+    ttlMs?: number,
+  ): Promise<boolean>
 }
 
 // ---------------------------------------------------------------------------
@@ -362,31 +490,71 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   // --- KV (backs `Room` state) ---
   //
-  // Stored in the same Workers KV namespace as broadcast presence, under its own
-  // `tfkv:` prefix. Room state tolerates KV's eventual consistency: live updates
-  // travel as broadcast events, KV is durability + late-joiner seed + crash reaping
-  // (`ROOM_MEMBER_TTL_MS` is sized for KV's propagation delay).
+  // Room state routes by `partitionKey`: a room's keys carry the room's control-lane key and land on
+  // the Durable Object that already sequences that room — strongly consistent, at the room's optimal
+  // location. The one unpartitioned key is the cross-room room-existence index (`Room.list`); it has
+  // no single home, so it lives in the shared, listable Workers KV namespace (eventually consistent,
+  // which enumeration tolerates).
 
-  async get(key: string): Promise<string | null> {
-    return await this.requireKV().get(KV_STORE_PREFIX + key)
+  async get(key: string, options?: KvReadOptions): Promise<string | null> {
+    const partitionKey = options?.partitionKey
+    if (partitionKey === undefined) return await this.requireKV().get(KV_STORE_PREFIX + key)
+    return await this.roomStateStub(partitionKey).telefuncRoomStateGet(key)
   }
 
-  async set(key: string, value: string, options?: { ttlMs?: number }): Promise<void> {
-    if (options?.ttlMs === undefined) {
+  async set(key: string, value: string, options?: KvWriteOptions): Promise<void> {
+    const partitionKey = options?.partitionKey
+    if (partitionKey !== undefined) {
+      await this.roomStateStub(partitionKey).telefuncRoomStateSet(key, value, options?.ttlMs)
+      return
+    }
+    await this.putWorkersKv(key, value, options?.ttlMs)
+  }
+
+  async delete(key: string, options?: KvReadOptions): Promise<void> {
+    const partitionKey = options?.partitionKey
+    if (partitionKey === undefined) await this.requireKV().delete(KV_STORE_PREFIX + key)
+    else await this.roomStateStub(partitionKey).telefuncRoomStateDelete(key)
+  }
+
+  async keys(prefix: string, options?: KvReadOptions): Promise<string[]> {
+    const partitionKey = options?.partitionKey
+    if (partitionKey !== undefined) return await this.roomStateStub(partitionKey).telefuncRoomStateKeys(prefix)
+    return await this.listWorkersKv(prefix)
+  }
+
+  async setIfAbsent(key: string, value: string, options?: KvWriteOptions): Promise<boolean> {
+    const stub = this.roomStateStub(this.requirePartition(options))
+    return await stub.telefuncRoomStateSetIfAbsent(key, value, options?.ttlMs)
+  }
+
+  async update(key: string, mutate: KvMutate, options?: KvWriteOptions): Promise<string | null> {
+    const stub = this.roomStateStub(this.requirePartition(options))
+    // Optimistic compare-and-set loop: the transport runs `mutate`, the DO applies only if the value
+    // is unchanged, so a concurrent writer re-runs `mutate` on the fresh value instead of losing it.
+    for (;;) {
+      const current = await stub.telefuncRoomStateGet(key)
+      const next = mutate(current)
+      if (next === KV_KEEP) return current
+      if (await stub.telefuncRoomStateCompareAndSet(key, current, next, options?.ttlMs)) return next
+    }
+  }
+
+  private requirePartition(options: KvWriteOptions | undefined): string {
+    assert(options?.partitionKey !== undefined, 'A Room atomic KV write must carry a partition key.')
+    return options.partitionKey
+  }
+
+  private async putWorkersKv(key: string, value: string, ttlMs: number | undefined): Promise<void> {
+    if (ttlMs === undefined) {
       await this.requireKV().put(KV_STORE_PREFIX + key, value)
       return
     }
-    // Workers KV expirations are seconds with a 60s floor — round up, never down, so a
-    // record can only outlive the requested TTL, not vanish early.
-    const expirationTtl = Math.max(60, Math.ceil(options.ttlMs / 1000))
-    await this.requireKV().put(KV_STORE_PREFIX + key, value, { expirationTtl })
+    // Workers KV expirations are seconds with a 60s floor — round up, never down.
+    await this.requireKV().put(KV_STORE_PREFIX + key, value, { expirationTtl: Math.max(60, Math.ceil(ttlMs / 1000)) })
   }
 
-  async delete(key: string): Promise<void> {
-    await this.requireKV().delete(KV_STORE_PREFIX + key)
-  }
-
-  async keys(prefix: string): Promise<string[]> {
+  private async listWorkersKv(prefix: string): Promise<string[]> {
     const kv = this.requireKV()
     const fullPrefix = KV_STORE_PREFIX + prefix
     const keys: string[] = []
@@ -397,6 +565,12 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       cursor = list.list_complete ? undefined : list.cursor
     } while (cursor)
     return keys
+  }
+
+  /** The room-state authority stub for a partition key (a room's control-lane key): the very Durable
+   *  Object that sequences that room, provisioned at its optimal location. */
+  private roomStateStub(partitionKey: string): TelefuncRoomStateStub {
+    return this.getAuthorityStub(partitionKey, this.locationBucket ?? undefined) as unknown as TelefuncRoomStateStub
   }
 
   // --- Local subscriber tracking ---
