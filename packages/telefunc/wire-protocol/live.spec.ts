@@ -7,9 +7,6 @@ import { Live } from '../node/server/live/live.js'
 import type { ClientLive } from '../node/server/live/live.js'
 import type { ClientReviverContext, ServerReplacerContext } from './types.js'
 
-// Deterministic microtask flush — the cell's producer emissions are coalesced with `queueMicrotask`.
-const tick = () => new Promise<void>((resolve) => queueMicrotask(() => resolve()))
-
 type FakeServerChannel = {
   id: string
   sends: unknown[]
@@ -119,21 +116,7 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
     expect(server.created).toHaveLength(1)
   })
 
-  it('T12.D1 producer verbs after serialization ride the channel (coalesced data + invalidate events)', async () => {
-    const server = createServerHarness()
-    const live = new Live('a')
-    server.serialize(live.client)
-    const channel = server.created[0]!
-    live.set('b')
-    live.set('c') // coalesced → one data event with the last value
-    await tick()
-    expect(channel.sends).toEqual([{ kind: 'data', data: 'c' }])
-    live.invalidate()
-    await tick()
-    expect(channel.sends).toEqual([{ kind: 'data', data: 'c' }, { kind: 'invalidate' }])
-  })
-
-  it('T12.A5 the revived consumer .data tracks pushes; onData/onInvalidate observe channel events', () => {
+  it('T12.A5 the revived consumer observes invalidation; .data stays the wire snapshot (invalidation-only)', () => {
     const server = createServerHarness()
     const live = new Live<string>('a')
     const body = server.serialize(live.client)
@@ -141,18 +124,12 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
     const revived = client.parseBody(body) as ClientLive<string>
     const channel = client.minted[0]!
 
-    const onData = vi.fn()
     const onInvalidate = vi.fn()
-    revived.onData(onData)
     revived.onInvalidate(onInvalidate)
-
-    channel.deliver({ kind: 'data', data: 'z' })
-    expect(revived.data).toBe('z') // .data updates BEFORE the tap fires
-    expect(onData).toHaveBeenCalledWith('z')
 
     channel.deliver({ kind: 'invalidate' })
     expect(onInvalidate).toHaveBeenCalledTimes(1)
-    expect(revived.data).toBe('z') // an invalidate leaves .data unchanged
+    expect(revived.data).toBe('a') // .data is the fixed snapshot — an invalidate just triggers a client refetch
   })
 
   it('T12.D6 multi/nested walk: distinct handles register once; repeated refs revive to === identity', () => {

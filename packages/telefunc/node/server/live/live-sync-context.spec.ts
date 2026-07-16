@@ -141,7 +141,6 @@ describe('sync context mode — tag usage must survive a macrotask (real-I/O) aw
       const live = new Live<string[]>([])
       Live.onInvalidate('t', live) // BEFORE any await — fence captured while the context is live
       await macrotask() // context nulled (the redis await)
-      live.set(['fetched']) // handle op after the await — no context needed
       server.serialize(live.client) // serialize post-await (context null) — must use the CAPTURED fence
     })
     const channel = server.created[0]!

@@ -8,7 +8,7 @@ import type { ClientLive, LiveEvent } from '../../../node/server/live/live.js'
 const liveReviver: ReviverType<LiveContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_LIVE,
   revive(metadata, context) {
-    const channel = context.createChannel<never, LiveEvent<unknown>>({ channelId: metadata.channelId })
+    const channel = context.createChannel<never, LiveEvent>({ channelId: metadata.channelId })
     return {
       value: createClientLive(metadata.data, channel),
       async close() {
@@ -21,26 +21,16 @@ const liveReviver: ReviverType<LiveContract, ClientReviverContext> = {
   },
 }
 
-/** Build the client-side consumer end over the revived channel: `.data` seeds from the wire snapshot
- *  and tracks pushed `data` events; `onData`/`onInvalidate` observe the channel's events. */
-function createClientLive<T>(initialData: T, channel: ClientChannel<never, LiveEvent<T>>): ClientLive<T> {
-  let data = initialData
-  const dataTaps: Array<(data: T) => void> = []
+/** Build the client-side consumer end over the revived channel: `.data` is the wire snapshot (fixed —
+ *  invalidation-only, no delta push); `onInvalidate` observes the channel's stale signals. */
+function createClientLive<T>(initialData: T, channel: ClientChannel<never, LiveEvent>): ClientLive<T> {
   const invalidateTaps: Array<() => void> = []
-  channel.listen((event) => {
-    if (event.kind === 'data') {
-      data = event.data
-      for (const tap of [...dataTaps]) tap(data)
-    } else {
-      for (const tap of [...invalidateTaps]) tap()
-    }
+  channel.listen(() => {
+    for (const tap of [...invalidateTaps]) tap()
   })
   return {
     get data() {
-      return data
-    },
-    onData(callback) {
-      return addTap(dataTaps, callback)
+      return initialData
     },
     onInvalidate(callback) {
       return addTap(invalidateTaps, callback)
