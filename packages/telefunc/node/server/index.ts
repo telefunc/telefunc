@@ -27,6 +27,8 @@ export { addLiveSource, takeLiveSources } from './live/source.js'
 export type { LiveSource } from './live/source.js'
 export { incrementCounter, snapshotCounters } from './live/telemetry.js'
 export type { LiveCounterName } from './live/telemetry.js'
+export { Live } from './live/live.js'
+export type { ClientLive } from './live/live.js'
 export type {
   TypeContract,
   ReplacerType,
