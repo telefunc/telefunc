@@ -1640,6 +1640,14 @@ class ServerRoom implements Room {
         await kv.set(memberKey, stringify({ ...record, seenAt: Date.now() } satisfies RoomMemberRecord), {
           ttlMs: ROOM_MEMBER_KV_TTL_MS,
         })
+        // Refresh the member's sibling index keys on the same cadence — they carry the record's TTL,
+        // so without this a member that outlives one TTL window would keep its record (heartbeated)
+        // yet lose its identity marker (breaking `removeParticipant(id, { identity })` sweeps) and,
+        // if hidden, its off-presence marker (the count would drift back to counting it).
+        if (record.identity !== undefined) {
+          await kv.set(roomIdentityMemberKvKey(this.id, record.identity, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
+        }
+        if (record.hidden) await kv.set(roomHiddenMemberKvKey(this.id, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
       }
       await readMembers(kv, this.id)
     } finally {

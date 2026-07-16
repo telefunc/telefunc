@@ -2511,6 +2511,30 @@ describe('liveness', () => {
     }
   })
 
+  it("the heartbeat refreshes a member's identity and hidden markers — neither outlives its record", async () => {
+    vi.useFakeTimers()
+    try {
+      const a = await Room.create('hb-markers')
+      const tab = await a.join({ meta: { name: 'T1' }, identity: 'user-9' })
+      await a.join({ hidden: true })
+      const left: unknown[] = []
+      tab.onLeave((cause) => left.push(cause))
+
+      // Heartbeat past a full KV TTL window. The record is refreshed each interval; before this fix
+      // the sibling index keys still carried the join-time TTL and silently expired right here.
+      await vi.advanceTimersByTimeAsync(ROOM_MEMBER_KV_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
+
+      // The hidden marker survived — the lazy seed still excludes the off-presence member.
+      expect((await Room.get('hb-markers')).count).toBe(1)
+
+      // The identity index survived — a by-identity kick still resolves the long-lived membership.
+      await Room.removeParticipant('hb-markers', { identity: 'user-9', reason: 'banned' })
+      expect(left).toEqual([{ type: 'removed', reason: 'banned' }])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('a heartbeat discovering its member gone (reaped elsewhere) applies the leave locally', async () => {
     vi.useFakeTimers()
     try {
