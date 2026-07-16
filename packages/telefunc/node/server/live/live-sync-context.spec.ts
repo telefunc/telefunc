@@ -17,7 +17,6 @@ import {
   _resetBroadcastAdapterForTesting,
   DefaultBroadcastAdapter,
 } from '../../../wire-protocol/server/broadcast.js'
-import { _resetCountersForTesting } from './telemetry.js'
 
 // A real macrotask — the same class of yield as `await redis.set()`. The sync-mode context-nulling
 // `setTimeout(0)` (scheduled first, inside restoreContext) fires before this resolves, so the context is
@@ -30,7 +29,6 @@ beforeEach(() => {
   previousAdapter = getBroadcastAdapter()
   _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter())
   _resetTagHubsForTesting()
-  _resetCountersForTesting()
 })
 afterEach(() => _resetBroadcastAdapterForTesting(previousAdapter))
 

@@ -19,14 +19,11 @@ const BARRIER_MAX_ATTEMPTS = 50
 // The barrier probes this many times before failing closed. Mutable only so a test can fail fast.
 let barrierMaxAttempts = BARRIER_MAX_ATTEMPTS
 
-type TagBatch = { batchId?: string; tags?: string[]; barrier?: string }
-// The batchId is retained so the fence catch-up (scanSince) can suppress a request's OWN echo — the
-// index path already gets it via `_notify`, but a self-publish caught by the scan would otherwise
-// self-invalidate (self-write ≠ self-refetch).
-type JournalEntry = { seq: number; tags: Set<string>; batchId: string | undefined }
-/** Delivered with the publish's seq and originating batchId, so a subscriber can dedupe by seq and
- *  skip its own request's echo. */
-type TagListener = (seq: number, batchId: string | undefined) => void
+type TagBatch = { tags?: string[]; barrier?: string }
+type JournalEntry = { seq: number; tags: Set<string> }
+/** Fired when a matching tag is published. Invalidation is idempotent, so listeners take no seq/id —
+ *  a duplicate fire is harmless. */
+type TagListener = () => void
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
@@ -76,16 +73,15 @@ class TagHub {
   }
 
   /** Publish one batch. Awaited by the caller (settle) so a failure is detected, not silent. */
-  async publish(tags: string[], batchId: string = crypto.randomUUID()): Promise<void> {
-    await Broadcast.publish<TagBatch>(this.key, { batchId, tags })
+  async publish(tags: string[]): Promise<void> {
+    await Broadcast.publish<TagBatch>(this.key, { tags })
   }
 
   /** Deliver `tags` to the local index without the Broadcast round-trip. Used when a publish fails:
    *  local subscribers still get the invalidation even though the fan-out hop was lost. */
-  fireLocal(tags: string[], batchId: string): void {
+  fireLocal(tags: string[]): void {
     this.lastSeq += 1
-    const seq = this.lastSeq
-    for (const tag of tags) this._notify(tag, seq, batchId)
+    for (const tag of tags) this._notify(tag)
   }
 
   registerTag(tag: string, listener: TagListener): () => void {
@@ -108,20 +104,14 @@ class TagHub {
     return fromExclusive < this.evictedUpTo
   }
 
-  /** The highest-seq publish of `tag` in `(fromExclusive, toInclusive]` as `{ seq, batchId }`, or
-   *  `{ seq: 0 }` if none. The batchId lets the caller skip its own request's echo (self-write ≠
-   *  self-refetch). The caller captures `toInclusive = currentSeq()` right after registering its index
-   *  listener, so a publish landing after that boundary is delivered by the index and NOT re-counted. */
-  scanSince(fromExclusive: number, toInclusive: number, tag: string): { seq: number; batchId: string | undefined } {
-    let best = 0
-    let bestBatchId: string | undefined
+  /** Whether `tag` appears in the retained journal after `fromExclusive` — the fence catch-up for a
+   *  publish that landed between the acquiring read and this subscribe. The caller replays once on a
+   *  hit; invalidation is idempotent, so an overlap with the index path needs no seq coordination. */
+  hasTagSince(fromExclusive: number, tag: string): boolean {
     for (const entry of this.journal) {
-      if (entry.seq > fromExclusive && entry.seq <= toInclusive && entry.seq > best && entry.tags.has(tag)) {
-        best = entry.seq
-        bestBatchId = entry.batchId
-      }
+      if (entry.seq > fromExclusive && entry.tags.has(tag)) return true
     }
-    return { seq: best, batchId: bestBatchId }
+    return false
   }
 
   private async _establishBarrier(): Promise<void> {
@@ -157,18 +147,18 @@ class TagHub {
       return
     }
     const tags = batch.tags ?? []
-    this.journal.push({ seq, tags: new Set(tags), batchId: batch.batchId })
+    this.journal.push({ seq, tags: new Set(tags) })
     if (this.journal.length > JOURNAL_LIMIT) {
       const evicted = this.journal.shift()!
       this.evictedUpTo = evicted.seq
     }
-    for (const tag of tags) this._notify(tag, seq, batch.batchId)
+    for (const tag of tags) this._notify(tag)
   }
 
-  private _notify(tag: string, seq: number, batchId: string | undefined): void {
+  private _notify(tag: string): void {
     const listeners = this.index.get(tag)
     if (!listeners) return
-    for (const listener of [...listeners]) listener(seq, batchId)
+    for (const listener of [...listeners]) listener()
   }
 
   /** @internal test-only — retained barrier tokens (0 or 1; never grows across fail/recover cycles). */

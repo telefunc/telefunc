@@ -13,7 +13,6 @@ import {
   _resetBroadcastAdapterForTesting,
   DefaultBroadcastAdapter,
 } from '../../../wire-protocol/server/broadcast.js'
-import { _resetCountersForTesting } from './telemetry.js'
 
 // A macrotask flush drains the tag-delivery + coalesced-emit chain (hub notify → live.invalidate →
 // the cell's coalesced flush → channel send).
@@ -24,7 +23,6 @@ beforeEach(() => {
   previousAdapter = getBroadcastAdapter()
   _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter())
   _resetTagHubsForTesting()
-  _resetCountersForTesting()
 })
 afterEach(() => _resetBroadcastAdapterForTesting(previousAdapter))
 
@@ -101,17 +99,19 @@ describe('Live tag statics — Live.onInvalidate / Live.invalidate over TagHub (
       expect(server.created[0]!.sends).toEqual([{ kind: 'invalidate' }])
     }))
 
-  it("T12.C1 a request's OWN Live.invalidate does not self-invalidate its own returned handle (ZERO)", () =>
+  it("T12.C1 a request's OWN Live.invalidate self-invalidates its handle (harmless — invalidation is idempotent)", () =>
     inRequest(async () => {
       await stampRequestStartFence()
       const live = new Live('rows')
       Live.onInvalidate('t', live) // the handle is live under 't'...
       Live.invalidate('t') // ...and the SAME request invalidates 't'
-      await publishQueuedTags() // settle publishes 't' under the request's OWN batchId
+      await publishQueuedTags() // settle publishes 't'
       const server = createServerHarness()
-      server.serialize(live.client) // activation's scanSince catches 't' — but it's this request's own echo
+      server.serialize(live.client) // activation's fence catch-up sees 't' published since the request-start fence
       await flush()
-      expect(server.created[0]!.sends).toEqual([]) // self-write ≠ self-refetch: ZERO self-invalidation
+      // Own-echo suppression was removed: a self-refetch is harmless (the client re-reads once), and can be
+      // necessary if a write followed the returned read. So the handle fires — invalidation is idempotent.
+      expect(server.created[0]!.sends).toEqual([{ kind: 'invalidate' }])
     }))
 
   it('T12.C3 Live.invalidate in-request queues; publishes one deduped batch at settle', () =>

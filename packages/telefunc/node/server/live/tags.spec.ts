@@ -4,7 +4,6 @@ import { restoreContext } from '../context/context.js'
 import { getTagHub, _resetTagHubsForTesting, _setBarrierBudgetForTesting } from './tagHub.js'
 import { liveTag, invalidateTag, stampRequestStartFence, publishQueuedTags } from './tags.js'
 import { takeLiveSources } from './source.js'
-import { _snapshotCountersForTesting, _resetCountersForTesting } from './telemetry.js'
 import {
   getBroadcastAdapter,
   _resetBroadcastAdapterForTesting,
@@ -19,7 +18,6 @@ beforeEach(() => {
   previousAdapter = getBroadcastAdapter()
   _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter()) // fresh in-memory adapter (seq resets)
   _resetTagHubsForTesting()
-  _resetCountersForTesting()
 })
 afterEach(() => {
   _resetBroadcastAdapterForTesting(previousAdapter)
@@ -37,28 +35,6 @@ function subscribeFirstSource(onInvalidate: () => void): void {
 /** Publish calls carrying a tag batch (readiness-barrier frames are `{"barrier":...}`, no tags). */
 function tagBatchCalls(spy: ReturnType<typeof vi.spyOn>): unknown[][] {
   return spy.mock.calls.filter((c) => typeof c[1] === 'string' && (c[1] as string).includes('"tags"'))
-}
-
-/** A transport that acknowledges `send()` immediately but delivers on the next macrotask, so the
- *  local echo arrives AFTER the publish promise resolves (the async-transport case). */
-function deferredEchoTransport(): BroadcastTransport {
-  let seq = 0
-  const listeners = new Map<string, (p: string, i: { seq: number; timestamp: number }) => void>()
-  return {
-    send: (key, payload) => {
-      seq++
-      const info = { seq, timestamp: 0 }
-      const listener = listeners.get(key)
-      if (listener) setTimeout(() => listener(payload, info), 0)
-      return Promise.resolve(info)
-    },
-    listen: (key, onMessage) => {
-      listeners.set(key, onMessage)
-      return () => listeners.delete(key)
-    },
-    sendBinary: () => Promise.resolve({ seq: 0, timestamp: 0 }),
-    listenBinary: () => () => {},
-  }
 }
 
 describe('tag fences (§3.E)', () => {
@@ -103,7 +79,7 @@ describe('tag fences (§3.E)', () => {
       expect(onInvalidate).toHaveBeenCalledTimes(0)
     }))
 
-  it('T1.E4/E15 journal overflow → unconditional replay + counter', () =>
+  it('T1.E4/E15 journal overflow → unconditional replay', () =>
     inRequest(async () => {
       await stampRequestStartFence()
       for (let i = 0; i < 1030; i++) await getTagHub().publish(['t'])
@@ -111,7 +87,6 @@ describe('tag fences (§3.E)', () => {
       const onInvalidate = vi.fn()
       subscribeFirstSource(onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(1)
-      expect(_snapshotCountersForTesting()['live.tagHub.journalOverflow']).toBe(1)
     }))
 
   it('T1.E5 live tag after subscribe fires via the index; non-matching does not', () =>
@@ -136,26 +111,6 @@ describe('tag fences (§3.E)', () => {
       expect(onInvalidate).toHaveBeenCalledTimes(0)
       await getTagHub().publish(['t']) // would be buffered by the channel until attach (Sprint 2)
       expect(onInvalidate).toHaveBeenCalledTimes(1)
-    }))
-
-  it('T1.E12 re-entrant receive between registerTag and scan fires exactly once', () =>
-    inRequest(async () => {
-      await stampRequestStartFence()
-      liveTag('t')
-      const hub = getTagHub()
-      const realRegister = hub.registerTag.bind(hub)
-      vi.spyOn(hub, 'registerTag').mockImplementation((tag, listener) => {
-        const teardown = realRegister(tag, listener)
-        // Inject a delivered message for the very next seq, BETWEEN registerTag and the source's scan.
-        ;(hub as unknown as { _receive(b: unknown, s: number): void })._receive(
-          { batchId: 'injected', tags: [tag] },
-          hub.currentSeq() + 1,
-        )
-        return teardown
-      })
-      const onInvalidate = vi.fn()
-      subscribeFirstSource(onInvalidate)
-      expect(onInvalidate).toHaveBeenCalledTimes(1) // index fired it; the scan must NOT re-emit
     }))
 
   it('T1.E10 the ready barrier is awaited once and reused only after a successful proof', () =>
@@ -220,7 +175,6 @@ describe('tag readiness barrier (§3.E T1.E10)', () => {
   beforeEach(() => {
     _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(delayedTransport(10)))
     _resetTagHubsForTesting()
-    _resetCountersForTesting()
   })
 
   it('T1.E10 ready() blocks until the subscription delivers; a publish after the read replays', () =>
@@ -312,26 +266,6 @@ describe('readiness barrier state is bounded across cycles (rubric §3 / T1.E10)
   })
 })
 
-describe('self-write suppression across a delayed echo (§3.E T1.E7)', () => {
-  beforeEach(() => {
-    _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(deferredEchoTransport()))
-    _resetTagHubsForTesting()
-    _resetCountersForTesting()
-  })
-
-  it('T1.E7 read+write does not self-invalidate even when the echo is delayed', () =>
-    inRequest(async () => {
-      await stampRequestStartFence()
-      liveTag('t')
-      invalidateTag('t')
-      const onInvalidate = vi.fn()
-      subscribeFirstSource(onInvalidate)
-      await publishQueuedTags() // acks now; local echo delivered on a later macrotask
-      await new Promise((resolve) => setTimeout(resolve, 5)) // let the deferred echo arrive
-      expect(onInvalidate).toHaveBeenCalledTimes(0) // suppressed by the request's own batchId
-    }))
-})
-
 describe('tag publish failure (§3.D T1.D2 / T1.J4)', () => {
   it('T1.D2/J4 publish failure is logged + counted + fired locally, result unmasked', () =>
     inRequest(async () => {
@@ -343,7 +277,6 @@ describe('tag publish failure (§3.D T1.D2 / T1.J4)', () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       invalidateTag('t')
       await expect(publishQueuedTags()).resolves.toBeUndefined() // never throws
-      expect(_snapshotCountersForTesting()['live.tagHub.publishFailure']).toBe(1)
       expect(localListener).toHaveBeenCalledTimes(1) // fired locally despite the failure
       expect(errorSpy).toHaveBeenCalled()
       errorSpy.mockRestore()

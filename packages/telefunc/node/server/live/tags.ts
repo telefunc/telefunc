@@ -8,7 +8,6 @@ import { addLiveSource } from './source.js'
 import type { LiveSource } from './source.js'
 import { getTagHub } from './tagHub.js'
 import type { TagHub } from './tagHub.js'
-import { incrementCounter } from './telemetry.js'
 
 const TAGS = Symbol.for('telefunc.tagState')
 
@@ -18,9 +17,6 @@ type TagState = {
   requestStartSeq: number
   /** invalidateTag() calls, published as one deduped batch at settle. */
   queued: Set<string>
-  /** batchIds this request published — its own sources skip these (self-write ≠ self-refetch),
-   *  including a transport's delayed echo. */
-  ownBatchIds: Set<string>
 }
 
 /** Stamp the request-start fence and await the hub's readiness barrier once — runs before the body
@@ -34,7 +30,6 @@ async function stampRequestStartFence(): Promise<void> {
     hub,
     requestStartSeq: hub.currentSeq(),
     queued: new Set(),
-    ownBatchIds: new Set(),
   } satisfies TagState
 }
 
@@ -44,50 +39,34 @@ function getRequestTagState(): TagState {
   const existing = context[TAGS] as TagState | undefined
   if (existing) return existing
   const hub = getTagHub()
-  const state: TagState = { hub, requestStartSeq: hub.currentSeq(), queued: new Set(), ownBatchIds: new Set() }
+  const state: TagState = { hub, requestStartSeq: hub.currentSeq(), queued: new Set() }
   context[TAGS] = state
   return state
 }
 
 /** A request's tag fence, captured while the sync context is live. Holds ONLY stable per-request refs
- *  (hub, request-start seq, own-batchId set) and registers NOTHING on the hub, so `subscribeCapturedTag`
- *  can run context-free at serialize (rationale on `captureTagFence`). */
-type TagFence = { tag: string; hub: TagHub; requestStartSeq: number; ownBatchIds: Set<string> }
+ *  (hub, request-start seq) and registers NOTHING on the hub, so `subscribeCapturedTag` can run
+ *  context-free at serialize (rationale on `captureTagFence`). */
+type TagFence = { tag: string; hub: TagHub; requestStartSeq: number }
 
 /** Capture the fence for `tag`. MUST run inside the request context — BEFORE any real-I/O await (which,
  *  in the default sync context mode, nulls the context at the next macrotask) — else `getRequestTagState()`
  *  throws the "inside a telefunction" assert (the guard that enforces subscribe-before-fetch). Reads only
- *  stable refs and registers no hub listener → leak-safe by construction until an actual subscribe.
- *  `ownBatchIds` is captured BY REFERENCE, so a same-request settle publish still self-suppresses. */
+ *  stable refs and registers no hub listener → leak-safe by construction until an actual subscribe. */
 function captureTagFence(tag: string): TagFence {
-  const { hub, requestStartSeq, ownBatchIds } = getRequestTagState()
-  return { tag, hub, requestStartSeq, ownBatchIds }
+  const { hub, requestStartSeq } = getRequestTagState()
+  return { tag, hub, requestStartSeq }
 }
 
 /** Subscribe a captured fence — CONTEXT-FREE. Register the index listener FIRST, then scan the journal
- *  from the request-start fence to catch a publish that landed between capture and now — delivered
- *  exactly once (seq-deduped; the request's own echo skipped by batchId; a journal overflow replays
- *  unconditionally). Returns the teardown. Runs at serialization, after the context may be gone. */
+ *  from the request-start fence to catch a publish that landed between capture and now (a journal
+ *  overflow replays unconditionally). Invalidation is idempotent, so a harmless overlap between the
+ *  catch-up and the index needs no dedup. Returns the teardown; runs at serialization, after the
+ *  context may be gone. */
 function subscribeCapturedTag(fence: TagFence, onInvalidate: () => void): () => void {
-  const { tag, hub, requestStartSeq, ownBatchIds } = fence
-  let lastDeliveredSeq = requestStartSeq
-  const emit = (seq: number, batchId: string | undefined): void => {
-    if (batchId !== undefined && ownBatchIds.has(batchId)) return
-    if (seq <= lastDeliveredSeq) return
-    lastDeliveredSeq = seq
-    onInvalidate()
-  }
-  const teardown = hub.registerTag(tag, emit)
-  if (hub.hasOverflow(requestStartSeq)) {
-    incrementCounter('live.tagHub.journalOverflow')
-    lastDeliveredSeq = hub.currentSeq()
-    onInvalidate()
-  } else {
-    // Carry the matched publish's batchId so `emit` can skip this request's OWN echo (self-write ≠
-    // self-refetch) — the same suppression the index path gets via `_notify`.
-    const match = hub.scanSince(requestStartSeq, hub.currentSeq(), tag)
-    if (match.seq > 0) emit(match.seq, match.batchId)
-  }
+  const { tag, hub, requestStartSeq } = fence
+  const teardown = hub.registerTag(tag, onInvalidate)
+  if (hub.hasOverflow(requestStartSeq) || hub.hasTagSince(requestStartSeq, tag)) onInvalidate()
   return teardown
 }
 
@@ -126,34 +105,30 @@ function invalidateTagStatic(tag: string): void {
 }
 
 /** Publish `tag` immediately (the out-of-request path). Awaits readiness + publish internally; a
- *  transport failure is counted + fired locally, never thrown to the fire-and-forget caller. */
+ *  transport failure is fired locally, never thrown to the fire-and-forget caller. */
 async function publishTagImmediate(tag: string): Promise<void> {
   const hub = getTagHub()
   await hub.ready()
-  await publishTags(hub, [tag], crypto.randomUUID())
+  await publishTags(hub, [tag])
 }
 
-/** Publish the request's queued tags as one deduped batch (called by settle). Records the batchId as
- *  the request's own so its sources skip the echo, then publishes failure-safe. */
+/** Publish the request's queued tags as one deduped batch (called by settle), failure-safe. */
 async function publishQueuedTags(): Promise<void> {
   const state = getRawContext()?.[TAGS] as TagState | undefined
   if (!state || state.queued.size === 0) return
   const tags = [...state.queued]
   state.queued = new Set()
-  const batchId = crypto.randomUUID()
-  state.ownBatchIds.add(batchId)
-  await publishTags(state.hub, tags, batchId)
+  await publishTags(state.hub, tags)
 }
 
-/** Publish one Broadcast batch. A transport failure is detected (counter + structured log) and the
- *  batch is fired to local subscribers anyway — never silent, never thrown. */
-async function publishTags(hub: TagHub, tags: string[], batchId: string): Promise<void> {
+/** Publish one Broadcast batch. A transport failure is detected (structured log) and the batch is
+ *  fired to local subscribers anyway — never silent, never thrown. */
+async function publishTags(hub: TagHub, tags: string[]): Promise<void> {
   if (tags.length === 0) return
   try {
-    await hub.publish(tags, batchId)
+    await hub.publish(tags)
   } catch (err) {
-    incrementCounter('live.tagHub.publishFailure')
     console.error('[telefunc:live] tag publish failed; firing local subscribers instead:', err)
-    hub.fireLocal(tags, batchId)
+    hub.fireLocal(tags)
   }
 }
