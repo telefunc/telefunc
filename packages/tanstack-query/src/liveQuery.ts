@@ -71,12 +71,14 @@ function createLiveQuery(queryClient: QueryClient) {
     const offInvalidate = clientLive.onInvalidate(() => {
       void queryClient.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: false }).catch(() => {})
     })
+    const offData = clientLive.onData((data) => queryClient.setQueryData(queryKey, data)) // direct cache write
     let closed = false
     subs.set(hash, {
       close: () => {
         if (closed) return Promise.resolve()
         closed = true
         offInvalidate()
+        offData()
         return clientLive.close()
       },
     })

@@ -143,6 +143,7 @@ describe('Live tag statics — Live.onInvalidate / Live.invalidate over TagHub (
       expect(_activationStateForTesting(live)).toEqual({
         lease: 0,
         invalidateListeners: 0,
+        dataListeners: 0,
         sourceActive: false,
       })
       const onInvalidate = vi.fn()

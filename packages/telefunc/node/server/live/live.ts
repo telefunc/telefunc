@@ -8,16 +8,18 @@ import { captureTagFence, subscribeCapturedTag, invalidateTagStatic } from './ta
 // reconstructs it locally via the same `Symbol.for('telefunc.Live')`.
 const LIVE_BRAND = Symbol.for('telefunc.Live')
 
-/** What travels once a Live crosses the wire: a stale signal — the client refetches. Invalidation-only
- *  (no delta push): the initial snapshot rides the wire metadata, and every later change is an
- *  `invalidate`. The channel/wire layer is added in its own module; this module is the in-memory cell. */
-type LiveEvent = { kind: 'invalidate' }
+/** What travels once a Live crosses the wire: a stale signal, or a pushed value. Phase 1 rides
+ *  `invalidate` (the client refetches); `data` carries the future delta push with no primitive
+ *  change. The channel/wire layer is added in its own module — this module is the in-memory cell. */
+type LiveEvent<T> = { kind: 'invalidate' } | { kind: 'data'; data: T }
 
-/** The consumer end: the initial snapshot plus invalidation/lifecycle observation (authority — the
- *  producer's `invalidate` verb — is the one asymmetry). Revived on the client from the wire; server-side
- *  it is `Live.client` re-typed. */
+/** The consumer end: the same observation taps as the producer, minus the producer verbs (authority
+ *  is the one asymmetry). Revived on the client from the wire; server-side it is `Live.client`
+ *  re-typed. */
 type ClientLive<T> = {
   readonly data: T
+  /** Observe pushed values. Returns an idempotent unsubscribe. */
+  onData(callback: (data: T) => void): () => void
   /** Observe stale signals. Returns an idempotent unsubscribe. */
   onInvalidate(callback: () => void): () => void
   onClose(callback: (err?: Error) => void): void
@@ -42,17 +44,23 @@ function track(cell: Live<unknown>): void {
   trackingStack[trackingStack.length - 1]?.add(cell)
 }
 
-/** The producer end of a live value: construct it around a snapshot, signal staleness (`invalidate`),
- *  and return `.client`. Liveness is serialize-time — the wire replacer creates the channel only if this
- *  crosses the wire — so `.client` is a side-effect-free re-type. This module is the in-memory cell; the
- *  channel, the `Live.onInvalidate`/`Live.invalidate` statics, and `Live.derived` are layered on in their
- *  own sub-units. */
+/** The producer end of a live value: construct it around a snapshot, drive it (`set`/`update`/
+ *  `invalidate`), and return `.client`. Liveness is serialize-time — the wire replacer creates the
+ *  channel only if this crosses the wire — so `.client` is a side-effect-free re-type. This module
+ *  is the in-memory cell; the channel, the `Live.onInvalidate`/`Live.invalidate` statics, and
+ *  `Live.derived` are layered on in their own sub-units. */
 class Live<T> {
   readonly [LIVE_BRAND] = true
   private currentData: T
   private closed = false
+  private dataTaps: Array<(data: T) => void> = []
   private invalidateTaps: Array<() => void> = []
   private closeCallbacks: Array<(err?: Error) => void> = []
+  // One coalesced emission per microtask window. `hasPendingData` is a flag (not a sentinel) so
+  // `set(undefined)` is a real pending value; the LAST `set` in the window wins.
+  private hasPendingData = false
+  private pendingInvalidate = false
+  private flushScheduled = false
   // ── serialize-time activation (deferred, cell-local lease-refcounted) ──
   /** Deps read during a `Live.derived` callback, held INERT — subscribed only at serialization. */
   private pendingDeps: Array<Live<unknown>> = []
@@ -74,11 +82,27 @@ class Live<T> {
     return this.currentData
   }
 
-  /** Signal the value is stale — the consumer refetches. Fires the invalidation taps directly (client-
-   *  side invalidation is idempotent, so no coalescing is needed). Inert after close. */
+  /** Push a new value. Coalesced: many `set`s in one microtask deliver once, with the last value. */
+  set(value: T): void {
+    if (this.closed) return
+    this.currentData = value
+    this.hasPendingData = true
+    this.scheduleFlush()
+  }
+
+  update(fn: (previous: T) => T): void {
+    this.set(fn(this.currentData))
+  }
+
+  /** Signal the value is stale — the consumer refetches. Coalesced per microtask. */
   invalidate(): void {
     if (this.closed) return
-    for (const tap of [...this.invalidateTaps]) tap()
+    this.pendingInvalidate = true
+    this.scheduleFlush()
+  }
+
+  onData(callback: (data: T) => void): () => void {
+    return addTap(this.dataTaps, callback)
   }
 
   onInvalidate(callback: () => void): () => void {
@@ -187,6 +211,30 @@ class Live<T> {
     for (const teardown of this.activationTeardowns) teardown()
     this.activationTeardowns = []
     void this.close()
+  }
+
+  private scheduleFlush(): void {
+    if (this.flushScheduled) return
+    this.flushScheduled = true
+    queueMicrotask(() => this.flush())
+  }
+
+  private flush(): void {
+    this.flushScheduled = false
+    if (this.closed) {
+      this.hasPendingData = false
+      this.pendingInvalidate = false
+      return
+    }
+    if (this.hasPendingData) {
+      this.hasPendingData = false
+      const data = this.currentData
+      for (const tap of [...this.dataTaps]) tap(data)
+    }
+    if (this.pendingInvalidate) {
+      this.pendingInvalidate = false
+      for (const tap of [...this.invalidateTaps]) tap()
+    }
   }
 }
 

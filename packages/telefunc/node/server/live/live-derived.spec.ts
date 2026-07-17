@@ -58,7 +58,7 @@ describe('Live.derived — deferred cascade activation + cell-local leasing (§3
     const b = new Live('b')
     const derived = Live.derived(() => `${a.data}|${b.data}`) // reads a.data + b.data → tracks {a,b}
     // Nothing serialized → zero listeners added on the deps, and the derived holds zero leases.
-    const empty = { lease: 0, invalidateListeners: 0, sourceActive: false }
+    const empty = { lease: 0, invalidateListeners: 0, dataListeners: 0, sourceActive: false }
     expect(_activationStateForTesting(a)).toEqual(empty)
     expect(_activationStateForTesting(b)).toEqual(empty)
     expect(_activationStateForTesting(asLive(derived)).lease).toBe(0)
