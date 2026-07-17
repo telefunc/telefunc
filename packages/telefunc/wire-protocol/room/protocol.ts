@@ -9,6 +9,7 @@ export {
   roomMemberDataKey,
   roomMemberTrackKey,
   roomDmKey,
+  roomOrderKey,
   roomRetainedTextKey,
   roomRetainedBinaryKey,
   roomRetainedBinaryPrefix,
@@ -66,6 +67,7 @@ export type {
   RoomDataEnvelope,
   RoomDataPublish,
   RoomAnnounceEnvelope,
+  RoomOrder,
   RoomDmEnvelope,
   RoomDmAckEnvelope,
   DmReply,
@@ -132,6 +134,12 @@ function roomDmKey(roomId: string, memberId: string): string {
 /** KV key holding the room's last `publish(data, { retain: true })` — replayed to new text subscribers. */
 function roomRetainedTextKey(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:rt`
+}
+/** KV key holding the room's semantic-lane order watermark (a `RoomOrder`): the persisted, clamped
+ *  `(timestamp, seq)` logical clock that `publish()` text and `Room.announce()` both draw from, so
+ *  every semantic message carries one room-wide order. */
+function roomOrderKey(roomId: string): string {
+  return `${ROOM_KEY_NAMESPACE}${roomId}:o`
 }
 /** KV key holding the last `publishBinary(data, { retain: true })` on one (member, track) — replayed
  *  (base64-encoded, since KV values are strings) to a new subscriber before live frames. Track is
@@ -351,17 +359,35 @@ type RoomCtrlEnvelope =
   | { __r: 'want'; member: string; track: string; node: string; on: boolean }
   | { __r: 'closed' }
 
+/** A semantic message's room-wide order: a lexicographically-comparable `(timestamp, seq)` pair the
+ *  room's logical clock hands out, and the record persisted at `roomOrderKey` (the last pair issued —
+ *  the watermark). Strictly increasing and unique per room across `publish()` and `Room.announce()`
+ *  alike — the honest meaning of a receipt's `seq`/`timestamp`. The clock only moves forward: `seq`
+ *  resets to `1` when wall time advances past `timestamp`, else it clamps `timestamp` and increments
+ *  `seq`, so the pair is monotonic whatever the node's clock skew. Keyed per room and kept (TTL-reaped,
+ *  not swept) across a close, so a recreation resumes past the previous watermark. */
+type RoomOrder = { seq: number; timestamp: number }
+
 /** A participant's message. Published on the room's text key (shared mode) or the member's own
  *  key (isolated mode). `fromMeta` is the sender's meta as verified by the sender's own node —
  *  never client-supplied — so any receiver can surface a correct sender even before its roster
- *  view catches up (see `RoomState.applyData`). */
-type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; fromIdentity?: string; data: unknown }
+ *  view catches up (see `RoomState.applyData`). `ord` is the room-wide order stamped by the sender's
+ *  node from the room clock — the receiver reads it, never the transport's per-key seq. */
+type RoomDataEnvelope = {
+  __r: 'data'
+  from: string
+  fromMeta: ParticipantMeta
+  fromIdentity?: string
+  data: unknown
+  ord: RoomOrder
+}
 
 /** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: boolean }
 
-/** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. */
-type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
+/** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. Carries the
+ *  same room-wide `ord` as participant text, so the two share one order domain. */
+type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown; ord: RoomOrder }
 
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
 

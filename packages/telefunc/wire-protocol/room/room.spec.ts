@@ -690,7 +690,7 @@ describe('data pub/sub', () => {
     const ghost = crypto.randomUUID()
     await getBroadcastAdapter().publish(
       roomTextKey('race'),
-      stringify({ __r: 'data', from: ghost, fromMeta: { name: 'Zoe' }, data: 'first!' }),
+      stringify({ __r: 'data', from: ghost, fromMeta: { name: 'Zoe' }, data: 'first!', ord: { seq: 0, timestamp: 1 } }),
     )
 
     expect(received).toEqual([{ data: 'first!', id: ghost, meta: { name: 'Zoe' } }])
@@ -1306,10 +1306,12 @@ describe('direct messages', () => {
     await alice.publish({ text: 'one' })
     await alice.publish({ text: 'two' })
     expect(published.map((p) => p.data)).toEqual([{ text: 'one' }, { text: 'two' }])
-    // The receipt carries the key's strict, monotonic counter — the order you persist for history.
-    expect(published[1]!.seq).toBeGreaterThan(published[0]!.seq)
-    expect(typeof published[0]!.timestamp).toBe('number')
-    expect(typeof published[0]!.receivers).toBe('number')
+    // The receipt carries the room's logical clock: the (timestamp, seq) pair strictly increases per
+    // publish — the order you persist for history — even as seq resets when wall time advances.
+    const [p0, p1] = [published[0]!, published[1]!]
+    expect(p1.timestamp > p0.timestamp || (p1.timestamp === p0.timestamp && p1.seq > p0.seq)).toBe(true)
+    expect(typeof p0.timestamp).toBe('number')
+    expect(typeof p0.receivers).toBe('number')
 
     await alice.send(bob.id, 'hi bob')
     expect(sent).toHaveLength(1)
@@ -1507,6 +1509,69 @@ describe('room-authored messages', () => {
     expect(aliceInbox).toEqual([[{ warning: 'watch the language' }, null]]) // null = room-authored
     expect(bobInbox).toEqual([])
     await expect(Room.send('automod', { id: crypto.randomUUID() }, 'x')).rejects.toThrow('Participant not found')
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// One ordered semantic lane — participant text and Room.announce() draw one
+// persisted, clamped (timestamp, seq) clock, so a room's semantic messages
+// totally order. Bug class targeted: text and announce on separate per-key seq
+// domains (uncomparable), and a clock that rewinds under skew or a recreation.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('one ordered semantic lane', () => {
+  /** Lexicographic (timestamp, seq): is x strictly before y in the room's semantic order? */
+  const before = (x: { timestamp: number; seq: number }, y: { timestamp: number; seq: number }) =>
+    x.timestamp < y.timestamp || (x.timestamp === y.timestamp && x.seq < y.seq)
+
+  it('participant text and Room.announce() draw one strictly-increasing, unique order', async () => {
+    const room = await Room.create('order:shared')
+    const alice = await room.join({ meta: { name: 'Alice' } })
+    const a = await alice.publish('one')
+    const b = await Room.announce('order:shared', 'notice') // an announcement, ordered against text
+    const c = await alice.publish('two')
+    expect(before(a, b)).toBe(true)
+    expect(before(b, c)).toBe(true)
+  })
+
+  it('the clock resets seq on a time advance and clamps+increments on a repeat or regress', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(1000)
+      const room = await Room.create('order:clock')
+      const alice = await room.join({ meta: {} })
+      const pair = async () => {
+        const { timestamp, seq } = await alice.publish('x')
+        return { timestamp, seq }
+      }
+      expect(await pair()).toEqual({ timestamp: 1000, seq: 1 }) // first: time advanced past 0 → reset to 1
+      expect(await pair()).toEqual({ timestamp: 1000, seq: 2 }) // same ms → clamp, increment
+      vi.setSystemTime(2000)
+      expect(await pair()).toEqual({ timestamp: 2000, seq: 1 }) // advance → reset to 1
+      vi.setSystemTime(1500) // wall clock jumps backward
+      expect(await pair()).toEqual({ timestamp: 2000, seq: 2 }) // clamp to the watermark, increment
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a recreation resumes past the previous watermark even if the wall clock regressed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(5000)
+      const first = await Room.create('order:recreate')
+      const old = await (await first.join({ meta: {} })).publish('old')
+      expect(old).toMatchObject({ timestamp: 5000, seq: 1 })
+      await Room.close('order:recreate')
+      vi.setSystemTime(3000) // the clock jumps backward before the room is recreated
+      const second = await Room.create('order:recreate')
+      const fresh = await (await second.join({ meta: {} })).publish('new')
+      // The watermark outlives the close, so the new incarnation clamps past it — never rewinding to
+      // the regressed wall clock, so no consumer sees a newer message stamped older than an old one.
+      expect(fresh).toMatchObject({ timestamp: 5000, seq: 2 })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

@@ -44,6 +44,7 @@ import {
   roomIdentityMemberKvKey,
   roomIdentityKvPrefix,
   roomIdentityRoomKvPrefix,
+  roomOrderKey,
   roomRetainedTextKey,
   roomRetainedBinaryKey,
   roomRetainedBinaryPrefix,
@@ -65,6 +66,7 @@ import {
   type RoomConfigRecord,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
+  type RoomOrder,
   type RoomDataPublish,
   type RoomDmEnvelope,
   type RoomDmAckEnvelope,
@@ -191,8 +193,9 @@ type RoomStatic = {
    *  travels with the removal — the kicked participant's `onLeave` receives `{ type: 'removed', reason }`,
    *  so "why" never races the removal. */
   removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void>
-  /** Publish a room-authored message — no sender, delivered to `onAnnounce()` (e.g. system notices). */
-  announce(id: string, data: unknown): Promise<void>
+  /** Publish a room-authored message — no sender, delivered to `onAnnounce()` (e.g. system notices).
+   *  Returns the message's room-wide order (`{ seq, timestamp }`), the same clock `publish()` stamps. */
+  announce(id: string, data: unknown): Promise<RoomSendReceipt>
   /** Send a server-authored private message — arrives on `listen()` with `from: null`. Target one
    *  participant by `{ id }` (throws when unknown), or every membership of an app identity at once
    *  (`{ identity }`, resolved from the identity index; 0 matches is a no-op — a signed-out user). */
@@ -244,11 +247,43 @@ const Room: RoomStatic = {
  *  can't attach); once it lapses, a fresh create simply starts a new generation at 1. */
 const ROOM_TOMBSTONE_TTL_MS = 60_000
 
+/** How long the semantic-lane order watermark lingers after the last allocation. Refreshed on every
+ *  `publish()`/`announce()`, so it never lapses while a room is active; it outlives a close only long
+ *  enough that a recreation within the window resumes the clock past the previous watermark. Past the
+ *  window, wall time has advanced far enough that a fresh `(now, 0)` already exceeds it. Matches the
+ *  tombstone window — both bound the same "a recreation resumes past the last incarnation" guarantee. */
+const ROOM_ORDER_KV_TTL_MS = ROOM_TOMBSTONE_TTL_MS
+
 /** (Re)register a room in the cross-room directory index (unscoped — enumeration spans rooms, so it
  *  can't live in one room's shard; see `listRooms`). Idempotent: a `set` of the same empty marker, so
  *  it also repairs a create that wrote the authoritative config but crashed before this second write. */
 async function registerRoomIndex(id: string): Promise<void> {
   await getRoomKV().set(roomIndexKvKey(id), '')
+}
+
+/** The clamped-clock advance: the next `(timestamp, seq)` from the previous watermark and the current
+ *  wall clock. Lexicographically strictly increasing — `seq` resets to `1` when time genuinely
+ *  advances, else the timestamp is clamped to the watermark and `seq` increments — so a repeated or
+ *  backward clock never yields a duplicate or an out-of-order pair. `seq` is 1-based, per the
+ *  `ChannelPublishInfo.seq` contract. Pure, so it's the whole contract. */
+function advanceRoomOrder(prev: RoomOrder | null, now: number): RoomOrder {
+  const baseTimestamp = prev?.timestamp ?? 0
+  return now > baseTimestamp ? { timestamp: now, seq: 1 } : { timestamp: baseTimestamp, seq: (prev?.seq ?? 0) + 1 }
+}
+
+/** Allocate a room's next semantic-lane order: one atomic advance of the persisted clock at
+ *  `roomOrderKey`, on the room's authority (`consistent`, so concurrent publishers across nodes
+ *  linearize). `publish()` text and `Room.announce()` share it, so a room's semantic messages carry
+ *  one strictly-increasing, unique order. The clamp in `advanceRoomOrder` continues past whatever
+ *  watermark is there — including one a previous incarnation left — so a recreation never rewinds. */
+async function allocateRoomOrder(id: string): Promise<RoomOrder> {
+  const stored = await getRoomKV(id).update(
+    roomOrderKey(id),
+    (raw) => stringify(advanceRoomOrder(raw === null ? null : (parse(raw) as RoomOrder), Date.now())),
+    { consistent: true, ttlMs: ROOM_ORDER_KV_TTL_MS },
+  )
+  assert(stored !== null) // the mutator always writes a record, never `KV_KEEP`/delete
+  return parse(stored) as RoomOrder
 }
 
 /** Atomically create a room, returning the fresh room if this call won the create, or `null` if a
@@ -515,9 +550,13 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
     .map((m) => ({ id: m.id, identity: m.identity ?? null, meta: m.meta, joinedAt: m.joinedAt }))
 }
 
-async function announceToRoom(id: string, data: unknown): Promise<void> {
+async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
   await requireRoom(id)
-  await getBroadcastAdapter().publish(roomCtrlKey(id), stringify({ __r: 'announce', data } satisfies RoomEnvelope))
+  // Draw from the room's semantic clock, the same one `publish()` uses, so an announcement is ordered
+  // relative to participant text — then ship the pair in the envelope for every receiver.
+  const ord = await allocateRoomOrder(id)
+  await getBroadcastAdapter().publish(roomCtrlKey(id), stringify({ __r: 'announce', data, ord } satisfies RoomEnvelope))
+  return ord
 }
 
 async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
@@ -580,7 +619,7 @@ class ServerRoom implements Room {
   _tail = false
   /** Text held between `Room.get({ tail })` and the stub attaching, replayed on attach. Bounded, so a
    *  fetched-with-tail room that is never serialized (misuse) can't grow it without limit. */
-  private readonly _tailHold: Array<{ serialized: string; rawInfo: WirePublishInfo; from: string }> = []
+  private readonly _tailHold: Array<{ serialized: string; ord: RoomOrder; from: string }> = []
   private _tailTimer: ReturnType<typeof setTimeout> | null = null
   /** In-flight `send(…, { ack: true })`s awaiting the recipient's reply, keyed by `ackId`. `to` is
    *  the recipient, so a leave/close can fail the ones it strands. Empty at steady state. */
@@ -875,12 +914,16 @@ class ServerRoom implements Room {
    *  retained-text slot (MQTT-style), replayed to any later text subscriber (see `_replayRetainedText`). */
   async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
     const sender = await this._admitPublish(from, data)
+    // Stamp the room-wide order before anything ships, so the retained copy, the live frame, and the
+    // receipt all carry the one pair — text and `announce()` share this clock, so they totally order.
+    const ord = await allocateRoomOrder(this.id)
     const envelope: RoomDataEnvelope = {
       __r: 'data',
       from,
       fromMeta: sender.meta,
       ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
+      ord,
     }
     const serialized = stringify(envelope)
     // Store before publishing live, so a subscriber that arrives around now is never left with a
@@ -894,6 +937,7 @@ class ServerRoom implements Room {
         this._isolated ? roomMemberDataKey(this.id, from) : roomTextKey(this.id),
         serialized,
       ),
+      ord,
     )
   }
 
@@ -943,9 +987,14 @@ class ServerRoom implements Room {
     sender: Sender,
     payload: unknown,
     publishing: BroadcastPublishResult | Promise<BroadcastPublishResult>,
+    order?: RoomOrder,
   ): Promise<ChannelPublishAck> {
     const result = await publishing
-    const ack = Object.assign(makePublishInfo(this.id, result.seq, result.timestamp), {
+    // Text carries the room-wide semantic order (`order`); binary keeps its own per-key transport seq,
+    // a separate order domain. `receivers`/`meta` always come from the transport hop.
+    const seq = order ? order.seq : result.seq
+    const timestamp = order ? order.timestamp : result.timestamp
+    const ack = Object.assign(makePublishInfo(this.id, seq, timestamp), {
       meta: result.meta,
       ...(result.receivers === undefined ? {} : { receivers: result.receivers }),
     })
@@ -1142,13 +1191,15 @@ class ServerRoom implements Room {
     const serverOnly = this._hidesFromClients(event)
 
     if (event.__r === 'announce') {
-      this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
+      this._state.applyAnnounce(event.data, makePublishInfo(this.id, event.ord.seq, event.ord.timestamp))
     } else {
       this._applyCtrl(event)
     }
 
     if (this._stubs.size > 0 && !serverOnly) {
-      const wireText = encodePublishText(serialized, rawInfo)
+      // An announcement carries the room's semantic order (`ord`); every other control event is
+      // presence/lifecycle, ordered only by the control lane's own transport seq.
+      const wireText = encodePublishText(serialized, event.__r === 'announce' ? event.ord : rawInfo)
       for (const stub of this._stubs) stub._relayPublishText(wireText)
     }
 
@@ -1171,7 +1222,7 @@ class ServerRoom implements Room {
   }
 
   /** The text data lane — relayed per stub, skipping the sender's own holder when it opted out. */
-  private _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
+  private _onTextData(serialized: string, _rawInfo: WirePublishInfo): void {
     let envelope: unknown
     try {
       envelope = parse(serialized)
@@ -1180,7 +1231,9 @@ class ServerRoom implements Room {
     }
     if (!hasRoomTag(envelope) || envelope.__r !== 'data') return
     const event = envelope as RoomDataEnvelope
-    const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
+    // The room-wide order rides in the envelope (`ord`), never the transport's per-key seq — so a
+    // receiver on any delivery key sees the single order the sender's clock assigned.
+    const info = makePublishInfo(this.id, event.ord.seq, event.ord.timestamp)
     this._state.applyData(
       event.from,
       event.fromMeta,
@@ -1192,7 +1245,7 @@ class ServerRoom implements Room {
     this._healUnknownSender(event.from)
 
     if (this._stubs.size > 0) {
-      const wireText = encodePublishText(serialized, rawInfo)
+      const wireText = encodePublishText(serialized, event.ord)
       for (const stub of this._stubs) {
         if (!stub._wantsTextFrom(event.from)) continue
         if (stub._selfSuppressed.has(event.from)) continue
@@ -1201,7 +1254,7 @@ class ServerRoom implements Room {
     } else if (this._tail) {
       // Tail, pre-attach: no stub yet, but `Room.get({ tail })` opened ingestion — hold the message so
       // the stub replays it on attach. Bounded FIFO; the client dedupes any overlap with history.
-      this._tailHold.push({ serialized, rawInfo, from: event.from })
+      this._tailHold.push({ serialized, ord: event.ord, from: event.from })
       if (this._tailHold.length > ROOM_TAIL_HOLD_MAX) this._tailHold.shift()
     }
   }
@@ -1369,7 +1422,7 @@ class ServerRoom implements Room {
       // Replay what arrived between `Room.get` and now, then hand ongoing relay to the stub. Clearing
       // `_tail` stops pre-attach buffering; the client holds the flushed text until its first subscribe.
       for (const held of this._tailHold) {
-        if (stub._wantsTextFrom(held.from)) stub._relayPublishText(encodePublishText(held.serialized, held.rawInfo))
+        if (stub._wantsTextFrom(held.from)) stub._relayPublishText(encodePublishText(held.serialized, held.ord))
       }
       this._tailHold.length = 0
       this._tail = false
@@ -1518,9 +1571,11 @@ class ServerRoom implements Room {
   ): Promise<void> {
     const stored = await retainedKv(this.id).get(roomRetainedTextKey(this.id))
     if (stored === null) return
-    const from = (parse(stored) as RoomDataEnvelope).from
-    if (prevWantsText || prevMemberWants.has(from) || !stub._wantsTextFrom(from)) return
-    stub._relayPublishText(encodePublishText(stored, { seq: 0, timestamp: Date.now() }))
+    const envelope = parse(stored) as RoomDataEnvelope
+    if (prevWantsText || prevMemberWants.has(envelope.from) || !stub._wantsTextFrom(envelope.from)) return
+    // Replay with the message's own stored order — its real place in the room's semantic sequence, not
+    // a fresh stamp — so a late subscriber can order it against live text.
+    stub._relayPublishText(encodePublishText(stored, envelope.ord))
   }
 
   /** @internal — MQTT-retained replay for the binary lanes. Called when a stub's `sub-binary` want
