@@ -14,6 +14,8 @@ import {
   KV_KEEP,
   type BroadcastAdapter,
   type BroadcastPublishResult,
+  type KvReadOptions,
+  type KvWriteOptions,
 } from '../server/broadcast.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
@@ -380,8 +382,10 @@ async function closeRoom(id: string): Promise<void> {
   for (const { key } of await listMemberKeys(kv, id)) await kv.delete(key)
   for (const key of await kv.keys(roomHiddenMemberKvPrefix(id))) await kv.delete(key)
   for (const key of await kv.keys(roomIdentityRoomKvPrefix(id))) await kv.delete(key)
-  for (const key of await kv.keys(roomRetainedBinaryPrefix(id))) await kv.delete(key)
-  await kv.delete(roomRetainedTextKey(id))
+  // Retained frames live on the authority tier, so sweep them there (see `retainedKv`).
+  const retained = retainedKv(id)
+  for (const key of await retained.keys(roomRetainedBinaryPrefix(id))) await retained.delete(key)
+  await retained.delete(roomRetainedTextKey(id))
   await kv.delete(roomConfigKvKey(id))
   await getRoomKV().delete(roomIndexKvKey(id)) // deregister from the cross-room index (unscoped)
 }
@@ -400,7 +404,7 @@ async function resolveParticipantRef(
       typeof target.id === 'string' && target.id.length > 0,
       'The participant { id } should be a non-empty string',
     )
-    const raw = await kv.get(roomMemberKvKey(roomId, target.id))
+    const raw = await kv.get(roomMemberKvKey(roomId, target.id), { consistent: true })
     if (raw === null) throw new RoomError(`Participant not found: ${target.id}`)
     return [{ memberId: target.id, identity: (parse(raw) as RoomMemberRecord).identity }]
   }
@@ -711,8 +715,9 @@ class ServerRoom implements Room {
     }
     if (hidden) await kv.set(roomHiddenMemberKvKey(this.id, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
     await kv.set(roomMemberKvKey(this.id, id), stringify(record), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
-    // The room may have been closed between the check and the write — roll back.
-    if ((await readConfig(kv, this.id)) === null) {
+    // The room may have been closed between the check and the write — roll back. Resolve against the
+    // authority so a just-created room (its replica not yet propagated) never reads as a false close.
+    if ((await resolveConfig(kv, this.id)) === null) {
       await kv.delete(roomMemberKvKey(this.id, id))
       if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
       if (hidden) await kv.delete(roomHiddenMemberKvKey(this.id, id))
@@ -742,7 +747,7 @@ class ServerRoom implements Room {
    *  node is still cleaned up (the set is instance-local; the keys are the source of truth).
    *  Deleting an absent key is a no-op, so a member that retained nothing just pays one empty scan. */
   private async _dropRetainedBinary(id: string): Promise<void> {
-    const kv = getRoomKV(this.id)
+    const kv = retainedKv(this.id)
     for (const key of await kv.keys(roomRetainedBinaryMemberPrefix(this.id, id))) await kv.delete(key)
   }
 
@@ -804,7 +809,7 @@ class ServerRoom implements Room {
     // Store before publishing live, so a subscriber that arrives around now is never left with a
     // gap: it either receives the live message (subscribed in time) or replays it (subscribed after
     // the store). The reverse order could drop it in the window between publish and store.
-    if (retain) await getRoomKV(this.id).set(roomRetainedTextKey(this.id), serialized)
+    if (retain) await retainedKv(this.id).set(roomRetainedTextKey(this.id), serialized)
     return this._finishPublish(
       sender,
       data,
@@ -830,7 +835,7 @@ class ServerRoom implements Room {
     // retained-text slot, it's reaped by lifecycle (the publisher's leave, or room close), never by
     // expiry, so text and binary retention behave identically.
     if (frame.retain) {
-      await getRoomKV(this.id).set(
+      await retainedKv(this.id).set(
         roomRetainedBinaryKey(this.id, from, frame.track ?? DEFAULT_TRACK),
         bytesToBase64(framed),
       )
@@ -1016,14 +1021,14 @@ class ServerRoom implements Room {
   private async _resolveMember(id: string): Promise<Sender | null> {
     const remote = this._state.getRemote(id)
     if (remote) return remote
-    const raw = await getRoomKV(this.id).get(roomMemberKvKey(this.id, id))
+    const raw = await getRoomKV(this.id).get(roomMemberKvKey(this.id, id), { consistent: true })
     if (raw === null) return null
     const record = parse(raw) as RoomMemberRecord
     return { id, meta: record.meta, identity: record.identity ?? null }
   }
 
   private async _assertOpen(kv: RoomKV): Promise<void> {
-    if (this._state.closed || (await readConfig(kv, this.id)) === null) {
+    if (this._state.closed || (await resolveConfig(kv, this.id)) === null) {
       throw new RoomError(`Room is closed: ${this.id}`)
     }
   }
@@ -1426,7 +1431,7 @@ class ServerRoom implements Room {
     prevWantsText: boolean,
     prevMemberWants: ReadonlySet<string>,
   ): Promise<void> {
-    const stored = await getRoomKV(this.id).get(roomRetainedTextKey(this.id))
+    const stored = await retainedKv(this.id).get(roomRetainedTextKey(this.id))
     if (stored === null) return
     const from = (parse(stored) as RoomDataEnvelope).from
     if (prevWantsText || prevMemberWants.has(from) || !stub._wantsTextFrom(from)) return
@@ -1439,7 +1444,7 @@ class ServerRoom implements Room {
    *  frame is self-describing, so the sender/track come from the frame itself, not the key. */
   async _replayRetainedBinary(stub: RoomStubChannel, prevWants: BinaryWants): Promise<void> {
     if (!wantsAnyBinary(stub._binaryWants)) return
-    const kv = getRoomKV(this.id)
+    const kv = retainedKv(this.id)
     for (const key of await kv.keys(roomRetainedBinaryPrefix(this.id))) {
       const stored = await kv.get(key)
       if (stored === null) continue
@@ -1838,7 +1843,13 @@ class ServerLocalParticipant extends ParticipantBase {
  *  each other (see the room-state discipline: create, config, member meta, tracks, heartbeat). */
 type RoomKV = Required<Pick<BroadcastAdapter, 'get' | 'set' | 'delete' | 'keys' | 'setIfAbsent' | 'update'>>
 
-function getRoomKV(roomId?: string): RoomKV {
+/** Consistency defaults every op of a facade carries. `Room` reads its directory state (config,
+ *  roster, markers) from the eventually-consistent replica — fast, global, healed by the live event
+ *  stream — and reserves `consistent: true` for the reads and writes that carry a hard guarantee (see
+ *  `KvWriteOptions` and `retainedKv`). Single-tier backends (in-memory, Redis) ignore it. */
+type RoomKvDefaults = { consistent?: boolean }
+
+function getRoomKV(roomId?: string, defaults?: RoomKvDefaults): RoomKV {
   const adapter = getBroadcastAdapter()
   const missing = (['get', 'set', 'delete', 'keys', 'setIfAbsent', 'update'] as const).filter(
     (method) => !adapter[method],
@@ -1853,40 +1864,70 @@ function getRoomKV(roomId?: string): RoomKV {
   if (roomId === undefined) return kv
   // Scoped: tag every op with the room's control-lane key, so a sharded backend routes all of one
   // room's state to the single authority that already sequences that room (see `KvWriteOptions`).
+  // `defaults` (e.g. the retained facade's `consistent`) ride every op too; a per-call option wins.
   const partitionKey = roomCtrlKey(roomId)
+  const merge = (options?: KvReadOptions & KvWriteOptions) => ({ ...defaults, ...options, partitionKey })
   return {
-    get: (key) => kv.get(key, { partitionKey }),
-    set: (key, value, options) => kv.set(key, value, { ...options, partitionKey }),
-    delete: (key) => kv.delete(key, { partitionKey }),
-    keys: (prefix) => kv.keys(prefix, { partitionKey }),
-    setIfAbsent: (key, value, options) => kv.setIfAbsent(key, value, { ...options, partitionKey }),
-    update: (key, mutate, options) => kv.update(key, mutate, { ...options, partitionKey }),
+    get: (key, options) => kv.get(key, merge(options)),
+    set: (key, value, options) => kv.set(key, value, merge(options)),
+    delete: (key, options) => kv.delete(key, merge(options)),
+    keys: (prefix, options) => kv.keys(prefix, merge(options)),
+    setIfAbsent: (key, value, options) => kv.setIfAbsent(key, value, merge(options)),
+    update: (key, mutate, options) => kv.update(key, mutate, merge(options)),
   }
+}
+
+/** Retained-message store: a room's strongly-consistent authority tier, never the replica. Retained
+ *  replay carries a hard guarantee — a late subscriber must observe the last retained frame of every
+ *  lane it starts watching — so both the write and the replay read are `consistent` (read-your-writes
+ *  across nodes); an eventually-consistent replica could hand a late subscriber a stale frame or none.
+ *  Staying off the replica also keeps a hot retained lane clear of its per-key write ceiling. */
+function retainedKv(roomId: string): RoomKV {
+  return getRoomKV(roomId, { consistent: true })
 }
 
 /** Statics prologue: validate the ID and load the room's config — or throw `Room not found`. */
 async function requireRoom(id: string): Promise<{ kv: RoomKV; config: RoomConfigRecord }> {
   assertRoomId(id)
   const kv = getRoomKV(id)
-  const config = await readConfig(kv, id)
+  const config = await resolveConfig(kv, id)
   if (config === null) throw new RoomError(`Room not found: ${id}`)
   return { kv, config }
 }
 
-async function readConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord | null> {
-  const raw = await kv.get(roomConfigKvKey(roomId))
+function parseConfig(raw: string | null): RoomConfigRecord | null {
   return raw === null ? null : (parse(raw) as RoomConfigRecord)
+}
+
+/** Fast replica read of a room's config. May lag a room created in another region by moments — for
+ *  enumeration (`Room.list`) that lag just means the room surfaces a beat later, which enumeration
+ *  tolerates. Single-room existence uses `resolveConfig` instead, so the lag never reads as absence. */
+async function readConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord | null> {
+  return parseConfig(await kv.get(roomConfigKvKey(roomId)))
+}
+
+/** Existence read for one specific room: the fast replica, falling back to the authority on a miss so
+ *  a room just created in another region (its replica not yet propagated) is never a false "not
+ *  found". The fallback costs one authority read only on a replica miss — the hit path stays replica-fast. */
+async function resolveConfig(kv: RoomKV, roomId: string): Promise<RoomConfigRecord | null> {
+  return (await readConfig(kv, roomId)) ?? parseConfig(await kv.get(roomConfigKvKey(roomId), { consistent: true }))
 }
 
 /** Read a room's member records, reaping members whose owning node stopped heartbeating
  *  (hard crash): their record is deleted and their leave announced to all observers. Pass `ids`
  *  to read a specific subset (e.g. one identity's memberships) instead of scanning the whole roster. */
 async function readMembers(kv: RoomKV, roomId: string, ids?: string[]): Promise<MemberSnapshot[]> {
+  // Roster reads run against the authority, not the replica: `_refreshMembers` relies on read-your-
+  // writes (a join/leave writes its record before publishing the event that triggers the read), and
+  // the reap below keys off `seenAt` — a replica lag could drop a live member from the roster or reap
+  // a member a live heartbeat just refreshed. The reap delete stays replicated so both tiers drop it.
   const memberKeys =
-    ids === undefined ? await listMemberKeys(kv, roomId) : ids.map((id) => ({ key: roomMemberKvKey(roomId, id), id }))
+    ids === undefined
+      ? await listMemberKeys(kv, roomId, { consistent: true })
+      : ids.map((id) => ({ key: roomMemberKvKey(roomId, id), id }))
   const members: MemberSnapshot[] = []
   for (const { key, id } of memberKeys) {
-    const raw = await kv.get(key)
+    const raw = await kv.get(key, { consistent: true })
     if (raw === null) continue // member left concurrently
     const record = parse(raw) as RoomMemberRecord
     if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
@@ -1909,10 +1950,14 @@ async function readMembers(kv: RoomKV, roomId: string, ids?: string[]): Promise<
 
 /** Keys of a room's member records. Member IDs are UUIDs — anything else under the prefix
  *  belongs to another room whose ID happens to start with `${roomId}:m:` (e.g. its `:config` key). */
-async function listMemberKeys(kv: RoomKV, roomId: string): Promise<Array<{ key: string; id: string }>> {
+async function listMemberKeys(
+  kv: RoomKV,
+  roomId: string,
+  options?: KvReadOptions,
+): Promise<Array<{ key: string; id: string }>> {
   const prefix = roomMemberKvPrefix(roomId)
   const memberKeys: Array<{ key: string; id: string }> = []
-  for (const key of await kv.keys(prefix)) {
+  for (const key of await kv.keys(prefix, options)) {
     const id = key.slice(prefix.length)
     if (uuidToBytes(id)) memberKeys.push({ key, id })
   }
@@ -1954,9 +1999,12 @@ async function listHiddenMemberIds(kv: RoomKV, roomId: string): Promise<Set<stri
 async function resolveIdentityMembers(kv: RoomKV, roomId: string, identity: string): Promise<string[]> {
   const prefix = roomIdentityKvPrefix(roomId, identity)
   const members: string[] = []
-  for (const key of await kv.keys(prefix)) {
+  // Authority-read the markers and their records: this resolves the targets of `removeParticipant`/
+  // `Room.send` by identity, and a replica lag on a just-joined membership would drop it here (or
+  // false-prune its marker). The prune delete stays replicated so both tiers drop a stale marker.
+  for (const key of await kv.keys(prefix, { consistent: true })) {
     const memberId = key.slice(prefix.length)
-    const raw = await kv.get(roomMemberKvKey(roomId, memberId))
+    const raw = await kv.get(roomMemberKvKey(roomId, memberId), { consistent: true })
     if (raw !== null && (parse(raw) as RoomMemberRecord).identity === identity) members.push(memberId)
     else await kv.delete(key) // the member left (or its join never committed) — prune the marker
   }
@@ -1977,8 +2025,10 @@ async function evictMember(
   // No local state here to tell whether the member was hidden — delete the marker unconditionally
   // (a no-op when it was a presence member).
   await kv.delete(roomHiddenMemberKvKey(roomId, memberId))
-  // Drop the kicked member's retained binary frames too (a kick doesn't run `_removeMember`).
-  for (const key of await kv.keys(roomRetainedBinaryMemberPrefix(roomId, memberId))) await kv.delete(key)
+  // Drop the kicked member's retained binary frames too (a kick doesn't run `_removeMember`) — on the
+  // authority tier where retained frames live (see `retainedKv`).
+  const retained = retainedKv(roomId)
+  for (const key of await retained.keys(roomRetainedBinaryMemberPrefix(roomId, memberId))) await retained.delete(key)
   await publishCtrl(roomId, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
 }
 

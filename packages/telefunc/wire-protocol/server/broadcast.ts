@@ -36,9 +36,18 @@ type KvMutate = (current: string | null) => string | null | typeof KV_KEEP
 /** `partitionKey` groups keys that must share a home so a backend can co-locate and linearize them.
  *  `Room` tags all of one room's keys with the room's control-lane key, so a sharded backend
  *  (Cloudflare) routes them to the single Durable Object that already sequences that room — same
- *  optimal location, one authority per room. Backends that don't shard (in-memory, Redis) ignore it. */
-type KvReadOptions = { partitionKey?: string }
-type KvWriteOptions = { ttlMs?: number; partitionKey?: string }
+ *  optimal location, one authority per room. Backends that don't shard (in-memory, Redis) ignore it.
+ *
+ *  `consistent: true` pins the operation to the strongly-consistent authority rather than an
+ *  eventually-consistent read replica: a read observes the latest write (read-your-writes) and a
+ *  write is kept off the replica. `Room` reads its directory state (config, roster, markers) from the
+ *  replica — fast, global, and self-healing through the live event stream — and flags `consistent`
+ *  only where staleness would break a guarantee: retained-message replay (its late-subscriber
+ *  delivery needs read-your-writes) and the retained writes behind it. A single-tier backend
+ *  (in-memory, Redis) is already strongly consistent and ignores it; only a two-tier backend
+ *  (Cloudflare: Durable Object authority + Workers KV replica) acts on it. */
+type KvReadOptions = { partitionKey?: string; consistent?: boolean }
+type KvWriteOptions = { ttlMs?: number; partitionKey?: string; consistent?: boolean }
 
 /** Transport-level publish result. `receivers` is the key's live subscription count at the
  *  transport hop — `0` means nobody anywhere is subscribed (see `ChannelPublishAck.receivers`);
