@@ -22,7 +22,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc --build",
+    "build": "rm -rf dist/ && tsc -p tsconfig.json && tsc -p tsconfig.spec.json",
     "dev": "tsc --watch"
   },
   "peerDependencies": {
