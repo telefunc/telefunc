@@ -35,8 +35,8 @@ const MAX_STATE_ROWS_PER_INPUT = 50_000
  *  (its lease is owned by the wire channel and released on close). */
 type MintedToken = { token: ReadToken; redeemed: boolean }
 
-/** The read half of the per-request DbLiveCarrier (the write tx-scope is threaded alongside by the
- *  write-capture unit). wrapLiveSelect pushes here; disposeUnredeemedReads reads here. */
+/** What the per-request DbLiveCarrier carries: `wrapLiveSelect` pushes here, `disposeUnredeemedReads`
+ *  reads here. */
 type ReadCarrier = { mintedTokens: MintedToken[] }
 
 /** One registry per db instance (keyed by identity — a WeakMap so a discarded db is collectable).

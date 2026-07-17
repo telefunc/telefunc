@@ -40,8 +40,6 @@ class TagHub {
   // from old/failed cycles are ignored and nothing accumulates across outage/recovery cycles.
   private pendingBarrier: { token: string; observed: boolean } | null = null
 
-  constructor() {}
-
   /** Subscribe to the app-scoped key once, then publish barrier frames until we observe one of our
    *  own — proof the subscription is actually delivering (a transport's `listen()` may become active
    *  after `send()` starts acknowledging). Awaiting this before the first fence scan is what closes
@@ -69,7 +67,8 @@ class TagHub {
     return this.observed
   }
 
-  /** Publish one batch. Awaited by the caller (settle) so a failure is detected, not silent. */
+  /** Publish one batch. Awaited by the caller so a failure is detected rather than silent — see
+   *  `publishTagImmediate`, which catches it and fires local subscribers instead. */
   async publish(tags: string[]): Promise<void> {
     await Broadcast.publish<TagBatch>(TAG_KEY, { tags })
   }

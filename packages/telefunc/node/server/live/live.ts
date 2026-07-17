@@ -64,9 +64,9 @@ type LiveSubscription<T> = {
   close(): Promise<void>
 }
 
-/** A server-owned source of invalidations for one Live (the engine graph, a tag subscription, …).
- *  Attached before serialization via `attachSource`; the replacer subscribes it only when the handle
- *  crosses the wire, and releases it on the last owning channel's close. */
+/** A server-owned source of invalidations for one Live. Attached before serialization via
+ *  `attachSource`; the replacer subscribes it only when the handle crosses the wire, and releases it on
+ *  the last owning channel's close. */
 type LiveActivationSource = {
   subscribe(onInvalidate: () => void): () => void
 }
@@ -106,7 +106,8 @@ class LiveCell<T> {
   /** Tag keys this cell should go stale on. Stored INERT — resolving a key to a hub subscription needs
    *  the request's fence, which only serialization has. */
   private tags: string[] = []
-  /** Server-owned invalidation sources (engine graph, tag subscriptions), subscribed on the first lease. */
+  /** Server-owned invalidation sources, subscribed on the first lease. Tag keys are NOT here — they
+   *  live in `tags` and resolve through `subscribeTag`, because they need the request's fence. */
   private sources: LiveActivationSource[] = []
   private sourceTeardowns: Array<() => void> = []
   /** Teardowns for activated pending deps (unsubscribe + cascade release). */
@@ -205,19 +206,22 @@ class LiveCell<T> {
    *  that decides what counts as "published since this request read" is stamped once at request entry,
    *  and serialization resolves the key against it. An association that had to capture the fence itself
    *  would have to run before the body's first await, which is an ordering rule nothing enforces and
-   *  every caller would eventually get wrong. */
+   *  every caller would eventually get wrong.
+   *
+   *  Generic in `T` although the body never reads it: `LiveCell` is invariant (`.data` returns `T`, the
+   *  data taps accept one), so a `LiveCell<unknown>` parameter would reject the `LiveCell<Todo[]>` every
+   *  real caller holds. Nothing here touches the value — only the key list — so any Live binds. */
   static onInvalidate<T>(key: string, live: LiveCell<T>): void {
     live.tags.push(key)
   }
 
-  /** Publish a stale signal for `key`. Inside a request it is queued and published at settle; outside
-   *  a request it publishes immediately. Fire-and-forget (`void`); publication is failure-safe. */
+  /** Publish a stale signal for `key`. Publishes immediately, in or out of a request.
+   *  Fire-and-forget (`void`); publication is failure-safe. */
   static invalidate(key: string): void {
     invalidateTagStatic(key)
   }
 
-  /** Attach a server-owned invalidation source (the ticket-6 engine seam / tag wiring). Inert until
-   *  the first `activate`. */
+  /** Attach a server-owned invalidation source. Inert until the first `activate`. */
   attachSource(source: LiveActivationSource): void {
     this.sources.push(source)
   }

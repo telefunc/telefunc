@@ -38,11 +38,19 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     let peerConnected = false
     let missedUpdate = false
     // The snapshot's revision, filled in below when the metadata is built. A data emission only tells
-    // this client something new if the value moved PAST what its snapshot already carries: a producer
-    // that populates with `set(...)` before returning has its value in the metadata, and its coalesced
-    // emission still lands here — pre-connect, but not news. Treating that as a miss would tell the
-    // client to refetch what it has, and the refetch would build the same Live and say it again.
-    // Revisions rather than value comparison, because `set` may hand back a mutated object.
+    // this client something new if the value moved PAST what its snapshot already carries.
+    //
+    // What lands here already represented by the snapshot: a producer that ALREADY HOLDS the cell,
+    // pushing across the two handoffs made before serialization — `executeTelefunction` awaits the body,
+    // then its caller awaits `executeTelefunction`. Such a push is in the metadata (serialization reads
+    // `.data` after it) while its coalesced emission still fires afterwards, once these taps exist.
+    // Marking that a miss would tell the client to refetch what it was just sent.
+    //
+    // A push from INSIDE the body cannot reach here at all: its flush is queued before the body returns,
+    // so it runs while no tap exists and is dropped. Which is why this is a revision comparison and not
+    // a rule about ordering — without it, the case would be decided by how many times the pipeline
+    // happens to await, and nothing declares that.
+    // Revisions rather than values, because `set` may hand back a mutated object.
     let snapshotRevision = Number.POSITIVE_INFINITY
     const offData = live.onData((data) => {
       if (!peerConnected && live.revision > snapshotRevision) missedUpdate = true

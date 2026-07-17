@@ -40,7 +40,7 @@ type LiveMember<M> = M extends (...args: infer A) => infer Ret
 
 /** The `.live` namespace: the query-producing methods of `TDb` (`select`; `db.query.*` is a fast-follow),
  *  each remapped so its terminal builder awaits to `Live<T[]>`. Mutations are NOT here — writes go
- *  through the acquired db's plain `insert/update/delete` (auto-captured), so their types stay Drizzle's. */
+ *  through the acquired db's plain `insert/update/delete`, so their types stay Drizzle's. */
 type LiveNamespace<TDb> = TDb extends { select: (...args: infer A) => infer R }
   ? { select(...args: A): LiveOf<R> }
   : Record<never, never>
@@ -48,14 +48,13 @@ type LiveNamespace<TDb> = TDb extends { select: (...args: infer A) => infer R }
 /** The acquired per-request reactive db: plain `TDb` (exact types + behavior) plus `.live`. */
 type Reactive<TDb> = TDb & { live: LiveNamespace<TDb> }
 
-/** Opaque per-request carrier: the minted-read-token Set + the write-capture tx-scope, created by the
- *  extension's start hook and captured by the accessor. Its concrete shape belongs to the runtime units;
- *  this surface only threads it. */
+/** Opaque per-request carrier, acquired by the accessor. Here it is nothing but a brand: its concrete
+ *  shape belongs to the runtime units, and this surface only threads it. */
 type DbLiveCarrier = { readonly __dbLiveCarrier: true }
 
 /** Set up reactive queries for a Drizzle `db` and return a PER-REQUEST accessor. Call the accessor at the
  *  TOP of a telefunction (before any await) to acquire the reactive db for that request; use `.live.*` for
- *  live reads and the plain `insert/update/delete` for auto-captured writes. */
+ *  live reads. Writes go through the plain `insert/update/delete`, unchanged. */
 function reactiveDrizzle<TDb extends object>(baseDb: TDb): () => Reactive<TDb> {
   return function acquireReactiveDb(): Reactive<TDb> {
     // Capture the per-request carrier NOW (context-bearing, before the body's first await). The returned

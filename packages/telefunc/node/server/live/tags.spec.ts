@@ -255,7 +255,8 @@ describe('tag publish failure', () => {
       await stampRequestStartFence() // barrier established over the working in-memory adapter
       const localListener = vi.fn()
       getTagHub().registerTag('t', localListener) // an external local subscriber
-      // Only the settle publish fails (transport down at write time), not readiness:
+      // Only the publish fails (transport down at write time), not readiness — the barrier above
+      // was already established, so this isolates the publish hop:
       vi.spyOn(getBroadcastAdapter(), 'publish').mockRejectedValue(new Error('transport down'))
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       LiveCell.invalidate('t') // fire-and-forget: a transport failure must never surface to the caller
