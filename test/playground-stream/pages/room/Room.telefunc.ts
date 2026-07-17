@@ -25,8 +25,8 @@ import { Room, Abort } from 'telefunc'
 
 /** Room IDs are generated client-side per scenario run — the in-memory KV outlives page
  *  loads, so a fixed ID would leak members and seq counters across runs. */
-async function onCreateRoom(roomId: string, opts?: { isolated?: boolean }) {
-  return await Room.create(roomId, { meta: { topic: 'e2e' }, ...opts })
+async function onCreateRoom(roomId: string) {
+  return await Room.create(roomId, { meta: { topic: 'e2e' } })
 }
 
 async function onGetRoom(roomId: string) {

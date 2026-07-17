@@ -229,7 +229,7 @@ class RoomState {
     return [...this._members.values()].filter((entry) => !entry.hidden).map((entry) => entry.remote)
   }
 
-  /** Member IDs currently known — drives isolated-mode per-member key subscriptions. */
+  /** Member IDs currently known — drives the per-member binary key subscriptions. */
   listMemberIds(): string[] {
     return [...this._members.keys()]
   }

@@ -150,14 +150,14 @@ function Room() {
         Server-side join + publish
       </button>
 
-      <h2>Binary (isolated mode)</h2>
+      <h2>Binary</h2>
 
       <button
         id="test-room-binary"
         onClick={async () => {
           setResult('')
           const roomId = `e2e-binary:${crypto.randomUUID()}`
-          await onCreateRoom(roomId, { isolated: true })
+          await onCreateRoom(roomId)
           const videoRoom = await onGetRoom(roomId)
           const me = await videoRoom.join({ meta: { name: 'Cam' } })
 

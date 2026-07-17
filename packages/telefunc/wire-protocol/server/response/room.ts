@@ -55,7 +55,6 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
         channelId: stub.id,
         roomId: serverRoom.id,
         meta: serverRoom.meta,
-        isolated: serverRoom._isolated,
         closed: serverRoom.isClosed,
         stamp: serverRoom._state.updateStamp,
         // Scalars only — the roster streams over the stub once its peer attaches, so

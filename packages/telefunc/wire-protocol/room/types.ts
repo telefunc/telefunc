@@ -140,10 +140,6 @@ type ParticipantRef = { id: string } | { identity: string }
 type RoomOptions<M extends RoomMeta = RoomMeta> = {
   /** Room metadata, visible to all observers. Default: `{}`. */
   meta?: M
-  /** Give each member their own upstream pub/sub key (default: `false`). Removes publish
-   *  contention on platforms that map each key to a separate coordinator (e.g. Cloudflare
-   *  Durable Objects). Clients don't see the difference. Fixed at creation. */
-  isolated?: boolean
 }
 
 type RoomGetOptions = {

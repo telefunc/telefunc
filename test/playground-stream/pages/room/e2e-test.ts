@@ -110,7 +110,7 @@ function testRoom() {
     })
   })
 
-  test('room: binary frames round-trip in isolated mode', async () => {
+  test('room: binary frames round-trip', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-binary')
 

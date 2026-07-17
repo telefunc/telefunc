@@ -178,12 +178,12 @@ type RoomStatic = {
   /** List all rooms — optionally only those whose ID starts with `prefix`. `M` types the returned
    *  `meta` (`Room.list<MatchMeta>()`), replacing a `r.meta as MatchMeta` cast at the call site. */
   list<M extends RoomMeta = RoomMeta>(options?: { prefix?: string }): Promise<RoomInfo<M>[]>
-  /** Admin: replace the room's metadata wholesale (`isolated` is fixed at creation). The
-   *  room-level counterpart to `LocalParticipant.setMeta`. */
+  /** Admin: replace the room's metadata wholesale. The room-level counterpart to
+   *  `LocalParticipant.setMeta`. */
   setMeta(id: string, meta: RoomMeta): Promise<void>
   /** Admin: merge the room's metadata per key — provided keys replace, omitted keys keep their
-   *  value, a key set to `undefined` is removed (`isolated` untouched). The room-level
-   *  counterpart to `LocalParticipant.setAttributes`. */
+   *  value, a key set to `undefined` is removed. The room-level counterpart to
+   *  `LocalParticipant.setAttributes`. */
   setAttributes(id: string, attributes: RoomMeta): Promise<void>
   /** Admin: close the room — disconnects all participants and removes the room. */
   close(id: string): Promise<void>
@@ -292,7 +292,6 @@ async function allocateRoomOrder(id: string): Promise<RoomOrder> {
  *  record means the create lost. Race-free — exactly one of any number of concurrent callers writes. */
 async function tryCreateRoom(id: string, options: RoomOptions | undefined, kv: RoomKV): Promise<Room | null> {
   const { meta } = normalizeOptions(options)
-  const isolated = options?.isolated === true
   let created: RoomConfigRecord | null = null
   await kv.update(roomConfigKvKey(id), (raw) => {
     const current = parseConfig(raw)
@@ -302,7 +301,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined, kv: R
       return KV_KEEP
     }
     // Fresh id, or a closed tombstone to resume past: take the next generation.
-    created = { meta, isolated, at: Date.now(), by: writerId(), gen: (current?.gen ?? 0) + 1, status: 'open' }
+    created = { meta, at: Date.now(), by: writerId(), gen: (current?.gen ?? 0) + 1, status: 'open' }
     return stringify(created)
   })
   if (created === null) return null
@@ -413,8 +412,8 @@ async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
 }
 
 /** Merge into the room's metadata per key — provided keys replace, omitted keys keep their value,
- *  a key set to `undefined` is removed (`isolated` untouched). The admin counterpart to
- *  `LocalParticipant.setAttributes`: one changed field is one small write, not a whole-`meta` resend. */
+ *  a key set to `undefined` is removed. The admin counterpart to `LocalParticipant.setAttributes`:
+ *  one changed field is one small write, not a whole-`meta` resend. */
 async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
   assertUsage(isObject(attributes), 'Room.setAttributes() attributes should be an object')
   const { kv, config } = await requireRoom(id)
@@ -441,7 +440,7 @@ async function writeRoomConfig(id: string, kv: RoomKV, config: RoomConfigRecord,
       decision.outcome = 'gone'
       return KV_KEEP
     }
-    const next: RoomConfigRecord = { meta, isolated: current.isolated, at, by, gen: current.gen, status: 'open' }
+    const next: RoomConfigRecord = { meta, at, by, gen: current.gen, status: 'open' }
     // Stamp-wins: `next` lands unless a strictly-newer config already sits there (that writer
     // published its own convergence event). One atomic step, no read-back re-assert.
     if (!stampNewer(next, current)) {
@@ -607,7 +606,6 @@ const ROOM_DM_ACK_TIMEOUT_MS = 60_000
 class ServerRoom implements Room {
   readonly [SERVER_ROOM_BRAND] = true
 
-  /** @internal */ readonly _isolated: boolean
   /** @internal — the room generation (`RoomConfigRecord.gen`) this handle is bound to. Every
    *  authority-side legality check (join, mutate, close) and every member record this handle writes
    *  carries it, so an operation from a previous incarnation is rejected after a close/recreate. */
@@ -631,7 +629,6 @@ class ServerRoom implements Room {
 
   private readonly _ctrlSub = new SubSlot()
   private readonly _textSub = new SubSlot()
-  private readonly _memberTextUnsubs = new Map<string, () => void>()
   /** Upstream binary subscriptions, keyed by the full adapter key — one per wanted (member, track). */
   private readonly _binaryKeyUnsubs = new Map<string, () => void>()
   private readonly _dmUnsubs = new Map<string, () => void>()
@@ -646,7 +643,6 @@ class ServerRoom implements Room {
   private _pendingRefresh: Promise<void> | null = null
 
   constructor(roomId: string, config: RoomConfigRecord, seed: { members: MemberSnapshot[] } | { count: number }) {
-    this._isolated = config.isolated
     this._gen = config.gen
     this._state = new RoomState({
       roomId,
@@ -908,10 +904,10 @@ class ServerRoom implements Room {
     await publishCtrl(this.id, { __r: 'p-meta', id, meta, prev, seq })
   }
 
-  /** @internal — publish a member's text message. The sender's verified meta/identity are
-   *  stamped into the envelope here — never client-supplied. Text rides the room's text key,
-   *  or the member's own key in isolated mode. `retain` stores the message as the room's one
-   *  retained-text slot (MQTT-style), replayed to any later text subscriber (see `_replayRetainedText`). */
+  /** @internal — publish a member's text message. The sender's verified meta/identity are stamped
+   *  into the envelope here — never client-supplied. Text rides the room's one text key. `retain`
+   *  stores the message as the room's one retained-text slot (MQTT-style), replayed to any later
+   *  text subscriber (see `_replayRetainedText`). */
   async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
     const sender = await this._admitPublish(from, data)
     // Stamp the room-wide order before anything ships, so the retained copy, the live frame, and the
@@ -930,15 +926,7 @@ class ServerRoom implements Room {
     // gap: it either receives the live message (subscribed in time) or replays it (subscribed after
     // the store). The reverse order could drop it in the window between publish and store.
     if (retain) await retainedKv(this.id).set(roomRetainedTextKey(this.id), serialized)
-    return this._finishPublish(
-      sender,
-      data,
-      getBroadcastAdapter().publish(
-        this._isolated ? roomMemberDataKey(this.id, from) : roomTextKey(this.id),
-        serialized,
-      ),
-      ord,
-    )
+    return this._finishPublish(sender, data, getBroadcastAdapter().publish(roomTextKey(this.id), serialized), ord)
   }
 
   /** @internal — publish a member's binary frame (`[16-byte member ID][flags][…]`, validated at
@@ -1633,31 +1621,15 @@ class ServerRoom implements Room {
     const binaryWants = this._aggregateBinaryWants()
     const wantAnyBinary = open && wantsAnyBinary(binaryWants)
     const needsRoster =
-      state.eventListenerCount + state.dataListenerCount + state.binaryListenerCount > 0 ||
-      (this._isolated && wantAnyText) ||
-      wantAnyBinary
+      state.eventListenerCount + state.dataListenerCount + state.binaryListenerCount > 0 || wantAnyBinary
     if ((becomesObserved && state.rosterKnown) || (open && !state.rosterKnown && needsRoster)) {
       void this._refreshMembers().catch(reportRoomError)
     }
-    if (this._isolated) {
-      // Isolated text rides per-member keys, so upstream delivery narrows to the wanted set.
-      const textIds = !wantAnyText
-        ? []
-        : textWants.all
-          ? memberIds
-          : memberIds.filter((id) => textWants.members.has(id))
-      this._syncKeyedSubs(this._memberTextUnsubs, textIds, (memberId) =>
-        adapter.subscribe(roomMemberDataKey(this.id, memberId), (serialized, info) =>
-          this._onTextData(serialized, info),
-        ),
-      )
-    } else {
-      // One shared key — the node ingests the room's text while anyone wants any of it;
-      // member-selectivity is enforced at the per-stub relay.
-      this._textSub.sync(wantAnyText, () =>
-        adapter.subscribe(roomTextKey(this.id), (serialized, info) => this._onTextData(serialized, info)),
-      )
-    }
+    // Text: one lane per room. The node ingests it while anyone wants any of it; member-selectivity
+    // is enforced at the per-stub relay (see `_onTextData`), never by narrowing the subscription.
+    this._textSub.sync(wantAnyText, () =>
+      adapter.subscribe(roomTextKey(this.id), (serialized, info) => this._onTextData(serialized, info)),
+    )
 
     // Binary: per-(publisher, track) keys in every mode — subscribing want-selectively at the
     // source makes upstream delivery pay-per-want, not filter-after-receive: dropping the last

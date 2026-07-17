@@ -757,8 +757,8 @@ describe('data pub/sub', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('selective binary delivery', () => {
-  it("isolated mode subscribes only the wanted members' upstream keys", async () => {
-    const a = await Room.create('sel', { isolated: true })
+  it("subscribes only the wanted members' binary upstream keys", async () => {
+    const a = await Room.create('sel')
     const cam1 = await a.join({ meta: { name: 'cam1' } })
     const cam2 = await a.join({ meta: { name: 'cam2' } })
     const b = await Room.get('sel')
@@ -773,7 +773,7 @@ describe('selective binary delivery', () => {
   })
 
   it('named tracks multiplex one member lane — filters, per-frame meta, zero-cost default', async () => {
-    const a = await Room.create('media', { isolated: true })
+    const a = await Room.create('media')
     const cam = await a.join({ meta: { name: 'Cam' } })
     const b = await Room.get('media')
     await b.getParticipants() // materialize the lazy roster
@@ -816,30 +816,7 @@ describe('selective binary delivery', () => {
     expect([...out.payload]).toEqual([9])
   })
 
-  it('isolated mode narrows the upstream text keys to the wanted members too', async () => {
-    const a = await Room.create('sel-text', { isolated: true })
-    const alice = await a.join({ meta: { name: 'alice' } })
-    const bob = await a.join({ meta: { name: 'bob' } })
-    const b = await Room.get('sel-text')
-    await b.getParticipants() // materialize the lazy roster
-
-    const subscribed = vi.spyOn(getBroadcastAdapter(), 'subscribe')
-    const heard: unknown[] = []
-    ;(await b.getParticipant(alice.id))!.subscribe((data) => heard.push(data))
-    const keys = () => subscribed.mock.calls.map(([key]) => key)
-    expect(keys()).toContain(roomMemberDataKey('sel-text', alice.id))
-    expect(keys()).not.toContain(roomMemberDataKey('sel-text', bob.id))
-
-    await alice.publish('a1')
-    await bob.publish('b1') // b never subscribed bob's key — nothing arrives, nothing to filter
-    expect(heard).toEqual(['a1'])
-
-    // A room-level subscription widens upstream to every member's key.
-    b.subscribe(() => {})
-    expect(keys()).toContain(roomMemberDataKey('sel-text', bob.id))
-  })
-
-  it('a shared-mode member-scoped listener still brings up the room text lane', async () => {
+  it('a member-scoped listener still brings up the room text lane', async () => {
     const a = await Room.create('sel-shared')
     const alice = await a.join({ meta: { name: 'alice' } })
     const bob = await a.join({ meta: { name: 'bob' } })
@@ -854,7 +831,7 @@ describe('selective binary delivery', () => {
   })
 
   it("releases a departed member's listeners — the decoder pattern must not pin subscriptions", async () => {
-    const a = await Room.create('release', { isolated: true })
+    const a = await Room.create('release')
     const cam = await a.join({ meta: { name: 'cam' } })
     const b = await Room.get('release')
     await b.getParticipants() // materialize the lazy roster
@@ -1576,32 +1553,6 @@ describe('one ordered semantic lane', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
-// Isolated mode — bug class targeted: data landing on the shared key anyway
-// (re-introducing the publish contention the mode exists to remove).
-// ───────────────────────────────────────────────────────────────────────────
-
-describe('isolated mode', () => {
-  it('routes text over per-member keys while control stays on the control key', async () => {
-    const a = await Room.create('vid', { isolated: true })
-    const b = await Room.get('vid')
-    const received: unknown[] = []
-    b.subscribe((data, _info, from) => received.push([data, from.meta]))
-
-    const ctrlTraffic: string[] = []
-    const textTraffic: string[] = []
-    Broadcast.subscribe<{ __r: string }>(roomCtrlKey('vid'), (msg) => ctrlTraffic.push(msg.__r))
-    Broadcast.subscribe<{ __r: string }>(roomTextKey('vid'), (msg) => textTraffic.push(msg.__r))
-
-    const me = await a.join({ meta: { name: 'Alice' } })
-    await me.publish('frame-1')
-
-    expect(received).toEqual([['frame-1', { name: 'Alice' }]]) // delivered via the member key
-    expect(ctrlTraffic).toEqual(['join']) // the control key carried only control
-    expect(textTraffic).toEqual([]) // isolated: not even the shared text key is touched
-  })
-})
-
-// ───────────────────────────────────────────────────────────────────────────
 // Room stub channel — the wire attachment a serialized Room gets. Bug classes
 // targeted: impersonated publishes, members surviving their client's death,
 // relay of binary frames the client never subscribed to.
@@ -2137,7 +2088,6 @@ function createSnapshot(roomId: string, partial?: Partial<RoomSnapshotMetadata>)
     channelId: 'ch1',
     roomId,
     meta: {},
-    isolated: false,
     closed: false,
     count: 0,
     stamp: { at: 0, by: '' },

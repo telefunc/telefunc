@@ -115,8 +115,8 @@ function roomCtrlKey(roomId: string): string {
 function roomTextKey(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:t`
 }
-/** Pub/sub key carrying one member's data: default-track binary always (per-publisher keys
- *  make delivery member-selective at the source), text too in isolated mode. */
+/** Pub/sub key carrying one member's default-track binary — per-publisher keys make delivery
+ *  member-selective at the source (a holder subscribes only the members it wants). */
 function roomMemberDataKey(roomId: string, memberId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomId}:m:${memberId}`
 }
@@ -257,7 +257,6 @@ type RoomStatus = 'open' | 'closing' | 'closed'
  *  legality (join/mutate/close) is decided against it, never against the eventually-consistent replica. */
 type RoomConfigRecord = {
   meta: RoomMeta
-  isolated: boolean
   at: number
   by: string
   gen: number
@@ -317,7 +316,6 @@ type RoomSnapshotMetadata = {
   channelId: string
   roomId: string
   meta: RoomMeta
-  isolated: boolean
   closed: boolean
   count: number
   /** LWW stamp of the config the snapshot reflects — seeds `applyRoomUpdate` ordering. */
@@ -368,9 +366,9 @@ type RoomCtrlEnvelope =
  *  not swept) across a close, so a recreation resumes past the previous watermark. */
 type RoomOrder = { seq: number; timestamp: number }
 
-/** A participant's message. Published on the room's text key (shared mode) or the member's own
- *  key (isolated mode). `fromMeta` is the sender's meta as verified by the sender's own node —
- *  never client-supplied — so any receiver can surface a correct sender even before its roster
+/** A participant's message. Published on the room's one text key. `fromMeta` is the sender's meta
+ *  as verified by the sender's own node — never client-supplied — so any receiver can surface a
+ *  correct sender even before its roster
  *  view catches up (see `RoomState.applyData`). `ord` is the room-wide order stamped by the sender's
  *  node from the room clock — the receiver reads it, never the transport's per-key seq. */
 type RoomDataEnvelope = {
