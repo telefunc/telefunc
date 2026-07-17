@@ -1,0 +1,45 @@
+{
+  "name": "@telefunc/drizzle",
+  "version": "0.1.0",
+  "description": "Reactive Drizzle queries for Telefunc — server-owned live-query invalidation derived from the SQL your telefunctions run.",
+  "homepage": "https://github.com/telefunc/telefunc/tree/main/packages/drizzle#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/telefunc/telefunc.git",
+    "directory": "packages/drizzle"
+  },
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@tanstack/db-ivm": "0.1.18"
+  },
+  "peerDependencies": {
+    "drizzle-orm": ">=1.0.0-rc.4 <2",
+    "telefunc": ">=0.2.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.4",
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "drizzle-orm": "1.0.0-rc.4",
+    "mysql2": "^3.11.0",
+    "pg": "^8.13.1",
+    "postgres": "^3.4.5",
+    "telefunc": "workspace:*",
+    "typescript": "^5.9.2"
+  }
+}
