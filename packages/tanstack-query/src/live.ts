@@ -13,7 +13,7 @@ import type { LiveSubscription } from 'telefunc/__internal'
  *  cache watcher that tears them down.
  *
  *  Module-level (not closed over by `live()`) because `live()` is called INLINE on every render:
- *  `queryFn: live(() => onGetTodos())` mints a new function each time. Per-call state would hand every
+ *  `queryFn: live(onGetTodos)` mints a new function each time. Per-call state would hand every
  *  render a fresh empty map — losing the previous handle instead of closing it, and adding one more
  *  cache watcher per render. Keyed weakly so a discarded QueryClient takes its registry with it. */
 type Registry = {
@@ -34,13 +34,14 @@ function registryFor(client: QueryClient): Registry {
 /**
  * Make a live query out of a telefunction call.
  *
- * Wrap the `queryFn` of an ordinary `useQuery` and the query stays up to date on its own: the server
- * pushes new data straight into the cache, and signals staleness by refetching.
+ * Pass the telefunction and its arguments — `live(onGetTodos, todoListId)` — as an ordinary `useQuery`
+ * `queryFn`, and the query stays current on its own: when the server signals the result is stale, the
+ * wrapper invalidates and refetches. It does not push rows into the cache — staleness drives a refetch.
  *
  * ```ts
  * const { data: todos } = useQuery({
- *   queryKey: ['todos'],
- *   queryFn: live(() => onGetTodos()), // onGetTodos() returns a Live<Todo[]>
+ *   queryKey: ['todos', todoListId],
+ *   queryFn: live(onGetTodos, todoListId), // onGetTodos(todoListId) returns a Live<Todo[]>
  * })
  * ```
  *
@@ -49,18 +50,20 @@ function registryFor(client: QueryClient): Registry {
  * This wraps the `queryFn`, not the hook, so it works unchanged with the React, Vue, Solid and Svelte
  * TanStack adapters. There is nothing else to install or configure.
  */
-function live<T>(queryFn: () => Live<T> | Promise<Live<T>>): (context: QueryFunctionContext) => Promise<T> {
+function live<T, TArgs extends unknown[]>(
+  telefunction: (...args: TArgs) => Live<T> | Promise<Live<T>>,
+  ...args: TArgs
+): (context: QueryFunctionContext) => Promise<T> {
   return async (context) => {
     // TanStack cancels an in-flight fetch by aborting this signal (see `cancelRefetch` below), and the
     // telefunction should hear about it rather than be abandoned mid-request.
     //
-    // The signal goes in when the call is CREATED, not after. Reaching for the returned promise and
-    // aborting it afterwards cannot work here: `queryFn` is the user's own closure, so what comes back
-    // is usually their wrapper — `live(async () => onGetTodos())` yields the async function's promise,
-    // not the telefunction's — and the abort would silently target the wrong object. `withContext`
-    // exists for exactly this: it hands the context to whatever call happens inside it.
+    // The signal has to be in scope when the telefunction actually RUNS: the generated stub reads its
+    // per-call context (this signal) synchronously at call time. `withContext` sets that context around
+    // the call and forwards the args, so `live(onGetTodos, id)` issues `onGetTodos(id)` with the signal
+    // attached — no user wrapper closure to thread it through, and nothing to abort after the fact.
     if (context.signal.aborted) throw abortError() // already cancelled — don't start the request at all
-    const handle = await withContext(queryFn, { signal: context.signal })()
+    const handle = await withContext(telefunction, { signal: context.signal })(...args)
     if (context.signal.aborted) {
       // Cancelled while in flight: the handle still arrived, so close it or its channel leaks.
       void subscriptionOf(handle)

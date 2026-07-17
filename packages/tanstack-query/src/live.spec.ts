@@ -67,6 +67,21 @@ describe('live() — the TanStack queryFn wrapper', () => {
     expect(queryClient.getQueryData(['todos'])).toBe('v1')
   })
 
+  it('the value form live(fn, ...args) forwards the arguments to the telefunction', async () => {
+    const queryClient = new QueryClient()
+    const handle = makeFakeLive('v1').handle
+    const received: unknown[] = []
+    // `live(onGetTodos, id)` issues `onGetTodos(id)` — the args ride through to the telefunction call,
+    // no closure needed to bake them in.
+    const telefn = (a: number, b: string): Promise<Live<string>> => {
+      received.push(a, b)
+      return Promise.resolve(handle)
+    }
+    const data = await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(telefn, 7, 'abc') })
+    expect(data).toBe('v1')
+    expect(received).toEqual([7, 'abc'])
+  })
+
   it('invalidation refetches the query it came from — keyed off the context, not a passed-in key', async () => {
     const queryClient = new QueryClient()
     const fake = makeFakeLive('v1')
