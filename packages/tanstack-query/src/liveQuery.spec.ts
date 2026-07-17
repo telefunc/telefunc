@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { QueryClient } from '@tanstack/query-core'
+import { QueryClient, QueryObserver } from '@tanstack/query-core'
 import type { ClientLive } from 'telefunc'
 import { createLiveQuery } from './liveQuery.js'
 
@@ -76,7 +76,9 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
 
     const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
     fake.fireInvalidate() // direct: each signal invalidates immediately (TanStack owns fetch; invalidation is idempotent)
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['todos'], exact: true }, { cancelRefetch: false })
+    // cancelRefetch:true → an invalidation landing DURING an in-flight fetch cancels it and refetches
+    // (never swallowed); see the mid-fetch test below.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['todos'], exact: true }, { cancelRefetch: true })
     fake.fireInvalidate() // no per-key coalescing scheduler — a second signal is a second (harmless) invalidate
     expect(invalidateSpy).toHaveBeenCalledTimes(2)
   })
@@ -120,5 +122,56 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
     await queryClient.fetchQuery({ ...options, staleTime: 0 }) // force a second fetch
     expect(first.close).toHaveBeenCalledTimes(1) // the previous ClientLive is closed
     expect(second.close).not.toHaveBeenCalled()
+  })
+
+  it('T12.F5 an invalidation arriving DURING an in-flight fetch is not swallowed (cancelRefetch:true cancels + refetches)', async () => {
+    const flush = async () => {
+      for (let i = 0; i < 6; i++) await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    }
+    const queryClient = new QueryClient()
+    const liveQuery = createLiveQuery(queryClient)
+
+    let fetchCount = 0
+    const releases: Array<(live: ClientLive<string>) => void> = []
+    // Every fetch is GATED on a manual release, so the test can fire an invalidation while a fetch is
+    // still in-flight and observe whether it produces a follow-up fetch.
+    const options = liveQuery({
+      queryKey: ['todos'],
+      queryFn: () =>
+        new Promise<ClientLive<string>>((resolve) => {
+          fetchCount++
+          releases.push(resolve)
+        }),
+    })
+
+    // An ACTIVE observer so invalidateQueries actually drives refetches (imperative fetchQuery would not).
+    const observer = new QueryObserver(queryClient, options)
+    const unsub = observer.subscribe(() => {})
+    await flush()
+    expect(fetchCount).toBe(1) // initial fetch in-flight
+
+    // Settle the initial fetch → the query holds v1 and onInvalidate is wired on the first ClientLive.
+    const first = makeFakeClientLive('v1')
+    releases[0]!(first.live)
+    await flush()
+    expect(queryClient.getQueryData(['todos'])).toBe('v1')
+
+    // Invalidate #1 → a refetch starts (fetch #2), left in-flight (gated).
+    first.fireInvalidate()
+    await flush()
+    expect(fetchCount).toBe(2)
+
+    // Invalidate #2 DURING the in-flight refetch. cancelRefetch:true cancels fetch #2 and starts fetch #3
+    // — the mid-flight invalidation is NOT swallowed. (Under cancelRefetch:false this stays at 2: the
+    // stale in-flight fetch completes and clears isInvalidated with no follow-up — finding #2.)
+    first.fireInvalidate()
+    await flush()
+    expect(fetchCount).toBe(3)
+
+    // Cleanup: release any still-gated fetches + unsubscribe.
+    const leftover = makeFakeClientLive('vN')
+    for (const release of releases.slice(1)) release(leftover.live)
+    await flush()
+    unsub()
   })
 })

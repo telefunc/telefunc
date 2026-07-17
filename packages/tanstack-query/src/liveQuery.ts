@@ -66,10 +66,13 @@ function createLiveQuery(queryClient: QueryClient) {
     if (previous) void previous.close().catch(() => {})
     ensureCacheWatch()
     // Direct refetch on invalidation. TanStack owns fetch behavior and client-side invalidation is
-    // idempotent, so no per-key coalescing scheduler is needed; `cancelRefetch: false` never restarts an
-    // in-flight fetch. A rejected refetch is swallowed so it can't surface as an unhandled rejection.
+    // idempotent, so no per-key coalescing scheduler is needed. `cancelRefetch: true` (TanStack's default
+    // cancel + restart) ensures an invalidation that lands DURING an in-flight fetch cancels that stale
+    // fetch and refetches — `cancelRefetch: false` would instead let the in-flight fetch complete and clear
+    // `isInvalidated` with no follow-up, swallowing the mid-fetch invalidation. A rejected refetch is
+    // swallowed so it can't surface as an unhandled rejection.
     const offInvalidate = clientLive.onInvalidate(() => {
-      void queryClient.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: false }).catch(() => {})
+      void queryClient.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: true }).catch(() => {})
     })
     const offData = clientLive.onData((data) => queryClient.setQueryData(queryKey, data)) // direct cache write
     let closed = false
