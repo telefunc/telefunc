@@ -104,7 +104,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       broadcast.attachBinding(binding, bindingName)
       const kv = getKVBinding(env)
       if (kv) broadcast.attachKV(kv)
-      this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
+      // The authority also owns room state and mirrors its replicated writes to the KV read replica.
+      this.authorityState = new CloudflareBroadcastAuthorityState(ctx, kv)
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
@@ -149,11 +150,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     telefuncRoomStateKeys(prefix: string) {
       return this.authorityState.roomStateKeys(prefix)
     }
-    telefuncRoomStateSet(key: string, value: string, ttlMs?: number) {
-      return this.authorityState.roomStateSet(key, value, ttlMs)
+    telefuncRoomStateSet(key: string, value: string, ttlMs?: number, replicate?: boolean) {
+      return this.authorityState.roomStateSet(key, value, ttlMs, replicate)
     }
-    telefuncRoomStateDelete(key: string) {
-      return this.authorityState.roomStateDelete(key)
+    telefuncRoomStateDelete(key: string, replicate?: boolean) {
+      return this.authorityState.roomStateDelete(key, replicate)
     }
     telefuncRoomStateSetIfAbsent(key: string, value: string, ttlMs?: number) {
       return this.authorityState.roomStateSetIfAbsent(key, value, ttlMs)
