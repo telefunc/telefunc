@@ -383,7 +383,7 @@ importers:
   packages/tanstack-query:
     devDependencies:
       '@tanstack/query-core':
-        specifier: ^5.0.0
+        specifier: ^5.66.0
         version: 5.101.0
       telefunc:
         specifier: link:../telefunc

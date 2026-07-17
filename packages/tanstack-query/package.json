@@ -27,11 +27,11 @@
   },
   "peerDependencies": {
     "telefunc": ">=0.2.0",
-    "@tanstack/query-core": ">=5.0.0"
+    "@tanstack/query-core": ">=5.66.0"
   },
   "devDependencies": {
     "telefunc": "workspace:*",
-    "@tanstack/query-core": "^5.0.0",
+    "@tanstack/query-core": "^5.66.0",
     "typescript": "^5.9.2"
   }
 }

@@ -1,2 +1,1 @@
-export { createLiveQuery } from './liveQuery.js'
-export type { LiveQueryOptions } from './liveQuery.js'
+export { live } from './live.js'
