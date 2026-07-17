@@ -10,7 +10,7 @@ import { createStreamingReplacer } from '../../../wire-protocol/server/response/
 import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
 import { Live } from './live.js'
 import { _activationStateForTesting, _listenerCountForTesting } from './testing.js'
-import { invalidateTag, stampRequestStartFence } from './tags.js'
+import { stampRequestStartFence } from './tags.js'
 import { getTagHub, _resetTagHubsForTesting } from './tagHub.js'
 import {
   getBroadcastAdapter,
@@ -75,24 +75,6 @@ function createServerHarness() {
 }
 
 describe('sync context mode — tag usage must survive a macrotask (real-I/O) await', () => {
-  it('the mechanism: after a macrotask await the request context is null → OLD invalidateTag THROWS', async () => {
-    let contextAfter: unknown = 'unset'
-    let thrown: unknown
-    await restoreContext({}, async () => {
-      await stampRequestStartFence()
-      await macrotask() // real-I/O await → sync context nulled (the redis-in-docker path)
-      contextAfter = getRawContext()
-      try {
-        invalidateTag('t')
-      } catch (err) {
-        thrown = err
-      }
-    })
-    expect(contextAfter).toBeNull() // proves the mechanism: the context is gone post-await
-    expect(thrown).toBeInstanceOf(Error)
-    expect(String(thrown)).toMatch(/inside a telefunction/) // the literal CI error
-  })
-
   it('WRITE fix: Live.invalidate after the await publishes immediately WITHOUT throwing', async () => {
     const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
     await restoreContext({}, async () => {

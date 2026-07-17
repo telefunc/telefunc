@@ -2,8 +2,8 @@ import '../context/async.js' // install AsyncLocalStorage mode so context surviv
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { restoreContext } from '../context/context.js'
 import { getTagHub, _resetTagHubsForTesting, _setBarrierBudgetForTesting } from './tagHub.js'
-import { liveTag, invalidateTag, stampRequestStartFence, publishQueuedTags } from './tags.js'
-import { takeLiveSources } from './source.js'
+import { stampRequestStartFence, publishQueuedTags, captureTagFence, subscribeCapturedTag } from './tags.js'
+import { Live } from './live.js'
 import {
   getBroadcastAdapter,
   _resetBroadcastAdapterForTesting,
@@ -27,9 +27,10 @@ function inRequest<T>(fn: () => Promise<T>): Promise<T> {
   return restoreContext({}, fn)
 }
 
-function subscribeFirstSource(onInvalidate: () => void): void {
-  const [source] = takeLiveSources()
-  source!.subscribe(onInvalidate)
+/** Capture a tag fence and subscribe it — the low-level catch-up path `Live.onInvalidate` uses at
+ *  serialization: register the index listener, then replay a publish that landed since the fence. */
+function subscribeFenced(tag: string, onInvalidate: () => void): () => void {
+  return subscribeCapturedTag(captureTagFence(tag), onInvalidate)
 }
 
 /** Publish calls carrying a tag batch (readiness-barrier frames are `{"barrier":...}`, no tags). */
@@ -38,33 +39,21 @@ function tagBatchCalls(spy: ReturnType<typeof vi.spyOn>): unknown[][] {
 }
 
 describe('tag fences (§3.E)', () => {
-  it('T1.E1a fence — liveTag-AFTER-read window replays exactly once', () =>
+  it('T1.E1 fence — a publish that landed since the request-start fence replays exactly once on subscribe', () =>
     inRequest(async () => {
       await stampRequestStartFence()
-      await getTagHub().publish(['t'])
-      liveTag('t')
+      await getTagHub().publish(['t']) // lands after the fence, before this request subscribes
       const onInvalidate = vi.fn()
-      subscribeFirstSource(onInvalidate)
-      expect(onInvalidate).toHaveBeenCalledTimes(1)
-    }))
-
-  it('T1.E1b fence — liveTag-BEFORE-publish window replays exactly once', () =>
-    inRequest(async () => {
-      await stampRequestStartFence()
-      liveTag('t')
-      await getTagHub().publish(['t'])
-      const onInvalidate = vi.fn()
-      subscribeFirstSource(onInvalidate)
+      subscribeFenced('t', onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     }))
 
   it('T1.E2 negative — non-matching tag', () =>
     inRequest(async () => {
       await stampRequestStartFence()
-      liveTag('t')
       await getTagHub().publish(['other'])
       const onInvalidate = vi.fn()
-      subscribeFirstSource(onInvalidate)
+      subscribeFenced('t', onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(0)
     }))
 
@@ -73,9 +62,8 @@ describe('tag fences (§3.E)', () => {
       await getTagHub().ready()
       await getTagHub().publish(['t']) // observed BEFORE the fence stamp
       await stampRequestStartFence()
-      liveTag('t')
       const onInvalidate = vi.fn()
-      subscribeFirstSource(onInvalidate)
+      subscribeFenced('t', onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(0)
     }))
 
@@ -83,18 +71,16 @@ describe('tag fences (§3.E)', () => {
     inRequest(async () => {
       await stampRequestStartFence()
       for (let i = 0; i < 1030; i++) await getTagHub().publish(['t'])
-      liveTag('t')
       const onInvalidate = vi.fn()
-      subscribeFirstSource(onInvalidate)
+      subscribeFenced('t', onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     }))
 
-  it('T1.E5 live tag after subscribe fires via the index; non-matching does not', () =>
+  it('T1.E5 a post-subscribe publish fires via the index; non-matching does not', () =>
     inRequest(async () => {
       await stampRequestStartFence()
-      liveTag('t')
       const onInvalidate = vi.fn()
-      subscribeFirstSource(onInvalidate)
+      subscribeFenced('t', onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(0)
       await getTagHub().publish(['t'])
       expect(onInvalidate).toHaveBeenCalledTimes(1)
@@ -105,11 +91,10 @@ describe('tag fences (§3.E)', () => {
   it('T1.E11 attach ordering — a post-subscribe publish makes the source emit exactly once', () =>
     inRequest(async () => {
       await stampRequestStartFence()
-      liveTag('t')
       const onInvalidate = vi.fn()
-      subscribeFirstSource(onInvalidate) // subscribed, no peer attached yet
+      subscribeFenced('t', onInvalidate) // subscribed, no publish yet
       expect(onInvalidate).toHaveBeenCalledTimes(0)
-      await getTagHub().publish(['t']) // would be buffered by the channel until attach (Sprint 2)
+      await getTagHub().publish(['t'])
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     }))
 
@@ -125,13 +110,13 @@ describe('tag fences (§3.E)', () => {
 })
 
 describe('tag settle + publish (§3.D / §3.E)', () => {
-  it('T1.E6/D1 invalidateTag queues; settle publishes one deduped batch', () =>
+  it('T1.E6/D1 Live.invalidate queues; settle publishes one deduped batch', () =>
     inRequest(async () => {
       await stampRequestStartFence()
       const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-      invalidateTag('t')
-      invalidateTag('t')
-      invalidateTag('u')
+      Live.invalidate('t')
+      Live.invalidate('t')
+      Live.invalidate('u')
       expect(tagBatchCalls(publishSpy)).toHaveLength(0) // not during the body
       await publishQueuedTags()
       const batches = tagBatchCalls(publishSpy)
@@ -139,11 +124,6 @@ describe('tag settle + publish (§3.D / §3.E)', () => {
       const batch = parse(batches[0]![1] as string) as { tags: string[] }
       expect(new Set(batch.tags)).toEqual(new Set(['t', 'u']))
     }))
-
-  it('T1.E9 invalidateTag outside a request asserts', async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(() => invalidateTag('t')).toThrow()
-  })
 })
 
 describe('tag readiness barrier (§3.E T1.E10)', () => {
@@ -181,9 +161,8 @@ describe('tag readiness barrier (§3.E T1.E10)', () => {
     inRequest(async () => {
       await stampRequestStartFence() // blocks until the barrier is observed (subscription active)
       await getTagHub().publish(['t']) // guaranteed delivered now
-      liveTag('t')
       const onInvalidate = vi.fn()
-      subscribeFirstSource(onInvalidate)
+      subscribeFenced('t', onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     }))
 })
@@ -267,7 +246,7 @@ describe('readiness barrier state is bounded across cycles (rubric §3 / T1.E10)
 })
 
 describe('tag publish failure (§3.D T1.D2 / T1.J4)', () => {
-  it('T1.D2/J4 publish failure is logged + counted + fired locally, result unmasked', () =>
+  it('T1.D2/J4 publish failure is logged + fired locally, result unmasked', () =>
     inRequest(async () => {
       await stampRequestStartFence() // barrier established over the working in-memory adapter
       const localListener = vi.fn()
@@ -275,7 +254,7 @@ describe('tag publish failure (§3.D T1.D2 / T1.J4)', () => {
       // Only the settle publish fails (transport down at write time), not readiness:
       vi.spyOn(getBroadcastAdapter(), 'publish').mockRejectedValue(new Error('transport down'))
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-      invalidateTag('t')
+      Live.invalidate('t')
       await expect(publishQueuedTags()).resolves.toBeUndefined() // never throws
       expect(localListener).toHaveBeenCalledTimes(1) // fired locally despite the failure
       expect(errorSpy).toHaveBeenCalled()

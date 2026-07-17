@@ -1,11 +1,9 @@
-export { liveTag, invalidateTag, stampRequestStartFence, publishQueuedTags }
-export { subscribeTagFenced, captureTagFence, subscribeCapturedTag, invalidateTagStatic }
+export { stampRequestStartFence, publishQueuedTags }
+export { captureTagFence, subscribeCapturedTag, invalidateTagStatic }
 export type { TagFence }
 
 import { assertUsage } from '../../../utils/assert.js'
 import { getRawContext } from '../context/context.js'
-import { addLiveSource } from './source.js'
-import type { LiveSource } from './source.js'
 import { getTagHub } from './tagHub.js'
 import type { TagHub } from './tagHub.js'
 
@@ -15,12 +13,13 @@ type TagState = {
   hub: TagHub
   /** The fence: only tags published after this seq replay to a subscribing source. */
   requestStartSeq: number
-  /** invalidateTag() calls, published as one deduped batch at settle. */
+  /** Tags queued by `Live.invalidate` in-request, published as one deduped batch at settle. */
   queued: Set<string>
 }
 
 /** Stamp the request-start fence and await the hub's readiness barrier once — runs before the body
- *  (core START step) so a tag published between the read and a later `liveTag()` still replays. */
+ *  (core START step) so a tag published between the read and a later `Live.onInvalidate` subscribe
+ *  still replays. */
 async function stampRequestStartFence(): Promise<void> {
   const context = getRawContext()
   if (!context || context[TAGS]) return
@@ -35,7 +34,10 @@ async function stampRequestStartFence(): Promise<void> {
 
 function getRequestTagState(): TagState {
   const context = getRawContext()
-  assertUsage(context, 'liveTag()/invalidateTag() can only be used inside a telefunction.')
+  assertUsage(
+    context,
+    'Live tag operations (Live.onInvalidate / Live.invalidate) can only be used inside a telefunction.',
+  )
   const existing = context[TAGS] as TagState | undefined
   if (existing) return existing
   const hub = getTagHub()
@@ -68,30 +70,6 @@ function subscribeCapturedTag(fence: TagFence, onInvalidate: () => void): () => 
   const teardown = hub.registerTag(tag, onInvalidate)
   if (hub.hasOverflow(requestStartSeq) || hub.hasTagSince(requestStartSeq, tag)) onInvalidate()
   return teardown
-}
-
-/** Eager capture + subscribe in one context-dependent call — the `liveTag` (bag-source) convenience,
- *  where the subscription is established synchronously within the request body. */
-function subscribeTagFenced(tag: string, onInvalidate: () => void): () => void {
-  return subscribeCapturedTag(captureTagFence(tag), onInvalidate)
-}
-
-/** Declare the current telefunction's result live under `tag`. Identity is server-owned
- *  (`tag:<namespace>:<tag>`) — the client never names it. Registration acquires no resource, so the
- *  source has no `dispose`; its subscription is torn down via the returned teardown. */
-function liveTag(tag: string): void {
-  const { hub } = getRequestTagState()
-  const source: LiveSource = {
-    identity: `tag:${hub.namespace}:${tag}`,
-    subscribe: (onInvalidate) => subscribeTagFenced(tag, onInvalidate),
-  }
-  addLiveSource(source)
-}
-
-/** Queue an invalidation for `tag`, published as one deduped batch at settle. Inside a request it
- *  queues into request state; outside a request it's a usage error. */
-function invalidateTag(tag: string): void {
-  getRequestTagState().queued.add(tag)
 }
 
 /** `Live.invalidate(key)` publish routing (fire-and-forget, `void`): inside a request it queues at

@@ -79,7 +79,7 @@ async function executeTelefunction(runContext: {
   }
 
   // ── START ── the core request-start tag fence (before the body), so a tag published between the
-  // acquiring read and a later liveTag()/live handle still replays.
+  // acquiring read and a later Live handle's serialize-time subscribe still replays.
   try {
     await withContext(() => stampRequestStartFence())
   } catch (err) {
