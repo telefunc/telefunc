@@ -3,7 +3,7 @@ export { liveReplacer }
 import type { LiveContract, ReplacerType, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_LIVE } from '../../constants.js'
 import type { LiveEvent } from '../../../node/server/live/live.js'
-import { getTagHub } from '../../../node/server/live/tagHub.js'
+import { assert } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -64,9 +64,14 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     // Deferred activation, refcounted by cell-local leases: cascade-activate this cell's pending
     // deps/source (idempotent — a dep also returned elsewhere activates exactly once). This channel
     // holds one lease; its permanent close releases it, tearing down on the last owner.
-    // The fence arrives explicitly on the context; a Live serialized outside a request has no read
-    // window to be stale against, so it starts observing from now.
-    live.activate(context.requestStartSeq ?? getTagHub().currentSeq())
+    // The fence arrives explicitly on the context. Every Live is serialized as a telefunction's
+    // response, after the fence is stamped at that request's entry — so a missing one means the
+    // plumbing that carries it is broken, not that we're outside a request. Guessing "start from now"
+    // there would hide exactly the writes the fence exists to catch: everything that landed between
+    // the read and this moment, silently, forever. If the fence is ever legitimately absent, its caller
+    // must say what it should be rather than have this infer it.
+    assert(context.requestStartSeq !== undefined)
+    live.activate(context.requestStartSeq)
     channel.onClose(() => {
       offData()
       offInvalidate()

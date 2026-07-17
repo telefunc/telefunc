@@ -51,6 +51,8 @@ function createServerHarness() {
     registerChannel: () => {},
     sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
     validators: new Map(),
+    // Production always carries the fence, stamped at request entry; these fakes stand in for that.
+    requestStartSeq: 0,
   } as unknown as ServerReplacerContext
   const replacer = createStreamingReplacer(
     () => context,
@@ -73,7 +75,6 @@ function makeFakeClientChannel(channelId: string): FakeClientChannel & Record<st
       return () => {}
     },
     onClose: (cb: () => void) => closeCbs.push(cb),
-    onOpen: (cb: () => void) => openCbs.push(cb),
     close: () => Promise.resolve(0),
     abort: () => {},
     deliver: (event: unknown) => listener?.(event),
@@ -285,5 +286,27 @@ describe('the refetch-on-connect repair must not fire for data the client alread
     // Telling this client to refetch would be telling it to fetch what it already has — and the refetch
     // would build another Live the same way, populate it the same way, and be told to refetch again.
     expect(received.some((d) => 'text' in d && d.text.includes('invalidate'))).toBe(false)
+  })
+})
+
+describe('a Live cannot be serialized without the request fence', () => {
+  it('a missing fence fails loudly instead of quietly starting from now', () => {
+    const context = {
+      createChannel: () => makeFakeServerChannel('x') as never,
+      registerChannel: () => {},
+      sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
+      validators: new Map(),
+      // No requestStartSeq: the plumbing that carries it is broken.
+    } as unknown as ServerReplacerContext
+    const replacer = createStreamingReplacer(
+      () => context,
+      () => {},
+      [],
+    )
+    // Defaulting to "observe from now" here would look like success and lose every write that landed
+    // between this request's read and this moment — silently, which is the one outcome the fence
+    // exists to prevent. Serialization is always a telefunction response, so an absent fence is a bug
+    // in us, not a mode to accommodate.
+    expect(() => stringify(new LiveCell('v'), { forbidReactElements: true, replacer })).toThrow()
   })
 })
