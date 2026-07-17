@@ -23,8 +23,12 @@ import { isPromise } from '../../utils/isPromise.js'
 import type { WirePublishInfo } from '../shared-ws.js'
 
 /** Sentinel an `update` mutator returns to leave the key untouched (no write). Distinct from
- *  `null`, which deletes. */
-const KV_KEEP: unique symbol = Symbol('telefunc.kv.keep')
+ *  `null`, which deletes. `Symbol.for` (not `Symbol`) so every copy of this module shares one
+ *  identity: a dev server loads two SSR module graphs, so the mutator (one graph) and the adapter
+ *  that compares its result (the other, since the adapter is a cross-graph singleton) hold different
+ *  bindings — a plain `Symbol` would mismatch, and the raw sentinel would be written into the store
+ *  instead of kept, corrupting it. */
+const KV_KEEP: unique symbol = Symbol.for('telefunc.kv.keep')
 
 /** An `update` mutator: given the current raw value (`null` if absent), return the next raw value,
  *  `null` to delete, or `KV_KEEP` to leave it unchanged. Runs inside the store's linearization

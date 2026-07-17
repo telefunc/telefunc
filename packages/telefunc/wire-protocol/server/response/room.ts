@@ -22,8 +22,10 @@ assertIsNotBrowser()
  *  self-suppressing participant are serialized into the same response, in arbitrary key order — so
  *  the drop-set of member ids lives in `context.passScope`, one shared `Set` per room instance. The
  *  participant adds its id; the room's stub adopts the very same set by reference. Order-independent
- *  by object identity, scoped to this one response, discarded when the pass ends. */
-const ROOM_SELF_SUPPRESS = Symbol('telefunc:roomSelfSuppress')
+ *  by object identity, scoped to this one response, discarded when the pass ends. `Symbol.for` (not
+ *  `Symbol`) so the two replacers rendezvous even when a dev server loads them from two SSR module
+ *  graphs — the same reason the brand checks below use it. */
+const ROOM_SELF_SUPPRESS = Symbol.for('telefunc:roomSelfSuppress')
 function roomSelfSuppressSet(context: ServerReplacerContext, room: ServerRoom): Set<string> {
   let byRoom = context.passScope.get(ROOM_SELF_SUPPRESS) as Map<ServerRoom, Set<string>> | undefined
   if (!byRoom) context.passScope.set(ROOM_SELF_SUPPRESS, (byRoom = new Map()))
