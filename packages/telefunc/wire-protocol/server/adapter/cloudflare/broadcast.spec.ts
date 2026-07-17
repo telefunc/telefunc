@@ -748,3 +748,103 @@ describe('cloudflare KV store (backs `Room` state)', () => {
     expect(await transport.keys('')).toEqual(['telefunc:room:lobby:config'])
   })
 })
+
+describe('cloudflare room-state routing (hybrid tiers)', () => {
+  // A binding whose authority stub records each room-state RPC, so a test can prove which tier — the
+  // Workers KV replica or the authority Durable Object — a given transport op actually hit.
+  function createRoomStateBinding(calls: string[], store = new Map<string, string>()) {
+    const stub = {
+      async telefuncRoomStateGet(key: string) {
+        calls.push(`get:${key}`)
+        return store.get(key) ?? null
+      },
+      async telefuncRoomStateKeys(prefix: string) {
+        calls.push(`keys:${prefix}`)
+        return [...store.keys()].filter((key) => key.startsWith(prefix))
+      },
+      async telefuncRoomStateSet(key: string, value: string, _ttlMs?: number, replicate?: boolean) {
+        calls.push(`set:${key}:replicate=${replicate}`)
+        store.set(key, value)
+      },
+      async telefuncRoomStateDelete(key: string, replicate?: boolean) {
+        calls.push(`delete:${key}:replicate=${replicate}`)
+        store.delete(key)
+      },
+      async telefuncRoomStateSetIfAbsent(key: string, value: string) {
+        calls.push(`setIfAbsent:${key}`)
+        if (store.has(key)) return false
+        store.set(key, value)
+        return true
+      },
+      async telefuncRoomStateCompareAndSet(key: string, expected: string | null, next: string | null) {
+        calls.push(`cas:${key}`)
+        if ((store.get(key) ?? null) !== expected) return false
+        if (next === null) store.delete(key)
+        else store.set(key, next)
+        return true
+      },
+    }
+    return {
+      idFromName: (name: string) => ({ name, equals: (other: { name: string }) => other.name === name }),
+      get: () => stub,
+    } as unknown as DurableObjectNamespace
+  }
+
+  function setup() {
+    const calls: string[] = []
+    const kv = createMockKV()
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    transport.attachBinding(createRoomStateBinding(calls), 'TelefuncDurableObject')
+    transport.attachKV(kv)
+    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    return { transport, calls, kv }
+  }
+
+  it('serves directory reads from the KV replica, never the authority', async () => {
+    const { transport, calls, kv } = setup()
+    await kv.put('tfkv:room:a:config', '{"x":1}')
+    await kv.put('tfkv:room:a:m:1', '{}')
+
+    expect(await transport.get('room:a:config', { partitionKey: 'p' })).toBe('{"x":1}')
+    expect((await transport.keys('room:a:', { partitionKey: 'p' })).sort()).toEqual(['room:a:config', 'room:a:m:1'])
+    expect(calls).toEqual([]) // the authority was never consulted
+  })
+
+  it('sends consistent reads to the authority, bypassing the replica', async () => {
+    const { transport, calls } = setup()
+    await transport.get('room:a:rt', { partitionKey: 'p', consistent: true })
+    await transport.keys('room:a:rt:', { partitionKey: 'p', consistent: true })
+    expect(calls).toEqual(['get:room:a:rt', 'keys:room:a:rt:'])
+  })
+
+  it('writes through the authority — replicated by default, authority-only when consistent', async () => {
+    const { transport, calls } = setup()
+    await transport.set('room:a:m:1', '{}', { partitionKey: 'p' }) // directory → mirrored
+    await transport.set('room:a:rt', 'frame', { partitionKey: 'p', consistent: true }) // retained → authority-only
+    await transport.delete('room:a:m:1', { partitionKey: 'p' })
+    await transport.delete('room:a:rt', { partitionKey: 'p', consistent: true })
+    expect(calls).toEqual([
+      'set:room:a:m:1:replicate=true',
+      'set:room:a:rt:replicate=false',
+      'delete:room:a:m:1:replicate=true',
+      'delete:room:a:rt:replicate=false',
+    ])
+  })
+
+  it('runs the atomic writes (setIfAbsent, update) against the authority', async () => {
+    const { transport, calls } = setup()
+    expect(await transport.setIfAbsent('room:a:config', 'v', { partitionKey: 'p' })).toBe(true)
+    expect(await transport.update('room:a:config', () => 'v2', { partitionKey: 'p' })).toBe('v2')
+    expect(calls).toEqual(['setIfAbsent:room:a:config', 'get:room:a:config', 'cas:room:a:config'])
+  })
+
+  it('keeps the unpartitioned room index on the replica alone', async () => {
+    const { transport, calls } = setup()
+    await transport.set('idx:a', '')
+    expect(await transport.get('idx:a')).toBe('')
+    expect(await transport.keys('idx:')).toEqual(['idx:a'])
+    await transport.delete('idx:a')
+    expect(await transport.get('idx:a')).toBeNull()
+    expect(calls).toEqual([]) // the index has no authority
+  })
+})
