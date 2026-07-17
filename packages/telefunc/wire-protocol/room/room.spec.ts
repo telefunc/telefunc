@@ -2938,6 +2938,27 @@ describe('snapshot() and onChange()', () => {
     expect(clientRoom.snapshot()).toBe(loaded) // the snapshot reference stays stable
   })
 
+  it('a drift reconcile fires one onChange per discovered change, with no redundant trailing bump', () => {
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('drift-reconcile', { count: 0 }))
+    const alice = crypto.randomUUID()
+    const bob = crypto.randomUUID()
+    fake.emit({ __r: 'roster', members: [{ id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0, identity: 'u1' }] })
+    const changes: number[] = []
+    clientRoom.onChange(() => changes.push(1))
+
+    // A later roster that adds Bob — drift, replayed through applyJoin (which bumps once). The reconcile
+    // must not add a second, redundant bump on top of the applier's.
+    fake.emit({
+      __r: 'roster',
+      members: [
+        { id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0, identity: 'u1' },
+        { id: bob, meta: { name: 'B' }, joinedAt: 2, metaSeq: 0, identity: null },
+      ],
+    })
+    expect(changes).toEqual([1]) // exactly one — applyJoin's bump alone
+  })
+
   it('an onChange subscriber that reads snapshot() on first roster load sees the roster, not an empty cache', () => {
     // Regression for the documented `useSyncExternalStore(room.onChange, room.snapshot)` pairing:
     // the first reconcile must bump the state version *after* creating entries. A pre-bump let the
@@ -2959,9 +2980,10 @@ describe('snapshot() and onChange()', () => {
     expect(sawCounts[sawCounts.length - 1]).toBe(1) // the onChange that fired already saw the roster
   })
 
-  it('an onChange subscriber that reads snapshot() during close sees the emptied, closed room', async () => {
-    // Regression: applyClosed() cleared members *after* its only bump, with leave callbacks running
-    // user code in between — so a snapshot() cached during close kept the stale roster forever.
+  it('close fires exactly one onChange, and it sees the emptied, closed room', async () => {
+    // applyClosed applies the whole transition (leave callbacks, roster clear) before its single bump,
+    // so a subscriber reading snapshot() during close sees only the final closed-and-empty room — never
+    // a stale roster, and never a transient closed-but-still-populated one from a first-of-two bumps.
     const room = await Room.create('snap-poison-close', { meta: { topic: 'x' } })
     await room.join({ meta: { name: 'Alice' }, identity: 'u1' })
     const seen: { closed: boolean; count: number }[] = []
@@ -2975,7 +2997,7 @@ describe('snapshot() and onChange()', () => {
     const final = room.snapshot()
     expect(final.isClosed).toBe(true)
     expect(final.participants).toEqual([]) // not the stale roster
-    expect(seen[seen.length - 1]).toEqual({ closed: true, count: 0 }) // last onChange saw it emptied
+    expect(seen).toEqual([{ closed: true, count: 0 }]) // one notification, the final state — no transient
   })
 })
 

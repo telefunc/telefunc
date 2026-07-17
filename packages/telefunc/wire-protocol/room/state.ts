@@ -417,15 +417,15 @@ class RoomState {
     if (this.closed) return
     this.closed = true
     this._rosterKnown = true // authoritatively empty
-    this._bumpMembership()
+    // Apply the whole transition before signalling: member-level cleanup (leave handlers, listener
+    // release) runs, the roster clears, then one `onChange` fires — so a subscriber reading `snapshot()`
+    // sees the final closed-and-empty room once, never a transient closed-but-still-populated one.
+    // Room-level `onLeave`/`onEmpty` intentionally stay silent; `onClose` is the signal.
     for (const entry of this._members.values()) {
       this._fireAll(entry.leaveCbs, cause)
       this._releaseEntryListeners(entry)
     }
     this._members.clear()
-    // Second bump: the first ran with members still present (so `onChange` narrates the closure),
-    // and the leave callbacks above run user code — invalidate any snapshot cached against the
-    // now-emptied room before `onClose` fires.
     this._bumpMembership()
     this._fireAll(this._closeCbs)
   }
@@ -569,10 +569,11 @@ class RoomState {
         drifted = true
       }
     }
-    // Bump only on a real change. The appliers already narrated their drift; a silent `tracks` refresh
-    // they didn't cover still needs one bump so the snapshot doesn't strand it. An echo reconcile that
-    // changed nothing — every event already applied through the live path — fires no spurious `onChange`.
-    if (drifted || silentChange) this._bumpMembership()
+    // The drift appliers (applyJoin/applyParticipantMeta/applyLeave) each bump once per real change, so
+    // drift needs no trailing bump — one there would re-fire `onChange` for a settle already narrated. A
+    // silent `tracks` refresh no applier covered still needs one, so the snapshot doesn't strand it; an
+    // echo reconcile that changed nothing — every event already applied through the live path — fires none.
+    if (silentChange) this._bumpMembership()
     return drifted
   }
 
