@@ -206,7 +206,7 @@ class LiveCell<T> {
    *  and serialization resolves the key against it. An association that had to capture the fence itself
    *  would have to run before the body's first await, which is an ordering rule nothing enforces and
    *  every caller would eventually get wrong. */
-  static onInvalidate(key: string, live: LiveCell<unknown>): void {
+  static onInvalidate<T>(key: string, live: LiveCell<T>): void {
     live.tags.push(key)
   }
 
