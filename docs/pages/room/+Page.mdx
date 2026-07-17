@@ -332,7 +332,7 @@ export async function onJoinChat(roomId) {
 }
 ```
 
-`{ tail: true }` buffers the room's live messages the moment the telefunction returns the room, and the client holds them until its first `subscribe()`. So the history you read *after* can't miss a message published meanwhile, and where history and the live tail overlap, your render skips ids it has already shown:
+`{ tail: true }` captures the room's recent live messages the moment the telefunction returns the room, holding them server-side until the client's first `subscribe()`, then flushing them to it in order, ahead of the live stream. So a prompt subscribe won't miss a message published between the history read and going live, and where history and the live tail overlap, your render skips ids it has already shown:
 
 ```js
 // Chat.js (client)
@@ -346,6 +346,8 @@ room.subscribe(show)               // flushes the held live tail, then stays liv
 ```
 
 Order both the stored history and the live tail by `seq`, the strict per-key counter every message carries, so they read as one timeline. `seq` and `timestamp` are assigned centrally (Redis, or the Cloudflare key authority), never a per-node clock, so the order holds across nodes.
+
+The tail is a bounded, drop-oldest buffer of the most recent messages, sized for a prompt subscribe, not a second copy of history: if a client is slow to subscribe on a busy room, the oldest tail messages roll off, and the database history you loaded above stays the source of truth.
 
 ### Switching rooms & capacity
 

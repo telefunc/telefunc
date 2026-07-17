@@ -3,6 +3,7 @@ export { RoomStubChannel, bindParticipantStubChannel }
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
+import { ROOM_TAIL_ATTACH_TIMEOUT_MS, ROOM_TAIL_HOLD_MAX } from '../constants.js'
 import type { ChannelPublishAck } from '../channel.js'
 import type { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
@@ -67,6 +68,14 @@ class RoomStubChannel extends ServerBroadcast {
   /** @internal — which members' text the client wants without a room-level subscription (`sub-text`). */
   _textMemberWants: Set<string> = new Set()
 
+  /** @internal — tail mode (`Room.get(id, { tail: true })`): the room's recent text, held on this stub
+   *  (bounded, drop-oldest) from the moment it attaches until the client's first text want declares the
+   *  selector, then flushed once, in order, ahead of the live stream (see `_flushTail`). `null` outside
+   *  tail mode or once flushed. Held server-side, so the client buffers nothing and the flush is
+   *  member-selective rather than a fire-hose of everything. */
+  _tailPending: Array<{ serialized: string; ord: RoomOrder; from: string }> | null = null
+  private _tailTimer: ReturnType<typeof setTimeout> | null = null
+
   /** @internal — retained replay is exactly-once and in-order against a racing live publish. Per text
    *  sender, `_textHigh` is the highest order this stub has been handed, and `_textPendingRetained` is
    *  a retained order just emitted that is still awaiting its own live echo. A retained frame is
@@ -130,6 +139,9 @@ class RoomStubChannel extends ServerBroadcast {
     if (binary) return
     const prevWantsText = this._wantsText
     this._wantsText = true
+    // Tail mode: this room-level want covers the whole held tail — flush it before the retained
+    // back-fill, so the flush advances the causal watermark and the retained replay dedupes against it.
+    this._flushTail()
     this._room._syncSubs()
     // MQTT-retained delivery: back-fill the last `publish(…, { retain: true })` now that this
     // client wants the text lane (see `_replayRetainedText` for the newly-covered semantics).
@@ -219,6 +231,53 @@ class RoomStubChannel extends ServerBroadcast {
     const prefix = `${from}\0`
     for (const lane of [this._binaryHigh, this._binaryPendingRetained])
       for (const key of lane.keys()) if (key.startsWith(prefix)) lane.delete(key)
+  }
+
+  /** @internal — begin holding the tail on this stub, seeded from the room's pre-attach hold. A
+   *  safety timer drops the hold and releases the room's text ingestion (via `onExpire`) if the
+   *  client never subscribes — the hold stays bounded in size, this bounds its lifetime too. */
+  _beginTail(seed: Array<{ serialized: string; ord: RoomOrder; from: string }>, onExpire: () => void): void {
+    this._tailPending = seed
+    this._tailTimer = setTimeout(() => {
+      this._tailPending = null
+      this._tailTimer = null
+      onExpire()
+    }, ROOM_TAIL_ATTACH_TIMEOUT_MS)
+  }
+
+  /** @internal — append a live message to the pending tail, bounded drop-oldest (the freshest tail is
+   *  what a late subscriber wants). Called only while `_tailPending` is non-null. */
+  _holdTail(serialized: string, ord: RoomOrder, from: string): void {
+    const hold = this._tailPending
+    if (!hold) return
+    hold.push({ serialized, ord, from })
+    if (hold.length > ROOM_TAIL_HOLD_MAX) hold.shift()
+  }
+
+  /** @internal — the client's first text want declares the selector: flush the held tail it now
+   *  covers, in order, through the live relay — so it advances the causal watermark and a retained
+   *  replay racing the same subscribe dedupes against it (see `_relayTextLive`/`_emitRetainedText`).
+   *  One-shot; a no-op if no tail is pending or the want still selects nothing (an empty `sub-text`). */
+  _flushTail(): void {
+    const hold = this._tailPending
+    if (!hold) return
+    if (!this._wantsText && this._textMemberWants.size === 0) return // keep holding until a real want
+    this._endTail()
+    for (const { serialized, ord, from } of hold) {
+      if (!this._wantsTextFrom(from)) continue
+      if (this._selfSuppressed.has(from)) continue
+      this._relayTextLive(encodePublishText(serialized, ord), from, ord)
+    }
+  }
+
+  /** @internal — drop the pending tail and its safety timer without flushing (the stub closed, or the
+   *  timer fired because the client never subscribed). */
+  _endTail(): void {
+    this._tailPending = null
+    if (this._tailTimer !== null) {
+      clearTimeout(this._tailTimer)
+      this._tailTimer = null
+    }
   }
 }
 

@@ -8,7 +8,13 @@ import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
+import {
+  ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_MEMBER_KV_TTL_MS,
+  ROOM_MEMBER_TTL_MS,
+  ROOM_TAIL_ATTACH_TIMEOUT_MS,
+  ROOM_TAIL_HOLD_MAX,
+} from '../constants.js'
 import {
   getBroadcastAdapter,
   KV_KEEP,
@@ -584,13 +590,6 @@ async function sendServerDm(roomId: string, memberId: string, data: unknown): Pr
 
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
 
-/** A room fetched with `{ tail: true }` is normally serialized into the same telefunction response
- *  within milliseconds; if it never is (misuse), this bounds how long its text ingestion lingers
- *  before the tail tears itself down. */
-const ROOM_TAIL_ATTACH_TIMEOUT_MS = 60_000
-/** Max messages held between `Room.get({ tail })` and the stub attaching (bounds the pre-attach hold). */
-const ROOM_TAIL_HOLD_MAX = 256
-
 /** Safety net for `send(…, { ack: true })`. The normal outcomes settle promptly — the recipient
  *  replies, leaves, or its inbox overflows — but a recipient that joined yet never `listen()`s and
  *  never leaves would strand the sender forever, so an ack unanswered this long rejects. Generous, so
@@ -617,11 +616,12 @@ class ServerRoom implements Room {
   readonly _gen: number
   /** @internal — tail mode (`Room.get(id, { tail: true })`): this node ingests and holds the room's
    *  text from the moment of `Room.get`, so a history read done before the room is serialized misses
-   *  no live message. Cleared when a stub attaches (the client then holds the flushed text until its
-   *  first `subscribe()`) or when the safety timer tears an unserialized tail down. */
+   *  no live message. Cleared when a stub attaches (the hold moves onto the stub, which keeps it until
+   *  the client's first `subscribe()`) or when the safety timer tears an unserialized tail down. */
   _tail = false
-  /** Text held between `Room.get({ tail })` and the stub attaching, replayed on attach. Bounded, so a
-   *  fetched-with-tail room that is never serialized (misuse) can't grow it without limit. */
+  /** Text held between `Room.get({ tail })` and the stub attaching; handed to the stub on attach (see
+   *  `_attachStub`). Bounded drop-oldest, so a fetched-with-tail room that is never serialized (misuse)
+   *  can't grow it without limit. */
   private readonly _tailHold: Array<{ serialized: string; ord: RoomOrder; from: string }> = []
   private _tailTimer: ReturnType<typeof setTimeout> | null = null
   /** In-flight `send(…, { ack: true })`s awaiting the recipient's reply, keyed by `ackId`. `to` is
@@ -1241,13 +1241,19 @@ class ServerRoom implements Room {
     if (this._stubs.size > 0) {
       const wireText = encodePublishText(serialized, event.ord)
       for (const stub of this._stubs) {
+        // A stub still awaiting its client's first text want holds the message server-side (bounded,
+        // drop-oldest) instead of relaying — flushed selectively once the want declares the selector.
+        if (stub._tailPending !== null) {
+          stub._holdTail(serialized, event.ord, event.from)
+          continue
+        }
         if (!stub._wantsTextFrom(event.from)) continue
         if (stub._selfSuppressed.has(event.from)) continue
         stub._relayTextLive(wireText, event.from, event.ord)
       }
     } else if (this._tail) {
       // Tail, pre-attach: no stub yet, but `Room.get({ tail })` opened ingestion — hold the message so
-      // the stub replays it on attach. Bounded FIFO; the client dedupes any overlap with history.
+      // the stub inherits it on attach. Bounded FIFO; the client dedupes any overlap with history.
       this._tailHold.push({ serialized, ord: event.ord, from: event.from })
       if (this._tailHold.length > ROOM_TAIL_HOLD_MAX) this._tailHold.shift()
     }
@@ -1385,7 +1391,6 @@ class ServerRoom implements Room {
 
   // ── Client stubs ──
 
-  /** @internal — called by `roomReplacer` when this room is serialized into a response. */
   /** @internal — begin tail relay (`Room.get({ tail: true })`): ingest and hold the room's text from
    *  now, so a history read done before this room is serialized misses no live message. A safety timer
    *  tears the ingestion down if the room is fetched-with-tail but never serialized. */
@@ -1405,21 +1410,17 @@ class ServerRoom implements Room {
 
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
-    // Tail mode (`Room.get(id, { tail: true })`): relay text from now, before the client
-    // declares a subscription, so a history read after this serialization misses nothing. The
-    // frames buffer in the stub's pre-peer buffer and the client holds them until its first
-    // subscribe(). `_syncSubs()` below brings up the upstream text ingestion.
+    // Tail mode (`Room.get(id, { tail: true })`): hand the pre-attach hold to the stub, which keeps
+    // holding server-side (still ingesting, gate closed) until the client's first text want declares
+    // the selector — then it flushes the selected messages once, in order, ahead of the live stream
+    // (see `_flushTail`). Nothing crosses the wire before the client asks for it, and the client needs
+    // no buffer of its own. `_syncSubs()` below keeps text ingestion up while the hold is pending.
     if (this._tail) {
-      stub._wantsText = true
       if (this._tailTimer !== null) {
         clearTimeout(this._tailTimer)
         this._tailTimer = null
       }
-      // Replay what arrived between `Room.get` and now, then hand ongoing relay to the stub. Clearing
-      // `_tail` stops pre-attach buffering; the client holds the flushed text until its first subscribe.
-      for (const held of this._tailHold) {
-        if (stub._wantsTextFrom(held.from)) stub._relayPublishText(encodePublishText(held.serialized, held.ord))
-      }
+      stub._beginTail(this._tailHold.slice(), () => this._syncSubs())
       this._tailHold.length = 0
       this._tail = false
     }
@@ -1436,6 +1437,7 @@ class ServerRoom implements Room {
     })
     stub.onClose(() => {
       this._stubs.delete(stub)
+      stub._endTail() // clear any pending tail hold/timer so a closed stub leaves nothing behind
       // The client is gone — presence says its members leave.
       for (const id of [...stub._stubMembers.keys()])
         void this._removeMember(id, { type: 'disconnected' }).catch(reportRoomError)
@@ -1522,6 +1524,7 @@ class ServerRoom implements Room {
         const members = Array.isArray(req.members) ? req.members.filter((m) => typeof m === 'string') : []
         const prev = stub._textMemberWants
         stub._textMemberWants = new Set(members)
+        stub._flushTail() // this selector newly covers held tail — flush it before live/retained relay
         this._syncSubs()
         void this._replayRetainedText(stub, stub._wantsText, prev).catch(reportRoomError)
         return undefined
@@ -1742,7 +1745,9 @@ class ServerRoom implements Room {
     if (local.all) return { all: true, members: new Set() }
     const members = new Set(local.members)
     for (const stub of this._stubs) {
-      if (stub._wantsText) return { all: true, members: new Set() }
+      // A tail-pending stub ingests everything so its hold captures the whole recent tail; the
+      // selector is applied at flush, not here (the want isn't known until the client subscribes).
+      if (stub._wantsText || stub._tailPending !== null) return { all: true, members: new Set() }
       for (const id of stub._textMemberWants) members.add(id)
     }
     return { all: false, members }

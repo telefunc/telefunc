@@ -247,6 +247,17 @@ export const ROOM_MEMBER_TTL_MS = 120_000
  *  and comfortably above Workers KV's 60s minimum expiration. */
 export const ROOM_MEMBER_KV_TTL_MS = ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS
 
+/** Max text messages held for a `Room.get({ tail })` client that hasn't subscribed yet — bounded on
+ *  the room until a stub attaches, then on that stub until the client's first text subscribe. Count-
+ *  capped, drop-oldest: paired with the per-message ingress cap (`CHANNEL_MESSAGE_LIMIT_BYTES`), a
+ *  count bound caps total tail memory without a second byte budget. The tail carries the *recent*
+ *  live messages a prompt subscriber would otherwise miss, not full history — that's `tail: N`. */
+export const ROOM_TAIL_HOLD_MAX = 256
+/** How long a `Room.get({ tail })` hold lingers without progress before it's dropped and its text
+ *  ingestion released: pre-attach, waiting to be serialized into a response; post-attach, waiting for
+ *  the client's first subscribe. Generous — the contract is a prompt subscribe, this only bounds misuse. */
+export const ROOM_TAIL_ATTACH_TIMEOUT_MS = 60_000
+
 // ===== Session routing =====
 
 /** User-facing header for sticky session routing (opaque token). */

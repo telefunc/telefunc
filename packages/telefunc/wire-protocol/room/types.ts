@@ -143,11 +143,12 @@ type RoomOptions<M extends RoomMeta = RoomMeta> = {
 }
 
 type RoomGetOptions = {
-  /** Start relaying the room's live messages the moment this room is serialized into a response,
-   *  buffered until the client attaches — so a history read done *after* `Room.get(id, { tail:
-   *  true })` in the same telefunction can't miss a message published in between. The client holds
-   *  the buffered tail until its first `subscribe()`, then flushes it. Lets you load history and
-   *  go live in a single call; the client dedupes the small overlap by message ID. */
+  /** Start capturing the room's live text the moment this room is serialized into a response, so a
+   *  history read done *after* `Room.get(id, { tail: true })` in the same telefunction can't miss a
+   *  message published in between. The recent tail is held server-side (bounded, drop-oldest) until
+   *  the client's first `subscribe()`, then flushed to it once, selected and in order, ahead of the
+   *  live stream. Lets you load history and go live in a single call; the client dedupes the small
+   *  overlap by message ID. Best-effort for a prompt subscribe, not a lossless backlog. */
   tail?: boolean
 }
 

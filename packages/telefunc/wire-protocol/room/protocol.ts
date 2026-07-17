@@ -321,9 +321,6 @@ type RoomSnapshotMetadata = {
   count: number
   /** LWW stamp of the config the snapshot reflects — seeds `applyRoomUpdate` ordering. */
   stamp: { at: number; by: string }
-  /** Tail mode (`Room.get(id, { tail: true })`): the client holds relayed text until its first
-   *  `subscribe()`, so history read after serialization can be stitched to the live stream. */
-  tail?: boolean
 }
 
 /** Serializer metadata of a `LocalParticipant` crossing the wire. */

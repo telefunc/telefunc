@@ -11,7 +11,12 @@ import {
 } from '../server/broadcast.js'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
+import {
+  ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_MEMBER_KV_TTL_MS,
+  ROOM_MEMBER_TTL_MS,
+  ROOM_TAIL_ATTACH_TIMEOUT_MS,
+} from '../constants.js'
 import { ACK_STATUS, TAG, decode, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { RoomStubChannel } from './stubs.js'
@@ -1811,19 +1816,51 @@ describe('room stub channel', () => {
     expect(relayedData()).toEqual(['from-alice', 'bob-now-flows', 'alice-still-flows'])
   })
 
-  it('tail mode relays text from Room.get — a message published before serialization is held, then flushed', async () => {
+  it('tail mode holds text server-side from Room.get until the first subscribe, then flushes it in order', async () => {
     const serverRoom = (await Room.create('tail-relay')) as ServerRoom
     const alice = await serverRoom.join({ meta: { name: 'A' } })
     serverRoom._startTail() // Room.get(id, { tail: true }): ingestion opens now, before any stub exists
 
-    await alice.publish({ text: 'early' }) // published before the stub attaches — held, not lost
+    await alice.publish({ text: 'early' }) // published before the stub attaches — held on the room
 
     const stub = new RoomStubChannel(serverRoom)
     stub._registerChannel()
-    serverRoom._attachStub(stub) // flushes the held message; no BROADCAST_SUB needed — tail opens the relay
+    serverRoom._attachStub(stub) // the hold moves onto the stub; nothing is relayed yet
     const peer = attachPeer(stub)
 
+    await alice.publish({ text: 'held' }) // still no subscribe — held on the stub, not relayed
+
+    const relayedData = () =>
+      peer
+        .decoded()
+        .filter((f) => f.tag === TAG.PUBLISH)
+        .map((f) => JSON.parse(f.text) as { __r: string; data?: unknown })
+        .filter((m) => m.__r === 'data')
+        .map((m) => m.data)
+    expect(relayedData()).toEqual([]) // the client asked for nothing yet, so nothing crossed the wire
+
+    stub._onPeerBroadcastSubscribe(false) // the client's first subscribe() — flush the held tail, in order
+    await settle()
     await alice.publish({ text: 'live' }) // relayed live from here
+
+    expect(relayedData()).toEqual([{ text: 'early' }, { text: 'held' }, { text: 'live' }])
+  })
+
+  it('tail flush is member-selective: a scoped subscribe replays only the wanted member, dropping the rest', async () => {
+    const serverRoom = (await Room.create('tail-selective')) as ServerRoom
+    const alice = await serverRoom.join({ meta: { name: 'A' } })
+    const bob = await serverRoom.join({ meta: { name: 'B' } })
+    serverRoom._startTail()
+    await alice.publish({ text: 'a1' })
+    await bob.publish({ text: 'b1' })
+
+    const stub = new RoomStubChannel(serverRoom)
+    stub._registerChannel()
+    serverRoom._attachStub(stub)
+    const peer = attachPeer(stub)
+
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [alice.id] }), 40) // wants Alice only
+    await settle()
 
     const relayed = peer
       .decoded()
@@ -1831,7 +1868,37 @@ describe('room stub channel', () => {
       .map((f) => JSON.parse(f.text) as { __r: string; data?: unknown })
       .filter((m) => m.__r === 'data')
       .map((m) => m.data)
-    expect(relayed).toEqual([{ text: 'early' }, { text: 'live' }]) // the pre-serialization message is not missed
+    expect(relayed).toEqual([{ text: 'a1' }]) // Bob's held tail is dropped — the client never wanted it
+  })
+
+  it('tail safety timer drops the held tail and releases ingestion when the client never subscribes', async () => {
+    vi.useFakeTimers()
+    try {
+      const serverRoom = (await Room.create('tail-timeout')) as ServerRoom
+      const alice = await serverRoom.join({ meta: { name: 'A' } })
+      serverRoom._startTail()
+      await alice.publish({ text: 'early' })
+
+      const stub = new RoomStubChannel(serverRoom)
+      stub._registerChannel()
+      serverRoom._attachStub(stub)
+      const peer = attachPeer(stub)
+      expect(stub._tailPending).not.toBeNull() // holding, awaiting the client's first subscribe
+
+      await vi.advanceTimersByTimeAsync(ROOM_TAIL_ATTACH_TIMEOUT_MS + 1) // ...which never comes
+      expect(stub._tailPending).toBeNull() // the safety timer dropped it
+
+      stub._onPeerBroadcastSubscribe(false) // a late subscribe gets no backfill — the tail is gone
+      await vi.advanceTimersByTimeAsync(0)
+      const relayedData = peer
+        .decoded()
+        .filter((f) => f.tag === TAG.PUBLISH)
+        .map((f) => JSON.parse(f.text) as { __r: string })
+        .filter((m) => m.__r === 'data')
+      expect(relayedData).toEqual([]) // roster still streams; only the held tail is gone
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('a stub member joined with selfDelivery=false gets no echo of its own publishes', async () => {
@@ -2506,24 +2573,6 @@ describe('ClientRoom', () => {
     gates.shift()!() // release the second send; B and C resolve with its receipt
     await Promise.all([pB, pC])
     expect(published).toEqual([{ x: 1 }, { x: 3 }])
-  })
-
-  it('tail mode holds relayed text until the first subscribe(), then flushes it in order', async () => {
-    const fake = createFakeStub()
-    const clientRoom = new ClientRoom(fake.stub, createSnapshot('tail', { tail: true, count: 1 }))
-    const alice = crypto.randomUUID()
-    fake.emit({ __r: 'roster', members: [{ id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0 }] })
-
-    // Live text arriving before any subscribe() is held, not dropped.
-    fake.emit({ __r: 'data', from: alice, fromMeta: { name: 'A' }, data: { text: 'm1' } })
-    fake.emit({ __r: 'data', from: alice, fromMeta: { name: 'A' }, data: { text: 'm2' } })
-
-    const seen: unknown[] = []
-    clientRoom.subscribe((data) => seen.push(data))
-    expect(seen).toEqual([{ text: 'm1' }, { text: 'm2' }]) // the held tail flushed, in order
-
-    fake.emit({ __r: 'data', from: alice, fromMeta: { name: 'A' }, data: { text: 'm3' } })
-    expect(seen).toEqual([{ text: 'm1' }, { text: 'm2' }, { text: 'm3' }]) // then live, straight through
   })
 
   it('onDemand fires when demand for a member track turns on, then off', async () => {
