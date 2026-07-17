@@ -5,8 +5,8 @@
 // synchronously redeeming the read token (subscribe-at-redeem + the seqAtRead fence) via the source's
 // `subscribe`; on the last owning channel's close it releases the lease. A handle that is never
 // serialized never activates, so its token stays un-redeemed and the request's finally-sweep
-// (disposeUnredeemedReads) releases it — net-zero, no leak. All engine complexity hides behind this
-// DbLiveRuntime seam; the reactiveDrizzle proxy is a thin typed consumer.
+// (disposeUnredeemedReads) releases it — net-zero, no leak. reactiveDrizzle imports wrapLiveSelect /
+// disposeUnredeemedReads from here DIRECTLY (no install seam) — this module IS the engine surface.
 
 export { wrapLiveSelect, disposeUnredeemedReads, compilePlanFor }
 export type { MintedToken, ReadCarrier }
