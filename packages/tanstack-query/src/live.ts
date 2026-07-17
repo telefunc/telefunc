@@ -73,8 +73,8 @@ function live<T>(queryFn: () => Live<T> | Promise<Live<T>>): (context: QueryFunc
 }
 
 /** The `@internal` consumer seam: a re-type, not a conversion. */
-function subscriptionOf<T>(handle: Live<T>): LiveSubscription<T> {
-  return handle as unknown as LiveSubscription<T>
+function subscriptionOf<T>(handle: Live<T>): LiveSubscription {
+  return handle as unknown as LiveSubscription
 }
 
 /** The rejection TanStack expects from a cancelled fetch. */
@@ -84,8 +84,8 @@ function abortError(): Error {
   return err
 }
 
-/** Bind one handle to its query: invalidation refetches, a data push writes the cache. Returns the
- *  initial value, which becomes the query's `data`. */
+/** Bind one handle to its query: an invalidation refetches. Returns the initial value, which becomes
+ *  the query's `data`. */
 function wire<T>(client: QueryClient, queryKey: QueryKey, handle: Live<T>): T {
   const registry = registryFor(client)
   const hash = hashKey(queryKey)
@@ -101,14 +101,12 @@ function wire<T>(client: QueryClient, queryKey: QueryKey, handle: Live<T>): T {
   const offInvalidate = subscription.onInvalidate(() => {
     void client.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: true }).catch(() => {})
   })
-  const offData = subscription.onData((data) => client.setQueryData(queryKey, data)) // direct cache write
   let closed = false
   registry.subs.set(hash, {
     close: () => {
       if (closed) return Promise.resolve()
       closed = true
       offInvalidate()
-      offData()
       return subscription.close()
     },
   })

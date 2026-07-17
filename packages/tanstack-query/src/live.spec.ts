@@ -40,14 +40,9 @@ const tick = () => new Promise<void>((resolve) => queueMicrotask(() => resolve()
  *  attached would look identical, and firing after teardown would still reach the cache. */
 function makeFakeLive<T>(initial: T) {
   const invalidateCbs = new Set<() => void>()
-  const dataCbs = new Set<(data: T) => void>()
   const close = vi.fn(() => Promise.resolve())
-  const handle: Live<T> & LiveSubscription<T> = {
+  const handle: Live<T> & LiveSubscription = {
     data: initial,
-    onData: (cb) => {
-      dataCbs.add(cb)
-      return () => dataCbs.delete(cb)
-    },
     onInvalidate: (cb) => {
       invalidateCbs.add(cb)
       return () => invalidateCbs.delete(cb)
@@ -58,7 +53,6 @@ function makeFakeLive<T>(initial: T) {
     handle,
     close,
     fireInvalidate: () => [...invalidateCbs].forEach((cb) => cb()),
-    fireData: (data: T) => [...dataCbs].forEach((cb) => cb(data)),
   }
 }
 
@@ -87,18 +81,6 @@ describe('live() — the TanStack queryFn wrapper', () => {
     expect(invalidateSpy).toHaveBeenCalledTimes(2)
   })
 
-  it('a pushed value writes the cache directly and does NOT refetch', async () => {
-    const queryClient = new QueryClient()
-    const fake = makeFakeLive('v1')
-    await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(async () => fake.handle) })
-
-    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
-    fake.fireData('v2')
-    expect(queryClient.getQueryData(['todos'])).toBe('v2')
-    await tick()
-    expect(invalidateSpy).not.toHaveBeenCalled()
-  })
-
   it('removing the query from the cache closes the live handle', async () => {
     const queryClient = new QueryClient()
     const fake = makeFakeLive('v1')
@@ -114,12 +96,11 @@ describe('live() — the TanStack queryFn wrapper', () => {
     await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(async () => fake.handle) })
     queryClient.removeQueries({ queryKey: ['todos'] })
 
-    // A handle can be closed and still have this adapter's callbacks hanging off it — closing is the
-    // handle's business, detaching is ours. Anything still attached here writes to a cache entry that
-    // no longer exists, and keeps this closure alive with it.
+    // A handle can be closed and still have this adapter's callback hanging off it — closing is the
+    // handle's business, detaching is ours. An invalidate still attached here would refetch a query the
+    // cache no longer holds, and keep this closure alive with it.
     const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
     fake.fireInvalidate()
-    fake.fireData('v2')
     expect(invalidateSpy).not.toHaveBeenCalled()
     expect(queryClient.getQueryData(['todos'])).toBeUndefined()
   })

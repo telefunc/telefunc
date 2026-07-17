@@ -121,43 +121,34 @@ describe('Live wire replacer/reviver + serialize-time single activation', () => 
     expect(server.created).toHaveLength(1)
   })
 
-  it('producer verbs after serialization ride the channel (coalesced data + invalidate events)', async () => {
+  it('an invalidation after serialization rides the channel (coalesced)', async () => {
     const server = createServerHarness()
     const live = new LiveCell('a')
     server.serialize(live)
     const channel = server.created[0]!
-    live.set('b')
-    live.set('c') // coalesced → one data event with the last value
-    await tick()
-    expect(channel.sends).toEqual([{ kind: 'data', data: 'c' }])
     live.invalidate()
+    live.invalidate() // coalesced → one invalidate event per microtask window
     await tick()
-    expect(channel.sends).toEqual([{ kind: 'data', data: 'c' }, { kind: 'invalidate' }])
+    expect(channel.sends).toEqual([{ kind: 'invalidate' }])
   })
 
-  it('the revived consumer .data tracks pushes; onData/onInvalidate observe channel events', () => {
+  it('the revived consumer .data is the wire snapshot; onInvalidate observes channel events', () => {
     const server = createServerHarness()
     const live = new LiveCell<string>('a')
     const body = server.serialize(live)
     const client = createClientHarness()
-    // The revived handle is publicly a `Live<T>`, but this test binds the taps an adapter uses — so it
-    // is the adapter's view, `Live & LiveSubscription`. Claiming plain `Live<T>` and then calling
-    // methods it does not have would describe a handle that could not exist.
-    const revived = client.parseBody(body) as Live<string> & LiveSubscription<string>
+    // The revived handle is publicly a `Live<T>`, but this test binds the tap an adapter uses — so it is
+    // the adapter's view, `Live & LiveSubscription`. Claiming plain `Live<T>` and then calling a method
+    // it does not have would describe a handle that could not exist.
+    const revived = client.parseBody(body) as Live<string> & LiveSubscription
     const channel = client.minted[0]!
 
-    const onData = vi.fn()
     const onInvalidate = vi.fn()
-    revived.onData(onData)
     revived.onInvalidate(onInvalidate)
-
-    channel.deliver({ kind: 'data', data: 'z' })
-    expect(revived.data).toBe('z') // .data updates BEFORE the tap fires
-    expect(onData).toHaveBeenCalledWith('z')
 
     channel.deliver({ kind: 'invalidate' })
     expect(onInvalidate).toHaveBeenCalledTimes(1)
-    expect(revived.data).toBe('z') // an invalidate leaves .data unchanged
+    expect(revived.data).toBe('a') // invalidation-only: `.data` stays the wire snapshot
   })
 
   it('multi/nested walk: distinct handles register once; repeated refs revive to === identity', () => {

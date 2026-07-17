@@ -42,21 +42,18 @@ const Live: {
   derived: (compute) => LiveCell.derived(compute),
 }
 
-/** What travels once a Live crosses the wire: a stale signal, or a pushed value. `invalidate` tells the
- *  client to refetch; `data` carries the value itself. The channel/wire layer lives in its own module —
- *  this one is the in-memory cell. */
-type LiveEvent<T> = { kind: 'invalidate' } | { kind: 'data'; data: T }
+/** What travels once a Live crosses the wire: a stale signal telling the client to refetch. The
+ *  channel/wire layer lives in its own module — this one is the in-memory cell. */
+type LiveEvent = { kind: 'invalidate' }
 
 /** @internal The consumer-side subscription behind a `Live<T>` — the seam adapters bind to (invalidate
- *  → refetch, data → cache write). Deliberately NOT on the public `Live<T>`: a user reads `.data`, and
- *  only an adapter needs the taps. Satisfied by both the revived client handle and a server `LiveCell`.
+ *  → refetch). Deliberately NOT on the public `Live<T>`: a user reads `.data`, and only an adapter needs
+ *  the tap. Satisfied by both the revived client handle and a server `LiveCell`.
  *
  *  Shared as a TYPE ONLY (via `telefunc/__internal`), never a runtime helper: the adapters that consume
  *  it ship to the BROWSER, and `telefunc/__internal` is a server entry (no browser condition) — so a
  *  runtime import would drag the server graph into a client bundle. A type import erases. */
-type LiveSubscription<T> = {
-  /** Observe pushed values. Returns an idempotent unsubscribe. */
-  onData(callback: (data: T) => void): () => void
+type LiveSubscription = {
   /** Observe stale signals. Returns an idempotent unsubscribe. */
   onInvalidate(callback: () => void): () => void
   close(): Promise<void>
@@ -80,19 +77,16 @@ function track(cell: LiveCell<unknown>): void {
 }
 
 /** @internal The in-memory cell behind every `Live<T>`: the producer end (construct around a snapshot,
- *  drive it via `set`/`update`/`invalidate`) plus the serialize-time activation lifecycle. Unexported
- *  from the package — that IS the boundary that keeps the producer verbs off the public API, so a
- *  telefunction returns the handle directly and the wire replacer serializes it. */
+ *  drive it via `invalidate`) plus the serialize-time activation lifecycle. Unexported from the package
+ *  — that IS the boundary that keeps the producer verbs off the public API, so a telefunction returns
+ *  the handle directly and the wire replacer serializes it. */
 class LiveCell<T> {
   readonly [LIVE_BRAND] = true
   private currentData: T
   private closed = false
-  private dataTaps: Array<(data: T) => void> = []
   private invalidateTaps: Array<() => void> = []
   private closeCallbacks: Array<(err?: Error) => void> = []
-  // One coalesced emission per microtask window. `hasPendingData` is a flag (not a sentinel) so
-  // `set(undefined)` is a real pending value; the LAST `set` in the window wins.
-  private hasPendingData = false
+  // One coalesced invalidation per microtask window — many `invalidate`s in one window deliver once.
   private pendingInvalidate = false
   private flushScheduled = false
   // ── serialize-time activation (deferred, cell-local lease-refcounted) ──
@@ -116,27 +110,11 @@ class LiveCell<T> {
     return this.currentData
   }
 
-  /** Push a new value. Coalesced: many `set`s in one microtask deliver once, with the last value. */
-  set(value: T): void {
-    if (this.closed) return
-    this.currentData = value
-    this.hasPendingData = true
-    this.scheduleFlush()
-  }
-
-  update(fn: (previous: T) => T): void {
-    this.set(fn(this.currentData))
-  }
-
   /** Signal the value is stale — the consumer refetches. Coalesced per microtask. */
   invalidate(): void {
     if (this.closed) return
     this.pendingInvalidate = true
     this.scheduleFlush()
-  }
-
-  onData(callback: (data: T) => void): () => void {
-    return addTap(this.dataTaps, callback)
   }
 
   onInvalidate(callback: () => void): () => void {
@@ -228,14 +206,8 @@ class LiveCell<T> {
   private flush(): void {
     this.flushScheduled = false
     if (this.closed) {
-      this.hasPendingData = false
       this.pendingInvalidate = false
       return
-    }
-    if (this.hasPendingData) {
-      this.hasPendingData = false
-      const data = this.currentData
-      for (const tap of [...this.dataTaps]) tap(data)
     }
     if (this.pendingInvalidate) {
       this.pendingInvalidate = false
