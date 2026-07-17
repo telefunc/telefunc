@@ -221,22 +221,38 @@ function attachPeer(channel: ServerChannel<never, LiveEvent<unknown>>) {
 }
 
 describe('a live query whose pre-peer frames are dropped still reaches the client', () => {
-  it('an invalidation evicted from the pre-peer buffer is still delivered on connect', async () => {
-    // A buffer far too small to hold the payload that follows.
-    const { channel, serialize } = createRealChannelHarness(64)
+  it('an invalidation dropped from the pre-peer buffer is still delivered on connect', async () => {
+    // A buffer too small to hold even one invalidate frame, so that frame is dropped outright — and
+    // NOTHING else is emitted. Any other traffic here would independently mark the client as missing
+    // something, and this test would pass without ever exercising the invalidation path it names.
+    const { channel, serialize } = createRealChannelHarness(8)
     const live = new LiveCell<string>('initial')
     serialize(live)
 
-    live.invalidate() // the client is not connected yet — this frame waits in the buffer
-    await tick()
-    // A payload larger than the entire buffer. The oversized path clears the whole lane, taking the
-    // waiting invalidation with it, and `send` swallows the rejection — so nothing upstream can tell.
-    live.set('x'.repeat(500))
+    live.invalidate() // the client is not connected yet, and this frame does not survive the buffer
     await tick()
 
     const received = attachPeer(channel)
-    // Whatever survived the buffer, the client must still be told its data moved on. Without the
-    // one-bit repair the buffer flushes empty and this client keeps `initial` forever.
+    // The buffer has nothing left to flush, so the repair is the only thing that can tell this client
+    // its data moved on. Without it, the client keeps `initial` forever.
+    expect(received.some((d) => 'text' in d && d.text.includes('invalidate'))).toBe(true)
+  })
+
+  it('an invalidation evicted by ordinary overflow — no oversized frame — is still delivered', async () => {
+    // The likelier path in production: nothing is oversized, there is simply more traffic than the cap,
+    // so the buffer evicts its OLDEST entry — which is exactly where the first invalidation sits.
+    const { channel, serialize } = createRealChannelHarness(96)
+    const live = new LiveCell<string>('initial')
+    serialize(live)
+
+    live.invalidate() // buffered first, and therefore first to be evicted
+    await tick()
+    for (let i = 0; i < 6; i++) {
+      live.set(`update-${i}`.padEnd(40, '.')) // ordinary frames, each well under the cap
+      await tick()
+    }
+
+    const received = attachPeer(channel)
     expect(received.some((d) => 'text' in d && d.text.includes('invalidate'))).toBe(true)
   })
 
