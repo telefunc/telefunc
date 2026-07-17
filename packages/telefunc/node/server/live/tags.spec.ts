@@ -11,6 +11,7 @@ import {
 } from '../../../wire-protocol/server/broadcast.js'
 import type { BroadcastTransport } from '../../../wire-protocol/server/broadcast.js'
 import { parse } from '@brillout/json-serializer/parse'
+import { stringify } from '@brillout/json-serializer/stringify'
 
 let previousAdapter: ReturnType<typeof getBroadcastAdapter>
 
@@ -260,4 +261,131 @@ describe('tag publish failure (§3.D T1.D2 / T1.J4)', () => {
       expect(errorSpy).toHaveBeenCalled()
       errorSpy.mockRestore()
     }))
+})
+
+describe('a tag that could not be broadcast still reaches the requests that need it', () => {
+  // A transport we can take down mid-test. While healthy, `send` loops the frame straight back to the
+  // listener (like the in-memory adapter) so the readiness barrier can confirm. Once down, `send`
+  // rejects and allocates NO backend seq — which is precisely what lets another instance's healthy
+  // publish arrive carrying a seq this instance already spent on a local fallback.
+  function controllableTransport() {
+    let sendsFail = false
+    let backendSeq = 0
+    const listeners = new Map<string, (payload: string, info: { seq: number; timestamp: number }) => void>()
+    const transport: BroadcastTransport = {
+      send: (key, payload) => {
+        if (sendsFail) return Promise.reject(new Error('broadcast transport is down'))
+        const info = { seq: ++backendSeq, timestamp: 0 }
+        listeners.get(key)?.(payload, info)
+        return Promise.resolve(info)
+      },
+      listen: (key, onMessage) => {
+        listeners.set(key, onMessage)
+        return () => listeners.delete(key)
+      },
+      sendBinary: () => Promise.resolve({ seq: 0, timestamp: 0 }),
+      listenBinary: () => () => {},
+    }
+    return {
+      transport,
+      takeDown: () => {
+        sendsFail = true
+      },
+      /** A batch arriving from ANOTHER instance, carrying the backend's authoritative seq. */
+      deliverFromPeer: (tags: string[], seq: number) => {
+        for (const [key, onMessage] of listeners) onMessage(stringify({ tags }), { seq, timestamp: 0 })
+      },
+    }
+  }
+
+  /** Drive the REAL failure path rather than calling the fallback directly: queue a tag in its own
+   *  request and settle it. Settle publishes, the downed transport rejects, and the hub falls back to
+   *  firing local subscribers. */
+  async function publishWhileDown(tag: string): Promise<void> {
+    await inRequest(async () => {
+      LiveCell.invalidate(tag)
+      await publishQueuedTags()
+    })
+  }
+
+  let broadcast: ReturnType<typeof controllableTransport>
+  let errorSpy: ReturnType<typeof vi.spyOn>
+  beforeEach(async () => {
+    broadcast = controllableTransport()
+    _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(broadcast.transport))
+    _resetTagHubsForTesting()
+    await getTagHub().ready() // subscribe + confirm the barrier while the transport is still healthy
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {}) // the fallback logs by design
+  })
+  afterEach(() => errorSpy.mockRestore())
+
+  it('a publish that fails is still caught by a request that read before it and subscribed after', () =>
+    inRequest(async () => {
+      await stampRequestStartFence() // the request reads at this fence
+      const fence = captureTagFence('t')
+
+      broadcast.takeDown()
+      await publishWhileDown('t') // a write elsewhere publishes 't'; the transport is down
+
+      // The request subscribes at serialize, AFTER the failed publish fired locally. If the fallback
+      // never entered the journal there is nothing for the catch-up scan to find, and this client
+      // would hold its pre-write snapshot forever with no signal that it went stale.
+      const onInvalidate = vi.fn()
+      subscribeCapturedTag(fence, onInvalidate)
+      expect(onInvalidate).toHaveBeenCalledTimes(1)
+    }))
+
+  it("a local fallback does not shadow another instance's real event at the same backend seq", async () => {
+    broadcast.deliverFromPeer(['warmup'], 42) // this instance has observed the backend up to 42
+    broadcast.takeDown()
+    await publishWhileDown('x') // our publish fails → fires locally, spending an observation
+
+    await inRequest(async () => {
+      await stampRequestStartFence() // the request fences AFTER the local fallback
+      const fence = captureTagFence('y')
+
+      // Instance B was healthy: its publish of 'y' carries backend seq 43 — the number our fallback
+      // already consumed locally. Adopting the transport's seq here would land this event AT the
+      // fence, and the strictly-greater catch-up scan would miss it entirely.
+      broadcast.deliverFromPeer(['y'], 43)
+
+      const onInvalidate = vi.fn()
+      subscribeCapturedTag(fence, onInvalidate)
+      expect(onInvalidate).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('many local fallbacks do not suppress the real events that follow them', async () => {
+    broadcast.deliverFromPeer(['warmup'], 42)
+    broadcast.takeDown()
+    for (let i = 0; i < 8; i++) await publishWhileDown(`local-${i}`) // inflate this instance's clock
+
+    await inRequest(async () => {
+      await stampRequestStartFence()
+      const fence = captureTagFence('y')
+      // Each of these carries a backend seq below the inflated local clock. Under a
+      // transport-authoritative clock the whole run 43..50 would be silently suppressed — the window
+      // spans many real deliveries, not just one recovery instant.
+      for (let seq = 43; seq <= 50; seq++) broadcast.deliverFromPeer(['y'], seq)
+      const onInvalidate = vi.fn()
+      subscribeCapturedTag(fence, onInvalidate)
+      expect(onInvalidate).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('the observation clock never goes backwards, whatever seq the transport reports', async () => {
+    const hub = getTagHub()
+    broadcast.takeDown()
+    const observed: number[] = []
+    for (let i = 0; i < 40; i++) {
+      if (i % 2 === 0) await publishWhileDown(`t-${i}`)
+      else broadcast.deliverFromPeer([`t-${i}`], 100 - i) // regressing backend seqs
+      observed.push(hub.currentSeq())
+    }
+    // Every journal entry is stamped with the clock at append time, so a strictly increasing clock is
+    // what keeps the journal ascending — and an ascending journal is what keeps the eviction
+    // watermark, and with it the overflow backstop, meaningful.
+    const strictlyAscending = observed.every((seq, i) => i === 0 || seq > observed[i - 1]!)
+    expect(strictlyAscending).toBe(true)
+  })
 })

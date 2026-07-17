@@ -32,7 +32,10 @@ class TagHub {
   private readonly key: string
   private readonly journal: JournalEntry[] = [] // ascending seq, at most JOURNAL_LIMIT entries
   private readonly index = new Map<string, Set<TagListener>>()
-  private lastSeq = 0
+  /** This instance's OBSERVATION clock — how many tag events THIS server has seen, not the transport's
+   *  counter. It only ever increases, and every event gets a fresh value, so an event observed after a
+   *  request stamped fence F always lands above F. See `_observe`. */
+  private observed = 0
   private evictedUpTo = 0 // highest seq dropped from the journal — the fence overflow watermark
   private subscribed = false
   private readyPromise: Promise<void> | null = null
@@ -67,9 +70,9 @@ class TagHub {
     return this.readyPromise
   }
 
-  /** The highest seq observed so far — stamped as a request's `requestStartSeq` fence. */
+  /** The highest event observed so far — stamped as a request's `requestStartSeq` fence. */
   currentSeq(): number {
-    return this.lastSeq
+    return this.observed
   }
 
   /** Publish one batch. Awaited by the caller (settle) so a failure is detected, not silent. */
@@ -80,7 +83,11 @@ class TagHub {
   /** Deliver `tags` to the local index without the Broadcast round-trip. Used when a publish fails:
    *  local subscribers still get the invalidation even though the fan-out hop was lost. */
   fireLocal(tags: string[]): void {
-    this.lastSeq += 1
+    const seq = this._observe()
+    // Journal BEFORE notifying, exactly like a received batch: a fallback invalidation that isn't in
+    // the journal is invisible to `hasTagSince`, so a request that fenced before it and subscribes
+    // after it would never learn its read went stale.
+    this._journal(seq, tags)
     for (const tag of tags) this._notify(tag)
   }
 
@@ -138,21 +145,51 @@ class TagHub {
     }
   }
 
-  private _receive(batch: TagBatch, seq: number): void {
-    this.lastSeq = seq
+  private _receive(batch: TagBatch, transportSeq: number): void {
     if (batch.barrier !== undefined) {
       if (this.pendingBarrier !== null && batch.barrier === this.pendingBarrier.token) {
         this.pendingBarrier.observed = true
       }
-      return
+      return // a barrier carries no tags: nothing to journal, and nothing a fence could need to catch
     }
-    const tags = batch.tags ?? []
-    this.journal.push({ seq, tags: new Set(tags) })
+    const batchTags = batch.tags ?? []
+    const seq = this._observe(transportSeq)
+    this._journal(seq, batchTags)
+    for (const tag of batchTags) this._notify(tag)
+  }
+
+  /** Advance the observation clock and return this event's seq.
+   *
+   *  The transport's seq is a HINT, never the clock itself. A failed publish allocates no transport
+   *  seq, so `fireLocal` synthesizes one locally — which means another instance's healthy publish can
+   *  legitimately arrive carrying a seq this instance already used. Assigning the transport's number
+   *  would then let an event land AT or BELOW a fence stamped after the local one, and `hasTagSince`
+   *  (strictly `>`) would miss it: the client keeps a stale snapshot with no signal, forever. It would
+   *  also break the journal's ascending order and, with it, the eviction watermark that backs the
+   *  overflow safety net.
+   *
+   *  So: always at least `observed + 1`. The `+1` is load-bearing — a plain `max(observed, seq)` lets
+   *  an event tie a fence, which is exactly the miss above. Taking the transport's seq when it's
+   *  higher keeps this instance roughly in step with the transport.
+   *
+   *  The cost is that the transport's seq is no longer a shared identity: a duplicate or out-of-order
+   *  delivery gets a fresh observation and may invalidate again. That's the safe direction —
+   *  invalidation is idempotent, so we over-invalidate rather than under. */
+  private _observe(transportSeq?: number): number {
+    this.observed = Math.max(this.observed + 1, transportSeq ?? 0)
+    return this.observed
+  }
+
+  /** Append to the bounded journal, evicting the oldest and raising the overflow watermark.
+   *
+   *  MUST be called BEFORE notifying. A listener reacting to the notification may scan the journal,
+   *  and a scan that runs before the append misses the very event it was woken for. */
+  private _journal(seq: number, tagList: string[]): void {
+    this.journal.push({ seq, tags: new Set(tagList) })
     if (this.journal.length > JOURNAL_LIMIT) {
       const evicted = this.journal.shift()!
       this.evictedUpTo = evicted.seq
     }
-    for (const tag of tags) this._notify(tag)
   }
 
   private _notify(tag: string): void {
