@@ -12,5 +12,12 @@
     "noUncheckedIndexedAccess": true,
     "lib": ["DOM", "ESNext"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  // One spec, excluded only because tsc cannot type it at all. It drives telefunc's internals against the
+  // real adapter, so it imports telefunc SOURCE while the adapter imports the telefunc PACKAGE — and one
+  // program cannot hold both: `client/remoteTelefunctionCall/onAbort.ts` augments `Window` globally, and
+  // its dist twin augments the same property with a structurally different type. Vitest runs it either
+  // way. Every other spec here stays typechecked — that net already caught a real variance bug in
+  // `LiveCell.onInvalidate`.
+  "exclude": ["src/live.refetch-on-connect.spec.ts"]
 }
