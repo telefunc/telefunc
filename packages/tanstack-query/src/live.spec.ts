@@ -33,28 +33,32 @@ function makeFakeTelefunction<T>(handle: Live<T>) {
 const tick = () => new Promise<void>((resolve) => queueMicrotask(() => resolve()))
 
 /** Stand in for a revived client Live: publicly a `Live<T>` (`.data`), carrying the `@internal`
- *  subscription taps the adapter binds — the same two-faced shape the wire reviver produces. */
+ *  subscription taps the adapter binds — the same two-faced shape the wire reviver produces.
+ *
+ *  The unsubscribes really detach, as the revived handle's do. Returning no-ops instead would make
+ *  every teardown assertion here unfalsifiable: an adapter that closed the handle but left its taps
+ *  attached would look identical, and firing after teardown would still reach the cache. */
 function makeFakeLive<T>(initial: T) {
-  const invalidateCbs: Array<() => void> = []
-  const dataCbs: Array<(data: T) => void> = []
+  const invalidateCbs = new Set<() => void>()
+  const dataCbs = new Set<(data: T) => void>()
   const close = vi.fn(() => Promise.resolve())
   const handle: Live<T> & LiveSubscription<T> = {
     data: initial,
     onData: (cb) => {
-      dataCbs.push(cb)
-      return () => {}
+      dataCbs.add(cb)
+      return () => dataCbs.delete(cb)
     },
     onInvalidate: (cb) => {
-      invalidateCbs.push(cb)
-      return () => {}
+      invalidateCbs.add(cb)
+      return () => invalidateCbs.delete(cb)
     },
     close,
   }
   return {
     handle,
     close,
-    fireInvalidate: () => invalidateCbs.forEach((cb) => cb()),
-    fireData: (data: T) => dataCbs.forEach((cb) => cb(data)),
+    fireInvalidate: () => [...invalidateCbs].forEach((cb) => cb()),
+    fireData: (data: T) => [...dataCbs].forEach((cb) => cb(data)),
   }
 }
 
@@ -102,6 +106,22 @@ describe('live() — the TanStack queryFn wrapper', () => {
     expect(fake.close).not.toHaveBeenCalled()
     queryClient.removeQueries({ queryKey: ['todos'] })
     expect(fake.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('teardown detaches the taps, it does not merely close the handle', async () => {
+    const queryClient = new QueryClient()
+    const fake = makeFakeLive('v1')
+    await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(async () => fake.handle) })
+    queryClient.removeQueries({ queryKey: ['todos'] })
+
+    // A handle can be closed and still have this adapter's callbacks hanging off it — closing is the
+    // handle's business, detaching is ours. Anything still attached here writes to a cache entry that
+    // no longer exists, and keeps this closure alive with it.
+    const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+    fake.fireInvalidate()
+    fake.fireData('v2')
+    expect(invalidateSpy).not.toHaveBeenCalled()
+    expect(queryClient.getQueryData(['todos'])).toBeUndefined()
   })
 
   it('a refetch mints a new handle and closes the previous one', async () => {

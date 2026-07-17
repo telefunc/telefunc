@@ -4,7 +4,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { createStreamingReplacer } from './server/response/registry.js'
 import { createStreamingReviver } from './client/response/registry.js'
 import { LiveCell } from '../node/server/live/live.js'
-import type { Live } from '../node/server/live/live.js'
+import type { Live, LiveSubscription } from '../node/server/live/live.js'
 import type { ClientReviverContext, ServerReplacerContext } from './types.js'
 import type { LiveEvent } from '../node/server/live/live.js'
 import { ServerChannel } from './server/channel.js'
@@ -147,7 +147,10 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
     const live = new LiveCell<string>('a')
     const body = server.serialize(live)
     const client = createClientHarness()
-    const revived = client.parseBody(body) as Live<string>
+    // The revived handle is publicly a `Live<T>`, but this test binds the taps an adapter uses — so it
+    // is the adapter's view, `Live & LiveSubscription`. Claiming plain `Live<T>` and then calling
+    // methods it does not have would describe a handle that could not exist.
+    const revived = client.parseBody(body) as Live<string> & LiveSubscription<string>
     const channel = client.minted[0]!
 
     const onData = vi.fn()
