@@ -239,18 +239,40 @@ const Room: RoomStatic = {
   getParticipants: getRoomParticipants as RoomStatic['getParticipants'],
 }
 
-/** Atomically create a room's config, returning the fresh room if this call won the create, or
- *  `null` if the room already existed. `setIfAbsent` makes the create race-free — exactly one of
- *  any number of concurrent callers writes the config; the rest observe it present. */
+/** How long a `closed` tombstone lingers before it's reaped. It exists only so a create that races or
+ *  follows a close resumes the generation past the previous incarnation (so stale records/mutations
+ *  can't attach); once it lapses, a fresh create simply starts a new generation at 1. */
+const ROOM_TOMBSTONE_TTL_MS = 60_000
+
+/** (Re)register a room in the cross-room directory index (unscoped — enumeration spans rooms, so it
+ *  can't live in one room's shard; see `listRooms`). Idempotent: a `set` of the same empty marker, so
+ *  it also repairs a create that wrote the authoritative config but crashed before this second write. */
+async function registerRoomIndex(id: string): Promise<void> {
+  await getRoomKV().set(roomIndexKvKey(id), '')
+}
+
+/** Atomically create a room, returning the fresh room if this call won the create, or `null` if a
+ *  live room already owns the id. One authority compare-and-set decides it: a fresh id (or a `closed`
+ *  tombstone left by an earlier incarnation) is taken at the next generation; an `open`/`closing`
+ *  record means the create lost. Race-free — exactly one of any number of concurrent callers writes. */
 async function tryCreateRoom(id: string, options: RoomOptions | undefined, kv: RoomKV): Promise<Room | null> {
   const { meta } = normalizeOptions(options)
-  const config: RoomConfigRecord = { meta, isolated: options?.isolated === true, at: Date.now(), by: writerId() }
-  const created = await kv.setIfAbsent(roomConfigKvKey(id), stringify(config))
-  if (!created) return null
-  // Register the room in the cross-room index (unscoped — enumeration spans rooms, so it can't live
-  // in this one room's shard; see `listRooms`).
-  await getRoomKV().set(roomIndexKvKey(id), '')
-  return new ServerRoom(id, config, { members: [] }) // fresh room — the roster is known: empty
+  const isolated = options?.isolated === true
+  let created: RoomConfigRecord | null = null
+  await kv.update(roomConfigKvKey(id), (raw) => {
+    const current = parseConfig(raw)
+    // A live room (open, or mid-close) already owns this id — lose the create.
+    if (current !== null && current.status !== 'closed') {
+      created = null
+      return KV_KEEP
+    }
+    // Fresh id, or a closed tombstone to resume past: take the next generation.
+    created = { meta, isolated, at: Date.now(), by: writerId(), gen: (current?.gen ?? 0) + 1, status: 'open' }
+    return stringify(created)
+  })
+  if (created === null) return null
+  await registerRoomIndex(id)
+  return new ServerRoom(id, created, { members: [] }) // fresh room — the roster is known: empty
 }
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
@@ -272,8 +294,14 @@ async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
 
 async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
-  // Won the atomic create → the fresh room; lost it (or it already existed) → load the existing one.
-  return (await tryCreateRoom(id, options, getRoomKV(id))) ?? (await getRoom(id))
+  // Won the atomic create → the fresh room. Lost it (already exists) → load it and idempotently
+  // repair the directory index, in case an earlier create wrote the config but crashed before the
+  // separate index write left it unlistable.
+  const created = await tryCreateRoom(id, options, getRoomKV(id))
+  if (created !== null) return created
+  const room = await getRoom(id)
+  await registerRoomIndex(id)
+  return room
 }
 
 const ROOM_GUARD_KEYS = [
@@ -336,7 +364,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
     if (id === null) continue
     const kv = getRoomKV(id)
     const config = await readConfig(kv, id)
-    if (config === null) continue // closed concurrently — a stale index entry, skip
+    if (config === null || config.status !== 'open') continue // closed/closing — a stale index entry, skip
     const count = await presenceCount(kv, id) // scan-only — no per-member reads, hidden excluded
     rooms.push({ id, meta: config.meta, count, isEmpty: count === 0 })
   }
@@ -366,28 +394,69 @@ async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void
  *  Shared by `setMeta()` (replace) and `setAttributes()` (merge). */
 async function writeRoomConfig(id: string, kv: RoomKV, config: RoomConfigRecord, meta: RoomMeta): Promise<void> {
   const at = Math.max(Date.now(), config.at + 1)
-  const next: RoomConfigRecord = { meta, isolated: config.isolated, at, by: writerId() }
+  const by = writerId()
+  // Object property, not a `let`: the mutator runs inside `update`, and control-flow analysis
+  // wouldn't see it reassign a plain local.
+  const decision = { outcome: 'kept' as 'wrote' | 'kept' | 'gone' }
   await kv.update(roomConfigKvKey(id), (raw) => {
-    const current = raw === null ? null : (parse(raw) as RoomConfigRecord)
-    return current !== null && !stampNewer(next, current) ? KV_KEEP : stringify(next)
+    const current = parseConfig(raw)
+    // Legality is decided against the authority: a missing/closing/closed record, or one from another
+    // generation, is never resurrected or mutated by `setMeta` — the write is dropped.
+    if (current === null || current.status !== 'open' || current.gen !== config.gen) {
+      decision.outcome = 'gone'
+      return KV_KEEP
+    }
+    const next: RoomConfigRecord = { meta, isolated: current.isolated, at, by, gen: current.gen, status: 'open' }
+    // Stamp-wins: `next` lands unless a strictly-newer config already sits there (that writer
+    // published its own convergence event). One atomic step, no read-back re-assert.
+    if (!stampNewer(next, current)) {
+      decision.outcome = 'kept'
+      return KV_KEEP
+    }
+    decision.outcome = 'wrote'
+    return stringify(next)
   })
-  await publishCtrl(id, { __r: 'update', meta, prev: config.meta, at: next.at, by: next.by })
+  if (decision.outcome === 'gone') throw new RoomError(`Room is closed: ${id}`)
+  if (decision.outcome === 'wrote') await publishCtrl(id, { __r: 'update', meta, prev: config.meta, at, by })
 }
 
 async function closeRoom(id: string): Promise<void> {
-  const { kv } = await requireRoom(id)
-  // Event first so observers disconnect promptly; then KV cleanup. A join racing the
-  // cleanup re-checks the config after writing its member record and rolls back.
+  const { kv, config } = await requireRoom(id)
+  // Fence first: atomically flip open→closing at this generation. Any in-flight join or mutation
+  // that revalidates against the authority now sees a non-open room and is rejected rather than
+  // orphaned. Losing the compare-and-set (already closing/closed, or a newer generation) means
+  // someone else owns the close — nothing to do.
+  let fenced = false
+  await kv.update(roomConfigKvKey(id), (raw) => {
+    const current = parseConfig(raw)
+    if (current === null || current.status !== 'open' || current.gen !== config.gen) return KV_KEEP
+    fenced = true
+    return stringify({ ...current, status: 'closing' })
+  })
+  if (!fenced) return
+  // Event so observers disconnect promptly; then sweep. The member scan reads the authority so it
+  // sees every record committed before the fence — nothing joined after it can slip past.
   await publishCtrl(id, { __r: 'closed' })
-  for (const { key } of await listMemberKeys(kv, id)) await kv.delete(key)
+  for (const { key } of await listMemberKeys(kv, id, { consistent: true })) await kv.delete(key)
   for (const key of await kv.keys(roomHiddenMemberKvPrefix(id))) await kv.delete(key)
   for (const key of await kv.keys(roomIdentityRoomKvPrefix(id))) await kv.delete(key)
   // Retained frames live on the authority tier, so sweep them there (see `retainedKv`).
   const retained = retainedKv(id)
   for (const key of await retained.keys(roomRetainedBinaryPrefix(id))) await retained.delete(key)
   await retained.delete(roomRetainedTextKey(id))
-  await kv.delete(roomConfigKvKey(id))
   await getRoomKV().delete(roomIndexKvKey(id)) // deregister from the cross-room index (unscoped)
+  // Finalize: closing→closed tombstone, keeping the generation so a later create resumes past it.
+  // TTL'd so a closed-and-never-recreated room can't leak; generation-guarded so a concurrent
+  // recreate that already reopened the room is never stamped back to closed.
+  await kv.update(
+    roomConfigKvKey(id),
+    (raw) => {
+      const current = parseConfig(raw)
+      if (current === null || current.gen !== config.gen || current.status !== 'closing') return KV_KEEP
+      return stringify({ ...current, status: 'closed' as const })
+    },
+    { ttlMs: ROOM_TOMBSTONE_TTL_MS },
+  )
 }
 
 /** The `(memberId, identity)` pairs a `ParticipantRef` addresses — shared by `Room.send()` and
@@ -430,16 +499,16 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
  *  pass `{ identity }` to read one identity's memberships in O(memberships) via the identity index —
  *  the cheap "is this user present / what's their status" read without loading the roster. */
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantSnapshotView[]> {
-  const { kv } = await requireRoom(id)
+  const { kv, config } = await requireRoom(id)
   let members: MemberSnapshot[]
   if (target === undefined) {
-    members = await readMembers(kv, id)
+    members = await readMembers(kv, id, config.gen)
   } else {
     assertUsage(
       isObject(target) && typeof target.identity === 'string' && target.identity.length > 0,
       'Room.getParticipants() target should be { identity }',
     )
-    members = await readMembers(kv, id, await resolveIdentityMembers(kv, id, target.identity))
+    members = await readMembers(kv, id, config.gen, await resolveIdentityMembers(kv, id, target.identity))
   }
   return members
     .filter((m) => !m.hidden) // hidden participants aren't presence participants
@@ -500,6 +569,10 @@ class ServerRoom implements Room {
   readonly [SERVER_ROOM_BRAND] = true
 
   /** @internal */ readonly _isolated: boolean
+  /** @internal — the room generation (`RoomConfigRecord.gen`) this handle is bound to. Every
+   *  authority-side legality check (join, mutate, close) and every member record this handle writes
+   *  carries it, so an operation from a previous incarnation is rejected after a close/recreate. */
+  readonly _gen: number
   /** @internal — tail mode (`Room.get(id, { tail: true })`): this node ingests and holds the room's
    *  text from the moment of `Room.get`, so a history read done before the room is serialized misses
    *  no live message. Cleared when a stub attaches (the client then holds the flushed text until its
@@ -535,6 +608,7 @@ class ServerRoom implements Room {
 
   constructor(roomId: string, config: RoomConfigRecord, seed: { members: MemberSnapshot[] } | { count: number }) {
     this._isolated = config.isolated
+    this._gen = config.gen
     this._state = new RoomState({
       roomId,
       meta: config.meta,
@@ -702,6 +776,7 @@ class ServerRoom implements Room {
       meta,
       joinedAt,
       seenAt: joinedAt,
+      gen: this._gen,
       metaSeq: 0,
       ...(identity === null ? {} : { identity }),
       ...(hidden ? { hidden: true } : {}),
@@ -715,9 +790,11 @@ class ServerRoom implements Room {
     }
     if (hidden) await kv.set(roomHiddenMemberKvKey(this.id, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
     await kv.set(roomMemberKvKey(this.id, id), stringify(record), { ttlMs: ROOM_MEMBER_KV_TTL_MS })
-    // The room may have been closed between the check and the write — roll back. Resolve against the
-    // authority so a just-created room (its replica not yet propagated) never reads as a false close.
-    if ((await resolveConfig(kv, this.id)) === null) {
+    // A close may have fenced the room to `closing` between the admission check and this write — the
+    // authority reflects that immediately (unlike the replica), so re-check and roll back if so. With
+    // the fence up before close's member sweep, either close's sweep catches this record or this
+    // rollback removes it: no orphan.
+    if ((await this._openConfig(kv)) === null) {
       await kv.delete(roomMemberKvKey(this.id, id))
       if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
       if (hidden) await kv.delete(roomHiddenMemberKvKey(this.id, id))
@@ -1027,8 +1104,16 @@ class ServerRoom implements Room {
     return { id, meta: record.meta, identity: record.identity ?? null }
   }
 
+  /** The room's authoritative config iff it is `open` at this handle's generation — the legality
+   *  oracle for every mutation. Reads the authority (never the eventually-consistent replica), so a
+   *  close is observed immediately; `null` means closed/closing/gone or a different generation. */
+  private async _openConfig(kv: RoomKV): Promise<RoomConfigRecord | null> {
+    const current = parseConfig(await kv.get(roomConfigKvKey(this.id), { consistent: true }))
+    return current !== null && current.status === 'open' && current.gen === this._gen ? current : null
+  }
+
   private async _assertOpen(kv: RoomKV): Promise<void> {
-    if (this._state.closed || (await resolveConfig(kv, this.id)) === null) {
+    if (this._state.closed || (await this._openConfig(kv)) === null) {
       throw new RoomError(`Room is closed: ${this.id}`)
     }
   }
@@ -1663,7 +1748,7 @@ class ServerRoom implements Room {
       try {
         while (!this._state.closed) {
           const version = this._state.membershipVersion
-          const members = await readMembers(getRoomKV(this.id), this.id)
+          const members = await readMembers(getRoomKV(this.id), this.id, this._gen)
           if (this._state.membershipVersion !== version) continue
           const drifted = this._state.reconcile(members)
           this._syncSubs() // per-member lanes may need subscriptions for the members just learned
@@ -1740,7 +1825,7 @@ class ServerRoom implements Room {
         }
         if (record!.hidden) await kv.set(roomHiddenMemberKvKey(this.id, id), '', { ttlMs: ROOM_MEMBER_KV_TTL_MS })
       }
-      await readMembers(kv, this.id)
+      await readMembers(kv, this.id, this._gen)
     } finally {
       this._heartbeatBusy = false
     }
@@ -1886,12 +1971,14 @@ function retainedKv(roomId: string): RoomKV {
   return getRoomKV(roomId, { consistent: true })
 }
 
-/** Statics prologue: validate the ID and load the room's config — or throw `Room not found`. */
+/** Statics prologue: validate the ID and load the room's config — or throw `Room not found`. Only an
+ *  `open` room resolves; a `closing`/`closed` tombstone reads as absent (its state is being or has
+ *  been swept). Mutations that pass this prologue still revalidate legality against the authority. */
 async function requireRoom(id: string): Promise<{ kv: RoomKV; config: RoomConfigRecord }> {
   assertRoomId(id)
   const kv = getRoomKV(id)
   const config = await resolveConfig(kv, id)
-  if (config === null) throw new RoomError(`Room not found: ${id}`)
+  if (config === null || config.status !== 'open') throw new RoomError(`Room not found: ${id}`)
   return { kv, config }
 }
 
@@ -1916,7 +2003,7 @@ async function resolveConfig(kv: RoomKV, roomId: string): Promise<RoomConfigReco
 /** Read a room's member records, reaping members whose owning node stopped heartbeating
  *  (hard crash): their record is deleted and their leave announced to all observers. Pass `ids`
  *  to read a specific subset (e.g. one identity's memberships) instead of scanning the whole roster. */
-async function readMembers(kv: RoomKV, roomId: string, ids?: string[]): Promise<MemberSnapshot[]> {
+async function readMembers(kv: RoomKV, roomId: string, gen: number, ids?: string[]): Promise<MemberSnapshot[]> {
   // Roster reads run against the authority, not the replica: `_refreshMembers` relies on read-your-
   // writes (a join/leave writes its record before publishing the event that triggers the read), and
   // the reap below keys off `seenAt` — a replica lag could drop a live member from the roster or reap
@@ -1930,6 +2017,7 @@ async function readMembers(kv: RoomKV, roomId: string, ids?: string[]): Promise<
     const raw = await kv.get(key, { consistent: true })
     if (raw === null) continue // member left concurrently
     const record = parse(raw) as RoomMemberRecord
+    if (record.gen !== gen) continue // a record from a previous incarnation — never in this roster
     if (Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS) {
       await kv.delete(key)
       await publishCtrl(roomId, { __r: 'leave', id, cause: 'disconnected' })
