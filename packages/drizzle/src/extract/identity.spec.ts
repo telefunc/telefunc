@@ -100,7 +100,7 @@ describe('canonicalValue — collision-free', () => {
     expect(canonicalValue(['a', 'b'])).not.toBe(canonicalValue(['a,b']))
     expect(canonicalValue(['a', 'b'])).not.toBe(canonicalValue(['ab']))
     expect(canonicalValue(['a', 'b'])).not.toBe(canonicalValue([['a', 'b']]))
-    // the finding's exact case: ['a','b'] vs ['a,s:b']
+    // a separator the encoding itself emits, embedded in an element: ['a','b'] vs ['a,s:b']
     expect(canonicalValue(['a', 'b'])).not.toBe(canonicalValue(['a,s:b']))
   })
 

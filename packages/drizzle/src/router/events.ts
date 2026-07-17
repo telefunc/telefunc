@@ -1,17 +1,10 @@
-// The change envelope: a set of TableChanges. It carries no transport position — no LSN, no cursor — so
-// ordering and delivery belong to whatever emits one.
+// The change envelope: a set of TableChanges. It carries no transport position, so ordering and
+// delivery belong to whatever emits one.
 
 export { type Row, type RowChange, type TableChange, type ChangeBatch }
 
 type Row = Record<string, unknown>
 
-/** One captured row change. `old` present ⇒ the full old row is inline (RI FULL / ORM
- *  returning); `key` carries the PK for a key-only retraction (RI DEFAULT); `new` is the
- *  full post-image (insert / update). `kind: 'coarse'` is the image-less marker — it carries only
- *  `{table}` (no old/new/key) and signals a mutation the source cannot represent precisely
- *  (image-less update/delete, generated-key-only insert, onConflict): the router demotes every
- *  affected graph to coarse and NEVER feeds it to a graph's `apply` (fabricating a row would corrupt
- *  exact operator/shadow state). */
 /** A row-level change — the coarse-free subset fed to a graph's `apply`. The router routes `coarse`
  *  markers to `coarsen()` and never to `apply`, so the row-space state machine only ever sees these. */
 type RowChange = {
@@ -22,6 +15,15 @@ type RowChange = {
   key?: Row
 }
 
+/** One change to one table.
+ *
+ *  Required of whoever emits one, and enforced by nothing here — the three row fields are optional on
+ *  every kind: `old`, when present, is the full old row inline; `key` carries the primary key alone, for
+ *  a key-only retraction; `new` is the full post-image. These are obligations on the producer, not
+ *  guarantees a reader can lean on.
+ *
+ *  `kind: 'coarse'` tells the router to demote every affected graph without feeding it a row —
+ *  fabricating one would corrupt exact operator/shadow state. */
 type TableChange = {
   table: string
   kind: 'insert' | 'update' | 'delete' | 'coarse'
@@ -30,5 +32,4 @@ type TableChange = {
   key?: Row
 }
 
-/** An ordered, atomic set of changes from one committed transaction. */
 type ChangeBatch = { changes: TableChange[] }

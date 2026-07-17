@@ -35,7 +35,7 @@ describe('evalK — NULL vs MISSING signal', () => {
     expect(evalK(eqA5, rowView({}))).toBe('missing') // not captured → σ-widens
   })
 
-  it('the two unknown causes are distinguishable (the finding counterexample)', () => {
+  it('the two unknown causes are distinguishable: a captured NULL is not a missing column', () => {
     const nullResult = evalK(eqA5, rowView({ a: null }))
     const missingResult = evalK(eqA5, rowView({}))
     expect(nullResult).not.toBe(missingResult)
