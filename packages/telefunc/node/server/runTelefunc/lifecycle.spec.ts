@@ -71,7 +71,7 @@ function tagBatchesFrom(spy: ReturnType<typeof vi.spyOn>): { tags: string[] }[] 
     .map((c) => parse(c[1] as string) as { tags: string[] })
 }
 
-describe('lifecycle — result transform chain (§3.A)', () => {
+describe('lifecycle — result transform chain', () => {
   it('result hooks run in registration order and thread the prior result', async () => {
     let e2Received: unknown
     const res = await run(
@@ -209,7 +209,7 @@ describe('lifecycle — the live-query fence is stamped before the body', () => 
   })
 })
 
-describe('forged / legacy request-extension data is inert (§3.B)', () => {
+describe('forged / legacy request-extension data is inert', () => {
   it('request data for an unregistered extension invokes nothing (only registered, request-activated extensions run)', async () => {
     const res = await run([ext('E1')], okBody, { E1: {}, 'not-registered': { anything: true } })
     expect(calls).toEqual(['E1.result']) // E1 ran via its own data; the unregistered payload invoked nothing

@@ -100,8 +100,8 @@ function createClientHarness() {
   return { parseBody, minted }
 }
 
-describe('Live wire replacer/reviver + serialize-time single activation (§3.D)', () => {
-  it('T12.D1 a returned Live → {data, channelId} on the wire → revives to a Live with .data', () => {
+describe('Live wire replacer/reviver + serialize-time single activation', () => {
+  it('a returned Live → {data, channelId} on the wire → revives to a Live with .data', () => {
     const server = createServerHarness()
     const live = new LiveCell({ n: 1 })
     const body = server.serialize(live)
@@ -128,7 +128,7 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
     expect(server.created).toHaveLength(1)
   })
 
-  it('T12.D1 producer verbs after serialization ride the channel (coalesced data + invalidate events)', async () => {
+  it('producer verbs after serialization ride the channel (coalesced data + invalidate events)', async () => {
     const server = createServerHarness()
     const live = new LiveCell('a')
     server.serialize(live)
@@ -142,7 +142,7 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
     expect(channel.sends).toEqual([{ kind: 'data', data: 'c' }, { kind: 'invalidate' }])
   })
 
-  it('T12.A5 the revived consumer .data tracks pushes; onData/onInvalidate observe channel events', () => {
+  it('the revived consumer .data tracks pushes; onData/onInvalidate observe channel events', () => {
     const server = createServerHarness()
     const live = new LiveCell<string>('a')
     const body = server.serialize(live)
@@ -167,7 +167,7 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
     expect(revived.data).toBe('z') // an invalidate leaves .data unchanged
   })
 
-  it('T12.D6 multi/nested walk: distinct handles register once; repeated refs revive to === identity', () => {
+  it('multi/nested walk: distinct handles register once; repeated refs revive to === identity', () => {
     const server = createServerHarness()
     const todos = new LiveCell([1, 2])
     const report = new LiveCell('R')

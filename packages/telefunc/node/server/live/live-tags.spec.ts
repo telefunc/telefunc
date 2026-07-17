@@ -81,8 +81,8 @@ function createServerHarness(requestContext?: Context) {
   return { serialize, created }
 }
 
-describe('Live tag statics — LiveCell.onInvalidate / LiveCell.invalidate over TagHub (§3.C)', () => {
-  it('T12.C1 LiveCell.onInvalidate binds the handle: a published tag → the handle channel invalidates', () =>
+describe('Live tag statics — LiveCell.onInvalidate / LiveCell.invalidate over TagHub', () => {
+  it('LiveCell.onInvalidate binds the handle: a published tag → the handle channel invalidates', () =>
     inRequest(async (requestContext) => {
       await stampRequestStartFence()
       const live = new LiveCell('rows')
@@ -95,7 +95,7 @@ describe('Live tag statics — LiveCell.onInvalidate / LiveCell.invalidate over 
       expect(channel.sends).toEqual([{ kind: 'invalidate' }])
     }))
 
-  it('T12.C2 fence catch-up: a tag published between the read and serialization is still caught', () =>
+  it('fence catch-up: a tag published between the read and serialization is still caught', () =>
     inRequest(async (requestContext) => {
       await stampRequestStartFence()
       const live = new LiveCell('rows')
@@ -107,7 +107,7 @@ describe('Live tag statics — LiveCell.onInvalidate / LiveCell.invalidate over 
       expect(server.created[0]!.sends).toEqual([{ kind: 'invalidate' }])
     }))
 
-  it("T12.C1 a request's OWN LiveCell.invalidate self-invalidates its handle (harmless — invalidation is idempotent)", () =>
+  it("a request's OWN LiveCell.invalidate self-invalidates its handle (harmless — invalidation is idempotent)", () =>
     inRequest(async (requestContext) => {
       await stampRequestStartFence()
       const live = new LiveCell('rows')
@@ -122,7 +122,7 @@ describe('Live tag statics — LiveCell.onInvalidate / LiveCell.invalidate over 
       expect(server.created[0]!.sends).toEqual([{ kind: 'invalidate' }])
     }))
 
-  it('T12.C3 LiveCell.invalidate out-of-request publishes immediately (void)', async () => {
+  it('LiveCell.invalidate out-of-request publishes immediately (void)', async () => {
     await getTagHub().ready()
     const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
     const result = LiveCell.invalidate('t')

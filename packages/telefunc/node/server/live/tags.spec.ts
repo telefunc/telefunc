@@ -45,8 +45,8 @@ function tagBatchCalls(spy: ReturnType<typeof vi.spyOn>): unknown[][] {
   return spy.mock.calls.filter((c) => typeof c[1] === 'string' && (c[1] as string).includes('"tags"'))
 }
 
-describe('tag fences (§3.E)', () => {
-  it('T1.E1 fence — a publish that landed since the request-start fence replays exactly once on subscribe', () =>
+describe('tag fences', () => {
+  it('fence — a publish that landed since the request-start fence replays exactly once on subscribe', () =>
     inRequest(async () => {
       await stampRequestStartFence()
       await getTagHub().publish(['t']) // lands after the fence, before this request subscribes
@@ -55,7 +55,7 @@ describe('tag fences (§3.E)', () => {
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     }))
 
-  it('T1.E2 negative — non-matching tag', () =>
+  it('negative — non-matching tag', () =>
     inRequest(async () => {
       await stampRequestStartFence()
       await getTagHub().publish(['other'])
@@ -64,7 +64,7 @@ describe('tag fences (§3.E)', () => {
       expect(onInvalidate).toHaveBeenCalledTimes(0)
     }))
 
-  it('T1.E3 negative — tag published before the fence', () =>
+  it('negative — tag published before the fence', () =>
     inRequest(async () => {
       await getTagHub().ready()
       await getTagHub().publish(['t']) // observed BEFORE the fence stamp
@@ -74,7 +74,7 @@ describe('tag fences (§3.E)', () => {
       expect(onInvalidate).toHaveBeenCalledTimes(0)
     }))
 
-  it('T1.E4/E15 journal overflow → unconditional replay', () =>
+  it('journal overflow → unconditional replay', () =>
     inRequest(async () => {
       await stampRequestStartFence()
       for (let i = 0; i < 1030; i++) await getTagHub().publish(['t'])
@@ -83,7 +83,7 @@ describe('tag fences (§3.E)', () => {
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     }))
 
-  it('T1.E5 a post-subscribe publish fires via the index; non-matching does not', () =>
+  it('a post-subscribe publish fires via the index; non-matching does not', () =>
     inRequest(async () => {
       await stampRequestStartFence()
       const onInvalidate = vi.fn()
@@ -95,7 +95,7 @@ describe('tag fences (§3.E)', () => {
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     }))
 
-  it('T1.E11 attach ordering — a post-subscribe publish makes the source emit exactly once', () =>
+  it('attach ordering — a post-subscribe publish makes the source emit exactly once', () =>
     inRequest(async () => {
       await stampRequestStartFence()
       const onInvalidate = vi.fn()
@@ -105,7 +105,7 @@ describe('tag fences (§3.E)', () => {
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     }))
 
-  it('T1.E10 the ready barrier is awaited once and reused only after a successful proof', () =>
+  it('the ready barrier is awaited once and reused only after a successful proof', () =>
     inRequest(async () => {
       const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
       await getTagHub().ready() // probes the barrier once (in-memory: one round-trip)
@@ -132,7 +132,7 @@ describe('tag publish', () => {
     }))
 })
 
-describe('tag readiness barrier (§3.E T1.E10)', () => {
+describe('tag readiness barrier', () => {
   // Transport whose listen() only starts delivering after `activateAfterMs`; earlier sends are
   // acknowledged but dropped. The barrier must wait until delivery is proven before the fence stamp.
   function delayedTransport(activateAfterMs: number): BroadcastTransport {
@@ -163,7 +163,7 @@ describe('tag readiness barrier (§3.E T1.E10)', () => {
     _resetTagHubsForTesting()
   })
 
-  it('T1.E10 ready() blocks until the subscription delivers; a publish after the read replays', () =>
+  it('ready() blocks until the subscription delivers; a publish after the read replays', () =>
     inRequest(async () => {
       await stampRequestStartFence() // blocks until the barrier is observed (subscription active)
       await getTagHub().publish(['t']) // guaranteed delivered now
@@ -173,7 +173,7 @@ describe('tag readiness barrier (§3.E T1.E10)', () => {
     }))
 })
 
-describe('readiness fails closed when unproven (§3.E T1.E10)', () => {
+describe('readiness fails closed when unproven', () => {
   // Transport that acknowledges every send but NEVER delivers — the exact async-SUBSCRIBE hole. The
   // barrier must never resolve unproven; it fails closed instead of proceeding best-effort.
   function neverDeliveringTransport(): BroadcastTransport {
@@ -193,12 +193,12 @@ describe('readiness fails closed when unproven (§3.E T1.E10)', () => {
   })
   afterEach(() => _setBarrierBudgetForTesting(50))
 
-  it('T1.E10 ready() rejects (fail-closed) when the subscription never confirms', () =>
+  it('ready() rejects (fail-closed) when the subscription never confirms', () =>
     inRequest(async () => {
       await expect(stampRequestStartFence()).rejects.toThrow() // request errors, no silent false negative
     }))
 
-  it('T1.E10 a failed barrier is not cached — a later ready() re-probes', () =>
+  it('a failed barrier is not cached — a later ready() re-probes', () =>
     inRequest(async () => {
       const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
       await expect(getTagHub().ready()).rejects.toThrow()
@@ -208,7 +208,7 @@ describe('readiness fails closed when unproven (§3.E T1.E10)', () => {
     }))
 })
 
-describe('readiness barrier state is bounded across cycles (rubric §3 / T1.E10)', () => {
+describe('readiness barrier state is bounded across cycles', () => {
   // Transport that buffers every send and only delivers on an explicit flush() — deterministically
   // simulating barrier frames that arrive AFTER their (already-failed) readiness attempt settled.
   let flush: () => void
@@ -240,7 +240,7 @@ describe('readiness barrier state is bounded across cycles (rubric §3 / T1.E10)
   })
   afterEach(() => _setBarrierBudgetForTesting(50))
 
-  it('T1.E10 five fail/recover cycles retain zero barrier tokens', async () => {
+  it('five fail/recover cycles retain zero barrier tokens', async () => {
     const hub = getTagHub()
     for (let i = 0; i < 5; i++) {
       await expect(hub.ready()).rejects.toThrow() // fails closed; the barrier frame is only buffered
@@ -251,8 +251,8 @@ describe('readiness barrier state is bounded across cycles (rubric §3 / T1.E10)
   })
 })
 
-describe('tag publish failure (§3.D T1.D2 / T1.J4)', () => {
-  it('T1.D2/J4 publish failure is logged + fired locally, result unmasked', () =>
+describe('tag publish failure', () => {
+  it('publish failure is logged + fired locally, result unmasked', () =>
     inRequest(async () => {
       await stampRequestStartFence() // barrier established over the working in-memory adapter
       const localListener = vi.fn()

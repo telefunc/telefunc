@@ -11,7 +11,7 @@ const compare = (col: string, value: number): Predicate => ({
 })
 const unknown: Predicate = { kind: 'unknown', tables: ['users'] }
 
-describe('dirty — tap frontier (T4.B2 / §5.4)', () => {
+describe('dirty — tap frontier', () => {
   it('A AND unknown → active, gate is A (tap after A)', () => {
     const frontier = dirtyFrontier({ kind: 'and', parts: [compare('team_id', 5), unknown] })
     expect(frontier.active).toBe(true)
@@ -42,7 +42,7 @@ describe('dirty — tap frontier (T4.B2 / §5.4)', () => {
   })
 })
 
-describe('dirty — sink signal/union (T4.B2)', () => {
+describe('dirty — sink signal/union', () => {
   it('signal fires and reset clears', () => {
     const sink = createDirtySink()
     expect(sink.fired()).toBe(false)
@@ -53,7 +53,7 @@ describe('dirty — sink signal/union (T4.B2)', () => {
   })
 })
 
-describe('dirty — bypass guarantee (T4.B2)', () => {
+describe('dirty — bypass guarantee', () => {
   it('a witnessed retract+insert that CANCELS in the data path still fires dirty', () => {
     // Model the D1 cancellation shape: the same projected tuple is retracted and inserted in
     // one commit, so distinct/consolidate net to zero on the data path — but the dirty tap,

@@ -31,7 +31,7 @@ function importsBinding(file: string): boolean {
   return /from\s+['"][^'"]*\/binding\/[^'"]*['"]|import\(['"][^'"]*\/binding\//.test(source)
 }
 
-describe('import-graph boundary (T4.F1 / T5.J2)', () => {
+describe('import-graph boundary', () => {
   it('ir/ + compile/ + graph/ + router/ import zero drizzle-orm (the ORM-agnostic engine)', () => {
     const offenders = productionFiles()
       .filter((file) => under(file, ['ir', 'compile', 'graph', 'router']))
@@ -49,7 +49,7 @@ describe('import-graph boundary (T4.F1 / T5.J2)', () => {
   })
 })
 
-describe('engine seam (T4.A1 / T5.J1)', () => {
+describe('engine seam', () => {
   it('@tanstack/db-ivm is imported ONLY in graph/ivm.ts across production src', () => {
     const importers = productionFiles()
       .filter((file) => importsOf(file, '@tanstack/db-ivm'))

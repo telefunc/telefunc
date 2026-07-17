@@ -130,8 +130,8 @@ function probe(graph: LiveGraph, model: S): void {
   }
 }
 
-describe('T5.I1 — model-based lifecycle invariants (legal transitions only)', () => {
-  it('a seeded walk over §3.C-TT keeps the real graph in the modeled state and holds every step invariant', async () => {
+describe('model-based lifecycle invariants (legal transitions only)', () => {
+  it('a seeded walk over keeps the real graph in the modeled state and holds every step invariant', async () => {
     const rng = prng(0x51c5)
     for (let trace = 0; trace < 25; trace++) {
       const driven = makeDriven()

@@ -73,7 +73,7 @@ describe('dialect & driver detection', () => {
   })
 })
 
-describe('semanticEnvironmentKeyOf — pinned to a provable session (T3.Q4)', () => {
+describe('semanticEnvironmentKeyOf — pinned to a provable session', () => {
   it('a single-session client (pg Client) probes and reflects the actual authority', async () => {
     const asSvc = await semanticEnvironmentKeyOf(pgClientDb, { run: authority('svc') })
     const asAdmin = await semanticEnvironmentKeyOf(pgClientDb, { run: authority('admin') })

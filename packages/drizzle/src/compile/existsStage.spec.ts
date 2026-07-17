@@ -18,7 +18,7 @@ const seed = (graph: CompiledGraph, ...commits: Change[][]): void => {
   for (const commit of commits) graph.apply(commit)
 }
 
-describe('existsStage — EXISTS/IN semi-join (T4.B8)', () => {
+describe('existsStage — EXISTS/IN semi-join', () => {
   it('an inner row satisfying the correlation makes the outer row appear (fires)', () => {
     const graph = run(
       qb
@@ -48,7 +48,7 @@ describe('existsStage — EXISTS/IN semi-join (T4.B8)', () => {
   })
 })
 
-describe('existsStage — NOT IN + NULL and scalar subqueries (T4.B8)', () => {
+describe('existsStage — NOT IN + NULL and scalar subqueries', () => {
   it('NOT IN degrades to dirty (the inner-NULL counterexample never misses)', () => {
     // NOT IN with an inner NULL: removing the inner NULL flips SQL excluded→included; a plain
     // anti-join would miss it, so this is a dirty degradation that fires on any inner change.

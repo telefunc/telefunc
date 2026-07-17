@@ -26,7 +26,7 @@ const upd = (old: Record<string, unknown>, next: Record<string, unknown>): Chang
   new: next,
 })
 
-describe('compile — classification (T4.B3)', () => {
+describe('compile — classification', () => {
   it('an untrackable coarse shape is a typed rejection, never an inputless graph', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const untrackable = extractQueryShape({ config: undefined, _: undefined }, { dialect: 'pg' })

@@ -47,7 +47,7 @@ const batch = (changes: TableChange[]): ChangeBatch => ({ changes })
 
 // ── G1 ──────────────────────────────────────────────────────────────
 
-describe('T5.G1 — apply once, synchronously, in order', () => {
+describe('apply once, synchronously, in order', () => {
   it('a batch applies exactly once; back-to-back batches apply twice, in order (never merged)', () => {
     const router = createRouter({ notify: () => {} })
     const g = fakeGraph(['users'], 'I')
@@ -71,7 +71,7 @@ describe('T5.G1 — apply once, synchronously, in order', () => {
 
 // ── G2 ──────────────────────────────────────────────────────────────
 
-describe('T5.G2 — notify ≤1 per graph AND per identity; a throwing apply is isolated', () => {
+describe('notify ≤1 per graph AND per identity; a throwing apply is isolated', () => {
   it('a multi-table batch ticks a join graph once and notifies its identity once', () => {
     const notified: string[] = []
     const router = createRouter({ notify: (k) => notified.push(k) })
@@ -131,7 +131,7 @@ describe('T5.G2 — notify ≤1 per graph AND per identity; a throwing apply is 
 
 // ── G3 — in-batch coarse marker ─────────────────────────────────────
 
-describe('T5.G3 — an in-batch coarse marker demotes the graph, never feeds it a row', () => {
+describe('an in-batch coarse marker demotes the graph, never feeds it a row', () => {
   it('a coarse marker calls coarsen (not apply) and coarse-notifies the identity', () => {
     const notified: string[] = []
     const router = createRouter({ notify: (k) => notified.push(k) })

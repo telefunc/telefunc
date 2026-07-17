@@ -20,7 +20,7 @@ const memberArm = () => qb.select({ id: members.id }).from(members)
 const adminArm = () => qb.select({ id: admins.id }).from(admins)
 const guestArm = () => qb.select({ id: guests.id }).from(guests)
 
-describe('setOpsStage — UNION ALL / UNION (T4.B7)', () => {
+describe('setOpsStage — UNION ALL / UNION', () => {
   it('UNION ALL fires from a change in EITHER branch', () => {
     const graph = run(pg.unionAll(memberArm(), adminArm()))
     expect(graph.apply([insM({ id: 1, name: 'm' })]).invalidated).toBe(true)
@@ -52,7 +52,7 @@ describe('setOpsStage — mixed UNION / UNION ALL global distinct is wrong SQL s
   })
 })
 
-describe('setOpsStage — INTERSECT / EXCEPT dirty from either branch (T4.B7)', () => {
+describe('setOpsStage — INTERSECT / EXCEPT dirty from either branch', () => {
   it('INTERSECT taps dirty from a change in either branch', () => {
     const graph = run(pg.intersect(memberArm(), adminArm()))
     expect(graph.apply([insM({ id: 1, name: 'm' })]).invalidated).toBe(true)

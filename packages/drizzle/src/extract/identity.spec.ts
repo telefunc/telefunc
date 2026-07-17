@@ -57,45 +57,45 @@ describe('planKeyOf / instanceKeyOf', () => {
     expect(instanceKeyOf(pk, [5])).not.toBe(instanceKeyOf(pk, [6]))
   })
 
-  it('component boundaries cannot be forged by moving a delimiter (O11)', () => {
+  it('component boundaries cannot be forged by moving a delimiter', () => {
     // planKey: a char shifted across the env/sql boundary must not collide
     const a = planKeyOf({ dialect: 'pg', semanticEnvironmentKey: 'ab', schemaFingerprint: 'f', sql: 'c' })
     const b = planKeyOf({ dialect: 'pg', semanticEnvironmentKey: 'a', schemaFingerprint: 'f', sql: 'bc' })
     expect(a).not.toBe(b)
   })
 
-  it('param-list boundaries cannot collide (O11)', () => {
+  it('param-list boundaries cannot collide', () => {
     expect(instanceKeyOf(pk, ['a', 'b'])).not.toBe(instanceKeyOf(pk, ['a,b']))
     expect(instanceKeyOf(pk, ['a', 'b'])).not.toBe(instanceKeyOf(pk, ['ab']))
     expect(instanceKeyOf(pk, [1])).not.toBe(instanceKeyOf(pk, [BigInt(1)]))
   })
 
-  it('number 1 and string "1" produce distinct instance keys (O11)', () => {
+  it('number 1 and string "1" produce distinct instance keys', () => {
     expect(instanceKeyOf(pk, [1])).not.toBe(instanceKeyOf(pk, ['1']))
   })
 })
 
-describe('planKey named gates (T3.O6/O7/O8)', () => {
+describe('planKey named gates', () => {
   const base = { dialect: 'pg', semanticEnvironmentKey: 'env', schemaFingerprint: 'fp', sql: 'select 1' }
 
-  it('O6: a database-authority (semantic environment) change changes the planKey', () => {
+  it('a database-authority (semantic environment) change changes the planKey', () => {
     expect(planKeyOf({ ...base, semanticEnvironmentKey: 'env2' })).not.toBe(planKeyOf(base))
   })
-  it('O7: a dialect change changes the planKey', () => {
+  it('a dialect change changes the planKey', () => {
     expect(planKeyOf({ ...base, dialect: 'mysql' })).not.toBe(planKeyOf(base))
   })
-  it('O8: the compiler ABI is embedded, so a bump invalidates every planKey', () => {
+  it('the compiler ABI is embedded, so a bump invalidates every planKey', () => {
     expect(planKeyOf(base).includes(COMPILER_ABI)).toBe(true)
   })
 })
 
-describe('canonicalValue — collision-free (O11)', () => {
+describe('canonicalValue — collision-free', () => {
   it('numbers and bigints are distinct', () => {
     expect(canonicalValue(1)).not.toBe(canonicalValue(BigInt(1)))
     expect(canonicalValue(10)).not.toBe(canonicalValue(BigInt(10)))
   })
 
-  it('number 1 and string "1" are distinct (O11)', () => {
+  it('number 1 and string "1" are distinct', () => {
     expect(canonicalValue(1)).not.toBe(canonicalValue('1'))
   })
 

@@ -26,7 +26,7 @@ const seed = (graph: CompiledGraph, ...commits: Change[][]): void => {
   for (const commit of commits) graph.apply(commit)
 }
 
-describe('aggregateStage — GROUP BY + COUNT (T4.B5)', () => {
+describe('aggregateStage — GROUP BY + COUNT', () => {
   it('count(*) crossing a group boundary fires; an unrelated group insert does not', () => {
     const graph = run(qb.select({ team: users.teamId, n: count() }).from(users).groupBy(users.teamId))
     seed(graph, [ins({ id: 1, team_id: 5, score: 10, name: 'a' })])
@@ -68,7 +68,7 @@ describe('aggregateStage — GROUP BY + COUNT (T4.B5)', () => {
   })
 })
 
-describe('aggregateStage — aggregate routes through window/projection (T4.B6, finding 1)', () => {
+describe('aggregateStage — aggregate routes through window/projection', () => {
   it('GROUP BY id ORDER BY id LIMIT 1: a below-window group insert does NOT fire; a window change does', () => {
     // Finding 1 regression: aggregate output must flow through topK, so a group strictly below
     // the top-1 window (total group order) leaves the SQL result unchanged → no fire.
@@ -85,7 +85,7 @@ describe('aggregateStage — aggregate routes through window/projection (T4.B6, 
   })
 })
 
-describe('aggregateStage — ungrouped empty baseline (T4.B5, finding 2)', () => {
+describe('aggregateStage — ungrouped empty baseline', () => {
   it('a first NULL row into sum / count(col) over an EMPTY graph does not fire; delete-to-empty still fires', () => {
     const s = run(qb.select({ s: sum(users.score) }).from(users)) // empty
     expect(s.apply([ins({ id: 1, team_id: 5, score: null, name: 'a' })]).invalidated).toBe(false) // NULL→NULL
@@ -97,7 +97,7 @@ describe('aggregateStage — ungrouped empty baseline (T4.B5, finding 2)', () =>
   })
 })
 
-describe('aggregateStage — MIN/MAX extremum removal (T4.B5)', () => {
+describe('aggregateStage — MIN/MAX extremum removal', () => {
   it('removing the current MIN reveals the next value', () => {
     const graph = run(qb.select({ m: min(users.score) }).from(users))
     seed(graph, [ins({ id: 1, team_id: 5, score: 3, name: 'a' })], [ins({ id: 2, team_id: 5, score: 7, name: 'b' })])
@@ -110,7 +110,7 @@ describe('aggregateStage — MIN/MAX extremum removal (T4.B5)', () => {
   })
 })
 
-describe('aggregateStage — empty-set + GROUP BY NULL (T4.B5)', () => {
+describe('aggregateStage — empty-set + GROUP BY NULL', () => {
   it('deleting the last row transitions count(*) to 0 (exact) and re-inserting fires again', () => {
     const graph = run(qb.select({ n: count() }).from(users))
     seed(graph, [ins({ id: 1, team_id: 5, score: 10, name: 'a' })])
@@ -151,7 +151,7 @@ describe('aggregateStage — opaque GROUP BY witnessed at the input adapter (blo
   })
 })
 
-describe('aggregateStage — HAVING + DISTINCT (T4.B5)', () => {
+describe('aggregateStage — HAVING + DISTINCT', () => {
   it('unknown HAVING (aggregate comparison) widens and taps dirty after the aggregate', () => {
     const graph = run(
       qb.select({ team: users.teamId, n: count() }).from(users).groupBy(users.teamId).having(gt(count(), 2)),

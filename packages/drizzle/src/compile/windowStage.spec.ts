@@ -31,7 +31,7 @@ const orderScore = (direction: 'asc' | 'desc', nulls?: 'first' | 'last'): OrderK
   nulls,
 })
 
-describe('windowStage — default NULL ordering matrix (T4.B6)', () => {
+describe('windowStage — default NULL ordering matrix', () => {
   it('pg: ASC → NULLs last, DESC → NULLs first', () => {
     const ascPg = comparatorFor([orderScore('asc')], 'pg')
     expect(ascPg(rowOf(null), rowOf(1))).toBeGreaterThan(0) // null sorts after → last
@@ -54,7 +54,7 @@ describe('windowStage — default NULL ordering matrix (T4.B6)', () => {
   })
 })
 
-describe('windowStage — topK precision (T4.B6)', () => {
+describe('windowStage — topK precision', () => {
   it('a below-window insert/update does NOT fire; an in-window change does (total order)', () => {
     const graph = run(qb.select().from(users).orderBy(asc(users.id)).limit(2))
     seed(graph, [ins({ id: 1, score: 10, name: 'a' })], [ins({ id: 2, score: 20, name: 'b' })])
@@ -67,7 +67,7 @@ describe('windowStage — topK precision (T4.B6)', () => {
   })
 })
 
-describe('windowStage — dirty degradations (T4.B6)', () => {
+describe('windowStage — dirty degradations', () => {
   it('a placeholder LIMIT bound taps dirty on any change', () => {
     const graph = run(qb.select().from(users).orderBy(asc(users.id)).limit(sql.placeholder('n')))
     expect(graph.apply([ins({ id: 1, score: 10, name: 'a' })]).invalidated).toBe(true)

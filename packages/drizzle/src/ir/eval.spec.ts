@@ -12,7 +12,7 @@ describe('rowView', () => {
     expect(view.get('b')).toEqual({ present: false })
   })
 
-  it('an inherited property name is MISSING, not a captured cell (T3.J7)', () => {
+  it('an inherited property name is MISSING, not a captured cell', () => {
     const view = rowView({})
     expect(view.get('toString')).toEqual({ present: false })
     expect(view.get('constructor')).toEqual({ present: false })
@@ -25,7 +25,7 @@ describe('rowView', () => {
   })
 })
 
-describe('evalK — NULL vs MISSING signal (T3.J7)', () => {
+describe('evalK — NULL vs MISSING signal', () => {
   const eqA5: Predicate = { kind: 'compare', op: '=', left: col('a'), right: lit(5) }
 
   it('a comparison is true/false on a value, and keeps WHY it is unknown', () => {
@@ -130,7 +130,7 @@ describe('eval3 — LIKE / ILIKE with SQL escapes', () => {
     expect(eval3(like('a.c', false), rowView({ t: 'abc' }))).toBe(false)
   })
 
-  it('an escaped %/_ is a literal, not a wildcard (T3.J8)', () => {
+  it('an escaped %/_ is a literal, not a wildcard', () => {
     // pattern a\%b (pg/mysql default backslash escape) matches the literal "a%b" only
     expect(eval3(like('a\\%b', false, '\\'), rowView({ t: 'a%b' }))).toBe(true)
     expect(eval3(like('a\\%b', false, '\\'), rowView({ t: 'axyzb' }))).toBe(false)

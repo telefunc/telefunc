@@ -228,7 +228,7 @@ const resetJoin = async () => {
   await client.exec('delete from teams')
 }
 
-describe('T5.H — differential oracle against LIVE-HYDRATED stateful graphs', () => {
+describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () => {
   it(
     'H2 inner join (match/non-match): exact iff post-flip',
     () =>

@@ -29,7 +29,7 @@ function selfJoin(): StatefulGraph {
   return compileQuery(extractQueryShape(q, { dialect: 'pg' })).instantiate() as StatefulGraph
 }
 
-describe('T5.A0 — runtime seam (per-input muted seed, self-join)', () => {
+describe('runtime seam (per-input muted seed, self-join)', () => {
   it('exposes one seed descriptor per input: distinct ids, same table, real PK', () => {
     const graph = selfJoin()
     expect(graph.seeds.length).toBe(2)

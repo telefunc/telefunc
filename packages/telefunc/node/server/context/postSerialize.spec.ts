@@ -4,7 +4,7 @@ import type { Context } from './context.js'
 
 const ctx = () => ({}) as Context
 
-describe('post-serialize disposer-drain (Ticket 6 R1 core seam)', () => {
+describe('post-serialize disposer-drain', () => {
   it('runs every registered disposer once, in registration order', () => {
     const c = ctx()
     const calls: number[] = []

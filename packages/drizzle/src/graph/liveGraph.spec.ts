@@ -60,7 +60,7 @@ async function warmedJoin(usersRows: Row[], teamsRows: Row[]): Promise<LiveGraph
 
 // ── B2a — old-inline retraction, no shadow consult ──────────────────
 
-describe('T5.B2a — an old-inline retraction resolves without consulting the shadow', () => {
+describe('an old-inline retraction resolves without consulting the shadow', () => {
   it('an inline old for a row absent from the (complete) shadow still feeds the retraction, whereas key-only drops', async () => {
     // Baseline join: users{id:1,team_id:5} ⋈ teams{id:5}. Both shadows are complete.
     const inlineGraph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
@@ -77,7 +77,7 @@ describe('T5.B2a — an old-inline retraction resolves without consulting the sh
 
 // ── C — the one-shot seed-race guard ────────────────────────────────
 
-describe('T5.C — a change routed during the scan is buffered and replayed exactly once', () => {
+describe('.C — a change routed during the scan is buffered and replayed exactly once', () => {
   it('buffers precisely (no coarse-invalidate) and replays as a PK-upsert: dup collapses, new lands', async () => {
     // SELECT DISTINCT team_id FROM users, seeded through a gated scan so we can inject during 'seeding'.
     let resolveScan!: (rows: Row[]) => void
@@ -168,7 +168,7 @@ describe('coarsen() intentionally demotes a graph to coarse', () => {
 
 // ── E1 — RLS-gated stateful born coarse ─────────────────────────────
 
-describe('T5.E1 — RLS-gated stateful graphs are born coarse', () => {
+describe('RLS-gated stateful graphs are born coarse', () => {
   it('the born-coarse gate (rlsEnabled true OR unknown) → coarse; no gate (false) → seeds', () => {
     const gated = createLiveGraph({
       kind: 'stateful',
@@ -214,7 +214,7 @@ describe('T5.E1 — RLS-gated stateful graphs are born coarse', () => {
 
 // ── G2 — ≤1 fire per graph per batch ────────────────────────────────
 
-describe('T5.G2 — a graph fires at most once per batch', () => {
+describe('a graph fires at most once per batch', () => {
   it('a multi-change batch touching a graph several times advances the invalidation seq by at most one', async () => {
     const graph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     const before = graph.invalidationSeq()

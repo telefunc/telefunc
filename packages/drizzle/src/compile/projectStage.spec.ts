@@ -22,7 +22,7 @@ const seed = (graph: CompiledGraph, ...commits: Change[][]): void => {
   for (const commit of commits) graph.apply(commit)
 }
 
-describe('projectStage — projected keys carry ORDER BY (T4.B9)', () => {
+describe('projectStage — projected keys carry ORDER BY', () => {
   it('the projection key set includes SELECT columns AND ORDER BY columns', () => {
     const keys = projectionKeysOf(shapeOf(qb.select({ name: users.name }).from(users).orderBy(asc(users.teamId))))
     expect(keys).toContain(qualifiedKey('users', 'name'))
@@ -34,7 +34,7 @@ describe('projectStage — projected keys carry ORDER BY (T4.B9)', () => {
   })
 })
 
-describe('projectStage — DISTINCT (T4.B9)', () => {
+describe('projectStage — DISTINCT', () => {
   it('a duplicate distinct value is silent; a new value fires', () => {
     const graph = run(qb.selectDistinct({ team: users.teamId }).from(users))
     seed(graph, [ins({ id: 1, team_id: 5, name: 'a' })])

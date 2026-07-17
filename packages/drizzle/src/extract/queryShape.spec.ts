@@ -268,7 +268,7 @@ describe('extractQueryShape — coarse fallback', () => {
     expect(new Set(shape.tables)).toEqual(new Set(['users', 'teams']))
   })
 
-  it('production cross-check discovers a pg join the config underreports but the SQL renders (O13)', () => {
+  it('production cross-check discovers a pg join the config underreports but the SQL renders', () => {
     // A pinned-shape wrapper hides the join in config.joins, but toSQL still renders
     // A INNER JOIN B — the cross-check reads the rendered SQL, so it degrades.
     const wrapper = {
@@ -283,7 +283,7 @@ describe('extractQueryShape — coarse fallback', () => {
     expect(new Set(shape.tables)).toEqual(new Set(['users', 'teams']))
   })
 
-  it('production cross-check discovers a MySQL backtick join the config underreports (O13)', () => {
+  it('production cross-check discovers a MySQL backtick join the config underreports', () => {
     const wrapper = {
       config: { table: pgUsers, fields: { id: pgUsers.id }, joins: [] },
       toSQL: () => ({
@@ -327,7 +327,7 @@ describe('extractQueryShape — coarse fallback', () => {
   })
 })
 
-describe('renderedRelationsFromSQL — every dialect quoting (O13)', () => {
+describe('renderedRelationsFromSQL — every dialect quoting', () => {
   const rel = (sqlText: string) => renderedRelationsFromSQL({ toSQL: () => ({ sql: sqlText, params: [] }) })
 
   it('double-quoted (pg/sqlite) identifiers, schema-qualified and aliased', () => {

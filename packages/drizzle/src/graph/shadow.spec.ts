@@ -27,7 +27,7 @@ function usersDescriptor(): SeedDescriptor {
   return graph.seeds.find((seed) => seed.table === 'users')!
 }
 
-describe('T5.B1 — σ-scoped PK → pruned tuple', () => {
+describe('σ-scoped PK → pruned tuple', () => {
   it('admits only σ-matching rows (NULL excludes, MISSING widens) and prunes to demanded columns', () => {
     const descriptor = usersDescriptor()
     expect(matchesResidual(descriptor, { id: 1, team_id: 5, score: 10 })).toBe(true)
@@ -41,7 +41,7 @@ describe('T5.B1 — σ-scoped PK → pruned tuple', () => {
   })
 })
 
-describe('T5.B2 — retraction resolution (key-only three-way)', () => {
+describe('retraction resolution (key-only three-way)', () => {
   it('b) key-only + shadow hit → the exact pruned old tuple', () => {
     const descriptor = usersDescriptor()
     const shadow = createShadow()
@@ -64,7 +64,7 @@ describe('T5.B2 — retraction resolution (key-only three-way)', () => {
   })
 })
 
-describe('T5.B3 — shadow size accounting', () => {
+describe('shadow size accounting', () => {
   it('put grows the count, remove shrinks it', () => {
     const descriptor = usersDescriptor()
     const shadow = createShadow()

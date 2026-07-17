@@ -83,8 +83,8 @@ afterEach(async () => {
   await tick()
 })
 
-describe('db.live runtime — carrier lifecycle (Ticket 6 §U3)', () => {
-  it('T6.S1 sync-mode: a POST-await db.live.select tracks via the CAPTURED carrier (getRawContext is null), and the finally-sweep disposes the un-activated token', async () => {
+describe('db.live runtime — carrier lifecycle', () => {
+  it('sync-mode: a POST-await db.live.select tracks via the CAPTURED carrier (getRawContext is null), and the finally-sweep disposes the un-activated token', async () => {
     // Seed PRODUCTION sync context — this schedules the first-macrotask null that caused the crisis.
     provideTelefuncContext({})
     const context = getRawContext()

@@ -51,7 +51,7 @@ async function _typeTransform_compileCheck(): Promise<void> {
 }
 void _typeTransform_compileCheck
 
-describe('reactiveDrizzle — client surface (Ticket 6 §1)', () => {
+describe('reactiveDrizzle — client surface', () => {
   beforeEach(() => {
     // Reset the engine stub to the default pass-through (the live builder forwards its base builder).
     vi.mocked(wrapLiveSelect).mockReset()

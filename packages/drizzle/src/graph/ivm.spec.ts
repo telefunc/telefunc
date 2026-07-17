@@ -47,14 +47,14 @@ function net(entries: MultiSetArray<unknown>): Map<string, number> {
   return out
 }
 
-describe('graph/ivm — engine pin (T4.A1)', () => {
+describe('graph/ivm — engine pin', () => {
   it('db-ivm is installed at the exact pinned engine golden 0.1.18', () => {
     expect(IVM_ENGINE_VERSION).toBe('0.1.18')
     expect(ivmVersion()).toBe(IVM_ENGINE_VERSION)
   })
 })
 
-describe('graph/ivm — engine contract tests (T4.A3)', () => {
+describe('graph/ivm — engine contract tests', () => {
   it('inner join emits the matched pair and retracts it on the driving removal', () => {
     const graph = new D2()
     const left = graph.newInput<KeyValue<number, string>>()

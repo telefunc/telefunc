@@ -5,8 +5,8 @@ import { LiveCell } from './live.js'
 // so this queued-after callback resolves only once that flush has run (FIFO).
 const tick = () => new Promise<void>((resolve) => queueMicrotask(() => resolve()))
 
-describe('Live core cell (§3.A)', () => {
-  it('T12.A1 producer verbs + data; the cell IS the handle a telefunction returns', async () => {
+describe('Live core cell', () => {
+  it('producer verbs + data; the cell IS the handle a telefunction returns', async () => {
     const live = new LiveCell<number>(1)
     expect(live.data).toBe(1)
     live.set(2)
@@ -25,7 +25,7 @@ describe('Live core cell (§3.A)', () => {
     expect(live.isClosed).toBe(false)
   })
 
-  it('T12.A2 symmetric taps fire; unsubscribe is idempotent; a late tap does not replay', async () => {
+  it('symmetric taps fire; unsubscribe is idempotent; a late tap does not replay', async () => {
     const live = new LiveCell('a')
     const onData = vi.fn()
     const onInvalidate = vi.fn()
@@ -52,7 +52,7 @@ describe('Live core cell (§3.A)', () => {
     expect(lateTap).not.toHaveBeenCalled()
   })
 
-  it('T12.A3 per-cell coalescing, incl. set(undefined)', async () => {
+  it('per-cell coalescing, incl. set(undefined)', async () => {
     // Three rapid sets → one onData carrying the third value.
     const live = new LiveCell<string | undefined>('x')
     const onData = vi.fn()
@@ -95,7 +95,7 @@ describe('Live core cell (§3.A)', () => {
     expect(bothInv).toHaveBeenCalledTimes(1)
   })
 
-  it('T12.A4 set/update/invalidate after close are inert (no throw, no emission, data unchanged)', async () => {
+  it('set/update/invalidate after close are inert (no throw, no emission, data unchanged)', async () => {
     const live = new LiveCell('a')
     const onData = vi.fn()
     const onInvalidate = vi.fn()
@@ -112,7 +112,7 @@ describe('Live core cell (§3.A)', () => {
     expect(live.data).toBe('a')
   })
 
-  it('T12.A1/A4 close fires onClose once (idempotent); a late onClose fires immediately', async () => {
+  it('close fires onClose once (idempotent); a late onClose fires immediately', async () => {
     const live = new LiveCell('a')
     const onClose = vi.fn()
     live.onClose(onClose)

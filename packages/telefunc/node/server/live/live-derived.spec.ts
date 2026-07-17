@@ -56,8 +56,8 @@ function createServerHarness() {
 // derived cell, which is what the activation-state introspection reads.
 const asCell = (live: unknown) => live as LiveCell<unknown>
 
-describe('Live.derived — deferred cascade activation + cell-local leasing (§3.B)', () => {
-  it('T12.B1/B2 inert pending descriptors — a never-serialized derived subscribes NOTHING', () => {
+describe('Live.derived — deferred cascade activation + cell-local leasing', () => {
+  it('inert pending descriptors — a never-serialized derived subscribes NOTHING', () => {
     const subscribe = vi.fn(() => () => {})
     const a = new LiveCell('a')
     a.attachSource({ subscribe })
@@ -68,7 +68,7 @@ describe('Live.derived — deferred cascade activation + cell-local leasing (§3
     expect(subscribe).not.toHaveBeenCalled()
   })
 
-  it('T12.B2 multi-dep invalidate forwarding once serialized', async () => {
+  it('multi-dep invalidate forwarding once serialized', async () => {
     const a = new LiveCell(1)
     const b = new LiveCell(2)
     const server = createServerHarness()
@@ -82,7 +82,7 @@ describe('Live.derived — deferred cascade activation + cell-local leasing (§3
     expect(derivedChannel.sends).toEqual([{ kind: 'invalidate' }, { kind: 'invalidate' }])
   })
 
-  it('T12.B2 zero-dep derived is inert (no dep subscriptions) but serializes as a normal live cell', async () => {
+  it('zero-dep derived is inert (no dep subscriptions) but serializes as a normal live cell', async () => {
     const server = createServerHarness()
     const derived = Live.derived(() => 42) // reads no handle
     server.serialize(derived)

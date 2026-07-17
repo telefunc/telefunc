@@ -6,8 +6,8 @@ import * as telefunc from '../index.js'
 // onData/onInvalidate), the activation lifecycle, and the tag statics are all INTERNAL — reachable only
 // via `telefunc/__internal` (bindings) or not at all. The legacy request-bag/tag functions
 // (addLiveSource/takeLiveSources/liveTag/invalidateTag) were removed with the old TanStack wrapper path.
-describe('telefunc live exports (§3.G)', () => {
-  it('T1.G1/G4 exports the Live namespace; the legacy bag/tag functions are gone', () => {
+describe('telefunc live exports', () => {
+  it('exports the Live namespace; the legacy bag/tag functions are gone', () => {
     const Live = (telefunc as Record<string, unknown>).Live as Record<string, unknown>
     expect(typeof Live).toBe('object') // a namespace value, not a constructor — `new Live()` is not public
     expect(typeof Live.derived).toBe('function')
@@ -16,7 +16,7 @@ describe('telefunc live exports (§3.G)', () => {
     }
   })
 
-  it('T1.G1 the public Live namespace carries ONLY `derived` — no producer verbs, no tag statics', () => {
+  it('the public Live namespace carries ONLY `derived` — no producer verbs, no tag statics', () => {
     const Live = (telefunc as Record<string, unknown>).Live as object
     // The whole public value surface. A new key here is a public-API change and must be deliberate.
     expect(Object.keys(Live)).toEqual(['derived'])
@@ -26,7 +26,7 @@ describe('telefunc live exports (§3.G)', () => {
     }
   })
 
-  it('T1.G4 the producer cell is NOT publicly reachable', () => {
+  it('the producer cell is NOT publicly reachable', () => {
     // `LiveCell` is the boundary: unexported from the package root, so the producer verbs cannot be
     // reached from 'telefunc'. Bindings import it from 'telefunc/__internal' instead.
     expect((telefunc as Record<string, unknown>).LiveCell).toBeUndefined()

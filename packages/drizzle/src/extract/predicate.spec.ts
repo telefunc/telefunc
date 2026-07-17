@@ -125,7 +125,7 @@ describe('extractPredicate — operators', () => {
     expect(eval3(r.predicate, rowView({ user_id: 1 }))).toBeUndefined()
   })
 
-  it('an escaped %/_ in a LIKE pattern is a literal (T3.J8; pg default backslash escape)', () => {
+  it('an escaped %/_ in a LIKE pattern is a literal', () => {
     expect(ev(like(todos.text, 'a\\%b'), { text: 'a%b' })).toBe(true)
     expect(ev(like(todos.text, 'a\\%b'), { text: 'axyzb' })).toBe(false)
     // sqlite has no default escape: the backslash is literal, % stays a wildcard
@@ -352,7 +352,7 @@ describe('predicate goldens are built on the pinned rc', () => {
 })
 
 // Named composition cases for an unknown leaf (T3.K4), and that NNF preserves them.
-describe('unknown-leaf composition (T3.K4)', () => {
+describe('unknown-leaf composition', () => {
   const A: Predicate = {
     kind: 'compare',
     op: '=',

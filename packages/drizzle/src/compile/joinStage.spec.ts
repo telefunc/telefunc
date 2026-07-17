@@ -26,7 +26,7 @@ function seed(graph: CompiledGraph, ...commits: Change[][]): void {
   for (const commit of commits) graph.apply(commit)
 }
 
-describe('joinStage — INNER equi-join (T4.B4)', () => {
+describe('joinStage — INNER equi-join', () => {
   it('fires on a matching insert and not on a non-matching one', () => {
     const graph = run(qb.select().from(users).innerJoin(teams, eq(teams.id, users.teamId)))
     seed(graph, [insTeam({ id: 5, region: 'eu' })])
@@ -49,7 +49,7 @@ describe('joinStage — INNER equi-join (T4.B4)', () => {
   })
 })
 
-describe('joinStage — outer joins (T4.B4)', () => {
+describe('joinStage — outer joins', () => {
   it('LEFT join null-extends an unmatched left row (fires) and matches when the right arrives', () => {
     const graph = run(qb.select().from(users).leftJoin(teams, eq(teams.id, users.teamId)))
     // user with no team yet → null-extended row exists → fire
@@ -65,7 +65,7 @@ describe('joinStage — outer joins (T4.B4)', () => {
   })
 })
 
-describe('joinStage — degradation to live coarse (T4.B4)', () => {
+describe('joinStage — degradation to live coarse', () => {
   it('a no-equi-key (cross) join degrades to a coarse plan (dirty from both sides)', () => {
     const plan = compileQuery(extractQueryShape(qb.select().from(users).crossJoin(teams), { dialect: 'pg' }))
     expect(plan.coarse).toBe(true)

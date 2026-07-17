@@ -136,7 +136,7 @@ describe('registry precision — a precise graph notifies ONLY on an affected ch
 
 // ── A1 / A2 — dedup + concurrent creation ───────────────────────────
 
-describe('T5.A1 — canonical acquire dedup', () => {
+describe('canonical acquire dedup', () => {
   it('two acquires of the same identity return one shared graph, compiling once', async () => {
     const registry = registryOf()
     const compile = vi.fn(() => coarsePlan(['users']))
@@ -147,7 +147,7 @@ describe('T5.A1 — canonical acquire dedup', () => {
   })
 })
 
-describe('T5.A2 — concurrent acquire shares one creation + failure recovery', () => {
+describe('concurrent acquire shares one creation + failure recovery', () => {
   it('two concurrent acquires share one in-flight creation and receive the same graph', async () => {
     const registry = registryOf()
     const plan = deferred<GraphPlan>()
@@ -181,7 +181,7 @@ describe('T5.A2 — concurrent acquire shares one creation + failure recovery', 
 
 // ── A3 — activate before read ───────────────────────────────────────
 
-describe('T5.A3 — inputs registered before the acquiring read', () => {
+describe('inputs registered before the acquiring read', () => {
   it('router.register runs synchronously before the seed scan (spy order)', async () => {
     const registry = registryOf()
     const order: string[] = []
@@ -205,7 +205,7 @@ describe('T5.A3 — inputs registered before the acquiring read', () => {
 
 // ── A4 — born state ─────────────────────────────────────────────────
 
-describe('T5.A4 — born-state by plan class', () => {
+describe('born-state by plan class', () => {
   it('a stateless plan is born live', async () => {
     const r = await registryOf().acquire(req({ compilePlan: () => statelessPlan(['users']) }))
     expect(r.graph.state()).toBe('live')
@@ -231,7 +231,7 @@ describe('registry — each distinct instance compiles FRESH (no cross-instance 
 
 // ── A5 / A7 — refcount, tokens, leases ──────────────────────────────
 
-describe('T5.A5 — refcount = leases + unredeemed tokens; immediate destroy on zero', () => {
+describe('refcount = leases + unredeemed tokens; immediate destroy on zero', () => {
   it('releasing the sole token (no redeem) destroys immediately', async () => {
     const registry = registryOf()
     const r = await registry.acquire(req({ compilePlan: () => coarsePlan(['users']) }))
@@ -249,7 +249,7 @@ describe('T5.A5 — refcount = leases + unredeemed tokens; immediate destroy on 
   })
 })
 
-describe('T5.A7 — ReadToken redeem-transfer + disposal', () => {
+describe('ReadToken redeem-transfer + disposal', () => {
   it('carries the initial-read fence; a double redeem is rejected; a redeemed lease releases once (idempotent)', async () => {
     const registry = registryOf()
     const r = await registry.acquire(req({ instanceKey: 'inst-x', compilePlan: () => coarsePlan(['users']) }))
@@ -275,7 +275,7 @@ describe('T5.A7 — ReadToken redeem-transfer + disposal', () => {
 
 // ── A6 — state-row bound + no-PK born coarse ────────────────────────
 
-describe('T5.A6 — state-row bound → demote; no-PK input born coarse', () => {
+describe('state-row bound → demote; no-PK input born coarse', () => {
   it('a no-PK stateful input is born coarse (cannot shadow-resolve a retraction)', async () => {
     const r = await registryOf().acquire(
       req({ compilePlan: () => statefulPlan(['users'], [seed('users', 'users', [])]) }),
@@ -297,7 +297,7 @@ describe('T5.A6 — state-row bound → demote; no-PK input born coarse', () => 
 // Each case discriminates a seam: reverting subscribe-mint→redeem (seam 1) breaks the inert-token
 // assertions; reverting the seqAtRead fence (seam 2) breaks the catch-up assertions.
 
-describe('§6.1/6.2 — un-redeemed token is inert; the redeem fence replays exactly once', () => {
+describe('un-redeemed token is inert; the redeem fence replays exactly once', () => {
   it('a change routed during the read window does not notify the inert token, then redeem fires it once', async () => {
     const registry = registryOf()
     const notify = vi.fn()
@@ -312,7 +312,7 @@ describe('§6.1/6.2 — un-redeemed token is inert; the redeem fence replays exa
   })
 })
 
-describe('§6.3 — a clean redeem fires no notify', () => {
+describe('a clean redeem fires no notify', () => {
   it('redeem with no change since the σ-read does not spuriously fire', async () => {
     const registry = registryOf()
     const notify = vi.fn()
@@ -322,7 +322,7 @@ describe('§6.3 — a clean redeem fires no notify', () => {
   })
 })
 
-describe('§6.5 — a never-redeemed token disposes net-zero', () => {
+describe('a never-redeemed token disposes net-zero', () => {
   it('the eagerly-hydrated graph is created then fully disposed on release; zero fires', async () => {
     const registry = registryOf()
     const notify = vi.fn()
@@ -336,7 +336,7 @@ describe('§6.5 — a never-redeemed token disposes net-zero', () => {
   })
 })
 
-describe('§6.6 — redeem transfers with no transient zero; double-redeem throws', () => {
+describe('redeem transfers with no transient zero; double-redeem throws', () => {
   it('redeem keeps the graph alive across the token→lease transfer and rejects a second redeem', async () => {
     const registry = registryOf()
     const r = await registry.acquire(req({ compilePlan: () => coarsePlan(['users']) }))
@@ -348,7 +348,7 @@ describe('§6.6 — redeem transfers with no transient zero; double-redeem throw
   })
 })
 
-describe('§6.6b — leases refcount: a non-last close does not dispose while another owner holds', () => {
+describe('leases refcount: a non-last close does not dispose while another owner holds', () => {
   it('two redeemed owners of one instance — closing EITHER first keeps the graph live + the survivor notifying; last close disposes', async () => {
     for (const closeFirst of ['A', 'B'] as const) {
       const registry = registryOf()
@@ -380,7 +380,7 @@ describe('§6.6b — leases refcount: a non-last close does not dispose while an
 
 // ── §6 fence × router-owned demotions (fault/coarsen must advance seq) ──
 
-describe('§6.2b — a coarse event during the read window is caught by the redeem fence', () => {
+describe('a coarse event during the read window is caught by the redeem fence', () => {
   it('a coarse marker routed after the σ-read (before redeem) fires notify exactly once at redeem', async () => {
     const registry = registryOf()
     const notify = vi.fn()
@@ -394,7 +394,7 @@ describe('§6.2b — a coarse event during the read window is caught by the rede
   })
 })
 
-describe('§6.2c — an apply-fault during the read window is caught by the redeem fence', () => {
+describe('an apply-fault during the read window is caught by the redeem fence', () => {
   it('a fault (what the router does on an apply-throw) after the σ-read fires notify exactly once at redeem', async () => {
     const registry = registryOf()
     const notify = vi.fn()

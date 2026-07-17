@@ -79,20 +79,20 @@ describe('tableFingerprint — canonical inputs each affect the key', () => {
     expect(tableFingerprint(secured)).not.toBe(tableFingerprint(base))
   })
 
-  it('changes when a type parameter (varchar width) changes (O9)', () => {
+  it('changes when a type parameter (varchar width) changes', () => {
     const narrow = pgTable('t', { id: integer('id').primaryKey(), name: varchar('name', { length: 10 }) })
     const wide = pgTable('t', { id: integer('id').primaryKey(), name: varchar('name', { length: 20 }) })
     expect(tableFingerprint(narrow)).not.toBe(tableFingerprint(wide))
   })
 
-  it('changes when a column is added or renamed (O9)', () => {
+  it('changes when a column is added or renamed', () => {
     const added = pgTable('t', { id: integer('id').primaryKey(), a: integer('a'), b: integer('b') })
     expect(tableFingerprint(added)).not.toBe(tableFingerprint(base))
     const renamed = pgTable('t', { id: integer('id').primaryKey(), a: integer('a_renamed') })
     expect(tableFingerprint(renamed)).not.toBe(tableFingerprint(base))
   })
 
-  it('injectively encodes relation identity — a dotted schema/name cannot collide (O9)', () => {
+  it('injectively encodes relation identity — a dotted schema/name cannot collide', () => {
     const t1 = pgSchema('a').table('b.c', { id: integer('id').primaryKey() })
     const t2 = pgSchema('a.b').table('c', { id: integer('id').primaryKey() })
     expect(relationKeyOf(t1)).not.toBe(relationKeyOf(t2))
@@ -116,7 +116,7 @@ describe('schemaFingerprint', () => {
     expect(schemaFingerprint([users, alias(users, 'u2')])).toBe(schemaFingerprint([users]))
   })
 
-  it('does not collapse same-named relations from different schemas (O9)', () => {
+  it('does not collapse same-named relations from different schemas', () => {
     const aUsers = pgSchema('a').table('users', { id: integer('id').primaryKey(), v: integer('v') })
     const bUsers = pgSchema('b').table('users', { id: integer('id').primaryKey(), v: integer('v') })
     const bUsersChanged = pgSchema('b').table('users', { id: integer('id').primaryKey(), v: text('v') })

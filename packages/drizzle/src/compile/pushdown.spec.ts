@@ -19,7 +19,7 @@ const shapeOf = (builder: unknown) => extractQueryShape(builder, { dialect: 'pg'
 const inputOf = (builder: unknown, alias = 'users') =>
   pushdownOf(shapeOf(builder)).inputs.find((plan) => plan.alias === alias)!
 
-describe('pushdown — column pruning (T4.B1)', () => {
+describe('pushdown — column pruning', () => {
   it('demands the PK, WHERE, SELECT, GROUP-adjacent and ORDER BY columns only', () => {
     const plan = inputOf(
       qb.select({ name: users.name }).from(users).where(eq(users.teamId, 5)).orderBy(asc(users.created)),
@@ -40,7 +40,7 @@ describe('pushdown — column pruning (T4.B1)', () => {
   })
 })
 
-describe('pushdown — σ conjunct partition (T4.B1)', () => {
+describe('pushdown — σ conjunct partition', () => {
   it('single-input conjuncts push to their input; a cross-input conjunct becomes the residual', () => {
     const shape = shapeOf(
       qb.select().from(users).innerJoin(teams, eq(teams.id, users.teamId)).where(eq(users.name, 'x')),
