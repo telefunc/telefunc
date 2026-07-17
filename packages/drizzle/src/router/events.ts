@@ -1,6 +1,5 @@
-// The change envelope: ordered, atomic sets of TableChanges from one committed transaction.
-// Whoever emits them owns their ordering and delivery, so the shape carries no transport position —
-// no LSN, no cursor. Capture is in-process, so nothing here is serialized.
+// The change envelope: a set of TableChanges. It carries no transport position — no LSN, no cursor — so
+// ordering and delivery belong to whatever emits one.
 
 export { type Row, type RowChange, type TableChange, type ChangeBatch }
 

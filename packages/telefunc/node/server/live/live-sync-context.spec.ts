@@ -120,11 +120,11 @@ describe('sync context mode — tag usage must survive a macrotask (real-I/O) aw
       await stampRequestStartFence()
       const live = new LiveCell<string[]>([])
       live.onInvalidate(invalidated) // observe whether ANY invalidation reaches the cell
-      LiveCell.onInvalidate('t', live) // captures the fence, but the handle is NEVER serialized (no activate)
+      LiveCell.onInvalidate('t', live) // records the key; the handle is NEVER serialized, so nothing activates
     })
-    // Publishing the captured tag reaches nothing: capture alone subscribes no hub listener, so the
-    // cell never invalidates. Were the fence subscribed eagerly at capture time — the leak this design
-    // exists to prevent — this publish would deliver and the tap would fire.
+    // Publishing the tag reaches nothing: recording a key subscribes no hub listener, so the cell never
+    // invalidates. Were the key resolved to a subscription here rather than at serialization — the leak
+    // this design exists to prevent — this publish would deliver and the tap would fire.
     await getTagHub().publish(['t'])
     await flush()
     expect(invalidated).not.toHaveBeenCalled()

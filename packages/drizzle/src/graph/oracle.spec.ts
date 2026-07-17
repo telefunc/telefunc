@@ -1,7 +1,7 @@
 // T5.H — the differential oracle over LIVE-SEEDED stateful graphs. Every stateful mechanic runs
 // through the REAL registry + real compiled StatefulGraph seam + a real PGlite-backed
 // HydrationExecutor: the graph SEEDS synchronously from PGlite (σ-scoped, pruned) — acquire BLOCKS
-// on the seed, so it is PRECISE from tick one (no warming tier, no over-fire carve-out). H1 = seeds
+// on the seed, so it is PRECISE from tick one. H1 = seeds
 // through the real seam; H2 = per-mechanic invalidation decisions (each join type, aggregate
 // crossings incl. MIN/MAX retraction, HAVING, distinct, below-window insert, unselected-column
 // update); H3 = graph fired IFF the SQL result changed (both directions; a false negative OR false
@@ -192,9 +192,9 @@ async function runLive<St>(m: Mechanic<St>): Promise<void> {
     await m.reset()
     const rng = prng(seed)
     const st = m.newState()
-    // 1. Seed a non-trivial baseline into PGlite (NOT fed to the graph — warming hydrates it).
+    // 1. Seed a non-trivial baseline into PGlite (NOT fed to the graph — the seed below hydrates it).
     for (let i = 0; i < 12; i++) await m.mutate(rng, st)
-    // 2. Acquire → seed from PGlite → warm through the real drain loop → live.
+    // 2. Acquire — which blocks on the seed from PGlite — then assert it reached live.
     const graph = await acquireLive(m, `${m.name}-${seed}`)
     await seedToLive(graph, `${m.name} seed=${seed}`)
     // 3. Post-flip differential: fired IFF the SQL result changed (both directions).

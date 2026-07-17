@@ -37,12 +37,12 @@ function statefulFake(seeds: SeedDescriptor[]): StatefulGraph {
   return { seeds, seedInput() {}, flushSeed() {}, feedInput() {}, runBatch: () => noFire, apply: () => noFire }
 }
 
-// ── a real compiled users ⋈ teams graph, warmed through the drain loop ──
+// ── a real compiled users ⋈ teams graph, seeded to live through its HydrationExecutor ──
 
 function joinExecutor(usersRows: Row[], teamsRows: Row[]): HydrationExecutor {
   return { scan: async (descriptor) => (descriptor.table === 'users' ? usersRows : teamsRows) }
 }
-async function warmedJoin(usersRows: Row[], teamsRows: Row[]): Promise<LiveGraph> {
+async function seededJoin(usersRows: Row[], teamsRows: Row[]): Promise<LiveGraph> {
   const build = () => qb.select().from(users).innerJoin(teams, eq(teams.id, users.teamId))
   const spec: LiveGraphSpec = {
     kind: 'stateful',
@@ -63,13 +63,13 @@ async function warmedJoin(usersRows: Row[], teamsRows: Row[]): Promise<LiveGraph
 describe('an old-inline retraction resolves without consulting the shadow', () => {
   it('an inline old for a row absent from the (complete) shadow still feeds the retraction, whereas key-only drops', async () => {
     // Baseline join: users{id:1,team_id:5} ⋈ teams{id:5}. Both shadows are complete.
-    const inlineGraph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    const inlineGraph = await seededJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     // Old carried INLINE for id=2 (never seeded): trusted directly → feeds the retraction → fires.
     const inline = inlineGraph.apply([{ table: 'users', kind: 'delete', old: { id: 2, team_id: 5 } }])
     expect(inline.invalidated).toBe(true)
 
     // The SAME retraction key-only misses the complete shadow → provably irrelevant → dropped.
-    const keyOnlyGraph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    const keyOnlyGraph = await seededJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     const keyOnly = keyOnlyGraph.apply([{ table: 'users', kind: 'delete', key: { id: 2 } }])
     expect(keyOnly.invalidated).toBe(false) // would also fire if old-inline consulted the shadow
   })
@@ -96,7 +96,7 @@ describe('.C — a change routed during the scan is buffered and replayed exactl
     // Two changes routed during the scan: one DUPLICATES the snapshot's PK (id 1), one is NEW (id 2).
     const dup = graph.apply([{ table: 'users', kind: 'insert', new: { id: 1, team_id: 5 } }])
     const fresh = graph.apply([{ table: 'users', kind: 'insert', new: { id: 2, team_id: 9 } }])
-    expect(dup.invalidated).toBe(false) // BUFFERED precisely — NOT coarse-invalidated (the warming behavior we cut)
+    expect(dup.invalidated).toBe(false) // BUFFERED precisely — NOT coarse-invalidated
     expect(fresh.invalidated).toBe(false)
 
     resolveScan([{ id: 1, team_id: 5 }]) // snapshot already contains id 1 (team 5)
@@ -139,7 +139,7 @@ describe('.C — a change routed during the scan is buffered and replayed exactl
 
 describe('fault() permanently demotes a corrupt graph to coarse', () => {
   it('a faulted live graph goes coarse and every subsequent change coarse-fires (sound over-fire)', async () => {
-    const graph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    const graph = await seededJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     expect(graph.state()).toBe('live')
     graph.fault() // the router calls this after a caught apply() throw — the precise state is corrupt
     expect(graph.state()).toBe('coarse')
@@ -150,7 +150,7 @@ describe('fault() permanently demotes a corrupt graph to coarse', () => {
 
 describe('coarsen() intentionally demotes a graph to coarse', () => {
   it('an explicit coarse event demotes a live graph to coarse and every subsequent change coarse-fires', async () => {
-    const graph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    const graph = await seededJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     expect(graph.state()).toBe('live')
     graph.coarsen() // the router calls this for an image-less mutation it can't represent precisely
     expect(graph.state()).toBe('coarse')
@@ -159,7 +159,7 @@ describe('coarsen() intentionally demotes a graph to coarse', () => {
   })
 
   it('coarsen on a terminal (destroyed) graph is inert', async () => {
-    const destroyed = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    const destroyed = await seededJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     destroyed.destroy()
     destroyed.coarsen() // terminal wins → no-op
     expect(destroyed.state()).toBe('destroyed')
@@ -216,7 +216,7 @@ describe('RLS-gated stateful graphs are born coarse', () => {
 
 describe('a graph fires at most once per batch', () => {
   it('a multi-change batch touching a graph several times advances the invalidation seq by at most one', async () => {
-    const graph = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    const graph = await seededJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     const before = graph.invalidationSeq()
     const out = graph.apply([
       { table: 'users', kind: 'insert', new: { id: 2, team_id: 5 } },

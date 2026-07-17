@@ -10,7 +10,7 @@ import { disposeUnredeemedReads, type ReadCarrier } from './readCapture.js'
 // releases anything a read reserved but never used.
 
 /** The context symbol under which a request's db.live carrier is stashed — one carrier per request,
- *  reused by every `.live` read + captured mutation in that request. */
+ *  reused by every `.live` read in that request. */
 const REACTIVE_CARRIER = Symbol.for('telefunc.reactiveDrizzleCarrier')
 
 /** The concrete carrier: the read half (the tokens each live read reserves) plus the opaque brand the

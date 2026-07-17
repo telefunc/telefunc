@@ -44,9 +44,9 @@ const Live: {
   derived: (compute) => LiveCell.derived(compute),
 }
 
-/** What travels once a Live crosses the wire: a stale signal, or a pushed value. Phase 1 rides
- *  `invalidate` (the client refetches); `data` carries the future delta push with no primitive
- *  change. The channel/wire layer is added in its own module — this module is the in-memory cell. */
+/** What travels once a Live crosses the wire: a stale signal, or a pushed value. `invalidate` tells the
+ *  client to refetch; `data` carries the value itself. The channel/wire layer lives in its own module —
+ *  this one is the in-memory cell. */
 type LiveEvent<T> = { kind: 'invalidate' } | { kind: 'data'; data: T }
 
 /** @internal The consumer-side subscription behind a `Live<T>` — the seam adapters bind to (invalidate

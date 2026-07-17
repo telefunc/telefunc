@@ -31,7 +31,7 @@ const MAX_STATE_ROWS_PER_INPUT = 50_000
 
 /** A read token minted for a db.live handle in the current request, tracked on the carrier so the
  *  request's finally-sweep can release it if the handle is never serialized (never activated). The
- *  handle's serialize-time `_activate` flips `redeemed`, so an activated token is skipped by the sweep
+ *  handle's serialize-time `activate` flips `redeemed`, so an activated token is skipped by the sweep
  *  (its lease is owned by the wire channel and released on close). */
 type MintedToken = { token: ReadToken; redeemed: boolean }
 
@@ -104,7 +104,7 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
   const entry: MintedToken = { token, redeemed: false }
   carrier.mintedTokens.push(entry)
 
-  const initialRows = (await builder) as Row[] // Phase 1: the initial result is a plain read; the graph signals staleness
+  const initialRows = (await builder) as Row[] // the initial result is a plain read; the graph signals staleness
   live = new LiveCell<Row[]>(initialRows)
   live.attachSource({
     subscribe: () => {

@@ -58,9 +58,9 @@ function subscribeTag(tag: string, requestStartSeq: number, onInvalidate: () => 
 }
 
 /** Invalidate `tag` (fire-and-forget, `void`). Publishes IMMEDIATELY and knows nothing about requests
- *  or transactions: the caller decides when a change is real, and says so by calling this. Batching a
- *  write's invalidations until its transaction commits is the write-capture layer's job — it is the
- *  only layer that knows what a commit is. */
+ *  or transactions: the caller decides when a change is real, and says so by calling this. Holding a
+ *  write's invalidations back until its transaction commits belongs to whoever owns that transaction —
+ *  nothing at this level can see one. */
 function invalidateTagStatic(tag: string): void {
   void publishTagImmediate(tag)
 }
