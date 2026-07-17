@@ -22,6 +22,8 @@ export type { ChannelBase, ClientChannel } from '../../wire-protocol/channel.js'
 export { DefaultBroadcastAdapter } from '../../wire-protocol/server/broadcast.js'
 export type { BroadcastAdapter, BroadcastTransport } from '../../wire-protocol/server/broadcast.js'
 export type { TelefuncServerExtension } from './extensions.js'
+export { Live } from './live/live.js'
+export type { ClientLive } from './live/live.js'
 export type {
   TypeContract,
   ReplacerType,
