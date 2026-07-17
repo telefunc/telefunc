@@ -1,5 +1,4 @@
 export { extractPredicate, parsePredicate, toNNF, conjunctsOf }
-export type { PredicateResult }
 
 import type { Column, SQL } from 'drizzle-orm'
 import type { CompareOp, Dialect, Predicate, ScalarExpr, SqlSource } from '../ir/types.js'

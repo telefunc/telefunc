@@ -7,11 +7,11 @@
 // to all columns. `applyChange` is the adapter: a captured change becomes a pruned,
 // qualified data delta (no-op updates fold away) and a per-change dirty decision.
 
-export { type InputPlan, type Change, type InputDelta, pushdownOf, applyChange }
+export { type InputPlan, type Change, pushdownOf, applyChange }
 
 import { conjunctsOf } from '../extract/predicate.js'
 import type { ColRef, Predicate, ScalarExpr, SelectShape, TableRef } from '../ir/types.js'
-import { containsUnknown, dirtyFrontier } from './dirty.js'
+import { dirtyFrontier } from './dirty.js'
 import { type Row, projectRaw, qualifiedRowView, requalify, rowString, sigmaMatch } from './rowSpace.js'
 
 type InputPlan = {
@@ -238,32 +238,5 @@ function eachLeafTable(pred: Predicate, visit: (real: string) => void): void {
       return
     default:
       return
-  }
-}
-
-function isStateful(shape: SelectShape): boolean {
-  return (
-    shape.joins.length > 0 ||
-    shape.groupBy.length > 0 ||
-    shape.groupByOpaque ||
-    shape.projection.items.some((item) => item.kind === 'agg') ||
-    shape.distinct.on !== false ||
-    shape.setOps.length > 0 ||
-    (shape.limit !== undefined && shape.orderBy.length > 0) ||
-    (shape.where ? containsUnknown(shape.where) && hasExistsLeaf(shape.where) : false)
-  )
-}
-
-function hasExistsLeaf(pred: Predicate): boolean {
-  switch (pred.kind) {
-    case 'exists':
-      return true
-    case 'and':
-    case 'or':
-      return pred.parts.some(hasExistsLeaf)
-    case 'not':
-      return hasExistsLeaf(pred.operand)
-    default:
-      return false
   }
 }

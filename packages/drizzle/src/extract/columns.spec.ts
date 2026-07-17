@@ -1,7 +1,5 @@
-import { eq } from 'drizzle-orm'
-import { QueryBuilder, alias, integer, pgSchema, pgTable, primaryKey, text, varchar } from 'drizzle-orm/pg-core'
+import { alias, integer, pgSchema, pgTable, primaryKey, text, varchar } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
-import { extractQueryShape } from './queryShape.js'
 import {
   colRefOf,
   primaryKeyOf,

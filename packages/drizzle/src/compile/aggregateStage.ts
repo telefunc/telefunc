@@ -11,7 +11,7 @@
 // UNGROUPED aggregate seeds its unit-group zero row (count 0 / sum NULL) before any input,
 // so a first NULL row that leaves the value unchanged emits no delta.
 
-export { type AggregateResult, applyAggregate }
+export { applyAggregate }
 
 import {
   type D2,

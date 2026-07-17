@@ -4,7 +4,6 @@ export {
   clientOf,
   semanticEnvironmentKeyOf,
   rlsEnabledOf,
-  rowRunnerFor,
   executeSql,
   entityKindOf,
   isSingleSession,

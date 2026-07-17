@@ -9,7 +9,7 @@
 // rather than silently miss. INNER equi-joins keep their non-equi residual as a widening
 // filter with the dirty tap on the candidate pairs.
 
-export { type JoinResult, applyJoins, joinsExact }
+export { applyJoins, joinsExact }
 
 import { conjunctsOf } from '../extract/predicate.js'
 import { type IStreamBuilder, type KeyValue, filter, join as joinOp, keyBy, map } from '../graph/ivm.js'

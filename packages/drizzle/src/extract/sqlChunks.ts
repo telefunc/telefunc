@@ -1,4 +1,4 @@
-export { tokenize, ChunkCursor, textOf, isText, splitOn, stripParens, readAggCall }
+export { tokenize, textOf, isText, splitOn, stripParens, readAggCall }
 export type { SqlToken }
 
 import { Column, Param, Placeholder, SQL, StringChunk, is } from 'drizzle-orm'

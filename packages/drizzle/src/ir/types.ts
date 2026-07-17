@@ -187,7 +187,7 @@ export type QueryShape = SelectShape | CoarseShape
 
 /** One cell of a row: `present: false` is a column that was never captured
  *  (MISSING → widens to unknown); `present: true, value: null` is a real SQL NULL. */
-export type Cell = { present: false } | { present: true; value: unknown }
+type Cell = { present: false } | { present: true; value: unknown }
 
 export interface RowView {
   get(column: string): Cell

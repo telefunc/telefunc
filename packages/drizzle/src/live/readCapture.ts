@@ -9,7 +9,7 @@
 // disposeUnredeemedReads from here DIRECTLY (no install seam) — this module IS the engine surface.
 
 export { wrapLiveSelect, disposeUnredeemedReads, compilePlanFor }
-export type { MintedToken, ReadCarrier }
+export type { ReadCarrier }
 
 import { type Table, isTable } from 'drizzle-orm'
 import type { Live } from 'telefunc'

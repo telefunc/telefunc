@@ -21,7 +21,7 @@ export {
   filterBy,
   IVM_ENGINE_VERSION,
 }
-export type { IStreamBuilder, MultiSetArray, KeyValue, PipedOperator, RootStreamBuilder, KeyedStream }
+export type { IStreamBuilder, MultiSetArray, KeyValue, RootStreamBuilder }
 
 import {
   D2,

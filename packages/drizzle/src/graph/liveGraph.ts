@@ -9,7 +9,7 @@
 // state-row overflow, or a caught apply-fault (the router faults a throwing graph) DEMOTES to coarse
 // (sound over-fire). Firing is reported to the caller (the router owns per-identity notification).
 
-export { type LiveGraph, type LiveGraphSpec, type GraphState, type ApplyOutcome, createLiveGraph }
+export { type LiveGraph, type LiveGraphSpec, type ApplyOutcome, createLiveGraph }
 
 import type { Change, CompiledGraph, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
 import type { RowChange, TableChange } from '../router/events.js'
@@ -80,7 +80,6 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
   }
 
   function startSeeding(): void {
-    seed?.abort() // supersede any prior generation (defensive — there is only the initial seed)
     const stateful = spec as Extract<LiveGraphSpec, { kind: 'stateful' }>
     graph = stateful.instantiate()
     // A no-PK input can never shadow-resolve a key-only retraction → born coarse (T5.A6).

@@ -6,7 +6,7 @@
 // the σ rules the shadow is scoped by — membership, pruning, and the PK key — so "σ-matching"
 // means one thing in exactly one place. Shadow rows count toward the per-input state bound.
 
-export { type ShadowIndex, type ShadowMatch, createShadow, matchesResidual, pruneRow, pkOf }
+export { type ShadowIndex, createShadow, matchesResidual, pruneRow, pkOf }
 
 import type { SeedDescriptor } from '../compile/compile.js'
 import { type Row, projectRaw, qualifiedRowView, sigmaMatch } from '../compile/rowSpace.js'

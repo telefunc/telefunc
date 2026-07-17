@@ -9,7 +9,7 @@
 // state bound demotes to coarse (bounded, sound). A generation aborted (retire / destroy / demote)
 // before it lands is inert — a late scan completion never seeds a dead or superseded graph.
 
-export { type HydrationExecutor, type SeedHooks, type Seed, createSeed }
+export { type HydrationExecutor, type Seed, createSeed }
 
 import type { SeedDescriptor } from '../compile/compile.js'
 import type { Row } from '../compile/rowSpace.js'

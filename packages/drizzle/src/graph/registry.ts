@@ -7,7 +7,7 @@
 // atomic transfer (no transient zero); refcount 0 destroys immediately and synchronously (no grace,
 // no cap, no pool).
 
-export { type Registry, type AcquireRequest, type AcquireResult, type ReadToken, type Lease, createRegistry }
+export { type Registry, type AcquireRequest, type ReadToken, createRegistry }
 
 import type { GraphPlan, StatefulGraph } from '../compile/compile.js'
 import { assertUsage } from '../utils/assert.js'

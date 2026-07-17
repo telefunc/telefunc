@@ -1,5 +1,5 @@
 export { reactiveDrizzle }
-export type { Reactive, LiveOf, LiveNamespace, DbLiveCarrier }
+export type { LiveOf, DbLiveCarrier }
 
 import type { Live } from 'telefunc'
 import { acquireCarrier, captureMutation } from './dbLiveRuntime.js'

@@ -1,5 +1,4 @@
 export { selectConfigOf, isPartialSelect }
-export type { DrizzleSelect, SelectConfig, JoinConfig, SetOperatorConfig }
 
 import type { SQL } from 'drizzle-orm'
 

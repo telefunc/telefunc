@@ -6,7 +6,7 @@
 // filter that could cancel a witnessed change. Over-firing is sound; a miss never is.
 
 export { createDirtySink, dirtyFrontier, containsUnknown }
-export type { DirtySink, DirtyFrontier }
+export type { DirtySink }
 
 import { conjunctsOf } from '../extract/predicate.js'
 import { type IStreamBuilder, concat, map, output } from '../graph/ivm.js'

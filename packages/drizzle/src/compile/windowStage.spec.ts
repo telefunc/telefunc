@@ -1,4 +1,4 @@
-import { asc, desc, sql } from 'drizzle-orm'
+import { asc, sql } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { extractQueryShape } from '../extract/queryShape.js'
