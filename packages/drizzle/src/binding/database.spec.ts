@@ -7,7 +7,7 @@ import { Client, Pool } from 'pg'
 import postgres from 'postgres'
 import { afterAll, describe, expect, it } from 'vitest'
 import { StatementSync } from 'node:sqlite'
-import { type RowRunner, clientOf, dialectOf, driverOf, rlsEnabledOf, semanticEnvironmentKeyOf } from './database.js'
+import { type RowRunner, dialectOf, driverOf, rlsEnabledOf, semanticEnvironmentKeyOf } from './database.js'
 
 // drizzle-orm rc.4 node-sqlite calls StatementSync.setReturnArrays() (added Node 22.16 / 24.0; ABSENT
 // in 23.x). Where it is missing, the real sqlite authority probe fail-closes (production-correct) and
@@ -66,10 +66,6 @@ describe('dialect & driver detection', () => {
     expect(driverOf(pgPoolDb)).toBe('NodePgDatabase')
     expect(driverOf(pjDb)).toBe('PostgresJsDatabase')
     expect(driverOf(myDb)).toBe('MySql2Database')
-  })
-
-  it('exposes the raw $client', () => {
-    expect(clientOf(pgPoolDb)).toBe(pgPool)
   })
 })
 

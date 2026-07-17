@@ -1,13 +1,4 @@
-export {
-  dialectOf,
-  driverOf,
-  clientOf,
-  semanticEnvironmentKeyOf,
-  rlsEnabledOf,
-  executeSql,
-  entityKindOf,
-  isSingleSession,
-}
+export { dialectOf, driverOf, semanticEnvironmentKeyOf, rlsEnabledOf, executeSql, entityKindOf, isSingleSession }
 export type { RlsStatus, RowRunner }
 
 import { type SQL, entityKind, sql } from 'drizzle-orm'
@@ -52,11 +43,6 @@ function driverOf(db: AnyDb): string {
   const kind = entityKindOf(db)
   assertUsage(kind, 'Expected a drizzle database instance (no entityKind found).')
   return kind
-}
-
-/** The raw driver client (`Pool`, `postgres` sql, `DatabaseSync`, …). */
-function clientOf(db: AnyDb): unknown {
-  return db.$client
 }
 
 // ── Semantic authority ──────────────────────────────────────────────
