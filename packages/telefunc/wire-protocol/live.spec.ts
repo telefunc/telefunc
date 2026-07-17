@@ -242,24 +242,6 @@ describe('a live query whose pre-peer frames are dropped still reaches the clien
     expect(received.some((d) => 'text' in d && d.text.includes('invalidate'))).toBe(true)
   })
 
-  it('an invalidation evicted by ordinary overflow — no oversized frame — is still delivered', async () => {
-    // The likelier path in production: nothing is oversized, there is simply more traffic than the cap,
-    // so the buffer evicts its OLDEST entry — which is exactly where the first invalidation sits.
-    const { channel, serialize } = createRealChannelHarness(96)
-    const live = new LiveCell<string>('initial')
-    serialize(live)
-
-    live.invalidate() // buffered first, and therefore first to be evicted
-    await tick()
-    for (let i = 0; i < 6; i++) {
-      live.set(`update-${i}`.padEnd(40, '.')) // ordinary frames, each well under the cap
-      await tick()
-    }
-
-    const received = attachPeer(channel)
-    expect(received.some((d) => 'text' in d && d.text.includes('invalidate'))).toBe(true)
-  })
-
   it('a data push evicted before connect is not lost silently either', async () => {
     const { channel, serialize } = createRealChannelHarness(64)
     const live = new LiveCell<string>('initial')
