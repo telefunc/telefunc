@@ -44,24 +44,6 @@ function toToken(chunk: unknown): SqlToken | null {
   return { kind: 'param', value: chunk }
 }
 
-/** A rewindable reader over a token stream, for sequential atom parsing. */
-class ChunkCursor {
-  private index = 0
-  constructor(private readonly tokens: readonly SqlToken[]) {}
-  get done(): boolean {
-    return this.index >= this.tokens.length
-  }
-  get remaining(): number {
-    return this.tokens.length - this.index
-  }
-  peek(offset = 0): SqlToken | undefined {
-    return this.tokens[this.index + offset]
-  }
-  next(): SqlToken | undefined {
-    return this.tokens[this.index++]
-  }
-}
-
 function textOf(token: SqlToken | undefined): string | null {
   return token?.kind === 'text' ? token.text : null
 }

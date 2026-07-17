@@ -38,11 +38,8 @@ import {
   reduce,
   topK,
 } from '@tanstack/db-ivm'
-import type { IStreamBuilder, KeyValue, MultiSetArray, PipedOperator, RootStreamBuilder } from '@tanstack/db-ivm'
+import type { IStreamBuilder, KeyValue, MultiSetArray, RootStreamBuilder } from '@tanstack/db-ivm'
 
 /** The engine golden. db-ivm is pre-1.0, so the pin is exact and this name is asserted
  *  by the contract spec against the installed package version. */
 const IVM_ENGINE_VERSION = '0.1.18'
-
-/** A keyed difference stream — the shape every join/aggregate/window stage keys into. */
-type KeyedStream<K, V> = IStreamBuilder<KeyValue<K, V>>
