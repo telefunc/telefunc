@@ -149,3 +149,29 @@ describe('sync context mode — tag usage must survive a macrotask (real-I/O) aw
     expect(server.created[0]!.sends).toContainEqual({ kind: 'invalidate' })
   })
 })
+
+describe("the fence is the request's, wherever the association is written", () => {
+  it('a tag associated after the read still catches a write that landed before the association', async () => {
+    const requestContext = {}
+    const server = createServerHarness(requestContext)
+    const live = new LiveCell<string[]>([])
+    await restoreContext(requestContext, async () => {
+      await stampRequestStartFence()
+      await macrotask() // the read's I/O await — the sync-mode context is gone from here on
+      expect(getRawContext()).toBeNull()
+
+      // The write lands BEFORE this request has said which tag it cares about.
+      await getTagHub().publish(['t'])
+      // ...and the association is written after both the await and the write. The two existing cases
+      // each leave a way out: one associates before the await, the other publishes after associating.
+      // An implementation that fenced post-await associations from "now" — a plausible way to make
+      // post-await association work — would satisfy both and lose exactly this write. Only the fence
+      // stamped at request entry covers a read whose write raced it and whose tag was named later.
+      LiveCell.onInvalidate('t', live)
+      live.set(['fetched'])
+      server.serialize(live)
+    })
+    await flush()
+    expect(server.created[0]!.sends).toContainEqual({ kind: 'invalidate' })
+  })
+})
