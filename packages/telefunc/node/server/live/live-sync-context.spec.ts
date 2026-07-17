@@ -6,10 +6,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { restoreContext, getRawContext } from '../context/context.js'
+import type { Context } from '../context/context.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
 import { LiveCell } from './live.js'
-import { stampRequestStartFence } from './tags.js'
+import { stampRequestStartFence, getRequestStartSeq } from './tags.js'
 import { getTagHub, _resetTagHubsForTesting } from './tagHub.js'
 import {
   getBroadcastAdapter,
@@ -51,7 +52,7 @@ function makeFakeChannel(id: string): FakeChannel & Record<string, unknown> {
   }
 }
 
-function createServerHarness() {
+function createServerHarness(requestContext?: Context) {
   const created: Array<FakeChannel & Record<string, unknown>> = []
   let n = 0
   const context = {
@@ -63,6 +64,11 @@ function createServerHarness() {
     registerChannel: () => {},
     sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
     validators: new Map(),
+    // Mirrors production: serialization takes the fence from the request context it was handed, not
+    // from the ambient one — which in sync mode is already gone by the time this runs.
+    get requestStartSeq() {
+      return requestContext ? getRequestStartSeq(requestContext) : undefined
+    },
   } as unknown as ServerReplacerContext
   const replacer = createStreamingReplacer(
     () => context,
@@ -86,20 +92,25 @@ describe('sync context mode — tag usage must survive a macrotask (real-I/O) aw
     expect(tagBatchCalls(publishSpy).length).toBeGreaterThanOrEqual(1) // the invalidation crossed the wire
   })
 
-  it('READ fix (guard): LiveCell.onInvalidate called AFTER the await THROWS — enforces subscribe-before-fetch', async () => {
-    let thrown: unknown
-    await restoreContext({}, async () => {
+  it('associating a tag AFTER an await is valid — there is no ordering rule to get wrong', async () => {
+    const requestContext = {}
+    const server = createServerHarness(requestContext)
+    const live = new LiveCell<string[]>([])
+    await restoreContext(requestContext, async () => {
       await stampRequestStartFence()
-      await macrotask() // context nulled
-      const live = new LiveCell<string[]>([])
-      try {
-        LiveCell.onInvalidate('t', live) // eager fence capture needs the live context — throws post-await
-      } catch (err) {
-        thrown = err
-      }
+      await macrotask() // a real-I/O await: the sync-mode context is nulled from here on
+      expect(getRawContext()).toBeNull()
+      // Associating a tag reads no context, so this is fine — which is the whole point. The fence was
+      // stamped at request entry, and serialization resolves the key against it. Requiring this call to
+      // precede the body's first await would be an ordering rule nothing enforces and every caller
+      // would eventually break; a read above it would silently lose its catch-up.
+      expect(() => LiveCell.onInvalidate('t', live)).not.toThrow()
+      live.set(['fetched'])
+      server.serialize(live)
     })
-    expect(thrown).toBeInstanceOf(Error)
-    expect(String(thrown)).toMatch(/inside a telefunction/)
+    await getTagHub().publish(['t'])
+    await flush()
+    expect(server.created[0]!.sends).toContainEqual({ kind: 'invalidate' })
   })
 
   it('LEAK-SAFETY: capture-but-never-serialize subscribes NOTHING (serialize-time single activation)', async () => {
@@ -118,22 +129,22 @@ describe('sync context mode — tag usage must survive a macrotask (real-I/O) aw
     expect(invalidated).not.toHaveBeenCalled()
   })
 
-  it('READ fix: LiveCell.onInvalidate BEFORE the await + live.set after → the serialized handle fires on a later publish', async () => {
-    const server = createServerHarness()
-    await restoreContext({}, async () => {
+  it('a tag published between the read and serialization is still caught, across a context-nulling await', async () => {
+    const requestContext = {}
+    const server = createServerHarness(requestContext)
+    const live = new LiveCell<string[]>([])
+    await restoreContext(requestContext, async () => {
       await stampRequestStartFence()
-      const live = new LiveCell<string[]>([])
-      LiveCell.onInvalidate('t', live) // BEFORE any await — fence captured while the context is live
-      await macrotask() // context nulled (the redis await)
-      live.set(['fetched']) // handle op after the await — no context needed
-      server.serialize(live) // serialize post-await (context null) — must use the CAPTURED fence
+      LiveCell.onInvalidate('t', live)
+      await macrotask() // the read's I/O await — the context is gone from here on
+      // A write lands in the window between this request's read and its serialize. Catching it is the
+      // entire reason the fence exists, and it must survive the context being nulled: serialization
+      // resolves the tag against the explicitly-carried fence, never an ambient lookup.
+      await getTagHub().publish(['t'])
+      live.set(['fetched'])
+      server.serialize(live)
     })
-    const channel = server.created[0]!
-    await getTagHub().publish(['t'])
     await flush()
-    // The handle is live across the context-nulling await: a later cross-request publish reaches it. (The
-    // pre-serialize `live.set` may also ride an initial data frame — harness-timing-dependent — so assert
-    // the invalidate is delivered rather than the exact frame sequence.)
-    expect(channel.sends).toContainEqual({ kind: 'invalidate' })
+    expect(server.created[0]!.sends).toContainEqual({ kind: 'invalidate' })
   })
 })

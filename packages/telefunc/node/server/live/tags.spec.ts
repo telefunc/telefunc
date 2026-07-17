@@ -1,8 +1,8 @@
 import '../context/async.js' // install AsyncLocalStorage mode so context survives macrotask awaits
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { restoreContext } from '../context/context.js'
+import { restoreContext, getRawContext } from '../context/context.js'
 import { getTagHub, _resetTagHubsForTesting, _setBarrierBudgetForTesting } from './tagHub.js'
-import { stampRequestStartFence, captureTagFence, subscribeCapturedTag } from './tags.js'
+import { stampRequestStartFence, getRequestStartSeq, subscribeTag } from './tags.js'
 import { LiveCell } from './live.js'
 import {
   getBroadcastAdapter,
@@ -31,10 +31,13 @@ function inRequest<T>(fn: () => Promise<T>): Promise<T> {
   return restoreContext({}, fn)
 }
 
-/** Capture a tag fence and subscribe it — the low-level catch-up path `LiveCell.onInvalidate` uses at
- *  serialization: register the index listener, then replay a publish that landed since the fence. */
+/** The request fence, as serialization reads it off the request context. */
+const requestFence = () => getRequestStartSeq(getRawContext()!)!
+
+/** Subscribe a tag the way serialization does: resolve the key against the request fence — register
+ *  the index listener, then replay anything published since. */
 function subscribeFenced(tag: string, onInvalidate: () => void): () => void {
-  return subscribeCapturedTag(captureTagFence(tag), onInvalidate)
+  return subscribeTag(tag, requestFence(), onInvalidate)
 }
 
 /** Publish calls carrying a tag batch (readiness-barrier frames are `{"barrier":...}`, no tags). */
@@ -322,7 +325,7 @@ describe('a tag that could not be broadcast still reaches the requests that need
   it('a publish that fails is still caught by a request that read before it and subscribed after', () =>
     inRequest(async () => {
       await stampRequestStartFence() // the request reads at this fence
-      const fence = captureTagFence('t')
+      const fence = requestFence()
 
       broadcast.takeDown()
       await publishWhileDown('t') // a write elsewhere publishes 't'; the transport is down
@@ -331,7 +334,7 @@ describe('a tag that could not be broadcast still reaches the requests that need
       // never entered the journal there is nothing for the catch-up scan to find, and this client
       // would hold its pre-write snapshot forever with no signal that it went stale.
       const onInvalidate = vi.fn()
-      subscribeCapturedTag(fence, onInvalidate)
+      subscribeTag('t', fence, onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     }))
 
@@ -342,7 +345,7 @@ describe('a tag that could not be broadcast still reaches the requests that need
 
     await inRequest(async () => {
       await stampRequestStartFence() // the request fences AFTER the local fallback
-      const fence = captureTagFence('y')
+      const fence = requestFence()
 
       // Instance B was healthy: its publish of 'y' carries backend seq 43 — the number our fallback
       // already consumed locally. Adopting the transport's seq here would land this event AT the
@@ -350,7 +353,7 @@ describe('a tag that could not be broadcast still reaches the requests that need
       broadcast.deliverFromPeer(['y'], 43)
 
       const onInvalidate = vi.fn()
-      subscribeCapturedTag(fence, onInvalidate)
+      subscribeTag('y', fence, onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     })
   })
@@ -362,13 +365,13 @@ describe('a tag that could not be broadcast still reaches the requests that need
 
     await inRequest(async () => {
       await stampRequestStartFence()
-      const fence = captureTagFence('y')
+      const fence = requestFence()
       // Each of these carries a backend seq below the inflated local clock. Under a
       // transport-authoritative clock the whole run 43..50 would be silently suppressed — the window
       // spans many real deliveries, not just one recovery instant.
       for (let seq = 43; seq <= 50; seq++) broadcast.deliverFromPeer(['y'], seq)
       const onInvalidate = vi.fn()
-      subscribeCapturedTag(fence, onInvalidate)
+      subscribeTag('y', fence, onInvalidate)
       expect(onInvalidate).toHaveBeenCalledTimes(1)
     })
   })

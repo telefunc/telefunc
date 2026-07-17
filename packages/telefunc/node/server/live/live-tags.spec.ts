@@ -2,10 +2,11 @@ import '../context/async.js' // keep the request context alive across the specs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { restoreContext } from '../context/context.js'
+import type { Context } from '../context/context.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
 import { LiveCell } from './live.js'
-import { stampRequestStartFence } from './tags.js'
+import { stampRequestStartFence, getRequestStartSeq } from './tags.js'
 import { getTagHub, _resetTagHubsForTesting } from './tagHub.js'
 import {
   getBroadcastAdapter,
@@ -25,8 +26,11 @@ beforeEach(() => {
 })
 afterEach(() => _resetBroadcastAdapterForTesting(previousAdapter))
 
-function inRequest<T>(fn: () => Promise<T>): Promise<T> {
-  return restoreContext({}, fn)
+/** Run `fn` inside a request, handing it the request's context object — the same object production
+ *  serialization is given, and where the entry fence is stamped. */
+function inRequest<T>(fn: (requestContext: Context) => Promise<T>): Promise<T> {
+  const requestContext: Context = {}
+  return restoreContext(requestContext, () => fn(requestContext))
 }
 
 /** Publish calls carrying a tag batch (readiness-barrier frames are `{"barrier":…}`, no tags). */
@@ -50,7 +54,7 @@ function makeFakeChannel(id: string): FakeChannel & Record<string, unknown> {
   }
 }
 
-function createServerHarness() {
+function createServerHarness(requestContext?: Context) {
   const created: Array<FakeChannel & Record<string, unknown>> = []
   let n = 0
   const context = {
@@ -62,6 +66,10 @@ function createServerHarness() {
     registerChannel: () => {},
     sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
     validators: new Map(),
+    // Mirrors production: the fence is carried on the request context serialization was handed.
+    get requestStartSeq() {
+      return requestContext ? getRequestStartSeq(requestContext) : undefined
+    },
   } as unknown as ServerReplacerContext
   const replacer = createStreamingReplacer(
     () => context,
@@ -74,11 +82,11 @@ function createServerHarness() {
 
 describe('Live tag statics — LiveCell.onInvalidate / LiveCell.invalidate over TagHub (§3.C)', () => {
   it('T12.C1 LiveCell.onInvalidate binds the handle: a published tag → the handle channel invalidates', () =>
-    inRequest(async () => {
+    inRequest(async (requestContext) => {
       await stampRequestStartFence()
       const live = new LiveCell('rows')
       LiveCell.onInvalidate('t', live)
-      const server = createServerHarness()
+      const server = createServerHarness(requestContext)
       server.serialize(live) // serialization activates the fenced tag source
       const channel = server.created[0]!
       await getTagHub().publish(['t'])
@@ -87,25 +95,25 @@ describe('Live tag statics — LiveCell.onInvalidate / LiveCell.invalidate over 
     }))
 
   it('T12.C2 fence catch-up: a tag published between the read and serialization is still caught', () =>
-    inRequest(async () => {
+    inRequest(async (requestContext) => {
       await stampRequestStartFence()
       const live = new LiveCell('rows')
       LiveCell.onInvalidate('t', live)
       await getTagHub().publish(['t']) // published BEFORE serialization — the read→attach window
-      const server = createServerHarness()
+      const server = createServerHarness(requestContext)
       server.serialize(live) // the activation's scanSince catch-up delivers the earlier publish
       await flush()
       expect(server.created[0]!.sends).toEqual([{ kind: 'invalidate' }])
     }))
 
   it("T12.C1 a request's OWN LiveCell.invalidate self-invalidates its handle (harmless — invalidation is idempotent)", () =>
-    inRequest(async () => {
+    inRequest(async (requestContext) => {
       await stampRequestStartFence()
       const live = new LiveCell('rows')
       LiveCell.onInvalidate('t', live) // the handle is live under 't'...
       LiveCell.invalidate('t') // ...and the SAME request invalidates 't'
       await flush() // the publish is fire-and-forget; let it land
-      const server = createServerHarness()
+      const server = createServerHarness(requestContext)
       server.serialize(live) // activation's fence catch-up sees 't' published since the request-start fence
       await flush()
       // Own-echo suppression was removed: a self-refetch is harmless (the client re-reads once), and can be
@@ -123,7 +131,7 @@ describe('Live tag statics — LiveCell.onInvalidate / LiveCell.invalidate over 
   })
 
   it('never-serialized tag handle activates nothing (leak-safe)', () =>
-    inRequest(async () => {
+    inRequest(async (requestContext) => {
       await stampRequestStartFence()
       const live = new LiveCell('rows')
       LiveCell.onInvalidate('t', live)

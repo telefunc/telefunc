@@ -1,7 +1,7 @@
 export { Live, LiveCell }
 export type { LiveEvent, LiveSubscription }
 
-import { captureTagFence, subscribeCapturedTag, invalidateTagStatic } from './tags.js'
+import { subscribeTag, invalidateTagStatic } from './tags.js'
 
 // A PRIVATE brand (global-registry symbol, like SERVER_CHANNEL_BRAND). Detection is internal only —
 // never a public surface — so this is neither exported nor exposed via a static; the wire replacer
@@ -100,6 +100,9 @@ class LiveCell<T> {
   // ── serialize-time activation (deferred, cell-local lease-refcounted) ──
   /** Deps read during a `Live.derived` callback, held INERT — subscribed only at serialization. */
   private pendingDeps: Array<LiveCell<unknown>> = []
+  /** Tag keys this cell should go stale on. Stored INERT — resolving a key to a hub subscription needs
+   *  the request's fence, which only serialization has. */
+  private tags: string[] = []
   /** Server-owned invalidation sources (engine graph, tag subscriptions), subscribed on the first lease. */
   private sources: LiveActivationSource[] = []
   private sourceTeardowns: Array<() => void> = []
@@ -185,18 +188,16 @@ class LiveCell<T> {
     return derived
   }
 
-  /** Subscribe this cell to a server-owned tag (manual liveness). Attaches a FENCED tag source (the
-   *  existing TagHub `requestStartSeq`/`scanSince` catch-up — a tag published between the acquiring
-   *  read and serialization is still caught) that the replacer activates at serialization and uses to
-   *  `invalidate` the cell; the cell-local lease refcounts a handle held by more than one channel. */
+  /** Go stale whenever `key` is invalidated.
+   *
+   *  This only RECORDS the key. It reads no context, touches no hub, and registers nothing, so it can
+   *  be called anywhere in a telefunction — before or after any `await`. That is the point: the fence
+   *  that decides what counts as "published since this request read" is stamped once at request entry,
+   *  and serialization resolves the key against it. An association that had to capture the fence itself
+   *  would have to run before the body's first await, which is an ordering rule nothing enforces and
+   *  every caller would eventually get wrong. */
   static onInvalidate(key: string, live: LiveCell<unknown>): void {
-    // Capture the tag fence NOW — inside the request context, BEFORE any real-I/O await (which, in the
-    // default sync context mode, nulls the context at the next macrotask). The subscription itself is
-    // deferred to serialization (leak-safe: a never-serialized handle registers nothing on the hub) but
-    // replays through the captured, context-free fence — so it survives an I/O await. Call before any
-    // await; a post-await call throws the "inside a telefunction" assert (enforces subscribe-before-fetch).
-    const fence = captureTagFence(key)
-    live.attachSource({ subscribe: (onInvalidate) => subscribeCapturedTag(fence, onInvalidate) })
+    live.tags.push(key)
   }
 
   /** Publish a stale signal for `key`. Inside a request it is queued and published at settle; outside
@@ -212,15 +213,22 @@ class LiveCell<T> {
   }
 
   /** Serialize-time activation, refcounted by cell-local leases (one per owning channel). On the first
-   *  lease it subscribes the source and cascade-activates each pending dep — idempotent, so a dep also
-   *  returned elsewhere activates EXACTLY ONCE — wiring each dep's `onInvalidate` to this cell's
-   *  `invalidate` (invalidate-only forwarding). */
-  activate(): void {
+   *  lease it resolves this cell's tag keys against the request's fence, subscribes its sources, and
+   *  cascade-activates each pending dep — idempotent, so a dep also returned elsewhere activates EXACTLY
+   *  ONCE — wiring each dep's `onInvalidate` to this cell's `invalidate` (invalidate-only forwarding).
+   *
+   *  `requestStartSeq` is threaded down the cascade explicitly rather than read from ambient context:
+   *  by serialize time the request context may already be gone, and a dep is activated by whichever
+   *  cell owns it, not by the request. */
+  activate(requestStartSeq: number): void {
     this.lease++
     if (this.lease !== 1) return
+    for (const tag of this.tags) {
+      this.sourceTeardowns.push(subscribeTag(tag, requestStartSeq, () => this.invalidate()))
+    }
     for (const source of this.sources) this.sourceTeardowns.push(source.subscribe(() => this.invalidate()))
     for (const dep of this.pendingDeps) {
-      dep.activate()
+      dep.activate(requestStartSeq)
       const off = dep.onInvalidate(() => this.invalidate())
       this.activationTeardowns.push(() => {
         off()

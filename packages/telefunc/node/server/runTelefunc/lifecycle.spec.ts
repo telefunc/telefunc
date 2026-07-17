@@ -6,7 +6,7 @@ import { REQUEST_CONTEXT } from '../context/requestContext.js'
 import { getRawContext } from '../context/context.js'
 import { getServerConfig } from '../serverConfig.js'
 import type { TelefuncServerExtension } from '../extensions.js'
-import { captureTagFence, subscribeCapturedTag } from '../live/tags.js'
+import { subscribeTag, getRequestStartSeq } from '../live/tags.js'
 import { getTagHub, _resetTagHubsForTesting } from '../live/tagHub.js'
 import { parse } from '@brillout/json-serializer/parse'
 import {
@@ -201,8 +201,8 @@ describe('lifecycle — the live-query fence is stamped before the body', () => 
       // the fence stamped lazily on first use (below), it would sit ABOVE this publish and miss it —
       // which is the whole reason it is stamped at entry rather than on demand.
       await getTagHub().publish(['t'])
-      const fence = captureTagFence('t')
-      subscribeCapturedTag(fence, onInvalidate)
+      // Resolve the tag the way serialization does: against the fence stamped at request entry.
+      subscribeTag('t', getRequestStartSeq(getRawContext()!)!, onInvalidate)
       return 'r'
     })
     expect(onInvalidate).toHaveBeenCalledTimes(1)

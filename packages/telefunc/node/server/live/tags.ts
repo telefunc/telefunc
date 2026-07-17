@@ -1,9 +1,7 @@
-export { stampRequestStartFence }
-export { captureTagFence, subscribeCapturedTag, invalidateTagStatic }
-export type { TagFence }
+export { stampRequestStartFence, getRequestStartSeq, subscribeTag, invalidateTagStatic }
 
-import { assertUsage } from '../../../utils/assert.js'
 import { getRawContext } from '../context/context.js'
+import type { Context } from '../context/context.js'
 import { getTagHub } from './tagHub.js'
 import type { TagHub } from './tagHub.js'
 
@@ -15,9 +13,9 @@ type TagState = {
   requestStartSeq: number
 }
 
-/** Stamp the request-start fence and await the hub's readiness barrier once — runs before the body
- *  (core START step) so a tag published between the read and a later `Live.onInvalidate` subscribe
- *  still replays. */
+/** Stamp the request's fence, once, before the body runs — and therefore before any read it performs.
+ *  Key-agnostic: it records WHEN the request started observing, not what it cares about. Awaits the
+ *  hub's readiness barrier so the subscription is proven live before that moment is recorded. */
 async function stampRequestStartFence(): Promise<void> {
   const context = getRawContext()
   if (!context || context[TAGS]) return
@@ -29,41 +27,25 @@ async function stampRequestStartFence(): Promise<void> {
   } satisfies TagState
 }
 
-function getRequestTagState(): TagState {
-  const context = getRawContext()
-  assertUsage(
-    context,
-    'Live tag operations (Live.onInvalidate / Live.invalidate) can only be used inside a telefunction.',
-  )
-  const existing = context[TAGS] as TagState | undefined
-  if (existing) return existing
+/** Read the stamped fence off an EXPLICIT context object. Serialization passes the context it already
+ *  holds rather than reaching for the ambient one, which by then may be gone: in the default sync mode
+ *  the request context is nulled at the first macrotask, so an ambient read at serialize is a race. */
+function getRequestStartSeq(context: Context): number | undefined {
+  return (context[TAGS] as TagState | undefined)?.requestStartSeq
+}
+
+/** Subscribe `tag`, replaying anything published since `requestStartSeq`.
+ *
+ *  Order is load-bearing: REGISTER FIRST, then scan. Registering first means a publish landing during
+ *  the scan is delivered by the index rather than falling between the two steps; the reverse order has
+ *  a window where an invalidation belongs to neither. An overlap is harmless — invalidation is
+ *  idempotent, so the pair may deliver twice but can never deliver zero times. A journal overflow
+ *  replays unconditionally, since "published since the fence" can no longer be answered.
+ *
+ *  Context-free by construction: everything it needs is an argument, so it runs at serialize time
+ *  whether or not the request context still exists. */
+function subscribeTag(tag: string, requestStartSeq: number, onInvalidate: () => void): () => void {
   const hub = getTagHub()
-  const state: TagState = { hub, requestStartSeq: hub.currentSeq() }
-  context[TAGS] = state
-  return state
-}
-
-/** A request's tag fence, captured while the sync context is live. Holds ONLY stable per-request refs
- *  (hub, request-start seq) and registers NOTHING on the hub, so `subscribeCapturedTag` can run
- *  context-free at serialize (rationale on `captureTagFence`). */
-type TagFence = { tag: string; hub: TagHub; requestStartSeq: number }
-
-/** Capture the fence for `tag`. MUST run inside the request context — BEFORE any real-I/O await (which,
- *  in the default sync context mode, nulls the context at the next macrotask) — else `getRequestTagState()`
- *  throws the "inside a telefunction" assert (the guard that enforces subscribe-before-fetch). Reads only
- *  stable refs and registers no hub listener → leak-safe by construction until an actual subscribe. */
-function captureTagFence(tag: string): TagFence {
-  const { hub, requestStartSeq } = getRequestTagState()
-  return { tag, hub, requestStartSeq }
-}
-
-/** Subscribe a captured fence — CONTEXT-FREE. Register the index listener FIRST, then scan the journal
- *  from the request-start fence to catch a publish that landed between capture and now (a journal
- *  overflow replays unconditionally). Invalidation is idempotent, so a harmless overlap between the
- *  catch-up and the index needs no dedup. Returns the teardown; runs at serialization, after the
- *  context may be gone. */
-function subscribeCapturedTag(fence: TagFence, onInvalidate: () => void): () => void {
-  const { tag, hub, requestStartSeq } = fence
   const teardown = hub.registerTag(tag, onInvalidate)
   if (hub.hasOverflow(requestStartSeq) || hub.hasTagSince(requestStartSeq, tag)) onInvalidate()
   return teardown
