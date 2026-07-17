@@ -14,11 +14,11 @@ import { settleLiveState } from './settleLiveState.js'
 import { stampRequestStartFence } from '../live/tags.js'
 import type { ConfigResolved } from '../serverConfig.js'
 
-// Lifecycle state machine: START (core fence + every onTelefunctionStart) → BODY → RESULT (every
-// onTelefunctionResult, success only, as a transform chain) → SETTLED (every onTelefunctionSettled,
-// then core settleLiveState). Every phase attempts all applicable hooks in registration order; the
-// FIRST throw (earliest phase) is the single primary error surfaced as the top-level error, later
-// throws are logged. A body Abort classifies as 'abort' (never converted to an error by a hook throw).
+// Lifecycle: START (core request-start tag fence) → BODY → RESULT (every onTelefunctionResult, success
+// only, as a transform chain) → SETTLED (core settleLiveState, on every path). The FIRST throw is the
+// single primary error surfaced as the top-level error; later throws are logged. Core settleLiveState
+// runs even on body-error/abort, so a request's queued tag invalidations still publish. A body Abort
+// classifies as 'abort' (never converted to an error by a later throw).
 async function executeTelefunction(runContext: {
   telefunction: Telefunction
   telefunctionName: string
@@ -78,33 +78,13 @@ async function executeTelefunction(runContext: {
     raisePrimary(surfaced)
   }
 
-  // Run one void phase: every extension's `pick` hook, in registration order, each in context. All
-  // are attempted; the first throw becomes the phase's contribution to the primary error.
-  const runVoidHookPhase = async <C>(
-    pick: (ext: TelefuncServerExtension) => ((ctx: C) => void | Promise<void>) | undefined,
-    ctxFor: (ext: TelefuncServerExtension) => C,
-  ): Promise<void> => {
-    for (const ext of extensions) {
-      const hook = pick(ext)
-      if (!hook) continue
-      try {
-        await withContext(() => hook(ctxFor(ext)))
-      } catch (err) {
-        raiseHookError(err)
-      }
-    }
-  }
-
-  // ── START ── core fence first (before user start hooks), then every onTelefunctionStart.
+  // ── START ── the core request-start tag fence (before the body), so a tag published between the
+  // acquiring read and a later liveTag()/live handle still replays.
   try {
     await withContext(() => stampRequestStartFence())
   } catch (err) {
     raiseHookError(err)
   }
-  await runVoidHookPhase(
-    (ext) => ext.hooks?.onTelefunctionStart,
-    (ext) => ({ data: dataFor(ext) }),
-  )
 
   // ── BODY ── skipped if START already produced a primary error.
   if (phase.outcome === 'success') {
@@ -145,14 +125,8 @@ async function executeTelefunction(runContext: {
     }
   }
 
-  // ── SETTLED ── every path. Hooks observe the outcome frozen after BODY/RESULT; core settleLiveState
-  // runs last, always.
-  const settledOutcome = phase.outcome
-  const settledError = phase.outcome === 'error' ? phase.primaryError : undefined
-  await runVoidHookPhase(
-    (ext) => ext.hooks?.onTelefunctionSettled,
-    (ext) => ({ outcome: settledOutcome, error: settledError, data: dataFor(ext) }),
-  )
+  // ── SETTLED ── core settleLiveState runs on EVERY path (success/error/abort), so a request's queued
+  // tag invalidations publish even when the body threw or aborted.
   try {
     await withContext(() => settleLiveState())
   } catch (err) {
