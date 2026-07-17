@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import * as telefunc from '../index.js'
 
-// The public live surface exported from 'telefunc' is exactly THREE concepts: a `Live<T>`
-// (read `.data`), `Live.derived(…)`, and that's it. The producer cell, its verbs (set/update/invalidate/
-// onData/onInvalidate), the activation lifecycle, and the tag statics are all INTERNAL — reachable only
-// via `telefunc/__internal` (bindings) or not at all. The legacy request-bag/tag functions
-// (addLiveSource/takeLiveSources/liveTag/invalidateTag) were removed with the old TanStack wrapper path.
+// The public live surface exported from 'telefunc' is exactly TWO concepts: a `Live<T>` (read `.data`)
+// and `Live.derived(…)`. The producer cell and its surviving verbs (invalidate/onInvalidate/close plus
+// the activation lifecycle) are INTERNAL — reachable only via `telefunc/__internal` (bindings) or not at
+// all. The delta-push verbs (set/update/onData) and the tag statics were DELETED outright — gone, not
+// hidden — as were the legacy request-bag/tag functions (addLiveSource/takeLiveSources/liveTag/
+// invalidateTag), removed with the old TanStack wrapper path.
 describe('telefunc live exports', () => {
   it('exports the Live namespace; the legacy bag/tag functions are gone', () => {
     const Live = (telefunc as Record<string, unknown>).Live as Record<string, unknown>
@@ -20,9 +21,10 @@ describe('telefunc live exports', () => {
     const Live = (telefunc as Record<string, unknown>).Live as object
     // The whole public value surface. A new key here is a public-API change and must be deliberate.
     expect(Object.keys(Live)).toEqual(['derived'])
-    // The old statics are gone from the public namespace (they live on the internal cell now).
-    for (const internal of ['invalidate', 'onInvalidate']) {
-      expect((Live as Record<string, unknown>)[internal]).toBeUndefined()
+    // The old tag statics (`Live.invalidate`/`Live.onInvalidate`) were DELETED with the tag stack — not
+    // relocated — and must not reappear on the public namespace.
+    for (const removed of ['invalidate', 'onInvalidate']) {
+      expect((Live as Record<string, unknown>)[removed]).toBeUndefined()
     }
   })
 

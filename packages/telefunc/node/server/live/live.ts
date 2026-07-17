@@ -7,15 +7,17 @@ export type { LiveEvent, LiveSubscription }
 const LIVE_BRAND = Symbol.for('telefunc.Live')
 
 /**
- * A live value: read `.data`, and it stays up to date as the server pushes.
+ * A live value: read `.data` for the current snapshot. A `Live` also signals when it goes stale — an
+ * adapter (e.g. `@telefunc/tanstack-query`) observes that and refetches, swapping in a fresh handle. The
+ * bare handle's own `.data` does not mutate in place; staleness drives a refetch, not an in-place update.
  *
  * Return one from a telefunction and the client receives a live handle:
  * ```ts
  * // server
- * async function onGetTodos() { return db.live.select().from(todos) }
+ * async function onGetTodos() { return db.select().from(todos).live() }
  * // client
  * const todos = await onGetTodos()
- * todos.data // Todo[] — updates on its own
+ * todos.data // Todo[] — a snapshot; an adapter refetches when it goes stale
  * ```
  */
 type Live<T> = {
@@ -105,8 +107,7 @@ class LiveCell<T> {
   }
 
   get data(): T {
-    // `LiveCell<T>` is invariant in T (its tap arrays), so widen to the tracking type.
-    track(this as unknown as LiveCell<unknown>)
+    track(this) // reading `.data` inside a `Live.derived` callback registers this cell as a dependency
     return this.currentData
   }
 
