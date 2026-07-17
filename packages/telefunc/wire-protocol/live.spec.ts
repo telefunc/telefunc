@@ -6,6 +6,11 @@ import { createStreamingReviver } from './client/response/registry.js'
 import { LiveCell } from '../node/server/live/live.js'
 import type { Live } from '../node/server/live/live.js'
 import type { ClientReviverContext, ServerReplacerContext } from './types.js'
+import type { LiveEvent } from '../node/server/live/live.js'
+import { ServerChannel } from './server/channel.js'
+import { IndexedPeer } from './server/IndexedPeer.js'
+import { ReplayBuffer } from './replay-buffer.js'
+import { TAG, decode } from './shared-ws.js'
 
 // Deterministic microtask flush — the cell's producer emissions are coalesced with `queueMicrotask`.
 const tick = () => new Promise<void>((resolve) => queueMicrotask(() => resolve()))
@@ -18,6 +23,7 @@ type FakeServerChannel = {
 function makeFakeServerChannel(id: string): FakeServerChannel & Record<string, unknown> {
   const sends: unknown[] = []
   const closeCbs: Array<() => void> = []
+  const openCbs: Array<() => void> = []
   return {
     id,
     sends,
@@ -27,6 +33,7 @@ function makeFakeServerChannel(id: string): FakeServerChannel & Record<string, u
       return Promise.resolve()
     },
     onClose: (cb: () => void) => closeCbs.push(cb),
+    onOpen: (cb: () => void) => openCbs.push(cb),
     close: () => Promise.resolve(),
     abort: () => {},
   }
@@ -66,6 +73,7 @@ function makeFakeClientChannel(channelId: string): FakeClientChannel & Record<st
       return () => {}
     },
     onClose: (cb: () => void) => closeCbs.push(cb),
+    onOpen: (cb: () => void) => openCbs.push(cb),
     close: () => Promise.resolve(0),
     abort: () => {},
     deliver: (event: unknown) => listener?.(event),
@@ -181,5 +189,68 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
     expect(revived.todos).toBe(revived.list[1].deep)
     expect(revived.report).toBe(revived.list[0])
     expect(revived.todos).not.toBe(revived.report) // distinct handles stay distinct
+  })
+})
+
+describe('a live query whose pre-peer frames are dropped still reaches the client', () => {
+  // The full chain over a REAL ServerChannel: replacer → real pre-peer buffer → real peer attach.
+  // A fake channel here would only re-prove the buffer's own unit test.
+  function createRealChannelHarness(bufferLimit: number) {
+    const channel = new ServerChannel<never, LiveEvent<unknown>>({ id: crypto.randomUUID(), bufferLimit })
+    const context = {
+      createChannel: () => channel,
+      registerChannel: () => {},
+      sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
+      validators: new Map(),
+      requestStartSeq: 0,
+    } as unknown as ServerReplacerContext
+    const replacer = createStreamingReplacer(
+      () => context,
+      () => {},
+      [],
+    )
+    return { channel, serialize: (v: unknown) => stringify(v, { forbidReactElements: true, replacer }) }
+  }
+
+  /** Attach a real client peer and collect the frames it receives. */
+  function attachPeer(channel: ServerChannel<never, LiveEvent<unknown>>) {
+    const frames: Uint8Array[] = []
+    channel._attachPeer(
+      new IndexedPeer({ send: (frame) => void frames.push(frame) }, 7, new ReplayBuffer(1 << 20, 60_000, 1 << 21)),
+    )
+    return frames.map((f) => decode(f)).filter((d) => d.tag === TAG.TEXT || d.tag === TAG.PUBLISH)
+  }
+
+  it('an invalidation evicted from the pre-peer buffer is still delivered on connect', async () => {
+    // A buffer far too small to hold the payload that follows.
+    const { channel, serialize } = createRealChannelHarness(64)
+    const live = new LiveCell<string>('initial')
+    serialize(live)
+
+    live.invalidate() // the client is not connected yet — this frame waits in the buffer
+    await tick()
+    // A payload larger than the entire buffer. The oversized path clears the whole lane, taking the
+    // waiting invalidation with it, and `send` swallows the rejection — so nothing upstream can tell.
+    live.set('x'.repeat(500))
+    await tick()
+
+    const received = attachPeer(channel)
+    // Whatever survived the buffer, the client must still be told its data moved on. Without the
+    // one-bit repair the buffer flushes empty and this client keeps `initial` forever.
+    expect(received.some((d) => 'text' in d && d.text.includes('invalidate'))).toBe(true)
+  })
+
+  it('a data push evicted before connect is not lost silently either', async () => {
+    const { channel, serialize } = createRealChannelHarness(64)
+    const live = new LiveCell<string>('initial')
+    serialize(live)
+
+    live.set('x'.repeat(500)) // the ONLY emission, and it is dropped outright by the oversized path
+    await tick()
+
+    const received = attachPeer(channel)
+    // A Live's truth can travel in `data` frames just as much as in invalidations. The client cannot be
+    // left on the wire snapshot believing it is current, so it is told to refetch.
+    expect(received.some((d) => 'text' in d && d.text.includes('invalidate'))).toBe(true)
   })
 })
