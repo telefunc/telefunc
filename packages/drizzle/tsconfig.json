@@ -12,5 +12,6 @@
     "noUncheckedIndexedAccess": true,
     "lib": ["DOM", "ESNext"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["**/*.spec.ts"]
 }
