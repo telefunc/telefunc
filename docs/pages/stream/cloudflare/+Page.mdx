@@ -75,9 +75,10 @@ See: <Link href="/Telefunc" />.
 
 Telefunc uses [Durable Objects](https://developers.cloudflare.com/durable-objects/) for <Link href="/channel">channel</Link> state and <Link href="/channel#broadcast">broadcast</Link> fan-out. Channel state is in-memory JavaScript (closures, callbacks, local variables), so it must live on the same Durable Object that holds the WebSocket connection.
 
-[KV](https://developers.cloudflare.com/kv/) stores two things:
+[KV](https://developers.cloudflare.com/kv/) stores three things:
 - **Session tokens** — pin a browser to the same Durable Object across requests.
 - **Broadcast presence** — tracks which Durable Objects have active subscribers for each key.
+- **Room state replica** — a globally-distributed read copy of each <Link href="/room">room</Link>'s directory (see <Link href="#room-state">Room state</Link>).
 
 ### Regions
 
@@ -105,6 +106,20 @@ On the first request, Telefunc picks a Durable Object in the nearest region, sto
 **CDN / reverse proxy** — make sure `x-telefunc-session` isn't stripped from responses or requests. Without it, each request would be routed to a random Durable Object and channel state would be lost.
 
 </Warning>
+
+
+### Room state
+
+<Link href="/room">Rooms</Link> add a third kind of state, split across two tiers. Each room has one **authority** Durable Object — the same one that already sequences the room's messages, provisioned near its first publisher — holding the room's source of truth and serializing its atomic writes (race-free `Room.create`, member updates, heartbeats) so concurrent writers never clobber. As it writes, the authority mirrors the room's directory (config, roster, markers) to a **Workers KV replica**.
+
+Reads pick a tier by what they need:
+
+| Read | Tier | Consistency |
+|---|---|---|
+| `Room.get`, `Room.list` (existence, meta, member count), the room index | KV replica | Eventually consistent (KV's cross-region cache) |
+| The streamed roster, `retain`-ed message replay | Authority | Strongly consistent (read-your-writes) |
+
+`Room.get` and `Room.list` are fast global KV reads with no cross-region hop, and enumeration is a plain KV scan. Their eventual consistency is invisible in practice: a member's join, leave, or meta change rides the room's live event stream in real time, so the replica is only the cold-start snapshot and the room directory — the one visible effect is that a room created in one region may take a moment to surface in a `Room.list` from another. Reads that carry a hard guarantee go to the authority instead: the streamed roster (a join writes its record before the event that announces it) and retained-message replay (a late subscriber must observe the last frame).
 
 
 ## Scaling
