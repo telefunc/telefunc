@@ -40,6 +40,7 @@ export {
   roomFailureError,
   roomAckError,
   ROOM_BUG_MESSAGE,
+  DM_PARTICIPANT_LEFT,
   leaveCauseFromWire,
   leaveCauseToWire,
   DEFAULT_TRACK,
@@ -381,6 +382,10 @@ type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
 /** The result of handling an `{ ack: true }` DM: the recipient's `listen` return, or its failure
  *  (an `Abort` value the handler raised, or an operational/generic error — see `RoomFailure`). */
 type DmReply = { ok: true; result: unknown } | RoomFailure
+
+/** The `{ ack: true }` reply a sender gets when its recipient has already left — resolved (never left
+ *  hanging) with one stable reason, wherever the departure is noticed (its stub, its held inbox). */
+const DM_PARTICIPANT_LEFT: DmReply = { ok: false, err: 'Participant left the room' }
 
 /** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
  *  `sub-binary` declares the client's binary wants (full replace, see `BinaryWants`);

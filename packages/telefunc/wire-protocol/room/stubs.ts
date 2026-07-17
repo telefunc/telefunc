@@ -11,6 +11,7 @@ import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from '.
 import type { ParticipantMeta, RoomSendReceipt } from './types.js'
 import {
   binaryWantsCovers,
+  DM_PARTICIPANT_LEFT,
   emptyTrackWants,
   RoomError,
   roomAckError,
@@ -222,7 +223,7 @@ function bindParticipantStubChannel(
       (reply) => reply as DmReply,
       // The channel ack only rejects on transport failure (a handler throw comes back encoded in
       // the resolved `DmReply`), so a rejection means the holder's stub died — it has left.
-      () => ({ ok: false, err: 'Participant left the room' }) as DmReply,
+      () => DM_PARTICIPANT_LEFT,
     )
   })
 

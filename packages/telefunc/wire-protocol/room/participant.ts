@@ -2,7 +2,7 @@ export { ParticipantBase }
 export type { InboxMessage }
 
 import type { ChannelPublishAck } from '../channel.js'
-import { RoomError, toRoomFailure, type DmReply } from './protocol.js'
+import { RoomError, toRoomFailure, DM_PARTICIPANT_LEFT, type DmReply } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -123,7 +123,7 @@ abstract class ParticipantBase implements LocalParticipant {
   _deliverMessageAck(msg: InboxMessage): Promise<DmReply> {
     if (this._forwarder) return Promise.resolve(this._forwarder(msg) ?? { ok: true, result: undefined })
     if (this._messageCbs.length === 0) {
-      if (this._left) return Promise.resolve({ ok: false, err: 'Participant left the room' })
+      if (this._left) return Promise.resolve(DM_PARTICIPANT_LEFT)
       return new Promise<DmReply>((resolve) => this._hold(msg, resolve))
     }
     return this._fireInboxAck(msg)
@@ -220,7 +220,7 @@ abstract class ParticipantBase implements LocalParticipant {
     // Held ack DMs will never be handled now — fail their senders instead of hanging them.
     const held = this._pendingInbox
     this._pendingInbox = null
-    if (held) for (const entry of held) entry.ackResolve?.({ ok: false, err: 'Participant left the room' })
+    if (held) for (const entry of held) entry.ackResolve?.(DM_PARTICIPANT_LEFT)
     const cbs = this._leaveCbs
     this._leaveCbs = []
     for (const cb of cbs) this._invoke(cb, cause)
