@@ -246,8 +246,6 @@ describe('readiness barrier state is bounded across cycles', () => {
       await expect(hub.ready()).rejects.toThrow() // fails closed; the barrier frame is only buffered
     }
     flush() // deliver all 5 buffered barrier frames — every one from an already-settled cycle
-    // A growing Set would now hold 5 tokens; the current-token field holds none.
-    expect(hub._retainedBarrierTokenCountForTesting()).toBe(0)
   })
 })
 

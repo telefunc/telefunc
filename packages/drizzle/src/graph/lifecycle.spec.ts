@@ -3,7 +3,7 @@
 // state equals the legal target (no illegal transition is reachable), ≤1 fire per graph per batch, a
 // SEEDING graph buffers a substantive change precisely (never coarse, never dropped) while a coarse
 // graph over-fires, and a destroyed graph is inert (never rehydrated). A separate case pins the sinks
-// (coarse is left only by destroy; there is no gap/resync seam — a ChangeSource is gap-free).
+// (coarse is left only by destroy; there is no gap/resync seam — capture is gap-free).
 // Deterministic — a fixed PRNG + deferred scans, never timers.
 
 import { describe, expect, it } from 'vitest'

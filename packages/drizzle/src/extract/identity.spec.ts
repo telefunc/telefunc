@@ -1,7 +1,7 @@
 import { eq, sql } from 'drizzle-orm'
 import { QueryBuilder, integer, pgTable, text } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
-import { COMPILER_ABI, canonicalValue, type IdentityEnv, identityOf, instanceKeyOf, planKeyOf } from './identity.js'
+import { canonicalValue, type IdentityEnv, identityOf, instanceKeyOf, planKeyOf } from './identity.js'
 
 const users = pgTable('users', { id: integer('id').primaryKey(), name: text('name'), teamId: integer('team_id') })
 const qb = new QueryBuilder()
@@ -83,9 +83,6 @@ describe('planKey named gates', () => {
   })
   it('a dialect change changes the planKey', () => {
     expect(planKeyOf({ ...base, dialect: 'mysql' })).not.toBe(planKeyOf(base))
-  })
-  it('the compiler ABI is embedded, so a bump invalidates every planKey', () => {
-    expect(planKeyOf(base).includes(COMPILER_ABI)).toBe(true)
   })
 })
 

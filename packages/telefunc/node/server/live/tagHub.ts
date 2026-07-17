@@ -5,12 +5,11 @@ import { Broadcast } from '../../../wire-protocol/server/server-broadcast.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { getProjectError } from '../../../utils/assert.js'
 
-// One app-scoped Broadcast key per namespace bounds authority-DO/KV cardinality regardless of how
-// many distinct tags exist. Each server keeps a bounded (seq, tags) journal of what it observed on
-// that key, plus a local index of the tags it currently cares about.
+// One app-scoped Broadcast key carries every tag, so the authority sees a fixed number of keys no
+// matter how many distinct tags an app uses. Each server keeps a bounded (seq, tags) journal of what
+// it observed on that key, plus a local index of the tags it currently cares about.
 
-const KEY_PREFIX = '__tf_tags__:'
-const DEFAULT_NAMESPACE = 'default'
+const TAG_KEY = '__tf_tags__:default'
 const JOURNAL_LIMIT = 1024
 const BARRIER_BACKOFF_MS = 5
 const BARRIER_MAX_BACKOFF_MS = 50
@@ -28,8 +27,6 @@ type TagListener = () => void
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 class TagHub {
-  readonly namespace: string
-  private readonly key: string
   private readonly journal: JournalEntry[] = [] // ascending seq, at most JOURNAL_LIMIT entries
   private readonly index = new Map<string, Set<TagListener>>()
   /** This instance's OBSERVATION clock — how many tag events THIS server has seen, not the transport's
@@ -43,10 +40,7 @@ class TagHub {
   // from old/failed cycles are ignored and nothing accumulates across outage/recovery cycles.
   private pendingBarrier: { token: string; observed: boolean } | null = null
 
-  constructor(namespace: string) {
-    this.namespace = namespace
-    this.key = KEY_PREFIX + namespace
-  }
+  constructor() {}
 
   /** Subscribe to the app-scoped key once, then publish barrier frames until we observe one of our
    *  own — proof the subscription is actually delivering (a transport's `listen()` may become active
@@ -60,7 +54,7 @@ class TagHub {
   ready(): Promise<void> {
     if (this.readyPromise) return this.readyPromise
     if (!this.subscribed) {
-      Broadcast.subscribe<TagBatch>(this.key, (batch, info) => this._receive(batch, info.seq))
+      Broadcast.subscribe<TagBatch>(TAG_KEY, (batch, info) => this._receive(batch, info.seq))
       this.subscribed = true
     }
     this.readyPromise = this._establishBarrier().catch((err) => {
@@ -77,7 +71,7 @@ class TagHub {
 
   /** Publish one batch. Awaited by the caller (settle) so a failure is detected, not silent. */
   async publish(tags: string[]): Promise<void> {
-    await Broadcast.publish<TagBatch>(this.key, { tags })
+    await Broadcast.publish<TagBatch>(TAG_KEY, { tags })
   }
 
   /** Deliver `tags` to the local index without the Broadcast round-trip. Used when a publish fails:
@@ -127,7 +121,7 @@ class TagHub {
     try {
       for (let attempt = 0; attempt < barrierMaxAttempts; attempt++) {
         try {
-          await Broadcast.publish<TagBatch>(this.key, { barrier: barrier.token })
+          await Broadcast.publish<TagBatch>(TAG_KEY, { barrier: barrier.token })
         } catch {
           // Transport not ready or momentarily down — keep probing within the attempt budget.
         }
@@ -136,7 +130,7 @@ class TagHub {
       }
       // Fail closed — resolving here would let a write during this unconfirmed window be missed.
       throw getProjectError(
-        `Tag readiness could not be confirmed for namespace "${this.namespace}": the Broadcast subscription never delivered. Live queries require a working Broadcast transport.`,
+        'Tag readiness could not be confirmed: the Broadcast subscription never delivered. Live queries require a working Broadcast transport.',
       )
     } finally {
       // Drop the token once the attempt settles: a frame delivered later can no longer confirm it,
@@ -197,19 +191,13 @@ class TagHub {
     if (!listeners) return
     for (const listener of [...listeners]) listener()
   }
-
-  /** @internal test-only — retained barrier tokens (0 or 1; never grows across fail/recover cycles). */
-  _retainedBarrierTokenCountForTesting(): number {
-    return this.pendingBarrier === null ? 0 : 1
-  }
 }
 
-// One app-scoped tag hub on the default namespace. (The multi-namespace generality was speculative and
-// test-only, so it was removed; a single-tenant app needs exactly one hub.)
+// One app-scoped tag hub.
 const globalObject = getGlobalObject<{ hub: TagHub | null }>('tagHub.ts', () => ({ hub: null }))
 
 function getTagHub(): TagHub {
-  if (!globalObject.hub) globalObject.hub = new TagHub(DEFAULT_NAMESPACE)
+  if (!globalObject.hub) globalObject.hub = new TagHub()
   return globalObject.hub
 }
 

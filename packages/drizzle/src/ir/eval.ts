@@ -170,9 +170,9 @@ function mergeCause(a: UnknownCause | undefined, b: UnknownCause): UnknownCause 
 }
 
 // ── Value comparison across producers ───────────────────────────────
-// One order bridging producer differences: CDC delivers pg-parsed values, ORM
-// capture delivers the user's JS values, SQLite stores booleans as 0/1 and dates
-// as strings. Returns undefined for genuinely incomparable pairs.
+// One order spanning how differently the same value arrives: capture hands back the user's own JS
+// values, while SQLite stores booleans as 0/1 and dates as strings. Returns undefined for genuinely
+// incomparable pairs.
 
 function compareValues(a: unknown, b: unknown): number | undefined {
   if (a instanceof Date || b instanceof Date) {

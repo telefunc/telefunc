@@ -4,7 +4,7 @@
 // is ISOLATED — its identity is coarse-notified while the other graphs in the batch are unaffected
 // (G2). An in-batch `kind:'coarse'` marker demotes every graph on that table to coarse and never
 // feeds it a row — an image-less mutation can't corrupt precise state (G3). Transport reliability
-// (ordering, gap/duplicate handling, positions) lives INSIDE the ChangeSource, not here.
+// (ordering, gap/duplicate handling, positions) lives with whoever emits the batches, not here.
 // Deterministic — ingest is synchronous.
 
 import { describe, expect, it, vi } from 'vitest'

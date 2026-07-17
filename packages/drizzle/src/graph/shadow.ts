@@ -1,6 +1,6 @@
 // The σ-scoped shadow: for one stateful input, a PK → pruned-tuple
 // index over EXACTLY the σ-matching rows, maintained in lockstep with operator state by the
-// same deltas. It is what resolves a key-only CDC retraction without guessing: a hit yields
+// same deltas. It is what resolves a key-only retraction without guessing: a hit yields
 // the exact old tuple to retract; a miss on COMPLETE state proves the row never σ-matched
 // (drop); a miss on INCOMPLETE state cannot prove irrelevance (coarse). This module also owns
 // the σ rules the shadow is scoped by — membership, pruning, and the PK key — so "σ-matching"

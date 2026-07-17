@@ -1,12 +1,9 @@
-export { identityOf, planKeyOf, instanceKeyOf, canonicalValue, COMPILER_ABI }
+export { identityOf, planKeyOf, instanceKeyOf, canonicalValue }
 export type { Identity, IdentityEnv }
 
 import { Placeholder, fillPlaceholders, is } from 'drizzle-orm'
 import { assertUsage } from '../utils/assert.js'
 import { canonicalValue, frame } from '../utils/canonical.js'
-
-/** Bumps whenever the extractor/compiler ABI changes, invalidating cached plans. */
-const COMPILER_ABI = 'telefunc-drizzle-ir/1'
 
 type Identity = {
   /** The graph-state key: the structural plan key (semantic environment / dialect / compiler ABI /
@@ -51,9 +48,7 @@ function planKeyOf(parts: {
   schemaFingerprint: string
   sql: string
 }): string {
-  return [COMPILER_ABI, parts.semanticEnvironmentKey, parts.dialect, parts.schemaFingerprint, parts.sql]
-    .map(frame)
-    .join('')
+  return [parts.semanticEnvironmentKey, parts.dialect, parts.schemaFingerprint, parts.sql].map(frame).join('')
 }
 
 /** Graph-state key: the plan plus the canonicalized resolved bindings. Placeholders are

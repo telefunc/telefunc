@@ -1,4 +1,4 @@
-// The change router: a ChangeSource emits ordered, atomic TableChange batches; the router fans each
+// The change router: something emits ordered, atomic TableChange batches; the router fans each
 // batch to every affected graph's `apply(union-slice)` EXACTLY ONCE, synchronously, in order — one
 // commit = one graph tick, never merged across batches — then notifies ≤1 per graph AND per attached
 // identity. A graph whose `apply` throws is isolated: its identity is coarse-notified so its
@@ -8,7 +8,7 @@
 // that table is demoted to coarse and notified, never fed a row — precise state is never corrupted
 // by a fabricated image.
 
-export { type RoutableGraph, type ChangeSource, type Router, createRouter }
+export { type RoutableGraph, type Router, createRouter }
 
 import type { ApplyOutcome } from '../graph/liveGraph.js'
 import type { ChangeBatch, TableChange } from './events.js'
@@ -24,14 +24,6 @@ type RoutableGraph = {
   /** An in-batch coarse marker for one of this graph's tables → intentionally demote to coarse
    *  (an image-less mutation the source can't represent precisely); never fed a row. */
   coarsen(): void
-}
-
-/** Ordered atomic TableChange batches; the source owns its reliability — a CDC source's
- *  positioning, ordering and reconnect all live INSIDE it, never here. The `@telefunc/postgres`
- *  integration point (CDC there; the ORM binding implements it in-process). */
-type ChangeSource = {
-  watchTables(tables: string[]): void
-  subscribe(onBatch: (batch: ChangeBatch) => void): () => void
 }
 
 type Router = {
