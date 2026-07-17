@@ -1,4 +1,4 @@
-export { stampRequestStartFence, publishQueuedTags }
+export { stampRequestStartFence }
 export { captureTagFence, subscribeCapturedTag, invalidateTagStatic }
 export type { TagFence }
 
@@ -13,8 +13,6 @@ type TagState = {
   hub: TagHub
   /** The fence: only tags published after this seq replay to a subscribing source. */
   requestStartSeq: number
-  /** Tags queued by `Live.invalidate` in-request, published as one deduped batch at settle. */
-  queued: Set<string>
 }
 
 /** Stamp the request-start fence and await the hub's readiness barrier once — runs before the body
@@ -28,7 +26,6 @@ async function stampRequestStartFence(): Promise<void> {
   context[TAGS] = {
     hub,
     requestStartSeq: hub.currentSeq(),
-    queued: new Set(),
   } satisfies TagState
 }
 
@@ -41,7 +38,7 @@ function getRequestTagState(): TagState {
   const existing = context[TAGS] as TagState | undefined
   if (existing) return existing
   const hub = getTagHub()
-  const state: TagState = { hub, requestStartSeq: hub.currentSeq(), queued: new Set() }
+  const state: TagState = { hub, requestStartSeq: hub.currentSeq() }
   context[TAGS] = state
   return state
 }
@@ -72,31 +69,20 @@ function subscribeCapturedTag(fence: TagFence, onInvalidate: () => void): () => 
   return teardown
 }
 
-/** `Live.invalidate(key)` publish routing (fire-and-forget, `void`): inside a request it queues at
- *  settle (like `invalidateTag`); outside a request it publishes immediately. */
+/** Invalidate `tag` (fire-and-forget, `void`). Publishes IMMEDIATELY and knows nothing about requests
+ *  or transactions: the caller decides when a change is real, and says so by calling this. Batching a
+ *  write's invalidations until its transaction commits is the write-capture layer's job — it is the
+ *  only layer that knows what a commit is. */
 function invalidateTagStatic(tag: string): void {
-  if (getRawContext()) {
-    getRequestTagState().queued.add(tag)
-  } else {
-    void publishTagImmediate(tag)
-  }
+  void publishTagImmediate(tag)
 }
 
-/** Publish `tag` immediately (the out-of-request path). Awaits readiness + publish internally; a
- *  transport failure is fired locally, never thrown to the fire-and-forget caller. */
+/** Publish `tag`. Awaits readiness + publish internally; a transport failure is fired locally, never
+ *  thrown to the fire-and-forget caller. */
 async function publishTagImmediate(tag: string): Promise<void> {
   const hub = getTagHub()
   await hub.ready()
   await publishTags(hub, [tag])
-}
-
-/** Publish the request's queued tags as one deduped batch (called by settle), failure-safe. */
-async function publishQueuedTags(): Promise<void> {
-  const state = getRawContext()?.[TAGS] as TagState | undefined
-  if (!state || state.queued.size === 0) return
-  const tags = [...state.queued]
-  state.queued = new Set()
-  await publishTags(state.hub, tags)
 }
 
 /** Publish one Broadcast batch. A transport failure is detected (structured log) and the batch is

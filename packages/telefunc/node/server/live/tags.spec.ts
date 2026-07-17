@@ -2,7 +2,7 @@ import '../context/async.js' // install AsyncLocalStorage mode so context surviv
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { restoreContext } from '../context/context.js'
 import { getTagHub, _resetTagHubsForTesting, _setBarrierBudgetForTesting } from './tagHub.js'
-import { stampRequestStartFence, publishQueuedTags, captureTagFence, subscribeCapturedTag } from './tags.js'
+import { stampRequestStartFence, captureTagFence, subscribeCapturedTag } from './tags.js'
 import { LiveCell } from './live.js'
 import {
   getBroadcastAdapter,
@@ -23,6 +23,9 @@ beforeEach(() => {
 afterEach(() => {
   _resetBroadcastAdapterForTesting(previousAdapter)
 })
+
+/** Let a fire-and-forget publish settle (invalidate is `void`-returning by design). */
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
 function inRequest<T>(fn: () => Promise<T>): Promise<T> {
   return restoreContext({}, fn)
@@ -110,20 +113,19 @@ describe('tag fences (§3.E)', () => {
     }))
 })
 
-describe('tag settle + publish (§3.D / §3.E)', () => {
-  it('T1.E6/D1 LiveCell.invalidate queues; settle publishes one deduped batch', () =>
+describe('tag publish', () => {
+  it('invalidate publishes immediately — it does not wait for the request to settle', () =>
     inRequest(async () => {
       await stampRequestStartFence()
       const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
       LiveCell.invalidate('t')
-      LiveCell.invalidate('t')
       LiveCell.invalidate('u')
-      expect(tagBatchCalls(publishSpy)).toHaveLength(0) // not during the body
-      await publishQueuedTags()
-      const batches = tagBatchCalls(publishSpy)
-      expect(batches).toHaveLength(1) // exactly one batch
-      const batch = parse(batches[0]![1] as string) as { tags: string[] }
-      expect(new Set(batch.tags)).toEqual(new Set(['t', 'u']))
+      await flush()
+      // The caller decides when a change is real; saying so publishes it. Holding invalidations until
+      // the request settles would be this layer guessing at transaction boundaries it cannot see —
+      // that belongs to whoever owns the write.
+      const tags = tagBatchCalls(publishSpy).map((call) => (parse(call[1] as string) as { tags: string[] }).tags)
+      expect(new Set(tags.flat())).toEqual(new Set(['t', 'u']))
     }))
 })
 
@@ -255,8 +257,8 @@ describe('tag publish failure (§3.D T1.D2 / T1.J4)', () => {
       // Only the settle publish fails (transport down at write time), not readiness:
       vi.spyOn(getBroadcastAdapter(), 'publish').mockRejectedValue(new Error('transport down'))
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-      LiveCell.invalidate('t')
-      await expect(publishQueuedTags()).resolves.toBeUndefined() // never throws
+      LiveCell.invalidate('t') // fire-and-forget: a transport failure must never surface to the caller
+      await flush()
       expect(localListener).toHaveBeenCalledTimes(1) // fired locally despite the failure
       expect(errorSpy).toHaveBeenCalled()
       errorSpy.mockRestore()
@@ -298,14 +300,12 @@ describe('a tag that could not be broadcast still reaches the requests that need
     }
   }
 
-  /** Drive the REAL failure path rather than calling the fallback directly: queue a tag in its own
-   *  request and settle it. Settle publishes, the downed transport rejects, and the hub falls back to
-   *  firing local subscribers. */
+  /** Drive the REAL failure path rather than calling the fallback directly: invalidate publishes
+   *  immediately, the downed transport rejects, and the hub falls back to firing local subscribers.
+   *  The publish is fire-and-forget, so let it settle. */
   async function publishWhileDown(tag: string): Promise<void> {
-    await inRequest(async () => {
-      LiveCell.invalidate(tag)
-      await publishQueuedTags()
-    })
+    LiveCell.invalidate(tag)
+    await flush()
   }
 
   let broadcast: ReturnType<typeof controllableTransport>

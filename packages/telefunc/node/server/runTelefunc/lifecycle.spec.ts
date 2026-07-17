@@ -6,8 +6,8 @@ import { REQUEST_CONTEXT } from '../context/requestContext.js'
 import { getRawContext } from '../context/context.js'
 import { getServerConfig } from '../serverConfig.js'
 import type { TelefuncServerExtension } from '../extensions.js'
-import { LiveCell } from '../live/live.js'
-import { _resetTagHubsForTesting } from '../live/tagHub.js'
+import { captureTagFence, subscribeCapturedTag } from '../live/tags.js'
+import { getTagHub, _resetTagHubsForTesting } from '../live/tagHub.js'
 import { parse } from '@brillout/json-serializer/parse'
 import {
   getBroadcastAdapter,
@@ -93,31 +93,26 @@ describe('lifecycle — result transform chain (§3.A)', () => {
     expect(res.telefunctionHasErrored).toBe(false)
   })
 
-  it('a result-hook throw → outcome errors, result discarded, later hooks still run on the last-good value', async () => {
+  it('a result-hook throw stops the chain and propagates', async () => {
     const boom = new Error('result-fail')
-    let e3Received: unknown
-    const res = await run(
-      [
-        ext('E1', { onResult: () => 'r1' }),
-        ext('E2', {
-          onResult: () => {
-            throw boom
-          },
-        }),
-        ext('E3', {
-          onResult: (c) => {
-            e3Received = c.result
-            return 'r3'
-          },
-        }),
-      ],
-      okBody,
-      { E1: {}, E2: {}, E3: {} },
-    )
-    expect(e3Received).toBe('r1') // the last SUCCESSFUL value, not r0 or E2's output
-    expect(res.telefunctionHasErrored).toBe(true)
-    expect(res.telefunctionTopLevelError).toBe(boom)
-    expect(calls).toEqual(['E1.result', 'E2.result', 'E3.result']) // all attempted
+    await expect(
+      run(
+        [
+          ext('E1', { onResult: () => 'r1' }),
+          ext('E2', {
+            onResult: () => {
+              throw boom
+            },
+          }),
+          ext('E3', { onResult: () => 'r3' }),
+        ],
+        okBody,
+        { E1: {}, E2: {}, E3: {} },
+      ),
+    ).rejects.toBe(boom)
+    // The hooks form a transform chain, not a cleanup chain: once one link throws, the value handed to
+    // the next is not a result anyone produced, so the chain stops rather than transforming a stale one.
+    expect(calls).toEqual(['E1.result', 'E2.result'])
   })
 
   it('result-hook runs ONLY for an extension the request activated (pre-PR gate); `data` is that payload', async () => {
@@ -162,7 +157,7 @@ describe('lifecycle — result transform chain (§3.A)', () => {
   })
 })
 
-describe('lifecycle — body outcome + core settle on every path (§3.A)', () => {
+describe('lifecycle — body outcome', () => {
   it('body error: RESULT skipped, outcome errors, original error propagates', async () => {
     const boom = new Error('boom')
     const res = await run(
@@ -190,42 +185,27 @@ describe('lifecycle — body outcome + core settle on every path (§3.A)', () =>
     expect(res.telefunctionReturn).toBe('v')
   })
 
-  it('a non-async return is a usage error, RECORDED (not thrown) so settle still runs', async () => {
-    const res = await run([ext('E1')], (() => 'sync') as never)
-    expect(res.telefunctionHasErrored).toBe(true)
+  it('a non-async telefunction is a usage error', async () => {
+    await expect(run([ext('E1')], (() => 'sync') as never)).rejects.toThrow(
+      /did not return a promise or async generator/,
+    )
   })
+})
 
-  it('core settleLiveState publishes a body-queued tag on SUCCESS', async () => {
-    const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-    await run([ext('E1')], async () => {
-      LiveCell.invalidate('z')
+describe('lifecycle — the live-query fence is stamped before the body', () => {
+  it('a tag published before the body first touches the tag API still replays', async () => {
+    const onInvalidate = vi.fn()
+    await run([], async () => {
+      // A write lands here — after the request started, but before this body has touched tags at all.
+      // The fence is stamped at ENTRY, so it sits below this publish and the catch-up replays it. Were
+      // the fence stamped lazily on first use (below), it would sit ABOVE this publish and miss it —
+      // which is the whole reason it is stamped at entry rather than on demand.
+      await getTagHub().publish(['t'])
+      const fence = captureTagFence('t')
+      subscribeCapturedTag(fence, onInvalidate)
       return 'r'
     })
-    const batches = tagBatchesFrom(publishSpy)
-    expect(batches).toHaveLength(1)
-    expect(batches[0]!.tags).toContain('z')
-  })
-
-  it('core settleLiveState runs on EVERY path — a body-queued tag publishes even when the body ERRORS', async () => {
-    const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-    await run([ext('E1')], async () => {
-      LiveCell.invalidate('z')
-      throw new Error('boom')
-    })
-    const batches = tagBatchesFrom(publishSpy)
-    expect(batches).toHaveLength(1) // settle is not skipped by the body error
-    expect(batches[0]!.tags).toContain('z')
-  })
-
-  it('core settleLiveState runs on the ABORT path too — a body-queued tag publishes even when the body aborts', async () => {
-    const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-    await run([ext('E1')], async () => {
-      LiveCell.invalidate('z')
-      throw Abort('v')
-    })
-    const batches = tagBatchesFrom(publishSpy)
-    expect(batches).toHaveLength(1) // settle is not skipped by the body abort
-    expect(batches[0]!.tags).toContain('z')
+    expect(onInvalidate).toHaveBeenCalledTimes(1)
   })
 })
 

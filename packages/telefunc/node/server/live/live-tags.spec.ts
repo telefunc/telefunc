@@ -5,7 +5,7 @@ import { restoreContext } from '../context/context.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
 import { LiveCell } from './live.js'
-import { stampRequestStartFence, publishQueuedTags } from './tags.js'
+import { stampRequestStartFence } from './tags.js'
 import { getTagHub, _resetTagHubsForTesting } from './tagHub.js'
 import {
   getBroadcastAdapter,
@@ -104,24 +104,13 @@ describe('Live tag statics — LiveCell.onInvalidate / LiveCell.invalidate over 
       const live = new LiveCell('rows')
       LiveCell.onInvalidate('t', live) // the handle is live under 't'...
       LiveCell.invalidate('t') // ...and the SAME request invalidates 't'
-      await publishQueuedTags() // settle publishes 't'
+      await flush() // the publish is fire-and-forget; let it land
       const server = createServerHarness()
       server.serialize(live) // activation's fence catch-up sees 't' published since the request-start fence
       await flush()
       // Own-echo suppression was removed: a self-refetch is harmless (the client re-reads once), and can be
       // necessary if a write followed the returned read. So the handle fires — invalidation is idempotent.
       expect(server.created[0]!.sends).toEqual([{ kind: 'invalidate' }])
-    }))
-
-  it('T12.C3 LiveCell.invalidate in-request queues; publishes one deduped batch at settle', () =>
-    inRequest(async () => {
-      await stampRequestStartFence()
-      const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-      LiveCell.invalidate('t')
-      LiveCell.invalidate('t')
-      expect(tagBatchCalls(publishSpy)).toHaveLength(0) // nothing during the body
-      await publishQueuedTags()
-      expect(tagBatchCalls(publishSpy)).toHaveLength(1)
     }))
 
   it('T12.C3 LiveCell.invalidate out-of-request publishes immediately (void)', async () => {
