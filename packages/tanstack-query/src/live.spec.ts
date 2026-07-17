@@ -2,7 +2,33 @@ import { describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryObserver } from '@tanstack/query-core'
 import type { Live } from 'telefunc'
 import type { LiveSubscription } from 'telefunc/__internal'
+// `telefunc/client` resolves by CONDITION: the browser gets the real client, node gets a no-op shim
+// (`withContext = (fn) => fn`, `abort = () => {}`). This adapter ships to the browser, so under vitest's
+// node resolution it would otherwise be tested against a stub of the very thing under test — every
+// assertion about cancellation would pass no matter what the adapter did. Give it the real module.
+vi.mock('telefunc/client', async () => await import('../../telefunc/client/withContext.js'))
+
+// The generated telefunc stub reads its per-call context from this module-global at call time (see
+// remoteTelefunctionCall.ts). It is not public API, so a faithful fake telefunction reads it the same
+// way the real one does — a fake that got its signal by any other route would prove nothing about
+// whether a real telefunction receives it.
+import { getPendingContext } from '../../telefunc/client/withContext.js'
 import { live } from './live.js'
+
+/** A stand-in for a telefunction: it takes its signal from the pending call context, exactly as the
+ *  generated stub does, and stays in flight until released. */
+function makeFakeTelefunction<T>(handle: Live<T>) {
+  const observed: { signal?: AbortSignal; calls: number } = { calls: 0 }
+  let release: (() => void) | undefined
+  const call = (): Promise<Live<T>> => {
+    observed.calls++
+    observed.signal = getPendingContext()?.signal
+    return new Promise<Live<T>>((resolve) => {
+      release = () => resolve(handle)
+    })
+  }
+  return { call, observed, release: () => release?.() }
+}
 
 const tick = () => new Promise<void>((resolve) => queueMicrotask(() => resolve()))
 
@@ -173,5 +199,52 @@ describe('live() — the TanStack queryFn wrapper', () => {
     await flush()
     expect(late.close).toHaveBeenCalledTimes(1)
     unsub()
+  })
+})
+
+describe('live() — cancelling a query cancels the telefunction request', () => {
+  const flush = async () => {
+    for (let i = 0; i < 6; i++) await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  }
+
+  it('the telefunction receives the query signal, and cancelling the query aborts it', async () => {
+    const queryClient = new QueryClient()
+    const fake = makeFakeTelefunction(makeFakeLive('v1').handle)
+    // The natural spelling, and the one that used to break: an async wrapper. What `queryFn()` returns
+    // is the WRAPPER's promise, so anything that tries to identify the telefunction call afterwards is
+    // holding the wrong object.
+    const observer = new QueryObserver(queryClient, {
+      queryKey: ['todos'],
+      queryFn: live(async () => fake.call()),
+    })
+    const unsub = observer.subscribe(() => {})
+    await flush()
+
+    expect(fake.observed.calls).toBe(1)
+    expect(fake.observed.signal).toBeInstanceOf(AbortSignal) // the signal reached the call itself
+    expect(fake.observed.signal!.aborted).toBe(false)
+
+    void queryClient.cancelQueries({ queryKey: ['todos'] })
+    await flush()
+    // The request is actually cancelled — not merely abandoned while it runs to completion.
+    expect(fake.observed.signal!.aborted).toBe(true)
+    fake.release()
+    await flush()
+    unsub()
+  })
+
+  it('a query already cancelled before the fetch starts never issues the request', async () => {
+    const queryClient = new QueryClient()
+    const fake = makeFakeTelefunction(makeFakeLive('v1').handle)
+    const queryFn = live(async () => fake.call())
+    const controller = new AbortController()
+    controller.abort() // cancelled before TanStack ever calls us
+
+    // Attaching an abort listener would never have fired here — an already-aborted signal does not
+    // replay. The only way not to issue a doomed request is to check before starting.
+    await expect(
+      queryFn({ client: queryClient, queryKey: ['todos'], signal: controller.signal, meta: undefined } as never),
+    ).rejects.toThrow(/aborted/)
+    expect(fake.observed.calls).toBe(0)
   })
 })

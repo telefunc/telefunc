@@ -1,7 +1,7 @@
 export { live }
 
 import { hashKey, type QueryClient, type QueryFunctionContext, type QueryKey } from '@tanstack/query-core'
-import { abort } from 'telefunc/client'
+import { withContext } from 'telefunc/client'
 import type { Live } from 'telefunc'
 // TYPE-ONLY (erased at build): `telefunc/__internal` is a server entry with no browser condition, so a
 // runtime import would pull the server context/tagHub graph into this browser bundle. The taps already
@@ -51,28 +51,22 @@ function registryFor(client: QueryClient): Registry {
  */
 function live<T>(queryFn: () => Live<T> | Promise<Live<T>>): (context: QueryFunctionContext) => Promise<T> {
   return async (context) => {
-    const call = queryFn()
-    // TanStack cancels an in-flight fetch by aborting this signal (see `cancelRefetch` below). Forward
-    // that to the telefunction call so the request is actually dropped rather than merely abandoned.
-    // `abort()` asserts on anything that isn't a pending call, so a synchronous `queryFn` is tolerated.
-    context.signal.addEventListener(
-      'abort',
-      () => {
-        try {
-          abort(call as object)
-        } catch {}
-      },
-      { once: true },
-    )
-    const handle = await call
+    // TanStack cancels an in-flight fetch by aborting this signal (see `cancelRefetch` below), and the
+    // telefunction should hear about it rather than be abandoned mid-request.
+    //
+    // The signal goes in when the call is CREATED, not after. Reaching for the returned promise and
+    // aborting it afterwards cannot work here: `queryFn` is the user's own closure, so what comes back
+    // is usually their wrapper — `live(async () => onGetTodos())` yields the async function's promise,
+    // not the telefunction's — and the abort would silently target the wrong object. `withContext`
+    // exists for exactly this: it hands the context to whatever call happens inside it.
+    if (context.signal.aborted) throw abortError() // already cancelled — don't start the request at all
+    const handle = await withContext(queryFn, { signal: context.signal })()
     if (context.signal.aborted) {
       // Cancelled while in flight: the handle still arrived, so close it or its channel leaks.
       void subscriptionOf(handle)
         .close()
         .catch(() => {})
-      const aborted = new Error('The live query fetch was aborted.')
-      aborted.name = 'AbortError'
-      throw aborted
+      throw abortError()
     }
     return wire(context.client, context.queryKey, handle)
   }
@@ -81,6 +75,13 @@ function live<T>(queryFn: () => Live<T> | Promise<Live<T>>): (context: QueryFunc
 /** The `@internal` consumer seam: a re-type, not a conversion. */
 function subscriptionOf<T>(handle: Live<T>): LiveSubscription<T> {
   return handle as unknown as LiveSubscription<T>
+}
+
+/** The rejection TanStack expects from a cancelled fetch. */
+function abortError(): Error {
+  const err = new Error('The live query fetch was aborted.')
+  err.name = 'AbortError'
+  return err
 }
 
 /** Bind one handle to its query: invalidation refetches, a data push writes the cache. Returns the
