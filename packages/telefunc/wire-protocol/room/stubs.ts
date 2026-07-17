@@ -6,7 +6,7 @@ import { isObject } from '../../utils/isObject.js'
 import type { ChannelPublishAck } from '../channel.js'
 import type { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
-import { encodePublishText } from '../shared-ws.js'
+import { encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from './server.js'
 import type { ParticipantMeta, RoomSendReceipt } from './types.js'
 import {
@@ -16,10 +16,12 @@ import {
   RoomError,
   roomAckError,
   roomFailureError,
+  roomOrderBefore,
   hasRoomTag,
   roomCtrlKey,
   unframeMemberId,
   type BinaryWants,
+  type RoomOrder,
   type DmReply,
   type MemberSnapshot,
   type ParticipantStubRequest,
@@ -64,6 +66,18 @@ class RoomStubChannel extends ServerBroadcast {
   _wantsText = false
   /** @internal — which members' text the client wants without a room-level subscription (`sub-text`). */
   _textMemberWants: Set<string> = new Set()
+
+  /** @internal — retained replay is exactly-once and in-order against a racing live publish. Per text
+   *  sender, `_textHigh` is the highest order this stub has been handed, and `_textPendingRetained` is
+   *  a retained order just emitted that is still awaiting its own live echo. A retained frame is
+   *  skipped when the watermark already covers it (a same-or-newer live frame won the race); the live
+   *  echo of an emitted retained is dropped (the retained won). Binary is the twin, per (member,
+   *  track) lane — its own order domain (the per-key transport seq). Pruned on leave (`_forgetMember`). */
+  private readonly _textHigh = new Map<string, RoomOrder>()
+  private readonly _textPendingRetained = new Map<string, RoomOrder>()
+  // Binary lanes keyed `${member}\0${track}` — one flat map, so a member leaving prunes by prefix.
+  private readonly _binaryHigh = new Map<string, WirePublishInfo>()
+  private readonly _binaryPendingRetained = new Map<string, WirePublishInfo>()
 
   /** @internal — relay gate: does this client want the (member, track) the frame belongs to? */
   _wantsBinary(memberId: string, track: string): boolean {
@@ -148,6 +162,63 @@ class RoomStubChannel extends ServerBroadcast {
   _relayPublishBinary(wireData: Uint8Array): void {
     if (this._peer) this._peer.sendPublishBinary(wireData)
     else this._prePeerBuffer.pushPublishBinary(wireData)
+  }
+
+  /** @internal — relay a live text frame, advancing the sender's watermark and dropping the live echo
+   *  of a retained frame this stub was just handed, so a subscribe-then-publish race delivers the
+   *  message exactly once. */
+  _relayTextLive(wireText: string, from: string, ord: RoomOrder): void {
+    const pending = this._textPendingRetained.get(from)
+    if (pending && pending.seq === ord.seq && pending.timestamp === ord.timestamp) {
+      this._textPendingRetained.delete(from) // this live frame is the echo of the retained we emitted
+      return
+    }
+    this._relayPublishText(wireText)
+    const high = this._textHigh.get(from)
+    if (!high || roomOrderBefore(high, ord)) this._textHigh.set(from, ord)
+  }
+
+  /** @internal — replay a retained text frame unless the sender's watermark already covers it (a
+   *  same-or-newer live frame reached this stub first), then record it so its own live echo is
+   *  dropped. The MQTT-retained backfill, made causal. */
+  _emitRetainedText(wireText: string, from: string, ord: RoomOrder): void {
+    const high = this._textHigh.get(from)
+    if (high && !roomOrderBefore(high, ord)) return // superseded by a same-or-newer live frame
+    this._relayPublishText(wireText)
+    this._textHigh.set(from, ord)
+    this._textPendingRetained.set(from, ord)
+  }
+
+  /** @internal — the binary twin of `_relayTextLive`, per (member, track) lane; order is the per-key
+   *  transport seq (binary's own domain). */
+  _relayBinaryLive(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
+    const lane = `${from}\0${track}`
+    if (this._binaryPendingRetained.get(lane)?.seq === info.seq) {
+      this._binaryPendingRetained.delete(lane) // this live frame is the echo of the retained we emitted
+      return
+    }
+    this._relayPublishBinary(wireData)
+    const seen = this._binaryHigh.get(lane)
+    if (!seen || seen.seq < info.seq) this._binaryHigh.set(lane, info)
+  }
+
+  /** @internal — the binary twin of `_emitRetainedText`, per (member, track) lane. */
+  _emitRetainedBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
+    const lane = `${from}\0${track}`
+    if ((this._binaryHigh.get(lane)?.seq ?? -1) >= info.seq) return // superseded by a same-or-newer live frame
+    this._relayPublishBinary(wireData)
+    this._binaryHigh.set(lane, info)
+    this._binaryPendingRetained.set(lane, info)
+  }
+
+  /** @internal — a member left: drop its retained-replay bookkeeping so the maps stay bounded by the
+   *  live roster, not the room's lifetime churn. */
+  _forgetMember(from: string): void {
+    this._textHigh.delete(from)
+    this._textPendingRetained.delete(from)
+    const prefix = `${from}\0`
+    for (const lane of [this._binaryHigh, this._binaryPendingRetained])
+      for (const key of lane.keys()) if (key.startsWith(prefix)) lane.delete(key)
   }
 }
 

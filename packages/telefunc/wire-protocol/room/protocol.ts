@@ -10,6 +10,7 @@ export {
   roomMemberTrackKey,
   roomDmKey,
   roomOrderKey,
+  roomOrderBefore,
   roomRetainedTextKey,
   roomRetainedBinaryKey,
   roomRetainedBinaryPrefix,
@@ -365,6 +366,13 @@ type RoomCtrlEnvelope =
  *  `seq`, so the pair is monotonic whatever the node's clock skew. Keyed per room and kept (TTL-reaped,
  *  not swept) across a close, so a recreation resumes past the previous watermark. */
 type RoomOrder = { seq: number; timestamp: number }
+
+/** Strictly-before in the room's semantic order: lexicographic on `(timestamp, seq)`. Two distinct
+ *  semantic messages never compare equal (the clock is unique per room), so `!roomOrderBefore(a, b)`
+ *  with `a !== b` means `a` is at-or-after `b`. */
+function roomOrderBefore(a: RoomOrder, b: RoomOrder): boolean {
+  return a.timestamp < b.timestamp || (a.timestamp === b.timestamp && a.seq < b.seq)
+}
 
 /** A participant's message. Published on the room's one text key. `fromMeta` is the sender's meta
  *  as verified by the sender's own node — never client-supplied — so any receiver can surface a

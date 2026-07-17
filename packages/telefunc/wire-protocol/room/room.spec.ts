@@ -12,7 +12,7 @@ import {
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_KV_TTL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
-import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
+import { ACK_STATUS, TAG, decode, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { RoomStubChannel } from './stubs.js'
 import { ClientRoom } from './client.js'
@@ -22,9 +22,11 @@ import { createStreamingReviver } from '../client/response/registry.js'
 import type { ClientReviverContext, ServerReplacerContext } from '../types.js'
 import type { RemoteParticipant } from './types.js'
 import {
+  DEFAULT_TRACK,
   frameWithMemberId,
   roomCtrlKey,
   roomTextKey,
+  roomRetainedTextKey,
   roomMemberDataKey,
   roomMemberTrackKey,
   roomMemberKvKey,
@@ -2016,6 +2018,88 @@ describe('room stub channel', () => {
     stub._onPeerMessage(JSON.stringify({ __r: 'sub-text', members: [alice.id, bob.id] }), 45) // now wants Bob
     await settle()
     expect(dataFramesOf(peer)).toEqual(['bob-pinned'])
+  })
+
+  // ── Retained replay is causal and metadata-preserving. A subscribe races the publisher's live
+  //    stream: the retained back-fill and the live frame can carry the same message, in either order.
+  //    Replay must reconcile against the live frames a stub has been handed, so a message lands exactly
+  //    once and never rewinds the stream — and carry the frame's real order, not a fresh stamp.
+  const textWire = (from: string, data: unknown, ord: { seq: number; timestamp: number }) =>
+    encodePublishText(stringify({ __r: 'data', from, data, ord }), ord)
+
+  it('replays a retained binary frame with its real publish receipt — not a fresh seq:0/timestamp stamp', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-binary-receipt')
+    const cam = await serverRoom.join({ meta: { name: 'cam' } })
+    await cam.publishBinary(new Uint8Array([1])) // lane seq 1 — not retained
+    const receipt = await cam.publishBinary(new Uint8Array([2]), { retain: true }) // lane seq 2, retained
+
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 40)
+    await settle()
+
+    const frames = peer.decoded().filter((f) => f.tag === TAG.PUBLISH_BINARY)
+    expect(frames).toHaveLength(1)
+    expect(receipt.seq).toBeGreaterThan(1) // guards the assertion: a stale seq:0 would be visibly wrong order
+    expect(frames[0].info).toEqual({ seq: receipt.seq, timestamp: receipt.timestamp }) // the lane's real order
+  })
+
+  it('delivers a retained text message and its own late live echo exactly once', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-echo')
+    const alice = await serverRoom.join({ meta: { name: 'Alice' } })
+    await alice.publish('hello', { retain: true })
+
+    stub._onPeerBroadcastSubscribe(false) // subscribe after the publish — the retained slot back-fills
+    await settle()
+    expect(dataFramesOf(peer)).toEqual(['hello']) // replayed once
+
+    // The publish's own live broadcast reaches this node after the retained back-fill: pub/sub fan-out
+    // lags the read-your-writes retained store. Re-inject the exact stored frame on the text key — the
+    // stub must recognize it as the echo of what it just replayed and drop it, not deliver a duplicate.
+    const stored = getBroadcastAdapter().get(roomRetainedTextKey('retain-echo')) as string
+    await getBroadcastAdapter().publish(roomTextKey('retain-echo'), stored)
+    await settle()
+    expect(dataFramesOf(peer)).toEqual(['hello']) // still once — the echo was dropped
+  })
+
+  it('skips a retained text frame once a newer live frame from the sender has reached the client', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-stale')
+    const alice = await serverRoom.join({ meta: { name: 'Alice' } })
+    stub._onPeerBroadcastSubscribe(false)
+    await settle()
+
+    const older = { seq: 1, timestamp: 1000 }
+    const newer = { seq: 1, timestamp: 2000 }
+    stub._relayTextLive(textWire(alice.id, 'live-new', newer), alice.id, newer) // client already saw newer text
+    stub._emitRetainedText(textWire(alice.id, 'retained-old', older), alice.id, older) // stale retained, late
+
+    expect(dataFramesOf(peer)).toEqual(['live-new']) // the stale retained is dropped — the stream never rewinds
+  })
+
+  it('never drops a live text frame for arriving out of order — the causal gate guards retained replay only', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('reorder-live')
+    const alice = await serverRoom.join({ meta: { name: 'Alice' } })
+    stub._onPeerBroadcastSubscribe(false)
+    await settle()
+
+    const first = { seq: 2, timestamp: 2000 }
+    const second = { seq: 1, timestamp: 1000 } // older, arrives second
+    stub._relayTextLive(textWire(alice.id, 'a', first), alice.id, first)
+    stub._relayTextLive(textWire(alice.id, 'b', second), alice.id, second)
+
+    expect(dataFramesOf(peer)).toEqual(['a', 'b']) // text is a stream: no live frame is withheld for being "old"
+  })
+
+  it("drops a retained binary frame's own live echo per (member, track) lane — the binary twin", async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-binary-echo')
+    const cam = await serverRoom.join({ meta: { name: 'cam' } })
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 40)
+    await settle()
+
+    const framed = frameWithMemberId(cam.id, new Uint8Array([7]))
+    const info = { seq: 3, timestamp: 3000 }
+    stub._emitRetainedBinary(encodePublishBinary(framed, info), cam.id, DEFAULT_TRACK, info) // retained back-fill
+    stub._relayBinaryLive(encodePublishBinary(framed, info), cam.id, DEFAULT_TRACK, info) // its own late live echo
+
+    expect(binaryFramesOf(peer).map((r) => r.payload[0])).toEqual([7]) // delivered once — the echo dropped
   })
 })
 

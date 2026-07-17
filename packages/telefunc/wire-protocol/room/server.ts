@@ -254,6 +254,11 @@ const ROOM_TOMBSTONE_TTL_MS = 60_000
  *  tombstone window — both bound the same "a recreation resumes past the last incarnation" guarantee. */
 const ROOM_ORDER_KV_TTL_MS = ROOM_TOMBSTONE_TTL_MS
 
+/** The retained value stored per (member, track) binary lane: the base64 frame plus the publish
+ *  receipt it was assigned, so a late subscriber replays it in the lane's real order (never a fresh
+ *  `seq:0`/`Date.now()` stamp). */
+type RetainedBinary = { b64: string; seq: number; timestamp: number }
+
 /** (Re)register a room in the cross-room directory index (unscoped — enumeration spans rooms, so it
  *  can't live in one room's shard; see `listRooms`). Idempotent: a `set` of the same empty marker, so
  *  it also repairs a create that wrote the authoritative config but crashed before this second write. */
@@ -938,18 +943,7 @@ class ServerRoom implements Room {
     // The guard sees exactly what a subscriber would: the payload, without the wire frame.
     const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
-    // Retained per (member, track), MQTT-style: replayed to any later subscriber of that lane (see
-    // `_replayRetainedBinary`). Stored base64 (KV is string-only) before the live publish, so the
-    // frame is never lost in the publish→store window. No TTL — like the room config record and the
-    // retained-text slot, it's reaped by lifecycle (the publisher's leave, or room close), never by
-    // expiry, so text and binary retention behave identically.
-    if (frame.retain) {
-      await retainedKv(this.id).set(
-        roomRetainedBinaryKey(this.id, from, frame.track ?? DEFAULT_TRACK),
-        bytesToBase64(framed),
-      )
-    }
-    return this._finishPublish(
+    const ack = await this._finishPublish(
       sender,
       frame.payload,
       getBroadcastAdapter().publishBinary(
@@ -957,6 +951,18 @@ class ServerRoom implements Room {
         framed,
       ),
     )
+    // Retained per (member, track), MQTT-style: replayed to any later subscriber of that lane (see
+    // `_replayRetainedBinary`). Stored WITH the publish receipt, so a late subscriber replays it in the
+    // lane's real order rather than a fresh stamp — which means storing after the publish that assigns
+    // the receipt (text stores before, because its `ord` is pre-allocated). No TTL: reaped by lifecycle
+    // (the publisher's leave, or room close), never by expiry, matching the retained-text slot.
+    if (frame.retain) {
+      await retainedKv(this.id).set(
+        roomRetainedBinaryKey(this.id, from, frame.track ?? DEFAULT_TRACK),
+        stringify({ b64: bytesToBase64(framed), seq: ack.seq, timestamp: ack.timestamp } satisfies RetainedBinary),
+      )
+    }
+    return ack
   }
 
   /** Shared publish prologue: open check + `onBeforePublish` guard, on the verified sender. */
@@ -1237,7 +1243,7 @@ class ServerRoom implements Room {
       for (const stub of this._stubs) {
         if (!stub._wantsTextFrom(event.from)) continue
         if (stub._selfSuppressed.has(event.from)) continue
-        stub._relayPublishText(wireText)
+        stub._relayTextLive(wireText, event.from, event.ord)
       }
     } else if (this._tail) {
       // Tail, pre-attach: no stub yet, but `Room.get({ tail })` opened ingestion — hold the message so
@@ -1263,10 +1269,11 @@ class ServerRoom implements Room {
 
     if (this._stubs.size > 0) {
       const wireData = encodePublishBinary(framed, rawInfo)
+      const track = unframed.track ?? DEFAULT_TRACK
       for (const stub of this._stubs) {
-        if (!stub._wantsBinary(unframed.from, unframed.track ?? DEFAULT_TRACK)) continue
+        if (!stub._wantsBinary(unframed.from, track)) continue
         if (stub._selfSuppressed.has(unframed.from)) continue
-        stub._relayPublishBinary(wireData)
+        stub._relayBinaryLive(wireData, unframed.from, track, rawInfo)
       }
     }
   }
@@ -1357,6 +1364,7 @@ class ServerRoom implements Room {
     for (const stub of this._stubs) {
       stub._stubMembers.delete(id)
       stub._selfSuppressed.delete(id)
+      stub._forgetMember(id) // drop the departed member's retained-replay watermarks (bounded state)
     }
     this._syncSubs()
   }
@@ -1561,9 +1569,9 @@ class ServerRoom implements Room {
     if (stored === null) return
     const envelope = parse(stored) as RoomDataEnvelope
     if (prevWantsText || prevMemberWants.has(envelope.from) || !stub._wantsTextFrom(envelope.from)) return
-    // Replay with the message's own stored order — its real place in the room's semantic sequence, not
-    // a fresh stamp — so a late subscriber can order it against live text.
-    stub._relayPublishText(encodePublishText(stored, envelope.ord))
+    // Replay with the message's own stored order, and let the stub drop it if a same-or-newer live
+    // frame already reached it (a publish that raced this subscribe) — exactly-once, in order.
+    stub._emitRetainedText(encodePublishText(stored, envelope.ord), envelope.from, envelope.ord)
   }
 
   /** @internal — MQTT-retained replay for the binary lanes. Called when a stub's `sub-binary` want
@@ -1576,12 +1584,16 @@ class ServerRoom implements Room {
     for (const key of await kv.keys(roomRetainedBinaryPrefix(this.id))) {
       const stored = await kv.get(key)
       if (stored === null) continue
-      const framed = base64ToBytes(stored)
+      const record = parse(stored) as RetainedBinary
+      const framed = base64ToBytes(record.b64)
       const frame = unframeMemberId(framed)
       if (!frame) continue
       const track = frame.track ?? DEFAULT_TRACK
       if (binaryWantsCovers(prevWants, frame.from, track) || !stub._wantsBinary(frame.from, track)) continue
-      stub._relayPublishBinary(encodePublishBinary(framed, { seq: 0, timestamp: Date.now() }))
+      // Replay with the frame's own stored receipt (never seq:0/Date.now()); the stub drops it if a
+      // same-or-newer live frame on this lane already reached it — exactly-once, in order.
+      const info: WirePublishInfo = { seq: record.seq, timestamp: record.timestamp }
+      stub._emitRetainedBinary(encodePublishBinary(framed, info), frame.from, track, info)
     }
   }
 
