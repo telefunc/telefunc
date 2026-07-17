@@ -178,10 +178,6 @@ type ServerReplacerContext = {
    *  Replacers pick the names relevant to their data flow. Each returns `true` on success or an error
    *  string — call sites decide the action (throw, drop, ...). */
   validators: ShieldValidators
-  /** When this request started observing invalidations, stamped at its entry. Passed explicitly because
-   *  serialization can run after the request context is gone. A Live serialized without one (outside a
-   *  request) has no read window to be stale against, so it simply starts from now. */
-  requestStartSeq?: number
 }
 
 /** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */

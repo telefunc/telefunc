@@ -1,4 +1,5 @@
 export { stampRequestStartFence, getRequestStartSeq, subscribeTag, invalidateTagStatic }
+export type { LiveSerializeContext }
 
 import { getRawContext } from '../context/context.js'
 import type { Context } from '../context/context.js'
@@ -26,6 +27,11 @@ async function stampRequestStartFence(): Promise<void> {
     requestStartSeq: hub.currentSeq(),
   } satisfies TagState
 }
+
+/** @internal What serialization carries so a Live can resolve its tags: the request's fence, and
+ *  nothing else. Kept OFF the generic replacer context — that type is public and shared by every
+ *  extension's replacer, none of which have any business knowing this request has a fence. */
+type LiveSerializeContext = { requestStartSeq: number }
 
 /** Read the stamped fence off an EXPLICIT context object. Serialization passes the context it already
  *  holds rather than reaching for the ambient one, which by then may be gone: in the default sync mode

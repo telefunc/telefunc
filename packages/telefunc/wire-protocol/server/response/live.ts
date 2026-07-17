@@ -3,6 +3,7 @@ export { liveReplacer }
 import type { LiveContract, ReplacerType, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_LIVE } from '../../constants.js'
 import type { LiveEvent } from '../../../node/server/live/live.js'
+import type { LiveSerializeContext } from '../../../node/server/live/tags.js'
 import { assert } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -64,14 +65,15 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     // Deferred activation, refcounted by cell-local leases: cascade-activate this cell's pending
     // deps/source (idempotent — a dep also returned elsewhere activates exactly once). This channel
     // holds one lease; its permanent close releases it, tearing down on the last owner.
-    // The fence arrives explicitly on the context. Every Live is serialized as a telefunction's
-    // response, after the fence is stamped at that request's entry — so a missing one means the
-    // plumbing that carries it is broken, not that we're outside a request. Guessing "start from now"
-    // there would hide exactly the writes the fence exists to catch: everything that landed between
-    // the read and this moment, silently, forever. If the fence is ever legitimately absent, its caller
-    // must say what it should be rather than have this infer it.
-    assert(context.requestStartSeq !== undefined)
-    live.activate(context.requestStartSeq)
+    // The fence arrives explicitly on the context — on the Live-specific extension of it, since no
+    // other extension's replacer has any business knowing this request has a fence. Every Live is
+    // serialized as a telefunction's response, after the fence is stamped at that request's entry, so
+    // a missing one means the plumbing that carries it is broken rather than that we're outside a
+    // request. Guessing "start from now" there would hide exactly the writes the fence exists to
+    // catch: everything that landed between the read and this moment, silently, forever.
+    const { requestStartSeq } = context as ServerReplacerContext & Partial<LiveSerializeContext>
+    assert(requestStartSeq !== undefined)
+    live.activate(requestStartSeq)
     channel.onClose(() => {
       offData()
       offInvalidate()
