@@ -32,8 +32,9 @@ afterAll(async () => {
 })
 
 const carrierOf = (): ReadCarrier => ({ mintedTokens: [] })
+// The terminal `.live()` runs the read-capture pipeline (awaiting the builder itself gives plain rows).
 const liveSelect = (builder: unknown, carrier: ReadCarrier): Promise<Live<UserRow[]>> =>
-  wrapLiveSelect(builder, carrier, db as object) as Promise<Live<UserRow[]>>
+  (wrapLiveSelect(builder, carrier, db as object) as { live(): Promise<Live<UserRow[]>> }).live()
 /** Drive the wire replacer's serialize-time activation path (the Live source's subscribe). */
 const activate = (live: Live<unknown>): void => (live as unknown as { activate(): void }).activate()
 
@@ -125,17 +126,17 @@ describe('disposeUnredeemedReads — the request finally-sweep', () => {
   })
 })
 
-// ── the chainable thenable proxy ────────────────────────────────────
+// ── the chainable live builder proxy ────────────────────────────────
 
-describe('wrapLiveSelect — chainable thenable builder', () => {
-  it('chain methods re-wrap (stay live + thenable); non-builder returns pass through untouched', () => {
+describe('wrapLiveSelect — chainable live builder', () => {
+  it('chain methods re-wrap (stay live, keep the terminal `.live()`); non-builder returns pass through untouched', () => {
     const toSQLResult = { sql: 'select', params: [] as unknown[] }
     const inner = { toSQL: () => toSQLResult, where: () => ({ toSQL: () => toSQLResult }) }
     const base = { toSQL: () => toSQLResult, from: () => inner }
     const wrapped = wrapLiveSelect(base, carrierOf(), {} as object) as Record<string, unknown>
 
     const afterFrom = (wrapped.from as () => Record<string, unknown>)()
-    expect(typeof afterFrom.then).toBe('function') // the chain stays a thenable live-builder
+    expect(typeof afterFrom.live).toBe('function') // the re-wrapped chain still carries the terminal
     expect(typeof afterFrom.where).toBe('function') // …and keeps forwarding chain methods
     expect((wrapped.toSQL as () => unknown)()).toBe(toSQLResult) // a non-builder return is passed through raw
   })

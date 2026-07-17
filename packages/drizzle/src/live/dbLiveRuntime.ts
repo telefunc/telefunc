@@ -25,9 +25,7 @@ type CarrierImpl = ReadCarrier & { __dbLiveCarrier: true }
 function acquireCarrier(): DbLiveCarrier {
   const context = getRawContext()
   if (!context) {
-    throw new Error(
-      'reactiveDrizzle: the reactive db accessor must be called inside a telefunction, before the body’s first await.',
-    )
+    throw new Error('reactiveDrizzle(db) must be called inside a telefunction, before the body’s first await.')
   }
   const existing = context[REACTIVE_CARRIER] as CarrierImpl | undefined
   if (existing) return existing

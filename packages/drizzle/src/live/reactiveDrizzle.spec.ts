@@ -1,10 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Live } from 'telefunc'
 
 // The client surface imports the concrete runtime DIRECTLY (the `_installDbLiveRuntime` seam was removed in
-// the auto-load full-remove). Mock both units so these tests drive the proxy + type-transform surface with
-// controllable stubs: the carrier lifecycle (`./dbLiveRuntime`) and the read-capture engine
-// (`./readCapture`). `vi.mock` is hoisted above the imports below.
+// the auto-load full-remove). Mock both units so these tests drive the proxy surface with controllable
+// stubs: the carrier lifecycle (`./dbLiveRuntime`) and the read-capture engine (`./readCapture`).
+// `vi.mock` is hoisted above the imports below.
 vi.mock('./dbLiveRuntime.js', () => ({
   acquireCarrier: vi.fn(() => ({ __dbLiveCarrier: true })),
   captureMutation: vi.fn((_op: unknown, baseMethod: unknown) => baseMethod),
@@ -14,85 +13,74 @@ vi.mock('./readCapture.js', () => ({
 }))
 
 import { reactiveDrizzle } from './reactiveDrizzle.js'
+import { acquireCarrier, captureMutation } from './dbLiveRuntime.js'
 import { wrapLiveSelect } from './readCapture.js'
 
-// ── Compile-time type-transform test. Verified by tsc; never executed. Proves:
-//    plain `db.select()...`  awaits to  `Row[]`             (unchanged — observable-equivalence)
-//    `db.live.select()...`   awaits to  `Live<Row[]>`  (the one owned re-typing seam)
-//    plain fields are preserved. ────────────────────────────────────────────────────────────────────
-type Row = { id: number; text: string }
-interface SelectBuilder extends PromiseLike<Row[]> {
-  from(t: unknown): SelectBuilder
-  where(c: unknown): SelectBuilder
-  toSQL(): { sql: string; params: unknown[] }
-  // drizzle's QueryPromise terminal: runs the query to PLAIN rows. It is the structural marker the
-  // transform keys on (a builder has `.execute()`), and its OWN result must stay plain.
-  execute(): Promise<Row[]>
-}
-interface MockDb {
-  select(): SelectBuilder
-  tag: string
-}
-async function _typeTransform_compileCheck(): Promise<void> {
-  const getDb = reactiveDrizzle({} as MockDb)
-  const db = getDb()
-  const plain: Row[] = await db.select().from(0).where(0) // plain path unchanged
-  const live: Live<Row[]> = await db.live.select().from(0).where(0) // remapped to Live
-  const tag: string = db.tag // plain field preserved
-  // TYPE-NEGATIVE: `.execute()` is the un-captured terminal → PLAIN rows, NOT Live.
-  const executed: Row[] = await db.live.select().from(0).execute()
-  // @ts-expect-error `.execute()` must NOT type as Live (it runs the query and resolves to rows).
-  const executedLie: Live<Row[]> = await db.live.select().from(0).execute()
-  void plain
-  void live
-  void tag
-  void executed
-  void executedLie
-}
-void _typeTransform_compileCheck
+// The runtime type contract (row types survive the terminal `.live()`, teeth) lives in the dedicated
+// HKT contract spec, exercised against REAL Drizzle builders — a hand-rolled db can't stand in for the
+// HKT seam. These tests own the PROXY behaviour: direct-return, select-wrapping, plain-field forwarding.
 
 describe('reactiveDrizzle — client surface', () => {
   beforeEach(() => {
-    // Reset the engine stub to the default pass-through (the live builder forwards its base builder).
+    vi.mocked(acquireCarrier).mockClear()
+    vi.mocked(captureMutation).mockClear()
     vi.mocked(wrapLiveSelect).mockReset()
     vi.mocked(wrapLiveSelect).mockImplementation((baseBuilder: unknown) => baseBuilder)
   })
 
-  it('per-request accessor: plain fields forward (observable-equivalence), `.live` is added', () => {
-    const base = { tag: 'base', select: () => ({ from: () => ({}) }) } as unknown as MockDb
-    const db = reactiveDrizzle(base)()
-    expect((db as unknown as { tag: string }).tag).toBe('base') // plain forwards untouched
-    expect(typeof (db as unknown as { live: { select: unknown } }).live.select).toBe('function') // .live added
+  it('returns the proxied db DIRECTLY (no accessor), capturing the carrier once up front', () => {
+    const base = { tag: 'base', select: () => ({}) }
+    const db = reactiveDrizzle(base)
+    // The db itself — not a function you must call to acquire it. The old `()` accessor is gone.
+    expect(typeof db).toBe('object')
+    // The carrier is captured NOW (before the body's first await), not lazily per read.
+    expect(acquireCarrier).toHaveBeenCalledTimes(1)
   })
 
-  it('`reactiveDrizzle(db)` returns a callable per-request accessor (not the db itself)', () => {
-    const acquire = reactiveDrizzle({ tag: 't', select: () => ({}) } as unknown as MockDb)
-    expect(typeof acquire).toBe('function')
-    expect(acquire()).not.toBe(undefined)
+  it('plain fields forward untouched (observable-equivalence)', () => {
+    const base = { tag: 'base', select: () => ({}) }
+    const db = reactiveDrizzle(base) as unknown as { tag: string }
+    expect(db.tag).toBe('base')
   })
 
-  it('`.execute()` yields plain rows and mints nothing; only the awaited-builder path captures', async () => {
-    const mints: number[] = []
-    const rows: Row[] = [{ id: 7, text: 'x' }]
-    // The engine's wrapLiveSelect result: the terminal `then` captures (mint); `.execute()` is a plain
-    // forwarded terminal (resolves to rows, never captured). Mirrors readCapture's proxy behaviour.
+  it('select() routes through the read-capture engine with this db’s own base builder + the carrier', () => {
+    const baseBuilder = { from: () => ({}) }
+    const base = { select: vi.fn(() => baseBuilder) }
+    const db = reactiveDrizzle(base) as unknown as { select: () => unknown }
+
+    const built = db.select()
+    expect(base.select).toHaveBeenCalledTimes(1)
+    expect(wrapLiveSelect).toHaveBeenCalledTimes(1)
+    const [passedBuilder, carrier] = vi.mocked(wrapLiveSelect).mock.calls[0]!
+    expect(passedBuilder).toBe(baseBuilder) // the engine wraps THIS db's own base builder
+    expect(carrier).toEqual({ __dbLiveCarrier: true })
+    expect(built).toBe(baseBuilder) // the pass-through stub returns it untouched
+  })
+
+  it('the terminal `.live()` is the engine wrapper’s; `then`/`execute` stay plain rows', async () => {
+    // The engine's wrapLiveSelect result mirrors readCapture's proxy: `.live()` captures (a Live),
+    // `execute()`/`await` forward to PLAIN rows. The base builder itself has NO `.live` — nothing leaks.
+    const rows = [{ id: 7 }]
     const liveBuilder = {
-      from: () => liveBuilder,
-      where: () => liveBuilder,
+      from: (_t: unknown) => liveBuilder,
       execute: () => Promise.resolve(rows),
-      then: (onFulfilled: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) => {
-        mints.push(1)
-        return Promise.resolve({ live: true }).then(onFulfilled, onRejected)
-      },
+      live: () => Promise.resolve({ data: rows }),
     }
     vi.mocked(wrapLiveSelect).mockReturnValue(liveBuilder)
-    const db = reactiveDrizzle({ tag: 't', select: () => ({}) } as unknown as MockDb)()
+    const base = { select: () => ({}) } // base builder: no `.live`
+    const db = reactiveDrizzle(base) as unknown as { select: () => typeof liveBuilder }
 
-    const executed = await db.live.select().from(0).execute() // forwarded terminal → plain rows, no mint
+    const live = await db.select().from(0).live()
+    expect(live).toEqual({ data: rows })
+    const executed = await db.select().from(0).execute() // the un-captured terminal → plain rows
     expect(executed).toEqual(rows)
-    expect(mints).toHaveLength(0)
+  })
 
-    await db.live.select().from(0) // the awaited-builder terminal DOES capture
-    expect(mints).toHaveLength(1)
+  it('writes route through the mutation seam (plain today); the seam sees op + carrier', () => {
+    const insert = vi.fn()
+    const base = { select: () => ({}), insert }
+    const db = reactiveDrizzle(base) as unknown as { insert: unknown }
+    void db.insert // property access drives the proxy get
+    expect(captureMutation).toHaveBeenCalledWith('insert', expect.any(Function), { __dbLiveCarrier: true })
   })
 })

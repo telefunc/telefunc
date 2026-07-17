@@ -1,7 +1,8 @@
-// The engine read-capture. `db.live.select(...)` produces a CHAINABLE thenable
-// live-builder (via wrapLiveSelect) whose terminal `await` runs the pipeline: extractQueryShape →
+// The engine read-capture. `reactiveDrizzle(db).select(...)` produces a CHAINABLE
+// live-builder (via wrapLiveSelect) whose terminal `.live()` runs the pipeline: extractQueryShape →
 // compileQuery → registry.acquire (eager-async hydrate in the prologue) → new LiveCell(rows) +
-// attachSource → Live<Row[]>. The wire replacer activates the handle at SERIALIZE time,
+// attachSource → Live<Row[]>. Awaiting the same builder (no `.live()`) forwards to plain rows. The
+// wire replacer activates the handle at SERIALIZE time,
 // synchronously redeeming the read token (subscribe-at-redeem + the seqAtRead fence) via the source's
 // `subscribe`; on the last owning channel's close it releases the lease. A handle that is never
 // serialized never activates, so its token stays un-redeemed and the request's finally-sweep
@@ -48,16 +49,18 @@ function registryFor(db: object): Registry {
   return registry
 }
 
-/** Wrap a live SELECT builder into a CHAINABLE thenable: `from`/`where`/… forward to the underlying
+/** Wrap a live SELECT builder into a CHAINABLE builder: `from`/`where`/… forward to the underlying
  *  drizzle builder and re-wrap the result (so the chain stays live); non-builder returns (`toSQL`,
- *  metadata) pass through untouched; the terminal `then` (an `await`) runs the read-capture pipeline
- *  and resolves to `Live<Row[]>`. This is the runtime for reactiveDrizzle's `LiveOf<>` type. */
+ *  metadata) pass through untouched; the terminal `.live()` runs the read-capture pipeline and resolves
+ *  to `Live<Row[]>`, while `then`/`execute` forward untouched to plain rows (the base builder is itself
+ *  a `QueryPromise`). This is the runtime behind reactiveDrizzle's terminal `.live()`. */
 function wrapLiveSelect(baseBuilder: unknown, carrier: ReadCarrier, db: object): unknown {
   return new Proxy(baseBuilder as object, {
     get(target, prop, receiver) {
-      if (prop === 'then') {
-        return (onFulfilled?: (value: Live<Row[]>) => unknown, onRejected?: (reason: unknown) => unknown) =>
-          captureAndBuild(target, carrier, db).then(onFulfilled, onRejected)
+      if (prop === 'live') {
+        // The terminal: run the read-capture pipeline and resolve to Live<Row[]>. `.live` is synthesized
+        // here — the base drizzle builder has no such member, so nothing leaks onto a plain builder.
+        return () => captureAndBuild(target, carrier, db)
       }
       const value = Reflect.get(target, prop, receiver)
       if (typeof value !== 'function') return value
