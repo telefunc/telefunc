@@ -59,22 +59,25 @@ function invalidateTagStatic(tag: string): void {
   void publishTagImmediate(tag)
 }
 
-/** Publish `tag`. Awaits readiness + publish internally; a transport failure is fired locally, never
- *  thrown to the fire-and-forget caller. */
+/** Publish `tag` to every instance, falling back to this one if the transport can't be reached.
+ *
+ *  Getting the tag OUT is one operation with two ways to fail, so it gets one failure boundary.
+ *  Confirming the subscription can fail (the transport is down, or never proves itself and fails
+ *  closed) just as publishing can, and either way the outcome is the same: the fan-out hop is lost, so
+ *  local subscribers are told directly. Leaving readiness outside the boundary meant a first
+ *  invalidation against a broken transport was neither published, nor journaled, nor fired — and its
+ *  rejection escaped a caller that, by design, is not awaiting it.
+ *
+ *  Never throws: the caller is fire-and-forget, so a throw here has nowhere to go but an unhandled
+ *  rejection. A failed readiness probe is not cached (see `ready`), so a later invalidation re-probes
+ *  and recovers on its own. */
 async function publishTagImmediate(tag: string): Promise<void> {
   const hub = getTagHub()
-  await hub.ready()
-  await publishTags(hub, [tag])
-}
-
-/** Publish one Broadcast batch. A transport failure is detected (structured log) and the batch is
- *  fired to local subscribers anyway — never silent, never thrown. */
-async function publishTags(hub: TagHub, tags: string[]): Promise<void> {
-  if (tags.length === 0) return
   try {
-    await hub.publish(tags)
+    await hub.ready()
+    await hub.publish([tag])
   } catch (err) {
     console.error('[telefunc:live] tag publish failed; firing local subscribers instead:', err)
-    hub.fireLocal(tags)
+    hub.fireLocal([tag])
   }
 }

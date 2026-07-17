@@ -392,3 +392,46 @@ describe('a tag that could not be broadcast still reaches the requests that need
     expect(strictlyAscending).toBe(true)
   })
 })
+
+describe('an invalidation survives a transport that never confirms', () => {
+  // Acknowledges every send but never delivers, so the readiness barrier can never prove itself and
+  // fails closed — a transport that is down when the FIRST invalidation of the process arrives.
+  function neverDelivering(): BroadcastTransport {
+    let seq = 0
+    return {
+      send: () => Promise.resolve({ seq: ++seq, timestamp: 0 }),
+      listen: () => () => {},
+      sendBinary: () => Promise.resolve({ seq: 0, timestamp: 0 }),
+      listenBinary: () => () => {},
+    }
+  }
+
+  beforeEach(() => {
+    _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(neverDelivering()))
+    _resetTagHubsForTesting()
+    _setBarrierBudgetForTesting(2) // fail closed fast instead of the production budget
+  })
+  afterEach(() => _setBarrierBudgetForTesting(50))
+
+  it('readiness failing still reaches local subscribers, and never escapes as an unhandled rejection', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (err: unknown) => unhandled.push(err)
+    process.on('unhandledRejection', onUnhandled)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {}) // the fallback logs by design
+
+    const onInvalidate = vi.fn()
+    getTagHub().registerTag('t', onInvalidate)
+
+    LiveCell.invalidate('t') // fire-and-forget, against a transport that will never confirm
+    for (let i = 0; i < 12; i++) await new Promise<void>((resolve) => setTimeout(resolve, 5))
+
+    // Readiness failing is just another way for the fan-out hop to be lost. This instance's own
+    // subscribers must still learn the tag changed, exactly as when the publish itself fails.
+    expect(onInvalidate).toHaveBeenCalledTimes(1)
+    // And the caller never awaited this, so a rejection has nowhere to go but the process.
+    expect(unhandled).toEqual([])
+
+    process.off('unhandledRejection', onUnhandled)
+    errorSpy.mockRestore()
+  })
+})
