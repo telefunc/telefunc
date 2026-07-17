@@ -82,7 +82,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
   function startSeeding(): void {
     const stateful = spec as Extract<LiveGraphSpec, { kind: 'stateful' }>
     graph = stateful.instantiate()
-    // A no-PK input can never shadow-resolve a key-only retraction → born coarse (T5.A6).
+    // A no-PK input can never shadow-resolve a key-only retraction → born coarse.
     if (graph.seeds.some((descriptor) => descriptor.primaryKey.length === 0)) {
       graph = undefined
       state = 'coarse'
@@ -103,7 +103,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       maxStateRows: stateful.maxStateRows,
       hooks: {
         onComplete(built) {
-          // The synchronous cut (T5.C4): reconcile the one-shot seed-race buffer against the
+          // The synchronous cut: reconcile the one-shot seed-race buffer against the
           // freshly-scanned shadows, then seed the engine from the final baseline in ONE muted
           // flush — NO await anywhere between here and `state = 'live'`.
           for (const change of oneShot)

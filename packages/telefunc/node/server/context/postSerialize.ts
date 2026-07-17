@@ -2,7 +2,7 @@ export { onPostSerialize, drainPostSerializeDisposers }
 
 import type { Context } from './context.js'
 
-// A GENERIC, DB.live-agnostic telefunc-core seam (Ticket 6, R1): run registered disposers ONCE after the
+// A generic core seam, agnostic of what registers with it: run registered disposers ONCE after the
 // execute→serialize pipeline settles — on success AND on a body-throw / serialize-failure. Scoped to the
 // request's `context` object (NOT an ambient `getRawContext()` lookup, which nulls at the first macrotask
 // in sync mode): the registrar captures the context while it is live (before the body's first await), and

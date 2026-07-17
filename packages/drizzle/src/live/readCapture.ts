@@ -1,4 +1,4 @@
-// The engine read-capture (Ticket 6 §U3). `db.live.select(...)` produces a CHAINABLE thenable
+// The engine read-capture. `db.live.select(...)` produces a CHAINABLE thenable
 // live-builder (via wrapLiveSelect) whose terminal `await` runs the pipeline: extractQueryShape →
 // compileQuery → registry.acquire (eager-async hydrate in the prologue) → new LiveCell(rows) +
 // attachSource → Live<Row[]>. The wire replacer activates the handle at SERIALIZE time,

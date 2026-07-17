@@ -358,7 +358,7 @@ async function runTelefunc_({
     }
   }
 
-  // R1 (Ticket 6) — the post-serialize disposer-drain + activated-channel abort must run on EVERY outcome
+  // The post-serialize disposer-drain + activated-channel abort must run on EVERY outcome
   // of the execute→serialize pipeline: success, a body/shield throw BEFORE serialize, AND a serialize
   // failure. A body-throw jumps straight to runTelefunc's catch, skipping serializeTelefunctionResult
   // entirely, so the drain cannot live only inside it. On any FAILURE we also abort the response so a

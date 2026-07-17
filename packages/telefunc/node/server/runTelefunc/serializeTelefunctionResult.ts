@@ -141,7 +141,7 @@ function serializeTelefunctionResult(runContext: {
     extensionResponseTypes,
   )
 
-  // The post-serialize disposer-drain (Ticket 6, R1) is driven by runTelefunc's OUTER finally around the
+  // The post-serialize disposer-drain is driven by runTelefunc's OUTER finally around the
   // whole execute→serialize pipeline — NOT here — so it also runs when a body/shield throw skips this
   // function entirely (a serialize failure below still reaches it: the throw propagates to that finally).
   let httpResponseBody: string

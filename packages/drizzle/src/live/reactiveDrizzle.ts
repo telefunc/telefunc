@@ -5,20 +5,12 @@ import type { Live } from 'telefunc'
 import { acquireCarrier, captureMutation } from './dbLiveRuntime.js'
 import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Ticket 6 §1 — client `db.live` surface (type transform + PER-REQUEST accessor).
+// The `db.live` surface: the type transform, and the per-request accessor behind it.
 //
-// `reactiveDrizzle(baseDb)()` acquires the reactive db at the top of a telefunction (before any await).
-// `acquireCarrier()` establishes the per-request minted-token carrier (context-bearing, before the body's
-// first await); the acquired db CLOSES OVER it, so every `.live.select()` — even POST-await — uses the
-// captured carrier, never ambient `getRawContext` (which nulls in sync mode, the no-async_hooks reality).
-// No module-global `.live` that would silently leak a post-await token.
-//
-// OWNERSHIP: this module owns the CLIENT SURFACE + the type transform ([GEN]). The engine-coupled runtime
-// is imported directly and concretely — the carrier lifecycle from `./dbLiveRuntime` (`acquireCarrier` +
-// `captureMutation`) and the read-capture engine from `./readCapture` (`wrapLiveSelect`). No install seam
-// and no server auto-load: `reactiveDrizzle(db)` wires them at call time.
-// ─────────────────────────────────────────────────────────────────────────────
+// `reactiveDrizzle(baseDb)()` is called at the top of a telefunction, and the db it returns CLOSES OVER
+// that request's carrier. That is what lets `.live.select()` work after an await: it uses the captured
+// carrier rather than looking for the ambient request context, which by then may be gone. A module-level
+// `.live` would have nothing to capture and would silently attach reads to the wrong request.
 
 /** A live query: the SAME Drizzle select-builder chain, but awaiting it yields `Live<T[]>` instead of
  *  `T[]`. Every chain method (`from`/`where`/`innerJoin`/…) returns another `LiveOf<…>`, carrying the

@@ -83,7 +83,7 @@ function pushdownOf(shape: SelectShape): { inputs: InputPlan[]; crossResidual?: 
   return { inputs, crossResidual: cross.length ? { kind: 'and', parts: cross } : undefined }
 }
 
-/** The §5.2 input adapter: a captured change → a pruned, qualified data delta and a
+/** The input adapter: a captured change → a pruned, qualified data delta and a
  *  dirty decision. Row-space σ decides membership on each side; identical pruned
  *  projections of an update fold away (a no-op update never invalidates); a dirty input
  *  fires when the full captured row actually changed and satisfies the tap gate. */
