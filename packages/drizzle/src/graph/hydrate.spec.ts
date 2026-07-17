@@ -231,13 +231,4 @@ describe('T5.C — a late scan completion after abort is inert (never seeds a de
     await flush()
     expect(graph.state()).toBe('destroyed')
   })
-
-  it('retire during the seed: a late scan never flips a retired graph live', async () => {
-    const { executor, calls } = scanQueue()
-    const graph = createLiveGraph(statefulSpec(executor))
-    graph.retire()
-    calls[0]!.resolve([{ id: 1 }])
-    await flush()
-    expect(graph.state()).toBe('retired')
-  })
 })

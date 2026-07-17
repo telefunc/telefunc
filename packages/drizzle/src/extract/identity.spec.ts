@@ -11,36 +11,36 @@ const env: IdentityEnv = {
   schemaFingerprint: 'fp',
 }
 
-describe('identityOf — two-level identity', () => {
-  it('same shape, different param values → same planKey, different instanceKey', () => {
+describe('identityOf — instance identity', () => {
+  it('same query shape, different param values → different instanceKey (value-sensitive)', () => {
     const a = identityOf(qb.select().from(users).where(eq(users.teamId, 5)), env)
     const b = identityOf(qb.select().from(users).where(eq(users.teamId, 9)), env)
-    expect(a.planKey).toBe(b.planKey)
     expect(a.instanceKey).not.toBe(b.instanceKey)
   })
 
-  it('different query structure → different planKey', () => {
+  it('different query structure → different instanceKey', () => {
     const a = identityOf(qb.select().from(users).where(eq(users.teamId, 5)), env)
     const b = identityOf(qb.select().from(users).where(eq(users.id, 5)), env)
-    expect(a.planKey).not.toBe(b.planKey)
+    expect(a.instanceKey).not.toBe(b.instanceKey)
   })
 
-  it('placeholder query: planKey stable across bindings, instanceKey tracks resolved values', () => {
+  it('placeholder query: instanceKey tracks the resolved binding values', () => {
     const builder = qb
       .select()
       .from(users)
       .where(eq(users.id, sql.placeholder('uid')))
     const a = identityOf(builder, { ...env, bindings: { uid: 5 } })
     const b = identityOf(builder, { ...env, bindings: { uid: 9 } })
-    expect(a.planKey).toBe(b.planKey)
     expect(a.instanceKey).not.toBe(b.instanceKey)
   })
 
-  it('planKey folds in the semantic environment and schema fingerprint', () => {
+  it('instanceKey folds in the semantic environment and schema fingerprint (no cross-boundary sharing)', () => {
     const builder = qb.select().from(users).where(eq(users.teamId, 5))
     const base = identityOf(builder, env)
-    expect(identityOf(builder, { ...env, semanticEnvironmentKey: 'other' }).planKey).not.toBe(base.planKey)
-    expect(identityOf(builder, { ...env, schemaFingerprint: 'other' }).planKey).not.toBe(base.planKey)
+    // A graph is shared ONLY across acquisitions with an identical instanceKey — its structural
+    // foundation (via planKeyOf) must fold in the security/schema context, so these do NOT collide.
+    expect(identityOf(builder, { ...env, semanticEnvironmentKey: 'other' }).instanceKey).not.toBe(base.instanceKey)
+    expect(identityOf(builder, { ...env, schemaFingerprint: 'other' }).instanceKey).not.toBe(base.instanceKey)
   })
 })
 

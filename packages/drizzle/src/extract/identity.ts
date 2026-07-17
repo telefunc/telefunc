@@ -9,9 +9,11 @@ import { canonicalValue, frame } from '../utils/canonical.js'
 const COMPILER_ABI = 'telefunc-drizzle-ir/1'
 
 type Identity = {
-  /** Structural: caches extraction/compilation. Same shape ⇒ same planKey. */
-  planKey: string
-  /** planKey plus typed bindings: the graph-state key. Same rows read ⇒ same graph. */
+  /** The graph-state key: the structural plan key (semantic environment / dialect / compiler ABI /
+   *  schema fingerprint / SQL shape, via planKeyOf) folded together with the typed bindings. Same rows
+   *  read under the same authority ⇒ same graph — this is the registry's identical-instance dedup key,
+   *  and its structural foundation is what keeps a graph from being shared across an RLS/role/dialect
+   *  boundary (O6/O7/O8/O11). */
   instanceKey: string
 }
 
@@ -36,7 +38,7 @@ function identityOf(builder: unknown, env: IdentityEnv): Identity {
     schemaFingerprint: env.schemaFingerprint,
     sql,
   })
-  return { planKey, instanceKey: instanceKeyOf(planKey, params, env.bindings) }
+  return { instanceKey: instanceKeyOf(planKey, params, env.bindings) }
 }
 
 /** Structural key. `sql` from toSQL() is already parameterized (values normalized to

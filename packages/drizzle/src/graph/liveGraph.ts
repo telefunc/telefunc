@@ -1,4 +1,4 @@
-// One compiled query as a live runtime object: the seeding / live / coarse / retired / destroyed
+// One compiled query as a live runtime object: the seeding / live / coarse / destroyed
 // state machine. A stateful graph SEEDS synchronously-from-the-caller's-view —
 // the registry blocks acquire on the seed — so it is PRECISE from its first live tick; there is no
 // warming tier and no coarse-during-seed window. `seeding` is internal and transient: it exists
@@ -7,8 +7,7 @@
 // cut. Once live, each routed change is classified through the escalation ladder — inline old >
 // shadow resolve > provably-irrelevant drop — and fires AT MOST ONCE per batch. A seed error, a
 // state-row overflow, or a caught apply-fault (the router faults a throwing graph) DEMOTES to coarse
-// (sound over-fire); schema drift RETIRES (terminal). Firing is reported to the caller (the router
-// owns per-identity notification).
+// (sound over-fire). Firing is reported to the caller (the router owns per-identity notification).
 
 export { type LiveGraph, type LiveGraphSpec, type GraphState, type ApplyOutcome, createLiveGraph }
 
@@ -18,11 +17,11 @@ import { rowChanged } from '../compile/rowSpace.js'
 import { type HydrationExecutor, type Seed, createSeed } from './hydrate.js'
 import { type ShadowIndex, matchesResidual, pkOf, pruneRow } from './shadow.js'
 
-type GraphState = 'seeding' | 'live' | 'coarse' | 'retired' | 'destroyed'
+type GraphState = 'seeding' | 'live' | 'coarse' | 'destroyed'
 type ApplyOutcome = { invalidated: boolean }
 
 type LiveGraphSpec =
-  | { kind: 'coarse'; instanceKey: string; tables: string[]; reason?: string }
+  | { kind: 'coarse'; instanceKey: string; tables: string[] }
   | { kind: 'stateless'; instanceKey: string; tables: string[]; instantiate: () => CompiledGraph }
   | {
       kind: 'stateful'
@@ -31,8 +30,8 @@ type LiveGraphSpec =
       instantiate: () => StatefulGraph
       executor: HydrationExecutor
       maxStateRows: number
-      /** rls / no-pk → born coarse (never hydrates row state). */
-      bornCoarse?: string
+      /** rls (true / 'unknown') → born coarse (never hydrates row state). */
+      bornCoarse?: boolean
     }
 
 type LiveGraph = {
@@ -50,8 +49,6 @@ type LiveGraph = {
   /** An explicit coarse event (an image-less mutation the source can't represent precisely) →
    *  intentionally demote to coarse (distinct from fault's apply-throw, same coarse outcome). */
   coarsen(): void
-  /** Schema/relation drift → terminal; the registry recompiles on the next read. */
-  retire(): void
   /** Refcount 0 → terminal; frees state immediately. */
   destroy(): void
 }
@@ -224,7 +221,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     invalidationSeq: () => seq,
     ready: () => seedDone,
     apply(changes) {
-      if (state === 'retired' || state === 'destroyed') return { invalidated: false }
+      if (state === 'destroyed') return { invalidated: false }
       if (state === 'coarse') return coarseApply(changes)
       if (state === 'seeding') return seedingApply(changes)
       // The router routes coarse markers to coarsen(), never to apply; the row-space state machine is
@@ -235,7 +232,7 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       // A routed apply() threw (a latent bug left state possibly corrupt): permanently demote to
       // coarse so every subsequent change coarse-fires (sound over-fire) — the precise state can no
       // longer be trusted. The router surfaces the error (structured log).
-      if (state === 'retired' || state === 'destroyed') return
+      if (state === 'destroyed') return
       fire() // advance seq so a fault landing in the read window is caught by the redeem fence
       demote()
     },
@@ -243,17 +240,9 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
       // An explicit coarse event (an image-less mutation the source can't represent precisely):
       // intentionally demote to coarse via the SAME path as fault(). Feeds no row — the router calls
       // this INSTEAD of apply(), so precise state is never fed a fabrication.
-      if (state === 'retired' || state === 'destroyed') return
+      if (state === 'destroyed') return
       fire() // advance seq so a coarse event in the read window is caught by the redeem fence
       demote()
-    },
-    retire() {
-      seed?.abort()
-      seed = undefined
-      graph = undefined
-      shadows.clear()
-      state = 'retired'
-      resolveSeed()
     },
     destroy() {
       seed?.abort()

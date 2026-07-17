@@ -158,15 +158,10 @@ describe('coarsen() intentionally demotes a graph to coarse', () => {
     expect(graph.apply([{ table: 'users', kind: 'insert', new: { id: 99, team_id: 5 } }]).invalidated).toBe(true)
   })
 
-  it('coarsen on a terminal (retired/destroyed) graph is inert', async () => {
-    const retired = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
-    retired.retire()
-    retired.coarsen() // terminal wins → no-op
-    expect(retired.state()).toBe('retired')
-
+  it('coarsen on a terminal (destroyed) graph is inert', async () => {
     const destroyed = await warmedJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
     destroyed.destroy()
-    destroyed.coarsen()
+    destroyed.coarsen() // terminal wins → no-op
     expect(destroyed.state()).toBe('destroyed')
   })
 })
@@ -182,7 +177,7 @@ describe('T5.E1 — RLS-gated stateful graphs are born coarse', () => {
       instantiate: () => statefulFake([fakeSeed('users', 'users')]),
       executor: neverExecutor(),
       maxStateRows: 1e9,
-      bornCoarse: 'rls', // the registry sets this for RlsStatus true OR 'unknown'
+      bornCoarse: true, // the registry sets this for RlsStatus true OR 'unknown'
     })
     expect(gated.state()).toBe('coarse')
 
@@ -206,7 +201,6 @@ describe('T5.E1 — RLS-gated stateful graphs are born coarse', () => {
       instantiate: () => statefulFake([fakeSeed('users', 'users')]),
     }
     const r = await registry.acquire({
-      planKey: 'p',
       instanceKey: 'i',
       tables: ['users'],
       rlsEnabled: true,

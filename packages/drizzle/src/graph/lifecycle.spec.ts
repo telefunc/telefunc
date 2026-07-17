@@ -2,10 +2,9 @@
 // from the §3.C-TT transition table and drives a real liveGraph, asserting at every step: the real
 // state equals the legal target (no illegal transition is reachable), ≤1 fire per graph per batch, a
 // SEEDING graph buffers a substantive change precisely (never coarse, never dropped) while a coarse
-// graph over-fires and never claims exactness, and retired/destroyed graphs are inert (never
-// rehydrated). A separate case pins the sinks (coarse is left only by drift/destroy; there is no
-// gap/resync seam — a ChangeSource is gap-free; drift→re-seed is unreachable). Deterministic — a
-// fixed PRNG + deferred scans, never timers.
+// graph over-fires, and a destroyed graph is inert (never rehydrated). A separate case pins the sinks
+// (coarse is left only by destroy; there is no gap/resync seam — a ChangeSource is gap-free).
+// Deterministic — a fixed PRNG + deferred scans, never timers.
 
 import { describe, expect, it } from 'vitest'
 import type { SeedDescriptor, StatefulGraph } from '../compile/compile.js'
@@ -78,7 +77,7 @@ function makeDriven(): { graph: LiveGraph; resolveScan: (rows: Row[]) => void } 
   return { graph, resolveScan: (rows) => calls[calls.length - 1]?.resolve(rows) }
 }
 
-type S = 'seeding' | 'live' | 'coarse' | 'retired' | 'destroyed'
+type S = 'seeding' | 'live' | 'coarse' | 'destroyed'
 type Edge = { trigger: string; to: S }
 
 // §3.C-TT — the complete legal transition set (the walk only ever fires triggers from here).
@@ -86,19 +85,15 @@ const TT: Record<S, Edge[]> = {
   seeding: [
     { trigger: 'seed-complete', to: 'live' },
     { trigger: 'demote-seed', to: 'coarse' },
-    { trigger: 'drift', to: 'retired' },
     { trigger: 'destroy', to: 'destroyed' },
   ],
   live: [
     { trigger: 'state-limit', to: 'coarse' }, // live shadow overflows → coarse (no live→seeding; a gap can't re-seed)
-    { trigger: 'drift', to: 'retired' },
     { trigger: 'destroy', to: 'destroyed' },
   ],
   coarse: [
-    { trigger: 'drift', to: 'retired' }, // coarse is a sink: only drift/destroy leave it
-    { trigger: 'destroy', to: 'destroyed' },
+    { trigger: 'destroy', to: 'destroyed' }, // coarse is a sink: only destroy leaves it
   ],
-  retired: [],
   destroyed: [],
 }
 
@@ -112,8 +107,6 @@ async function drive(driven: { graph: LiveGraph; resolveScan: (rows: Row[]) => v
     await settle(g)
   } else if (trigger === 'state-limit') {
     g.apply(manyChanges(MAX_STATE_ROWS + 50)) // live shadow overflows → demote
-  } else if (trigger === 'drift') {
-    g.retire()
   } else if (trigger === 'destroy') {
     g.destroy()
   }
@@ -131,7 +124,7 @@ function probe(graph: LiveGraph, model: S): void {
   if (model === 'coarse') {
     expect(out.invalidated).toBe(true) // coarse over-fire is licensed (never a silent drop)
   }
-  if (model === 'retired' || model === 'destroyed') {
+  if (model === 'destroyed') {
     expect(out.invalidated).toBe(false) // terminal — inert, never rehydrated
     expect(delta).toBe(0)
   }
@@ -156,20 +149,12 @@ describe('T5.I1 — model-based lifecycle invariants (legal transitions only)', 
     }
   })
 
-  it('coarse and drift are sinks; terminals are inert', async () => {
-    // coarse is a sink — reached by a seed over the bound, left only by drift/destroy
+  it('coarse is a sink; destroyed is terminal and inert', async () => {
+    // coarse is a sink — reached by a seed over the bound, left only by destroy
     const c = makeDriven()
     c.resolveScan(manyRows(MAX_STATE_ROWS + 50))
     await settle(c.graph)
     expect(c.graph.state()).toBe('coarse')
-
-    // drift retires terminally — there is NO drift→re-seed path
-    const r = makeDriven()
-    r.resolveScan([{ id: 1 }])
-    await settle(r.graph)
-    r.graph.retire()
-    expect(r.graph.state()).toBe('retired')
-    expect(r.graph.apply([{ table: 'users', kind: 'insert', new: { id: 1 } }]).invalidated).toBe(false) // never rehydrated
 
     // destroyed is terminal and inert
     const d = makeDriven()

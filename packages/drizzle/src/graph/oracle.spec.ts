@@ -174,7 +174,6 @@ async function seedToLive(graph: LiveGraph, where: string): Promise<void> {
 async function acquireLive<St>(m: Mechanic<St>, key: string): Promise<LiveGraph> {
   const registry = createRegistry({ maxStateRowsPerInput: 1e9 })
   const acquired = await registry.acquire({
-    planKey: key,
     instanceKey: key,
     tables: m.tables,
     rlsEnabled: false,

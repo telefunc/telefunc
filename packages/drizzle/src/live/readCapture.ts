@@ -40,7 +40,7 @@ type MintedToken = { token: ReadToken; redeemed: boolean }
 type ReadCarrier = { mintedTokens: MintedToken[] }
 
 /** One registry per db instance (keyed by identity — a WeakMap so a discarded db is collectable).
- *  All live queries over the same db share its plan cache + graph state. */
+ *  All live queries over the same db share its graph state. */
 const registries = new WeakMap<object, Registry>()
 function registryFor(db: object): Registry {
   let registry = registries.get(db)
@@ -82,7 +82,7 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
     semanticEnvironmentKey: await semanticEnvironmentKeyOf(db),
     schemaFingerprint: schemaFingerprint(tableObjectsOf(builder)),
   }
-  const { planKey, instanceKey } = identityOf(builder, env)
+  const { instanceKey } = identityOf(builder, env)
   const rlsEnabled = await anyRlsEnabled(db, shape.tables)
 
   // notify is set to forward to the (not-yet-created) Live; it is only ever CALLED at redeem-time or
@@ -90,7 +90,6 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
   // fire reaches this before activation.
   let live: Live<Row[]> | undefined
   const { graph, token } = await registryFor(db).acquire({
-    planKey,
     instanceKey,
     tables: shape.tables,
     rlsEnabled,
