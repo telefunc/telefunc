@@ -1,16 +1,17 @@
-export { assembleDbLiveRuntime }
+export { acquireCarrier, captureMutation }
 
 import { getRawContext } from 'telefunc'
 import { onPostSerialize } from 'telefunc/__internal'
-import type { DbLiveCarrier, DbLiveRuntime } from './reactiveDrizzle.js'
-import { wrapLiveSelect, disposeUnredeemedReads, type ReadCarrier } from './readCapture.js'
+import type { DbLiveCarrier } from './reactiveDrizzle.js'
+import { disposeUnredeemedReads, type ReadCarrier } from './readCapture.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Ticket 6 §U3 — the telefunc-side db.live RUNTIME assembly [GEN]. Owns the per-request CARRIER
-// lifecycle (acquire before the first await; the R1 net-zero finally-sweep) + the pass-through
-// captureMutation (U4 supplies the real write-capture). The engine half — `wrapLiveSelect` +
-// `disposeUnredeemedReads` — is EngineFix's readCapture.ts; this module threads them behind the
-// `DbLiveRuntime` seam, and server.ts installs the assembled runtime at extension setup.
+// Ticket 6 §U3 — the telefunc-side db.live CARRIER lifecycle [GEN]. Owns per-request carrier acquisition
+// (before the body's first await; the R1 net-zero finally-sweep via the core post-serialize disposer
+// drain) + the pass-through captureMutation (U4 supplies the real write-capture). The engine half
+// (`wrapLiveSelect` + `disposeUnredeemedReads`) is EngineFix's readCapture.ts; `acquireCarrier` uses
+// `disposeUnredeemedReads` for the sweep, and the client surface (reactiveDrizzle) imports `acquireCarrier`
+// + `captureMutation` directly — no install seam, no server auto-load.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The context symbol under which a request's db.live carrier is stashed — one carrier per request,
@@ -49,16 +50,4 @@ function captureMutation(
   _carrier: DbLiveCarrier,
 ): (...a: unknown[]) => unknown {
   return baseMethod
-}
-
-/** Assemble the installable runtime: EngineFix's read-capture engine + the carrier lifecycle + the
- *  pass-through mutations. The opaque `DbLiveCarrier` the client surface threads is the concrete
- *  `ReadCarrier` at runtime, so the engine boundary casts through it. Installed once by server.ts. */
-function assembleDbLiveRuntime(): DbLiveRuntime {
-  return {
-    acquireCarrier,
-    wrapLiveSelect: (baseBuilder, carrier, db) =>
-      wrapLiveSelect(baseBuilder, carrier as unknown as ReadCarrier, db as object),
-    captureMutation,
-  }
 }

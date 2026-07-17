@@ -1,6 +1,20 @@
-import { beforeAll, describe, expect, it } from 'vitest'
-import { reactiveDrizzle, _installDbLiveRuntime } from './reactiveDrizzle.js'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ClientLive } from 'telefunc'
+
+// The client surface imports the concrete runtime DIRECTLY (the `_installDbLiveRuntime` seam was removed in
+// the auto-load full-remove). Mock both units so these tests drive the proxy + type-transform surface with
+// controllable stubs: the carrier lifecycle (`./dbLiveRuntime`) and the read-capture engine
+// (`./readCapture`). `vi.mock` is hoisted above the imports below.
+vi.mock('./dbLiveRuntime.js', () => ({
+  acquireCarrier: vi.fn(() => ({ __dbLiveCarrier: true })),
+  captureMutation: vi.fn((_op: unknown, baseMethod: unknown) => baseMethod),
+}))
+vi.mock('./readCapture.js', () => ({
+  wrapLiveSelect: vi.fn((baseBuilder: unknown) => baseBuilder),
+}))
+
+import { reactiveDrizzle } from './reactiveDrizzle.js'
+import { wrapLiveSelect } from './readCapture.js'
 
 // ── Compile-time type-transform test (Ticket 6 §1, T6.A1/A2). Verified by tsc; never executed. Proves:
 //    plain `db.select()...`  awaits to  `Row[]`             (unchanged — observable-equivalence)
@@ -38,14 +52,10 @@ async function _typeTransform_compileCheck(): Promise<void> {
 void _typeTransform_compileCheck
 
 describe('reactiveDrizzle — client surface (Ticket 6 §1)', () => {
-  beforeAll(() => {
-    // The real runtime (read-capture + write-capture) lands with EngineFix's U3 seam; a pass-through stub
-    // exercises the client surface here. `_installDbLiveRuntime` is the documented install point.
-    _installDbLiveRuntime({
-      acquireCarrier: () => ({ __dbLiveCarrier: true }),
-      wrapLiveSelect: (baseBuilder) => baseBuilder,
-      captureMutation: (_op, baseMethod) => baseMethod,
-    })
+  beforeEach(() => {
+    // Reset the engine stub to the default pass-through (the live builder forwards its base builder).
+    vi.mocked(wrapLiveSelect).mockReset()
+    vi.mocked(wrapLiveSelect).mockImplementation((baseBuilder: unknown) => baseBuilder)
   })
 
   it('per-request accessor: plain fields forward (observable-equivalence), `.live` is added', () => {
@@ -75,11 +85,7 @@ describe('reactiveDrizzle — client surface (Ticket 6 §1)', () => {
         return Promise.resolve({ live: true }).then(onFulfilled, onRejected)
       },
     }
-    _installDbLiveRuntime({
-      acquireCarrier: () => ({ __dbLiveCarrier: true }),
-      wrapLiveSelect: () => liveBuilder,
-      captureMutation: (_op, baseMethod) => baseMethod,
-    })
+    vi.mocked(wrapLiveSelect).mockReturnValue(liveBuilder)
     const db = reactiveDrizzle({ tag: 't', select: () => ({}) } as unknown as MockDb)()
 
     const executed = await db.live.select().from(0).execute() // forwarded terminal → plain rows, no mint

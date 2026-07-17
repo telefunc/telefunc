@@ -1,32 +1,7 @@
-// Package surface for the IR + extraction layer of this ticket. The runtime entry
-// (reactiveDrizzle, reactiveControls) lands in a later ticket and supersedes this.
+// Public surface of @telefunc/drizzle — reactive Drizzle queries for Telefunc. Call `reactiveDrizzle(db)`
+// at the top of a telefunction to get a per-request reactive db (`.live.select()` awaits to a live
+// `ClientLive`; plain `insert`/`update`/`delete` are auto-captured). The IR / extraction / read-capture
+// engine internals are implementation detail and are intentionally NOT re-exported here.
 
-export type * from './ir/types.js'
-export { evalK, eval3, collapseQuad, rowView, compareValues } from './ir/eval.js'
-
-export { extractQueryShape, renderedRelationsFromSQL } from './extract/queryShape.js'
-export { extractPredicate, parsePredicate, toNNF, conjunctsOf } from './extract/predicate.js'
-export type { PredicateResult } from './extract/predicate.js'
-export {
-  tableRefOf,
-  colRefOf,
-  realTableNameOf,
-  primaryKeyOf,
-  tableFingerprint,
-  schemaFingerprint,
-  relationKeyOf,
-} from './extract/columns.js'
-export { identityOf, planKeyOf, instanceKeyOf, canonicalValue, COMPILER_ABI } from './extract/identity.js'
-export type { Identity, IdentityEnv } from './extract/identity.js'
-
-export {
-  dialectOf,
-  driverOf,
-  clientOf,
-  semanticEnvironmentKeyOf,
-  rlsEnabledOf,
-  rowRunnerFor,
-} from './binding/database.js'
-export type { RlsStatus, RowRunner } from './binding/database.js'
-export { selectConfigOf, isPartialSelect } from './binding/drizzleShape.js'
-export type { DrizzleSelect } from './binding/drizzleShape.js'
+export { reactiveDrizzle } from './live/reactiveDrizzle.js'
+export type { Reactive, LiveOf, LiveNamespace } from './live/reactiveDrizzle.js'

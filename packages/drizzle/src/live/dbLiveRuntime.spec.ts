@@ -1,9 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getRawContext, provideTelefuncContext } from 'telefunc'
 import { drainPostSerializeDisposers } from 'telefunc/__internal'
-import { reactiveDrizzle, _installDbLiveRuntime } from './reactiveDrizzle.js'
+import { reactiveDrizzle } from './reactiveDrizzle.js'
 import type { DbLiveCarrier } from './reactiveDrizzle.js'
-import { assembleDbLiveRuntime } from './dbLiveRuntime.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Ticket 6 §U3 — the db.live runtime wiring gate (JOINT with EngineFix's readCapture engine). Proves the
@@ -11,7 +10,8 @@ import { assembleDbLiveRuntime } from './dbLiveRuntime.js'
 // await, so a POST-await `db.live.select()` still tracks its read token on the captured carrier even after
 // `getRawContext()` has nulled (the sync-mode / no-async_hooks reality), and the R1 finally-sweep releases
 // a token that was never activated (net-zero). The engine's real token mechanics live in EngineFix's
-// readCapture engine tests; here a fake engine isolates the sync-context concern with a controllable token.
+// readCapture engine tests; here a FAKE `wrapLiveSelect` (mocked) isolates the sync-context concern with a
+// controllable token, while the REAL `acquireCarrier` + `disposeUnredeemedReads` run the lifecycle.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
@@ -19,12 +19,16 @@ const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 type FakeToken = { release: () => void }
 type FakeEntry = { token: FakeToken; redeemed: boolean }
 
-/** A fake read-capture engine honoring EngineFix's contract: a chainable thenable whose terminal `await`
- *  mints `{ token, redeemed:false }` onto the request carrier. `minted`/`released` expose what happened so
- *  the sync-mode + sweep assertions can inspect it without reaching into the real engine's internals. */
-function installFakeEngine() {
-  const minted: FakeEntry[] = []
-  const released: FakeToken[] = []
+// Hoisted engine state the mocked `wrapLiveSelect` writes to — hoisted because the `vi.mock` factory is
+// lifted above the imports, so it must close over hoisted state. Reset per test in `beforeEach`.
+const engine = vi.hoisted(() => ({ minted: [] as FakeEntry[], released: [] as FakeToken[] }))
+
+// Fake ONLY the engine's `wrapLiveSelect`; keep the REAL `disposeUnredeemedReads` (and everything else)
+// so the real carrier lifecycle — `acquireCarrier`'s R1 finally-sweep — runs end-to-end against
+// controllable tokens. The fake wrapper's terminal `await` mints `{ token, redeemed:false }` onto the
+// request carrier, honoring EngineFix's read-capture contract.
+vi.mock('./readCapture.js', async (importActual) => {
+  const actual = await importActual<typeof import('./readCapture.js')>()
   const wrapLiveSelect = (_baseBuilder: unknown, carrier: DbLiveCarrier, _db: unknown): unknown => {
     const wrapper: Record<string, unknown> = {
       from: () => wrapper,
@@ -34,22 +38,20 @@ function installFakeEngine() {
           .then(() => {
             const token: FakeToken = {
               release: () => {
-                released.push(token)
+                engine.released.push(token)
               },
             }
             const entry: FakeEntry = { token, redeemed: false }
             ;(carrier as unknown as { mintedTokens: FakeEntry[] }).mintedTokens.push(entry)
-            minted.push(entry)
+            engine.minted.push(entry)
             return { __fakeClientLive: true }
           })
           .then(onFulfilled, onRejected),
     }
     return wrapper
   }
-  // Real carrier lifecycle (acquireCarrier + the sweep registration) + real captureMutation; fake engine.
-  _installDbLiveRuntime({ ...assembleDbLiveRuntime(), wrapLiveSelect })
-  return { minted, released }
-}
+  return { ...actual, wrapLiveSelect }
+})
 
 // Typed shape for the fake db so the `LiveOf<>` transform sees a real builder chain (`.from().where()`
 // awaiting to a result) — mirrors the compile-check in reactiveDrizzle.spec.ts. Runtime is the fake below.
@@ -72,6 +74,10 @@ const plainBuilder: Record<string, unknown> = {
 }
 const baseDb = { tag: 'db', select: () => plainBuilder } as unknown as MockDb
 
+beforeEach(() => {
+  engine.minted.length = 0
+  engine.released.length = 0
+})
 // Flush the sync-mode null timer scheduled by provideTelefuncContext so it never leaks into the next test.
 afterEach(async () => {
   await tick()
@@ -79,8 +85,6 @@ afterEach(async () => {
 
 describe('db.live runtime — carrier lifecycle (Ticket 6 §U3)', () => {
   it('T6.S1 sync-mode: a POST-await db.live.select tracks via the CAPTURED carrier (getRawContext is null), and the finally-sweep disposes the un-activated token', async () => {
-    const engine = installFakeEngine()
-
     // Seed PRODUCTION sync context — this schedules the first-macrotask null that caused the crisis.
     provideTelefuncContext({})
     const context = getRawContext()
@@ -106,7 +110,6 @@ describe('db.live runtime — carrier lifecycle (Ticket 6 §U3)', () => {
   })
 
   it('sweep skips an ACTIVATED token: a serialized (redeemed) handle keeps its channel-owned lease', async () => {
-    const engine = installFakeEngine()
     provideTelefuncContext({})
     const context = getRawContext()
 
@@ -122,7 +125,6 @@ describe('db.live runtime — carrier lifecycle (Ticket 6 §U3)', () => {
   })
 
   it('binding differential: `db.live.select()` mints a read token; plain `db.select()` does not', async () => {
-    const engine = installFakeEngine()
     provideTelefuncContext({})
 
     const db = reactiveDrizzle(baseDb)()
@@ -137,7 +139,6 @@ describe('db.live runtime — carrier lifecycle (Ticket 6 §U3)', () => {
   })
 
   it('acquireCarrier throws outside a telefunction (no context to capture)', () => {
-    installFakeEngine()
     // No provideTelefuncContext here (and afterEach flushed any prior test's null timer), so
     // getRawContext() is null at accessor-call time → the read guard fires.
     expect(() => reactiveDrizzle(baseDb)()).toThrow(/reactive db accessor must be called inside a telefunction/)
