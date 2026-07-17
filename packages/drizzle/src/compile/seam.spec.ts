@@ -1,4 +1,4 @@
-// T5.A0 — the runtime seam is concrete: per-input seed descriptors, a MUTED per-input seed,
+// The runtime seam is concrete: per-input seed descriptors, a MUTED per-input seed,
 // and the self-join no-double-feed integration. Seeding one alias must not fan rows into
 // another alias of the same table, seeding emits no notification, and one real table change
 // then applies to both aliases correctly.

@@ -351,7 +351,7 @@ describe('predicate goldens are built on the pinned rc', () => {
   })
 })
 
-// Named composition cases for an unknown leaf (T3.K4), and that NNF preserves them.
+// Named composition cases for an unknown leaf, and that NNF preserves them.
 describe('unknown-leaf composition', () => {
   const A: Predicate = {
     kind: 'compare',

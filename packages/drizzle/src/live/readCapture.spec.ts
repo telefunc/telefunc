@@ -1,9 +1,9 @@
-// The engine read-capture pipeline (Ticket 6 §U3). Proves wrapLiveSelect end-to-end against a REAL
+// The engine read-capture pipeline. Proves wrapLiveSelect end-to-end against a REAL
 // PGlite db + the telefunc Live primitive: builder → IR → compile → registry.acquire (eager hydrate)
 // → Live; the serialize-time activation redeems the token (flips redeemed=true) and the
 // finally-sweep releases only the un-activated ones. The carrier/sync-mode concern is covered by the
-// Generator's dbLiveRuntime.spec (fake engine); the seqAtRead fence's seq-comparison is covered by
-// registry.spec §6.2b/§6.2c — here we exercise the real redeem/lease wiring behind the seam.
+// dbLiveRuntime.spec (fake engine); the seqAtRead fence's seq-comparison is covered by
+// registry.spec — here we exercise the real redeem/lease wiring behind the seam.
 
 import { PGlite } from '@electric-sql/pglite'
 import { entityKind, sql } from 'drizzle-orm'
@@ -81,7 +81,7 @@ describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydra
   it('#5 — PGlite (single-session) compiles a PRECISE plan (NOT over-coarsed)', () => {
     // PGlite is an in-process single connection ⇒ isSingleSession=true ⇒ precise; a plain SELECT is stateless.
     const shape = extractQueryShape(db.select().from(users), { dialect: 'pg' })
-    expect(compilePlanFor(db as object, shape)().coarse).toBe(false) // the Evaluator's probe: real PGlite plan must be coarse=false
+    expect(compilePlanFor(db as object, shape)().coarse).toBe(false) // the probe: real PGlite plan must be coarse=false
   })
 
   it('#5 — a pooled-unpinned connection (a real pg Pool) forces a COARSE plan (no precise hydration from a mismatched session)', () => {

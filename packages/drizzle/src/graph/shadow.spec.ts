@@ -1,4 +1,4 @@
-// T5.B — the σ-scoped shadow: PK → pruned tuple for σ-matching rows only (B1), the three-way
+// The σ-scoped shadow: PK → pruned tuple for σ-matching rows only (B1), the three-way
 // retraction resolution hit / drop-on-complete / coarse-on-incomplete (B2), and size
 // accounting toward the state bound (B3). The old-inline case (B2a) is resolved by liveGraph
 // without consulting the shadow and is covered there.

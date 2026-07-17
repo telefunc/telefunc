@@ -9,7 +9,7 @@ import { onPostSerialize } from '../context/postSerialize.js'
 // vitest env otherwise resolves first.
 vi.mock('./loadTelefuncFilesUsingVite.js', () => ({ loadTelefuncFilesUsingVite: async () => null }))
 
-// Finding 2 (Ticket 6 R1 re-cert): the post-serialize disposer-drain must run on EVERY outcome of the
+// The post-serialize disposer-drain must run on EVERY outcome of the
 // execute→serialize pipeline. A body throw jumps to runTelefunc's catch, skipping serialize entirely, and
 // a serialize failure throws before the response is built — the OLD drain (inside serializeTelefunctionResult
 // only) missed both, leaking the db.live read token minted during the body. These drive the REAL runTelefunc

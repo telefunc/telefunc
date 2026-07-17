@@ -1,4 +1,4 @@
-// T5.C — synchronous-cut hydration: the seed module. C1 (start() does not await the scan and state
+// Synchronous-cut hydration: the seed module. C1 (start() does not await the scan and state
 // is σ-bounded, not table size), C3 (the seed scan is the σ-pruned in-memory baseline; single +
 // composite PK), a seed exceeding the per-input state bound → coarse, a scan error → coarse (never a
 // partial seed), and abort — a late scan completion after destroy / retire is inert (never seeds a
@@ -87,7 +87,7 @@ function scanQueue(): { executor: HydrationExecutor; calls: Deferred<Row[]>[] } 
   }
 }
 
-// ── C1 — non-blocking + σ-bounded ───────────────────────────────────
+// ── non-blocking + σ-bounded ───────────────────────────────────
 
 describe('start() does not await the scan; state is σ-bounded (not table size)', () => {
   it('start() returns before the scan resolves, and only σ-matching rows enter state', async () => {
@@ -164,7 +164,7 @@ describe('seed scan = σ-scoped pruned baseline, single + composite PK', () => {
 
 // ── bounded state + fail-closed ─────────────────────────────────────
 
-describe('.C — a seed exceeding the per-input state bound demotes to coarse', () => {
+describe('a seed exceeding the per-input state bound demotes to coarse', () => {
   it('onDemote fires with state-row-limit and onComplete does not', async () => {
     let demoted: string | undefined
     let completed = false
@@ -181,7 +181,7 @@ describe('.C — a seed exceeding the per-input state bound demotes to coarse', 
   })
 })
 
-describe('.C — a scan error demotes to coarse (never a partial seed)', () => {
+describe('a scan error demotes to coarse (never a partial seed)', () => {
   it('onDemote fires with hydration-error', async () => {
     let demoted: string | undefined
     const seed = createSeed({
@@ -202,7 +202,7 @@ describe('.C — a scan error demotes to coarse (never a partial seed)', () => {
 
 // ── abort — a late completion is inert ──────────────────────────────
 
-describe('.C — a late scan completion after abort is inert (never seeds a dead graph)', () => {
+describe('a late scan completion after abort is inert (never seeds a dead graph)', () => {
   it('the seed module: abort() before the scan resolves → neither hook fires', async () => {
     const scanDef = deferred<Row[]>()
     let completed = false

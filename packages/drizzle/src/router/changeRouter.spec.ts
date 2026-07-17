@@ -1,4 +1,4 @@
-// T5.G — the change router over ordered, atomic TableChange batches. One commit = one graph tick:
+// The change router over ordered, atomic TableChange batches. One commit = one graph tick:
 // each batch applies once, synchronously, in source order, never merged (G1); a multi-table batch
 // ticks a join graph once and notifies ≤1 per graph AND per attached identity, and a throwing apply
 // is ISOLATED — its identity is coarse-notified while the other graphs in the batch are unaffected

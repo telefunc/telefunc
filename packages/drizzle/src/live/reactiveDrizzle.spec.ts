@@ -16,7 +16,7 @@ vi.mock('./readCapture.js', () => ({
 import { reactiveDrizzle } from './reactiveDrizzle.js'
 import { wrapLiveSelect } from './readCapture.js'
 
-// ── Compile-time type-transform test (Ticket 6 §1, T6.A1/A2). Verified by tsc; never executed. Proves:
+// ── Compile-time type-transform test. Verified by tsc; never executed. Proves:
 //    plain `db.select()...`  awaits to  `Row[]`             (unchanged — observable-equivalence)
 //    `db.live.select()...`   awaits to  `Live<Row[]>`  (the one owned re-typing seam)
 //    plain fields are preserved. ────────────────────────────────────────────────────────────────────
@@ -26,7 +26,7 @@ interface SelectBuilder extends PromiseLike<Row[]> {
   where(c: unknown): SelectBuilder
   toSQL(): { sql: string; params: unknown[] }
   // drizzle's QueryPromise terminal: runs the query to PLAIN rows. It is the structural marker the
-  // transform keys on (a builder has `.execute()`), and its OWN result must stay plain — Finding 4.
+  // transform keys on (a builder has `.execute()`), and its OWN result must stay plain.
   execute(): Promise<Row[]>
 }
 interface MockDb {
@@ -39,7 +39,7 @@ async function _typeTransform_compileCheck(): Promise<void> {
   const plain: Row[] = await db.select().from(0).where(0) // plain path unchanged
   const live: Live<Row[]> = await db.live.select().from(0).where(0) // remapped to Live
   const tag: string = db.tag // plain field preserved
-  // Finding 4 — TYPE-NEGATIVE: `.execute()` is the un-captured terminal → PLAIN rows, NOT Live.
+  // TYPE-NEGATIVE: `.execute()` is the un-captured terminal → PLAIN rows, NOT Live.
   const executed: Row[] = await db.live.select().from(0).execute()
   // @ts-expect-error `.execute()` must NOT type as Live (it runs the query and resolves to rows).
   const executedLie: Live<Row[]> = await db.live.select().from(0).execute()
@@ -71,7 +71,7 @@ describe('reactiveDrizzle — client surface', () => {
     expect(acquire()).not.toBe(undefined)
   })
 
-  it('Finding 4 — `.execute()` yields plain rows and mints nothing; only the awaited-builder path captures', async () => {
+  it('`.execute()` yields plain rows and mints nothing; only the awaited-builder path captures', async () => {
     const mints: number[] = []
     const rows: Row[] = [{ id: 7, text: 'x' }]
     // The engine's wrapLiveSelect result: the terminal `then` captures (mint); `.execute()` is a plain

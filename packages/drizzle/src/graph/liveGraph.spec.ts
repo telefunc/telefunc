@@ -1,4 +1,4 @@
-// T5.B2a / C / E1 / G2 — the live-graph state machine. Real compiled join graphs are seeded
+// The live-graph state machine. Real compiled join graphs are seeded
 // through a controllable executor, then driven live: an old-inline retraction resolves without a
 // shadow consult (B2a), a change routed DURING the scan is buffered and replayed exactly once as a
 // PK-upsert (the one-shot seed-race guard, C), RLS-gated stateful graphs are born coarse (E1), and a
@@ -58,7 +58,7 @@ async function seededJoin(usersRows: Row[], teamsRows: Row[]): Promise<LiveGraph
   return graph
 }
 
-// ── B2a — old-inline retraction, no shadow consult ──────────────────
+// ── old-inline retraction, no shadow consult ──────────────────
 
 describe('an old-inline retraction resolves without consulting the shadow', () => {
   it('an inline old for a row absent from the (complete) shadow still feeds the retraction, whereas key-only drops', async () => {
@@ -77,7 +77,7 @@ describe('an old-inline retraction resolves without consulting the shadow', () =
 
 // ── C — the one-shot seed-race guard ────────────────────────────────
 
-describe('.C — a change routed during the scan is buffered and replayed exactly once', () => {
+describe('a change routed during the scan is buffered and replayed exactly once', () => {
   it('buffers precisely (no coarse-invalidate) and replays as a PK-upsert: dup collapses, new lands', async () => {
     // SELECT DISTINCT team_id FROM users, seeded through a gated scan so we can inject during 'seeding'.
     let resolveScan!: (rows: Row[]) => void

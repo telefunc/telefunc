@@ -55,8 +55,8 @@ describe('aggregateStage — GROUP BY + COUNT', () => {
     expect(colCount.apply([ins({ id: 2, team_id: 5, score: 10, name: 'x' })]).invalidated).toBe(true)
   })
 
-  it('adding a NULL to sum/avg does not fire, even over an EMPTY baseline (finding 2)', () => {
-    // Finding 2 regression: without the seeded unit-group zero state the FIRST null row would
+  it('adding a NULL to sum/avg does not fire, even over an EMPTY baseline', () => {
+    // Regression: without the seeded unit-group zero state the FIRST null row would
     // over-fire (materializing sum=NULL for the first time). The genesis seed makes the empty
     // baseline already hold sum=NULL, so a first NULL row emits no delta.
     const graph = run(qb.select({ s: sum(users.score), a: avg(users.score) }).from(users)) // EMPTY baseline
@@ -70,7 +70,7 @@ describe('aggregateStage — GROUP BY + COUNT', () => {
 
 describe('aggregateStage — aggregate routes through window/projection', () => {
   it('GROUP BY id ORDER BY id LIMIT 1: a below-window group insert does NOT fire; a window change does', () => {
-    // Finding 1 regression: aggregate output must flow through topK, so a group strictly below
+    // Regression: aggregate output must flow through topK, so a group strictly below
     // the top-1 window (total group order) leaves the SQL result unchanged → no fire.
     const graph = run(
       qb.select({ id: users.id, n: count() }).from(users).groupBy(users.id).orderBy(asc(users.id)).limit(1),

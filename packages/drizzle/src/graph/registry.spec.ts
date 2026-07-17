@@ -1,9 +1,9 @@
-// T5.A + §6 reopen — the registry: canonical acquire dedup (A1), concurrent-share + failure recovery
+// The registry: canonical acquire dedup (A1), concurrent-share + failure recovery
 // (A2), activate-before-read spy order (A3), born-state by plan class (A4), refcount = leases +
 // unredeemed tokens with atomic redeem-transfer + immediate destroy (A5/A7), state-row + no-PK
 // born-coarse (A6), per-instance FRESH compile (no cross-instance plan cache), and precision relay (a
 // precise graph notifies ONLY on an affected change — the "spare unaffected queries" mandate). Plus
-// the db.live registry reopen (§6): subscribe-at-redeem (un-redeemed tokens inert), the seqAtRead
+// the db.live registry: subscribe-at-redeem (un-redeemed tokens inert), the seqAtRead
 // activation fence, and the router-owned coarse/fault demotions caught by that fence. Everything is
 // observed THROUGH THE INTERFACE — graph.state() and notify — never an inspect() getter. All fakes
 // are deterministic; pending promises drive the async paths, never timers.
@@ -134,7 +134,7 @@ describe('registry precision — a precise graph notifies ONLY on an affected ch
   })
 })
 
-// ── A1 / A2 — dedup + concurrent creation ───────────────────────────
+// ── dedup + concurrent creation ───────────────────────────
 
 describe('canonical acquire dedup', () => {
   it('two acquires of the same identity return one shared graph, compiling once', async () => {
@@ -293,7 +293,7 @@ describe('state-row bound → demote; no-PK input born coarse', () => {
   })
 })
 
-// ── §6 — db.live registry reopen re-certification (seams 1+2) ────────
+// ── db.live registry: subscribe-at-redeem + the seqAtRead fence ──────
 // Each case discriminates a seam: reverting subscribe-mint→redeem (seam 1) breaks the inert-token
 // assertions; reverting the seqAtRead fence (seam 2) breaks the catch-up assertions.
 
@@ -378,7 +378,7 @@ describe('leases refcount: a non-last close does not dispose while another owner
   })
 })
 
-// ── §6 fence × router-owned demotions (fault/coarsen must advance seq) ──
+// ── the fence × router-owned demotions (fault/coarsen must advance seq) ──
 
 describe('a coarse event during the read window is caught by the redeem fence', () => {
   it('a coarse marker routed after the σ-read (before redeem) fires notify exactly once at redeem', async () => {

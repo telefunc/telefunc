@@ -63,7 +63,7 @@ describe('evalK — NULL vs MISSING signal', () => {
   })
 })
 
-// ── Independent full Kleene truth-table oracle (T3.K3) ───────────────
+// ── Independent full Kleene truth-table oracle ───────────────
 // evalK's and/or/not must match a reference four-valued Kleene table for every
 // operand combination, not just the cases the other specs happen to hit.
 

@@ -1,4 +1,4 @@
-// T4.E1 — the differential soundness gate. For each stateless mechanic (and each named
+// The differential soundness gate. For each stateless mechanic (and each named
 // degradation) we compile the drizzle query, then drive a property-generated,
 // deterministically-seeded (hence replayable) sequence of commits against a PGlite
 // database. After every commit we compare `graph invalidated?` against `did the SQL result
@@ -181,7 +181,7 @@ function renderSql(spec: Spec): string {
   return sqlText
 }
 
-describe('E1 oracle — exact stateless mechanics', () => {
+describe('oracle — exact stateless mechanics', () => {
   it('WHERE eq', () =>
     oracle({ name: 'eq', build: () => db.select().from(users).where(eq(users.teamId, 2)), exact: true }))
   it('WHERE and(eq, gt)', () =>
@@ -226,7 +226,7 @@ describe('E1 oracle — exact stateless mechanics', () => {
     }))
 })
 
-describe('E1 oracle — ORDER BY (tie-canonical bag)', () => {
+describe('oracle — ORDER BY (tie-canonical bag)', () => {
   it('ORDER BY score, name (no LIMIT) fires on a sort-key change, not an equal-key permutation', () =>
     oracle({
       name: 'orderBy',
@@ -236,7 +236,7 @@ describe('E1 oracle — ORDER BY (tie-canonical bag)', () => {
     }))
 })
 
-describe('E1 oracle — licensed degradations (never miss)', () => {
+describe('oracle — licensed degradations (never miss)', () => {
   it('LIMIT without ORDER BY (dirty)', () =>
     oracle({ name: 'limit', build: () => db.select().from(users).limit(3), exact: false }))
   it('opaque WHERE (dirty)', () =>
@@ -266,7 +266,7 @@ describe('E1 oracle — licensed degradations (never miss)', () => {
     }))
 })
 
-describe('E1 oracle — ungrouped aggregate over an empty baseline (exact, finding 2)', () => {
+describe('oracle — ungrouped aggregate over an empty baseline (exact)', () => {
   it('sum(score): fired IFF the result changed, with NO first-row false positive', () =>
     oracle({ name: 'sumAgg', build: () => db.select({ s: sum(users.score) }).from(users), exact: true }))
   it('count(name): fired IFF the result changed', () =>
@@ -275,7 +275,7 @@ describe('E1 oracle — ungrouped aggregate over an empty baseline (exact, findi
 
 // ── Stateful (delta-level) differential: an INNER equi-join fed the SAME commits as the
 // DB, comparing the graph's incremental fire against the re-run join result. Hydration is
-// ticket 5, so the graph state is built up purely from the fed deltas (no live warming).
+// so the graph state is built up purely from the fed deltas.
 
 const teams = pg.pgTable('teams', { id: pg.integer('id').primaryKey(), region: pg.text('region') })
 
@@ -311,7 +311,7 @@ async function mutateJoin(
   return mutate(rng, userIds, { value: next.u++ })
 }
 
-describe('E1 oracle — stateful INNER join (delta-level, hand-fed)', () => {
+describe('oracle — stateful INNER join (delta-level, hand-fed)', () => {
   it('graph fire agrees with the re-run join result over generated commits', async () => {
     for (const seed of SEEDS) {
       await client.exec('delete from users')

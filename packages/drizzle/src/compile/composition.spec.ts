@@ -1,4 +1,4 @@
-// T4.C1 — one named case per §5.4 composition-table row, each asserting the dirty tap at
+// One named case per composition-table row, each asserting the dirty tap at
 // the exact frontier the table specifies. Over-firing is licensed for a degradation, but
 // a miss never is; the frontier cases below check the tap is placed no wider than stated.
 

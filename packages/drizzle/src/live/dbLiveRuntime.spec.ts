@@ -5,11 +5,11 @@ import { reactiveDrizzle } from './reactiveDrizzle.js'
 import type { DbLiveCarrier } from './reactiveDrizzle.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Ticket 6 §U3 — the db.live runtime wiring gate (JOINT with EngineFix's readCapture engine). Proves the
-// CARRIER lifecycle [GEN] under PRODUCTION SYNC mode: the carrier is captured before the body's first
+// The db.live runtime wiring gate. Proves the
+// CARRIER lifecycle under PRODUCTION SYNC mode: the carrier is captured before the body's first
 // await, so a POST-await `db.live.select()` still tracks its read token on the captured carrier even after
-// `getRawContext()` has nulled (the sync-mode / no-async_hooks reality), and the R1 finally-sweep releases
-// a token that was never activated (net-zero). The engine's real token mechanics live in EngineFix's
+// `getRawContext()` has nulled (the sync-mode / no-async_hooks reality), and the finally-sweep releases
+// a token that was never activated (net-zero). The engine's real token mechanics live in the
 // readCapture engine tests; here a FAKE `wrapLiveSelect` (mocked) isolates the sync-context concern with a
 // controllable token, while the REAL `acquireCarrier` + `disposeUnredeemedReads` run the lifecycle.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -26,7 +26,7 @@ const engine = vi.hoisted(() => ({ minted: [] as FakeEntry[], released: [] as Fa
 // Fake ONLY the engine's `wrapLiveSelect`; keep the REAL `disposeUnredeemedReads` (and everything else)
 // so the real carrier lifecycle — `acquireCarrier`'s R1 finally-sweep — runs end-to-end against
 // controllable tokens. The fake wrapper's terminal `await` mints `{ token, redeemed:false }` onto the
-// request carrier, honoring EngineFix's read-capture contract.
+// request carrier, honoring the read-capture contract.
 vi.mock('./readCapture.js', async (importActual) => {
   const actual = await importActual<typeof import('./readCapture.js')>()
   const wrapLiveSelect = (_baseBuilder: unknown, carrier: DbLiveCarrier, _db: unknown): unknown => {

@@ -1,4 +1,4 @@
-// T5.H — the differential oracle over LIVE-SEEDED stateful graphs. Every stateful mechanic runs
+// The differential oracle over LIVE-SEEDED stateful graphs. Every stateful mechanic runs
 // through the REAL registry + real compiled StatefulGraph seam + a real PGlite-backed
 // HydrationExecutor: the graph SEEDS synchronously from PGlite (σ-scoped, pruned) — acquire BLOCKS
 // on the seed, so it is PRECISE from tick one. H1 = seeds
@@ -216,7 +216,7 @@ async function runLive<St>(m: Mechanic<St>): Promise<void> {
   }
 }
 
-// ── H1/H2/H3 — per-mechanic hydrated invalidation, post-flip iff ────
+// ── per-mechanic hydrated invalidation, post-flip iff ────
 
 const usersState = (): UsersState => ({ ids: [], nextId: { value: 1 } })
 const joinState = (): JoinState => ({ userIds: [], teamIds: [], next: { u: 1, t: 100 } })
@@ -228,9 +228,9 @@ const resetJoin = async () => {
   await client.exec('delete from teams')
 }
 
-describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () => {
+describe('differential oracle against LIVE-HYDRATED stateful graphs', () => {
   it(
-    'H2 inner join (match/non-match): exact iff post-flip',
+    'inner join (match/non-match): exact iff post-flip',
     () =>
       runLive({
         name: 'innerJoin',
@@ -247,7 +247,7 @@ describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () 
   )
 
   it(
-    'H2 left join (null-extension): exact iff post-flip',
+    'left join (null-extension): exact iff post-flip',
     () =>
       runLive({
         name: 'leftJoin',
@@ -264,7 +264,7 @@ describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () 
   )
 
   it(
-    'H2 sum group by (aggregate crossing + unselected-column update = no fire): exact iff',
+    'sum group by (aggregate crossing + unselected-column update = no fire): exact iff',
     () =>
       runLive({
         name: 'sumGroup',
@@ -284,7 +284,7 @@ describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () 
   )
 
   it(
-    'H2 min group by (MIN retraction reveals the next value): exact iff',
+    'min group by (MIN retraction reveals the next value): exact iff',
     () =>
       runLive({
         name: 'minGroup',
@@ -304,7 +304,7 @@ describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () 
   )
 
   it(
-    'H2 max group by (MAX retraction): exact iff',
+    'max group by (MAX retraction): exact iff',
     () =>
       runLive({
         name: 'maxGroup',
@@ -324,7 +324,7 @@ describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () 
   )
 
   it(
-    'H2 distinct (suppression): exact iff post-flip',
+    'distinct (suppression): exact iff post-flip',
     () =>
       runLive({
         name: 'distinct',
@@ -340,7 +340,7 @@ describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () 
   )
 
   it(
-    'H2 topK window (below-window insert = no fire): exact iff post-flip',
+    'topK window (below-window insert = no fire): exact iff post-flip',
     () =>
       runLive({
         name: 'window',
@@ -357,7 +357,7 @@ describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () 
   )
 
   it(
-    'H2 HAVING over an aggregate (licensed dirty): changed ⇒ fired (never missed)',
+    'HAVING over an aggregate (licensed dirty): changed ⇒ fired (never missed)',
     () =>
       runLive({
         name: 'having',
@@ -378,7 +378,7 @@ describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () 
   )
 
   it(
-    'H2 mixed UNION / UNION ALL chain (dirty — never miss): live-hydrated',
+    'mixed UNION / UNION ALL chain (dirty — never miss): live-hydrated',
     () =>
       runLive({
         name: 'mixedSetOp',
@@ -402,7 +402,7 @@ describe('.H — differential oracle against LIVE-HYDRATED stateful graphs', () 
   )
 
   it(
-    'H2 opaque GROUP BY (score % 2) membership move (dirty — never miss): live-hydrated',
+    'opaque GROUP BY (score % 2) membership move (dirty — never miss): live-hydrated',
     () =>
       runLive({
         name: 'opaqueGroup',

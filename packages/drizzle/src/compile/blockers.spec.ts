@@ -1,4 +1,4 @@
-// T4.D1/D2/D3 — the three adjudicated soundness blockers, each written as a
+// The three soundness blockers, each written as a
 // failing-then-passing regression: first the data path alone is shown to MISS the change
 // (the "without the fix" behaviour), then the compiler is shown to catch it (the fix). If
 // the fix were removed, the passing assertion below would flip to the failing one.
@@ -47,7 +47,7 @@ const net = (entries: MultiSetArray<unknown>): Map<string, number> => {
   return out
 }
 
-describe('D1 — unknown-predicate membership transition under DISTINCT/consolidate', () => {
+describe('unknown-predicate membership transition under DISTINCT/consolidate', () => {
   it('WITHOUT the witness: the same projected tuple retract+insert cancels in distinct (MISS)', () => {
     const graph = new D2()
     const input = graph.newInput<string>()
@@ -91,7 +91,7 @@ describe('D1 — unknown-predicate membership transition under DISTINCT/consolid
   })
 })
 
-describe('D2 — ORDER-only reorder with an unselected sort key', () => {
+describe('ORDER-only reorder with an unselected sort key', () => {
   const shape = shapeOf(qb.select({ name: users.name }).from(users).orderBy(asc(users.score)))
 
   it('WITHOUT the fix: a name-only projection makes a score reorder invisible (MISS)', () => {
@@ -116,7 +116,7 @@ describe('D2 — ORDER-only reorder with an unselected sort key', () => {
   })
 })
 
-describe('D3 — non-unique topK boundary tie', () => {
+describe('non-unique topK boundary tie', () => {
   it('WITHOUT the license check: a raw topK by a non-total comparator hides a boundary-tie payload change (MISS)', () => {
     type R = { id: number; score: number; payload: number }
     const graph = new D2()

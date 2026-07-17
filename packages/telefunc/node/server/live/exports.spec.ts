@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import * as telefunc from '../index.js'
 
-// The public live surface exported from 'telefunc' (§3.G G1/G4) is exactly THREE concepts: a `Live<T>`
+// The public live surface exported from 'telefunc' is exactly THREE concepts: a `Live<T>`
 // (read `.data`), `Live.derived(…)`, and that's it. The producer cell, its verbs (set/update/invalidate/
 // onData/onInvalidate), the activation lifecycle, and the tag statics are all INTERNAL — reachable only
 // via `telefunc/__internal` (bindings) or not at all. The legacy request-bag/tag functions

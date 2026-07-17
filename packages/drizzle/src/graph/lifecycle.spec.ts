@@ -1,5 +1,5 @@
-// T5.I1 — model-based lifecycle traces. A seeded walk enumerates trigger sequences generated ONLY
-// from the §3.C-TT transition table and drives a real liveGraph, asserting at every step: the real
+// Model-based lifecycle traces. A seeded walk enumerates trigger sequences generated ONLY
+// from the transition table and drives a real liveGraph, asserting at every step: the real
 // state equals the legal target (no illegal transition is reachable), ≤1 fire per graph per batch, a
 // SEEDING graph buffers a substantive change precisely (never coarse, never dropped) while a coarse
 // graph over-fires, and a destroyed graph is inert (never rehydrated). A separate case pins the sinks
@@ -80,7 +80,7 @@ function makeDriven(): { graph: LiveGraph; resolveScan: (rows: Row[]) => void } 
 type S = 'seeding' | 'live' | 'coarse' | 'destroyed'
 type Edge = { trigger: string; to: S }
 
-// §3.C-TT — the complete legal transition set (the walk only ever fires triggers from here).
+// The complete legal transition set (the walk only ever fires triggers from here).
 const TT: Record<S, Edge[]> = {
   seeding: [
     { trigger: 'seed-complete', to: 'live' },
@@ -144,7 +144,7 @@ describe('model-based lifecycle invariants (legal transitions only)', () => {
         const edge: Edge = legal[Math.floor(rng() * legal.length)]!
         await drive(driven, edge.trigger)
         model = edge.to
-        expect(driven.graph.state()).toBe(model) // no transition outside §3.C-TT is reachable
+        expect(driven.graph.state()).toBe(model) // no transition outside the table is reachable
       }
     }
   })
