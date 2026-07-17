@@ -47,7 +47,6 @@ function makeFakeChannel(id: string): FakeChannel & Record<string, unknown> {
       return Promise.resolve()
     },
     onClose: () => {},
-    onOpen: () => {},
     close: () => Promise.resolve(),
     abort: () => {},
   }

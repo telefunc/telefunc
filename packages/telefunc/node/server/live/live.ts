@@ -92,9 +92,6 @@ class LiveCell<T> {
   private dataTaps: Array<(data: T) => void> = []
   private invalidateTaps: Array<() => void> = []
   private closeCallbacks: Array<(err?: Error) => void> = []
-  /** Bumped on every `set`. Lets a reader tell whether a value it captured is still the current one —
-   *  which comparing the values themselves cannot do, since `set` may hand back a mutated object. */
-  private dataRevision = 0
   // One coalesced emission per microtask window. `hasPendingData` is a flag (not a sentinel) so
   // `set(undefined)` is a real pending value; the LAST `set` in the window wins.
   private hasPendingData = false
@@ -129,15 +126,8 @@ class LiveCell<T> {
   set(value: T): void {
     if (this.closed) return
     this.currentData = value
-    this.dataRevision++
     this.hasPendingData = true
     this.scheduleFlush()
-  }
-
-  /** Which revision `data` currently holds. Read it beside `data` to capture a snapshot; a later
-   *  emission is new to the holder of that snapshot only if the revision has moved past it. */
-  get revision(): number {
-    return this.dataRevision
   }
 
   update(fn: (previous: T) => T): void {

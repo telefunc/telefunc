@@ -4,5 +4,5 @@
     "noEmit": true
   },
   "include": ["src/**/*.spec.ts"],
-  "exclude": ["src/live.refetch-on-connect.spec.ts"]
+  "exclude": []
 }

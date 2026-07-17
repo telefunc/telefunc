@@ -12,7 +12,6 @@ type FakeChannel = { id: string; sends: unknown[]; fireClose: () => void }
 function makeFakeChannel(id: string): FakeChannel & Record<string, unknown> {
   const sends: unknown[] = []
   const closeCbs: Array<() => void> = []
-  const openCbs: Array<() => void> = []
   return {
     id,
     sends,
@@ -22,7 +21,6 @@ function makeFakeChannel(id: string): FakeChannel & Record<string, unknown> {
       return Promise.resolve()
     },
     onClose: (cb: () => void) => closeCbs.push(cb),
-    onOpen: (cb: () => void) => openCbs.push(cb),
     close: () => Promise.resolve(),
     abort: () => {},
   }

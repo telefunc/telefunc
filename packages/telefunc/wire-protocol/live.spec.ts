@@ -6,16 +6,6 @@ import { createStreamingReviver } from './client/response/registry.js'
 import { LiveCell } from '../node/server/live/live.js'
 import type { Live, LiveSubscription } from '../node/server/live/live.js'
 import type { ClientReviverContext, ServerReplacerContext } from './types.js'
-import type { LiveEvent } from '../node/server/live/live.js'
-import { ServerChannel } from './server/channel.js'
-import { IndexedPeer } from './server/IndexedPeer.js'
-import { ReplayBuffer } from './replay-buffer.js'
-import { TAG, decode } from './shared-ws.js'
-import { executeTelefunction } from '../node/server/runTelefunc/executeTelefunction.js'
-import { createRequestContext } from '../node/server/context/requestContext.js'
-import { getServerConfig } from '../node/server/serverConfig.js'
-import { getRequestStartSeq } from '../node/server/live/tags.js'
-import type { Context } from '../node/server/context/context.js'
 
 const TELEFUNC_URL = 'http://localhost/_telefunc'
 
@@ -30,7 +20,6 @@ type FakeServerChannel = {
 function makeFakeServerChannel(id: string): FakeServerChannel & Record<string, unknown> {
   const sends: unknown[] = []
   const closeCbs: Array<() => void> = []
-  const openCbs: Array<() => void> = []
   return {
     id,
     sends,
@@ -40,7 +29,6 @@ function makeFakeServerChannel(id: string): FakeServerChannel & Record<string, u
       return Promise.resolve()
     },
     onClose: (cb: () => void) => closeCbs.push(cb),
-    onOpen: (cb: () => void) => openCbs.push(cb),
     close: () => Promise.resolve(),
     abort: () => {},
   }
@@ -200,102 +188,6 @@ describe('Live wire replacer/reviver + serialize-time single activation', () => 
     expect(revived.todos).toBe(revived.list[1].deep)
     expect(revived.report).toBe(revived.list[0])
     expect(revived.todos).not.toBe(revived.report) // distinct handles stay distinct
-  })
-})
-
-// A REAL ServerChannel: replacer → real pre-peer buffer → real peer attach. A fake channel here would
-// only re-prove the buffer's own unit test. The fence is read from the request context `executeTelefunction`
-// stamped, the way `serializeTelefunctionResult` reads it.
-function createRealChannelHarness(bufferLimit: number, requestContext: Context) {
-  const channel = new ServerChannel<never, LiveEvent<unknown>>({ id: crypto.randomUUID(), bufferLimit })
-  const context = {
-    createChannel: () => channel,
-    registerChannel: () => {},
-    sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
-    validators: new Map(),
-    get requestStartSeq() {
-      return getRequestStartSeq(requestContext)
-    },
-  } as unknown as ServerReplacerContext
-  const replacer = createStreamingReplacer(
-    () => context,
-    () => {},
-    [],
-  )
-  return { channel, serialize: (v: unknown) => stringify(v, { forbidReactElements: true, replacer }) }
-}
-
-/** Run `fn` `hops` microtask turns from now — lets a test pin a producer's push to an exact point in
- *  the handoffs between a telefunction returning and its result being serialized. */
-function afterMicrotasks(hops: number, fn: () => void): void {
-  const step = (remaining: number) => {
-    if (remaining === 0) return fn()
-    queueMicrotask(() => step(remaining - 1))
-  }
-  step(hops)
-}
-
-/** Attach a real client peer and collect the frames it receives. */
-function attachPeer(channel: ServerChannel<never, LiveEvent<unknown>>) {
-  const frames: Uint8Array[] = []
-  channel._attachPeer(
-    new IndexedPeer({ send: (frame) => void frames.push(frame) }, 7, new ReplayBuffer(1 << 20, 60_000, 1 << 21)),
-  )
-  return frames.map((f) => decode(f)).filter((d) => d.tag === TAG.TEXT || d.tag === TAG.PUBLISH)
-}
-
-// Whether a dropped frame's replacement actually REACHES the client is asserted where that can be seen —
-// against a revived client and a real adapter tap, in
-// packages/tanstack-query/src/live.refetch-on-connect.spec.ts. Asserting it here could only show that the
-// server sent a frame, which was never the part in doubt.
-
-describe('the refetch-on-connect repair must not fire for data the client already has', () => {
-  it('an emission carrying a revision the snapshot already holds sends no invalidation', async () => {
-    const requestContext: Context = {}
-    const { channel, serialize } = createRealChannelHarness(4096, requestContext) // roomy: nothing is dropped
-    const live = new LiveCell<string>('initial')
-
-    const telefunction = async () => {
-      // A producer OTHER than the body pushes into the cell — a source that already holds it. Nothing
-      // orders such a push against the body's return, and two handoffs stand between that return and
-      // serialization: `executeTelefunction` awaits the body, then the caller awaits
-      // `executeTelefunction`. Two turns lands the push in the gap between them. That is ONE schedule
-      // out of several such a producer could take, pinned deliberately because it is the one that
-      // produces the case being guarded: the push is already in the snapshot (serialization reads
-      // `.data` after it), yet its coalesced emission fires afterwards, once the wire taps exist. That
-      // emission carries a revision the client was already sent.
-      //
-      // A push from inside the body cannot produce this — its flush is queued before the body returns,
-      // so it runs while no tap exists and is swallowed. Which is the point: without the revision check,
-      // this case would be answered by how many times the pipeline happens to await, and nothing
-      // declares that.
-      afterMicrotasks(2, () => live.set('pushed-value'))
-      return live
-    }
-
-    const { telefunctionReturn } = await executeTelefunction({
-      telefunction,
-      telefunctionName: 'onGetTodos',
-      telefuncFilePath: '/pages/todos/Todos.telefunc.ts',
-      telefunctionArgs: [],
-      context: requestContext,
-      requestContext: createRequestContext(new Request(TELEFUNC_URL, { method: 'POST' })),
-      request: new Request(TELEFUNC_URL, { method: 'POST' }),
-      requestExtensions: {},
-      serverConfig: getServerConfig(),
-    })
-    serialize(telefunctionReturn) // synchronous after the await, exactly as `runTelefunc` does
-    await tick()
-
-    const received = attachPeer(channel)
-    // The control, and it has to come first: had the push missed that gap, its emission would have been
-    // swallowed tapless, no frame would exist at all, and the assertion below would hold for a reason
-    // that has nothing to do with revisions. A schedule that drifts fails here instead of passing quietly.
-    expect(received.some((d) => 'text' in d && d.text.includes('pushed-value'))).toBe(true)
-    // An invalidation here would be telling the client to fetch what it was just sent. This stops at the
-    // frame — no client, no adapter — so what it establishes is that none is sent, which is enough: one
-    // never sent cannot reach anyone.
-    expect(received.some((d) => 'text' in d && d.text.includes('invalidate'))).toBe(false)
   })
 })
 

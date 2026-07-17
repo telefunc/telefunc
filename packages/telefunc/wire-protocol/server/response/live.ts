@@ -22,54 +22,12 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     // HERE, only because this Live is crossing the wire. A Live that never serializes reaches this
     // never — no channel, no subscription — so it activates nothing and cannot leak.
     const channel = context.createChannel<never, LiveEvent<unknown>>()
-    // The producer's coalesced emissions ride the channel; the channel owns their teardown.
-    // These taps MUST be installed BEFORE `activate()`. Activation resolves this Live's tags against the
-    // request fence and replays anything published since — an invalidation that fires with no tap
-    // attached reaches nothing, and the client silently keeps a snapshot it should have refetched.
-    // Frames sent before the client connects wait in the channel's pre-peer buffer, which is byte-capped
-    // and drops in two ways: an oversized frame clears the whole lane, and an ordinary overflow evicts
-    // the OLDEST entries — which is exactly where the earliest emission sits. `send` swallows the
-    // resulting rejection, so nothing here can tell whether a frame survived; the channel goes on
-    // looking healthy while the client holds a snapshot it should have replaced.
-    //
-    // So remember, in one bit that lives outside the buffer, that something was emitted before anyone
-    // was listening. It applies to data pushes as much as invalidations: a Live's truth may travel in
-    // either, and a dropped push leaves the client on the wire snapshot just as silently.
-    let peerConnected = false
-    let missedUpdate = false
-    // The snapshot's revision, filled in below when the metadata is built. A data emission only tells
-    // this client something new if the value moved PAST what its snapshot already carries.
-    //
-    // What lands here already represented by the snapshot: a producer that ALREADY HOLDS the cell,
-    // pushing across the two handoffs made before serialization — `executeTelefunction` awaits the body,
-    // then its caller awaits `executeTelefunction`. Such a push is in the metadata (serialization reads
-    // `.data` after it) while its coalesced emission still fires afterwards, once these taps exist.
-    // Marking that a miss would tell the client to refetch what it was just sent.
-    //
-    // A push from INSIDE the body cannot reach here at all: its flush is queued before the body returns,
-    // so it runs while no tap exists and is dropped. Which is why this is a revision comparison and not
-    // a rule about ordering — without it, the case would be decided by how many times the pipeline
-    // happens to await, and nothing declares that.
-    // Revisions rather than values, because `set` may hand back a mutated object.
-    let snapshotRevision = Number.POSITIVE_INFINITY
-    const offData = live.onData((data) => {
-      if (!peerConnected && live.revision > snapshotRevision) missedUpdate = true
-      void channel.send({ kind: 'data', data })
-    })
-    const offInvalidate = live.onInvalidate(() => {
-      if (!peerConnected) missedUpdate = true
-      void channel.send({ kind: 'invalidate' })
-    })
-    // `onOpen` fires once, on the first peer attach, AFTER the pre-peer buffer is flushed — so this
-    // lands behind whatever did survive. Since a survivor is indistinguishable from a casualty here,
-    // this may be redundant: the client refetches once more than it strictly had to. That is the cheap
-    // direction. The other one loses the only signal that its data moved on.
-    channel.onOpen(() => {
-      peerConnected = true
-      if (!missedUpdate) return
-      missedUpdate = false
-      void channel.send({ kind: 'invalidate' })
-    })
+    // The producer's coalesced emissions ride the channel; the channel owns their teardown. These taps
+    // MUST be installed BEFORE `activate()`: activation resolves this Live's tags against the request
+    // fence and replays anything published since, and a catch-up invalidation that fires with no tap
+    // attached reaches nothing — the client would keep a snapshot it should have refetched.
+    const offData = live.onData((data) => void channel.send({ kind: 'data', data }))
+    const offInvalidate = live.onInvalidate(() => void channel.send({ kind: 'invalidate' }))
     // Deferred activation, refcounted by cell-local leases: cascade-activate this cell's pending
     // deps/source (idempotent — a dep also returned elsewhere activates exactly once). This channel
     // holds one lease; its permanent close releases it, tearing down on the last owner.
@@ -89,9 +47,6 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
       // channel closes stays live for the derived cells that hold it.
       live.release()
     })
-    // Capture the revision beside the value it describes, in the same tick — the taps above only fire
-    // on a later microtask, so by then this records exactly what the client was sent.
-    snapshotRevision = live.revision
     return {
       metadata: { data: live.data, channelId: channel.id },
       async close() {
