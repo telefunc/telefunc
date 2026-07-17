@@ -192,35 +192,35 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
   })
 })
 
+// The full chain over a REAL ServerChannel: replacer → real pre-peer buffer → real peer attach.
+// A fake channel here would only re-prove the buffer's own unit test.
+function createRealChannelHarness(bufferLimit: number) {
+  const channel = new ServerChannel<never, LiveEvent<unknown>>({ id: crypto.randomUUID(), bufferLimit })
+  const context = {
+    createChannel: () => channel,
+    registerChannel: () => {},
+    sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
+    validators: new Map(),
+    requestStartSeq: 0,
+  } as unknown as ServerReplacerContext
+  const replacer = createStreamingReplacer(
+    () => context,
+    () => {},
+    [],
+  )
+  return { channel, serialize: (v: unknown) => stringify(v, { forbidReactElements: true, replacer }) }
+}
+
+/** Attach a real client peer and collect the frames it receives. */
+function attachPeer(channel: ServerChannel<never, LiveEvent<unknown>>) {
+  const frames: Uint8Array[] = []
+  channel._attachPeer(
+    new IndexedPeer({ send: (frame) => void frames.push(frame) }, 7, new ReplayBuffer(1 << 20, 60_000, 1 << 21)),
+  )
+  return frames.map((f) => decode(f)).filter((d) => d.tag === TAG.TEXT || d.tag === TAG.PUBLISH)
+}
+
 describe('a live query whose pre-peer frames are dropped still reaches the client', () => {
-  // The full chain over a REAL ServerChannel: replacer → real pre-peer buffer → real peer attach.
-  // A fake channel here would only re-prove the buffer's own unit test.
-  function createRealChannelHarness(bufferLimit: number) {
-    const channel = new ServerChannel<never, LiveEvent<unknown>>({ id: crypto.randomUUID(), bufferLimit })
-    const context = {
-      createChannel: () => channel,
-      registerChannel: () => {},
-      sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
-      validators: new Map(),
-      requestStartSeq: 0,
-    } as unknown as ServerReplacerContext
-    const replacer = createStreamingReplacer(
-      () => context,
-      () => {},
-      [],
-    )
-    return { channel, serialize: (v: unknown) => stringify(v, { forbidReactElements: true, replacer }) }
-  }
-
-  /** Attach a real client peer and collect the frames it receives. */
-  function attachPeer(channel: ServerChannel<never, LiveEvent<unknown>>) {
-    const frames: Uint8Array[] = []
-    channel._attachPeer(
-      new IndexedPeer({ send: (frame) => void frames.push(frame) }, 7, new ReplayBuffer(1 << 20, 60_000, 1 << 21)),
-    )
-    return frames.map((f) => decode(f)).filter((d) => d.tag === TAG.TEXT || d.tag === TAG.PUBLISH)
-  }
-
   it('an invalidation evicted from the pre-peer buffer is still delivered on connect', async () => {
     // A buffer far too small to hold the payload that follows.
     const { channel, serialize } = createRealChannelHarness(64)
@@ -252,5 +252,22 @@ describe('a live query whose pre-peer frames are dropped still reaches the clien
     // A Live's truth can travel in `data` frames just as much as in invalidations. The client cannot be
     // left on the wire snapshot believing it is current, so it is told to refetch.
     expect(received.some((d) => 'text' in d && d.text.includes('invalidate'))).toBe(true)
+  })
+})
+
+describe('the refetch-on-connect repair must not fire for data the client already has', () => {
+  it('a value set before serialization does not trigger a redundant refetch', async () => {
+    const { channel, serialize } = createRealChannelHarness(4096) // roomy: nothing is evicted here
+    const live = new LiveCell<string>('initial')
+    // The producer populates the cell BEFORE returning it — the shape any `live.set(...)` producer has.
+    // The wire snapshot therefore already carries this value.
+    live.set('populated')
+    serialize(live)
+    await tick() // the coalesced data emission lands here: after serialize, before the client connects
+
+    const received = attachPeer(channel)
+    // Telling this client to refetch would be telling it to fetch what it already has — and the refetch
+    // would build another Live the same way, populate it the same way, and be told to refetch again.
+    expect(received.some((d) => 'text' in d && d.text.includes('invalidate'))).toBe(false)
   })
 })

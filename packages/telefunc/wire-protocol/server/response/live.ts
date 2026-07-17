@@ -35,16 +35,20 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     // was listening. It applies to data pushes as much as invalidations: a Live's truth may travel in
     // either, and a dropped push leaves the client on the wire snapshot just as silently.
     let peerConnected = false
-    let emittedBeforeConnect = false
-    const noteEmission = () => {
-      if (!peerConnected) emittedBeforeConnect = true
-    }
+    let missedUpdate = false
+    // The snapshot's revision, filled in below when the metadata is built. A data emission only tells
+    // this client something new if the value moved PAST what its snapshot already carries: a producer
+    // that populates with `set(...)` before returning has its value in the metadata, and its coalesced
+    // emission still lands here — pre-connect, but not news. Treating that as a miss would tell the
+    // client to refetch what it has, and the refetch would build the same Live and say it again.
+    // Revisions rather than value comparison, because `set` may hand back a mutated object.
+    let snapshotRevision = Number.POSITIVE_INFINITY
     const offData = live.onData((data) => {
-      noteEmission()
+      if (!peerConnected && live.revision > snapshotRevision) missedUpdate = true
       void channel.send({ kind: 'data', data })
     })
     const offInvalidate = live.onInvalidate(() => {
-      noteEmission()
+      if (!peerConnected) missedUpdate = true
       void channel.send({ kind: 'invalidate' })
     })
     // `onOpen` fires once, on the first peer attach, AFTER the pre-peer buffer is flushed — so this
@@ -53,8 +57,8 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     // direction. The other one loses the only signal that its data moved on.
     channel.onOpen(() => {
       peerConnected = true
-      if (!emittedBeforeConnect) return
-      emittedBeforeConnect = false
+      if (!missedUpdate) return
+      missedUpdate = false
       void channel.send({ kind: 'invalidate' })
     })
     // Deferred activation, refcounted by cell-local leases: cascade-activate this cell's pending
@@ -70,6 +74,9 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
       // channel closes stays live for the derived cells that hold it.
       live.release()
     })
+    // Capture the revision beside the value it describes, in the same tick — the taps above only fire
+    // on a later microtask, so by then this records exactly what the client was sent.
+    snapshotRevision = live.revision
     return {
       metadata: { data: live.data, channelId: channel.id },
       async close() {
