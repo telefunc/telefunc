@@ -1,7 +1,7 @@
 export { reactiveDrizzle }
 export type { Reactive, LiveOf, LiveNamespace, DbLiveCarrier }
 
-import type { ClientLive } from 'telefunc'
+import type { Live } from 'telefunc'
 import { acquireCarrier, captureMutation } from './dbLiveRuntime.js'
 import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
 
@@ -20,16 +20,16 @@ import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
 // and no server auto-load: `reactiveDrizzle(db)` wires them at call time.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** A live query: the SAME Drizzle select-builder chain, but awaiting it yields `ClientLive<T[]>` instead
- *  of `T[]`. Every chain method (`from`/`where`/`innerJoin`/…) returns another `LiveOf<…>`, carrying the
+/** A live query: the SAME Drizzle select-builder chain, but awaiting it yields `Live<T[]>` instead of
+ *  `T[]`. Every chain method (`from`/`where`/`innerJoin`/…) returns another `LiveOf<…>`, carrying the
  *  live-ness to the terminal `await`; non-await surface (`toSQL`, `getSQL`) is preserved. A member that
  *  returns a plain `Promise<rows>` rather than a builder — `.execute()`, `.catch`, `.finally` — is NOT
  *  remapped: `.execute()` runs the query and resolves to PLAIN rows (it is never token-captured), so its
- *  type must stay `Promise<rows>`, not `ClientLive`. db.live tracks ONLY the awaited-builder path. */
+ *  type must stay `Promise<rows>`, not `Live`. db.live tracks ONLY the awaited-builder path. */
 type LiveOf<B> = B extends PromiseLike<infer R>
   ? { [K in keyof B]: LiveMember<B[K]> } & {
-      then<TResult1 = ClientLive<R>, TResult2 = never>(
-        onfulfilled?: ((value: ClientLive<R>) => TResult1 | PromiseLike<TResult1>) | null,
+      then<TResult1 = Live<R>, TResult2 = never>(
+        onfulfilled?: ((value: Live<R>) => TResult1 | PromiseLike<TResult1>) | null,
         onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
       ): Promise<TResult1 | TResult2>
     }
@@ -47,7 +47,7 @@ type LiveMember<M> = M extends (...args: infer A) => infer Ret
   : M
 
 /** The `.live` namespace: the query-producing methods of `TDb` (`select`; `db.query.*` is a fast-follow),
- *  each remapped so its terminal builder awaits to `ClientLive<T[]>`. Mutations are NOT here — writes go
+ *  each remapped so its terminal builder awaits to `Live<T[]>`. Mutations are NOT here — writes go
  *  through the acquired db's plain `insert/update/delete` (auto-captured), so their types stay Drizzle's. */
 type LiveNamespace<TDb> = TDb extends { select: (...args: infer A) => infer R }
   ? { select(...args: A): LiveOf<R> }

@@ -6,7 +6,7 @@ import { REQUEST_CONTEXT } from '../context/requestContext.js'
 import { getRawContext } from '../context/context.js'
 import { getServerConfig } from '../serverConfig.js'
 import type { TelefuncServerExtension } from '../extensions.js'
-import { Live } from '../live/live.js'
+import { LiveCell } from '../live/live.js'
 import { _resetTagHubsForTesting } from '../live/tagHub.js'
 import { parse } from '@brillout/json-serializer/parse'
 import {
@@ -198,7 +198,7 @@ describe('lifecycle — body outcome + core settle on every path (§3.A)', () =>
   it('core settleLiveState publishes a body-queued tag on SUCCESS', async () => {
     const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
     await run([ext('E1')], async () => {
-      Live.invalidate('z')
+      LiveCell.invalidate('z')
       return 'r'
     })
     const batches = tagBatchesFrom(publishSpy)
@@ -209,7 +209,7 @@ describe('lifecycle — body outcome + core settle on every path (§3.A)', () =>
   it('core settleLiveState runs on EVERY path — a body-queued tag publishes even when the body ERRORS', async () => {
     const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
     await run([ext('E1')], async () => {
-      Live.invalidate('z')
+      LiveCell.invalidate('z')
       throw new Error('boom')
     })
     const batches = tagBatchesFrom(publishSpy)
@@ -220,7 +220,7 @@ describe('lifecycle — body outcome + core settle on every path (§3.A)', () =>
   it('core settleLiveState runs on the ABORT path too — a body-queued tag publishes even when the body aborts', async () => {
     const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
     await run([ext('E1')], async () => {
-      Live.invalidate('z')
+      LiveCell.invalidate('z')
       throw Abort('v')
     })
     const batches = tagBatchesFrom(publishSpy)

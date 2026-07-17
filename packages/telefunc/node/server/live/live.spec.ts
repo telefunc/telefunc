@@ -1,14 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
-import { Live } from './live.js'
-import type { ClientLive } from './live.js'
+import { LiveCell } from './live.js'
 
 // Deterministic microtask flush: the cell schedules its coalesced emission with `queueMicrotask`,
 // so this queued-after callback resolves only once that flush has run (FIFO).
 const tick = () => new Promise<void>((resolve) => queueMicrotask(() => resolve()))
 
 describe('Live core cell (§3.A)', () => {
-  it('T12.A1 producer verbs + data + side-effect-free .client', async () => {
-    const live = new Live<number>(1)
+  it('T12.A1 producer verbs + data; the cell IS the handle a telefunction returns', async () => {
+    const live = new LiveCell<number>(1)
     expect(live.data).toBe(1)
     live.set(2)
     await tick()
@@ -20,16 +19,14 @@ describe('Live core cell (§3.A)', () => {
     await tick()
     expect(live.data).toBe(12)
 
-    // `.client` is a side-effect-free re-type: same underlying value + the shared consumer surface.
-    const client: ClientLive<number> = live.client
-    expect(client.data).toBe(12)
-    expect(client.isClosed).toBe(false)
-    expect(typeof client.onData).toBe('function')
-    expect(typeof client.onInvalidate).toBe('function')
+    // No `.client` re-type step: a telefunction returns the cell itself and the wire replacer
+    // serializes it. `.data` is the whole of what the public `Live<T>` promises a consumer.
+    expect(live.data).toBe(12)
+    expect(live.isClosed).toBe(false)
   })
 
   it('T12.A2 symmetric taps fire; unsubscribe is idempotent; a late tap does not replay', async () => {
-    const live = new Live('a')
+    const live = new LiveCell('a')
     const onData = vi.fn()
     const onInvalidate = vi.fn()
     const offData = live.onData(onData)
@@ -57,7 +54,7 @@ describe('Live core cell (§3.A)', () => {
 
   it('T12.A3 per-cell coalescing, incl. set(undefined)', async () => {
     // Three rapid sets → one onData carrying the third value.
-    const live = new Live<string | undefined>('x')
+    const live = new LiveCell<string | undefined>('x')
     const onData = vi.fn()
     live.onData(onData)
     live.set('a')
@@ -75,7 +72,7 @@ describe('Live core cell (§3.A)', () => {
     expect(onData).toHaveBeenCalledWith(undefined)
 
     // Three rapid invalidates → one onInvalidate.
-    const inv = new Live(0)
+    const inv = new LiveCell(0)
     const onInvalidate = vi.fn()
     inv.onInvalidate(onInvalidate)
     inv.invalidate()
@@ -85,7 +82,7 @@ describe('Live core cell (§3.A)', () => {
     expect(onInvalidate).toHaveBeenCalledTimes(1)
 
     // A data + an invalidate in one window → both fire once (data is not dropped by the invalidate).
-    const both = new Live('p')
+    const both = new LiveCell('p')
     const bothData = vi.fn()
     const bothInv = vi.fn()
     both.onData(bothData)
@@ -99,7 +96,7 @@ describe('Live core cell (§3.A)', () => {
   })
 
   it('T12.A4 set/update/invalidate after close are inert (no throw, no emission, data unchanged)', async () => {
-    const live = new Live('a')
+    const live = new LiveCell('a')
     const onData = vi.fn()
     const onInvalidate = vi.fn()
     live.onData(onData)
@@ -116,7 +113,7 @@ describe('Live core cell (§3.A)', () => {
   })
 
   it('T12.A1/A4 close fires onClose once (idempotent); a late onClose fires immediately', async () => {
-    const live = new Live('a')
+    const live = new LiveCell('a')
     const onClose = vi.fn()
     live.onClose(onClose)
     await live.close()

@@ -8,8 +8,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { restoreContext, getRawContext } from '../context/context.js'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
-import { Live } from './live.js'
-import { _activationStateForTesting, _listenerCountForTesting } from './testing.js'
+import { LiveCell } from './live.js'
 import { stampRequestStartFence } from './tags.js'
 import { getTagHub, _resetTagHubsForTesting } from './tagHub.js'
 import {
@@ -75,26 +74,26 @@ function createServerHarness() {
 }
 
 describe('sync context mode — tag usage must survive a macrotask (real-I/O) await', () => {
-  it('WRITE fix: Live.invalidate after the await publishes immediately WITHOUT throwing', async () => {
+  it('WRITE fix: LiveCell.invalidate after the await publishes immediately WITHOUT throwing', async () => {
     const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
     await restoreContext({}, async () => {
       await stampRequestStartFence()
       await macrotask() // context nulled
       expect(getRawContext()).toBeNull()
-      expect(() => Live.invalidate('t')).not.toThrow() // getRawContext() null → out-of-request immediate publish
+      expect(() => LiveCell.invalidate('t')).not.toThrow() // getRawContext() null → out-of-request immediate publish
     })
     await flush()
     expect(tagBatchCalls(publishSpy).length).toBeGreaterThanOrEqual(1) // the invalidation crossed the wire
   })
 
-  it('READ fix (guard): Live.onInvalidate called AFTER the await THROWS — enforces subscribe-before-fetch', async () => {
+  it('READ fix (guard): LiveCell.onInvalidate called AFTER the await THROWS — enforces subscribe-before-fetch', async () => {
     let thrown: unknown
     await restoreContext({}, async () => {
       await stampRequestStartFence()
       await macrotask() // context nulled
-      const live = new Live<string[]>([])
+      const live = new LiveCell<string[]>([])
       try {
-        Live.onInvalidate('t', live) // eager fence capture needs the live context — throws post-await
+        LiveCell.onInvalidate('t', live) // eager fence capture needs the live context — throws post-await
       } catch (err) {
         thrown = err
       }
@@ -103,26 +102,31 @@ describe('sync context mode — tag usage must survive a macrotask (real-I/O) aw
     expect(String(thrown)).toMatch(/inside a telefunction/)
   })
 
-  it('LEAK-SAFETY: capture-but-never-serialize registers NO hub listener (serialize-time single activation)', async () => {
+  it('LEAK-SAFETY: capture-but-never-serialize subscribes NOTHING (serialize-time single activation)', async () => {
+    const invalidated = vi.fn()
     await restoreContext({}, async () => {
       await stampRequestStartFence()
-      const live = new Live<string[]>([])
-      Live.onInvalidate('t', live) // captures the fence, but the handle is NEVER serialized (no _activate)
-      expect(_listenerCountForTesting(getTagHub(), 't')).toBe(0) // capture touched no hub listener
-      expect(_activationStateForTesting(live).sourceActive).toBe(false) // and nothing activated on the cell
+      const live = new LiveCell<string[]>([])
+      live.onInvalidate(invalidated) // observe whether ANY invalidation reaches the cell
+      LiveCell.onInvalidate('t', live) // captures the fence, but the handle is NEVER serialized (no activate)
     })
-    expect(_listenerCountForTesting(getTagHub(), 't')).toBe(0) // still zero after the request — nothing to leak
+    // Publishing the captured tag reaches nothing: capture alone subscribes no hub listener, so the
+    // cell never invalidates. Were the fence subscribed eagerly at capture time — the leak this design
+    // exists to prevent — this publish would deliver and the tap would fire.
+    await getTagHub().publish(['t'])
+    await flush()
+    expect(invalidated).not.toHaveBeenCalled()
   })
 
-  it('READ fix: Live.onInvalidate BEFORE the await + live.set after → the serialized handle fires on a later publish', async () => {
+  it('READ fix: LiveCell.onInvalidate BEFORE the await + live.set after → the serialized handle fires on a later publish', async () => {
     const server = createServerHarness()
     await restoreContext({}, async () => {
       await stampRequestStartFence()
-      const live = new Live<string[]>([])
-      Live.onInvalidate('t', live) // BEFORE any await — fence captured while the context is live
+      const live = new LiveCell<string[]>([])
+      LiveCell.onInvalidate('t', live) // BEFORE any await — fence captured while the context is live
       await macrotask() // context nulled (the redis await)
       live.set(['fetched']) // handle op after the await — no context needed
-      server.serialize(live.client) // serialize post-await (context null) — must use the CAPTURED fence
+      server.serialize(live) // serialize post-await (context null) — must use the CAPTURED fence
     })
     const channel = server.created[0]!
     await getTagHub().publish(['t'])

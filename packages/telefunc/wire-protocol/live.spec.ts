@@ -3,8 +3,8 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { createStreamingReplacer } from './server/response/registry.js'
 import { createStreamingReviver } from './client/response/registry.js'
-import { Live } from '../node/server/live/live.js'
-import type { ClientLive } from '../node/server/live/live.js'
+import { LiveCell } from '../node/server/live/live.js'
+import type { Live } from '../node/server/live/live.js'
 import type { ClientReviverContext, ServerReplacerContext } from './types.js'
 
 // Deterministic microtask flush — the cell's producer emissions are coalesced with `queueMicrotask`.
@@ -87,15 +87,15 @@ function createClientHarness() {
     waitFor: () => {},
   } as unknown as ClientReviverContext
   const reviver = createStreamingReviver(context, () => {}, [])
-  const parseBody = (body: string) => parse(body, { reviver }) as ClientLive<unknown>
+  const parseBody = (body: string) => parse(body, { reviver }) as Live<unknown>
   return { parseBody, minted }
 }
 
 describe('Live wire replacer/reviver + serialize-time single activation (§3.D)', () => {
-  it('T12.D1 a returned ClientLive → {data, channelId} on the wire → revives to a ClientLive with .data', () => {
+  it('T12.D1 a returned Live → {data, channelId} on the wire → revives to a Live with .data', () => {
     const server = createServerHarness()
-    const live = new Live({ n: 1 })
-    const body = server.serialize(live.client)
+    const live = new LiveCell({ n: 1 })
+    const body = server.serialize(live)
     expect(body).toContain('!TelefuncLive:')
     expect(server.created).toHaveLength(1) // the channel is created AT serialization
 
@@ -111,18 +111,18 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
     server.serialize({ plain: 'x', n: 42 }) // no Live in the value
     expect(server.created).toHaveLength(0)
     // A Live that exists but is not part of the serialized value activates nothing either.
-    const live = new Live('v')
+    const live = new LiveCell('v')
     server.serialize({ other: 'y' })
     expect(server.created).toHaveLength(0)
     // Only when the Live actually crosses the wire is a channel created — exactly once.
-    server.serialize(live.client)
+    server.serialize(live)
     expect(server.created).toHaveLength(1)
   })
 
   it('T12.D1 producer verbs after serialization ride the channel (coalesced data + invalidate events)', async () => {
     const server = createServerHarness()
-    const live = new Live('a')
-    server.serialize(live.client)
+    const live = new LiveCell('a')
+    server.serialize(live)
     const channel = server.created[0]!
     live.set('b')
     live.set('c') // coalesced → one data event with the last value
@@ -135,10 +135,10 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
 
   it('T12.A5 the revived consumer .data tracks pushes; onData/onInvalidate observe channel events', () => {
     const server = createServerHarness()
-    const live = new Live<string>('a')
-    const body = server.serialize(live.client)
+    const live = new LiveCell<string>('a')
+    const body = server.serialize(live)
     const client = createClientHarness()
-    const revived = client.parseBody(body) as ClientLive<string>
+    const revived = client.parseBody(body) as Live<string>
     const channel = client.minted[0]!
 
     const onData = vi.fn()
@@ -157,24 +157,24 @@ describe('Live wire replacer/reviver + serialize-time single activation (§3.D)'
 
   it('T12.D6 multi/nested walk: distinct handles register once; repeated refs revive to === identity', () => {
     const server = createServerHarness()
-    const todos = new Live([1, 2])
-    const report = new Live('R')
+    const todos = new LiveCell([1, 2])
+    const report = new LiveCell('R')
     // Two distinct handles plus repeated references nested across objects/arrays.
     const value = {
-      todos: todos.client,
-      report: report.client,
-      dup: todos.client,
-      list: [report.client, { deep: todos.client }],
+      todos: todos,
+      report: report,
+      dup: todos,
+      list: [report, { deep: todos }],
     }
     const body = server.serialize(value)
     expect(server.created).toHaveLength(2) // one channel per DISTINCT handle (repeats do not re-create)
 
     const client = createClientHarness()
     const revived = client.parseBody(body) as unknown as {
-      todos: ClientLive<unknown>
-      report: ClientLive<unknown>
-      dup: ClientLive<unknown>
-      list: [ClientLive<unknown>, { deep: ClientLive<unknown> }]
+      todos: Live<unknown>
+      report: Live<unknown>
+      dup: Live<unknown>
+      list: [Live<unknown>, { deep: Live<unknown> }]
     }
     expect(client.minted).toHaveLength(2) // two distinct client objects
     expect(revived.todos).toBe(revived.dup) // repeated ref → same revived object

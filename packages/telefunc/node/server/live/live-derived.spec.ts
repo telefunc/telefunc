@@ -2,8 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
 import type { ServerReplacerContext } from '../../../wire-protocol/types.js'
-import { Live } from './live.js'
-import { _activationStateForTesting } from './testing.js'
+import { Live, LiveCell } from './live.js'
 
 // A macrotask flush drains the whole microtask chain (a dep's coalesced flush → derived.invalidate →
 // the derived's own coalesced flush → channel send).
@@ -49,24 +48,25 @@ function createServerHarness() {
   return { serialize, created }
 }
 
-// `Live.derived` returns `.client` (a ClientLive), whose underlying object IS the derived Live.
-const asLive = (clientLive: unknown) => clientLive as unknown as Live<unknown>
+// `Live.derived` returns the public `Live<R>` (just `{ readonly data }`); the object behind it IS the
+// derived cell, which is what the activation-state introspection reads.
+const asCell = (live: unknown) => live as LiveCell<unknown>
 
 describe('Live.derived — deferred cascade activation + cell-local leasing (§3.B)', () => {
   it('T12.B1/B2 inert pending descriptors — a never-serialized derived subscribes NOTHING', () => {
-    const a = new Live('a')
-    const b = new Live('b')
-    const derived = Live.derived(() => `${a.data}|${b.data}`) // reads a.data + b.data → tracks {a,b}
-    // Nothing serialized → zero listeners added on the deps, and the derived holds zero leases.
-    const empty = { lease: 0, invalidateListeners: 0, dataListeners: 0, sourceActive: false }
-    expect(_activationStateForTesting(a)).toEqual(empty)
-    expect(_activationStateForTesting(b)).toEqual(empty)
-    expect(_activationStateForTesting(asLive(derived)).lease).toBe(0)
+    const subscribe = vi.fn(() => () => {})
+    const a = new LiveCell('a')
+    a.attachSource({ subscribe })
+    const b = new LiveCell('b')
+    Live.derived(() => `${a.data}|${b.data}`) // reads a.data + b.data → tracks {a,b}
+    // Never serialized → the tracked deps stay INERT: nothing subscribes their sources. This is the
+    // leak the deferred design exists to prevent — if `derived` activated at CALL time, it fires.
+    expect(subscribe).not.toHaveBeenCalled()
   })
 
   it('T12.B2 multi-dep invalidate forwarding once serialized', async () => {
-    const a = new Live(1)
-    const b = new Live(2)
+    const a = new LiveCell(1)
+    const b = new LiveCell(2)
     const server = createServerHarness()
     server.serialize(Live.derived(() => a.data + b.data)) // tracks {a,b}
     const derivedChannel = server.created[0]!
@@ -78,34 +78,38 @@ describe('Live.derived — deferred cascade activation + cell-local leasing (§3
     expect(derivedChannel.sends).toEqual([{ kind: 'invalidate' }, { kind: 'invalidate' }])
   })
 
-  it('T12.B2 zero-dep derived is inert (no dep subscriptions) but serializes as a normal live cell', () => {
+  it('T12.B2 zero-dep derived is inert (no dep subscriptions) but serializes as a normal live cell', async () => {
     const server = createServerHarness()
     const derived = Live.derived(() => 42) // reads no handle
     server.serialize(derived)
     expect(server.created).toHaveLength(1)
-    expect(_activationStateForTesting(asLive(derived)).lease).toBe(1) // its own channel's lease, no cascade
+    // It behaves as an ordinary cell on its own channel: driving it emits, with no cascade to speak of.
+    asCell(derived).invalidate()
+    await flush()
+    expect(server.created[0]!.sends).toEqual([{ kind: 'invalidate' }])
   })
 
   it('shared-dep-activated-once — a dep both returned and read by a derived activates its source ONCE', () => {
     const teardown = vi.fn()
     const subscribe = vi.fn(() => teardown)
-    const a = new Live('a')
-    a._attachSource({ subscribe })
+    const a = new LiveCell('a')
+    a.attachSource({ subscribe })
     const server = createServerHarness()
-    server.serialize({ a: a.client, summary: Live.derived(() => `sum:${a.data}`) })
+    server.serialize({ a, summary: Live.derived(() => `sum:${a.data}`) })
     expect(server.created).toHaveLength(2) // a's channel + the derived's channel
-    expect(subscribe).toHaveBeenCalledTimes(1) // idempotent _activate: the shared source subscribes once
-    expect(_activationStateForTesting(a).lease).toBe(2) // one lease per owning channel
+    expect(subscribe).toHaveBeenCalledTimes(1) // idempotent activate: the shared source subscribes once
+    // (That `a` holds one lease PER owning channel is proven behaviorally by the close-order test
+    // below — the survivor stays live and the source tears down exactly once.)
   })
 
   it('both close orders — the survivor stays live; the shared source tears down exactly once', async () => {
     // close-dep-channel-first → the derived still fires
     {
       const teardown = vi.fn()
-      const a = new Live('a')
-      a._attachSource({ subscribe: () => teardown })
+      const a = new LiveCell('a')
+      a.attachSource({ subscribe: () => teardown })
       const server = createServerHarness()
-      server.serialize({ a: a.client, summary: Live.derived(() => a.data) })
+      server.serialize({ a, summary: Live.derived(() => a.data) })
       const [aChannel, derivedChannel] = server.created
       aChannel!.fireClose() // close the dep's OWN channel first
       expect(teardown).not.toHaveBeenCalled() // a still holds the derived's lease
@@ -118,10 +122,10 @@ describe('Live.derived — deferred cascade activation + cell-local leasing (§3
     // close-derived-channel-first → the dep still fires
     {
       const teardown = vi.fn()
-      const a = new Live('a')
-      a._attachSource({ subscribe: () => teardown })
+      const a = new LiveCell('a')
+      a.attachSource({ subscribe: () => teardown })
       const server = createServerHarness()
-      server.serialize({ a: a.client, summary: Live.derived(() => a.data) })
+      server.serialize({ a, summary: Live.derived(() => a.data) })
       const [aChannel, derivedChannel] = server.created
       derivedChannel!.fireClose() // close the derived's channel first
       expect(teardown).not.toHaveBeenCalled() // a still holds its own channel's lease

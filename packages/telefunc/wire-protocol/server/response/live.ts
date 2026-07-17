@@ -26,13 +26,13 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     // Deferred activation, refcounted by cell-local leases: cascade-activate this cell's pending
     // deps/source (idempotent — a dep also returned elsewhere activates exactly once). This channel
     // holds one lease; its permanent close releases it, tearing down on the last owner.
-    live._activate()
+    live.activate()
     channel.onClose(() => {
       offData()
       offInvalidate()
-      // `_release` closes the cell only on the LAST owning channel (lease 0) — a shared dep whose own
+      // `release` closes the cell only on the LAST owning channel (lease 0) — a shared dep whose own
       // channel closes stays live for the derived cells that hold it.
-      live._release()
+      live.release()
     })
     return {
       metadata: { data: live.data, channelId: channel.id },

@@ -2,17 +2,21 @@ export { createLiveQuery }
 export type { LiveQueryOptions }
 
 import { hashKey, type QueryClient, type QueryKey, type QueryObserverOptions } from '@tanstack/query-core'
-import type { ClientLive } from 'telefunc'
+import type { Live } from 'telefunc'
+// TYPE-ONLY (erased at build): `telefunc/__internal` is a server entry with no browser condition, so a
+// runtime import would pull the server context/tagHub graph into this browser bundle. The adapter needs
+// the subscription taps, which the public `Live<T>` deliberately doesn't advertise.
+import type { LiveSubscription } from 'telefunc/__internal'
 
 /** The full TanStack query-options seam (staleTime, gcTime, refetchOnMount, …) with ONE override: the
- *  user's `queryFn` returns a `ClientLive<T>`, which the adapter unwraps to `T`. Every other option is
+ *  user's `queryFn` returns a `Live<T>`, which the adapter unwraps to `T`. Every other option is
  *  forwarded verbatim, so `liveQuery({ queryKey, queryFn, staleTime: Infinity })` type-checks inline.
  *  Framework-agnostic — `QueryObserverOptions` is query-core's base for every framework's `useQuery`. */
 type LiveQueryOptions<TData = unknown, TError = Error, TQueryKey extends QueryKey = QueryKey> = Omit<
   QueryObserverOptions<TData, TError, TData, TData, TQueryKey>,
   'queryFn'
 > & {
-  queryFn: () => ClientLive<TData> | Promise<ClientLive<TData>>
+  queryFn: () => Live<TData> | Promise<Live<TData>>
 }
 
 /** The RETURNED options: every forwarded TanStack option, with `queryFn` pinned to the PRECISE unwrapped
@@ -26,14 +30,15 @@ type LiveQueryResult<TData, TError, TQueryKey extends QueryKey> = Omit<
 /** Wire a `QueryClient` for live queries and return the `liveQuery` options adapter.
  *
  *  Framework-agnostic (works with `useQuery` across the React/Solid/Vue TanStack adapters): the input
- *  `queryFn` returns `Promise<ClientLive<T>>`, and the adapter re-types the surfaced `data` to `T`
- *  (TanStack infers `data` from `queryFn`, so this owned seam is the only honest re-typing point).
+ *  `queryFn` returns `Promise<Live<T>>`, and the adapter re-types the surfaced `data` to `T` (TanStack
+ *  infers `data` from `queryFn`, so this owned seam is the only honest re-typing point).
  *
  *  The `QueryClient` is supplied here rather than read from `QueryFunctionContext.client` (which is not
- *  guaranteed at the declared `@tanstack/query-core >=5.0.0` floor). The adapter reaches ONLY into
- *  `ClientLive`'s public surface (`data`/`onInvalidate`/`onData`/`close`) — no telefunc core internals. */
+ *  guaranteed at the declared `@tanstack/query-core >=5.0.0` floor). Beyond the public `.data`, the
+ *  adapter binds the taps through telefunc's `@internal` `LiveSubscription` seam — the sanctioned
+ *  adapter surface, kept off the public `Live<T>`. */
 function createLiveQuery(queryClient: QueryClient) {
-  // Per-query live subscription (the ClientLive + its teardown), keyed by `hashKey`.
+  // Per-query live subscription (the Live handle + its teardown), keyed by `hashKey`.
   const subs = new Map<string, { close: () => Promise<void> }>()
   let cacheUnsub: (() => void) | null = null
 
@@ -59,9 +64,12 @@ function createLiveQuery(queryClient: QueryClient) {
     }
   }
 
-  function wire<T>(queryKey: readonly unknown[], clientLive: ClientLive<T>): T {
+  function wire<T>(queryKey: readonly unknown[], live: Live<T>): T {
     const hash = hashKey(queryKey)
-    // Replace-on-resubscribe: a refetch mints a new ClientLive — close the previous one for this key.
+    // The @internal consumer seam: every Live telefunc revives carries these taps; the public `Live<T>`
+    // just doesn't advertise them (a user reads `.data`; binding the taps is an adapter's job).
+    const subscription = live as unknown as LiveSubscription<T>
+    // Replace-on-resubscribe: a refetch mints a new Live — close the previous one for this key.
     const previous = subs.get(hash)
     if (previous) void previous.close().catch(() => {})
     ensureCacheWatch()
@@ -71,10 +79,10 @@ function createLiveQuery(queryClient: QueryClient) {
     // fetch and refetches — `cancelRefetch: false` would instead let the in-flight fetch complete and clear
     // `isInvalidated` with no follow-up, swallowing the mid-fetch invalidation. A rejected refetch is
     // swallowed so it can't surface as an unhandled rejection.
-    const offInvalidate = clientLive.onInvalidate(() => {
+    const offInvalidate = subscription.onInvalidate(() => {
       void queryClient.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: true }).catch(() => {})
     })
-    const offData = clientLive.onData((data) => queryClient.setQueryData(queryKey, data)) // direct cache write
+    const offData = subscription.onData((data) => queryClient.setQueryData(queryKey, data)) // direct cache write
     let closed = false
     subs.set(hash, {
       close: () => {
@@ -82,14 +90,14 @@ function createLiveQuery(queryClient: QueryClient) {
         closed = true
         offInvalidate()
         offData()
-        return clientLive.close()
+        return subscription.close()
       },
     })
-    return clientLive.data
+    return live.data
   }
 
   // Forward every TanStack option (the §3.F rest seam) and re-type only `queryFn`: TanStack infers
-  // `data` from `queryFn`, so unwrapping `ClientLive<T>` → `T` here is the single honest re-typing point.
+  // `data` from `queryFn`, so unwrapping `Live<T>` → `T` here is the single honest re-typing point.
   return function liveQuery<TData, TError = Error, TQueryKey extends QueryKey = QueryKey>(
     options: LiveQueryOptions<TData, TError, TQueryKey>,
   ): LiveQueryResult<TData, TError, TQueryKey> {

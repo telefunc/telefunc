@@ -1,7 +1,7 @@
 // The engine read-capture (Ticket 6 §U3). `db.live.select(...)` produces a CHAINABLE thenable
 // live-builder (via wrapLiveSelect) whose terminal `await` runs the pipeline: extractQueryShape →
-// compileQuery → registry.acquire (eager-async hydrate in the prologue) → new Live(rows) +
-// _attachSource → ClientLive<Row[]>. The wire replacer activates the handle at SERIALIZE time,
+// compileQuery → registry.acquire (eager-async hydrate in the prologue) → new LiveCell(rows) +
+// attachSource → Live<Row[]>. The wire replacer activates the handle at SERIALIZE time,
 // synchronously redeeming the read token (subscribe-at-redeem + the seqAtRead fence) via the source's
 // `subscribe`; on the last owning channel's close it releases the lease. A handle that is never
 // serialized never activates, so its token stays un-redeemed and the request's finally-sweep
@@ -12,8 +12,8 @@ export { wrapLiveSelect, disposeUnredeemedReads, compilePlanFor }
 export type { MintedToken, ReadCarrier }
 
 import { type Table, isTable } from 'drizzle-orm'
-import { Live } from 'telefunc'
-import type { ClientLive } from 'telefunc'
+import type { Live } from 'telefunc'
+import { LiveCell } from 'telefunc/__internal'
 import { type GraphPlan, coarsePlan, compileQuery } from '../compile/compile.js'
 import type { Row } from '../compile/rowSpace.js'
 import { selectConfigOf } from '../binding/drizzleShape.js'
@@ -51,12 +51,12 @@ function registryFor(db: object): Registry {
 /** Wrap a live SELECT builder into a CHAINABLE thenable: `from`/`where`/… forward to the underlying
  *  drizzle builder and re-wrap the result (so the chain stays live); non-builder returns (`toSQL`,
  *  metadata) pass through untouched; the terminal `then` (an `await`) runs the read-capture pipeline
- *  and resolves to `ClientLive<Row[]>`. This is the runtime for reactiveDrizzle's `LiveOf<>` type. */
+ *  and resolves to `Live<Row[]>`. This is the runtime for reactiveDrizzle's `LiveOf<>` type. */
 function wrapLiveSelect(baseBuilder: unknown, carrier: ReadCarrier, db: object): unknown {
   return new Proxy(baseBuilder as object, {
     get(target, prop, receiver) {
       if (prop === 'then') {
-        return (onFulfilled?: (value: ClientLive<Row[]>) => unknown, onRejected?: (reason: unknown) => unknown) =>
+        return (onFulfilled?: (value: Live<Row[]>) => unknown, onRejected?: (reason: unknown) => unknown) =>
           captureAndBuild(target, carrier, db).then(onFulfilled, onRejected)
       }
       const value = Reflect.get(target, prop, receiver)
@@ -74,7 +74,7 @@ function wrapLiveSelect(baseBuilder: unknown, carrier: ReadCarrier, db: object):
  *  time activation redeems the token. `notify` forwards the graph's invalidation to `live.invalidate`
  *  (equivalent to the source's onInvalidate); the token subscribes it at redeem (seam 1), and the
  *  seqAtRead fence replays a change that landed during the read window (seam 2). */
-async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: object): Promise<ClientLive<Row[]>> {
+async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: object): Promise<Live<Row[]>> {
   const dialect = dialectOf(db)
   const shape = extractQueryShape(builder, { dialect })
   const env = {
@@ -88,7 +88,7 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
   // notify is set to forward to the (not-yet-created) Live; it is only ever CALLED at redeem-time or
   // later (a graph invalidation), by which point `live` exists — an un-redeemed token is inert, so no
   // fire reaches this before activation.
-  let live: Live<Row[]> | undefined
+  let live: LiveCell<Row[]> | undefined
   const { graph, token } = await registryFor(db).acquire({
     instanceKey,
     tables: shape.tables,
@@ -105,8 +105,8 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
   carrier.mintedTokens.push(entry)
 
   const initialRows = (await builder) as Row[] // Phase 1: the initial result is a plain read; the graph signals staleness
-  live = new Live<Row[]>(initialRows)
-  live._attachSource({
+  live = new LiveCell<Row[]>(initialRows)
+  live.attachSource({
     subscribe: () => {
       // Serialize-time activation (SYNC): redeem the token — subscribe its notify to the graph's sink
       // and replay the seqAtRead fence — and mark it activated so the finally-sweep skips it. The
@@ -116,7 +116,9 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
       return () => lease.release()
     },
   })
-  return live.client
+  // Just return the cell: it IS the `Live<Row[]>` the telefunction hands back, and the wire replacer
+  // serializes it. No `.client` re-type — the public type simply doesn't advertise the producer verbs.
+  return live
 }
 
 /** The plan compiler for one query, gated on session provability: a single-session connection (a

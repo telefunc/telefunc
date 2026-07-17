@@ -1,19 +1,18 @@
 import { describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryObserver } from '@tanstack/query-core'
-import type { ClientLive } from 'telefunc'
+import type { Live } from 'telefunc'
+import type { LiveSubscription } from 'telefunc/__internal'
 import { createLiveQuery } from './liveQuery.js'
 
 const tick = () => new Promise<void>((resolve) => queueMicrotask(() => resolve()))
 
-function makeFakeClientLive<T>(initial: T) {
+/** Stand in for a revived client Live: publicly a `Live<T>` (`.data`), carrying the `@internal`
+ *  subscription taps the adapter binds — the same two-faced shape the wire reviver produces. */
+function makeFakeLive<T>(initial: T) {
   const invalidateCbs: Array<() => void> = []
   const dataCbs: Array<(data: T) => void> = []
-  let closed = false
-  const close = vi.fn(() => {
-    closed = true
-    return Promise.resolve()
-  })
-  const live: ClientLive<T> = {
+  const close = vi.fn(() => Promise.resolve())
+  const live: Live<T> & LiveSubscription<T> = {
     data: initial,
     onData: (cb) => {
       dataCbs.push(cb)
@@ -23,11 +22,7 @@ function makeFakeClientLive<T>(initial: T) {
       invalidateCbs.push(cb)
       return () => {}
     },
-    onClose: () => {},
     close,
-    get isClosed() {
-      return closed
-    },
   }
   return {
     live,
@@ -37,15 +32,15 @@ function makeFakeClientLive<T>(initial: T) {
   }
 }
 
-describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
-  it('T12.F2 the surfaced data re-types to T (queryFn returns Promise<T>, not Promise<ClientLive<T>>)', () => {
+describe('liveQuery — TanStack adapter over Live (§3.F)', () => {
+  it('T12.F2 the surfaced data re-types to T (queryFn returns Promise<T>, not Promise<Live<T>>)', () => {
     const liveQuery = createLiveQuery(new QueryClient())
     const options = liveQuery({
       queryKey: ['n'],
-      queryFn: async (): Promise<ClientLive<number>> => makeFakeClientLive(1).live,
+      queryFn: async (): Promise<Live<number>> => makeFakeLive(1).live,
     })
     // Compile-time proof (§3.F2): `queryFn` is PRECISELY `() => Promise<number>` (not QueryObserverOptions'
-    // `skipToken | QueryFunction` union), so TanStack infers `data: number`, not `ClientLive<number>`.
+    // `skipToken | QueryFunction` union), so TanStack infers `data: number`, not `Live<number>`.
     const check: () => Promise<number> = options.queryFn
     expect(typeof check).toBe('function')
   })
@@ -56,7 +51,7 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
     // this is exactly what a `staleTime: Infinity` live query needs (rely on invalidation, not polling).
     const options = liveQuery({
       queryKey: ['n'],
-      queryFn: async (): Promise<ClientLive<number>> => makeFakeClientLive(1).live,
+      queryFn: async (): Promise<Live<number>> => makeFakeLive(1).live,
       staleTime: Infinity,
       gcTime: 5000,
       refetchOnMount: false,
@@ -69,7 +64,7 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
   it('T12.F3 unwraps .data into the cache; onInvalidate calls invalidateQueries directly (idempotent, no coalescing)', async () => {
     const queryClient = new QueryClient()
     const liveQuery = createLiveQuery(queryClient)
-    const fake = makeFakeClientLive('v1')
+    const fake = makeFakeLive('v1')
     const data = await queryClient.fetchQuery(liveQuery({ queryKey: ['todos'], queryFn: async () => fake.live }))
     expect(data).toBe('v1') // .data unwrapped into the cache
     expect(queryClient.getQueryData(['todos'])).toBe('v1')
@@ -86,7 +81,7 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
   it('T12.F3 onData writes the cache directly and does NOT refetch', async () => {
     const queryClient = new QueryClient()
     const liveQuery = createLiveQuery(queryClient)
-    const fake = makeFakeClientLive('v1')
+    const fake = makeFakeLive('v1')
     await queryClient.fetchQuery(liveQuery({ queryKey: ['todos'], queryFn: async () => fake.live }))
 
     const setDataSpy = vi.spyOn(queryClient, 'setQueryData')
@@ -98,21 +93,21 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
     expect(invalidateSpy).not.toHaveBeenCalled() // a data push writes the cache, never refetches
   })
 
-  it('T12.F4 teardown: removing the query from the cache closes the ClientLive', async () => {
+  it('T12.F4 teardown: removing the query from the cache closes the Live', async () => {
     const queryClient = new QueryClient()
     const liveQuery = createLiveQuery(queryClient)
-    const fake = makeFakeClientLive('v1')
+    const fake = makeFakeLive('v1')
     await queryClient.fetchQuery(liveQuery({ queryKey: ['todos'], queryFn: async () => fake.live }))
     expect(fake.close).not.toHaveBeenCalled()
     queryClient.removeQueries({ queryKey: ['todos'] })
     expect(fake.close).toHaveBeenCalledTimes(1)
   })
 
-  it('T12.F3 replace-on-resubscribe: a refetch mints a new ClientLive and closes the previous one', async () => {
+  it('T12.F3 replace-on-resubscribe: a refetch mints a new Live and closes the previous one', async () => {
     const queryClient = new QueryClient()
     const liveQuery = createLiveQuery(queryClient)
-    const first = makeFakeClientLive('a')
-    const second = makeFakeClientLive('b')
+    const first = makeFakeLive('a')
+    const second = makeFakeLive('b')
     let call = 0
     const options = liveQuery({
       queryKey: ['x'],
@@ -120,7 +115,7 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
     })
     await queryClient.fetchQuery(options)
     await queryClient.fetchQuery({ ...options, staleTime: 0 }) // force a second fetch
-    expect(first.close).toHaveBeenCalledTimes(1) // the previous ClientLive is closed
+    expect(first.close).toHaveBeenCalledTimes(1) // the previous Live is closed
     expect(second.close).not.toHaveBeenCalled()
   })
 
@@ -132,13 +127,13 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
     const liveQuery = createLiveQuery(queryClient)
 
     let fetchCount = 0
-    const releases: Array<(live: ClientLive<string>) => void> = []
+    const releases: Array<(live: Live<string>) => void> = []
     // Every fetch is GATED on a manual release, so the test can fire an invalidation while a fetch is
     // still in-flight and observe whether it produces a follow-up fetch.
     const options = liveQuery({
       queryKey: ['todos'],
       queryFn: () =>
-        new Promise<ClientLive<string>>((resolve) => {
+        new Promise<Live<string>>((resolve) => {
           fetchCount++
           releases.push(resolve)
         }),
@@ -150,8 +145,8 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
     await flush()
     expect(fetchCount).toBe(1) // initial fetch in-flight
 
-    // Settle the initial fetch → the query holds v1 and onInvalidate is wired on the first ClientLive.
-    const first = makeFakeClientLive('v1')
+    // Settle the initial fetch → the query holds v1 and onInvalidate is wired on the first Live.
+    const first = makeFakeLive('v1')
     releases[0]!(first.live)
     await flush()
     expect(queryClient.getQueryData(['todos'])).toBe('v1')
@@ -169,7 +164,7 @@ describe('liveQuery — TanStack adapter over ClientLive (§3.F)', () => {
     expect(fetchCount).toBe(3)
 
     // Cleanup: release any still-gated fetches + unsubscribe.
-    const leftover = makeFakeClientLive('vN')
+    const leftover = makeFakeLive('vN')
     for (const release of releases.slice(1)) release(leftover.live)
     await flush()
     unsub()

@@ -44,7 +44,7 @@ vi.mock('./readCapture.js', async (importActual) => {
             const entry: FakeEntry = { token, redeemed: false }
             ;(carrier as unknown as { mintedTokens: FakeEntry[] }).mintedTokens.push(entry)
             engine.minted.push(entry)
-            return { __fakeClientLive: true }
+            return { __fakeLive: true }
           })
           .then(onFulfilled, onRejected),
     }

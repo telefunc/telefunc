@@ -1,5 +1,5 @@
-export { Live }
-export type { ClientLive, LiveEvent }
+export { Live, LiveCell }
+export type { LiveEvent, LiveSubscription }
 
 import { captureTagFence, subscribeCapturedTag, invalidateTagStatic } from './tags.js'
 
@@ -8,48 +8,84 @@ import { captureTagFence, subscribeCapturedTag, invalidateTagStatic } from './ta
 // reconstructs it locally via the same `Symbol.for('telefunc.Live')`.
 const LIVE_BRAND = Symbol.for('telefunc.Live')
 
+/**
+ * A live value: read `.data`, and it stays up to date as the server pushes.
+ *
+ * Return one from a telefunction and the client receives a live handle:
+ * ```ts
+ * // server
+ * async function onGetTodos() { return db.live.select().from(todos) }
+ * // client
+ * const todos = await onGetTodos()
+ * todos.data // Todo[] — updates on its own
+ * ```
+ */
+type Live<T> = {
+  readonly data: T
+}
+
+/**
+ * The `Live` namespace.
+ *
+ * The annotation is explicit so the emitted `.d.ts` pins the public surface to the three concepts:
+ * a `Live<T>` is `{ readonly data: T }`, and `Live.derived` composes one from others. Without it,
+ * inference would leak the internal `LiveCell` into the public types.
+ */
+const Live: {
+  /**
+   * Derive a live value from other live values. Reading a `Live`'s `.data` inside `compute`
+   * registers it as a dependency; the derived value goes stale when any dependency does.
+   * ```ts
+   * const count = Live.derived(() => todos.data.length)
+   * ```
+   */
+  derived<R>(compute: () => R): Live<R>
+} = {
+  derived: (compute) => LiveCell.derived(compute),
+}
+
 /** What travels once a Live crosses the wire: a stale signal, or a pushed value. Phase 1 rides
  *  `invalidate` (the client refetches); `data` carries the future delta push with no primitive
  *  change. The channel/wire layer is added in its own module — this module is the in-memory cell. */
 type LiveEvent<T> = { kind: 'invalidate' } | { kind: 'data'; data: T }
 
-/** The consumer end: the same observation taps as the producer, minus the producer verbs (authority
- *  is the one asymmetry). Revived on the client from the wire; server-side it is `Live.client`
- *  re-typed. */
-type ClientLive<T> = {
-  readonly data: T
+/** @internal The consumer-side subscription behind a `Live<T>` — the seam adapters bind to (invalidate
+ *  → refetch, data → cache write). Deliberately NOT on the public `Live<T>`: a user reads `.data`, and
+ *  only an adapter needs the taps. Satisfied by both the revived client handle and a server `LiveCell`.
+ *
+ *  Shared as a TYPE ONLY (via `telefunc/__internal`), never a runtime helper: the adapters that consume
+ *  it ship to the BROWSER, and `telefunc/__internal` is a server entry (no browser condition) — so a
+ *  runtime import would drag the server context/tagHub graph into a client bundle. A type import erases. */
+type LiveSubscription<T> = {
   /** Observe pushed values. Returns an idempotent unsubscribe. */
   onData(callback: (data: T) => void): () => void
   /** Observe stale signals. Returns an idempotent unsubscribe. */
   onInvalidate(callback: () => void): () => void
-  onClose(callback: (err?: Error) => void): void
   close(): Promise<void>
-  readonly isClosed: boolean
 }
 
 /** A server-owned source of invalidations for one Live (the engine graph, a tag subscription, …).
- *  Attached before serialization via `_attachSource`; the replacer subscribes it only when the handle
+ *  Attached before serialization via `attachSource`; the replacer subscribes it only when the handle
  *  crosses the wire, and releases it on the last owning channel's close. */
 type LiveActivationSource = {
   subscribe(onInvalidate: () => void): () => void
 }
 
 // Callback-scoped dependency tracking for `Live.derived`: each `Live.derived(fn)` pushes a frame, and
-// every `Live.data` getter read during `fn` records its cell on the top frame (the Solid/Vue computed
+// every `.data` getter read during `fn` records its cell on the top frame (the Solid/Vue computed
 // idiom — synchronous, nothing request-global). Popped in `finally`, so a throwing `fn` never poisons
 // a later derivation.
-const trackingStack: Array<Set<Live<unknown>>> = []
+const trackingStack: Array<Set<LiveCell<unknown>>> = []
 
-function track(cell: Live<unknown>): void {
+function track(cell: LiveCell<unknown>): void {
   trackingStack[trackingStack.length - 1]?.add(cell)
 }
 
-/** The producer end of a live value: construct it around a snapshot, drive it (`set`/`update`/
- *  `invalidate`), and return `.client`. Liveness is serialize-time — the wire replacer creates the
- *  channel only if this crosses the wire — so `.client` is a side-effect-free re-type. This module
- *  is the in-memory cell; the channel, the `Live.onInvalidate`/`Live.invalidate` statics, and
- *  `Live.derived` are layered on in their own sub-units. */
-class Live<T> {
+/** @internal The in-memory cell behind every `Live<T>`: the producer end (construct around a snapshot,
+ *  drive it via `set`/`update`/`invalidate`) plus the serialize-time activation lifecycle. Unexported
+ *  from the package — that IS the boundary that keeps the producer verbs off the public API, so a
+ *  telefunction returns the handle directly and the wire replacer serializes it. */
+class LiveCell<T> {
   readonly [LIVE_BRAND] = true
   private currentData: T
   private closed = false
@@ -63,7 +99,7 @@ class Live<T> {
   private flushScheduled = false
   // ── serialize-time activation (deferred, cell-local lease-refcounted) ──
   /** Deps read during a `Live.derived` callback, held INERT — subscribed only at serialization. */
-  private pendingDeps: Array<Live<unknown>> = []
+  private pendingDeps: Array<LiveCell<unknown>> = []
   /** Server-owned invalidation sources (engine graph, tag subscriptions), subscribed on the first lease. */
   private sources: LiveActivationSource[] = []
   private sourceTeardowns: Array<() => void> = []
@@ -77,8 +113,8 @@ class Live<T> {
   }
 
   get data(): T {
-    // `Live<T>` is invariant in T (its tap arrays), so widen to the tracking type as `.client` does.
-    track(this as unknown as Live<unknown>)
+    // `LiveCell<T>` is invariant in T (its tap arrays), so widen to the tracking type.
+    track(this as unknown as LiveCell<unknown>)
     return this.currentData
   }
 
@@ -130,20 +166,13 @@ class Live<T> {
     return this.closed
   }
 
-  /** The consumer-end view — return this from a telefunction. A side-effect-free re-type (no
-   *  channel, no activation): the wire replacer activates at serialization. Mirrors
-   *  `ServerChannel.client`. */
-  get client(): ClientLive<T> {
-    return this as unknown as ClientLive<T>
-  }
-
   /** Computed sugar: run `fn` once (tracking which deps' `.data` were read), snapshot the value, and
    *  record the deps as INERT pending descriptors — NO subscriptions at call time. The replacer
-   *  activates them at serialization (cascade `_activate`); a derived that never serializes subscribes
+   *  activates them at serialization (cascade `activate`); a derived that never serializes subscribes
    *  nothing. Invalidate-only forwarding (a dep's invalidation forwards to the derived; re-derivation
    *  is the client's refetch re-running the telefunction). */
-  static derived<R>(fn: () => R): ClientLive<R> {
-    const frame = new Set<Live<unknown>>()
+  static derived<R>(fn: () => R): LiveCell<R> {
+    const frame = new Set<LiveCell<unknown>>()
     trackingStack.push(frame)
     let value: R
     try {
@@ -151,23 +180,23 @@ class Live<T> {
     } finally {
       trackingStack.pop()
     }
-    const derived = new Live(value)
+    const derived = new LiveCell(value)
     derived.pendingDeps = [...frame]
-    return derived.client
+    return derived
   }
 
-  /** Subscribe this handle to a server-owned tag (manual liveness). Attaches a FENCED tag source (the
+  /** Subscribe this cell to a server-owned tag (manual liveness). Attaches a FENCED tag source (the
    *  existing TagHub `requestStartSeq`/`scanSince` catch-up — a tag published between the acquiring
    *  read and serialization is still caught) that the replacer activates at serialization and uses to
-   *  `invalidate` the handle; the cell-local lease refcounts a handle held by more than one channel. */
-  static onInvalidate(key: string, live: Live<unknown>): void {
+   *  `invalidate` the cell; the cell-local lease refcounts a handle held by more than one channel. */
+  static onInvalidate(key: string, live: LiveCell<unknown>): void {
     // Capture the tag fence NOW — inside the request context, BEFORE any real-I/O await (which, in the
     // default sync context mode, nulls the context at the next macrotask). The subscription itself is
     // deferred to serialization (leak-safe: a never-serialized handle registers nothing on the hub) but
     // replays through the captured, context-free fence — so it survives an I/O await. Call before any
     // await; a post-await call throws the "inside a telefunction" assert (enforces subscribe-before-fetch).
     const fence = captureTagFence(key)
-    live._attachSource({ subscribe: (onInvalidate) => subscribeCapturedTag(fence, onInvalidate) })
+    live.attachSource({ subscribe: (onInvalidate) => subscribeCapturedTag(fence, onInvalidate) })
   }
 
   /** Publish a stale signal for `key`. Inside a request it is queued and published at settle; outside
@@ -176,33 +205,33 @@ class Live<T> {
     invalidateTagStatic(key)
   }
 
-  /** @internal — attach a server-owned invalidation source (the ticket-6 engine seam / tag wiring).
-   *  Inert until the first `_activate`. */
-  _attachSource(source: LiveActivationSource): void {
+  /** Attach a server-owned invalidation source (the ticket-6 engine seam / tag wiring). Inert until
+   *  the first `activate`. */
+  attachSource(source: LiveActivationSource): void {
     this.sources.push(source)
   }
 
-  /** @internal — serialize-time activation, refcounted by cell-local leases (one per owning channel).
-   *  On the first lease it subscribes the source and cascade-activates each pending dep — idempotent,
-   *  so a dep also returned elsewhere activates EXACTLY ONCE — wiring each dep's `onInvalidate` to this
-   *  cell's `invalidate` (invalidate-only forwarding). */
-  _activate(): void {
+  /** Serialize-time activation, refcounted by cell-local leases (one per owning channel). On the first
+   *  lease it subscribes the source and cascade-activates each pending dep — idempotent, so a dep also
+   *  returned elsewhere activates EXACTLY ONCE — wiring each dep's `onInvalidate` to this cell's
+   *  `invalidate` (invalidate-only forwarding). */
+  activate(): void {
     this.lease++
     if (this.lease !== 1) return
     for (const source of this.sources) this.sourceTeardowns.push(source.subscribe(() => this.invalidate()))
     for (const dep of this.pendingDeps) {
-      dep._activate()
+      dep.activate()
       const off = dep.onInvalidate(() => this.invalidate())
       this.activationTeardowns.push(() => {
         off()
-        dep._release()
+        dep.release()
       })
     }
   }
 
-  /** @internal — release one lease (an owning channel closed). On the LAST release it tears down the
-   *  source subscription and cascade-releases each pending dep — exactly once, order-independent. */
-  _release(): void {
+  /** Release one lease (an owning channel closed). On the LAST release it tears down the source
+   *  subscription and cascade-releases each pending dep — exactly once, order-independent. */
+  release(): void {
     if (this.lease === 0) return
     this.lease--
     if (this.lease !== 0) return // a shared cell stays live while any owning channel remains

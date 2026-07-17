@@ -22,8 +22,9 @@ export type { ChannelBase, ClientChannel } from '../../wire-protocol/channel.js'
 export { DefaultBroadcastAdapter } from '../../wire-protocol/server/broadcast.js'
 export type { BroadcastAdapter, BroadcastTransport } from '../../wire-protocol/server/broadcast.js'
 export type { TelefuncServerExtension } from './extensions.js'
+// The whole public live surface: the `Live<T>` type AND the `Live` namespace (one re-export carries
+// both meanings). The cell, the producer verbs, and the activation lifecycle stay unexported.
 export { Live } from './live/live.js'
-export type { ClientLive } from './live/live.js'
 export type {
   TypeContract,
   ReplacerType,

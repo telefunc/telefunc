@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ClientLive } from 'telefunc'
+import type { Live } from 'telefunc'
 
 // The client surface imports the concrete runtime DIRECTLY (the `_installDbLiveRuntime` seam was removed in
 // the auto-load full-remove). Mock both units so these tests drive the proxy + type-transform surface with
@@ -18,7 +18,7 @@ import { wrapLiveSelect } from './readCapture.js'
 
 // ── Compile-time type-transform test (Ticket 6 §1, T6.A1/A2). Verified by tsc; never executed. Proves:
 //    plain `db.select()...`  awaits to  `Row[]`             (unchanged — observable-equivalence)
-//    `db.live.select()...`   awaits to  `ClientLive<Row[]>`  (the one owned re-typing seam)
+//    `db.live.select()...`   awaits to  `Live<Row[]>`  (the one owned re-typing seam)
 //    plain fields are preserved. ────────────────────────────────────────────────────────────────────
 type Row = { id: number; text: string }
 interface SelectBuilder extends PromiseLike<Row[]> {
@@ -37,12 +37,12 @@ async function _typeTransform_compileCheck(): Promise<void> {
   const getDb = reactiveDrizzle({} as MockDb)
   const db = getDb()
   const plain: Row[] = await db.select().from(0).where(0) // plain path unchanged
-  const live: ClientLive<Row[]> = await db.live.select().from(0).where(0) // remapped to ClientLive
+  const live: Live<Row[]> = await db.live.select().from(0).where(0) // remapped to Live
   const tag: string = db.tag // plain field preserved
-  // Finding 4 — TYPE-NEGATIVE: `.execute()` is the un-captured terminal → PLAIN rows, NOT ClientLive.
+  // Finding 4 — TYPE-NEGATIVE: `.execute()` is the un-captured terminal → PLAIN rows, NOT Live.
   const executed: Row[] = await db.live.select().from(0).execute()
-  // @ts-expect-error `.execute()` must NOT type as ClientLive (it runs the query and resolves to rows).
-  const executedLie: ClientLive<Row[]> = await db.live.select().from(0).execute()
+  // @ts-expect-error `.execute()` must NOT type as Live (it runs the query and resolves to rows).
+  const executedLie: Live<Row[]> = await db.live.select().from(0).execute()
   void plain
   void live
   void tag

@@ -1,6 +1,6 @@
 // The engine read-capture pipeline (Ticket 6 §U3). Proves wrapLiveSelect end-to-end against a REAL
 // PGlite db + the telefunc Live primitive: builder → IR → compile → registry.acquire (eager hydrate)
-// → ClientLive; the serialize-time _activate redeems the token (flips redeemed=true) and the
+// → Live; the serialize-time activation redeems the token (flips redeemed=true) and the
 // finally-sweep releases only the un-activated ones. The carrier/sync-mode concern is covered by the
 // Generator's dbLiveRuntime.spec (fake engine); the seqAtRead fence's seq-comparison is covered by
 // registry.spec §6.2b/§6.2c — here we exercise the real redeem/lease wiring behind the seam.
@@ -9,7 +9,7 @@ import { PGlite } from '@electric-sql/pglite'
 import { entityKind, sql } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
-import type { ClientLive } from 'telefunc'
+import type { Live } from 'telefunc'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { extractQueryShape } from '../extract/queryShape.js'
 import type { ReadToken } from '../graph/registry.js'
@@ -32,10 +32,10 @@ afterAll(async () => {
 })
 
 const carrierOf = (): ReadCarrier => ({ mintedTokens: [] })
-const liveSelect = (builder: unknown, carrier: ReadCarrier): Promise<ClientLive<UserRow[]>> =>
-  wrapLiveSelect(builder, carrier, db as object) as Promise<ClientLive<UserRow[]>>
+const liveSelect = (builder: unknown, carrier: ReadCarrier): Promise<Live<UserRow[]>> =>
+  wrapLiveSelect(builder, carrier, db as object) as Promise<Live<UserRow[]>>
 /** Drive the wire replacer's serialize-time activation path (the Live source's subscribe). */
-const activate = (live: ClientLive<unknown>): void => (live as unknown as { _activate(): void })._activate()
+const activate = (live: Live<unknown>): void => (live as unknown as { activate(): void }).activate()
 
 /** A fake POOLED pg connection for the coarse control: pg dialect (stable entity kind) + a raw client
  *  that is a `Pool` (not a pinned `Client`) + NOT a PgliteDatabase → isSingleSession=false ⇒ coarse. */
@@ -47,8 +47,8 @@ const poolFake = { dialect: new FakePgDialect(), $client: new Pool() } as object
 
 // ── the real pipeline ───────────────────────────────────────────────
 
-describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydrate) → ClientLive', () => {
-  it('resolves to a ClientLive carrying the initial rows + an INERT minted token (not yet redeemed)', async () => {
+describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydrate) → Live', () => {
+  it('resolves to a Live carrying the initial rows + an INERT minted token (not yet redeemed)', async () => {
     const carrier = carrierOf()
     const live = await liveSelect(db.select().from(users), carrier)
     expect([...live.data].sort((a, b) => a.id - b.id)).toEqual([
@@ -59,11 +59,11 @@ describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydra
     expect(carrier.mintedTokens[0]!.redeemed).toBe(false) // inert until serialize-time activation
   })
 
-  it('serialize-time _activate REDEEMS the token — proven by a second redeem throwing (not just the flag)', async () => {
+  it('serialize-time activation REDEEMS the token — proven by a second redeem throwing (not just the flag)', async () => {
     const carrier = carrierOf()
     const live = await liveSelect(db.select().from(users), carrier)
     const token = carrier.mintedTokens[0]!.token
-    activate(live) // the wire replacer's _activate → the Live source subscribe → token.redeem()
+    activate(live) // the wire replacer's activate → the Live source subscribe → token.redeem()
     expect(carrier.mintedTokens[0]!.redeemed).toBe(true)
     expect(() => token.redeem()).toThrow() // REAL registry consequence: actually redeemed (double-redeem rejected) — not the co-set flag
   })
@@ -90,11 +90,11 @@ describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydra
     expect(compilePlanFor(poolFake, shape)().coarse).toBe(true) // pooled ⇒ coarse; a never-coarse mutant gives false → RED
   })
 
-  it('#2 (engine half) — an activated handle releases its lease on _release (channel close); the sweep then skips it, no double-release', async () => {
+  it('#2 (engine half) — an activated handle releases its lease on release (channel close); the sweep then skips it, no double-release', async () => {
     const carrier = carrierOf()
     const live = await liveSelect(db.select().from(users), carrier)
-    activate(live) // _activate → redeem → lease
-    ;(live as unknown as { _release(): void })._release() // channel close/abort → source teardown → lease.release()
+    activate(live) // activate → redeem → lease
+    ;(live as unknown as { release(): void }).release() // channel close/abort → source teardown → lease.release()
     expect(carrier.mintedTokens[0]!.redeemed).toBe(true) // activated (channel-owned)
     expect(() => disposeUnredeemedReads(carrier)).not.toThrow() // sweep skips the redeemed entry — lease already released, no double
   })

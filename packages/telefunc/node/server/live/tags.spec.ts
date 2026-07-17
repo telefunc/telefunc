@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { restoreContext } from '../context/context.js'
 import { getTagHub, _resetTagHubsForTesting, _setBarrierBudgetForTesting } from './tagHub.js'
 import { stampRequestStartFence, publishQueuedTags, captureTagFence, subscribeCapturedTag } from './tags.js'
-import { Live } from './live.js'
+import { LiveCell } from './live.js'
 import {
   getBroadcastAdapter,
   _resetBroadcastAdapterForTesting,
@@ -27,7 +27,7 @@ function inRequest<T>(fn: () => Promise<T>): Promise<T> {
   return restoreContext({}, fn)
 }
 
-/** Capture a tag fence and subscribe it — the low-level catch-up path `Live.onInvalidate` uses at
+/** Capture a tag fence and subscribe it — the low-level catch-up path `LiveCell.onInvalidate` uses at
  *  serialization: register the index listener, then replay a publish that landed since the fence. */
 function subscribeFenced(tag: string, onInvalidate: () => void): () => void {
   return subscribeCapturedTag(captureTagFence(tag), onInvalidate)
@@ -110,13 +110,13 @@ describe('tag fences (§3.E)', () => {
 })
 
 describe('tag settle + publish (§3.D / §3.E)', () => {
-  it('T1.E6/D1 Live.invalidate queues; settle publishes one deduped batch', () =>
+  it('T1.E6/D1 LiveCell.invalidate queues; settle publishes one deduped batch', () =>
     inRequest(async () => {
       await stampRequestStartFence()
       const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-      Live.invalidate('t')
-      Live.invalidate('t')
-      Live.invalidate('u')
+      LiveCell.invalidate('t')
+      LiveCell.invalidate('t')
+      LiveCell.invalidate('u')
       expect(tagBatchCalls(publishSpy)).toHaveLength(0) // not during the body
       await publishQueuedTags()
       const batches = tagBatchCalls(publishSpy)
@@ -254,7 +254,7 @@ describe('tag publish failure (§3.D T1.D2 / T1.J4)', () => {
       // Only the settle publish fails (transport down at write time), not readiness:
       vi.spyOn(getBroadcastAdapter(), 'publish').mockRejectedValue(new Error('transport down'))
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-      Live.invalidate('t')
+      LiveCell.invalidate('t')
       await expect(publishQueuedTags()).resolves.toBeUndefined() // never throws
       expect(localListener).toHaveBeenCalledTimes(1) // fired locally despite the failure
       expect(errorSpy).toHaveBeenCalled()
