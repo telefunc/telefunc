@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { executeTelefunction } from './executeTelefunction.js'
 import { Abort } from '../Abort.js'
 import { createRequestContext } from '../context/requestContext.js'
@@ -6,25 +6,13 @@ import { REQUEST_CONTEXT } from '../context/requestContext.js'
 import { getRawContext } from '../context/context.js'
 import { getServerConfig } from '../serverConfig.js'
 import type { TelefuncServerExtension } from '../extensions.js'
-import { subscribeTag, getRequestStartSeq } from '../live/tags.js'
-import { getTagHub, _resetTagHubsForTesting } from '../live/tagHub.js'
-import { parse } from '@brillout/json-serializer/parse'
-import {
-  getBroadcastAdapter,
-  _resetBroadcastAdapterForTesting,
-  DefaultBroadcastAdapter,
-} from '../../../wire-protocol/server/broadcast.js'
+import { getBroadcastAdapter } from '../../../wire-protocol/server/broadcast.js'
 
 let calls: string[]
-let previousAdapter: ReturnType<typeof getBroadcastAdapter>
 
 beforeEach(() => {
   calls = []
-  previousAdapter = getBroadcastAdapter()
-  _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter())
-  _resetTagHubsForTesting()
 })
-afterEach(() => _resetBroadcastAdapterForTesting(previousAdapter))
 
 type Hooks = { onResult?: (ctx: { result: unknown; data?: Record<string, unknown> }) => unknown }
 
@@ -63,13 +51,6 @@ function run(
 }
 
 const okBody = async () => 'r0'
-
-/** Parsed tag batches from an adapter `publish` spy (excludes readiness-barrier frames). */
-function tagBatchesFrom(spy: ReturnType<typeof vi.spyOn>): { tags: string[] }[] {
-  return spy.mock.calls
-    .filter((c) => typeof c[1] === 'string' && (c[1] as string).includes('"tags"'))
-    .map((c) => parse(c[1] as string) as { tags: string[] })
-}
 
 describe('lifecycle — result transform chain', () => {
   it('result hooks run in registration order and thread the prior result', async () => {
@@ -192,33 +173,28 @@ describe('lifecycle — body outcome', () => {
   })
 })
 
-describe('lifecycle — the live-query fence is stamped before the body', () => {
-  it('a tag published before the body first touches the tag API still replays', async () => {
-    const onInvalidate = vi.fn()
-    await run([], async () => {
-      // A write lands here — after the request started, but before this body has touched tags at all.
-      // The fence is stamped at ENTRY, so it sits below this publish and the catch-up replays it. Were
-      // the fence stamped lazily on first use (below), it would sit ABOVE this publish and miss it —
-      // which is the whole reason it is stamped at entry rather than on demand.
-      await getTagHub().publish(['t'])
-      // Resolve the tag the way serialization does: against the fence stamped at request entry.
-      subscribeTag('t', getRequestStartSeq(getRawContext()!)!, onInvalidate)
-      return 'r'
-    })
-    expect(onInvalidate).toHaveBeenCalledTimes(1)
-  })
-})
-
 describe('forged / legacy request-extension data is inert', () => {
   it('request data for an unregistered extension invokes nothing (only registered, request-activated extensions run)', async () => {
     const res = await run([ext('E1')], okBody, { E1: {}, 'not-registered': { anything: true } })
     expect(calls).toEqual(['E1.result']) // E1 ran via its own data; the unregistered payload invoked nothing
     expect(res.telefunctionHasErrored).toBe(false)
   })
+})
 
-  it('forged live data triggers no tag publish', async () => {
-    const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-    await run([ext('E1')], okBody, { E1: {}, '@telefunc/live': { queryKey: ['x'], invalidates: [['y']] } })
-    expect(tagBatchesFrom(publishSpy)).toHaveLength(0) // forged live data invokes no invalidation
+describe('regression — a plain telefunction pays no live-query readiness cost', () => {
+  it('executing a non-Live telefunction touches the broadcast transport zero times', async () => {
+    // The every-telefunction fence that used to run at entry awaited the tag hub's readiness barrier,
+    // which subscribed to the tag key and published barrier frames on the broadcast transport — a cost
+    // paid by EVERY telefunction, Live or not. With the tag stack cut, a plain telefunction must do
+    // none of that. Spying the transport is a can-fail proof: re-introduce the fence and these fire.
+    const adapter = getBroadcastAdapter()
+    const subscribeSpy = vi.spyOn(adapter, 'subscribe')
+    const publishSpy = vi.spyOn(adapter, 'publish')
+    const res = await run([], async () => 'plain-result')
+    expect(res.telefunctionReturn).toBe('plain-result')
+    expect(subscribeSpy).not.toHaveBeenCalled()
+    expect(publishSpy).not.toHaveBeenCalled()
+    subscribeSpy.mockRestore()
+    publishSpy.mockRestore()
   })
 })

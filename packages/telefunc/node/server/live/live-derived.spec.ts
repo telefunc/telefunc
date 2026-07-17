@@ -38,8 +38,6 @@ function createServerHarness() {
     registerChannel: () => {},
     sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
     validators: new Map(),
-    // Production always carries the fence, stamped at request entry; these fakes stand in for that.
-    requestStartSeq: 0,
   } as unknown as ServerReplacerContext
   const replacer = createStreamingReplacer(
     () => context,

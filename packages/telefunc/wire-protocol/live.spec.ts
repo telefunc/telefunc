@@ -46,8 +46,6 @@ function createServerHarness() {
     registerChannel: () => {},
     sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
     validators: new Map(),
-    // Production always carries the fence, stamped at request entry; these fakes stand in for that.
-    requestStartSeq: 0,
   } as unknown as ServerReplacerContext
   const replacer = createStreamingReplacer(
     () => context,
@@ -188,27 +186,5 @@ describe('Live wire replacer/reviver + serialize-time single activation', () => 
     expect(revived.todos).toBe(revived.list[1].deep)
     expect(revived.report).toBe(revived.list[0])
     expect(revived.todos).not.toBe(revived.report) // distinct handles stay distinct
-  })
-})
-
-describe('a Live cannot be serialized without the request fence', () => {
-  it('a missing fence fails loudly instead of quietly starting from now', () => {
-    const context = {
-      createChannel: () => makeFakeServerChannel('x') as never,
-      registerChannel: () => {},
-      sendStream: () => ({ metadata: { __index: 0 }, close() {}, abort() {} }),
-      validators: new Map(),
-      // No requestStartSeq: the plumbing that carries it is broken.
-    } as unknown as ServerReplacerContext
-    const replacer = createStreamingReplacer(
-      () => context,
-      () => {},
-      [],
-    )
-    // Defaulting to "observe from now" here would look like success and lose every write that landed
-    // between this request's read and this moment — silently, which is the one outcome the fence
-    // exists to prevent. Serialization is always a telefunction response, so an absent fence is a bug
-    // in us, not a mode to accommodate.
-    expect(() => stringify(new LiveCell('v'), { forbidReactElements: true, replacer })).toThrow()
   })
 })

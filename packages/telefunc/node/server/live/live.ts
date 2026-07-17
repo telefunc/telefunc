@@ -1,8 +1,6 @@
 export { Live, LiveCell }
 export type { LiveEvent, LiveSubscription }
 
-import { subscribeTag, invalidateTagStatic } from './tags.js'
-
 // A PRIVATE brand (global-registry symbol, like SERVER_CHANNEL_BRAND). Detection is internal only —
 // never a public surface — so this is neither exported nor exposed via a static; the wire replacer
 // reconstructs it locally via the same `Symbol.for('telefunc.Live')`.
@@ -55,7 +53,7 @@ type LiveEvent<T> = { kind: 'invalidate' } | { kind: 'data'; data: T }
  *
  *  Shared as a TYPE ONLY (via `telefunc/__internal`), never a runtime helper: the adapters that consume
  *  it ship to the BROWSER, and `telefunc/__internal` is a server entry (no browser condition) — so a
- *  runtime import would drag the server context/tagHub graph into a client bundle. A type import erases. */
+ *  runtime import would drag the server graph into a client bundle. A type import erases. */
 type LiveSubscription<T> = {
   /** Observe pushed values. Returns an idempotent unsubscribe. */
   onData(callback: (data: T) => void): () => void
@@ -100,11 +98,7 @@ class LiveCell<T> {
   // ── serialize-time activation (deferred, cell-local lease-refcounted) ──
   /** Deps read during a `Live.derived` callback, held INERT — subscribed only at serialization. */
   private pendingDeps: Array<LiveCell<unknown>> = []
-  /** Tag keys this cell should go stale on. Stored INERT — resolving a key to a hub subscription needs
-   *  the request's fence, which only serialization has. */
-  private tags: string[] = []
-  /** Server-owned invalidation sources, subscribed on the first lease. Tag keys are NOT here — they
-   *  live in `tags` and resolve through `subscribeTag`, because they need the request's fence. */
+  /** Server-owned invalidation sources, subscribed on the first lease. */
   private sources: LiveActivationSource[] = []
   private sourceTeardowns: Array<() => void> = []
   /** Teardowns for activated pending deps (unsubscribe + cascade release). */
@@ -189,50 +183,21 @@ class LiveCell<T> {
     return derived
   }
 
-  /** Go stale whenever `key` is invalidated.
-   *
-   *  This only RECORDS the key. It reads no context, touches no hub, and registers nothing, so it can
-   *  be called anywhere in a telefunction — before or after any `await`. That is the point: the fence
-   *  that decides what counts as "published since this request read" is stamped once at request entry,
-   *  and serialization resolves the key against it. An association that had to capture the fence itself
-   *  would have to run before the body's first await, which is an ordering rule nothing enforces and
-   *  every caller would eventually get wrong.
-   *
-   *  Generic in `T` although the body never reads it: `LiveCell` is invariant (`.data` returns `T`, the
-   *  data taps accept one), so a `LiveCell<unknown>` parameter would reject the `LiveCell<Todo[]>` every
-   *  real caller holds. Nothing here touches the value — only the key list — so any Live binds. */
-  static onInvalidate<T>(key: string, live: LiveCell<T>): void {
-    live.tags.push(key)
-  }
-
-  /** Publish a stale signal for `key`. Publishes immediately, in or out of a request.
-   *  Fire-and-forget (`void`); publication is failure-safe. */
-  static invalidate(key: string): void {
-    invalidateTagStatic(key)
-  }
-
   /** Attach a server-owned invalidation source. Inert until the first `activate`. */
   attachSource(source: LiveActivationSource): void {
     this.sources.push(source)
   }
 
   /** Serialize-time activation, refcounted by cell-local leases (one per owning channel). On the first
-   *  lease it resolves this cell's tag keys against the request's fence, subscribes its sources, and
-   *  cascade-activates each pending dep — idempotent, so a dep also returned elsewhere activates EXACTLY
-   *  ONCE — wiring each dep's `onInvalidate` to this cell's `invalidate` (invalidate-only forwarding).
-   *
-   *  `requestStartSeq` is threaded down the cascade explicitly rather than read from ambient context:
-   *  by serialize time the request context may already be gone, and a dep is activated by whichever
-   *  cell owns it, not by the request. */
-  activate(requestStartSeq: number): void {
+   *  lease it subscribes this cell's sources and cascade-activates each pending dep — idempotent, so a
+   *  dep also returned elsewhere activates EXACTLY ONCE — wiring each dep's `onInvalidate` to this cell's
+   *  `invalidate` (invalidate-only forwarding). */
+  activate(): void {
     this.lease++
     if (this.lease !== 1) return
-    for (const tag of this.tags) {
-      this.sourceTeardowns.push(subscribeTag(tag, requestStartSeq, () => this.invalidate()))
-    }
     for (const source of this.sources) this.sourceTeardowns.push(source.subscribe(() => this.invalidate()))
     for (const dep of this.pendingDeps) {
-      dep.activate(requestStartSeq)
+      dep.activate()
       const off = dep.onInvalidate(() => this.invalidate())
       this.activationTeardowns.push(() => {
         off()

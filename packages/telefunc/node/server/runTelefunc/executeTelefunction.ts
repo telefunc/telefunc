@@ -9,7 +9,6 @@ import { assertUsage } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { isAsyncGenerator } from '../../../utils/isAsyncGenerator.js'
 import { validateTelefunctionError } from './validateTelefunctionError.js'
-import { stampRequestStartFence } from '../live/tags.js'
 import type { ConfigResolved } from '../serverConfig.js'
 
 async function executeTelefunction(runContext: {
@@ -28,13 +27,6 @@ async function executeTelefunction(runContext: {
 
   /** Restore unified context before executing `fn`. */
   const withContext = <T>(fn: () => T): T => restoreContext(runContext.context, fn)
-
-  // Stamp the request's live-query fence BEFORE the body runs — and therefore before any read it
-  // performs. Awaited, so the tag transport is confirmed ready first. A write landing between a read
-  // and the moment its Live handle subscribes is caught by replaying from this point; a fence stamped
-  // after the read would have nothing to replay from. If this throws, the body never runs and the
-  // error escapes to runTelefunc, which aborts the response and drains request resources.
-  await withContext(() => stampRequestStartFence())
 
   let telefunctionReturn: unknown
   let telefunctionTopLevelError: unknown

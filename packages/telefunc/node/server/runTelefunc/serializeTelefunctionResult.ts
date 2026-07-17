@@ -24,7 +24,6 @@ import { uint8ArrayToBase64url } from '../../../wire-protocol/base64url.js'
 import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/types.js'
 import { type RequestContext } from '../context/requestContext.js'
 import type { Context } from '../context/context.js'
-import { getRequestStartSeq, type LiveSerializeContext } from '../live/tags.js'
 import type { ReplacerType, TypeContract, ServerReplacerContext } from '../../../wire-protocol/types.js'
 import type { Readable } from 'node:stream'
 
@@ -117,23 +116,14 @@ function serializeTelefunctionResult(runContext: {
     registerChannel(channel)
     return channel
   }
-  // Read the request's fence from the context we already hold, NOT from the ambient one: in the default
-  // sync context mode the ambient context is nulled at the first macrotask, so by serialize time it may
-  // be gone. Passing it explicitly is what lets a Live resolve its tags here rather than at the call site.
-  const requestStartSeq = getRequestStartSeq(runContext.context)
   const replacer = createStreamingReplacer(
     function getContext(value: unknown): ServerReplacerContext {
-      // Typed as the Live extension on the way out, and widened to the generic context on the way in:
-      // the fence reaches the Live replacer without the public type every other extension's replacer
-      // sees ever mentioning it.
-      const context: ServerReplacerContext & Partial<LiveSerializeContext> = {
+      return {
         createChannel,
         registerChannel,
         sendStream,
         validators: makeValidators(value, valueShields, shieldCtx),
-        requestStartSeq,
       }
-      return context
     },
     function onReplaced({ abort }) {
       requestContext.responseAbort.onAbort(abort)
