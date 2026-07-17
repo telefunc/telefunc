@@ -37,8 +37,8 @@ function acquireCarrier(): DbLiveCarrier {
   return carrier
 }
 
-/** Pass-through for now — mutations run as plain Drizzle. Write-capture replaces this with
- *  the tx-scoped accumulator → `router.ingest` → Broadcast; the carrier already carries the write slot. */
+/** Pass-through: mutations run as plain Drizzle and nothing observes them. The seam exists so writes
+ *  route through one place once capture is built; today it changes nothing. */
 function captureMutation(
   _op: 'insert' | 'update' | 'delete',
   baseMethod: (...a: unknown[]) => unknown,

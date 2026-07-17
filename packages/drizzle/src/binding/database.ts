@@ -68,8 +68,7 @@ function clientOf(db: AnyDb): unknown {
  *  another, so its probed authority is unprovable — such clients FAIL CLOSED to a
  *  per-call unique key, so two sessions never share a graph on an unproven assumption.
  *  Only a provably single-session client (node:sqlite, a single pg `Client`, a pinned
- *  connection) yields a shareable probed key. (Connection pinning restores
- *  sharing for pools by binding the probe to the query's connection.) */
+ *  connection) yields a shareable probed key. */
 async function semanticEnvironmentKeyOf(db: AnyDb, opts?: { run?: RowRunner }): Promise<string> {
   const dialect = dialectOf(db)
   const driver = driverOf(db)

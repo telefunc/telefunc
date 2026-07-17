@@ -6,11 +6,11 @@ import { assertUsage } from '../utils/assert.js'
 import { canonicalValue, frame } from '../utils/canonical.js'
 
 type Identity = {
-  /** The graph-state key: the structural plan key (semantic environment / dialect / compiler ABI /
-   *  schema fingerprint / SQL shape, via planKeyOf) folded together with the typed bindings. Same rows
-   *  read under the same authority ⇒ same graph — this is the registry's identical-instance dedup key,
-   *  and its structural foundation is what keeps a graph from being shared across an RLS/role/dialect
-   *  boundary (O6/O7/O8/O11). */
+  /** The graph-state key: the structural plan key (semantic environment / dialect / schema
+   *  fingerprint / SQL shape, via planKeyOf) folded together with the typed bindings. Same rows read
+   *  under the same authority ⇒ same graph — this is the registry's identical-instance dedup key, and
+   *  its structural foundation is what keeps a graph from being shared across an RLS/role/dialect
+   *  boundary. */
   instanceKey: string
 }
 
