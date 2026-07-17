@@ -2720,6 +2720,28 @@ describe('snapshot() and onChange()', () => {
     ])
   })
 
+  it('an echo roster reconcile that changes nothing fires no onChange', () => {
+    // Every already-applied membership event triggers a roster refresh; when the streamed roster
+    // matches what the live path already applied, the reconcile is a pure echo — it must not bump the
+    // state version, or `useSyncExternalStore` re-renders on every echo.
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('echo-reconcile', { count: 0 }))
+    const alice = crypto.randomUUID()
+    const roster = {
+      __r: 'roster' as const,
+      members: [{ id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0, identity: 'u1' }],
+    }
+
+    fake.emit(roster) // first load
+    const loaded = clientRoom.snapshot()
+    const changes: number[] = []
+    clientRoom.onChange(() => changes.push(1))
+
+    fake.emit(roster) // identical roster — a pure echo
+    expect(changes).toEqual([]) // no spurious onChange
+    expect(clientRoom.snapshot()).toBe(loaded) // the snapshot reference stays stable
+  })
+
   it('an onChange subscriber that reads snapshot() on first roster load sees the roster, not an empty cache', () => {
     // Regression for the documented `useSyncExternalStore(room.onChange, room.snapshot)` pairing:
     // the first reconcile must bump the state version *after* creating entries. A pre-bump let the

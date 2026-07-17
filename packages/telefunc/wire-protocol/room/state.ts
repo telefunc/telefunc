@@ -536,6 +536,7 @@ class RoomState {
     }
 
     let drifted = false
+    let silentChange = false // a `tracks` refresh no applier narrated (`joinedAt` is immutable)
     const seen = new Set<string>()
     for (const member of roster) {
       seen.add(member.id)
@@ -554,7 +555,12 @@ class RoomState {
           drifted = true
         }
         entry.joinedAt = member.joinedAt
-        for (const track of member.tracks ?? []) entry.tracks.add(track)
+        for (const track of member.tracks ?? []) {
+          if (!entry.tracks.has(track)) {
+            entry.tracks.add(track)
+            silentChange = true
+          }
+        }
       }
     }
     for (const id of [...this._members.keys()]) {
@@ -563,9 +569,10 @@ class RoomState {
         drifted = true
       }
     }
-    // Bump after the diff is applied: the silent `joinedAt`/`tracks` refreshes above don't bump,
-    // so an early bump could strand a stale snapshot cached under the already-advanced version.
-    this._bumpMembership()
+    // Bump only on a real change. The appliers already narrated their drift; a silent `tracks` refresh
+    // they didn't cover still needs one bump so the snapshot doesn't strand it. An echo reconcile that
+    // changed nothing — every event already applied through the live path — fires no spurious `onChange`.
+    if (drifted || silentChange) this._bumpMembership()
     return drifted
   }
 
