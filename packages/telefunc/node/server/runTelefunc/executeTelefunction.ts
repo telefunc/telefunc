@@ -110,15 +110,17 @@ async function executeTelefunction(runContext: {
     }
   }
 
-  // ── RESULT ── success only; a transform chain — each hook receives the last successful result.
-  // All result hooks are attempted; a throw makes the outcome an error (result discarded) but does
-  // not skip the remaining hooks, which keep transforming the last-good value.
+  // ── RESULT ── success only; a transform chain — each hook receives the last successful result. The hook
+  // runs ONLY for an extension the request activated (its `requestExtensions` data is present) — the pre-PR
+  // contract. All eligible hooks are attempted; a throw makes the outcome an error (result discarded) but
+  // does not skip the remaining eligible hooks, which keep transforming the last-good value.
   if (phase.outcome === 'success') {
     for (const ext of extensions) {
       const hook = ext.hooks?.onTelefunctionResult
-      if (!hook) continue
+      const data = dataFor(ext)
+      if (!hook || !data) continue
       try {
-        telefunctionReturn = await withContext(() => hook({ result: telefunctionReturn, data: dataFor(ext) }))
+        telefunctionReturn = await withContext(() => hook({ result: telefunctionReturn, data }))
       } catch (err) {
         raiseHookError(err)
       }

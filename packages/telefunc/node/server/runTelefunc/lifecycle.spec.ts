@@ -85,6 +85,7 @@ describe('lifecycle — result transform chain (§3.A)', () => {
         }),
       ],
       okBody,
+      { E1: {}, E2: {} },
     )
     expect(calls).toEqual(['E1.result', 'E2.result'])
     expect(e2Received).toBe('r1') // each hook receives the previous hook's returned result
@@ -111,6 +112,7 @@ describe('lifecycle — result transform chain (§3.A)', () => {
         }),
       ],
       okBody,
+      { E1: {}, E2: {}, E3: {} },
     )
     expect(e3Received).toBe('r1') // the last SUCCESSFUL value, not r0 or E2's output
     expect(res.telefunctionHasErrored).toBe(true)
@@ -118,7 +120,7 @@ describe('lifecycle — result transform chain (§3.A)', () => {
     expect(calls).toEqual(['E1.result', 'E2.result', 'E3.result']) // all attempted
   })
 
-  it('result-hook `data` is present only when the request carried it; the hook still runs otherwise', async () => {
+  it('result-hook runs ONLY for an extension the request activated (pre-PR gate); `data` is that payload', async () => {
     const seen: Record<string, unknown[]> = { E1: [], F: [] }
     await run(
       [
@@ -136,10 +138,10 @@ describe('lifecycle — result transform chain (§3.A)', () => {
         }),
       ],
       okBody,
-      { E1: { q: 1 } },
+      { E1: { q: 1 } }, // the request carried data for E1 only
     )
-    expect(seen.E1).toEqual([{ q: 1 }])
-    expect(seen.F).toEqual([undefined]) // no request data for F, but its hook still ran
+    expect(seen.E1).toEqual([{ q: 1 }]) // E1 was activated → ran with its request payload
+    expect(seen.F).toEqual([]) // F carried no request data → its hook did NOT run
   })
 
   it('the result hook observes the request context', async () => {
@@ -154,6 +156,7 @@ describe('lifecycle — result transform chain (§3.A)', () => {
         }),
       ],
       okBody,
+      { E1: {} },
     )
     expect(seen).toEqual([true])
   })
@@ -162,18 +165,26 @@ describe('lifecycle — result transform chain (§3.A)', () => {
 describe('lifecycle — body outcome + core settle on every path (§3.A)', () => {
   it('body error: RESULT skipped, outcome errors, original error propagates', async () => {
     const boom = new Error('boom')
-    const res = await run([ext('E1'), ext('E2')], async () => {
-      throw boom
-    })
+    const res = await run(
+      [ext('E1'), ext('E2')],
+      async () => {
+        throw boom
+      },
+      { E1: {}, E2: {} },
+    )
     expect(calls.filter((c) => c.endsWith('.result'))).toHaveLength(0) // result skipped on error
     expect(res.telefunctionHasErrored).toBe(true)
     expect(res.telefunctionTopLevelError).toBe(boom)
   })
 
   it('body abort: outcome aborts, abortValue preserved, RESULT skipped', async () => {
-    const res = await run([ext('E1')], async () => {
-      throw Abort('v')
-    })
+    const res = await run(
+      [ext('E1')],
+      async () => {
+        throw Abort('v')
+      },
+      { E1: {} },
+    )
     expect(calls.filter((c) => c.endsWith('.result'))).toHaveLength(0)
     expect(res.telefunctionAborted).toBe(true)
     expect(res.telefunctionReturn).toBe('v')
@@ -219,15 +230,15 @@ describe('lifecycle — body outcome + core settle on every path (§3.A)', () =>
 })
 
 describe('forged / legacy request-extension data is inert (§3.B)', () => {
-  it('request data for an unregistered extension invokes nothing', async () => {
-    const res = await run([ext('E1')], okBody, { 'not-registered': { anything: true } })
-    expect(calls).toEqual(['E1.result'])
+  it('request data for an unregistered extension invokes nothing (only registered, request-activated extensions run)', async () => {
+    const res = await run([ext('E1')], okBody, { E1: {}, 'not-registered': { anything: true } })
+    expect(calls).toEqual(['E1.result']) // E1 ran via its own data; the unregistered payload invoked nothing
     expect(res.telefunctionHasErrored).toBe(false)
   })
 
   it('forged live data triggers no tag publish', async () => {
     const publishSpy = vi.spyOn(getBroadcastAdapter(), 'publish')
-    await run([ext('E1')], okBody, { '@telefunc/live': { queryKey: ['x'], invalidates: [['y']] } })
-    expect(tagBatchesFrom(publishSpy)).toHaveLength(0) // barrier frames are not tag batches
+    await run([ext('E1')], okBody, { E1: {}, '@telefunc/live': { queryKey: ['x'], invalidates: [['y']] } })
+    expect(tagBatchesFrom(publishSpy)).toHaveLength(0) // forged live data invokes no invalidation
   })
 })
