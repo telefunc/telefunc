@@ -16,6 +16,7 @@ import {
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
+  ROOM_TRACKS_PER_MEMBER_MAX,
 } from '../constants.js'
 import { ACK_STATUS, TAG, decode, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
@@ -928,6 +929,36 @@ describe('selective binary delivery', () => {
     expect((await cam.publishBinary(new Uint8Array([3]), { track: 'screen' })).receivers).toBe(0)
     expect((await cam.publishBinary(new Uint8Array([4]))).receivers).toBe(1)
   })
+
+  it('caps the named tracks one participant can announce, sparing the default lane', async () => {
+    const room = await Room.create('track-cap')
+    const cam = await room.join({ meta: { name: 'Cam' } })
+    for (let i = 0; i < ROOM_TRACKS_PER_MEMBER_MAX; i++) {
+      await cam.publishBinary(new Uint8Array([i]), { track: `t${i}` })
+    }
+    // A new distinct track past the cap is rejected...
+    await expect(cam.publishBinary(new Uint8Array([1]), { track: 'overflow' })).rejects.toThrow(/at most .*tracks/)
+    // ...while an already-announced track and the unnamed default lane keep working.
+    await expect(cam.publishBinary(new Uint8Array([1]), { track: 't0' })).resolves.toBeDefined()
+    await expect(cam.publishBinary(new Uint8Array([1]))).resolves.toBeDefined()
+  })
+
+  it('unframeMemberId rejects a malformed binary frame with null instead of throwing', () => {
+    const id = crypto.randomUUID()
+    expect(
+      unframeMemberId(frameWithMemberId(id, new Uint8Array([1, 2]), { track: 'cam', meta: { k: 1 } })),
+    ).toMatchObject({ from: id, track: 'cam', meta: { k: 1 } })
+    expect(unframeMemberId(new Uint8Array(10))).toBeNull() // shorter than the fixed sender+flags prefix
+
+    // Layout: [16-byte id][1-byte flags][?1-byte track length + track][?2-byte meta length + meta][payload].
+    const badTrack = frameWithMemberId(id, new Uint8Array([1]), { track: 'cam' })
+    badTrack[17] = 200 // the track-length byte — 200 > TRACK_MAX_BYTES, so the frame is over its bound
+    expect(unframeMemberId(badTrack)).toBeNull()
+
+    const badMeta = frameWithMemberId(id, new Uint8Array([1]), { meta: { k: 1 } })
+    badMeta[19] = 0x78 // clobber the opening `{` of the meta JSON (offset 16+1+2) so parse would throw
+    expect(unframeMemberId(badMeta)).toBeNull()
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1629,6 +1660,23 @@ describe('room stub channel', () => {
     expect(acks.find((f) => f.ackedSeq === 2).status).toBe(ACK_STATUS.OK)
     expect(acks.find((f) => f.ackedSeq === 3).status).toBe(ACK_STATUS.ERROR)
     expect(serverRoom.count).toBe(1)
+  })
+
+  it("a member's malformed binary frame is rejected with a clean error ack, not a crash", async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('bad-binary')
+    const { id } = await joinViaStub(stub, peer, 1)
+
+    // The member's own valid ID (so it passes the impersonation check), but corrupt meta JSON — the
+    // validating unframe rejects it rather than throwing into the relay.
+    const framed = frameWithMemberId(id, new Uint8Array([1]), { meta: { k: 1 } })
+    framed[19] = 0x78 // clobber the opening `{` of the meta JSON (see `unframeMemberId`)
+    await stub._onPeerPublishBinaryAckReqMessage(framed, 2)
+    await settle()
+
+    const ack = peer.decoded().find((f) => f.tag === TAG.ACK_RES && f.ackedSeq === 2)
+    expect(ack.status).toBe(ACK_STATUS.ERROR)
+    expect(ack.text).toContain('Malformed binary frame')
+    expect(serverRoom.count).toBe(1) // the room is unharmed
   })
 
   it('the error contract matches telefunc across the wire: bug hidden, RoomError shown, Abort carried', async () => {

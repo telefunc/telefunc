@@ -14,6 +14,7 @@ import {
   ROOM_MEMBER_TTL_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_MAX,
+  ROOM_TRACKS_PER_MEMBER_MAX,
 } from '../constants.js'
 import {
   getBroadcastAdapter,
@@ -31,6 +32,7 @@ import {
   leaveCauseToWire,
   stampNewer,
   frameWithMemberId,
+  binaryFrameSender,
   hasRoomTag,
   mergeAttributes,
   normalizeJoinOptions,
@@ -939,7 +941,11 @@ class ServerRoom implements Room {
    *  (publisher, track) for named tracks: that's what makes delivery track-selective at the
    *  source, so `receivers: 0` on the ack truthfully means "nobody anywhere wants this track". */
   async _publishBinaryFramed(from: string, framed: Uint8Array): Promise<ChannelPublishAck> {
-    const frame = unframeMemberId(framed)!
+    // The single validating unframe of the publish path: a locally-built frame always parses; a
+    // hand-crafted one that doesn't (truncated, over-long track/meta, malformed meta JSON) is rejected
+    // here, cleanly, rather than crashing the relay or corrupting a lane.
+    const frame = unframeMemberId(framed)
+    if (!frame) throw new RoomError('Malformed binary frame')
     // The guard sees exactly what a subscriber would: the payload, without the wire frame.
     const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
@@ -1024,13 +1030,19 @@ class ServerRoom implements Room {
       (raw) => {
         if (raw === null) throw new RoomError(`Participant not found (left?): ${from}`)
         const record = parse(raw) as RoomMemberRecord
-        if (record.tracks?.includes(track)) {
+        const tracks = record.tracks ?? []
+        if (tracks.includes(track)) {
           appended = false
           return KV_KEEP
         }
+        // Bound named tracks per participant: authoritative here (the record is the cross-node source
+        // of truth), so a hostile publisher can't spray distinct track names to multiply KV slots,
+        // announcements, retained frames, and subscriptions. The default lane is unnamed, never counted.
+        if (tracks.length >= ROOM_TRACKS_PER_MEMBER_MAX) {
+          throw new RoomError(`A participant may announce at most ${ROOM_TRACKS_PER_MEMBER_MAX} tracks`)
+        }
         appended = true
-        const tracks = [...(record.tracks ?? []), track]
-        return stringify({ ...record, tracks, seenAt: Date.now() } satisfies RoomMemberRecord)
+        return stringify({ ...record, tracks: [...tracks, track], seenAt: Date.now() } satisfies RoomMemberRecord)
       },
       { ttlMs: ROOM_MEMBER_KV_TTL_MS },
     )
@@ -1548,7 +1560,9 @@ class ServerRoom implements Room {
       this._assertStubMember(stub, publish.from)
       return await this._publishText(publish.from, publish.data, publish.retain)
     }
-    const from = unframeMemberId(payload.binary)?.from
+    // Read only the sender prefix to check membership; the full validating unframe happens once, in
+    // `_publishBinaryFramed`. A frame too short to carry a sender fails the membership check here.
+    const from = binaryFrameSender(payload.binary)
     this._assertStubMember(stub, from)
     return await this._publishBinaryFramed(from, payload.binary)
   }

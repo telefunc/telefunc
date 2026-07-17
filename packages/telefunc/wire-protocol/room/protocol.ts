@@ -33,6 +33,7 @@ export {
   uuidToBytes,
   frameWithMemberId,
   unframeMemberId,
+  binaryFrameSender,
   hasRoomTag,
   normalizeJoinOptions,
   mergeAttributes,
@@ -670,7 +671,11 @@ function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryP
   return framed
 }
 
-/** Split a binary relay frame into sender, track, per-frame meta, and payload. `null` on truncation. */
+/** Split a binary relay frame into sender, track, per-frame meta, and payload. The one validating
+ *  seam for an untrusted frame (a hand-crafted publish need not have gone through `frameWithMemberId`):
+ *  `null` on truncation, an over-long track or meta (past the same bounds the framer enforces), an
+ *  empty named track (`''` is the default lane), or meta that isn't valid serialized JSON. A `null`
+ *  return means "reject this frame" — callers never see a half-parsed one. */
 function unframeMemberId(data: Uint8Array): {
   from: string
   payload: Uint8Array
@@ -688,7 +693,7 @@ function unframeMemberId(data: Uint8Array): {
     if (data.byteLength < offset + 1) return null
     const trackLength = data[offset]!
     offset += 1
-    if (data.byteLength < offset + trackLength) return null
+    if (trackLength === 0 || trackLength > TRACK_MAX_BYTES || data.byteLength < offset + trackLength) return null
     track = frameTextDecoder.decode(data.subarray(offset, offset + trackLength))
     offset += trackLength
   }
@@ -696,11 +701,22 @@ function unframeMemberId(data: Uint8Array): {
     if (data.byteLength < offset + 2) return null
     const metaLength = (data[offset]! << 8) | data[offset + 1]!
     offset += 2
-    if (data.byteLength < offset + metaLength) return null
-    meta = parse(frameTextDecoder.decode(data.subarray(offset, offset + metaLength))) as Record<string, unknown>
+    if (metaLength > META_MAX_BYTES || data.byteLength < offset + metaLength) return null
+    try {
+      meta = parse(frameTextDecoder.decode(data.subarray(offset, offset + metaLength))) as Record<string, unknown>
+    } catch {
+      return null // malformed meta JSON on a hand-crafted frame — reject the whole frame, don't throw
+    }
     offset += metaLength
   }
   return { from: bytesToUuid(data), payload: data.subarray(offset), track, meta, retain }
+}
+
+/** The sender UUID carried in a binary frame's fixed prefix, or `null` if the frame is too short to
+ *  hold one. Cheap (reads only the member-ID prefix): lets the publish path check membership before
+ *  the full validating `unframeMemberId`, so a frame is parsed once, not twice. */
+function binaryFrameSender(data: Uint8Array): string | null {
+  return data.byteLength >= MEMBER_ID_BYTE_LENGTH ? bytesToUuid(data) : null
 }
 
 // ---------------------------------------------------------------------------
