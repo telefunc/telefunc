@@ -15,8 +15,15 @@ vi.mock('telefunc/client', async () => await import('../../telefunc/client/withC
 import { getPendingContext } from '../../telefunc/client/withContext.js'
 import { live } from './live.js'
 
+/** Brand a fake exactly the way telefunc's client transform brands a real telefunction stub — a string
+ *  `_key`. `live()`'s runtime guard accepts only branded functions; a plain wrapper carries no `_key` and
+ *  is rejected. Every fake telefunction below is passed through this, mirroring what the client sees. */
+function stub<F extends (...args: never[]) => unknown>(fn: F): F {
+  return Object.assign(fn, { _key: 'test.telefunc:onGet' })
+}
+
 /** A stand-in for a telefunction: it takes its signal from the pending call context, exactly as the
- *  generated stub does, and stays in flight until released. */
+ *  generated stub does, stays in flight until released, and is branded like a real client stub. */
 function makeFakeTelefunction<T>(handle: Live<T>) {
   const observed: { signal?: AbortSignal; calls: number } = { calls: 0 }
   let release: (() => void) | undefined
@@ -27,7 +34,7 @@ function makeFakeTelefunction<T>(handle: Live<T>) {
       release = () => resolve(handle)
     })
   }
-  return { call, observed, release: () => release?.() }
+  return { call: stub(call), observed, release: () => release?.() }
 }
 
 const tick = () => new Promise<void>((resolve) => queueMicrotask(() => resolve()))
@@ -62,7 +69,7 @@ describe('live() — the TanStack queryFn wrapper', () => {
     const fake = makeFakeLive('v1')
     // Compile-time proof: `live()` returns a QueryFunction whose data is `string`, so TanStack infers
     // `data: string` rather than `Live<string>` — this wrapper is the one honest re-typing point.
-    const data = await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(() => fake.handle) })
+    const data = await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(stub(() => fake.handle)) })
     expect(data).toBe('v1')
     expect(queryClient.getQueryData(['todos'])).toBe('v1')
   })
@@ -73,10 +80,10 @@ describe('live() — the TanStack queryFn wrapper', () => {
     const received: unknown[] = []
     // `live(onGetTodos, id)` issues `onGetTodos(id)` — the args ride through to the telefunction call,
     // no closure needed to bake them in.
-    const telefn = (a: number, b: string): Promise<Live<string>> => {
+    const telefn = stub((a: number, b: string): Promise<Live<string>> => {
       received.push(a, b)
       return Promise.resolve(handle)
-    }
+    })
     const data = await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(telefn, 7, 'abc') })
     expect(data).toBe('v1')
     expect(received).toEqual([7, 'abc'])
@@ -85,7 +92,7 @@ describe('live() — the TanStack queryFn wrapper', () => {
   it('invalidation refetches the query it came from — keyed off the context, not a passed-in key', async () => {
     const queryClient = new QueryClient()
     const fake = makeFakeLive('v1')
-    await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(async () => fake.handle) })
+    await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(stub(async () => fake.handle)) })
 
     const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
     fake.fireInvalidate()
@@ -99,7 +106,7 @@ describe('live() — the TanStack queryFn wrapper', () => {
   it('removing the query from the cache closes the live handle', async () => {
     const queryClient = new QueryClient()
     const fake = makeFakeLive('v1')
-    await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(async () => fake.handle) })
+    await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(stub(async () => fake.handle)) })
     expect(fake.close).not.toHaveBeenCalled()
     queryClient.removeQueries({ queryKey: ['todos'] })
     expect(fake.close).toHaveBeenCalledTimes(1)
@@ -108,7 +115,7 @@ describe('live() — the TanStack queryFn wrapper', () => {
   it('teardown detaches the taps, it does not merely close the handle', async () => {
     const queryClient = new QueryClient()
     const fake = makeFakeLive('v1')
-    await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(async () => fake.handle) })
+    await queryClient.fetchQuery({ queryKey: ['todos'], queryFn: live(stub(async () => fake.handle)) })
     queryClient.removeQueries({ queryKey: ['todos'] })
 
     // A handle can be closed and still have this adapter's callback hanging off it — closing is the
@@ -125,7 +132,7 @@ describe('live() — the TanStack queryFn wrapper', () => {
     const first = makeFakeLive('a')
     const second = makeFakeLive('b')
     let call = 0
-    const queryFn = live(async () => (call++ === 0 ? first.handle : second.handle))
+    const queryFn = live(stub(async () => (call++ === 0 ? first.handle : second.handle)))
     await queryClient.fetchQuery({ queryKey: ['x'], queryFn })
     await queryClient.fetchQuery({ queryKey: ['x'], queryFn, staleTime: 0 }) // force a second fetch
     expect(first.close).toHaveBeenCalledTimes(1)
@@ -138,8 +145,8 @@ describe('live() — the TanStack queryFn wrapper', () => {
     const queryClient = new QueryClient()
     const first = makeFakeLive('a')
     const second = makeFakeLive('b')
-    await queryClient.fetchQuery({ queryKey: ['x'], queryFn: live(async () => first.handle) })
-    await queryClient.fetchQuery({ queryKey: ['x'], queryFn: live(async () => second.handle), staleTime: 0 })
+    await queryClient.fetchQuery({ queryKey: ['x'], queryFn: live(stub(async () => first.handle)) })
+    await queryClient.fetchQuery({ queryKey: ['x'], queryFn: live(stub(async () => second.handle)), staleTime: 0 })
     expect(first.close).toHaveBeenCalledTimes(1) // a DIFFERENT live() closure still found and closed it
     queryClient.removeQueries({ queryKey: ['x'] })
     expect(second.close).toHaveBeenCalledTimes(1) // and one cache watcher still tears the survivor down
@@ -158,11 +165,13 @@ describe('live() — the TanStack queryFn wrapper', () => {
     const options = {
       queryKey: ['todos'],
       queryFn: live(
-        () =>
-          new Promise<Live<string>>((resolve) => {
-            fetchCount++
-            releases.push(resolve)
-          }),
+        stub(
+          () =>
+            new Promise<Live<string>>((resolve) => {
+              fetchCount++
+              releases.push(resolve)
+            }),
+        ),
       ),
     }
 
@@ -203,7 +212,7 @@ describe('live() — the TanStack queryFn wrapper', () => {
     let release: ((handle: Live<string>) => void) | undefined
     const observer = new QueryObserver(queryClient, {
       queryKey: ['todos'],
-      queryFn: live(() => new Promise<Live<string>>((resolve) => (release = resolve))),
+      queryFn: live(stub(() => new Promise<Live<string>>((resolve) => (release = resolve)))),
     })
     const unsub = observer.subscribe(() => {})
     await flush()
@@ -226,12 +235,11 @@ describe('live() — cancelling a query cancels the telefunction request', () =>
   it('the telefunction receives the query signal, and cancelling the query aborts it', async () => {
     const queryClient = new QueryClient()
     const fake = makeFakeTelefunction(makeFakeLive('v1').handle)
-    // The natural spelling, and the one that used to break: an async wrapper. What `queryFn()` returns
-    // is the WRAPPER's promise, so anything that tries to identify the telefunction call afterwards is
-    // holding the wrong object.
+    // The value form: the telefunction is passed directly, so `withContext` sets the per-call context
+    // exactly around its own invocation and the signal reaches it synchronously — no wrapper to detach it.
     const observer = new QueryObserver(queryClient, {
       queryKey: ['todos'],
-      queryFn: live(async () => fake.call()),
+      queryFn: live(fake.call),
     })
     const unsub = observer.subscribe(() => {})
     await flush()
@@ -252,7 +260,7 @@ describe('live() — cancelling a query cancels the telefunction request', () =>
   it('a query already cancelled before the fetch starts never issues the request', async () => {
     const queryClient = new QueryClient()
     const fake = makeFakeTelefunction(makeFakeLive('v1').handle)
-    const queryFn = live(async () => fake.call())
+    const queryFn = live(fake.call)
     const controller = new AbortController()
     controller.abort() // cancelled before TanStack ever calls us
 
@@ -262,5 +270,19 @@ describe('live() — cancelling a query cancels the telefunction request', () =>
       queryFn({ client: queryClient, queryKey: ['todos'], signal: controller.signal, meta: undefined } as never),
     ).rejects.toThrow(/aborted/)
     expect(fake.observed.calls).toBe(0)
+  })
+
+  it('rejects a wrapper: a delayed call runs outside the signal window, so live() throws up front', () => {
+    const fake = makeFakeTelefunction(makeFakeLive('v1').handle)
+    // A delayed wrapper reaches the telefunction only AFTER an await — outside withContext's synchronous
+    // context window — which is exactly how cancellation silently detaches. It carries no telefunction
+    // `_key`, so live() rejects it immediately instead of building a queryFn that drops the signal. The
+    // value form (`live(fake.call)`, above) is the only spelling that works.
+    const wrapper = async () => {
+      await tick()
+      return fake.call()
+    }
+    expect(() => live(wrapper)).toThrow(/telefunction/)
+    expect(fake.observed.calls).toBe(0) // rejected before the wrapper — and its telefunction call — ever ran
   })
 })

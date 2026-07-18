@@ -54,6 +54,7 @@ function live<T, TArgs extends unknown[]>(
   telefunction: (...args: TArgs) => Live<T> | Promise<Live<T>>,
   ...args: TArgs
 ): (context: QueryFunctionContext) => Promise<T> {
+  assertTelefunction(telefunction)
   return async (context) => {
     // TanStack cancels an in-flight fetch by aborting this signal (see `cancelRefetch` below), and the
     // telefunction should hear about it rather than be abandoned mid-request.
@@ -72,6 +73,31 @@ function live<T, TArgs extends unknown[]>(
       throw abortError()
     }
     return wire(context.client, context.queryKey, handle)
+  }
+}
+
+/**
+ * Reject anything that isn't a real telefunction. The value form (`live(onGetTodos, id)`) MUST be the only
+ * spelling that works: a wrapper — `live(() => onGetTodos(id))` or, worse, `live(async () => { await x; return
+ * onGetTodos(id) })` — silently disconnects cancellation. `withContext` sets the per-call context only for
+ * the synchronous window in which the passed function runs; a telefunction the wrapper calls AFTER an await
+ * sees no pending context, so the query's abort signal never reaches the request and cancellation quietly
+ * does nothing. We catch this up front instead of letting it fail silently at runtime.
+ *
+ * The check is the generated client stub's `_key` marker (telefunc's client transform stamps it on every
+ * telefunction; a plain function has none). This is a RUNTIME guard BY DESIGN: a compile-time brand would
+ * require telefunc to brand every telefunction's client stub TYPE — a client-typegen feature that resolves
+ * telefunction types from source today — which is out of scope here. So the enforcement is the throw below,
+ * not the type.
+ */
+function assertTelefunction(fn: unknown): void {
+  if (typeof fn !== 'function' || typeof (fn as { _key?: unknown })._key !== 'string') {
+    throw new Error(
+      'live() expects a telefunction — pass it and its arguments directly, e.g. live(onGetTodos, todoListId). ' +
+        'It was given a plain function (a wrapper like live(() => onGetTodos(todoListId))?), which detaches the ' +
+        "query's cancellation signal from the request: the telefunction call runs outside the signal's context " +
+        'window, so cancelling the query would silently do nothing.',
+    )
   }
 }
 
