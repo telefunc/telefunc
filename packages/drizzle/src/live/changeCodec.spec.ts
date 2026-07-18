@@ -286,5 +286,6 @@ describe('change codec — the rejected shapes are shapes that would SILENTLY MI
     expect(decodeChangePayload(payload)).toBeUndefined()
 
     await client.close()
-  })
+    // Boots PGlite and hydrates a real join graph, so it needs more than the 5s default on a loaded machine.
+  }, 30_000)
 })

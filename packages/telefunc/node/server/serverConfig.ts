@@ -252,8 +252,8 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
                     registerShieldType(name, verify)
                   }
                 }
-                // Hand the extension the host toolkit so an integration can reach reactive primitives
-                // (a Live producer, per-request cleanup) without importing telefunc internals.
+                // Hand the extension the host toolkit so an integration can reach the reactive primitive
+                // (a Live producer) without importing telefunc internals.
                 ext.setup?.(telefuncExtensionHost)
               }
               return target.length

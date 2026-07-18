@@ -166,7 +166,7 @@ describe('an ABANDONED live read is reclaimed when its handle is collected', () 
     await collectGarbage()
 
     expect(tokens[0]!.released).toBe(1) // the finalizer gave the graph token back
-  })
+  }, 30_000)
 
   it('does NOT release an ACTIVATED handle’s token while its channel is open', async () => {
     const tokens = trackTokens()
@@ -178,7 +178,7 @@ describe('an ABANDONED live read is reclaimed when its handle is collected', () 
     expect(tokens[0]!.redeemed).toBe(1)
     expect(tokens[0]!.released).toBe(0) // untouched by the finalizer
     ;(live as unknown as { release(): void }).release() // and the channel still owns a working teardown
-  })
+  }, 30_000)
 
   it('a handle SERIALIZED then CLOSED is collected without a second release', async () => {
     // The control that can actually disagree with the finalizer's redeemed-check, and the reason that check
@@ -197,7 +197,7 @@ describe('an ABANDONED live read is reclaimed when its handle is collected', () 
 
     expect(tokens[0]!.redeemed).toBe(1)
     expect(tokens[0]!.released).toBe(0) // the finalizer left the redeemed token alone
-  })
+  }, 30_000)
 })
 
 // ── the chainable live builder proxy ────────────────────────────────

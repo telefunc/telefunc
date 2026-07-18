@@ -357,9 +357,9 @@ async function runTelefunc_({
     }
   }
 
-  // On any FAILURE of the execute→serialize pipeline — success, a body/shield throw BEFORE serialize, or a
-  // serialize failure — abort the response so a handle activated during a partial serialize has its channel
-  // torn down (the response never goes out). A body-throw jumps straight to runTelefunc's catch, skipping
+  // On any FAILURE of the execute→serialize pipeline — a body/shield throw BEFORE serialize, or a serialize
+  // failure — abort the response so a handle activated during a partial serialize has its channel torn down
+  // (the response never goes out). A body-throw jumps straight to runTelefunc's catch, skipping
   // serializeTelefunctionResult entirely, so this cannot live inside it.
   let pipelineFailed = false
   try {

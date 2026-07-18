@@ -12,9 +12,9 @@ type TelefuncServerExtension = {
   name: string
   /** Called ONCE, SYNCHRONOUSLY, when the extension is registered (`config.extensions.push(ext)`) — which
    *  may be at import time OR lazily mid-request (as @telefunc/drizzle registers on first use). Receives the
-   *  host toolkit: the sanctioned seam for a server-side integration (e.g. an ORM binding) to reach reactive
-   *  primitives — a `Live` producer and per-request cleanup — WITHOUT importing telefunc internals. Stash
-   *  the host and use it from your integration's request-time code. */
+   *  host toolkit: the sanctioned seam for a server-side integration (e.g. an ORM binding) to reach the
+   *  reactive primitive — a `Live` producer — WITHOUT importing telefunc internals. Stash the host and use
+   *  it from your integration's request-time code. */
   setup?: (host: TelefuncExtensionHost) => void
   /** Lifecycle hooks (run in context — `getContext()`/`getRawContext()` work). */
   hooks?: {
