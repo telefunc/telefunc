@@ -6,15 +6,12 @@ export { defaultChangeTransport, createInMemoryChangeTransport, transportFor, se
  * Live side (`reactiveDrizzle(db, { changeTransport })`), INDEPENDENT of the user's app-level
  * `config.broadcast.transport`. (Owner correction: never route Live change traffic through the user's app
  * Broadcast by default — a user must be able to run, e.g., Redis for their app Broadcast and something else
- * for Live.) It mirrors the Broadcast publish/subscribe SHAPE; the default is an in-process dedicated
- * channel-space (below), and a multi-process deployment injects a transport-backed implementation.
+ * for Live.) It mirrors the Broadcast publish/subscribe SHAPE.
  *
- * DEPLOYMENT TRUTH — assume NO cross-server magic from the default: the built-in default fans out
- * **in-process only** (one Node process). A multi-process / multi-server deployment MUST inject a shared,
- * transport-backed ChangeTransport (Redis/Postgres-backed, or telefunc's Broadcast wired to a real
- * transport) via `reactiveDrizzle(db, { changeTransport })`, or a write on one server will not reach a live
- * query on another. (Telefunc's own default Broadcast adapter is likewise process-local — nothing
- * cross-process is silently provided here.)
+ * DEPLOYMENT TRUTH — assume NO cross-server magic from the default: it fans out **in-process only** (one
+ * Node process, see below). A multi-process deployment MUST inject a shared, transport-backed one, or a
+ * write on one server will not reach a live query on another. Telefunc's own default Broadcast adapter is
+ * likewise process-local — nothing cross-process is silently provided here.
  *
  * The payload is an OPAQUE STRING the package encodes and decodes itself (see `changeCodec.ts`), so a
  * transport is never asked to preserve the JS value domain a SQL row is made of — BigInt, Date, byte

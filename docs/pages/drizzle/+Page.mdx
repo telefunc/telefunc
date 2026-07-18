@@ -87,6 +87,20 @@ const rdb = reactiveDrizzle(db, { changeTransport: myRedisChangeTransport })
 
 > This transport is dedicated to live queries and is independent of your app's `config.broadcast.transport`.
 
+A transport carries an opaque string — Telefunc encodes the change itself, so you never have to make `BigInt`, `Date` or byte columns survive your serializer:
+
+```ts
+type ChangeTransport = {
+  publish(topic: string, payload: string): void | Promise<void>
+  subscribe(topic: string, onPayload: (payload: string) => void): Promise<{ unsubscribe(): void | Promise<void> }>
+}
+```
+
+Two rules make it correct:
+
+- **Resolve `subscribe()` once the subscription really exists** — after Redis acknowledges `SUBSCRIBE`, not when the command is sent. A live read waits on that promise, so resolving early re-opens the gap it closes, and rejecting fails the read rather than admitting one that could miss writes. Likewise resolve `unsubscribe()` only once the listener is detached.
+- **Deliver each message to a subscriber at most once.** Row-level invalidation is not idempotent, so a transport that can redeliver must deduplicate before calling back.
+
 
 ## Precision & limits
 
@@ -122,7 +136,9 @@ await db.execute(sql`select count(*) from audit_log`) // base db — invalidates
 
 #### Delivery
 
-Invalidation is best-effort pub/sub. A live read is not admitted until its subscription is proven listening, so a write can't be missed in the gap between the two. Beyond that, a message dropped on an established connection delays that query's invalidation until the next write touching the table — bounded staleness, never a fabricated row.
+Invalidation is best-effort pub/sub. A live read is not admitted until the transport has confirmed its subscription, so a write can't be missed in the gap between the two. Beyond that, a message dropped on an established connection delays that query's invalidation until the next write touching the table — bounded staleness, never a fabricated row.
+
+A db subscribes while it has live queries and unsubscribes when the last one closes, so a `db` you stop using is not held open by the transport.
 
 
 ## See also

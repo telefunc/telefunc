@@ -12,38 +12,28 @@ import type { ChangeBatch } from '../router/events.js'
 // receiver feeds the whole batch into its own graphs via `router.ingest`; the router already slices it per
 // table and notifies each affected graph at most once, so one message is one atomic graph tick.
 //
-// SINGLE TOPIC, deliberately. An earlier design published one full copy of the batch to each touched
-// table's topic, so that a runtime only heard about tables it watched. That fan-out bought receiver
-// filtering and paid for it with a correctness protocol: k copies of every k-table commit, an apply-once
-// rule to suppress the duplicates it created, per-batch id memory with a time bound, a monotonic clock and
-// sweeper to expire it, a 30-second cross-topic skew guarantee demanded of every adapter, and a reserved
-// wildcard channel (plus a reserved relation identity) for writes whose tables are unknowable. All of that
-// existed to undo the duplication; none of it is needed once the batch is published once.
+// SINGLE TOPIC, deliberately. Receiver filtering is the router's job — it ignores tables no graph watches —
+// and publishing a copy per touched table instead would buy that filtering at the price of a correctness
+// protocol to undo its own duplicates: apply-once memory, a time bound on it, a sweeper, and a cross-topic
+// skew guarantee every adapter would owe. If measured broker traffic ever justifies per-table filtering, it
+// returns as a versioned additive capability, never as a baseline the runtime compensates for.
 //
-// What remains is the part that was never about fan-out:
+// Two obligations survive, and neither is about fan-out:
 //   - ORIGIN self-suppression — a db feeds its own graphs DIRECTLY in `ingestWrite`, before publishing, so
 //     it must drop its own echo or apply the same delta twice.
-//   - AT-MOST-ONCE per topic, which the adapter still owes: precise row deltas are not idempotent, and
-//     single-topic removes the duplicates this layer created, not generic redelivery.
+//   - AT-MOST-ONCE per topic, which the adapter still owes: precise row deltas are not idempotent.
 //
-// Receiver filtering is now the router's job (it ignores tables no graph watches). If measured broker
-// traffic ever makes per-table filtering worth its price again, it returns as a versioned, additive
-// transport capability — not as a baseline the runtime has to compensate for.
+// READINESS BARRIER (acquireSubscription): a live read is not admitted until the transport has ADMITTED
+// this db's subscription — which is what awaiting `subscribe()` means (changeTransport.ts). Readiness is a
+// control-plane fact and is asked of the control plane; proving it on the data plane instead (publish a
+// token, await it back) would demand self-delivery from every adapter and still say nothing about the
+// cluster, since an isolated Redis namespace loops its own probe back happily. A rejected subscribe fails
+// the read CLOSED.
 //
-// READINESS BARRIER (acquireSubscription): a live read is not admitted until this db's subscription is
-// ADMITTED by the transport — which is exactly what awaiting `subscribe()` means (changeTransport.ts). The
-// readiness question is a CONTROL-PLANE one, so it is asked on the control plane: an earlier design proved
-// it on the data plane instead, by publishing a unique token and awaiting it back on a bounded retry pump.
-// That probe demanded self-delivery from every adapter, rejected otherwise-usable transports, and still
-// proved nothing about the cluster — a Redis namespace isolated from every other instance loops its own
-// probe back happily. What the read actually needs is the transport's own assertion that publications made
-// from now on can be observed; a rejected (or never-resolving) subscribe fails the read CLOSED.
-//
-// LIFETIME: the subscription is REFCOUNTED against the same ownership the graph registry already uses — a
-// read token holds a ref from before `registry.acquire` until it redeems into a channel lease, and the last
-// lease to close drops it. At zero the listener is detached, so a db nobody is reading live is no longer
-// pinned by a callback closing over it. Previously the first live read subscribed a db for the lifetime of
-// the process.
+// LIFETIME: the subscription is REFCOUNTED against the ownership the graph registry already models — a read
+// token holds a ref from before `registry.acquire` until it redeems into a channel lease, and the last lease
+// to close drops it. At zero the listener is detached, so a db nobody reads live is not pinned by a callback
+// closing over it.
 
 /** The one change topic for a logical database. Every runtime sharing a changeTransport exchanges changes
  *  on it; scoping several logical databases onto one transport is the adapter's namespacing concern. */

@@ -82,6 +82,55 @@ describe('write capture — a write feeds the same db-scoped graphs the reads cr
   })
 })
 
+// The acceptance proof for cross-instance write capture, on the PUBLIC stack: a write on instance A
+// invalidates ONLY the affected live query on instance B, and provably not an unaffected one. Two reactive
+// dbs share the process-wide default transport, which encodes and decodes like any other — so this runs
+// through the serialize/parse codec boundary rather than handing B a reference to A's own objects.
+//
+// Counted at each ROUTER, not at the Live handles: a handle coalesces its invalidations in a microtask, so
+// one delivery and two look identical there — which is exactly how a broken echo suppression would hide.
+describe('write capture — a write on A reaches only the affected live query on B', () => {
+  it('delivers the changed ROW cross-instance, once, and leaves the unaffected query alone', async () => {
+    provideTelefuncContext({})
+    const baseA = drizzle({ client })
+    const baseB = drizzle({ client })
+    type Reader = {
+      select: () => { from: (t: unknown) => { live: () => Promise<unknown> } }
+      insert: (t: unknown) => { values: (v: unknown) => PromiseLike<unknown> }
+    }
+    const instanceA = reactiveDrizzle(baseA) as unknown as Reader
+    const instanceB = reactiveDrizzle(baseB) as unknown as Reader
+
+    activate(await instanceA.select().from(users).live())
+    const remoteUsers = await instanceB.select().from(users).live()
+    const remotePosts = await instanceB.select().from(posts).live()
+    activate(remoteUsers)
+    activate(remotePosts)
+    const remoteUsersInvalidated = onInvalidate(remoteUsers)
+    const remotePostsInvalidated = onInvalidate(remotePosts)
+
+    const ingestA = vi.spyOn(registryFor(baseA).router, 'ingest')
+    const ingestB = vi.spyOn(registryFor(baseB).router, 'ingest')
+
+    await instanceA.insert(users).values({ id: 700, name: 'cross' })
+    await tick()
+
+    // B heard about it exactly once, and precisely: the row itself survived the wire, not a coarse marker.
+    expect(ingestB).toHaveBeenCalledTimes(1)
+    expect(ingestB).toHaveBeenCalledWith({
+      changes: [{ table: 'users', kind: 'insert', new: { id: 700, name: 'cross' } }],
+    })
+    expect(remoteUsersInvalidated).toHaveBeenCalledTimes(1)
+    expect(remotePostsInvalidated).not.toHaveBeenCalled() // the unaffected query on B does not fire
+
+    // A fed its own graphs directly, before publishing — its own echo must not arrive on top of that.
+    expect(ingestA).toHaveBeenCalledTimes(1)
+
+    ingestA.mockRestore()
+    ingestB.mockRestore()
+  })
+})
+
 // A raw statement's touched tables are unknowable, so other instances are told with ONE coarse-all
 // announcement, which coarsens every table the receiver watches. Publishing the same write's own coarse
 // markers as well delivered the SAME invalidation to a remote watcher TWICE. Driven end-to-end here (real
