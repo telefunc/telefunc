@@ -379,8 +379,13 @@ function buildSetOps(
     if (stream) branches.push({ kind: op.type, stream })
     if (!stream || op.orderBy.length > 0 || op.limit !== undefined || op.offset !== undefined) degrade = true
   }
-  if (!main) return undefined
-  if (degrade) return dirtyOnly(main, branches, dirty)
+  // A degraded MAIN must still fall through to `dirtyOnly`, not return early. Returning here left every
+  // successfully-built ARM untapped: its inputs were registered and fed, but nothing consumed the stream —
+  // no output pipe (the caller only pipes a defined stream) and no dirty tap — so a change to an arm-only
+  // table reported `invalidated: false` on a plan that was otherwise PRECISE. That is a missed
+  // invalidation, not a safe over-fire. `dirtyOnly` was already written for this case: its `main` parameter
+  // is optional and it guards with `if (main)`.
+  if (degrade || !main) return dirtyOnly(main, branches, dirty)
   return applySetOps(main, branches, dirty)
 }
 

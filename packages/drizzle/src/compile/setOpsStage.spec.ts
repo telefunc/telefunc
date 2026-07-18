@@ -72,3 +72,28 @@ describe('setOpsStage — INTERSECT / EXCEPT dirty from either branch', () => {
     expect(isDirtySetOp('exceptAll')).toBe(true)
   })
 })
+
+// REGRESSION — a MISSED invalidation (not a safe over-fire), on a plan that is otherwise precise.
+//
+// When the main branch degrades internally it taps its own streams and returns `undefined`. `buildSetOps`
+// then returned early, so every successfully-built ARM was left untapped: its inputs were registered and
+// fed, but nothing consumed the resulting stream — the caller only pipes a defined stream, and no dirty tap
+// was installed. A change to an arm-only table therefore reported `invalidated: false`.
+//
+// Reachable from ordinary Drizzle: a cross join has no equi key, so the main branch degrades, and a shape
+// carrying set-ops is stateful-planned without consulting join exactness.
+describe('setOpsStage — a degraded MAIN branch must not silence the arms', () => {
+  // members ⨯ admins (no equi key → the main branch degrades) UNION guests
+  const crossJoinedMain = () => qb.select({ id: members.id }).from(members).crossJoin(admins).union(guestArm())
+
+  it('a change to an ARM-ONLY table still invalidates', () => {
+    const graph = run(crossJoinedMain())
+    expect(graph.apply([insG({ id: 1, name: 'g' })]).invalidated).toBe(true)
+  })
+
+  it('the degraded main branch still invalidates from its own tables', () => {
+    const graph = run(crossJoinedMain())
+    expect(graph.apply([insM({ id: 2, name: 'm' })]).invalidated).toBe(true)
+    expect(graph.apply([insA({ id: 3, name: 'a' })]).invalidated).toBe(true)
+  })
+})
