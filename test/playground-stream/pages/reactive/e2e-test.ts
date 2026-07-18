@@ -74,9 +74,9 @@ function testReactive() {
     // Both queries refetched, each landing one observed success. Read this as EVENTUAL invalidation of both
     // tables from one transaction — NOT as proof of exactly-once delivery or of the one-atomic-tick property.
     // A `+1` here cannot distinguish one delivery from two: server-side invalidate coalescing and the client's
-    // cancelRefetch can both collapse a second delivery into the same single success, so removing cross-topic
-    // dedupe entirely could still show `+1`. Exactly-once ingestion is proven in writeTransport.spec.ts
-    // against router.ingest, where the count is actually observable and mutation-gated.
+    // cancelRefetch can both collapse a second delivery into the same single success, so a duplicated
+    // publication would still show `+1`. Exactly-once ingestion is proven in writeTransport.spec.ts against
+    // router.ingest, where the count is actually observable and mutation-gated.
     expect(after.todosFetches).toBe(before.todosFetches + 1)
     expect(after.notesFetches).toBe(before.notesFetches + 1)
   })
@@ -92,8 +92,8 @@ function testReactive() {
     })
 
     // NOTE: no precision assertion here, deliberately. Instance A cannot know which tables instance B
-    // watches, so a raw-SQL write announces itself on the wildcard coarse channel and B coarsens EVERY
-    // table it watches — `notes` included. That over-fire is the documented, sound fallback; asserting the
+    // watches, so a raw-SQL write announces itself as a coarse-all and B coarsens EVERY table it
+    // watches — `notes` included. That over-fire is the documented, sound fallback; asserting the
     // control unchanged here would assert the opposite of the intended behaviour.
   })
 }

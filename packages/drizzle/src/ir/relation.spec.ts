@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { describeRelationId, parseRelationId, relationIdOf } from './relation.js'
 
 describe('relation identity — the two encoding forms', () => {
-  it('an unqualified relation keeps its readable bare name (so topics stay `__live__:todos`)', () => {
+  it('an unqualified relation keeps its readable bare name (the common case stays legible in logs)', () => {
     expect(relationIdOf({ name: 'todos' })).toBe('todos')
   })
 

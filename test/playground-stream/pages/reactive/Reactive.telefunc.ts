@@ -30,8 +30,8 @@ async function onAddTodo(text: string) {
   return { ok: true }
 }
 
-/** One transaction touching TWO tables: the batch must reach both tables' topics and apply as ONE atomic
- *  tick on the receiving instance (per-table topics + the deterministic cross-topic dedupe rule). */
+/** One transaction touching TWO tables: the whole batch is published ONCE and must apply as ONE atomic
+ *  tick on the receiving instance, invalidating both tables' live queries. */
 async function onAddTx() {
   const db = reactiveDrizzle(dbA)
   await ensureTablesReady()
@@ -43,7 +43,7 @@ async function onAddTx() {
 }
 
 /** A FAIL-CLOSED COARSE write: raw SQL, whose touched tables are unknowable without parsing it. It must
- *  still invalidate cross-instance — via the wildcard coarse channel, since instance A cannot know which
+ *  still invalidate cross-instance — via a coarse-all announcement, since instance A cannot know which
  *  tables instance B watches. */
 async function onAddCoarse() {
   const db = reactiveDrizzle(dbA)

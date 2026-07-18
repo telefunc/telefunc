@@ -247,9 +247,9 @@ describe('write capture — non-SQL mutations still invalidate (refreshMateriali
   })
 })
 
-// Review finding #6: writes used the bare `getTableName(table)` and topics `__live__:{table}`, so a write
-// to `a.users` reached a live query on `b.users` (the Evaluator's crossSchemaRoutingProbe observed 1 fire on
-// the provably-unaffected query). Routing now runs on the schema-qualified relation identity.
+// Review finding #6: writes routed on the bare `getTableName(table)`, so a write to `a.users` reached a live
+// query on `b.users` (the Evaluator's crossSchemaRoutingProbe observed 1 fire on the provably-unaffected
+// query). Routing now runs on the schema-qualified relation identity.
 //
 // Each case asserts BOTH halves: the write's OWN schema fires (a positive control, so the zero below cannot
 // pass vacuously — e.g. if capture silently stopped emitting) and the same-named relation in the OTHER
