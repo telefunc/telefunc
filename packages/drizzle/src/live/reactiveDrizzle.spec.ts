@@ -81,12 +81,13 @@ describe('reactiveDrizzle — client surface', () => {
     expect(executed).toEqual(rows)
   })
 
-  it('writes route through the mutation seam (plain today); the seam sees op + carrier', () => {
+  it('writes route through the mutation seam; the seam sees the op + the db (for ingest routing)', () => {
     const insert = vi.fn()
     const base = { select: () => ({}), insert }
     const db = reactive(base) as unknown as { insert: unknown }
     void db.insert // property access drives the proxy get
-    expect(captureMutation).toHaveBeenCalledWith('insert', expect.any(Function), { __dbLiveCarrier: true })
+    // Capture is keyed to the db so it reaches the SAME registry the reads acquired from.
+    expect(captureMutation).toHaveBeenCalledWith('insert', expect.any(Function), base)
   })
 
   it('CTE-prefixed reads are NOT reactive: with() is forwarded unwrapped, so its builders carry no .live()', () => {

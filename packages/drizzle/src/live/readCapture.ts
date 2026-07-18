@@ -25,11 +25,8 @@ import { schemaFingerprint } from '../extract/columns.js'
 import { identityOf } from '../extract/identity.js'
 import { extractQueryShape } from '../extract/queryShape.js'
 import type { QueryShape } from '../ir/types.js'
-import { type Registry, type ReadToken, createRegistry } from '../graph/registry.js'
-
-/** The per-input state cap: a stateful graph whose shadow exceeds it demotes to coarse (bounded,
- *  sound over-fire). Internal — not a public knob. */
-const MAX_STATE_ROWS_PER_INPUT = 50_000
+import type { ReadToken } from '../graph/registry.js'
+import { registryFor } from './dbRuntime.js'
 
 /** A read token minted for a db.live handle in the current request, tracked on the carrier so the
  *  request's finally-sweep can release it if the handle is never serialized (never activated). The
@@ -40,15 +37,6 @@ type MintedToken = { token: ReadToken; redeemed: boolean }
 /** What the per-request DbLiveCarrier carries: `wrapLiveSelect` pushes here, `disposeUnredeemedReads`
  *  reads here. */
 type ReadCarrier = { mintedTokens: MintedToken[] }
-
-/** One registry per db instance (keyed by identity — a WeakMap so a discarded db is collectable).
- *  All live queries over the same db share its graph state. */
-const registries = new WeakMap<object, Registry>()
-function registryFor(db: object): Registry {
-  let registry = registries.get(db)
-  if (!registry) registries.set(db, (registry = createRegistry({ maxStateRowsPerInput: MAX_STATE_ROWS_PER_INPUT })))
-  return registry
-}
 
 /** Wrap a live SELECT builder into a CHAINABLE builder: `from`/`where`/… forward to the underlying
  *  drizzle builder and re-wrap the result (so the chain stays live); non-builder returns (`toSQL`,

@@ -339,9 +339,11 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb): Reactive<TD
         }
       }
       if (prop === 'insert' || prop === 'update' || prop === 'delete') {
-        // Writes run as plain Drizzle today; the seam exists so T4 can route capture through one place.
+        // Writes run as plain Drizzle, then feed their change into this db's graphs (via captureMutation →
+        // ingestWrite) so the live reads they affect refetch. Capture is keyed to `target` (the db) so it
+        // reaches the SAME registry the reads acquired from.
         const base = Reflect.get(target, prop, receiver) as (...a: unknown[]) => unknown
-        return captureMutation(prop, base.bind(target), carrier)
+        return captureMutation(prop, base.bind(target), target)
       }
       return Reflect.get(target, prop, receiver)
     },
