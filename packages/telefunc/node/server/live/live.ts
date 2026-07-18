@@ -27,7 +27,7 @@ type Live<T> = {
 /**
  * The `Live` namespace.
  *
- * The annotation is explicit so the emitted `.d.ts` pins the public surface to the three concepts:
+ * The annotation is explicit so the emitted `.d.ts` pins the public surface to the two concepts:
  * a `Live<T>` is `{ readonly data: T }`, and `Live.derived` composes one from others. Without it,
  * inference would leak the internal `LiveCell` into the public types.
  */
