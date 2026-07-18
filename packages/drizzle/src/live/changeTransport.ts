@@ -27,6 +27,12 @@ export { defaultChangeTransport, createInMemoryChangeTransport, transportFor, se
  *  - **`unsubscribe()` detaches the listener**, and its promise (if it returns one) resolves only once it
  *    HAS. The runtime serializes teardown against re-subscription on that promise, so an early resolve can
  *    leave an old and a new listener overlapping — and a precise batch delivered to both is applied twice.
+ *    A REJECTION is read as "detachment unconfirmed", not as "detached anyway": the runtime then refuses to
+ *    subscribe again and fails live reads on that db closed until a retry succeeds. So `unsubscribe()` must
+ *    be **IDEMPOTENT** — the runtime calls it again after a failure, and calling it on an already-detached
+ *    subscription must resolve rather than throw, or that db never recovers. (Redis `UNSUBSCRIBE` is
+ *    naturally idempotent; an adapter that tracks its own listeners should treat "not subscribed" as
+ *    success.)
  *  - **At-most-once delivery per topic.** A transport MUST NOT redeliver the same published message to the
  *    same subscriber on the same topic. Precise row application is NOT idempotent (a stateful aggregate
  *    would count the same delta twice). A transport that can redeliver must deduplicate internally before

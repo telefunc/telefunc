@@ -104,10 +104,14 @@ function reportPublishFailure(error: unknown): void {
 type SubscriptionRef = { release(): void }
 
 /** What the runtime knows about a db's presence on the change topic: how many owners want it, the live
- *  handle if there is one, and the chain that serializes every transition between those two facts. */
+ *  handle if there is one, the chain that serializes every transition between those two facts — and any
+ *  handle whose detachment FAILED, whose listener is therefore of unknown status. */
 type SubscriptionState = {
   refs: number
   active: ChangeSubscription | undefined
+  /** A subscription we asked to detach and could not confirm. Until it is confirmed gone, subscribing again
+   *  could put a second listener alongside one that never left — so this blocks every new subscribe. */
+  undetached: ChangeSubscription | undefined
   transition: Promise<void>
 }
 
@@ -115,7 +119,12 @@ const subscriptions = new WeakMap<object, SubscriptionState>()
 
 function stateFor(db: object): SubscriptionState {
   let state = subscriptions.get(db)
-  if (!state) subscriptions.set(db, (state = { refs: 0, active: undefined, transition: Promise.resolve() }))
+  if (!state) {
+    subscriptions.set(
+      db,
+      (state = { refs: 0, active: undefined, undetached: undefined, transition: Promise.resolve() }),
+    )
+  }
   return state
 }
 
@@ -166,6 +175,14 @@ function reconcile(db: object, state: SubscriptionState): Promise<void> {
 /** One transition toward the desired state. Anything that changed the refcount during an await has already
  *  queued its own step behind this one, so a single reconciliation per call is enough. */
 async function step(db: object, state: SubscriptionState): Promise<void> {
+  // FAIL CLOSED on an unconfirmed detach. A previous unsubscribe rejected, so its callback may well still be
+  // attached; subscribing now would leave two listeners on one topic and apply the next precise batch TWICE.
+  // Retry the detach first (the contract requires unsubscribe to be idempotent) and let a still-failing one
+  // throw — which rejects the live read waiting on it, rather than admitting one onto a doubled listener.
+  if (state.undetached) {
+    await state.undetached.unsubscribe()
+    state.undetached = undefined
+  }
   if (state.refs > 0 && !state.active) {
     state.active = await transportFor(db).subscribe(CHANGE_TOPIC, (payload) => receive(db, payload))
     return
@@ -173,13 +190,18 @@ async function step(db: object, state: SubscriptionState): Promise<void> {
   if (state.refs === 0 && state.active) {
     const active = state.active
     state.active = undefined // `active` means a subscription we intend to keep; from here we are letting go of it
-    await active.unsubscribe()
+    try {
+      await active.unsubscribe()
+    } catch (error) {
+      state.undetached = active // its listener's status is now UNKNOWN — block subscribing until it is not
+      throw error
+    }
   }
 }
 
 function reportUnsubscribeFailure(error: unknown): void {
   console.error(
-    '[telefunc] live: detaching the change subscription failed. Nothing is stale as a result; the runtime will subscribe again for the next live read.',
+    '[telefunc] live: detaching the change subscription failed, so its listener may still be attached. Live reads on this db FAIL CLOSED until the transport confirms detachment (each one retries it); admitting them would risk applying a change twice.',
     error,
   )
 }

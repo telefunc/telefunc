@@ -34,13 +34,14 @@ import { acquireSubscription } from './writeTransport.js'
  *  `listenerPeak` is the instrument behind the no-overlap claim: if a re-subscribe ever began before the
  *  unsubscribe it follows had detached, two callbacks would be attached at once and the peak would read 2 —
  *  and a precise batch delivered to both would be applied twice. */
-function brokerTransport(options: { autoAdmit?: boolean; holdUnsubscribe?: boolean } = {}) {
+function brokerTransport(options: { autoAdmit?: boolean; holdUnsubscribe?: boolean; failDetach?: boolean } = {}) {
   const pendingSubscribes: { admit: () => void; refuse: (error: Error) => void }[] = []
   const pendingDetaches: (() => void)[] = []
   const listeners = new Set<(payload: string) => void>()
   let subscribes = 0
   let unsubscribes = 0
   let listenerPeak = 0
+  let failDetach = options.failDetach === true
 
   const attach = (onPayload: (payload: string) => void): ChangeSubscription => {
     listeners.add(onPayload)
@@ -48,6 +49,9 @@ function brokerTransport(options: { autoAdmit?: boolean; holdUnsubscribe?: boole
     return {
       unsubscribe() {
         unsubscribes++
+        // A detach that FAILS AND LEAVES THE LISTENER ATTACHED — the case a transport hits on a dropped
+        // connection, and the one that makes "unsubscribe rejected" different from "unsubscribed".
+        if (failDetach) return Promise.reject(new Error('UNSUBSCRIBE failed'))
         if (!options.holdUnsubscribe) {
           listeners.delete(onPayload)
           return
@@ -86,6 +90,8 @@ function brokerTransport(options: { autoAdmit?: boolean; holdUnsubscribe?: boole
     refuse: () => pendingSubscribes.shift()?.refuse(new Error('SUBSCRIBE refused')),
     detach: () => pendingDetaches.shift()?.(),
     deliver: (payload: string) => transport.publish('', payload),
+    /** Let the broker start detaching successfully again — the transient-failure half of the story. */
+    healDetach: () => (failDetach = false),
   }
 }
 
@@ -256,6 +262,61 @@ describe('change subscription — teardown at the last release', () => {
 
     expect(broker.subscribeCount()).toBe(2) // only now
     expect(broker.listenerPeak()).toBe(1) // and never two listeners at once — no batch is applied twice
+  })
+
+  it('a FAILED detach never lets a second listener be subscribed on top of the first', async () => {
+    // The counterexample this fixes. Clearing `active` before awaiting the detach meant a rejecting
+    // unsubscribe left the state claiming no listener existed, while the transport still had one attached.
+    // The next live read then subscribed a SECOND callback, and one precise publication reached both — a
+    // double-apply, on an ordinary transport failure path rather than an exotic one.
+    const db = {}
+    const broker = attached(db, { autoAdmit: true, failDetach: true })
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const first = await acquireSubscription(db)
+
+    first.release()
+    await settle()
+    expect(broker.unsubscribeCount()).toBe(1) // asked to detach…
+    expect(broker.listenerCount()).toBe(1) // …and the listener is still there, because the detach failed
+
+    // A later live read must not subscribe alongside a listener that may still exist. The counts are
+    // asserted BEFORE the outcome deliberately: they are the counterexample itself (the broken build showed
+    // subscribeCount 2 / listenerCount 2), so this is what a regression has to disagree with first.
+    const second = acquireSubscription(db).then(
+      () => 'admitted',
+      (error: Error) => error,
+    )
+    await settle()
+    expect(broker.subscribeCount()).toBe(1) // NOT 2 — nothing was subscribed on top
+    expect(broker.listenerCount()).toBe(1) // NOT 2 — no doubled delivery is possible
+
+    expect(await second).toBeInstanceOf(Error) // …and the read FAILED CLOSED rather than being admitted
+    expect(reported).toHaveBeenCalled() // the operator is told, honestly
+
+    reported.mockRestore()
+  })
+
+  it('recovers once the transport can detach again — the retry is what unblocks the db', async () => {
+    // Fail-closed must not mean fail-forever: each read retries the detach, so a transient failure heals.
+    // This is why the contract requires `unsubscribe()` to be idempotent.
+    const db = {}
+    const broker = attached(db, { autoAdmit: true, failDetach: true })
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const first = await acquireSubscription(db)
+
+    first.release()
+    await settle()
+    await acquireSubscription(db).catch(() => undefined) // blocked while detachment is unconfirmed
+
+    broker.healDetach()
+    const reacquired = await acquireSubscription(db)
+
+    // The peak is the load-bearing one: on the build this fixes, the blocked read above had already
+    // subscribed a second callback, so the peak reads 2 and a precise batch would have applied twice.
+    expect(broker.listenerPeak()).toBe(1) // never two listeners at once, across the whole episode
+    expect(broker.listenerCount()).toBe(1) // the stale listener went, and exactly one new one arrived
+    reacquired.release()
+    reported.mockRestore()
   })
 
   it('a re-acquire that arrives BEFORE the teardown runs simply keeps the subscription', async () => {
