@@ -5,6 +5,7 @@ import { type Column, SQL, type Table, getTableColumns, getTableName, is, isTabl
 import { dialectOf, driverOf, isSingleSession } from '../binding/database.js'
 import { primaryKeyOf } from '../extract/columns.js'
 import { ingestWrite, registryFor } from './dbRuntime.js'
+import { publishCoarseAll } from './writeTransport.js'
 import type { Row, TableChange } from '../router/events.js'
 
 // The write-capture engine. `reactiveDrizzle`'s proxy routes insert/update/delete here. The write runs as
@@ -179,6 +180,13 @@ function captureRawSql(base: (...a: unknown[]) => unknown, db: object, sink: Cap
           sink,
           tables.map((table) => ({ table, kind: 'coarse' as const })),
         )
+      // Other instances may watch tables THIS db does not — the per-table topics would never reach them,
+      // so announce the unknowable-table write on the wildcard coarse channel (each coarsens its own).
+      try {
+        publishCoarseAll(db)
+      } catch (error) {
+        reportCaptureFault(error, '*')
+      }
     }
     if (isThenable(result)) {
       return Promise.resolve(result).then((rows) => {

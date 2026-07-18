@@ -7,14 +7,29 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TableChange } from '../router/events.js'
 
-const engine = vi.hoisted(() => ({ ingest: vi.fn() }))
+// The mocked registry is PER-DB and tracks registered graphs, so watchedTables() answers truthfully — the
+// wildcard coarse-all path depends on it.
+const engine = vi.hoisted(() => ({ ingest: vi.fn(), watched: new Map<object, string[]>() }))
 vi.mock('./dbRuntime.js', () => ({
-  registryFor: () => ({ router: { ingest: engine.ingest, register: vi.fn(), unregister: vi.fn() }, acquire: vi.fn() }),
+  registryFor: (db: object) => ({
+    router: {
+      ingest: engine.ingest,
+      register: (graph: { tables: string[] }) =>
+        engine.watched.set(db, [...(engine.watched.get(db) ?? []), ...graph.tables]),
+      unregister: () => engine.watched.delete(db),
+      watchedTables: () => engine.watched.get(db) ?? [],
+    },
+    acquire: vi.fn(),
+  }),
   ingestWrite: vi.fn(),
 }))
 
 import { createInMemoryChangeTransport, setChangeTransport } from './changeTransport.js'
-import { batchTopic, ensureSubscribed, publishBatch } from './writeTransport.js'
+import { registryFor } from './dbRuntime.js'
+import { batchTopic, ensureSubscribed, publishBatch, publishCoarseAll } from './writeTransport.js'
+
+/** A minimal registered graph — only its `tables` matter to watchedTables(). */
+const watching = (table: string) => ({ tables: [table] }) as never
 
 const change = (table: string): TableChange => ({ table, kind: 'insert', new: { id: 1 } })
 let counter = 0
@@ -28,7 +43,10 @@ function freshDb() {
   return { db, transport }
 }
 
-beforeEach(() => engine.ingest.mockClear())
+beforeEach(() => {
+  engine.ingest.mockClear()
+  engine.watched.clear()
+})
 
 describe('write transport — per-table topics + batch-ID dedupe', () => {
   it('a batch spanning TWO of a subscriber’s topics applies exactly ONCE (dedupe by id)', async () => {
@@ -67,6 +85,32 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
     transport.publish(batchTopic('users'), { origin: remoteId(), tables: ['users'], changes })
     expect(engine.ingest).toHaveBeenCalledTimes(1)
     expect(engine.ingest).toHaveBeenCalledWith({ changes })
+  })
+
+  it('RAW-SQL coarse-all reaches an instance watching a table the writer does NOT watch (wildcard channel)', async () => {
+    // The per-table topics can't carry this: A has no graph on `ledger`, so it publishes nothing on
+    // __live__:ledger. Without the wildcard coarse channel, B's `ledger` query would never hear about A's
+    // raw write — a missed invalidation on a remote instance.
+    const transport = createInMemoryChangeTransport()
+    const dbA = {}
+    const dbB = {}
+    setChangeTransport(dbA, transport)
+    setChangeTransport(dbB, transport)
+    await ensureSubscribed(dbA, ['users']) // A watches only `users`
+    await ensureSubscribed(dbB, ['ledger']) // B watches only `ledger`
+    registryFor(dbB).router.register(watching('ledger'))
+    publishCoarseAll(dbA) // A ran raw SQL: touched tables unknowable
+    expect(engine.ingest).toHaveBeenCalledTimes(1)
+    expect(engine.ingest).toHaveBeenCalledWith({ changes: [{ table: 'ledger', kind: 'coarse' }] })
+  })
+
+  it('a db does NOT coarsen itself from its own raw-SQL announcement (origin self-suppression)', async () => {
+    const { db, transport } = freshDb()
+    void transport
+    await ensureSubscribed(db, ['users'])
+    registryFor(db).router.register(watching('users'))
+    publishCoarseAll(db) // its own graphs were already fed directly by the local coarse batch
+    expect(engine.ingest).not.toHaveBeenCalled()
   })
 
   it('cross-topic dedupe is DETERMINISTIC: an arbitrarily DELAYED second-topic copy still applies only once', async () => {

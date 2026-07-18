@@ -1,4 +1,4 @@
-export { publishBatch, ensureSubscribed, batchTopic }
+export { publishBatch, publishCoarseAll, ensureSubscribed, batchTopic, WILDCARD_TABLE }
 
 import { randomUUID } from 'node:crypto'
 import { registryFor } from './dbRuntime.js'
@@ -21,6 +21,13 @@ import type { ChangeBatch } from '../router/events.js'
 // requirement this leans on is documented on the ChangeTransport contract.
 
 const batchTopic = (table: string): string => `__live__:${table}`
+
+/** The WILDCARD coarse channel (`__live__:*`). Every db subscribes to it alongside its table topics — it
+ *  rides the same subscribe + readiness-probe machinery by being treated as a reserved "table". It carries
+ *  ONLY coarse-all directives: a mutation whose touched tables are unknowable (raw SQL) coarsens the
+ *  publisher's own watched tables locally, but a table watched ONLY on another instance would otherwise
+ *  never hear about it — a missed invalidation. A receiver of a coarse-all coarsens ITS OWN watched tables. */
+const WILDCARD_TABLE = '*'
 
 // DE-DUPLICATION IS DETERMINISTIC AND STATELESS — no id memory, so no eviction hole and no unbounded growth.
 // (An earlier count-bounded `seen` set was unsound: once an id aged out, a delayed copy of the same batch on
@@ -64,6 +71,13 @@ function publishBatch(db: object, batch: ChangeBatch): void {
   for (const table of tables) transport.publish(batchTopic(table), message)
 }
 
+/** Announce a mutation whose touched tables are UNKNOWABLE (raw SQL) to every OTHER instance on this
+ *  transport: each coarsens its own watched tables. The publisher's own graphs are fed directly (the local
+ *  coarse batch), and the `origin` check makes its own subscription drop this. */
+function publishCoarseAll(db: object): void {
+  transportFor(db).publish(batchTopic(WILDCARD_TABLE), { origin: dbIdOf(db), coarseAll: true })
+}
+
 // Bounded probe schedule — a proven-listening handshake tops out at ~1s before failing the read closed.
 const PROBE_INTERVAL_MS = 25
 const PROBE_MAX_ATTEMPTS = 40
@@ -81,7 +95,9 @@ function ensureSubscribed(db: object, tables: readonly string[]): Promise<void> 
   let perTable = readiness.get(db)
   if (!perTable) readiness.set(db, (perTable = new Map()))
   const waits: Promise<void>[] = []
-  for (const table of tables) {
+  // The wildcard coarse channel is subscribed alongside the read's tables and proven by the SAME probe
+  // machinery, so a live read is admitted only once it can also hear unknowable-table (raw SQL) writes.
+  for (const table of [...tables, WILDCARD_TABLE]) {
     let ready = perTable.get(table)
     if (!ready) {
       ready = subscribeAndProbe(db, table)
@@ -118,6 +134,15 @@ function subscribeAndProbe(db: object, table: string): Promise<void> {
         return
       }
       if (message.origin === dbIdOf(db)) return // our own batch — these graphs were fed directly in ingestWrite
+      if ('coarseAll' in message) {
+        // A mutation whose touched tables are unknowable happened on ANOTHER instance: coarsen every table
+        // WE watch (the publisher can't know them). Sound over-fire; never a fabricated row.
+        const watched = registryFor(db).router.watchedTables()
+        if (watched.length > 0) {
+          registryFor(db).router.ingest({ changes: watched.map((t) => ({ table: t, kind: 'coarse' as const })) })
+        }
+        return
+      }
       if (owningTable(db, message.tables) !== table) return // another of our subscribed topics applies it
       registryFor(db).router.ingest({ changes: message.changes })
     })

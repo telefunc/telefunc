@@ -13,7 +13,10 @@ import type { TableChange } from '../router/events.js'
  * eviction hole: a receiver drops the batch if it published it, and otherwise applies it on exactly one
  * topic (see `writeTransport.ts`).
  */
-type ChangeMessage = { origin: string; tables: string[]; changes: TableChange[] } | { probe: string }
+type ChangeMessage =
+  | { origin: string; tables: string[]; changes: TableChange[] }
+  | { origin: string; coarseAll: true }
+  | { probe: string }
 
 /**
  * The transport the Live feature fans captured writes out over — DEDICATED to Live and configured on the
@@ -37,6 +40,10 @@ type ChangeMessage = { origin: string; tables: string[]; changes: TableChange[] 
  *    publisher's own messages back makes the probe time out → the live read FAILS CLOSED (rejects) rather
  *    than admitting a read that could silently miss remote writes. (Redis pub/sub and the in-memory default
  *    both self-deliver.)
+ *  - **Raw reads over-invalidate.** A raw statement run on the REACTIVE db (`db.run(sql`…`)`) coarsens every
+ *    watched table, because its touched tables are unknowable without parsing SQL — including a raw SELECT.
+ *    Run raw READS on the base db you still hold if you don't want that (the reactive db is only needed for
+ *    `.live()` and captured writes).
  *  - **At-most-once delivery per topic.** A transport MUST NOT redeliver the same published message to the
  *    same subscriber on the same topic. Precise row application is NOT idempotent (a stateful aggregate would
  *    count the same delta twice), and this layer keeps NO id memory to catch it — the cross-topic duplicates
