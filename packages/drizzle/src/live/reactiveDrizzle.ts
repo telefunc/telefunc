@@ -395,7 +395,18 @@ function isWriteOp(prop: string | symbol): prop is 'insert' | 'update' | 'delete
 /** The db-level RAW SQL execution surfaces — they bypass the builder entirely, so they need their own
  *  fail-closed capture (coarsen this db's watched tables). */
 function isRawSqlOp(prop: string | symbol): boolean {
-  return prop === 'run' || prop === 'execute' || prop === 'all' || prop === 'get' || prop === 'values'
+  return (
+    prop === 'run' ||
+    prop === 'execute' ||
+    prop === 'all' ||
+    prop === 'get' ||
+    prop === 'values' ||
+    // Not SQL execution, but a MUTATION with the same problem: it changes what a live query on the view
+    // reads, and its effect is unknowable without resolving the view's definition. It used to fall through
+    // to plain Drizzle and commit with nothing captured and nothing published — the same silent bypass
+    // `tx.execute` had. Coarsening it is sound and it is a rare, deliberate operation.
+    prop === 'refreshMaterializedView'
+  )
 }
 
 /** Wrap `db.transaction(cb)`: the callback gets a proxied tx db whose writes BUFFER; on outer COMMIT the

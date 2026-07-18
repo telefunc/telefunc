@@ -36,19 +36,21 @@ describe('setOpsStage — UNION ALL / UNION', () => {
   })
 })
 
-describe('setOpsStage — mixed UNION / UNION ALL global distinct is wrong SQL semantics (BLOCKER #2)', () => {
-  it('(members UNION admins) UNION ALL members: deleting a row still present via UNION ALL misses the bag change', () => {
+describe('setOpsStage — a MIXED UNION / UNION ALL nesting never misses', () => {
+  it('deleting a row still present via the UNION ALL arm invalidates', () => {
     // SQL set ops are LEFT-ASSOCIATIVE: (members UNION admins) UNION ALL guests = distinct(members ∪
-    // admins) then + ALL guests. Value 1 appears in members AND guests (not admins), so the RESULT
-    // holds it at multiplicity 2 (once from the distinct, once from the UNION ALL arm); deleting the
-    // members row drops the bag to 1 → the result changes → must fire. The stage concatenates every
-    // arm and applies ONE global distinct (because a UNION arm exists), collapsing the value to
-    // multiplicity 1, so the delete produces no delta → a false negative.
+    // admins) then + ALL guests. Value 1 appears in members AND guests (not admins), so the RESULT holds
+    // it at multiplicity 2; deleting the members row drops the bag to 1 → the result changes → must fire.
+    //
+    // It fires by DIRTY (over-fire), not by computing the bag delta: the stage concatenates every arm and
+    // applies ONE global distinct when a UNION arm exists, which cannot represent that bag. Mixed
+    // nestings therefore degrade to dirty — sound (never-miss), deliberately imprecise. Verified by probe:
+    // this graph also fires for an insert+delete of the same row in one commit, which a precise plan would
+    // fold to a no-op.
     const graph = run(pg.unionAll(pg.union(memberArm(), adminArm()), guestArm()))
     graph.apply([insM({ id: 1, name: 'm' })])
     graph.apply([insG({ id: 1, name: 'g' })]) // value 1 now in distinct(members ∪ admins) AND the UNION ALL arm → bag 2
-    const fired = graph.apply([delM({ id: 1, name: 'm' })]).invalidated
-    expect(fired).toBe(true) // FAILS today: global distinct still shows {1} (from guests) → no delta → MISS
+    expect(graph.apply([delM({ id: 1, name: 'm' })]).invalidated).toBe(true)
   })
 })
 

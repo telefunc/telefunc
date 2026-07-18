@@ -13,8 +13,16 @@ import { type RowRunner, dialectOf, driverOf, rlsEnabledOf, semanticEnvironmentK
 // in 23.x). Where it is missing, the real sqlite authority probe fail-closes (production-correct) and
 // the stable-shareable-key assertion below no longer holds — skip just that case there. Requires Node
 // >= 22.16 or >= 24.
+//
+// Deliberately gated on the runtime CAPABILITY rather than on the probe's outcome, unlike the SQLite lane
+// in writeCapture.capture.spec.ts which runs the real path. Gating on the outcome would be circular here:
+// the assertion below IS "the key is not fail-closed", so a probe-succeeded gate would make it vacuous.
+// This is an environmental precondition, independent of what the test asserts.
 const SQLITE_PROBE_SUPPORTED =
   typeof (StatementSync.prototype as { setReturnArrays?: unknown }).setReturnArrays === 'function'
+const sqliteProbeNote = SQLITE_PROBE_SUPPORTED
+  ? ''
+  : ' — SKIPPED: this runtime lacks StatementSync.setReturnArrays (needs Node >= 22.16 or >= 24)'
 
 // Real driver db instances (never connected). Authority discovery runs through injected
 // fake runners; only provably single-session clients (sqlite, a single pg Client) probe.
@@ -94,7 +102,7 @@ describe('semanticEnvironmentKeyOf — pinned to a provable session', () => {
   })
 
   it.skipIf(!SQLITE_PROBE_SUPPORTED)(
-    'probes a real single-session sqlite connection for a stable shareable key',
+    `probes a real single-session sqlite connection for a stable shareable key${sqliteProbeNote}`,
     async () => {
       const a = await semanticEnvironmentKeyOf(sqliteDb)
       const b = await semanticEnvironmentKeyOf(sqliteDb)

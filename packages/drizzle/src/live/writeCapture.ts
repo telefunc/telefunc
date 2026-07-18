@@ -75,7 +75,16 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
         return (...args: unknown[]) => runWrite(target, table, op, db, sink, args)
       }
       // Driver terminals that execute DIRECTLY (SQLite's run/all/get/values — SYNCHRONOUS on node:sqlite).
-      if (typeof prop === 'string' && (DIRECT_TERMINALS.has(prop) || isTerminalValues(prop, target))) {
+      // Gated on the underlying builder ACTUALLY having the member: PG and MySQL write builders have no
+      // `run`/`all`/`get`, and synthesizing one made `typeof builder.get === 'function'` report true on a
+      // proxy that is supposed to be transparent except for `.live()` — then died inside the interceptor
+      // ("Cannot read properties of undefined") instead of with the driver's own error. Mirrors the
+      // `prepare` guard below and the raw-SQL guard in reactiveDrizzle.
+      if (
+        typeof prop === 'string' &&
+        (DIRECT_TERMINALS.has(prop) || isTerminalValues(prop, target)) &&
+        typeof Reflect.get(target, prop, receiver) === 'function'
+      ) {
         return (...args: unknown[]) => runDirectTerminal(target, prop, args, table, op, db, sink)
       }
       // A prepared write executes LATER; hand back a wrapped prepared query so each execution invalidates.

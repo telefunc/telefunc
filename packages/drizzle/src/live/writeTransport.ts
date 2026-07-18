@@ -92,9 +92,16 @@ const MAX_FANOUT_SKEW_MS = 30_000
  *  monotonic source makes "all entries share one TTL, so insertion order IS expiry order" actually true. */
 const monotonicNow = (): number => performance.now()
 
-/** A db's applied-batch markers plus the timer that sweeps them. Keyed by db so a discarded db is
- *  collectable — note the sweep closure captures THIS STATE, never the db, or the timer would keep the db
- *  alive and defeat the WeakMap. */
+/** A db's applied-batch markers plus the timer that sweeps them. The sweep closure captures THIS STATE,
+ *  never the db, so the timer alone does not pin one.
+ *
+ *  RETENTION, stated honestly: the WeakMap does NOT make a db collectable in practice. A db that has served
+ *  one live read holds a transport subscription whose callback closes over it (`subscribeAndProbe`), and on
+ *  the success path that subscription is never torn down — with the default in-process transport, whose
+ *  topic table is a module singleton, that reference lives for the process. So this map and the others keyed
+ *  by db (`readiness`, `dbIds`, `registries`) behave as strong maps. Harmless for the usual one-db-per-
+ *  process shape; a per-tenant or per-connection db instance leaks its registry and graph state. Closing
+ *  that needs a db-disposal seam, which is deliberately not invented here. */
 type AppliedState = { markers: Map<string, number>; sweep?: ReturnType<typeof setTimeout> }
 const applied = new WeakMap<object, AppliedState>()
 
@@ -163,7 +170,8 @@ const PROBE_MAX_ATTEMPTS = 40
 
 // One readiness promise per (db, table). Cached: subscribeAndProbe subscribes ONCE (the subscription lives
 // for the db, receiving future batches) and resolves when the probe proves it listening; later reads await
-// the same (already-resolved) promise. Keyed by db so a discarded db is collectable.
+// the same (already-resolved) promise. Keyed by db — but see the retention note on `applied`: the live
+// subscription itself pins the db, so this is weak in type only.
 const readiness = new WeakMap<object, Map<string, Promise<void>>>()
 
 /** Subscribe this db to each table's topic and resolve once every subscription is PROVEN LISTENING (idempotent

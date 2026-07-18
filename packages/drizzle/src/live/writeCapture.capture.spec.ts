@@ -334,6 +334,19 @@ describe('write capture — SQLite (node-sqlite)', () => {
     expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
   })
 
+  it('the proxy does not SYNTHESIZE driver terminals the builder lacks', async () => {
+    // The capture proxy must be transparent except for `.live()`. PG write builders have no
+    // `run`/`all`/`get`, but the terminal branch returned a callable for those names unconditionally — so
+    // `typeof builder.get === 'function'` reported true and calling it died inside the interceptor
+    // ("Cannot read properties of undefined") instead of with the driver's own error.
+    const { wrapped } = capturing(pg, 'insert', pg.insert.bind(pg))
+    const builder = wrapped(users).values({ id: 901, name: 'shape' })
+    const plain = pg.insert(users).values({ id: 902, name: 'shape' })
+    for (const terminal of ['run', 'all', 'get']) {
+      expect(typeof builder[terminal]).toBe(typeof (plain as unknown as Record<string, unknown>)[terminal])
+    }
+  })
+
   it('the CHAIN .values(rows) still only BUILDS — it must not execute mid-chain', async () => {
     // The reason `values` was excluded from the terminal set in the first place. This is the control that
     // fails if the discrimination is dropped and every `values` is treated as a terminal.

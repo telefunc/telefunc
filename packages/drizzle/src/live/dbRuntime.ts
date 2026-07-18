@@ -7,7 +7,8 @@ import { publishBatch } from './writeTransport.js'
 // The db-scoped reactive runtime: ONE registry per db instance owns BOTH paths — reads acquire graphs
 // from it (`registryFor(db).acquire(...)`), and captured writes feed those same graphs through it
 // (`ingestWrite(db, batch)` → `registryFor(db).router.ingest(...)`). Keyed by db object identity via a
-// WeakMap, so a discarded db is collectable. This ownership lives here (not inside the read engine) so the
+// WeakMap — though a db that has served a live read is pinned by its transport subscription regardless; see
+// the retention note in writeTransport.ts. This ownership lives here (not inside the read engine) so the
 // write path and the read path share the exact same graphs — a write invalidates precisely the live reads
 // that were built against the same db.
 

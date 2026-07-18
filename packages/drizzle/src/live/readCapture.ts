@@ -89,7 +89,8 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
   // later (a graph invalidation), by which point `live` exists — an un-redeemed token is inert, so no
   // fire reaches this before activation.
   let live: LiveProducer<Row[]> | undefined
-  const { graph, token } = await registryFor(db).acquire({
+  // Only the token is needed here — the graph drives invalidation through the `notify` callback below.
+  const { token } = await registryFor(db).acquire({
     instanceKey,
     tables: shape.tables,
     rlsEnabled,
@@ -97,7 +98,6 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
     executor: hydrationExecutorOf(db),
     notify: () => live?.invalidate(),
   })
-  void graph // the graph drives invalidation through `notify`; the handle needs no direct reference
 
   // OWN the token on the carrier IMMEDIATELY — BEFORE the fallible σ-read — so a rejecting read still
   // leaves a sweepable (un-redeemed) entry: the request finally-sweep releases it → net-zero, no leak.
