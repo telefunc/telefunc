@@ -75,7 +75,7 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
         return (...args: unknown[]) => runWrite(target, table, op, db, sink, args)
       }
       // Driver terminals that execute DIRECTLY (SQLite's run/all/get/values — SYNCHRONOUS on node:sqlite).
-      if (typeof prop === 'string' && DIRECT_TERMINALS.has(prop)) {
+      if (typeof prop === 'string' && (DIRECT_TERMINALS.has(prop) || isTerminalValues(prop, target))) {
         return (...args: unknown[]) => runDirectTerminal(target, prop, args, table, op, db, sink)
       }
       // A prepared write executes LATER; hand back a wrapped prepared query so each execution invalidates.
@@ -97,10 +97,30 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
 }
 
 /** Driver terminals that run the statement immediately rather than through the QueryPromise (SQLite).
- *  NOTE: `values` is deliberately ABSENT — on a write builder `.values({…})` is the insert builder's own
- *  method, not a terminal; treating it as one would execute the statement mid-chain. (At the DB level
+ *  `values` is NOT here because the name is overloaded — see `isTerminalValues`. (At the DB level
  *  `db.values(sql`…`)` IS a raw execution surface — see `isRawSqlOp` in reactiveDrizzle.) */
 const DIRECT_TERMINALS = new Set(['run', 'all', 'get'])
+
+/** `values` names TWO different things on a write chain, and only one of them executes:
+ *
+ *    db.insert(t).values(rows)              — the insert BUILDER's own method: supplies the rows, no SQL runs
+ *    db.insert(t).values(rows).returning()
+ *                             .values()     — a SQLite driver TERMINAL: runs the statement, returns rows
+ *
+ *  Discriminated by the RECEIVING OBJECT's surface, not by the argument shape: the chain builder
+ *  (`SQLiteInsertBuilder`) exposes `values` and nothing else, while an executable statement also exposes the
+ *  execution surface (`execute`/`then`). Argument shape alone is not enough — `.values()` with no arguments
+ *  is exactly what the terminal looks like, and a caller could equally pass an empty row list.
+ *
+ *  Verified against node:sqlite: the chain form inserts nothing until a terminal runs, while the terminal
+ *  form executes and returns positional row arrays. Those positional rows are why this path stays COARSE —
+ *  mapping `[2, 'b']` back to named columns would mean assuming projection order, which is the kind of guess
+ *  the capture contract forbids. `captureMismatch` catches it and fails closed. */
+function isTerminalValues(prop: string, target: object): boolean {
+  if (prop !== 'values') return false
+  const candidate = target as { execute?: unknown; then?: unknown }
+  return typeof candidate.execute === 'function' || typeof candidate.then === 'function'
+}
 
 const isThenable = (value: unknown): value is PromiseLike<unknown> =>
   typeof value === 'object' && value !== null && typeof (value as { then?: unknown }).then === 'function'
@@ -149,11 +169,14 @@ function wrapPrepared(prepared: unknown, table: Table, sink: CaptureSink): unkno
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver)
       if (typeof value !== 'function') return value
+      // A prepared statement IS the executable surface, so `values` here is unambiguously the driver
+      // terminal — there is no chain builder left to confuse it with.
       const isTerminal =
         prop === 'then' ||
         prop === 'catch' ||
         prop === 'finally' ||
         prop === 'execute' ||
+        prop === 'values' ||
         (typeof prop === 'string' && DIRECT_TERMINALS.has(prop))
       if (!isTerminal) return (...args: unknown[]) => (value as (...a: unknown[]) => unknown).apply(target, args)
       return (...args: unknown[]) => {
@@ -174,9 +197,19 @@ function wrapPrepared(prepared: unknown, table: Table, sink: CaptureSink): unkno
 /** Wrap a RAW-SQL execution surface on the reactive db (`db.run(sql\`…\`)`, `db.execute(sql\`…\`)`, …). The
  *  touched tables are unknowable without parsing SQL, so — per the owner disposition — this coarsens EVERY
  *  table that currently has a registered graph on this db (safe over-fire, keeps raw SQL usable) as ONE batch
- *  at completion. Two honest bounds: a raw READ also over-fires (sound, just noisy), and a raw write to a
- *  table nothing on THIS db watches emits nothing — an instance watching only on another db is not reached. */
-function captureRawSql(base: (...a: unknown[]) => unknown, db: object, sink: CaptureSink) {
+ *  at completion. One honest bound: a raw READ also over-fires (sound, just noisy).
+ *
+ *  `announce` is how OTHER instances hear about it — they may watch tables this db does not, which the
+ *  per-table topics could never reach. It defaults to publishing on the wildcard coarse channel immediately,
+ *  which is right for an autocommit statement. INSIDE A TRANSACTION the caller passes an announce that only
+ *  records the intent, so nothing is published until the outer COMMIT and a rollback announces nothing —
+ *  publishing mid-transaction would tell other instances to refetch state that may never exist. */
+function captureRawSql(
+  base: (...a: unknown[]) => unknown,
+  db: object,
+  sink: CaptureSink,
+  announce: () => void = () => publishCoarseAll(db),
+) {
   return (...args: unknown[]) => {
     const result = base(...args)
     const emit = () => {
@@ -186,10 +219,8 @@ function captureRawSql(base: (...a: unknown[]) => unknown, db: object, sink: Cap
           sink,
           tables.map((table) => ({ table, kind: 'coarse' as const })),
         )
-      // Other instances may watch tables THIS db does not — the per-table topics would never reach them,
-      // so announce the unknowable-table write on the wildcard coarse channel (each coarsens its own).
       try {
-        publishCoarseAll(db)
+        announce()
       } catch (error) {
         reportCaptureFault(error, '*')
       }

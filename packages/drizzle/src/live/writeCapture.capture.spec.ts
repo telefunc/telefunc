@@ -278,4 +278,38 @@ describe('write capture — SQLite (node-sqlite)', () => {
       expect(withRet.batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 2, name: 'b' } }]])
     },
   )
+
+  // `values` names two different things on a write chain and only one executes. Both directions matter: miss
+  // the terminal and a real write runs uncaptured; treat the chain method as a terminal and `.values(rows)`
+  // fires the statement mid-chain, breaking every insert.
+  it.skipIf(!nodeSqlite)('the TERMINAL .values() executes — and is captured, not bypassed', async () => {
+    const { DatabaseSync } = nodeSqlite!
+    const { drizzle } = await import('drizzle-orm/node-sqlite')
+    const client = new (DatabaseSync as new (p: string) => unknown)(':memory:') as never
+    const db = drizzle(client)
+    await db.run(sql`create table users (id integer primary key, name text)`)
+    const rowCount = () =>
+      (db.$client as { prepare(s: string): { get(): { c: number } } }).prepare('select count(*) c from users').get().c
+
+    const { wrapped, batches } = capturing(db, 'insert', db.insert.bind(db))
+    const out = wrapped(sqUsers).values({ id: 1, name: 'a' }).returning().values()
+
+    expect(rowCount()).toBe(1) // it really did execute
+    expect(out).toEqual([[1, 'a']]) // caller's result is the driver's own positional rows, unchanged
+    // Captured — COARSE, because positional rows carry no column names and mapping them back would mean
+    // assuming projection order. Over-invalidating is the contract; guessing is not. The point of the
+    // assertion is that SOMETHING was emitted: before this, the write published nothing at all.
+    expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+  })
+
+  it('the CHAIN .values(rows) still only BUILDS — it must not execute mid-chain', async () => {
+    // The reason `values` was excluded from the terminal set in the first place. This is the control that
+    // fails if the discrimination is dropped and every `values` is treated as a terminal.
+    const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
+    const builder = wrapped(users).values({ id: 900, name: 'chain' }) // built, never awaited
+    expect(batches).toEqual([]) // nothing captured, because nothing ran
+    const found = await pgClient.query('select * from users where id = 900')
+    expect(found.rows).toEqual([]) // and nothing was written
+    void builder
+  })
 })

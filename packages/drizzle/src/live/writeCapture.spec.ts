@@ -4,11 +4,13 @@
 // REAL PGlite db + the real registry/router/graph engine end-to-end (nothing mocked).
 
 import { PGlite } from '@electric-sql/pglite'
+import { sql } from 'drizzle-orm'
 import { integer, pgSchema, pgTable, text } from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { getRawContext, provideTelefuncContext } from 'telefunc'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
+import { registryFor } from './dbRuntime.js'
 
 // Deterministic flush — the cell coalesces its invalidation with queueMicrotask; a macrotask hop also
 // clears the sync-mode context null timer between phases.
@@ -75,6 +77,44 @@ describe('write capture — a write feeds the same db-scoped graphs the reads cr
 
     expect(usersInvalidated).toHaveBeenCalledTimes(1) // the affected live query refetches
     expect(postsInvalidated).not.toHaveBeenCalled() // the unaffected one does not
+  })
+})
+
+// A raw statement's touched tables are unknowable, so other instances are told on the WILDCARD coarse
+// channel — which every db subscribes to, and which coarsens every table the receiver watches. Publishing
+// the same write's coarse markers per-table as well delivered the SAME invalidation to a remote watcher
+// TWICE. Driven end-to-end here (real PGlite, real registries, two instances on the shared default
+// transport) rather than simulated, so it fails if the wiring changes and not just if the helper does.
+describe('write capture — a raw write reaches a remote live query exactly ONCE', () => {
+  it('an autocommit raw write is DELIVERED to a remote instance a single time', async () => {
+    provideTelefuncContext({})
+    const baseA = drizzle({ client })
+    const baseB = drizzle({ client })
+    const instanceA = reactiveDrizzle(baseA) as unknown as {
+      execute: (q: unknown) => Promise<unknown>
+      select: () => { from: (t: unknown) => { live: () => Promise<unknown> } }
+    }
+    const instanceB = reactiveDrizzle(baseB) as unknown as {
+      select: () => { from: (t: unknown) => { live: () => Promise<unknown> } }
+    }
+
+    // BOTH instances watch `users`. A must watch it too, or its raw write has no watched table to coarsen
+    // and publishes no per-table markers at all — the redundant-delivery case would be unreachable and this
+    // control would pass no matter what the code did.
+    activate(await instanceA.select().from(users).live())
+    const remoteLive = await instanceB.select().from(users).live()
+    activate(remoteLive)
+
+    // Counted at B's ROUTER, not at its Live handle: the handle coalesces invalidations in a microtask, so
+    // one delivery and two look identical there. Verified by mutation — asserting on onInvalidate here does
+    // NOT fail when the redundant per-table publication is restored, which would make it a false green.
+    const ingestSpy = vi.spyOn(registryFor(baseB).router, 'ingest')
+
+    await instanceA.execute(sql`insert into users (id, name) values (500, 'raw')`)
+    await tick()
+
+    expect(ingestSpy).toHaveBeenCalledTimes(1) // one write, one delivery — not two
+    ingestSpy.mockRestore()
   })
 })
 

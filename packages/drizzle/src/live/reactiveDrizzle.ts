@@ -27,7 +27,8 @@ import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/
 import type { Live } from 'telefunc'
 import { acquireCarrier } from './dbLiveRuntime.js'
 import { captureMutation, captureRawSql, emitSafely, type CaptureSink } from './writeCapture.js'
-import { ingestWrite } from './dbRuntime.js'
+import { ingestLocal, ingestWrite } from './dbRuntime.js'
+import { publishCoarseAll } from './writeTransport.js'
 import { type ChangeTransport, setChangeTransport } from './changeTransport.js'
 import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
 import type { TableChange } from '../router/events.js'
@@ -347,6 +348,8 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
   setChangeTransport(db, options?.changeTransport)
   // Autocommit writes ingest into THIS db's graphs immediately; a transaction buffers and flushes here once.
   const ingest: CaptureSink = (changes) => ingestWrite(db, { changes })
+  // Raw SQL's coarse markers stay local — the wildcard announcement is what reaches other instances.
+  const localIngest: CaptureSink = (changes) => ingestLocal(db, { changes })
   return new Proxy(db, {
     get(target, prop, receiver) {
       if (prop === 'select') {
@@ -367,15 +370,17 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
       if (prop === 'transaction') {
         // Writes INSIDE the transaction must capture too (a forwarded raw tx db would bypass capture) — and
         // buffer until the commit boundary, so one committed transaction is one atomic graph tick.
-        return wrapTransaction(target, db, ingest)
+        return wrapTransaction(target, db, ingest, () => publishCoarseAll(db))
       }
       if (isRawSqlOp(prop)) {
         // Raw SQL (`db.run(sql`…`)`, `db.execute(sql`…`)`, …) can mutate anything, and its touched tables are
         // unknowable without parsing — so it fails closed by coarsening every table this db has a graph on,
-        // rather than executing silently uncaptured.
+        // rather than executing silently uncaptured. Its coarse markers are ingested LOCALLY ONLY: other
+        // instances hear about it on the wildcard channel, which reaches every table any of them watches, so
+        // publishing per-table as well would just make a remote live query refetch twice.
         const base = Reflect.get(target, prop, receiver)
         if (typeof base === 'function') {
-          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), db, ingest)
+          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), db, localIngest)
         }
       }
       return Reflect.get(target, prop, receiver)
@@ -398,29 +403,47 @@ function isRawSqlOp(prop: string | symbol): boolean {
  *  buffer for a savepoint), so a committed transaction is one atomic graph tick. A rollback rejects and
  *  never flushes → its changes are discarded. `topDb` is the session the reads acquired from — capture
  *  reads its dialect/single-session/driver from it (a tx db isn't recognized as its own driver). */
-function wrapTransaction(txHost: object, topDb: object, enclosingSink: CaptureSink) {
+function wrapTransaction(txHost: object, topDb: object, enclosingSink: CaptureSink, enclosingAnnounce: () => void) {
   return (callback: (tx: unknown) => unknown, config?: unknown) => {
     const buffer: TableChange[] = []
     const buffered: CaptureSink = (changes) => {
       for (const change of changes) buffer.push(change)
     }
+    // A raw statement inside the transaction cannot be published when it runs: the transaction may still roll
+    // back, and a coarse-all already broadcast would have told every other instance to refetch state that
+    // never existed. Record the intent and hand it to the enclosing scope only if we COMMIT.
+    let announcePending = false
+    const bufferedAnnounce = () => {
+      announcePending = true
+    }
     const baseTransaction = (txHost as { transaction: (cb: unknown, c?: unknown) => unknown }).transaction.bind(txHost)
-    return Promise.resolve(baseTransaction((tx: object) => callback(txProxy(tx, topDb, buffered)), config)).then(
-      (result) => {
-        // Reached ONLY on COMMIT (a rollback / savepoint-rollback rejects and skips this) → flush once.
-        // Isolated: the transaction has COMMITTED, so a capture/publish fault must not reject it (it degrades
-        // to a coarse ingest and is reported) — the caller's result stays exactly plain Drizzle's.
-        if (buffer.length > 0) emitSafely(enclosingSink, buffer)
-        return result
-      },
-    )
+    return Promise.resolve(
+      baseTransaction((tx: object) => callback(txProxy(tx, topDb, buffered, bufferedAnnounce)), config),
+    ).then((result) => {
+      // Reached ONLY on COMMIT (a rollback / savepoint-rollback rejects and skips this) → flush once.
+      // Isolated: the transaction has COMMITTED, so a capture/publish fault must not reject it (it degrades
+      // to a coarse ingest and is reported) — the caller's result stays exactly plain Drizzle's.
+      if (buffer.length > 0) emitSafely(enclosingSink, buffer)
+      // For a SAVEPOINT this promotes the intent into the parent's; at the top level it publishes.
+      if (announcePending) {
+        try {
+          enclosingAnnounce()
+        } catch (error) {
+          console.error(
+            '[telefunc] live: announcing a committed raw-SQL transaction failed; other instances may hold stale live queries until the next write.',
+            error,
+          )
+        }
+      }
+      return result
+    })
   }
 }
 
 /** The proxy over a transaction db: writes buffer (via `sink`); a nested `transaction` is a SAVEPOINT whose
  *  buffer flushes into THIS one on release (and is discarded on savepoint-rollback); reads + everything else
  *  pass through as plain Drizzle (a live read inside a write transaction is out of scope). */
-function txProxy(txDb: object, topDb: object, sink: CaptureSink): unknown {
+function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () => void): unknown {
   return new Proxy(txDb, {
     get(target, prop, receiver) {
       if (isWriteOp(prop)) {
@@ -428,7 +451,23 @@ function txProxy(txDb: object, topDb: object, sink: CaptureSink): unknown {
         return captureMutation(prop, base.bind(target), topDb, sink) // session props from topDb; run on tx; buffer
       }
       if (prop === 'transaction') {
-        return wrapTransaction(target, topDb, sink) // nested → flush into THIS tx's buffer on release
+        return wrapTransaction(target, topDb, sink, announce) // nested → flush into THIS tx's buffer on release
+      }
+      if (isRawSqlOp(prop)) {
+        // `tx.execute(sql`…`)` used to pass straight through, so a raw write committed with NOTHING
+        // published — the same silent bypass the top-level db already fixed. Its coarse markers go into the
+        // transaction buffer and its announcement waits for the outer COMMIT.
+        //
+        // Unlike the autocommit path, these markers are NOT local-only: they share the transaction's single
+        // buffer, which flushes as one published batch. Splitting them out to avoid the redundant per-table
+        // publication would mean ingesting them separately from the transaction's precise changes — two local
+        // graph ticks for one commit, breaking the one-commit-one-atomic-tick guarantee. A remote watcher of
+        // an affected table therefore refetches twice for a transaction that mixes raw SQL with ORM writes;
+        // atomicity is worth more than the spare refetch.
+        const base = Reflect.get(target, prop, receiver)
+        if (typeof base === 'function') {
+          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), topDb, sink, announce)
+        }
       }
       return Reflect.get(target, prop, receiver)
     },
