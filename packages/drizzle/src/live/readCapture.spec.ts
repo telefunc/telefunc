@@ -1,19 +1,22 @@
 // The engine read-capture pipeline. Proves wrapLiveSelect end-to-end against a REAL
 // PGlite db + the telefunc Live primitive: builder → IR → compile → registry.acquire (eager hydrate)
-// → Live; the serialize-time activation redeems the token (flips redeemed=true) and the
-// finally-sweep releases only the un-activated ones. The carrier/sync-mode concern is covered by the
-// dbLiveRuntime.spec (fake engine); the seqAtRead fence's seq-comparison is covered by
-// registry.spec — here we exercise the real redeem/lease wiring behind the seam.
+// → Live; the serialize-time activation redeems the token into a channel lease. The seqAtRead fence's
+// seq-comparison is covered by registry.spec — here we exercise the real redeem/lease wiring behind the
+// seam, and what happens to a read that never reaches the wire at all.
+//
+// NOTHING in this file provides a telefunc request context, deliberately: the read-capture engine binds to
+// none, so `reactiveDrizzle(db)` at module level is the intended shape.
 
 import { PGlite } from '@electric-sql/pglite'
 import { entityKind, sql } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
 import type { Live } from 'telefunc'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { extractQueryShape } from '../extract/queryShape.js'
-import type { ReadToken } from '../graph/registry.js'
-import { type ReadCarrier, compilePlanFor, disposeUnredeemedReads, wrapLiveSelect } from './readCapture.js'
+import type { AcquireRequest, ReadToken } from '../graph/registry.js'
+import { registryFor } from './dbRuntime.js'
+import { compilePlanFor, wrapLiveSelect } from './readCapture.js'
 
 type UserRow = { id: number; tag: string }
 const users = pg.pgTable('users', { id: pg.integer('id').primaryKey(), tag: pg.text('tag') })
@@ -31,12 +34,42 @@ afterAll(async () => {
   await client.close()
 })
 
-const carrierOf = (): ReadCarrier => ({ mintedTokens: [] })
 // The terminal `.live()` runs the read-capture pipeline (awaiting the builder itself gives plain rows).
-const liveSelect = (builder: unknown, carrier: ReadCarrier): Promise<Live<UserRow[]>> =>
-  (wrapLiveSelect(builder, carrier, db as object) as { live(): Promise<Live<UserRow[]>> }).live()
+const liveSelect = (builder: unknown): Promise<Live<UserRow[]>> =>
+  (wrapLiveSelect(builder, db as object) as { live(): Promise<Live<UserRow[]>> }).live()
 /** Drive the wire replacer's serialize-time activation path (the Live source's subscribe). */
 const activate = (live: Live<unknown>): void => (live as unknown as { activate(): void }).activate()
+
+/** Count what happens to each read's TOKEN, by wrapping the real registry's `acquire`. The token is
+ *  otherwise private to the engine, and it is the thing whose release proves a read was reclaimed —
+ *  asserting on anything else would be asserting on a proxy for the claim. */
+type TrackedToken = { released: number; redeemed: number; token: ReadToken }
+function trackTokens(): TrackedToken[] {
+  const registry = registryFor(db as object)
+  const original = registry.acquire.bind(registry)
+  const seen: TrackedToken[] = []
+  vi.spyOn(registry, 'acquire').mockImplementation(async (request: AcquireRequest) => {
+    const acquired = await original(request)
+    const tracked: TrackedToken = { released: 0, redeemed: 0, token: acquired.token }
+    seen.push(tracked)
+    const token: ReadToken = {
+      instanceKey: acquired.token.instanceKey,
+      seqAtRead: acquired.token.seqAtRead,
+      redeem: () => {
+        tracked.redeemed++
+        return acquired.token.redeem()
+      },
+      release: () => {
+        tracked.released++
+        acquired.token.release()
+      },
+    }
+    return { ...acquired, token }
+  })
+  return seen
+}
+
+afterEach(() => vi.restoreAllMocks())
 
 /** A fake POOLED pg connection for the coarse control: pg dialect (stable entity kind) + a raw client
  *  that is a `Pool` (not a pinned `Client`) + NOT a PgliteDatabase → isSingleSession=false ⇒ coarse. */
@@ -49,34 +82,35 @@ const poolFake = { dialect: new FakePgDialect(), $client: new Pool() } as object
 // ── the real pipeline ───────────────────────────────────────────────
 
 describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydrate) → Live', () => {
-  it('resolves to a Live carrying the initial rows + an INERT minted token (not yet redeemed)', async () => {
-    const carrier = carrierOf()
-    const live = await liveSelect(db.select().from(users), carrier)
+  it('resolves to a Live carrying the initial rows, with its token INERT (not yet redeemed)', async () => {
+    const tokens = trackTokens()
+    const live = await liveSelect(db.select().from(users))
     expect([...live.data].sort((a, b) => a.id - b.id)).toEqual([
       { id: 1, tag: 'a' },
       { id: 2, tag: 'b' },
     ])
-    expect(carrier.mintedTokens).toHaveLength(1) // one read token minted on the carrier
-    expect(carrier.mintedTokens[0]!.redeemed).toBe(false) // inert until serialize-time activation
+    expect(tokens).toHaveLength(1)
+    expect(tokens[0]!.redeemed).toBe(0) // inert until serialize-time activation
+    expect(tokens[0]!.released).toBe(0)
   })
 
-  it('serialize-time activation REDEEMS the token — proven by a second redeem throwing (not just the flag)', async () => {
-    const carrier = carrierOf()
-    const live = await liveSelect(db.select().from(users), carrier)
-    const token = carrier.mintedTokens[0]!.token
+  it('serialize-time activation REDEEMS the token — proven by a second redeem throwing (not just a counter)', async () => {
+    const tokens = trackTokens()
+    const live = await liveSelect(db.select().from(users))
     activate(live) // the wire replacer's activate → the Live source subscribe → token.redeem()
-    expect(carrier.mintedTokens[0]!.redeemed).toBe(true)
-    expect(() => token.redeem()).toThrow() // REAL registry consequence: actually redeemed (double-redeem rejected) — not the co-set flag
+    expect(tokens[0]!.redeemed).toBe(1)
+    // REAL registry consequence: the underlying token is genuinely redeemed, so a second redeem is rejected.
+    expect(() => tokens[0]!.token.redeem()).toThrow()
   })
 
-  it('#1 — a rejecting σ-read still leaves a sweepable token on the carrier (net-zero, no leak)', async () => {
-    const carrier = carrierOf()
+  it('#1 — a rejecting σ-read releases its token IMMEDIATELY (no waiting on a sweep or a collection)', async () => {
+    const tokens = trackTokens()
     // PGlite is single-session ⇒ PRECISE: the predicate-only plan is stateless (no scan), acquire
-    // succeeds, then the initial read throws (1/0) — proving eager ownership before the fallible read.
-    await expect(liveSelect(db.select().from(users).where(sql`1 / 0 = 1`), carrier)).rejects.toThrow()
-    expect(carrier.mintedTokens).toHaveLength(1) // OWNED before the fallible read → sweepable (buggy push-after-await gave 0)
-    expect(carrier.mintedTokens[0]!.redeemed).toBe(false)
-    expect(() => disposeUnredeemedReads(carrier)).not.toThrow() // released → net-zero
+    // succeeds, then the initial read throws (1/0) — the failure path that must still give the token back.
+    await expect(liveSelect(db.select().from(users).where(sql`1 / 0 = 1`))).rejects.toThrow()
+    expect(tokens).toHaveLength(1) // acquired before the fallible read…
+    expect(tokens[0]!.released).toBe(1) // …and released on the way out, deterministically
+    expect(tokens[0]!.redeemed).toBe(0)
   })
 
   it('#5 — PGlite (single-session) compiles a PRECISE plan (NOT over-coarsed)', () => {
@@ -91,42 +125,78 @@ describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydra
     expect(compilePlanFor(poolFake, shape)().coarse).toBe(true) // pooled ⇒ coarse; a never-coarse mutant gives false → RED
   })
 
-  it('#2 (engine half) — an activated handle releases its lease on release (channel close); the sweep then skips it, no double-release', async () => {
-    const carrier = carrierOf()
-    const live = await liveSelect(db.select().from(users), carrier)
+  it('#2 (engine half) — an activated handle releases its lease on release (channel close)', async () => {
+    const tokens = trackTokens()
+    const live = await liveSelect(db.select().from(users))
     activate(live) // activate → redeem → lease
     ;(live as unknown as { release(): void }).release() // channel close/abort → source teardown → lease.release()
-    expect(carrier.mintedTokens[0]!.redeemed).toBe(true) // activated (channel-owned)
-    expect(() => disposeUnredeemedReads(carrier)).not.toThrow() // sweep skips the redeemed entry — lease already released, no double
+    expect(tokens[0]!.redeemed).toBe(1) // channel-owned: redeemed once…
+    expect(tokens[0]!.released).toBe(0) // …and never released as an un-redeemed token (that would throw)
   })
 })
 
-// ── the finally-sweep ───────────────────────────────────────────────
+// ── abandonment: a handle that never reaches the wire ────────────────
+//
+// This replaces a per-request sweep, which required `reactiveDrizzle(db)` to be called before the body's
+// first await so it could bind to the request — a usage rule the owner rejected, and one that still missed
+// any handle created after the sweep had already run. Ownership now follows the HANDLE: activated →
+// the channel lease releases it; collected without ever being activated → the FinalizationRegistry does.
+//
+// The honest limit: this is unbounded by spec (an implementation may never call a finalizer) and in
+// practice the next GC. `global.gc` is available because vitest.config.ts passes --expose-gc.
 
-describe('disposeUnredeemedReads — the request finally-sweep', () => {
-  it('releases only UN-redeemed tokens — and each one’s subscription ref with it', () => {
-    const releaseA = vi.fn()
-    const releaseB = vi.fn()
-    const subscriptionA = { release: vi.fn() }
-    const subscriptionB = { release: vi.fn() }
-    const carrier: ReadCarrier = {
-      mintedTokens: [
-        { token: { release: releaseA } as unknown as ReadToken, redeemed: false, subscription: subscriptionA },
-        { token: { release: releaseB } as unknown as ReadToken, redeemed: true, subscription: subscriptionB },
-      ],
-    }
-    disposeUnredeemedReads(carrier)
-    expect(releaseA).toHaveBeenCalledTimes(1) // never serialized → released (net-zero)
-    expect(subscriptionA.release).toHaveBeenCalledTimes(1) // …and it stops wanting the db subscribed
-    expect(releaseB).not.toHaveBeenCalled() // activated → its lease is owned by the wire channel
-    expect(subscriptionB.release).not.toHaveBeenCalled() // …as is its subscription ref
+/** Let V8 actually run finalizers: they are scheduled after collection, not during `gc()`. */
+async function collectGarbage(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    ;(global as unknown as { gc: () => void }).gc()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+}
+
+describe('an ABANDONED live read is reclaimed when its handle is collected', () => {
+  it('releases the token once the never-serialized handle is collected', async () => {
+    const tokens = trackTokens()
+    // Create and drop: nothing keeps a reference, exactly like a telefunction that builds a Live and then
+    // throws, or returns something else entirely.
+    await (async () => {
+      await liveSelect(db.select().from(users))
+    })()
+    expect(tokens[0]!.released).toBe(0) // still held — reclamation is not synchronous
+
+    await collectGarbage()
+
+    expect(tokens[0]!.released).toBe(1) // the finalizer gave the graph token back
   })
 
-  it('a never-serialized real handle is disposed by the sweep (net-zero, no leak)', async () => {
-    const carrier = carrierOf()
-    await liveSelect(db.select().from(users), carrier) // minted, never activated
-    expect(carrier.mintedTokens[0]!.redeemed).toBe(false)
-    expect(() => disposeUnredeemedReads(carrier)).not.toThrow() // releases the un-redeemed engine token
+  it('does NOT release an ACTIVATED handle’s token while its channel is open', async () => {
+    const tokens = trackTokens()
+    const live = await liveSelect(db.select().from(users))
+    activate(live) // serialized → the channel lease owns the token now
+
+    await collectGarbage()
+
+    expect(tokens[0]!.redeemed).toBe(1)
+    expect(tokens[0]!.released).toBe(0) // untouched by the finalizer
+    ;(live as unknown as { release(): void }).release() // and the channel still owns a working teardown
+  })
+
+  it('a handle SERIALIZED then CLOSED is collected without a second release', async () => {
+    // The control that can actually disagree with the finalizer's redeemed-check, and the reason that check
+    // exists. The case above cannot: it still holds `live`, so nothing is ever collected and a finalizer
+    // that released indiscriminately would look identical. Here the handle is genuinely dropped AFTER its
+    // channel closed, so the finalizer really does run on an already-redeemed read — and releasing an
+    // already-redeemed token is a usage error that throws, inside a GC callback.
+    const tokens = trackTokens()
+    await (async () => {
+      const live = await liveSelect(db.select().from(users))
+      activate(live) // → redeem
+      ;(live as unknown as { release(): void }).release() // channel closes → lease released
+    })()
+
+    await collectGarbage()
+
+    expect(tokens[0]!.redeemed).toBe(1)
+    expect(tokens[0]!.released).toBe(0) // the finalizer left the redeemed token alone
   })
 })
 
@@ -137,7 +207,7 @@ describe('wrapLiveSelect — chainable live builder', () => {
     const toSQLResult = { sql: 'select', params: [] as unknown[] }
     const inner = { toSQL: () => toSQLResult, where: () => ({ toSQL: () => toSQLResult }) }
     const base = { toSQL: () => toSQLResult, from: () => inner }
-    const wrapped = wrapLiveSelect(base, carrierOf(), {} as object) as Record<string, unknown>
+    const wrapped = wrapLiveSelect(base, {} as object) as Record<string, unknown>
 
     const afterFrom = (wrapped.from as () => Record<string, unknown>)()
     expect(typeof afterFrom.live).toBe('function') // the re-wrapped chain still carries the terminal

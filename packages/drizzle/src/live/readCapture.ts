@@ -1,17 +1,25 @@
 // The engine read-capture. `reactiveDrizzle(db).select(...)` produces a CHAINABLE
 // live-builder (via wrapLiveSelect) whose terminal `.live()` runs the pipeline: extractQueryShape →
 // compileQuery → registry.acquire (eager-async hydrate in the prologue) → host.createLive(rows) +
-// attachSource → Live<Row[]>. The `Live` producer + the request cleanup come from telefunc's extension
-// HOST (getTelefuncHost()), never telefunc internals. Awaiting the same builder (no `.live()`) forwards to
-// plain rows. The wire replacer activates the handle at SERIALIZE time,
-// synchronously redeeming the read token (subscribe-at-redeem + the seqAtRead fence) via the source's
-// `subscribe`; on the last owning channel's close it releases the lease. A handle that is never
-// serialized never activates, so its token stays un-redeemed and the request's finally-sweep
-// (disposeUnredeemedReads) releases it — net-zero, no leak. reactiveDrizzle imports wrapLiveSelect /
-// disposeUnredeemedReads from here DIRECTLY (no install seam) — this module IS the engine surface.
+// attachSource → Live<Row[]>. The `Live` producer comes from telefunc's extension HOST
+// (getTelefuncHost()), never telefunc internals. Awaiting the same builder (no `.live()`) forwards to
+// plain rows.
+//
+// NOTHING HERE IS REQUEST-SCOPED, and that is the point: `reactiveDrizzle(db)` can be called at module
+// level and shared by every telefunction. Attachment happens at SERIALIZE time — the wire replacer sees
+// the Live in the return value, creates the channel, and activates the handle, synchronously redeeming
+// the read token (subscribe-at-redeem + the seqAtRead fence) via the source's `subscribe`; on the last
+// owning channel's close it releases the lease. The replacer has the request context it needs, so this
+// module never asks for any.
+//
+// ABANDONMENT — a `.live()` whose handle is never serialized (the telefunction throws, or returns
+// something else). Its token and subscription ref are released when the Live is COLLECTED, via the
+// FinalizationRegistry below. That is unbounded by spec and in practice the next GC; see the honest limit
+// in the docs. It replaces a per-request sweep that required `reactiveDrizzle(db)` to be called before the
+// body's first await — a usage rule the owner rejected — and which was in any case a leaky net: a handle
+// created after the sweep had run was never swept at all.
 
-export { wrapLiveSelect, disposeUnredeemedReads, compilePlanFor }
-export type { ReadCarrier }
+export { wrapLiveSelect, compilePlanFor }
 
 import { type Table, isTable } from 'drizzle-orm'
 import type { Live, LiveProducer } from 'telefunc'
@@ -30,47 +38,69 @@ import type { ReadToken } from '../graph/registry.js'
 import { registryFor } from './dbRuntime.js'
 import { acquireSubscription, type SubscriptionRef } from './writeTransport.js'
 
-/** A read token minted for a db.live handle in the current request, tracked on the carrier so the
- *  request's finally-sweep can release it if the handle is never serialized (never activated). The
- *  handle's serialize-time `activate` flips `redeemed`, so an activated token is skipped by the sweep
- *  (its lease is owned by the wire channel and released on close). It carries the read's ref on the db's
- *  change subscription too — the two have exactly the same owner at every moment, so they travel together
- *  from token to lease and are dropped by whichever of them ends the read. */
-type MintedToken = { token: ReadToken; redeemed: boolean; subscription: SubscriptionRef }
+/** What one live read holds between `.live()` and either its activation or its collection: the graph's
+ *  read token and the db's change-subscription ref. The two have exactly the same owner at every moment,
+ *  so they travel together and are dropped by whichever of them ends the read. `redeemed` is flipped by
+ *  serialize-time activation, after which the channel lease owns both and the finalizer must not touch
+ *  them — `token.release()` on a redeemed token is a usage error, not a no-op. */
+type ReadOwnership = { token: ReadToken; subscription: SubscriptionRef; redeemed: boolean }
 
-/** What the per-request DbLiveCarrier carries: `wrapLiveSelect` pushes here, `disposeUnredeemedReads`
- *  reads here. */
-type ReadCarrier = { mintedTokens: MintedToken[] }
+/** Releases what an ABANDONED live read held, once the handle is collected.
+ *
+ *  The held value must not reach the Live, or the Live is never collected and this never fires. That is
+ *  why the graph's `notify` goes through `invalidationSink()` below: the token closes over `notify`, and
+ *  the finalizer holds the token, so a `notify` that closed over the Live strongly would keep every
+ *  abandoned handle alive forever — a silently dead net that still looks like a net. */
+const abandonedReads = new FinalizationRegistry<ReadOwnership>((owned) => {
+  if (owned.redeemed) return // activated: the wire channel's lease owns these and releases them on close
+  owned.token.release()
+  owned.subscription.release()
+})
+
+/** The graph's invalidation sink for one read, holding the Live WEAKLY.
+ *
+ *  Deliberately its own function so its closure scope contains the WeakRef and nothing else: closures
+ *  declared in one scope share a context, so building this inline beside a strong `live` binding could
+ *  retain the Live through that shared context and defeat the finalizer. A collected Live simply stops
+ *  receiving invalidations, which is correct — nobody is holding it to receive them. */
+function invalidationSink(): { notify: () => void; hold: (live: LiveProducer<Row[]>) => void } {
+  let ref: WeakRef<LiveProducer<Row[]>> | undefined
+  return {
+    notify: () => ref?.deref()?.invalidate(),
+    hold: (live) => {
+      ref = new WeakRef(live)
+    },
+  }
+}
 
 /** Wrap a live SELECT builder into a CHAINABLE builder: `from`/`where`/… forward to the underlying
  *  drizzle builder and re-wrap the result (so the chain stays live); non-builder returns (`toSQL`,
  *  metadata) pass through untouched; the terminal `.live()` runs the read-capture pipeline and resolves
  *  to `Live<Row[]>`, while `then`/`execute` forward untouched to plain rows (the base builder is itself
  *  a `QueryPromise`). This is the runtime behind reactiveDrizzle's terminal `.live()`. */
-function wrapLiveSelect(baseBuilder: unknown, carrier: ReadCarrier, db: object): unknown {
+function wrapLiveSelect(baseBuilder: unknown, db: object): unknown {
   return new Proxy(baseBuilder as object, {
     get(target, prop, receiver) {
       if (prop === 'live') {
         // The terminal: run the read-capture pipeline and resolve to Live<Row[]>. `.live` is synthesized
         // here — the base drizzle builder has no such member, so nothing leaks onto a plain builder.
-        return () => captureAndBuild(target, carrier, db)
+        return () => captureAndBuild(target, db)
       }
       const value = Reflect.get(target, prop, receiver)
       if (typeof value !== 'function') return value
       return (...args: unknown[]) => {
         const next = (value as (...a: unknown[]) => unknown).apply(target, args)
-        return isBuilder(next) ? wrapLiveSelect(next, carrier, db) : next
+        return isBuilder(next) ? wrapLiveSelect(next, db) : next
       }
     },
   })
 }
 
-/** The read-capture pipeline for one live query. Runs in the db.live prologue (eager-async, before
- *  serialize): compile + acquire (hydrate) + read the initial rows, then wire a Live whose serialize-
- *  time activation redeems the token. `notify` forwards the graph's invalidation to `live.invalidate`
- *  (equivalent to the source's onInvalidate); the token subscribes it at redeem (seam 1), and the
- *  seqAtRead fence replays a change that landed during the read window (seam 2). */
-async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: object): Promise<Live<Row[]>> {
+/** The read-capture pipeline for one live query: compile + acquire (hydrate) + read the initial rows,
+ *  then wire a Live whose serialize-time activation redeems the token. The sink forwards the graph's
+ *  invalidation to `live.invalidate` (equivalent to the source's onInvalidate); the token subscribes it at
+ *  redeem (seam 1), and the seqAtRead fence replays a change that landed during the read window (seam 2). */
+async function captureAndBuild(builder: unknown, db: object): Promise<Live<Row[]>> {
   const dialect = dialectOf(db)
   const shape = extractQueryShape(builder, { dialect })
   // READINESS BARRIER: take this read's ref on the db's change subscription AND await the transport's
@@ -80,10 +110,10 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
   // here — a plain awaited builder or a non-Live telefunction never subscribes. The subscription is per-DB,
   // not per-table: one topic carries every change and the router filters locally.
   const subscription = await acquireSubscription(db)
-  // Held until the carrier owns it below. EVERY way out of the read between here and there — a failed
-  // environment probe, compile, hydrate — has to give the ref back, or a db stays subscribed for a live
-  // query that never existed.
-  let owned = false
+  // EVERY way out of this read has to give the ref back, or a db stays subscribed for a live query that
+  // does not exist. Up to the handoff below that is this flag's job; after it, the channel lease's (on
+  // activation) or the finalizer's (on abandonment).
+  let handedOff = false
   try {
     const env = {
       dialect,
@@ -93,37 +123,43 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
     const { instanceKey } = identityOf(builder, env)
     const rlsEnabled = await anyRlsEnabled(db, shape.tables)
 
-    // notify is set to forward to the (not-yet-created) Live; it is only ever CALLED at redeem-time or
-    // later (a graph invalidation), by which point `live` exists — an un-redeemed token is inert, so no
-    // fire reaches this before activation.
-    let live: LiveProducer<Row[]> | undefined
-    // Only the token is needed here — the graph drives invalidation through the `notify` callback below.
+    // The sink forwards graph invalidations to a Live that does not exist yet, and holds it weakly once it
+    // does. It is only ever CALLED at redeem-time or later, by which point the Live exists — an un-redeemed
+    // token is inert, so no fire reaches it before activation.
+    const sink = invalidationSink()
+    // Only the token is needed here — the graph drives invalidation through the sink.
     const { token } = await registryFor(db).acquire({
       instanceKey,
       tables: shape.tables,
       rlsEnabled,
       compilePlan: compilePlanFor(db, shape),
       executor: hydrationExecutorOf(db),
-      notify: () => live?.invalidate(),
+      notify: sink.notify,
     })
 
-    // OWN the token AND the subscription ref on the carrier IMMEDIATELY — BEFORE the fallible σ-read — so a
-    // rejecting read still leaves a sweepable (un-redeemed) entry: the request finally-sweep releases both
-    // → net-zero, no leak.
-    const entry: MintedToken = { token, redeemed: false, subscription }
-    carrier.mintedTokens.push(entry)
-    owned = true
+    let rows: Row[]
+    try {
+      rows = (await builder) as Row[] // the initial result is a plain read; the graph signals staleness
+    } catch (error) {
+      token.release() // the σ-read failed, so nothing will ever own this token — release it here
+      throw error
+    }
 
-    const initialRows = (await builder) as Row[] // the initial result is a plain read; the graph signals staleness
-    live = getTelefuncHost().createLive<Row[]>(initialRows)
+    const owned: ReadOwnership = { token, subscription, redeemed: false }
+    const live = getTelefuncHost().createLive<Row[]>(rows)
+    sink.hold(live)
+    // From here the handle owns both refs: its channel lease releases them if it is serialized, and the
+    // finalizer releases them if it is collected without ever being.
+    abandonedReads.register(live, owned)
+    handedOff = true
     live.attachSource({
       subscribe: () => {
         // Serialize-time activation (SYNC): redeem the token — subscribe its notify to the graph's sink
-        // and replay the seqAtRead fence — and mark it activated so the finally-sweep skips it. The
+        // and replay the seqAtRead fence — and mark it activated so the finalizer leaves it alone. The
         // returned teardown releases the lease when the last owning channel closes, and with it the read's
         // share of the db's subscription.
         const lease = token.redeem()
-        entry.redeemed = true
+        owned.redeemed = true
         return () => {
           lease.release()
           subscription.release()
@@ -134,7 +170,7 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
     // serializes it. No `.client` re-type — the public type simply doesn't advertise the producer verbs.
     return live
   } finally {
-    if (!owned) subscription.release()
+    if (!handedOff) subscription.release()
   }
 }
 
@@ -144,18 +180,6 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
  *  could hydrate from a mismatched session — force it COARSE (invalidate-on-any-change, sound). */
 function compilePlanFor(db: object, shape: QueryShape): () => GraphPlan {
   return isSingleSession(db) ? () => compileQuery(shape) : () => coarsePlan(shape.tables)
-}
-
-/** Release every read token the request minted but never activated (a handle that was created but
- *  never serialized), and with it that read's share of the db's change subscription. Idempotent:
- *  `token.release()` is a safe no-op path on an un-redeemed token, and activated tokens (`redeemed`) are
- *  skipped — their lease and subscription ref are channel-owned and released on close. */
-function disposeUnredeemedReads(carrier: ReadCarrier): void {
-  for (const entry of carrier.mintedTokens) {
-    if (entry.redeemed) continue
-    entry.token.release()
-    entry.subscription.release()
-  }
 }
 
 /** The distinct drizzle table objects a select builder references (from + joins + set-op arms),

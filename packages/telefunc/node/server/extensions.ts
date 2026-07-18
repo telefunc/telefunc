@@ -34,7 +34,13 @@ type TelefuncServerExtension = {
 
 /** The toolkit telefunc hands an extension at `setup`. Deliberately small — exactly what a reactive ORM
  *  binding needs and no more (this is the seam a generic integration builds on; drizzle is the first
- *  consumer, not the shape). */
+ *  consumer, not the shape).
+ *
+ *  It carried a per-request `onRequestCleanup` too, for releasing what a returned-but-never-serialized
+ *  handle had reserved. That required the integration to register during the request's context-live window
+ *  — i.e. before the telefunction's first await — which pushed a usage rule onto every telefunction and
+ *  still missed a handle created after the sweep ran. An integration that needs to reclaim an abandoned
+ *  handle's resources should tie them to the handle's own lifetime instead. */
 type TelefuncExtensionHost = {
   /**
    * Create a server-side `Live` producer seeded with `initialData`. Return the handle from a telefunction
@@ -43,15 +49,6 @@ type TelefuncExtensionHost = {
    * it at serialize time — so nothing else is needed to make it cross the wire.
    */
   createLive<T>(initialData: T): LiveProducer<T>
-  /**
-   * Register a `cleanup` to run ONCE after the request's execute→serialize pipeline SETTLES, on EVERY
-   * outcome — success, a body/shield throw before serialize, or a serialize failure (on failure there may
-   * be no serialized response at all; the cleanup still runs). MUST be called inside a telefunction, before
-   * the body's first await (while the request context is live) — it binds to THAT request's context, so it
-   * fires even after the ambient context has nulled in sync mode. GUARANTEE: exactly-once; a throwing
-   * cleanup is isolated and never corrupts the response.
-   */
-  onRequestCleanup(cleanup: () => void): void
 }
 
 /** A server-side `Live` producer, as `host.createLive` returns it. To the telefunction's caller it

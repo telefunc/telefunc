@@ -12,8 +12,7 @@ import { reactiveDrizzle } from './reactiveDrizzle.js'
 // A COMPILE-TIME contract, checked by the package's own `tsc` (tsconfig.spec.json). It exercises the
 // SHIPPING `reactiveDrizzle` return type — not a copy of the HKTs — against REAL Drizzle rc.4 db types,
 // on all three targeted dialects (pg + sqlite + mysql). The proof IS the typecheck: every function below
-// either type-checks or is pinned with `@ts-expect-error`, and none is ever executed (so `reactiveDrizzle`
-// never runs `acquireCarrier`). If a pin stops erroring — someone widened a row type to `any`, or leaked
+// either type-checks or is pinned with `@ts-expect-error`, and none is ever executed. If a pin stops erroring — someone widened a row type to `any`, or leaked
 // `.live()` onto the base db — the directive becomes unused and tsc fails here (TS2578: fail-closed).
 //
 // Positives assign a CONCRETE field type (`const done: boolean = …`): were a row type silently `any`, the

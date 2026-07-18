@@ -7,7 +7,6 @@ import { objectAssign } from '../../utils/objectAssign.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { Telefunc, PROVIDED_CONTEXT } from './context/getContext.js'
 import { REQUEST_CONTEXT } from './context/requestContext.js'
-import { drainPostSerializeDisposers } from './context/postSerialize.js'
 import { loadTelefuncFiles } from './runTelefunc/loadTelefuncFiles.js'
 import { parseHttpRequest } from './runTelefunc/parseHttpRequest.js'
 // import { getEtag } from './runTelefunc/getEtag.js'
@@ -358,12 +357,10 @@ async function runTelefunc_({
     }
   }
 
-  // The post-serialize disposer-drain + activated-channel abort must run on EVERY outcome
-  // of the execute→serialize pipeline: success, a body/shield throw BEFORE serialize, AND a serialize
-  // failure. A body-throw jumps straight to runTelefunc's catch, skipping serializeTelefunctionResult
-  // entirely, so the drain cannot live only inside it. On any FAILURE we also abort the response so a
-  // handle activated during a partial serialize has its channel torn down (the response never goes out);
-  // the drain then releases every db.live read token minted-but-un-redeemed → net-zero.
+  // On any FAILURE of the execute→serialize pipeline — success, a body/shield throw BEFORE serialize, or a
+  // serialize failure — abort the response so a handle activated during a partial serialize has its channel
+  // torn down (the response never goes out). A body-throw jumps straight to runTelefunc's catch, skipping
+  // serializeTelefunctionResult entirely, so this cannot live inside it.
   let pipelineFailed = false
   try {
     {
@@ -431,10 +428,7 @@ async function runTelefunc_({
     throw err
   } finally {
     // Failure only: abort activated handles' channels (idempotent; a no-op on success/abort and when
-    // nothing activated). Each abort → channel onClose → the drizzle handle's lease teardown. The drain
-    // then releases every minted-but-un-redeemed token, on ALL paths (redeemed tokens are skipped —
-    // channel-owned).
+    // nothing activated). Each abort → channel onClose → the drizzle handle's lease teardown.
     if (pipelineFailed) runContext.requestContext.responseAbort.abort()
-    drainPostSerializeDisposers(runContext.context)
   }
 }

@@ -59,7 +59,7 @@ describe('write capture — a write feeds the same db-scoped graphs the reads cr
     provideTelefuncContext({})
     expect(getRawContext()).not.toBe(null)
 
-    // Acquire the reactive db at the TOP (before the body's first await) — the SAME db the write goes through.
+    // The SAME reactive db the write goes through — reads and writes share one registry.
     const db = reactiveDrizzle(base) as unknown as {
       select: () => { from: (t: unknown) => { live: () => Promise<unknown> } }
       insert: (t: unknown) => { values: (v: unknown) => PromiseLike<unknown> }

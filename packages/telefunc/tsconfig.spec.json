@@ -16,13 +16,11 @@
     "noEmit": true
   },
   "files": [
-    "node/server/context/postSerialize.spec.ts",
     "node/server/extensionHost.spec.ts",
     "node/server/live/exports.spec.ts",
     "node/server/live/live-derived.spec.ts",
     "node/server/live/live.spec.ts",
     "node/server/runTelefunc/lifecycle.spec.ts",
-    "node/server/runTelefunc/postSerializeDrain.spec.ts",
     "wire-protocol/live.spec.ts"
   ],
   "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"]

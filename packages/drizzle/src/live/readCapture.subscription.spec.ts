@@ -7,9 +7,10 @@
 // admitted the subscription: the graph must not be acquired, and the snapshot read must not run.
 //
 // OWNERSHIP. The ref is taken before `registry.acquire` and handed on to whoever ends up owning the read —
-// the request sweep for a handle that is never serialized, the channel lease for one that is. Every way out
-// has to give it back, or a db stays subscribed for a live query that no longer exists. Each exit path gets
-// its own case here, observed as an actual unsubscribe against the transport.
+// the channel lease once the handle is serialized, the finalizer if it never is. Every way out has to give
+// it back, or a db stays subscribed for a live query that no longer exists. The paths that resolve WITHOUT
+// producing a handle are here, observed as an actual unsubscribe against the transport; the collected-handle
+// path needs a real GC and lives in readCapture.spec.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChangeSubscription, ChangeTransport } from './changeTransport.js'
@@ -61,7 +62,7 @@ vi.mock('./telefuncHost.js', () => ({
 }))
 
 import { setChangeTransport } from './changeTransport.js'
-import { type ReadCarrier, disposeUnredeemedReads, wrapLiveSelect } from './readCapture.js'
+import { wrapLiveSelect } from './readCapture.js'
 
 /** A broker that counts what the runtime asked of it. With `autoAdmit` off the SUBSCRIBE stays
  *  unacknowledged until `admit()` — the window the ordering case lives in. */
@@ -96,8 +97,7 @@ function fakeBuilder() {
   }
 }
 
-const liveRead = (db: object, carrier: ReadCarrier) =>
-  (wrapLiveSelect(fakeBuilder(), carrier, db) as { live(): Promise<unknown> }).live()
+const liveRead = (db: object) => (wrapLiveSelect(fakeBuilder(), db) as { live(): Promise<unknown> }).live()
 
 /** Let every already-runnable continuation run, so "has not happened yet" means the code held it back and
  *  not that the assertion simply looked too early. */
@@ -119,7 +119,7 @@ describe('captureAndBuild — the readiness barrier gates the whole read', () =>
     const broker = brokerTransport()
     setChangeTransport(db, broker.transport)
 
-    const live = liveRead(db, { mintedTokens: [] })
+    const live = liveRead(db)
     live.catch(() => {}) // the read must not reject while the subscription is unacknowledged
 
     await settle()
@@ -135,59 +135,37 @@ describe('captureAndBuild — the readiness barrier gates the whole read', () =>
 })
 
 describe('captureAndBuild — every way out of a read gives the subscription ref back', () => {
-  it('a COMPILE/HYDRATE failure releases it (the read never reached the carrier)', async () => {
+  it('a COMPILE/HYDRATE failure releases it (the read never produced a handle to own it)', async () => {
     const db = {}
     const broker = brokerTransport({ autoAdmit: true })
     setChangeTransport(db, broker.transport)
     probes.acquireFails = true
 
-    await expect(liveRead(db, { mintedTokens: [] })).rejects.toThrow('hydrate failed')
+    await expect(liveRead(db)).rejects.toThrow('hydrate failed')
     await settle()
 
     expect(broker.unsubscribeCount()).toBe(1) // nothing is left subscribed for a read that never happened
   })
 
-  it('a SNAPSHOT-READ failure releases it (the request sweep finds the entry the read left behind)', async () => {
+  it('a SNAPSHOT-READ failure releases it, deterministically — no handle exists to be collected', async () => {
     const db = {}
     const broker = brokerTransport({ autoAdmit: true })
     setChangeTransport(db, broker.transport)
     probes.readFails = true
-    const carrier: ReadCarrier = { mintedTokens: [] }
 
-    await expect(liveRead(db, carrier)).rejects.toThrow('snapshot read failed')
-    expect(carrier.mintedTokens).toHaveLength(1) // owned BEFORE the fallible read — which is what makes it sweepable
-    expect(broker.unsubscribeCount()).toBe(0) // …so the ref is still held until the sweep runs
-
-    disposeUnredeemedReads(carrier)
+    await expect(liveRead(db)).rejects.toThrow('snapshot read failed')
     await settle()
-    expect(broker.unsubscribeCount()).toBe(1)
+
+    expect(broker.unsubscribeCount()).toBe(1) // released on the way out, not left to the finalizer
   })
 
-  it('a NEVER-SERIALIZED handle releases it at the request sweep', async () => {
+  it('a SERIALIZED handle keeps it until the last channel closes', async () => {
     const db = {}
     const broker = brokerTransport({ autoAdmit: true })
     setChangeTransport(db, broker.transport)
-    const carrier: ReadCarrier = { mintedTokens: [] }
 
-    await liveRead(db, carrier) // the handle is built but never activated
-    await settle()
-    expect(broker.unsubscribeCount()).toBe(0) // still a live read as far as the runtime knows
-
-    disposeUnredeemedReads(carrier)
-    await settle()
-    expect(broker.unsubscribeCount()).toBe(1)
-  })
-
-  it('a SERIALIZED handle keeps it until the last channel closes, and the sweep does not take it early', async () => {
-    const db = {}
-    const broker = brokerTransport({ autoAdmit: true })
-    setChangeTransport(db, broker.transport)
-    const carrier: ReadCarrier = { mintedTokens: [] }
-
-    await liveRead(db, carrier)
+    await liveRead(db)
     const teardown = host.sources[0]!.subscribe() // serialize-time activation: the token redeems into a lease
-
-    disposeUnredeemedReads(carrier) // the request ends — but the channel is still open
     await settle()
     expect(broker.unsubscribeCount()).toBe(0) // the wire channel owns this read now
 

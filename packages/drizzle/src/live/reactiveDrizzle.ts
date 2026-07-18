@@ -1,5 +1,5 @@
 export { reactiveDrizzle }
-export type { Reactive, DbLiveCarrier }
+export type { Reactive }
 
 import type { Assume, ColumnsSelection } from 'drizzle-orm'
 import type { JoinNullability, SelectMode } from 'drizzle-orm/query-builders/select.types'
@@ -25,12 +25,11 @@ import type {
 } from 'drizzle-orm/mysql-core'
 import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/mysql-core/async/select'
 import type { Live } from 'telefunc'
-import { acquireCarrier } from './dbLiveRuntime.js'
 import { captureMutation, captureRawSql, emitSafely, type CaptureSink } from './writeCapture.js'
 import { ingestLocal, ingestWrite } from './dbRuntime.js'
 import { publishCoarseAll } from './writeTransport.js'
 import { type ChangeTransport, setChangeTransport } from './changeTransport.js'
-import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
+import { wrapLiveSelect } from './readCapture.js'
 import type { TableChange } from '../router/events.js'
 
 /** Reactive-db options. `changeTransport` is the DEDICATED cross-instance transport for THIS feature's
@@ -47,12 +46,12 @@ type ReactiveOptions = { changeTransport?: ChangeTransport }
  *  literally true, including `execute(placeholderValues)`. */
 type AsyncTerminals<TAsyncBase, TCoreBase> = Pick<TAsyncBase, Exclude<keyof TAsyncBase, keyof TCoreBase>>
 
-// The reactive-db surface: the type transform, and the per-request proxy behind it.
+// The reactive-db surface: the type transform, and the proxy behind it.
 //
-// `const db = reactiveDrizzle(baseDb)` is called at the TOP of a telefunction (before the first await),
-// and the db it returns CLOSES OVER that request's carrier. That is what lets `db.select()…live()` work
-// after an await: it uses the captured carrier rather than looking for the ambient request context,
-// which by then may be gone.
+// `reactiveDrizzle(baseDb)` binds to NOTHING request-scoped: `export const db = reactiveDrizzle(baseDb)`
+// at module level is the intended shape, importable anywhere, callable at any point in a telefunction.
+// Everything request-bound happens at SERIALIZE time, where the wire replacer sees the returned Live and
+// has the request context it needs.
 //
 // ── Why the terminal `.live()` rides an HKT seam ──────────────────────────────────────────────────
 // Drizzle's select builders are parameterized by a Higher-Kinded Type (`PgSelectHKTBase` &c.) that it
@@ -313,13 +312,10 @@ type Reactive<TDb extends ReactiveDatabase> = ReturnType<TDb['select']> extends 
       ? ReactiveSQLiteDb<TDb>
       : never
 
-/** Opaque per-request carrier, acquired eagerly. Here it is nothing but a brand: its concrete shape
- *  belongs to the runtime units, and this surface only threads it. */
-type DbLiveCarrier = { readonly __dbLiveCarrier: true }
-
 /**
- * Set up reactive queries for a Drizzle `db` (or transaction). Call it at the TOP of a telefunction
- * (before the body's first await) to get a per-request reactive db: its `select()` builds an ordinary
+ * Set up reactive queries for a Drizzle `db` (or transaction). Call it anywhere — module level is the
+ * intended shape (`export const db = reactiveDrizzle(baseDb)`), and inside a telefunction, before or after
+ * an await, works identically. The reactive db's `select()` builds an ordinary
  * Drizzle query that you can either `await` for plain rows or terminate with `.live()` to get a
  * `Live<T[]>`. Everything except `.live()` is the ordinary async builder — `execute`/`prepare` and the
  * dialect runners are preserved. Writes (`insert`/`update`/`delete`) and every other surface run as plain
@@ -339,9 +335,6 @@ type DbLiveCarrier = { readonly __dbLiveCarrier: true }
  * used (zero-setup, fans out only within the process).
  */
 function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: ReactiveOptions): Reactive<TDb> {
-  // Capture the per-request carrier NOW (context-bearing, before the body's first await). The returned
-  // proxy closes over it, so `db.select()…live()` even post-await uses the CAPTURED carrier.
-  const carrier = acquireCarrier()
   const db = baseDb as object
   // Register the dedicated change transport for this db (set-once; default = the in-process bus). Reads
   // subscribe over it and writes publish over it — never the user's app Broadcast.
@@ -357,7 +350,7 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
         // to the read-capture engine), while `then`/`execute` forward untouched to plain rows.
         return (...args: unknown[]) => {
           const baseBuilder = (target as { select: (...a: unknown[]) => unknown }).select(...args)
-          return wrapLiveSelect(baseBuilder, carrier as unknown as ReadCarrier, target)
+          return wrapLiveSelect(baseBuilder, target)
         }
       }
       if (isWriteOp(prop)) {

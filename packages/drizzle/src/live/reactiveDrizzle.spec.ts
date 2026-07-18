@@ -1,12 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-// The client surface imports the concrete runtime DIRECTLY (the `_installDbLiveRuntime` seam was removed in
-// the auto-load full-remove). Mock both units so these tests drive the proxy surface with controllable
-// stubs: the carrier lifecycle (`./dbLiveRuntime`) and the read-capture engine (`./readCapture`).
-// `vi.mock` is hoisted above the imports below.
-vi.mock('./dbLiveRuntime.js', () => ({
-  acquireCarrier: vi.fn(() => ({ __dbLiveCarrier: true })),
-}))
+// The client surface imports the read-capture engine DIRECTLY. Mock it so these tests drive the proxy
+// surface with a controllable stub. `vi.mock` is hoisted above the imports below.
 vi.mock('./writeCapture.js', () => ({
   captureMutation: vi.fn((_op: unknown, baseMethod: unknown) => baseMethod),
 }))
@@ -15,7 +10,6 @@ vi.mock('./readCapture.js', () => ({
 }))
 
 import { reactiveDrizzle } from './reactiveDrizzle.js'
-import { acquireCarrier } from './dbLiveRuntime.js'
 import { captureMutation } from './writeCapture.js'
 import { wrapLiveSelect } from './readCapture.js'
 
@@ -30,19 +24,17 @@ const reactive = (db: object) => reactiveDrizzle(db as never)
 
 describe('reactiveDrizzle — client surface', () => {
   beforeEach(() => {
-    vi.mocked(acquireCarrier).mockClear()
     vi.mocked(captureMutation).mockClear()
     vi.mocked(wrapLiveSelect).mockReset()
     vi.mocked(wrapLiveSelect).mockImplementation((baseBuilder: unknown) => baseBuilder)
   })
 
-  it('returns the proxied db DIRECTLY (no accessor), capturing the carrier once up front', () => {
+  it('returns the proxied db DIRECTLY (no accessor), with NO request context of any kind', () => {
+    // No telefunc context is provided anywhere in this file: reactiveDrizzle binding to a request would
+    // throw here. Module-level `export const db = reactiveDrizzle(baseDb)` is the intended shape.
     const base = { tag: 'base', select: () => ({}) }
     const db = reactive(base)
-    // The db itself — not a function you must call to acquire it. The old `()` accessor is gone.
     expect(typeof db).toBe('object')
-    // The carrier is captured NOW (before the body's first await), not lazily per read.
-    expect(acquireCarrier).toHaveBeenCalledTimes(1)
   })
 
   it('plain fields forward untouched (observable-equivalence)', () => {
@@ -51,7 +43,7 @@ describe('reactiveDrizzle — client surface', () => {
     expect(db.tag).toBe('base')
   })
 
-  it('select() routes through the read-capture engine with this db’s own base builder + the carrier', () => {
+  it('select() routes through the read-capture engine with this db’s own base builder', () => {
     const baseBuilder = { from: () => ({}) }
     const base = { select: vi.fn(() => baseBuilder) }
     const db = reactive(base) as unknown as { select: () => unknown }
@@ -59,9 +51,9 @@ describe('reactiveDrizzle — client surface', () => {
     const built = db.select()
     expect(base.select).toHaveBeenCalledTimes(1)
     expect(wrapLiveSelect).toHaveBeenCalledTimes(1)
-    const [passedBuilder, carrier] = vi.mocked(wrapLiveSelect).mock.calls[0]!
+    const [passedBuilder, passedDb] = vi.mocked(wrapLiveSelect).mock.calls[0]!
     expect(passedBuilder).toBe(baseBuilder) // the engine wraps THIS db's own base builder
-    expect(carrier).toEqual({ __dbLiveCarrier: true })
+    expect(passedDb).toBe(base) // …keyed to THIS db, so reads and writes share one registry
     expect(built).toBe(baseBuilder) // the pass-through stub returns it untouched
   })
 

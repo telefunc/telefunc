@@ -18,31 +18,36 @@ That's it — there is nothing to register. `reactiveDrizzle()` is imported wher
 
 ## Usage
 
-Wrap your Drizzle `db` at the top of a telefunction, then terminate a query with `.live()`:
+Wrap your Drizzle `db` once, export it, and terminate a query with `.live()`:
+
+```ts
+// db.ts
+import { reactiveDrizzle } from '@telefunc/drizzle'
+import { db } from './drizzle'
+
+export const rdb = reactiveDrizzle(db)
+```
 
 ```ts
 // Todos.telefunc.ts
 // Environment: server
 
-import { reactiveDrizzle } from '@telefunc/drizzle'
 import { eq } from 'drizzle-orm'
-import { db } from './db'
+import { rdb } from './db'
 import { todos } from './schema'
 
 export async function onGetTodos(userId: number) {
-  const rdb = reactiveDrizzle(db)
   return rdb.select().from(todos).where(eq(todos.userId, userId)).live()
 }
 
 export async function onAddTodo(text: string) {
-  const rdb = reactiveDrizzle(db)
   await rdb.insert(todos).values({ text })
 }
 ```
 
 The read returns a `Live<Todo[]>`. The write is ordinary Drizzle — but because it ran through the reactive `db`, Telefunc knows which rows changed and invalidates exactly the live queries that read them.
 
-> **Call `reactiveDrizzle(db)` before the body's first `await`.** It binds to the current request, which is only reachable synchronously. Calling it later throws with that message rather than failing quietly.
+> `reactiveDrizzle(db)` binds to nothing request-scoped — call it at module level, or inside a telefunction, before or after an `await`. There are no usage rules to remember.
 
 Everything except `.live()` is the ordinary Drizzle builder — `await` the same chain for plain rows, and `execute`/`prepare`/the dialect runners all behave as before:
 
@@ -139,6 +144,10 @@ await db.execute(sql`select count(*) from audit_log`) // base db — invalidates
 Invalidation is best-effort pub/sub. A live read is not admitted until the transport has confirmed its subscription, so a write can't be missed in the gap between the two. Beyond that, a message dropped on an established connection delays that query's invalidation until the next write touching the table — bounded staleness, never a fabricated row.
 
 A db subscribes while it has live queries and unsubscribes when the last one closes, so a `db` you stop using is not held open by the transport.
+
+#### Abandoned live reads
+
+A `.live()` reserves a little state — the graph it invalidates through, and a share of the db's subscription — and hands it to the client connection when the handle is serialized. A handle that is **never** returned to the client (your telefunction builds one and then throws, or returns something else) has nothing to hand it to, so that state is released when the handle is garbage-collected instead. That is not bounded: the JavaScript spec allows a finalizer never to run, and in practice it is the next GC. The amount at stake is small — usually two refcounts, since live queries reading the same rows share one graph — but it is reclaimed on the collector's schedule, not yours.
 
 
 ## See also
