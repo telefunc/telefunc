@@ -2,7 +2,8 @@ export { publishBatch, publishCoarseAll, ensureSubscribed, CHANGE_TOPIC }
 
 import { randomUUID } from 'node:crypto'
 import { registryFor } from './dbRuntime.js'
-import { type ChangeMessage, transportFor } from './changeTransport.js'
+import { transportFor } from './changeTransport.js'
+import { CHANGE_CODEC_VERSION, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
 import type { ChangeBatch } from '../router/events.js'
 
 // Cross-instance change transport. A committed batch is published ONCE, to ONE topic per logical database,
@@ -28,11 +29,14 @@ import type { ChangeBatch } from '../router/events.js'
 // traffic ever makes per-table filtering worth its price again, it returns as a versioned, additive
 // transport capability — not as a baseline the runtime has to compensate for.
 //
-// READINESS BARRIER (ensureSubscribed): before a live read is admitted, the db's subscription is proven
-// LISTENING by a self-probe — publish a unique token and await it back. On a transport whose SUBSCRIBE is
-// async (e.g. Redis) a probe sent before the subscribe is acked is dropped, so the probe RETRIES on a
-// bounded schedule; if never proven it FAILS CLOSED (rejects the live read) rather than admitting a read
-// that could silently miss remote writes.
+// READINESS BARRIER (ensureSubscribed): a live read is not admitted until this db's subscription is
+// ADMITTED by the transport — which is exactly what awaiting `subscribe()` means (changeTransport.ts). The
+// readiness question is a CONTROL-PLANE one, so it is asked on the control plane: an earlier design proved
+// it on the data plane instead, by publishing a unique token and awaiting it back on a bounded retry pump.
+// That probe demanded self-delivery from every adapter, rejected otherwise-usable transports, and still
+// proved nothing about the cluster — a Redis namespace isolated from every other instance loops its own
+// probe back happily. What the read actually needs is the transport's own assertion that publications made
+// from now on can be observed; a rejected (or never-resolving) subscribe fails the read CLOSED.
 
 /** The one change topic for a logical database. Every runtime sharing a changeTransport exchanges changes
  *  on it; scoping several logical databases onto one transport is the adapter's namespacing concern. */
@@ -50,7 +54,20 @@ function dbIdOf(db: object): string {
  *  batch. Receivers slice it per table themselves. */
 function publishBatch(db: object, batch: ChangeBatch): void {
   if (batch.changes.length === 0) return
-  transportFor(db).publish(CHANGE_TOPIC, { origin: dbIdOf(db), changes: batch.changes })
+  const origin = dbIdOf(db)
+  let payload: string
+  try {
+    payload = encodeChangePayload({ version: CHANGE_CODEC_VERSION, origin, changes: batch.changes })
+  } catch (error) {
+    // A value the codec cannot carry must not cost the invalidation itself: fall back to the value-free
+    // coarse-all envelope, so remote graphs refetch instead of never hearing about the write.
+    console.error(
+      '[telefunc] live: a change batch could not be encoded for the transport, so a COARSE invalidation was published instead. Remote live queries over-fetch rather than miss the write.',
+      error,
+    )
+    payload = encodeChangePayload({ version: CHANGE_CODEC_VERSION, origin, coarseAll: true })
+  }
+  publishPayload(db, payload)
 }
 
 /** Announce a mutation whose touched tables are UNKNOWABLE (raw SQL, batch) to every OTHER instance: each
@@ -58,27 +75,49 @@ function publishBatch(db: object, batch: ChangeBatch): void {
  *  separate wildcard channel it used to need was an artefact of per-table fan-out. The publisher's own
  *  graphs are fed directly, and the `origin` check makes its own subscription drop this. */
 function publishCoarseAll(db: object): void {
-  transportFor(db).publish(CHANGE_TOPIC, { origin: dbIdOf(db), coarseAll: true })
+  publishPayload(db, encodeChangePayload({ version: CHANGE_CODEC_VERSION, origin: dbIdOf(db), coarseAll: true }))
 }
 
-// Bounded probe schedule — a proven-listening handshake tops out at ~1s before failing the read closed.
-const PROBE_INTERVAL_MS = 25
-const PROBE_MAX_ATTEMPTS = 40
+/** Hand a payload to the transport. The write that produced it has ALREADY COMMITTED, so a transport
+ *  failure — thrown outright, or a rejection from an async client that publishes over a socket — is
+ *  reported and dropped. It must never reject the caller's write (which succeeded) and must never surface
+ *  as an unhandled rejection. */
+function publishPayload(db: object, payload: string): void {
+  try {
+    const published = transportFor(db).publish(CHANGE_TOPIC, payload)
+    if (isThenable(published)) published.then(undefined, reportPublishFailure)
+  } catch (error) {
+    reportPublishFailure(error)
+  }
+}
 
-/** One readiness promise per db. `subscribeAndProbe` subscribes ONCE (the subscription lives for the db,
- *  receiving future batches) and resolves when the probe proves it listening; later reads await the same
- *  already-resolved promise. Keyed by db, though the live subscription itself pins the db — see the
- *  retention limit in the docs; refcounted teardown is the fix and lands with the awaitable contract. */
+function isThenable(value: void | Promise<void>): value is Promise<void> {
+  return typeof (value as Promise<void> | undefined)?.then === 'function'
+}
+
+function reportPublishFailure(error: unknown): void {
+  console.error(
+    '[telefunc] live: publishing a change batch to the changeTransport failed. The write COMMITTED and its result is unaffected; live queries on other instances may be stale until the next write touching those tables.',
+    error,
+  )
+}
+
+/** One readiness promise per db. Subscribes ONCE (the subscription lives for the db, receiving future
+ *  batches) and resolves when the transport admits it; later reads await the same already-resolved
+ *  promise. Keyed by db, though the live subscription itself pins the db — refcounted teardown lands with
+ *  the lifecycle slice. */
 const readiness = new WeakMap<object, Promise<void>>()
 
-/** Subscribe this db to the change topic and resolve once the subscription is PROVEN LISTENING (idempotent
- *  per db). A live read awaits this before its snapshot read, so a write on another instance can never land
- *  in the window between the read and a not-yet-listening subscription. Rejects (fails the read closed) if
- *  the subscription cannot be proven listening within the bounded probe schedule. */
+/** Subscribe this db to the change topic and resolve once the transport has ADMITTED the subscription
+ *  (idempotent per db). A live read awaits this before its snapshot read, so a write on another instance
+ *  can never land in the window between the read and a not-yet-established subscription. Rejects (fails the
+ *  read closed) if the transport refuses the subscription. */
 function ensureSubscribed(db: object): Promise<void> {
   let ready = readiness.get(db)
   if (!ready) {
-    ready = subscribeAndProbe(db)
+    ready = transportFor(db)
+      .subscribe(CHANGE_TOPIC, (payload) => receive(db, payload))
+      .then(() => undefined)
     readiness.set(db, ready)
     // Evict a FAILED readiness so a later read re-attempts — a transient transport hiccup must not
     // permanently wedge live reads for this db.
@@ -89,55 +128,34 @@ function ensureSubscribed(db: object): Promise<void> {
   return ready
 }
 
-/** Establish the ONE subscription for this db — handling both received batches and the readiness probe —
- *  and resolve when this instance receives its own probe back (proven listening). */
-function subscribeAndProbe(db: object): Promise<void> {
-  const transport = transportFor(db)
-  const probeToken = randomUUID()
-  return new Promise<void>((resolve, reject) => {
-    let proven = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const unsubscribe = transport.subscribe(CHANGE_TOPIC, (message) => {
-      if ('probe' in message) {
-        // Our own probe round-tripped → the subscription is proven listening. Foreign probes are ignored.
-        if (message.probe === probeToken && !proven) {
-          proven = true
-          if (timer) clearTimeout(timer)
-          resolve()
-        }
-        return
-      }
-      if (message.origin === dbIdOf(db)) return // our own batch — these graphs were fed directly in ingestWrite
-      if ('coarseAll' in message) {
-        // A mutation whose touched tables are unknowable happened on ANOTHER instance: coarsen every table
-        // WE watch. Sound over-fire; never a fabricated row.
-        const watched = registryFor(db).router.watchedTables()
-        if (watched.length > 0) {
-          registryFor(db).router.ingest({ changes: watched.map((t) => ({ table: t, kind: 'coarse' as const })) })
-        }
-        return
-      }
-      // One publication, one ingest — there are no sibling copies to reconcile against.
-      registryFor(db).router.ingest({ changes: message.changes })
-    })
-    let attempts = 0
-    const pump = () => {
-      if (proven) return
-      if (attempts >= PROBE_MAX_ATTEMPTS) {
-        proven = true // stop the pump; the read fails closed below
-        unsubscribe()
-        reject(
-          new Error(
-            `telefunc live: the change subscription was not proven listening after ${attempts} probes — the changeTransport must deliver a publisher's own messages back to its subscribers`,
-          ),
-        )
-        return
-      }
-      attempts++
-      transport.publish(CHANGE_TOPIC, { probe: probeToken } satisfies ChangeMessage)
-      if (proven) return // a synchronous (in-memory) transport already looped the probe back — no timer needed
-      timer = setTimeout(pump, PROBE_INTERVAL_MS)
-    }
-    pump()
-  })
+/** One delivered payload. Decodes, drops our own echo, and feeds the rest into this db's graphs. */
+function receive(db: object, payload: string): void {
+  const envelope = decodeChangePayload(payload)
+  if (!envelope) {
+    // Unreadable — an unknown codec version, or a payload the transport mangled. `origin` is unreadable
+    // too, so this may even be our own echo: coarsening costs a redundant refetch, while applying a guessed
+    // row would be wrong at any price.
+    console.error(
+      `[telefunc] live: an undecodable payload arrived on "${CHANGE_TOPIC}" (unknown codec version, or a transport that does not deliver the exact string it was given). Coarsening every watched table rather than interpreting it.`,
+    )
+    coarsenWatched(db)
+    return
+  }
+  if (envelope.origin === dbIdOf(db)) return // our own batch — these graphs were fed directly in ingestWrite
+  if ('coarseAll' in envelope) {
+    // A mutation whose touched tables are unknowable happened on ANOTHER instance: coarsen every table WE
+    // watch. Sound over-fire; never a fabricated row.
+    coarsenWatched(db)
+    return
+  }
+  // One publication, one ingest — there are no sibling copies to reconcile against.
+  registryFor(db).router.ingest({ changes: envelope.changes })
+}
+
+/** Coarsen every table this db currently watches — the sound response to a change whose reach we cannot
+ *  read. Nothing watched, nothing to do. */
+function coarsenWatched(db: object): void {
+  const watched = registryFor(db).router.watchedTables()
+  if (watched.length === 0) return
+  registryFor(db).router.ingest({ changes: watched.map((table) => ({ table, kind: 'coarse' as const })) })
 }

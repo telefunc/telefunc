@@ -36,11 +36,11 @@ function ingestWrite(db: object, batch: ChangeBatch): void {
   publishBatch(db, batch)
 }
 
-/** Feed a batch into THIS db's graphs only, publishing nothing. For a mutation whose reach is announced by
- *  another channel: raw SQL coarsens this db's watched tables locally and tells other instances over the
- *  WILDCARD coarse channel, which every db subscribes to. Publishing its coarse markers per-table as well
- *  would reach the same remote graphs a second time — the wildcard already covers every table any instance
- *  watches, including ones this db has never heard of — costing a redundant refetch. */
+/** Feed a batch into THIS db's graphs only, publishing nothing. For a mutation whose reach is announced
+ *  SEPARATELY: raw SQL coarsens this db's watched tables locally and tells other instances with ONE
+ *  coarse-all announcement (`publishCoarseAll`), which covers every table any receiver watches — including
+ *  ones this db has never heard of. Publishing this db's own coarse markers as well would reach the same
+ *  remote graphs a second time, costing a redundant refetch. */
 function ingestLocal(db: object, batch: ChangeBatch): void {
   registryFor(db).router.ingest(batch)
 }

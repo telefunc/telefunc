@@ -1,21 +1,5 @@
-export type { ChangeTransport, ChangeMessage }
+export type { ChangeTransport, ChangeSubscription }
 export { defaultChangeTransport, createInMemoryChangeTransport, transportFor, setChangeTransport }
-
-import type { TableChange } from '../router/events.js'
-
-/**
- * A message on the db's change topic (`__live__:changes`): either a committed write BATCH or a readiness
- * PROBE (a unique token the publisher awaits back to prove its OWN subscription is listening — see the
- * readiness barrier in writeTransport.ts). The two are discriminated structurally (`'probe' in message`).
- *
- * A batch carries `origin` (the publishing db's identity) and the changes themselves. There is exactly ONE
- * publication per committed batch, so a receiver simply drops its own echo and ingests everything else — no
- * batch ids, no apply-once reconciliation. See `writeTransport.ts`.
- */
-type ChangeMessage =
-  | { origin: string; changes: TableChange[] }
-  | { origin: string; coarseAll: true }
-  | { probe: string }
 
 /**
  * The transport the Live feature fans captured writes out over — DEDICATED to Live and configured on the
@@ -32,59 +16,71 @@ type ChangeMessage =
  * query on another. (Telefunc's own default Broadcast adapter is likewise process-local — nothing
  * cross-process is silently provided here.)
  *
- * CONTRACT — a custom transport MUST honor both, or the Live guarantees silently weaken:
- *  - **Self-delivery (loopback).** A message published to a topic is delivered to EVERY current subscriber
- *    of that topic, INCLUDING the publisher's own subscription. The readiness barrier proves a subscription
- *    is listening by publishing a probe and awaiting that SAME probe back; a transport that does NOT loop a
- *    publisher's own messages back makes the probe time out → the live read FAILS CLOSED (rejects) rather
- *    than admitting a read that could silently miss remote writes. (Redis pub/sub and the in-memory default
- *    both self-deliver.)
- *  - **Raw reads over-invalidate.** A raw statement run on the REACTIVE db (`db.run(sql`…`)`) coarsens every
- *    watched table, because its touched tables are unknowable without parsing SQL — including a raw SELECT.
- *    Run raw READS on the base db you still hold if you don't want that (the reactive db is only needed for
- *    `.live()` and captured writes).
+ * The payload is an OPAQUE STRING the package encodes and decodes itself (see `changeCodec.ts`), so a
+ * transport is never asked to preserve the JS value domain a SQL row is made of — BigInt, Date, byte
+ * arrays. Deliver the exact string it was given; parsing, rewriting or re-encoding it is the one way an
+ * adapter can corrupt a precise row delta.
+ *
+ * CONTRACT — a custom transport MUST honor all three, or the Live guarantees silently weaken:
+ *  - **`subscribe()` resolves only once the subscription is ADMITTED** — for Redis, after the broker's
+ *    `SUBSCRIBE` acknowledgement, not when the command is written. Resolution IS the readiness proof a live
+ *    read waits on: it asserts that publications made after it can be observed. A transport that resolves
+ *    early re-opens the window where a remote write lands before anyone is listening; one that rejects (or
+ *    never resolves) fails the live read CLOSED, which is the honest outcome.
+ *  - **`unsubscribe()` detaches the listener**, and its promise (if it returns one) resolves only once it
+ *    HAS. The runtime serializes teardown against re-subscription on that promise, so an early resolve can
+ *    leave an old and a new listener overlapping — and a precise batch delivered to both is applied twice.
  *  - **At-most-once delivery per topic.** A transport MUST NOT redeliver the same published message to the
- *    same subscriber on the same topic. Precise row application is NOT idempotent (a stateful aggregate would
- *    count the same delta twice). A transport that can redeliver must deduplicate internally before calling
- *    the subscriber.
- *    (There is no cross-topic timing requirement. An earlier design published one copy of a batch per
- *    touched table and asked adapters to bound the skew between those copies to 30 seconds; a single
- *    publication per batch removes both the duplicates and the guarantee they needed.)
- *  - **Structure preservation.** Change rows carry ordinary SQL values — BigInt, Date, byte arrays, NULL,
- *    composite keys — so a serializing transport MUST round-trip these faithfully (plain `JSON` does not:
- *    it throws on BigInt and drops Date/byte types). The in-memory default delivers by reference (same
- *    process, no serialization); subscribers treat a delivered message as read-only.
+ *    same subscriber on the same topic. Precise row application is NOT idempotent (a stateful aggregate
+ *    would count the same delta twice). A transport that can redeliver must deduplicate internally before
+ *    calling the subscriber.
+ *
+ * `publish()` may return a promise (real clients publish asynchronously). It is NOT awaited by the write
+ * that produced it — the database has already committed by then — but a rejection is reported rather than
+ * swallowed. Self-delivery is not required: a publisher's own graphs are fed directly, and an echo that
+ * does come back is dropped by origin.
  */
 interface ChangeTransport {
-  publish(topic: string, message: ChangeMessage): void
-  subscribe(topic: string, onMessage: (message: ChangeMessage) => void): () => void
+  publish(topic: string, payload: string): void | Promise<void>
+  subscribe(topic: string, onPayload: (payload: string) => void): Promise<ChangeSubscription>
+}
+
+/** A live subscription's teardown handle — the only thing `subscribe()` hands back. */
+interface ChangeSubscription {
+  unsubscribe(): void | Promise<void>
 }
 
 /**
  * A dedicated in-process pub/sub — the zero-setup default. It is a DEDICATED channel-space for Live change
- * traffic, separate from the global app Broadcast, and mirrors Broadcast's in-memory fan-out (delivers by
- * reference, no serialization). Multiple `reactiveDrizzle(...)` calls in one process share one instance (see
- * `defaultChangeTransport`), so two in-process db instances see each other's writes — the multi-instance
- * path, exercised without any external infra. Real multi-process fan-out injects a transport-backed one.
+ * traffic, separate from the global app Broadcast. Multiple `reactiveDrizzle(...)` calls in one process
+ * share one instance (see `defaultChangeTransport`), so two in-process db instances see each other's writes
+ * — the multi-instance path, exercised without any external infra. Real multi-process fan-out injects a
+ * transport-backed one.
+ *
+ * It carries the encoded payload like any other transport rather than passing live objects by reference:
+ * the default is then the same code path a Redis adapter runs, so a value the codec cannot carry surfaces
+ * in development instead of on the first cross-server deployment.
  */
 function createInMemoryChangeTransport(): ChangeTransport {
-  const topics = new Map<string, Set<(message: ChangeMessage) => void>>()
+  const topics = new Map<string, Set<(payload: string) => void>>()
   return {
-    publish(topic, message) {
+    publish(topic, payload) {
       const subscribers = topics.get(topic)
       if (!subscribers) return
       // Snapshot the set: a subscriber that (un)subscribes DURING dispatch must not perturb this delivery.
-      for (const onMessage of [...subscribers]) onMessage(message)
+      for (const onPayload of [...subscribers]) onPayload(payload)
     },
-    subscribe(topic, onMessage) {
+    async subscribe(topic, onPayload) {
       let subscribers = topics.get(topic)
       if (!subscribers) topics.set(topic, (subscribers = new Set()))
-      subscribers.add(onMessage)
-      return () => {
-        const set = topics.get(topic)
-        if (!set) return
-        set.delete(onMessage)
-        if (set.size === 0) topics.delete(topic)
+      subscribers.add(onPayload)
+      return {
+        unsubscribe() {
+          const set = topics.get(topic)
+          if (!set) return
+          set.delete(onPayload)
+          if (set.size === 0) topics.delete(topic)
+        },
       }
     },
   }

@@ -210,8 +210,8 @@ function wrapPrepared(prepared: unknown, table: Table, sink: CaptureSink): unkno
  *  table that currently has a registered graph on this db (safe over-fire, keeps raw SQL usable) as ONE batch
  *  at completion. One honest bound: a raw READ also over-fires (sound, just noisy).
  *
- *  `announce` is how OTHER instances hear about it — they may watch tables this db does not, which the
- *  per-table topics could never reach. It defaults to publishing on the wildcard coarse channel immediately,
+ *  `announce` is how OTHER instances hear about it — they may watch tables this db does not, which a batch
+ *  of THIS db's tables could never reach. It defaults to publishing a coarse-all announcement immediately,
  *  which is right for an autocommit statement. INSIDE A TRANSACTION the caller passes an announce that only
  *  records the intent, so nothing is published until the outer COMMIT and a rollback announces nothing —
  *  publishing mid-transaction would tell other instances to refetch state that may never exist. */

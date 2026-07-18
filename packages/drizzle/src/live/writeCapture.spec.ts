@@ -82,11 +82,11 @@ describe('write capture — a write feeds the same db-scoped graphs the reads cr
   })
 })
 
-// A raw statement's touched tables are unknowable, so other instances are told on the WILDCARD coarse
-// channel — which every db subscribes to, and which coarsens every table the receiver watches. Publishing
-// the same write's coarse markers per-table as well delivered the SAME invalidation to a remote watcher
-// TWICE. Driven end-to-end here (real PGlite, real registries, two instances on the shared default
-// transport) rather than simulated, so it fails if the wiring changes and not just if the helper does.
+// A raw statement's touched tables are unknowable, so other instances are told with ONE coarse-all
+// announcement, which coarsens every table the receiver watches. Publishing the same write's own coarse
+// markers as well delivered the SAME invalidation to a remote watcher TWICE. Driven end-to-end here (real
+// PGlite, real registries, two instances on the shared default transport) rather than simulated, so it
+// fails if the wiring changes and not just if the helper does.
 describe('write capture — a raw write reaches a remote live query exactly ONCE', () => {
   it('an autocommit raw write is DELIVERED to a remote instance a single time', async () => {
     provideTelefuncContext({})

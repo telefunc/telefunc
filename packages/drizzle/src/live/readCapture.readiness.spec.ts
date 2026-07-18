@@ -1,11 +1,12 @@
 // COMPOSED readiness gate. The readiness specs elsewhere call ensureSubscribed() directly, so deleting or
 // reordering the `await ensureSubscribed(...)` inside captureAndBuild leaves them green — a false-green the
 // review called out. This drives the REAL read pipeline (wrapLiveSelect(...).live()) and asserts the two
-// things that must NOT happen before the subscription is proven listening: the graph must not be acquired,
-// and the snapshot read must not run. Both are spied; the transport withholds probe delivery until released.
+// things that must NOT happen before the transport has admitted the subscription: the graph must not be
+// acquired, and the snapshot read must not run. Both are spied; the transport holds its `subscribe()`
+// promise open until the test releases it.
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ChangeMessage, ChangeTransport } from './changeTransport.js'
+import { describe, expect, it, vi } from 'vitest'
+import type { ChangeSubscription, ChangeTransport } from './changeTransport.js'
 
 const probes = vi.hoisted(() => ({ acquire: vi.fn(), snapshotRead: vi.fn() }))
 
@@ -41,24 +42,15 @@ vi.mock('./telefuncHost.js', () => ({
 import { setChangeTransport } from './changeTransport.js'
 import { wrapLiveSelect } from './readCapture.js'
 
-/** Delivery is withheld until goLive(), so the readiness probe cannot round-trip before then. */
-function gatedTransport() {
-  const topics = new Map<string, Set<(m: ChangeMessage) => void>>()
-  let open = false
+/** The subscription is not acknowledged until `admit()` — the window a real broker leaves open between the
+ *  SUBSCRIBE command and its ack. */
+function brokerTransport() {
+  let admit!: () => void
   const transport: ChangeTransport = {
-    publish(topic, message) {
-      if (!open) return
-      const subs = topics.get(topic)
-      if (subs) for (const cb of [...subs]) cb(message)
-    },
-    subscribe(topic, onMessage) {
-      let subs = topics.get(topic)
-      if (!subs) topics.set(topic, (subs = new Set()))
-      subs.add(onMessage)
-      return () => topics.get(topic)?.delete(onMessage)
-    },
+    publish() {},
+    subscribe: () => new Promise<ChangeSubscription>((resolve) => (admit = () => resolve({ unsubscribe() {} }))),
   }
-  return { transport, goLive: () => (open = true) }
+  return { transport, admit: () => admit() }
 }
 
 /** A minimal awaitable select builder; awaiting it IS the snapshot read. */
@@ -72,32 +64,29 @@ function fakeBuilder() {
   }
 }
 
-afterEach(() => {
-  vi.useRealTimers()
-  probes.acquire.mockClear()
-  probes.snapshotRead.mockClear()
-})
+/** Let every already-resolvable continuation run, so "not yet called" means the barrier held rather than
+ *  that the test simply looked too early. */
+const drainMicrotasks = async () => {
+  for (let i = 0; i < 10; i++) await Promise.resolve()
+}
 
 describe('captureAndBuild — the readiness barrier gates the whole read', () => {
-  it('acquires NO graph and runs NO snapshot read until the subscription is proven listening', async () => {
-    vi.useFakeTimers()
+  it('acquires NO graph and runs NO snapshot read until the transport admits the subscription', async () => {
     const db = {}
-    const { transport, goLive } = gatedTransport()
-    setChangeTransport(db, transport)
+    const broker = brokerTransport()
+    setChangeTransport(db, broker.transport)
 
     const live = (wrapLiveSelect(fakeBuilder(), { mintedTokens: [] }, db) as { live(): Promise<unknown> }).live()
-    live.catch(() => {}) // the read must not reject while we hold the probe
+    live.catch(() => {}) // the read must not reject while the subscription is unacknowledged
 
-    // Several probe attempts fire and are dropped: the barrier is still closed.
-    await vi.advanceTimersByTimeAsync(200)
+    await drainMicrotasks()
     expect(probes.acquire).not.toHaveBeenCalled() // graph NOT registered/seeded yet
     expect(probes.snapshotRead).not.toHaveBeenCalled() // snapshot NOT read yet
 
-    goLive() // the probe can now round-trip → readiness resolves
-    await vi.advanceTimersByTimeAsync(30)
+    broker.admit() // the broker acknowledges → readiness resolves
     await live
 
-    expect(probes.acquire).toHaveBeenCalledTimes(1) // only AFTER proven listening
+    expect(probes.acquire).toHaveBeenCalledTimes(1) // only AFTER the subscription exists
     expect(probes.snapshotRead).toHaveBeenCalledTimes(1)
   })
 })

@@ -348,7 +348,7 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
   setChangeTransport(db, options?.changeTransport)
   // Autocommit writes ingest into THIS db's graphs immediately; a transaction buffers and flushes here once.
   const ingest: CaptureSink = (changes) => ingestWrite(db, { changes })
-  // Raw SQL's coarse markers stay local — the wildcard announcement is what reaches other instances.
+  // Raw SQL's coarse markers stay local — the coarse-all announcement is what reaches other instances.
   const localIngest: CaptureSink = (changes) => ingestLocal(db, { changes })
   return new Proxy(db, {
     get(target, prop, receiver) {
@@ -376,8 +376,9 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
         // Raw SQL (`db.run(sql`…`)`, `db.execute(sql`…`)`, …) can mutate anything, and its touched tables are
         // unknowable without parsing — so it fails closed by coarsening every table this db has a graph on,
         // rather than executing silently uncaptured. Its coarse markers are ingested LOCALLY ONLY: other
-        // instances hear about it on the wildcard channel, which reaches every table any of them watches, so
-        // publishing per-table as well would just make a remote live query refetch twice.
+        // instances hear about it in ONE coarse-all announcement, which reaches every table any of them
+        // watches, so publishing this db's own markers as well would just make a remote live query refetch
+        // twice.
         const base = Reflect.get(target, prop, receiver)
         if (typeof base === 'function') {
           return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), db, localIngest)

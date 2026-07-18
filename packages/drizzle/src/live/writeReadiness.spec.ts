@@ -1,13 +1,14 @@
-// Readiness barrier (T4 slice 4). A live read is admitted only after its tables' change subscriptions are
-// PROVEN LISTENING — proven by a self-probe round-trip (publish a token, await it back). On a transport whose
-// SUBSCRIBE is async, an early probe is dropped, so the probe RETRIES on a bounded schedule; if never proven,
-// it FAILS CLOSED (rejects the read) rather than admitting a read that could silently miss remote writes.
+// Readiness barrier. A live read is admitted only once this db's change subscription has been ADMITTED by
+// the transport — which is precisely what awaiting `subscribe()` means. Readiness is a CONTROL-PLANE fact,
+// so it is asked of the control plane; the data-plane probe this replaced (publish a token, await it back on
+// a bounded retry pump) demanded self-delivery from every adapter and still proved nothing about the cluster.
 //
-// The gated fake transport models exactly this: while `live` is false its publishes are DROPPED (the window
-// between SUBSCRIBE issued and acked). registryFor is mocked (unused here — no batches are applied).
+// The fake transport here holds its `subscribe()` promise open by hand, which is the real Redis shape: the
+// SUBSCRIBE command is written, and the subscription does not exist until the broker acknowledges it.
+// registryFor is mocked (unused here — no batches are applied).
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ChangeMessage, ChangeTransport } from './changeTransport.js'
+import { describe, expect, it, vi } from 'vitest'
+import type { ChangeSubscription, ChangeTransport } from './changeTransport.js'
 
 vi.mock('./dbRuntime.js', () => ({
   registryFor: () => ({ router: { ingest: vi.fn(), register: vi.fn(), unregister: vi.fn() }, acquire: vi.fn() }),
@@ -17,25 +18,26 @@ vi.mock('./dbRuntime.js', () => ({
 import { setChangeTransport } from './changeTransport.js'
 import { ensureSubscribed } from './writeTransport.js'
 
-/** A transport whose SUBSCRIBE is "async": publishes are dropped until `goLive()`, then delivered
- *  synchronously. This is the loopback the probe depends on, gated behind a manual readiness switch. */
-function gatedTransport() {
-  const topics = new Map<string, Set<(m: ChangeMessage) => void>>()
-  let live = false
+/** A transport whose SUBSCRIBE is acknowledged by hand — `admit()` resolves the pending subscribe,
+ *  `refuse()` rejects it. `subscribes` counts how many times the transport was actually asked. */
+function brokerTransport() {
+  const pending: { admit: () => void; refuse: (error: Error) => void }[] = []
+  let subscribes = 0
   const transport: ChangeTransport = {
-    publish(topic, message) {
-      if (!live) return // not yet listening → the probe is lost, forcing a retry
-      const subs = topics.get(topic)
-      if (subs) for (const cb of [...subs]) cb(message)
-    },
-    subscribe(topic, onMessage) {
-      let subs = topics.get(topic)
-      if (!subs) topics.set(topic, (subs = new Set()))
-      subs.add(onMessage)
-      return () => topics.get(topic)?.delete(onMessage)
+    publish() {},
+    subscribe() {
+      subscribes++
+      return new Promise<ChangeSubscription>((resolve, reject) => {
+        pending.push({ admit: () => resolve({ unsubscribe() {} }), refuse: reject })
+      })
     },
   }
-  return { transport, goLive: () => (live = true) }
+  return {
+    transport,
+    subscribeCount: () => subscribes,
+    admit: () => pending.shift()?.admit(),
+    refuse: () => pending.shift()?.refuse(new Error('SUBSCRIBE refused')),
+  }
 }
 
 /** Track whether a promise has settled without awaiting it (so we can assert it is still PENDING). */
@@ -45,58 +47,83 @@ function settledTracker(p: Promise<unknown>) {
     () => (done = true),
     () => (done = true),
   )
-  return () => done
+  return async () => {
+    await Promise.resolve() // drain the microtask queue so a settled promise has had its chance
+    await Promise.resolve()
+    return done
+  }
 }
 
-afterEach(() => vi.useRealTimers())
-
-describe('readiness barrier — proven-listening before a live read is admitted', () => {
-  it('does NOT resolve while the subscription is not yet listening, then resolves once it is (bounded retry)', async () => {
-    vi.useFakeTimers()
+describe('readiness barrier — admitted before a live read is', () => {
+  it('does NOT resolve while the SUBSCRIBE is unacknowledged, then resolves once the broker admits it', async () => {
     const db = {}
-    const { transport, goLive } = gatedTransport()
-    setChangeTransport(db, transport)
+    const broker = brokerTransport()
+    setChangeTransport(db, broker.transport)
 
     const ready = ensureSubscribed(db)
     const isSettled = settledTracker(ready)
 
-    // Several probe attempts fire on the bounded schedule; all are DROPPED (transport not listening yet).
-    await vi.advanceTimersByTimeAsync(200)
-    expect(isSettled()).toBe(false) // the barrier holds — the read is NOT admitted unproven
+    expect(await isSettled()).toBe(false) // the barrier holds — the read is NOT admitted unproven
 
-    goLive() // SUBSCRIBE is now acked; the transport loops the next probe back
-    await vi.advanceTimersByTimeAsync(30) // the next scheduled probe round-trips
-    await ready // resolves — proven listening
-    expect(isSettled()).toBe(true)
+    broker.admit()
+    await ready // resolves — the transport has the subscription
+    expect(await isSettled()).toBe(true)
   })
 
-  it('FAILS CLOSED (rejects the live read) if the subscription is never proven listening', async () => {
-    vi.useFakeTimers()
+  it('FAILS CLOSED (rejects the live read) when the transport refuses the subscription', async () => {
     const db = {}
-    const { transport } = gatedTransport() // never goLive → every probe dropped
-    setChangeTransport(db, transport)
+    const broker = brokerTransport()
+    setChangeTransport(db, broker.transport)
 
     const ready = ensureSubscribed(db)
-    const outcome = ready.then(
-      () => 'resolved',
-      (e: Error) => e,
-    )
-    // Exhaust the bounded probe schedule (40 attempts × 25ms, plus slack).
-    await vi.advanceTimersByTimeAsync(25 * 45)
-    const result = await outcome
-    expect(result).toBeInstanceOf(Error)
-    expect(String(result)).toMatch(/not proven listening/)
+    broker.refuse()
+
+    await expect(ready).rejects.toThrow(/SUBSCRIBE refused/)
   })
 
-  it('a proven subscription is cached — a second read for the same table awaits no new probe', async () => {
+  it('RETRIES after a refusal: a later read asks the transport again rather than reusing the failure', async () => {
+    // A transient hiccup must not permanently wedge live reads for this db.
     const db = {}
-    const { transport, goLive } = gatedTransport()
-    goLive() // synchronous loopback from the start
-    setChangeTransport(db, transport)
+    const broker = brokerTransport()
+    setChangeTransport(db, broker.transport)
 
-    await ensureSubscribed(db) // proves + caches
-    // A second call resolves on the already-proven promise — no fake timers needed, no hang.
+    await expect(
+      (() => {
+        const first = ensureSubscribed(db)
+        broker.refuse()
+        return first
+      })(),
+    ).rejects.toThrow()
+
+    const second = ensureSubscribed(db)
+    expect(broker.subscribeCount()).toBe(2) // asked again, not served the cached rejection
+    broker.admit()
+    await second
+  })
+
+  it('CONCURRENT reads share ONE underlying subscribe', async () => {
+    const db = {}
+    const broker = brokerTransport()
+    setChangeTransport(db, broker.transport)
+
+    const first = ensureSubscribed(db)
+    const second = ensureSubscribed(db)
+    expect(broker.subscribeCount()).toBe(1) // one subscription serves every live read on this db
+
+    broker.admit()
+    await Promise.all([first, second])
+  })
+
+  it('an ADMITTED subscription is cached — a later read subscribes nothing new', async () => {
+    const db = {}
+    const broker = brokerTransport()
+    setChangeTransport(db, broker.transport)
+
+    const ready = ensureSubscribed(db)
+    broker.admit()
+    await ready
+
     await ensureSubscribed(db)
-    expect(true).toBe(true)
+    expect(broker.subscribeCount()).toBe(1)
   })
 })

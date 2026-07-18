@@ -133,21 +133,19 @@ describe('write capture — transaction buffering', () => {
 // on the change topic — and that announcement must wait for the outer COMMIT. Announcing it when
 // the statement runs would tell every other instance to refetch state a rollback then erased.
 describe('write capture — RAW SQL inside a transaction', () => {
-  /** Watch the change topic — what remote instances actually receive. */
-  function watchAnnouncements(db: object) {
+  /** Watch the change topic — the raw payloads remote instances actually receive. */
+  async function watchAnnouncements(db: object) {
     const transport = createInMemoryChangeTransport()
     setChangeTransport(db, transport)
-    const seen: unknown[] = []
-    transport.subscribe(CHANGE_TOPIC, (message) => {
-      if (!('probe' in message)) seen.push(message)
-    })
+    const seen: string[] = []
+    await transport.subscribe(CHANGE_TOPIC, (payload) => seen.push(payload))
     return seen
   }
 
   it('a COMMITTED raw-SQL transaction announces to other instances (was: nothing published)', async () => {
     provideTelefuncContext({})
     const fresh = drizzle({ client })
-    const announced = watchAnnouncements(fresh)
+    const announced = await watchAnnouncements(fresh)
     const db = reactiveDrizzle(fresh) as unknown as ReactiveDb & { execute: (q: unknown) => Promise<unknown> }
 
     await db.transaction(async (tx) => {
@@ -164,7 +162,7 @@ describe('write capture — RAW SQL inside a transaction', () => {
   it('a ROLLED-BACK raw-SQL transaction announces NOTHING', async () => {
     provideTelefuncContext({})
     const fresh = drizzle({ client })
-    const announced = watchAnnouncements(fresh)
+    const announced = await watchAnnouncements(fresh)
     const db = reactiveDrizzle(fresh) as unknown as ReactiveDb
 
     await expect(
