@@ -57,7 +57,7 @@ describe('readiness barrier — proven-listening before a live read is admitted'
     const { transport, goLive } = gatedTransport()
     setChangeTransport(db, transport)
 
-    const ready = ensureSubscribed(db, ['accounts'])
+    const ready = ensureSubscribed(db)
     const isSettled = settledTracker(ready)
 
     // Several probe attempts fire on the bounded schedule; all are DROPPED (transport not listening yet).
@@ -76,7 +76,7 @@ describe('readiness barrier — proven-listening before a live read is admitted'
     const { transport } = gatedTransport() // never goLive → every probe dropped
     setChangeTransport(db, transport)
 
-    const ready = ensureSubscribed(db, ['accounts'])
+    const ready = ensureSubscribed(db)
     const outcome = ready.then(
       () => 'resolved',
       (e: Error) => e,
@@ -94,9 +94,9 @@ describe('readiness barrier — proven-listening before a live read is admitted'
     goLive() // synchronous loopback from the start
     setChangeTransport(db, transport)
 
-    await ensureSubscribed(db, ['accounts']) // proves + caches
+    await ensureSubscribed(db) // proves + caches
     // A second call resolves on the already-proven promise — no fake timers needed, no hang.
-    await ensureSubscribed(db, ['accounts'])
+    await ensureSubscribed(db)
     expect(true).toBe(true)
   })
 })

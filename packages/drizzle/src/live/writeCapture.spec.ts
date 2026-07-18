@@ -124,10 +124,11 @@ describe('write capture — a raw write reaches a remote live query exactly ONCE
 // fell straight through the reactive proxy to plain Drizzle and committed with nothing captured and nothing
 // published — the same silent-bypass class as `tx.execute`.
 //
-// Neither exists on PGlite (they ship on libSQL / D1 / Neon-HTTP / sqlite-proxy), so the methods are
-// attached to a REAL reactive db here: that exercises the actual proxy interception and the actual coarse
-// path, with only the driver method itself simulated. Each case pins BOTH halves — the caller's result comes
-// back untouched, AND the live query is invalidated.
+// `batch` is absent on PGlite (it ships on libSQL / D1 / Neon-HTTP / sqlite-proxy); `refreshMaterializedView`
+// is real here, and the transaction case below drives the genuine PGlite method against a genuine
+// materialized view. The two top-level cases attach sentinel-returning stand-ins to a REAL reactive db so
+// the caller's result can be pinned exactly — the proxy interception and the coarse path they exercise are
+// the real ones. Each case asserts BOTH halves: the result comes back untouched, AND the query invalidates.
 describe('write capture — non-SQL mutations still invalidate (refreshMaterializedView, batch)', () => {
   type ExoticDb = {
     select: () => { from: (t: unknown) => { live: () => Promise<unknown> } }

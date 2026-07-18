@@ -17,7 +17,7 @@ vi.mock('./dbRuntime.js', async (importActual) => {
 import { ingestWrite } from './dbRuntime.js'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
 import { createInMemoryChangeTransport, setChangeTransport } from './changeTransport.js'
-import { WILDCARD_TABLE, batchTopic } from './writeTransport.js'
+import { CHANGE_TOPIC } from './writeTransport.js'
 import type { ChangeBatch } from '../router/events.js'
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
@@ -130,15 +130,15 @@ describe('write capture — transaction buffering', () => {
 // committed with NOTHING published — the top-level db already coarsened raw SQL, the tx db did not.
 //
 // Timing is the whole point: a raw statement's touched tables are unknowable, so other instances are told
-// via the wildcard coarse channel — and that announcement must wait for the outer COMMIT. Announcing it when
+// on the change topic — and that announcement must wait for the outer COMMIT. Announcing it when
 // the statement runs would tell every other instance to refetch state a rollback then erased.
 describe('write capture — RAW SQL inside a transaction', () => {
-  /** Watch the wildcard coarse channel — what remote instances actually receive. */
+  /** Watch the change topic — what remote instances actually receive. */
   function watchAnnouncements(db: object) {
     const transport = createInMemoryChangeTransport()
     setChangeTransport(db, transport)
     const seen: unknown[] = []
-    transport.subscribe(batchTopic(WILDCARD_TABLE), (message) => {
+    transport.subscribe(CHANGE_TOPIC, (message) => {
       if (!('probe' in message)) seen.push(message)
     })
     return seen

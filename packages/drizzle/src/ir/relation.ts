@@ -1,8 +1,8 @@
 // THE routing identity of a relation — the single string both sides of the live pipeline agree on.
 //
 // A live query registers its graph under the identities it reads; a write emits TableChanges under the
-// identity it touched; the transport's topic is `__live__:{identity}`. Read-side and write-side identities
-// are derived from the SAME drizzle table declaration, so they match by construction.
+// identity it touched, and the router matches them. Read-side and write-side identities are derived from
+// the SAME drizzle table declaration, so they match by construction.
 //
 // SCHEMA-QUALIFIED, because a bare table name is not an identity: `a.users` and `b.users` are different
 // physical relations that a bare name conflates, which routes a write on one to a live query on the other
@@ -12,14 +12,13 @@
 // identifiers (a table name may be any string, so "unlikely in practice" is not good enough):
 //
 //   plain   `users`        an UNQUALIFIED relation whose name is already unambiguous — used verbatim,
-//                          which keeps topics (`__live__:users`) and diagnostics readable.
+//                          which keeps diagnostics readable.
 //   framed  `1:a5:users`   everything else — each part length-prefixed (utils/canonical `frame`), so
 //                          `a`+`b.c` and `a.b`+`c` cannot collide the way a `.`-join would.
 //
-// A name is pushed into the framed form when it could be mistaken for one — it starts with `{digits}:`,
-// or it is the transport's reserved wildcard topic `*` (see WILDCARD_TABLE in writeTransport.ts, which
-// must stay exempt from qualification). The framed form always starts with `{digits}:` and the plain form
-// never does, so no plain identity can forge a framed one, and vice versa.
+// A name is pushed into the framed form when it could be mistaken for one — it starts with `{digits}:`.
+// The framed form always starts with `{digits}:` and the plain form never does, so no plain identity can
+// forge a framed one, and vice versa.
 //
 // AMBIGUITY CLASS — a relation drizzle declares WITHOUT a schema (`pgTable('users', …)`, every sqliteTable)
 // has no statically-knowable schema: the connection's search_path resolves it at runtime. Such a relation
@@ -30,22 +29,17 @@
 // writing through the other yields two identities, so the write does not invalidate the read. Declare a
 // relation once (the normal drizzle pattern) and the case cannot arise.
 
-export { relationIdOf, parseRelationId, describeRelationId, RESERVED_RELATION_NAMES }
+export { relationIdOf, parseRelationId, describeRelationId }
 
 import { frame } from '../utils/canonical.js'
 
 /** What an identity is computed from — the drizzle-free projection of a TableRef. */
 type RelationName = { name: string; schema?: string }
 
-/** Bare names the plain form may NOT use, because the transport gives them another meaning. Kept here
- *  (rather than imported from the transport) so ir/ stays dependency-free; writeTransport asserts the
- *  two agree. */
-const RESERVED_RELATION_NAMES: readonly string[] = ['*']
-
-/** True when a bare name would be indistinguishable from the framed form, or is reserved — such a name
- *  must take the framed form so the two encodings stay disjoint. */
+/** True when a bare name would be indistinguishable from the framed form — such a name must take the
+ *  framed form so the two encodings stay disjoint. */
 function needsFraming(name: string): boolean {
-  return /^\d+:/.test(name) || RESERVED_RELATION_NAMES.includes(name)
+  return /^\d+:/.test(name)
 }
 
 /** The routing identity of a relation. Aliases share it (they resolve to the real name). */

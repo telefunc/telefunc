@@ -4,16 +4,16 @@ export { defaultChangeTransport, createInMemoryChangeTransport, transportFor, se
 import type { TableChange } from '../router/events.js'
 
 /**
- * A message on a table's change topic (`__live__:{table}`): either a committed write BATCH or a readiness
+ * A message on the db's change topic (`__live__:changes`): either a committed write BATCH or a readiness
  * PROBE (a unique token the publisher awaits back to prove its OWN subscription is listening — see the
  * readiness barrier in writeTransport.ts). The two are discriminated structurally (`'probe' in message`).
  *
- * A batch carries `id` (the same on every copy of one published batch) and `origin` (the publishing db's
- * identity). A receiver drops the batch if it published it, and otherwise applies the FIRST copy it sees —
- * see the apply-once rule and its soundness invariant in `writeTransport.ts`.
+ * A batch carries `origin` (the publishing db's identity) and the changes themselves. There is exactly ONE
+ * publication per committed batch, so a receiver simply drops its own echo and ingests everything else — no
+ * batch ids, no apply-once reconciliation. See `writeTransport.ts`.
  */
 type ChangeMessage =
-  | { id: string; origin: string; changes: TableChange[] }
+  | { origin: string; changes: TableChange[] }
   | { origin: string; coarseAll: true }
   | { probe: string }
 
@@ -47,19 +47,9 @@ type ChangeMessage =
  *    same subscriber on the same topic. Precise row application is NOT idempotent (a stateful aggregate would
  *    count the same delta twice). A transport that can redeliver must deduplicate internally before calling
  *    the subscriber.
- *  - **Bounded fan-out skew (30s).** This layer publishes one batch to EACH touched table's topic, so a
- *    subscriber of several of them receives several copies and applies only the first (`writeTransport.ts`).
- *    The marker that suppresses the rest is remembered for a bounded window, so a transport MUST deliver
- *    every copy that arrives AFTER THE FIRST within **30 seconds** of that first one. A copy stranded for
- *    longer would find the marker gone and apply the same precise batch a second time, corrupting exact
- *    operator state.
- *
- *    Note what is NOT required: delivering all copies, or none. A PARTIAL fan-out is safe — every copy
- *    carries the WHOLE batch, so one arriving copy is sufficient and any others are pure duplicates. That
- *    matters in practice: a publisher that dies between per-topic publishes leaves a subset delivered, which
- *    is fine. (The in-memory default delivers synchronously inside the publish loop, skew zero; ordinary
- *    Redis pub/sub satisfies this comfortably. A store-and-forward queue with unbounded retry does NOT, and
- *    must collapse the fan-out itself.)
+ *    (There is no cross-topic timing requirement. An earlier design published one copy of a batch per
+ *    touched table and asked adapters to bound the skew between those copies to 30 seconds; a single
+ *    publication per batch removes both the duplicates and the guarantee they needed.)
  *  - **Structure preservation.** Change rows carry ordinary SQL values — BigInt, Date, byte arrays, NULL,
  *    composite keys — so a serializing transport MUST round-trip these faithfully (plain `JSON` does not:
  *    it throws on BigInt and drops Date/byte types). The in-memory default delivers by reference (same

@@ -1,11 +1,10 @@
 // The routing identity's defining property is INJECTIVITY: two distinct relations must never share an
 // identity, or a write on one invalidates a live query on the other (review finding #6). A table name may
 // be ANY string, so these cases deliberately use names that attack the encoding itself — names containing
-// dots, names shaped like the framed form, and the transport's reserved wildcard.
+// dots and names shaped like the framed form.
 
 import { describe, expect, it } from 'vitest'
-import { WILDCARD_TABLE } from '../live/writeTransport.js'
-import { RESERVED_RELATION_NAMES, describeRelationId, parseRelationId, relationIdOf } from './relation.js'
+import { describeRelationId, parseRelationId, relationIdOf } from './relation.js'
 
 describe('relation identity — the two encoding forms', () => {
   it('an unqualified relation keeps its readable bare name (so topics stay `__live__:todos`)', () => {
@@ -34,13 +33,6 @@ describe('relation identity — injectivity against adversarial names', () => {
     expect(impostor).not.toBe(qualified)
     // It is pushed into the framed form rather than used verbatim, which is what keeps the spaces disjoint.
     expect(impostor).not.toBe('1:a5:users')
-  })
-
-  it('a relation named `*` cannot claim the transport wildcard topic', () => {
-    expect(RESERVED_RELATION_NAMES).toContain(WILDCARD_TABLE)
-    expect(relationIdOf({ name: WILDCARD_TABLE })).not.toBe(WILDCARD_TABLE)
-    // A schema-qualified `*` is distinct again.
-    expect(relationIdOf({ name: WILDCARD_TABLE })).not.toBe(relationIdOf({ name: WILDCARD_TABLE, schema: 'a' }))
   })
 })
 
