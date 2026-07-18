@@ -119,6 +119,36 @@ describe('write capture — fail-closed COARSE (safe over-fire, never a wrong ro
   })
 })
 
+describe('write capture — a capture fault NEVER fails a committed write (isolation)', () => {
+  // The DB has already committed by the time the sink runs. A throwing sink/router/transport must not turn a
+  // committed write into a caller-visible rejection, and must degrade to a coarse ingest, not half-apply.
+  it('a throwing sink does NOT reject the caller; the row is committed and the plain result is returned', async () => {
+    const thrown: TableChange[][] = []
+    const wrapped = captureMutation('insert', pg.insert.bind(pg) as (...a: unknown[]) => unknown, pg, (changes) => {
+      thrown.push(changes)
+      throw new Error('sink exploded')
+    }) as AnyBuilder
+    const result = await wrapped(users).values({ id: 30, name: 'committed' }) // must NOT reject
+    expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 }) // exactly plain drizzle's result
+    const persisted = await pg.select().from(users).where(eq(users.id, 30))
+    expect(persisted).toEqual([{ id: 30, name: 'committed' }]) // the write really committed
+    // degraded: the precise feed threw, so a COARSE marker was attempted for the touched table
+    expect(thrown[0]).toEqual([{ table: 'users', kind: 'insert', new: { id: 30, name: 'committed' } }])
+    expect(thrown[1]).toEqual([{ table: 'users', kind: 'coarse' }])
+  })
+
+  it('a sink that throws on BOTH the precise feed and the coarse fallback still does not reject the caller', async () => {
+    let calls = 0
+    const wrapped = captureMutation('insert', pg.insert.bind(pg) as (...a: unknown[]) => unknown, pg, () => {
+      calls++
+      throw new Error('sink always explodes')
+    }) as AnyBuilder
+    const result = await wrapped(users).values({ id: 31, name: 'still-committed' })
+    expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 })
+    expect(calls).toBe(2) // precise attempt + coarse fallback attempt, both contained
+  })
+})
+
 describe('write capture — composite PK precise (slice 5)', () => {
   it('composite PK INSERT (no returning): emits {insert, new: full row}; result reconstructed', async () => {
     const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))

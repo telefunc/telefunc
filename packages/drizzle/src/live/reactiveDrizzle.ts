@@ -26,7 +26,7 @@ import type {
 import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/mysql-core/async/select'
 import type { Live } from 'telefunc'
 import { acquireCarrier } from './dbLiveRuntime.js'
-import { captureMutation, type CaptureSink } from './writeCapture.js'
+import { captureMutation, emitSafely, type CaptureSink } from './writeCapture.js'
 import { ingestWrite } from './dbRuntime.js'
 import { type ChangeTransport, setChangeTransport } from './changeTransport.js'
 import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
@@ -393,7 +393,9 @@ function wrapTransaction(txHost: object, topDb: object, enclosingSink: CaptureSi
     return Promise.resolve(baseTransaction((tx: object) => callback(txProxy(tx, topDb, buffered)), config)).then(
       (result) => {
         // Reached ONLY on COMMIT (a rollback / savepoint-rollback rejects and skips this) → flush once.
-        if (buffer.length > 0) enclosingSink(buffer)
+        // Isolated: the transaction has COMMITTED, so a capture/publish fault must not reject it (it degrades
+        // to a coarse ingest and is reported) — the caller's result stays exactly plain Drizzle's.
+        if (buffer.length > 0) emitSafely(enclosingSink, buffer)
         return result
       },
     )

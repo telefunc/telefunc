@@ -1,4 +1,4 @@
-export { captureMutation }
+export { captureMutation, emitSafely }
 export type { CaptureSink }
 
 import { type Column, SQL, type Table, getTableColumns, getTableName, is, isTable } from 'drizzle-orm'
@@ -81,14 +81,15 @@ async function runWrite(
 
   if (plan.mode === 'coarse') {
     const result = await runBase(builder, executeArgs) // run the caller's write untouched
-    sink([{ table: tableName, kind: 'coarse' }]) // fail-closed: over-invalidate the table, never guess a row
+    emitSafely(sink, [{ table: tableName, kind: 'coarse' }]) // fail-closed: over-invalidate, never guess
     return result
   }
 
   if (plan.callerReturning) {
     // The caller asked for rows — run their write, and capture only if the rows carry the FULL image.
     const rows = (await runBase(builder, executeArgs)) as Row[]
-    sink(coversAllColumns(rows, plan.columns) ? changesOf(op, tableName, rows, plan.pk) : [coarse(tableName)])
+    const changes = coversAllColumns(rows, plan.columns) ? changesOf(op, tableName, rows, plan.pk) : [coarse(tableName)]
+    emitSafely(sink, changes)
     return rows
   }
 
@@ -96,8 +97,39 @@ async function runWrite(
   // driver result reconstructed from it (verified faithful for this driver).
   const full = (builder as { returning: () => unknown }).returning()
   const rows = (await runBase(full, executeArgs)) as Row[]
-  sink(changesOf(op, tableName, rows, plan.pk))
+  emitSafely(sink, changesOf(op, tableName, rows, plan.pk))
   return plan.reconstruct(rows)
+}
+
+// ── capture-fault isolation ─────────────────────────────────────────
+
+/** Emit captured changes WITHOUT ever failing the caller's write. By the time we get here the DATABASE HAS
+ *  ALREADY COMMITTED, so a sink/router/transport fault must never turn a committed write into a caller-visible
+ *  rejection — the caller's result and failure behaviour stay exactly plain Drizzle's. A precise feed that
+ *  throws part-way is retried ONCE as a single coarse marker, so the graphs end up soundly over-fired rather
+ *  than half-applied; if even that fails the fault is reported and dropped (live queries on the table may be
+ *  stale until the next write, which is the honest degradation). */
+function emitSafely(sink: CaptureSink, changes: TableChange[]): void {
+  try {
+    sink(changes)
+  } catch (error) {
+    const tables = [...new Set(changes.map((change) => change.table))]
+    reportCaptureFault(error, tables.join(', '))
+    if (changes.every((change) => change.kind === 'coarse')) return // the coarse fallback itself failed
+    try {
+      sink(tables.map(coarse)) // degrade: coarsen EVERY touched table rather than leave a feed half-applied
+    } catch (fallbackError) {
+      reportCaptureFault(fallbackError, tables.join(', '))
+    }
+  }
+}
+
+/** The diagnostics seam for a contained capture fault. */
+function reportCaptureFault(error: unknown, tableName: string): void {
+  console.error(
+    `[telefunc] live write-capture failed for table "${tableName}". The write COMMITTED and its result is unaffected; live queries on this table may be stale until the next write.`,
+    error,
+  )
 }
 
 // ── capture planning ────────────────────────────────────────────────
