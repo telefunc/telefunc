@@ -27,6 +27,7 @@ import { extractQueryShape } from '../extract/queryShape.js'
 import type { QueryShape } from '../ir/types.js'
 import type { ReadToken } from '../graph/registry.js'
 import { registryFor } from './dbRuntime.js'
+import { ensureSubscribed } from './writeTransport.js'
 
 /** A read token minted for a db.live handle in the current request, tracked on the carrier so the
  *  request's finally-sweep can release it if the handle is never serialized (never activated). The
@@ -69,6 +70,10 @@ function wrapLiveSelect(baseBuilder: unknown, carrier: ReadCarrier, db: object):
 async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: object): Promise<Live<Row[]>> {
   const dialect = dialectOf(db)
   const shape = extractQueryShape(builder, { dialect })
+  // Subscribe this db to the read's tables' topics so a write on ANOTHER instance reaches this graph. (The
+  // db-scoped readiness barrier — proving the subscription is listening before the read is admitted — is a
+  // later slice; here it is established at read acquisition.)
+  ensureSubscribed(db, shape.tables)
   const env = {
     dialect,
     semanticEnvironmentKey: await semanticEnvironmentKeyOf(db),

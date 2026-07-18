@@ -2,6 +2,7 @@ export { registryFor, ingestWrite }
 
 import { type Registry, createRegistry } from '../graph/registry.js'
 import type { ChangeBatch } from '../router/events.js'
+import { publishBatch } from './writeTransport.js'
 
 // The db-scoped reactive runtime: ONE registry per db instance owns BOTH paths — reads acquire graphs
 // from it (`registryFor(db).acquire(...)`), and captured writes feed those same graphs through it
@@ -24,9 +25,12 @@ function registryFor(db: object): Registry {
   return registry
 }
 
-/** Feed a captured write batch into the db-scoped graphs — the router fans each `TableChange` to the
- *  graphs watching that table (or coarsens them for a `kind:'coarse'` change), invalidating exactly the
- *  live reads the write affects. The production caller for `router.ingest`. */
+/** Feed a captured write batch into the db-scoped graphs AND broadcast it cross-instance. The router fans
+ *  each `TableChange` to the local graphs watching that table (or coarsens them for a `kind:'coarse'`
+ *  change) — the DIRECT local feed, invalidating exactly the live reads this write affects. Then the batch
+ *  is published to each touched table's topic so OTHER instances feed it into their own graphs; the local
+ *  instance drops its own round-trip (see writeTransport dedupe), so there is no double-apply. */
 function ingestWrite(db: object, batch: ChangeBatch): void {
   registryFor(db).router.ingest(batch)
+  publishBatch(batch)
 }
