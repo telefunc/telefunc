@@ -1,4 +1,4 @@
-export { captureMutation, emitSafely, captureRawSql, planCapture }
+export { captureMutation, emitSafely, captureRawSql, planCapture, captureMismatch }
 export type { CaptureSink }
 
 import { type Column, SQL, type Table, getTableColumns, is, isTable } from 'drizzle-orm'
@@ -135,8 +135,7 @@ function directChanges(result: unknown, builder: object, table: Table, op: Op, d
   const relationId = relationKeyOf(table)
   const plan = planCapture(builder, table, op, db)
   if (plan.mode === 'precise' && plan.callerReturning && Array.isArray(result)) {
-    const rows = result as Row[]
-    if (coversAllColumns(rows, plan.columns)) return changesOf(op, relationId, rows, plan.pk)
+    return captureOrCoarse(op, relationId, result as Row[], plan)
   }
   return [coarse(relationId)]
 }
@@ -226,18 +225,17 @@ async function runWrite(
   if (plan.callerReturning) {
     // The caller asked for rows — run their write, and capture only if the rows carry the FULL image.
     const rows = (await runBase(builder, executeArgs)) as Row[]
-    const changes = coversAllColumns(rows, plan.columns)
-      ? changesOf(op, relationId, rows, plan.pk)
-      : [coarse(relationId)]
-    emitSafely(sink, changes)
+    emitSafely(sink, captureOrCoarse(op, relationId, rows, plan))
     return rows
   }
 
   // No caller `.returning()`: run a HIDDEN full-row returning to capture, and hand the caller back the plain
-  // driver result reconstructed from it (verified faithful for this driver).
+  // driver result reconstructed from it (verified faithful for this driver). The hidden RETURNING is
+  // expected to yield full rows, but that is still VERIFIED rather than trusted — this path used to build
+  // changes unchecked, so a driver returning a narrowed row would have emitted a partial image as precise.
   const full = (builder as { returning: () => unknown }).returning()
   const rows = (await runBase(full, executeArgs)) as Row[]
-  emitSafely(sink, changesOf(op, relationId, rows, plan.pk))
+  emitSafely(sink, captureOrCoarse(op, relationId, rows, plan))
   return plan.reconstruct(rows)
 }
 
@@ -275,16 +273,18 @@ function reportCaptureFault(error: unknown, relationId: string): void {
 
 // ── capture planning ────────────────────────────────────────────────
 
+/** What a precise plan carries into capture: the PK fields a retraction is keyed by, and the columns a
+ *  full image must contain. */
+type PrecisePlan = { pk: string[]; columns: string[] }
+
 type Plan =
   | { mode: 'coarse' }
-  | { mode: 'precise'; callerReturning: true; pk: string[]; columns: string[] }
-  | {
+  | ({ mode: 'precise'; callerReturning: true } & PrecisePlan)
+  | ({
       mode: 'precise'
       callerReturning: false
-      pk: string[]
-      columns: string[]
       reconstruct: (rows: Row[]) => unknown
-    }
+    } & PrecisePlan)
 
 /** Decide precise vs coarse for one write — every ambiguity fails closed to coarse. */
 function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
@@ -320,6 +320,50 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
 
 // ── change construction ─────────────────────────────────────────────
 
+/** Why a captured row set cannot be trusted as a full, identifiable image. `undefined` = it can. */
+type CaptureMismatch = { rowIndex: number; reason: 'missing-columns' | 'missing-key'; detail: string } | undefined
+
+/** THE CAPTURE OBSERVATION SEAM — the last check between a captured row set and precise change events.
+ *
+ *  Exported so the mismatch decision is independently observable: it is the one place a shape/identity
+ *  disagreement is caught, and it has to be assertable without contriving a driver that returns malformed
+ *  rows. A mismatch fails CLOSED (one coarse marker) — never a fabricated row or a key of `undefined`s.
+ *
+ *  Checks EVERY row, not just the first: a partial projection or a driver quirk can widen the first row and
+ *  narrow a later one, and `changesOf` would then emit a change whose `new` silently lacks columns.
+ *
+ *  What is deliberately NOT claimed here: a row-COUNT cross-check. On both RETURNING paths the only
+ *  affected-row count available (`reconstruct`'s `affectedRows`) is DERIVED from these same rows, so there
+ *  is no independent oracle to disagree with — a "count check" against it could never fail. Where an
+ *  independent count does exist (a SQLite direct terminal's `changes`) the write already fails closed to
+ *  coarse for other reasons. Asserting a check that cannot fail would be verification theatre. */
+function captureMismatch(rows: Row[], columns: string[], pk: string[], op: Op): CaptureMismatch {
+  for (const [rowIndex, row] of rows.entries()) {
+    const missing = columns.filter((column) => !(column in row))
+    if (missing.length > 0) return { rowIndex, reason: 'missing-columns', detail: missing.join(', ') }
+    // A retraction is keyed by PK, so an absent or NULL key value would key it to nothing. Inserts carry the
+    // whole row and need no key.
+    if (op === 'insert') continue
+    const unkeyed = pk.filter((field) => row[field] === undefined || row[field] === null)
+    if (unkeyed.length > 0) return { rowIndex, reason: 'missing-key', detail: unkeyed.join(', ') }
+  }
+  return undefined
+}
+
+/** Precise changes when the captured rows are a trustworthy full image, else ONE coarse marker. */
+function captureOrCoarse(op: Op, relationId: string, rows: Row[], plan: PrecisePlan): TableChange[] {
+  const mismatch = captureMismatch(rows, plan.columns, plan.pk, op)
+  if (!mismatch) return changesOf(op, relationId, rows, plan.pk)
+  reportCaptureMismatch(relationId, mismatch)
+  return [coarse(relationId)]
+}
+
+function reportCaptureMismatch(relationId: string, mismatch: NonNullable<CaptureMismatch>): void {
+  console.error(
+    `[telefunc] live write-capture fell back to COARSE for table "${describeRelationId(relationId)}": captured row ${mismatch.rowIndex} has ${mismatch.reason} (${mismatch.detail}). The write is unaffected; live queries on this table over-invalidate rather than receive a partial row.`,
+  )
+}
+
 function changesOf(op: Op, table: string, rows: Row[], pk: string[]): TableChange[] {
   return rows.map((row) => {
     if (op === 'insert') return { table, kind: 'insert', new: row }
@@ -335,11 +379,6 @@ function keyOf(row: Row, pk: string[]): Row {
 }
 
 const coarse = (table: string): TableChange => ({ table, kind: 'coarse' })
-
-/** Whether the returned rows carry every column (a full image). Zero rows = nothing to capture (precise). */
-function coversAllColumns(rows: Row[], columns: string[]): boolean {
-  return rows.length === 0 || columns.every((c) => c in rows[0]!)
-}
 
 // ── builder introspection (version-brittle, guarded — mirrors drizzleShape.ts) ───────────────────────
 
