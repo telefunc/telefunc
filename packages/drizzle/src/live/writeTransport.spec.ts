@@ -33,18 +33,21 @@ vi.mock('./dbRuntime.js', () => ({
 
 import { type ChangeTransport, createInMemoryChangeTransport, setChangeTransport } from './changeTransport.js'
 import { registryFor } from './dbRuntime.js'
-import { CHANGE_TOPIC, ensureSubscribed, publishBatch, publishCoarseAll } from './writeTransport.js'
+import { CHANGE_TOPIC, acquireSubscription, publishBatch, publishCoarseAll } from './writeTransport.js'
 
 /** A minimal registered graph — only its `tables` matter to watchedTables(). */
 const watching = (table: string) => ({ tables: [table] }) as never
 
 const change = (table: string): TableChange => ({ table, kind: 'insert', new: { id: 1 } })
 
-/** A fresh db + its own injected transport per test → no cross-test subscriber leakage. */
-function freshDb() {
+/** A fresh db + its own injected transport per test → no cross-test subscriber leakage. The ref that
+ *  acquireSubscription returns is deliberately kept for the test's lifetime: these tests are about what a
+ *  SUBSCRIBED db does, and the lifecycle that drops the subscription has its own spec. */
+async function freshDb() {
   const db = {}
   const transport = createInMemoryChangeTransport()
   setChangeTransport(db, transport)
+  await acquireSubscription(db)
   return { db, transport }
 }
 
@@ -55,8 +58,8 @@ async function twoInstances() {
   const dbB = {}
   setChangeTransport(dbA, transport)
   setChangeTransport(dbB, transport)
-  await ensureSubscribed(dbA)
-  await ensureSubscribed(dbB)
+  await acquireSubscription(dbA)
+  await acquireSubscription(dbB)
   return { transport, dbA, dbB }
 }
 
@@ -88,8 +91,7 @@ describe('write transport — one topic, one publication per batch', () => {
   })
 
   it('a LOCAL write is NOT double-applied: its own echo is dropped by origin', async () => {
-    const { db } = freshDb()
-    await ensureSubscribed(db)
+    const { db } = await freshDb()
     // The batch carries the publishing db's `origin`, so its own subscription drops the round-trip; its
     // graphs were already fed directly in ingestWrite.
     publishBatch(db, { changes: [change('users')] })
@@ -97,8 +99,7 @@ describe('write transport — one topic, one publication per batch', () => {
   })
 
   it('an empty batch publishes nothing', async () => {
-    const { db, transport } = freshDb()
-    await ensureSubscribed(db)
+    const { db, transport } = await freshDb()
     const wire = await wireTap(transport)
     publishBatch(db, { changes: [] })
     expect(wire).toEqual([])
@@ -147,8 +148,7 @@ describe('write transport — coarse-all rides the SAME topic', () => {
   })
 
   it('a db does NOT coarsen itself from its own announcement (origin self-suppression)', async () => {
-    const { db } = freshDb()
-    await ensureSubscribed(db)
+    const { db } = await freshDb()
     registryFor(db).router.register(watching('users'))
     publishCoarseAll(db) // its own graphs were already fed directly by the local coarse batch
     expect(engine.ingest).not.toHaveBeenCalled()
@@ -163,8 +163,7 @@ describe('write transport — coarse-all rides the SAME topic', () => {
 
 describe('write transport — a payload that cannot be trusted is never guessed at', () => {
   it('an UNDECODABLE payload coarsens the watched tables instead of reaching precise ingest', async () => {
-    const { db, transport } = freshDb()
-    await ensureSubscribed(db)
+    const { db, transport } = await freshDb()
     registryFor(db).router.register(watching('users'))
     const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
 
@@ -199,7 +198,7 @@ describe('write transport — an async publish failure never reaches the committ
       subscribe: async () => ({ unsubscribe() {} }),
     }
     setChangeTransport(db, rejecting)
-    await ensureSubscribed(db)
+    await acquireSubscription(db)
     const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
     const unhandled = vi.fn()
     process.on('unhandledRejection', unhandled)
@@ -223,7 +222,7 @@ describe('write transport — an async publish failure never reaches the committ
       subscribe: async () => ({ unsubscribe() {} }),
     }
     setChangeTransport(db, throwing)
-    await ensureSubscribed(db)
+    await acquireSubscription(db)
     const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     expect(() => publishBatch(db, { changes: [change('users')] })).not.toThrow()

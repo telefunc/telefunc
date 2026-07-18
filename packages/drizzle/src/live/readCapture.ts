@@ -28,13 +28,15 @@ import { parseRelationId } from '../ir/relation.js'
 import type { QueryShape } from '../ir/types.js'
 import type { ReadToken } from '../graph/registry.js'
 import { registryFor } from './dbRuntime.js'
-import { ensureSubscribed } from './writeTransport.js'
+import { acquireSubscription, type SubscriptionRef } from './writeTransport.js'
 
 /** A read token minted for a db.live handle in the current request, tracked on the carrier so the
  *  request's finally-sweep can release it if the handle is never serialized (never activated). The
  *  handle's serialize-time `activate` flips `redeemed`, so an activated token is skipped by the sweep
- *  (its lease is owned by the wire channel and released on close). */
-type MintedToken = { token: ReadToken; redeemed: boolean }
+ *  (its lease is owned by the wire channel and released on close). It carries the read's ref on the db's
+ *  change subscription too — the two have exactly the same owner at every moment, so they travel together
+ *  from token to lease and are dropped by whichever of them ends the read. */
+type MintedToken = { token: ReadToken; redeemed: boolean; subscription: SubscriptionRef }
 
 /** What the per-request DbLiveCarrier carries: `wrapLiveSelect` pushes here, `disposeUnredeemedReads`
  *  reads here. */
@@ -71,55 +73,69 @@ function wrapLiveSelect(baseBuilder: unknown, carrier: ReadCarrier, db: object):
 async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: object): Promise<Live<Row[]>> {
   const dialect = dialectOf(db)
   const shape = extractQueryShape(builder, { dialect })
-  // READINESS BARRIER: subscribe this db to its change topic AND await proof the subscription is LISTENING
-  // — before both the graph hydrate (registry.acquire) and the snapshot read below. This closes the window
-  // where a write on another instance, landing between our read and a not-yet-listening subscription, would
-  // be missed. Fails the read closed if it can't be proven listening. Only live reads reach here — a plain
-  // awaited builder or a non-Live telefunction never subscribes. The subscription is per-DB, not per-table:
-  // one topic carries every change and the router filters locally.
-  await ensureSubscribed(db)
-  const env = {
-    dialect,
-    semanticEnvironmentKey: await semanticEnvironmentKeyOf(db),
-    schemaFingerprint: schemaFingerprint(tableObjectsOf(builder)),
+  // READINESS BARRIER: take this read's ref on the db's change subscription AND await the transport's
+  // admission of it — before both the graph hydrate (registry.acquire) and the snapshot read below. This
+  // closes the window where a write on another instance, landing between our read and a not-yet-established
+  // subscription, would be missed. Fails the read closed if the transport refuses. Only live reads reach
+  // here — a plain awaited builder or a non-Live telefunction never subscribes. The subscription is per-DB,
+  // not per-table: one topic carries every change and the router filters locally.
+  const subscription = await acquireSubscription(db)
+  // Held until the carrier owns it below. EVERY way out of the read between here and there — a failed
+  // environment probe, compile, hydrate — has to give the ref back, or a db stays subscribed for a live
+  // query that never existed.
+  let owned = false
+  try {
+    const env = {
+      dialect,
+      semanticEnvironmentKey: await semanticEnvironmentKeyOf(db),
+      schemaFingerprint: schemaFingerprint(tableObjectsOf(builder)),
+    }
+    const { instanceKey } = identityOf(builder, env)
+    const rlsEnabled = await anyRlsEnabled(db, shape.tables)
+
+    // notify is set to forward to the (not-yet-created) Live; it is only ever CALLED at redeem-time or
+    // later (a graph invalidation), by which point `live` exists — an un-redeemed token is inert, so no
+    // fire reaches this before activation.
+    let live: LiveProducer<Row[]> | undefined
+    // Only the token is needed here — the graph drives invalidation through the `notify` callback below.
+    const { token } = await registryFor(db).acquire({
+      instanceKey,
+      tables: shape.tables,
+      rlsEnabled,
+      compilePlan: compilePlanFor(db, shape),
+      executor: hydrationExecutorOf(db),
+      notify: () => live?.invalidate(),
+    })
+
+    // OWN the token AND the subscription ref on the carrier IMMEDIATELY — BEFORE the fallible σ-read — so a
+    // rejecting read still leaves a sweepable (un-redeemed) entry: the request finally-sweep releases both
+    // → net-zero, no leak.
+    const entry: MintedToken = { token, redeemed: false, subscription }
+    carrier.mintedTokens.push(entry)
+    owned = true
+
+    const initialRows = (await builder) as Row[] // the initial result is a plain read; the graph signals staleness
+    live = getTelefuncHost().createLive<Row[]>(initialRows)
+    live.attachSource({
+      subscribe: () => {
+        // Serialize-time activation (SYNC): redeem the token — subscribe its notify to the graph's sink
+        // and replay the seqAtRead fence — and mark it activated so the finally-sweep skips it. The
+        // returned teardown releases the lease when the last owning channel closes, and with it the read's
+        // share of the db's subscription.
+        const lease = token.redeem()
+        entry.redeemed = true
+        return () => {
+          lease.release()
+          subscription.release()
+        }
+      },
+    })
+    // Just return the cell: it IS the `Live<Row[]>` the telefunction hands back, and the wire replacer
+    // serializes it. No `.client` re-type — the public type simply doesn't advertise the producer verbs.
+    return live
+  } finally {
+    if (!owned) subscription.release()
   }
-  const { instanceKey } = identityOf(builder, env)
-  const rlsEnabled = await anyRlsEnabled(db, shape.tables)
-
-  // notify is set to forward to the (not-yet-created) Live; it is only ever CALLED at redeem-time or
-  // later (a graph invalidation), by which point `live` exists — an un-redeemed token is inert, so no
-  // fire reaches this before activation.
-  let live: LiveProducer<Row[]> | undefined
-  // Only the token is needed here — the graph drives invalidation through the `notify` callback below.
-  const { token } = await registryFor(db).acquire({
-    instanceKey,
-    tables: shape.tables,
-    rlsEnabled,
-    compilePlan: compilePlanFor(db, shape),
-    executor: hydrationExecutorOf(db),
-    notify: () => live?.invalidate(),
-  })
-
-  // OWN the token on the carrier IMMEDIATELY — BEFORE the fallible σ-read — so a rejecting read still
-  // leaves a sweepable (un-redeemed) entry: the request finally-sweep releases it → net-zero, no leak.
-  const entry: MintedToken = { token, redeemed: false }
-  carrier.mintedTokens.push(entry)
-
-  const initialRows = (await builder) as Row[] // the initial result is a plain read; the graph signals staleness
-  live = getTelefuncHost().createLive<Row[]>(initialRows)
-  live.attachSource({
-    subscribe: () => {
-      // Serialize-time activation (SYNC): redeem the token — subscribe its notify to the graph's sink
-      // and replay the seqAtRead fence — and mark it activated so the finally-sweep skips it. The
-      // returned teardown releases the lease when the last owning channel closes.
-      const lease = token.redeem()
-      entry.redeemed = true
-      return () => lease.release()
-    },
-  })
-  // Just return the cell: it IS the `Live<Row[]>` the telefunction hands back, and the wire replacer
-  // serializes it. No `.client` re-type — the public type simply doesn't advertise the producer verbs.
-  return live
 }
 
 /** The plan compiler for one query, gated on session provability: a single-session connection (a
@@ -131,12 +147,14 @@ function compilePlanFor(db: object, shape: QueryShape): () => GraphPlan {
 }
 
 /** Release every read token the request minted but never activated (a handle that was created but
- *  never serialized). Idempotent: `token.release()` is a safe no-op path on an un-redeemed token, and
- *  activated tokens (`redeemed`) are skipped — their lease is channel-owned and released on close. */
+ *  never serialized), and with it that read's share of the db's change subscription. Idempotent:
+ *  `token.release()` is a safe no-op path on an un-redeemed token, and activated tokens (`redeemed`) are
+ *  skipped — their lease and subscription ref are channel-owned and released on close. */
 function disposeUnredeemedReads(carrier: ReadCarrier): void {
   for (const entry of carrier.mintedTokens) {
     if (entry.redeemed) continue
     entry.token.release()
+    entry.subscription.release()
   }
 }
 

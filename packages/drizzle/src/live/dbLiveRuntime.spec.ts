@@ -18,13 +18,15 @@ import type { DbLiveCarrier } from './reactiveDrizzle.js'
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
 type FakeToken = { release: () => void }
-type FakeEntry = { token: FakeToken; redeemed: boolean }
+type FakeRef = { release: () => void }
+type FakeEntry = { token: FakeToken; redeemed: boolean; subscription: FakeRef }
 
 // Hoisted engine state the mocked `wrapLiveSelect` + fake host write to — hoisted because the `vi.mock`
 // factories are lifted above the imports, so they must close over hoisted state. Reset per test.
 const engine = vi.hoisted(() => ({
   minted: [] as FakeEntry[],
   released: [] as FakeToken[],
+  unsubscribed: [] as FakeRef[],
   cleanups: [] as Array<() => void>,
 }))
 
@@ -63,7 +65,12 @@ vi.mock('./readCapture.js', async (importActual) => {
               engine.released.push(token)
             },
           }
-          const entry: FakeEntry = { token, redeemed: false }
+          const subscription: FakeRef = {
+            release: () => {
+              engine.unsubscribed.push(subscription)
+            },
+          }
+          const entry: FakeEntry = { token, redeemed: false, subscription }
           ;(carrier as unknown as { mintedTokens: FakeEntry[] }).mintedTokens.push(entry)
           engine.minted.push(entry)
           return { __fakeLive: true }
@@ -99,6 +106,7 @@ beforeEach(() => {
   engine.minted.length = 0
   engine.released.length = 0
   engine.cleanups.length = 0
+  engine.unsubscribed.length = 0
 })
 // Flush the sync-mode null timer scheduled by provideTelefuncContext so it never leaks into the next test.
 afterEach(async () => {
@@ -130,6 +138,9 @@ describe('db.live runtime — carrier lifecycle', () => {
     drain()
     expect(engine.released).toHaveLength(1)
     expect(engine.released[0]).toBe(engine.minted[0]!.token)
+    // …and with it the read's ref on the db's change subscription: an unserialized handle must not leave
+    // the db subscribed for a live query nobody is holding.
+    expect(engine.unsubscribed).toHaveLength(1)
   })
 
   it('sweep skips an ACTIVATED token: a serialized (redeemed) handle keeps its channel-owned lease', async () => {
@@ -144,6 +155,7 @@ describe('db.live runtime — carrier lifecycle', () => {
 
     drain()
     expect(engine.released).toHaveLength(0) // activated → skipped; its lease is channel-owned
+    expect(engine.unsubscribed).toHaveLength(0) // …as is its subscription ref
   })
 
   it('binding differential: terminal `.live()` mints a read token; a plain `await` of the same chain does not', async () => {

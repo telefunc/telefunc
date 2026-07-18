@@ -1,8 +1,9 @@
-export { publishBatch, publishCoarseAll, ensureSubscribed, CHANGE_TOPIC }
+export { publishBatch, publishCoarseAll, acquireSubscription, CHANGE_TOPIC }
+export type { SubscriptionRef }
 
 import { randomUUID } from 'node:crypto'
 import { registryFor } from './dbRuntime.js'
-import { transportFor } from './changeTransport.js'
+import { type ChangeSubscription, transportFor } from './changeTransport.js'
 import { CHANGE_CODEC_VERSION, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
 import type { ChangeBatch } from '../router/events.js'
 
@@ -29,7 +30,7 @@ import type { ChangeBatch } from '../router/events.js'
 // traffic ever makes per-table filtering worth its price again, it returns as a versioned, additive
 // transport capability — not as a baseline the runtime has to compensate for.
 //
-// READINESS BARRIER (ensureSubscribed): a live read is not admitted until this db's subscription is
+// READINESS BARRIER (acquireSubscription): a live read is not admitted until this db's subscription is
 // ADMITTED by the transport — which is exactly what awaiting `subscribe()` means (changeTransport.ts). The
 // readiness question is a CONTROL-PLANE one, so it is asked on the control plane: an earlier design proved
 // it on the data plane instead, by publishing a unique token and awaiting it back on a bounded retry pump.
@@ -37,6 +38,12 @@ import type { ChangeBatch } from '../router/events.js'
 // proved nothing about the cluster — a Redis namespace isolated from every other instance loops its own
 // probe back happily. What the read actually needs is the transport's own assertion that publications made
 // from now on can be observed; a rejected (or never-resolving) subscribe fails the read CLOSED.
+//
+// LIFETIME: the subscription is REFCOUNTED against the same ownership the graph registry already uses — a
+// read token holds a ref from before `registry.acquire` until it redeems into a channel lease, and the last
+// lease to close drops it. At zero the listener is detached, so a db nobody is reading live is no longer
+// pinned by a callback closing over it. Previously the first live read subscribed a db for the lifetime of
+// the process.
 
 /** The one change topic for a logical database. Every runtime sharing a changeTransport exchanges changes
  *  on it; scoping several logical databases onto one transport is the adapter's namespacing concern. */
@@ -102,30 +109,89 @@ function reportPublishFailure(error: unknown): void {
   )
 }
 
-/** One readiness promise per db. Subscribes ONCE (the subscription lives for the db, receiving future
- *  batches) and resolves when the transport admits it; later reads await the same already-resolved
- *  promise. Keyed by db, though the live subscription itself pins the db — refcounted teardown lands with
- *  the lifecycle slice. */
-const readiness = new WeakMap<object, Promise<void>>()
+/** One owner's hold on this db's change subscription. Released when that owner is done — the read token it
+ *  was minted for, or the channel lease that token redeemed into. */
+type SubscriptionRef = { release(): void }
 
-/** Subscribe this db to the change topic and resolve once the transport has ADMITTED the subscription
- *  (idempotent per db). A live read awaits this before its snapshot read, so a write on another instance
- *  can never land in the window between the read and a not-yet-established subscription. Rejects (fails the
- *  read closed) if the transport refuses the subscription. */
-function ensureSubscribed(db: object): Promise<void> {
-  let ready = readiness.get(db)
-  if (!ready) {
-    ready = transportFor(db)
-      .subscribe(CHANGE_TOPIC, (payload) => receive(db, payload))
-      .then(() => undefined)
-    readiness.set(db, ready)
-    // Evict a FAILED readiness so a later read re-attempts — a transient transport hiccup must not
-    // permanently wedge live reads for this db.
-    ready.catch(() => {
-      if (readiness.get(db) === ready) readiness.delete(db)
-    })
+/** What the runtime knows about a db's presence on the change topic: how many owners want it, the live
+ *  handle if there is one, and the chain that serializes every transition between those two facts. */
+type SubscriptionState = {
+  refs: number
+  active: ChangeSubscription | undefined
+  transition: Promise<void>
+}
+
+const subscriptions = new WeakMap<object, SubscriptionState>()
+
+function stateFor(db: object): SubscriptionState {
+  let state = subscriptions.get(db)
+  if (!state) subscriptions.set(db, (state = { refs: 0, active: undefined, transition: Promise.resolve() }))
+  return state
+}
+
+/** Take a ref on this db's change subscription, resolving once the transport has ADMITTED it. A live read
+ *  awaits this before both `registry.acquire` and its snapshot read, so a write on another instance can
+ *  never land in the window between the read and a not-yet-established subscription; a transport that
+ *  refuses fails the read CLOSED (and leaves nothing cached, so the next read retries).
+ *
+ *  Concurrent reads share ONE underlying subscription and hold a ref each. `release()` is idempotent, and
+ *  EVERY path a read can leave by must call it — never serialized, compile/hydrate failure, snapshot
+ *  failure, lease closed — or the db stays subscribed with nobody reading it. */
+async function acquireSubscription(db: object): Promise<SubscriptionRef> {
+  const state = stateFor(db)
+  state.refs++
+  let released = false
+  const ref: SubscriptionRef = {
+    release() {
+      if (released) return // idempotent: releasing twice must not drop somebody else's ref
+      released = true
+      state.refs--
+      // Teardown is nobody's read to fail: a transport that cannot detach is reported, not thrown at a
+      // caller who has already finished with its live query.
+      reconcile(db, state).catch(reportUnsubscribeFailure)
+    },
   }
-  return ready
+  try {
+    await reconcile(db, state)
+  } catch (error) {
+    ref.release()
+    throw error
+  }
+  return ref
+}
+
+/** Drive the transport toward the current refcount. Every transition is chained onto the previous one, and
+ *  that chaining is the whole point: a re-subscribe can never start before the unsubscribe it follows has
+ *  detached, so an old callback and a new one never both receive the same batch — which for a precise row
+ *  delta would be a double-apply, not a harmless duplicate. */
+function reconcile(db: object, state: SubscriptionState): Promise<void> {
+  const next = state.transition.then(
+    () => step(db, state),
+    () => step(db, state), // one failed transition must not wedge the chain behind it
+  )
+  state.transition = next
+  return next
+}
+
+/** One transition toward the desired state. Anything that changed the refcount during an await has already
+ *  queued its own step behind this one, so a single reconciliation per call is enough. */
+async function step(db: object, state: SubscriptionState): Promise<void> {
+  if (state.refs > 0 && !state.active) {
+    state.active = await transportFor(db).subscribe(CHANGE_TOPIC, (payload) => receive(db, payload))
+    return
+  }
+  if (state.refs === 0 && state.active) {
+    const active = state.active
+    state.active = undefined // `active` means a subscription we intend to keep; from here we are letting go of it
+    await active.unsubscribe()
+  }
+}
+
+function reportUnsubscribeFailure(error: unknown): void {
+  console.error(
+    '[telefunc] live: detaching the change subscription failed. Nothing is stale as a result; the runtime will subscribe again for the next live read.',
+    error,
+  )
 }
 
 /** One delivered payload. Decodes, drops our own echo, and feeds the rest into this db's graphs. */

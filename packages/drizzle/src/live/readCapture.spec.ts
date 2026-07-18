@@ -104,18 +104,22 @@ describe('wrapLiveSelect — builder → IR → compile → acquire (eager hydra
 // ── the finally-sweep ───────────────────────────────────────────────
 
 describe('disposeUnredeemedReads — the request finally-sweep', () => {
-  it('releases only UN-redeemed tokens (activated ones are channel-owned and skipped)', () => {
+  it('releases only UN-redeemed tokens — and each one’s subscription ref with it', () => {
     const releaseA = vi.fn()
     const releaseB = vi.fn()
+    const subscriptionA = { release: vi.fn() }
+    const subscriptionB = { release: vi.fn() }
     const carrier: ReadCarrier = {
       mintedTokens: [
-        { token: { release: releaseA } as unknown as ReadToken, redeemed: false },
-        { token: { release: releaseB } as unknown as ReadToken, redeemed: true },
+        { token: { release: releaseA } as unknown as ReadToken, redeemed: false, subscription: subscriptionA },
+        { token: { release: releaseB } as unknown as ReadToken, redeemed: true, subscription: subscriptionB },
       ],
     }
     disposeUnredeemedReads(carrier)
     expect(releaseA).toHaveBeenCalledTimes(1) // never serialized → released (net-zero)
+    expect(subscriptionA.release).toHaveBeenCalledTimes(1) // …and it stops wanting the db subscribed
     expect(releaseB).not.toHaveBeenCalled() // activated → its lease is owned by the wire channel
+    expect(subscriptionB.release).not.toHaveBeenCalled() // …as is its subscription ref
   })
 
   it('a never-serialized real handle is disposed by the sweep (net-zero, no leak)', async () => {
