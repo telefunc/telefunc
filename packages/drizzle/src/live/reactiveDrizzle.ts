@@ -25,7 +25,8 @@ import type {
 } from 'drizzle-orm/mysql-core'
 import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/mysql-core/async/select'
 import type { Live } from 'telefunc'
-import { acquireCarrier, captureMutation } from './dbLiveRuntime.js'
+import { acquireCarrier } from './dbLiveRuntime.js'
+import { captureMutation } from './writeCapture.js'
 import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
 
 /** The driver-terminal surface an async select adds OVER the core query-builder select: the `QueryPromise`

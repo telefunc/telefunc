@@ -6,6 +6,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // `vi.mock` is hoisted above the imports below.
 vi.mock('./dbLiveRuntime.js', () => ({
   acquireCarrier: vi.fn(() => ({ __dbLiveCarrier: true })),
+}))
+vi.mock('./writeCapture.js', () => ({
   captureMutation: vi.fn((_op: unknown, baseMethod: unknown) => baseMethod),
 }))
 vi.mock('./readCapture.js', () => ({
@@ -13,7 +15,8 @@ vi.mock('./readCapture.js', () => ({
 }))
 
 import { reactiveDrizzle } from './reactiveDrizzle.js'
-import { acquireCarrier, captureMutation } from './dbLiveRuntime.js'
+import { acquireCarrier } from './dbLiveRuntime.js'
+import { captureMutation } from './writeCapture.js'
 import { wrapLiveSelect } from './readCapture.js'
 
 // These tests drive the proxy over FAKE dbs (the engine is mocked). reactiveDrizzle's real-db constraint
