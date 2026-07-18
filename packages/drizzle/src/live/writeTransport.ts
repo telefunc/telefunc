@@ -1,4 +1,4 @@
-export { publishBatch, publishCoarseAll, ensureSubscribed, batchTopic, WILDCARD_TABLE }
+export { publishBatch, publishCoarseAll, ensureSubscribed, batchTopic, WILDCARD_TABLE, appliedMarkerCount }
 
 import { randomUUID } from 'node:crypto'
 import { registryFor } from './dbRuntime.js'
@@ -63,11 +63,15 @@ assertUsage(
 // true. Ownership must not depend on mutable receiver state, so it now depends on nothing but arrival order.
 //
 // The marker is time-bounded, which is sound only against an EXPLICIT transport guarantee — see the
-// `MAX_FANOUT_SKEW_MS` clause on the ChangeTransport contract: all copies of one published batch reach a
-// given subscriber within that window, or the transport delivers none of them. So once the window has passed
-// no further copy can arrive, and expiring the marker cannot resurrect a duplicate. This is an ARGUED bound
-// tied to a stated contract, not a silent cap: the earlier count-bounded `seen` set had no such guarantee —
-// after 4,096 unrelated ids the original aged out and a delayed copy applied twice.
+// `MAX_FANOUT_SKEW_MS` clause on the ChangeTransport contract: every copy arriving AFTER THE FIRST reaches a
+// given subscriber within that window of it. Once the window has passed no further copy can arrive, so
+// expiring the marker cannot resurrect a duplicate. Partial fan-out needs no guarantee at all — each copy
+// carries the WHOLE batch, so one is sufficient and the rest are pure duplicates.
+//
+// This is an ARGUED bound tied to a stated contract, not a silent cap: the earlier count-bounded `seen` set
+// had no such guarantee — after 4,096 unrelated ids the original aged out and a delayed copy applied twice.
+// The window is measured on a MONOTONIC clock, because a wall-clock step would expire a marker whose second
+// copy is still moments away in real time (see `monotonicNow`).
 
 /** The publishing identity of a db — stable for the db's lifetime, used to drop our own round-trip. */
 const dbIds = new WeakMap<object, string>()
@@ -77,30 +81,62 @@ function dbIdOf(db: object): string {
   return id
 }
 
-/** How far apart copies of ONE published batch may reach a given subscriber. The transport contract requires
- *  all copies within this window (or none delivered), so an APPLIED marker older than it can be forgotten
- *  without risking a duplicate application. The built-in default transport delivers synchronously inside the
- *  publish loop, so its real skew is zero; the window exists for transport-backed deployments. */
+/** How long after its FIRST copy a batch's marker is kept — the window the transport contract bounds
+ *  later copies by. The built-in default transport delivers synchronously inside the publish loop, so its
+ *  real skew is zero; the window exists for transport-backed deployments. */
 const MAX_FANOUT_SKEW_MS = 30_000
 
-/** Batch ids this db has already applied, with the time their marker may be forgotten. Keyed by db so a
- *  discarded db is collectable; bounded by the batches ARRIVING within one skew window, not by a fixed count. */
-const applied = new WeakMap<object, Map<string, number>>()
+/** Elapsed milliseconds on a MONOTONIC clock. Deliberately NOT `Date.now()`: the wall clock can step
+ *  (NTP correction, a VM resuming, an operator setting the time), and a forward step would expire a marker
+ *  whose second copy is still moments away in real time — applying the same precise batch twice. Only a
+ *  monotonic source makes "all entries share one TTL, so insertion order IS expiry order" actually true. */
+const monotonicNow = (): number => performance.now()
+
+/** A db's applied-batch markers plus the timer that sweeps them. Keyed by db so a discarded db is
+ *  collectable — note the sweep closure captures THIS STATE, never the db, or the timer would keep the db
+ *  alive and defeat the WeakMap. */
+type AppliedState = { markers: Map<string, number>; sweep?: ReturnType<typeof setTimeout> }
+const applied = new WeakMap<object, AppliedState>()
+
+/** Drop every marker whose window has passed. Entries share one TTL and the Map preserves insertion order,
+ *  so expiry order is insertion order: stop at the first live entry. */
+function pruneExpired(state: AppliedState, now: number): void {
+  for (const [id, expiresAt] of state.markers) {
+    if (expiresAt > now) break
+    state.markers.delete(id)
+  }
+}
+
+/** Keep "short-lived" literally true. Pruning only on the next admission would pin a burst of expired ids
+ *  for the db's lifetime if traffic then stopped, so a timer sweeps them out. One timer per db at a time,
+ *  rescheduled while markers remain, and `unref`'d so it never holds the process open. */
+function scheduleSweep(state: AppliedState): void {
+  if (state.sweep) return // a sweep is already pending; it reschedules itself while work remains
+  state.sweep = setTimeout(() => {
+    state.sweep = undefined
+    pruneExpired(state, monotonicNow())
+    if (state.markers.size > 0) scheduleSweep(state)
+  }, MAX_FANOUT_SKEW_MS)
+  state.sweep.unref?.()
+}
 
 /** Admit a batch copy for application — true for the FIRST copy this db sees, false for every later one.
  *  This is the whole cross-topic dedupe decision, and it reads no mutable subscription state. */
 function admitBatch(db: object, batchId: string): boolean {
-  let seen = applied.get(db)
-  if (!seen) applied.set(db, (seen = new Map()))
-  const now = Date.now()
-  // Entries share one TTL, so the Map's insertion order is expiry order: stop at the first live entry.
-  for (const [id, expiresAt] of seen) {
-    if (expiresAt > now) break
-    seen.delete(id)
-  }
-  if (seen.has(batchId)) return false
-  seen.set(batchId, now + MAX_FANOUT_SKEW_MS)
+  let state = applied.get(db)
+  if (!state) applied.set(db, (state = { markers: new Map() }))
+  const now = monotonicNow()
+  pruneExpired(state, now)
+  if (state.markers.has(batchId)) return false
+  state.markers.set(batchId, now + MAX_FANOUT_SKEW_MS)
+  scheduleSweep(state)
   return true
+}
+
+/** How many applied-batch markers this db currently holds. An OBSERVATION SEAM: the claim that markers are
+ *  short-lived is otherwise untestable, since nothing else makes their retention visible. */
+function appliedMarkerCount(db: object): number {
+  return applied.get(db)?.markers.size ?? 0
 }
 
 /** Publish a committed batch cross-instance over the db's changeTransport: one message per touched table's

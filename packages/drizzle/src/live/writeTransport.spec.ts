@@ -26,7 +26,10 @@ vi.mock('./dbRuntime.js', () => ({
 
 import { createInMemoryChangeTransport, setChangeTransport } from './changeTransport.js'
 import { registryFor } from './dbRuntime.js'
-import { batchTopic, ensureSubscribed, publishBatch, publishCoarseAll } from './writeTransport.js'
+import { appliedMarkerCount, batchTopic, ensureSubscribed, publishBatch, publishCoarseAll } from './writeTransport.js'
+
+/** Mirrors MAX_FANOUT_SKEW_MS — the marker window the sweep test advances past. */
+const MARKER_WINDOW_MS = 30_000
 
 /** A minimal registered graph — only its `tables` matter to watchedTables(). */
 const watching = (table: string) => ({ tables: [table] }) as never
@@ -194,6 +197,47 @@ describe('write transport — ownership cannot depend on mutable subscription st
     transport.publish(batchTopic('posts'), message) // the only copy that arrives — it must apply
     expect(engine.ingest).toHaveBeenCalledTimes(1)
     expect(engine.ingest).toHaveBeenCalledWith({ changes })
+  })
+
+  it('a WALL-CLOCK jump between two copies cannot expire the marker', async () => {
+    // The dedupe window is a real-time bound, so it must be measured on a MONOTONIC clock. With Date.now(),
+    // an NTP correction / VM resume / operator clock change that steps the wall clock past the window
+    // expires the marker while copy 2 is still moments away in real time — and the same precise batch
+    // applies twice. Here the wall clock leaps an hour between copies while real time barely moves.
+    const { db, transport } = freshDb()
+    const changes = [change('users'), change('posts')]
+    await ensureSubscribed(db, ['users', 'posts'])
+    const message = remoteBatch(changes)
+
+    transport.publish(batchTopic('users'), message) // copy 1 → applied, marker recorded
+
+    vi.useFakeTimers({ toFake: ['Date'] }) // fake ONLY the wall clock; performance.now() stays real
+    try {
+      vi.setSystemTime(new Date(Date.now() + 60 * 60 * 1000)) // an hour forward, instantly
+      transport.publish(batchTopic('posts'), message) // copy 2 → must still be suppressed
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(engine.ingest).toHaveBeenCalledTimes(1)
+  })
+
+  it('markers are swept on a timer, not only on the next admission', async () => {
+    // Pruning lazily means a burst followed by silence pins those ids for the db's lifetime — "short-lived"
+    // would not be true of a system that goes quiet, which is exactly when nothing triggers a prune.
+    const { db, transport } = freshDb()
+    await ensureSubscribed(db, ['users']) // the in-memory transport loops the probe back synchronously
+    vi.useFakeTimers()
+    try {
+      transport.publish(batchTopic('users'), remoteBatch([change('users')]))
+      expect(appliedMarkerCount(db)).toBe(1)
+
+      // No further traffic at all — only the passage of time may clear it.
+      await vi.advanceTimersByTimeAsync(MARKER_WINDOW_MS + 1_000)
+      expect(appliedMarkerCount(db)).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('a subscription added BETWEEN two copies of one batch cannot make the second apply again', async () => {

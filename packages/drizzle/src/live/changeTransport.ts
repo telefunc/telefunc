@@ -49,12 +49,17 @@ type ChangeMessage =
  *    the subscriber.
  *  - **Bounded fan-out skew (30s).** This layer publishes one batch to EACH touched table's topic, so a
  *    subscriber of several of them receives several copies and applies only the first (`writeTransport.ts`).
- *    The marker that suppresses the rest is remembered for a bounded window, so a transport MUST deliver ALL
- *    copies of one published batch to a given subscriber within **30 seconds** of the first, or deliver NONE
- *    of them. A transport that can strand one copy for longer would let it apply a second time, corrupting
- *    exact operator state. (Both the in-memory default — which delivers synchronously inside the publish
- *    loop, skew zero — and ordinary Redis pub/sub satisfy this comfortably; a store-and-forward queue with
- *    unbounded retry does NOT, and must collapse the fan-out itself.)
+ *    The marker that suppresses the rest is remembered for a bounded window, so a transport MUST deliver
+ *    every copy that arrives AFTER THE FIRST within **30 seconds** of that first one. A copy stranded for
+ *    longer would find the marker gone and apply the same precise batch a second time, corrupting exact
+ *    operator state.
+ *
+ *    Note what is NOT required: delivering all copies, or none. A PARTIAL fan-out is safe — every copy
+ *    carries the WHOLE batch, so one arriving copy is sufficient and any others are pure duplicates. That
+ *    matters in practice: a publisher that dies between per-topic publishes leaves a subset delivered, which
+ *    is fine. (The in-memory default delivers synchronously inside the publish loop, skew zero; ordinary
+ *    Redis pub/sub satisfies this comfortably. A store-and-forward queue with unbounded retry does NOT, and
+ *    must collapse the fan-out itself.)
  *  - **Structure preservation.** Change rows carry ordinary SQL values — BigInt, Date, byte arrays, NULL,
  *    composite keys — so a serializing transport MUST round-trip these faithfully (plain `JSON` does not:
  *    it throws on BigInt and drops Date/byte types). The in-memory default delivers by reference (same
