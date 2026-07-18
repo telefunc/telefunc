@@ -1,7 +1,7 @@
 export { reactiveDrizzle }
 export type { Reactive, DbLiveCarrier }
 
-import type { Assume, ColumnsSelection, QueryPromise } from 'drizzle-orm'
+import type { Assume, ColumnsSelection } from 'drizzle-orm'
 import type { JoinNullability, SelectMode } from 'drizzle-orm/query-builders/select.types'
 import type {
   PgSelectBase,
@@ -9,21 +9,33 @@ import type {
   PgSelectHKTBase,
   SelectedFields as PgSelectedFields,
 } from 'drizzle-orm/pg-core'
+import type { PgAsyncSelectBase, PgAsyncSelectBuilder } from 'drizzle-orm/pg-core/async/select'
 import type {
   SQLiteSelectBase,
   SQLiteSelectBuilder,
   SQLiteSelectHKTBase,
   SelectedFields as SQLiteSelectedFields,
 } from 'drizzle-orm/sqlite-core'
+import type { SQLiteAsyncSelectBase, SQLiteAsyncSelectBuilder } from 'drizzle-orm/sqlite-core/async/select'
 import type {
   MySqlSelectBase,
   MySqlSelectBuilder,
   MySqlSelectHKTBase,
   SelectedFields as MySqlSelectedFields,
 } from 'drizzle-orm/mysql-core'
+import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/mysql-core/async/select'
 import type { Live } from 'telefunc'
 import { acquireCarrier, captureMutation } from './dbLiveRuntime.js'
 import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
+
+/** The driver-terminal surface an async select adds OVER the core query-builder select: the `QueryPromise`
+ *  verbs (`then`/`catch`/`finally`/`execute`) plus `prepare` and each dialect's runners (SQLite
+ *  `all`/`get`/`run`/`values`, MySQL `iterator`). Picked as exactly the members the async base adds and no
+ *  more (`keyof async` minus `keyof core`), so intersecting it onto the reactive chain NEVER clashes with a
+ *  chain method — the reactive HKT keeps owning `from`/`where`/joins, and this only re-adds the terminals
+ *  the core builder lacks. This is what makes "everything except `.live()` is the ordinary async builder"
+ *  literally true, including `execute(placeholderValues)`. */
+type AsyncTerminals<TAsyncBase, TCoreBase> = Pick<TAsyncBase, Exclude<keyof TAsyncBase, keyof TCoreBase>>
 
 // The reactive-db surface: the type transform, and the per-request proxy behind it.
 //
@@ -35,14 +47,16 @@ import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
 // ── Why the terminal `.live()` rides an HKT seam ──────────────────────────────────────────────────
 // Drizzle's select builders are parameterized by a Higher-Kinded Type (`PgSelectHKTBase` &c.) that it
 // threads through EVERY chain method (`from`/`where`/`innerJoin`/…): each step re-applies the HKT to
-// compute the next builder. We define a custom HKT (`PgReactiveSelectHKT` &c.) whose `_type` is the
-// stock `PgSelectBase` intersected with `{ live(): Promise<Live<TResult>> }`. Because Drizzle's own
-// generics keep doing all row/selection/nullability inference and our HKT only ADDS `live()`, the
-// terminal rides the entire chain with the exact row type intact — no member-remap, nothing to
-// collapse. `await`-ing the builder still yields plain rows (`QueryPromise<TResult>`); only `.live()`
-// crosses into `Live<TResult>`. This is the seam the earlier dotted-namespace transform lacked: a
-// conditional remap of Drizzle's generic `from`/`where` collapsed their type parameters to their
-// constraints and lost the row type; threading the HKT never remaps them.
+// compute the next builder. We define a custom HKT (`PgReactiveSelectHKT` &c.) whose `_type` is the stock
+// `PgSelectBase` (threaded with OUR HKT so the chain stays reactive), plus the async driver terminals
+// (`AsyncTerminals`: `execute(placeholderValues)`/`prepare`/the dialect runners), plus
+// `{ live(): Promise<Live<TResult>> }`. Because Drizzle's own generics keep doing all
+// row/selection/nullability inference and our HKT only ADDS `live()`, the terminal rides the entire chain
+// with the exact row type intact — no member-remap, nothing to collapse. `await`-ing the builder still
+// yields plain rows; `.live()` crosses into `Live<TResult>`; and everything else is the ordinary async
+// builder. This is the seam the earlier dotted-namespace transform lacked: a conditional remap of
+// Drizzle's generic `from`/`where` collapsed their type parameters to their constraints and lost the row
+// type; threading the HKT never remaps them.
 
 // ── PostgreSQL ────────────────────────────────────────────────────────────────────────────────────
 /** Our HKT node: identical to Drizzle's `PgSelectBase` at each chain step, but carrying `live()`. */
@@ -78,7 +92,29 @@ type PgReactiveSelect<
   TResult,
   TSelectedFields
 > &
-  QueryPromise<TResult> & { live(): Promise<Live<TResult>> }
+  AsyncTerminals<
+    PgAsyncSelectBase<
+      TTableName,
+      TSelection,
+      TSelectMode,
+      TNullabilityMap,
+      TDynamic,
+      TExcludedMethods,
+      TResult,
+      TSelectedFields
+    >,
+    PgSelectBase<
+      PgReactiveSelectHKT,
+      TTableName,
+      TSelection,
+      TSelectMode,
+      TNullabilityMap,
+      TDynamic,
+      TExcludedMethods,
+      TResult,
+      TSelectedFields
+    >
+  > & { live(): Promise<Live<TResult>> }
 type ReactivePgDb<TDb> = Omit<TDb, 'select'> & {
   select(): PgSelectBuilder<undefined, PgReactiveSelectHKT>
   select<TSelection extends PgSelectedFields>(fields: TSelection): PgSelectBuilder<TSelection, PgReactiveSelectHKT>
@@ -120,7 +156,32 @@ type SQLiteReactiveSelect<
   TResult,
   TSelectedFields
 > &
-  QueryPromise<TResult> & { live(): Promise<Live<TResult>> }
+  AsyncTerminals<
+    SQLiteAsyncSelectBase<
+      TTableName,
+      'async',
+      TRunResult,
+      TSelection,
+      TSelectMode,
+      TNullabilityMap,
+      TDynamic,
+      TExcludedMethods,
+      TResult,
+      TSelectedFields
+    >,
+    SQLiteSelectBase<
+      SQLiteReactiveSelectHKT,
+      TTableName,
+      TRunResult,
+      TSelection,
+      TSelectMode,
+      TNullabilityMap,
+      TDynamic,
+      TExcludedMethods,
+      TResult,
+      TSelectedFields
+    >
+  > & { live(): Promise<Live<TResult>> }
 type ReactiveSQLiteDb<TDb> = Omit<TDb, 'select'> & {
   select(): SQLiteSelectBuilder<undefined, unknown, SQLiteReactiveSelectHKT>
   select<TSelection extends SQLiteSelectedFields>(
@@ -161,7 +222,29 @@ type MySqlReactiveSelect<
   TResult,
   TSelectedFields
 > &
-  QueryPromise<TResult> & { live(): Promise<Live<TResult>> }
+  AsyncTerminals<
+    MySqlAsyncSelectBase<
+      TTableName,
+      TSelection,
+      TSelectMode,
+      TNullabilityMap,
+      TDynamic,
+      TExcludedMethods,
+      TResult,
+      TSelectedFields
+    >,
+    MySqlSelectBase<
+      MySqlReactiveSelectHKT,
+      TTableName,
+      TSelection,
+      TSelectMode,
+      TNullabilityMap,
+      TDynamic,
+      TExcludedMethods,
+      TResult,
+      TSelectedFields
+    >
+  > & { live(): Promise<Live<TResult>> }
 type ReactiveMySqlDb<TDb> = Omit<TDb, 'select'> & {
   select(): MySqlSelectBuilder<undefined, MySqlReactiveSelectHKT>
   select<TSelection extends MySqlSelectedFields>(
@@ -169,38 +252,52 @@ type ReactiveMySqlDb<TDb> = Omit<TDb, 'select'> & {
   ): MySqlSelectBuilder<TSelection, MySqlReactiveSelectHKT>
 }
 
-/** The reactive db: exactly `TDb` (every write/query surface preserved) with `select()` re-typed to
- *  build a terminal-`.live()` chain, dispatched by the db's dialect. Dialect is read structurally off
- *  the db's own `select()` return — the db base classes aren't exported, but the select BUILDERS are,
- *  and each dialect's builder is a distinct type (no cross-match). A non-drizzle object falls through
- *  to `TDb` unchanged. */
-type Reactive<TDb extends { select: (...args: any[]) => any }> = ReturnType<TDb['select']> extends PgSelectBuilder<
-  any,
-  any
->
+/** The databases reactive queries support: a real, executable Drizzle db or transaction whose `select()`
+ *  builds an ASYNC (awaitable, hydratable) query. A bare `QueryBuilder` — which type-checks a query but
+ *  has no session to run it against — is deliberately excluded: a live read has nothing to hydrate from,
+ *  so accepting one would type a `.live()` that could never resolve. */
+type ReactiveDatabase = {
+  select: (
+    ...args: any[]
+  ) => PgAsyncSelectBuilder<any> | MySqlAsyncSelectBuilder<any> | SQLiteAsyncSelectBuilder<any, any, any>
+}
+
+/** The reactive db: exactly `TDb` (every write/query surface preserved) with `select()` re-typed to build
+ *  a terminal-`.live()` chain, dispatched by the db's dialect. Dialect is read structurally off the db's
+ *  own async select BUILDER (the db base classes aren't exported, but the builders are, and each dialect's
+ *  is distinct — no cross-match). Scope: only chains from the reactive db's OWN `select()` are live — a
+ *  CTE-prefixed chain (`db.with(cte).select()…`) runs through Drizzle's ordinary `with()` facade, which is
+ *  neither wrapped nor re-typed, so `.live()` is intentionally absent there (see the `reactiveDrizzle` doc). */
+type Reactive<TDb extends ReactiveDatabase> = ReturnType<TDb['select']> extends PgAsyncSelectBuilder<any>
   ? ReactivePgDb<TDb>
-  : ReturnType<TDb['select']> extends MySqlSelectBuilder<any, any>
+  : ReturnType<TDb['select']> extends MySqlAsyncSelectBuilder<any>
     ? ReactiveMySqlDb<TDb>
-    : ReturnType<TDb['select']> extends SQLiteSelectBuilder<any, any, any>
+    : ReturnType<TDb['select']> extends SQLiteAsyncSelectBuilder<any, any, any>
       ? ReactiveSQLiteDb<TDb>
-      : TDb
+      : never
 
 /** Opaque per-request carrier, acquired eagerly. Here it is nothing but a brand: its concrete shape
  *  belongs to the runtime units, and this surface only threads it. */
 type DbLiveCarrier = { readonly __dbLiveCarrier: true }
 
 /**
- * Set up reactive queries for a Drizzle `db`. Call it at the TOP of a telefunction (before the body's
- * first await) to get a per-request reactive db: its `select()` builds an ordinary Drizzle query that
- * you can either `await` for plain rows or terminate with `.live()` to get a `Live<T[]>`. Writes
- * (`insert`/`update`/`delete`) and every other surface run as plain Drizzle, unchanged.
+ * Set up reactive queries for a Drizzle `db` (or transaction). Call it at the TOP of a telefunction
+ * (before the body's first await) to get a per-request reactive db: its `select()` builds an ordinary
+ * Drizzle query that you can either `await` for plain rows or terminate with `.live()` to get a
+ * `Live<T[]>`. Everything except `.live()` is the ordinary async builder — `execute`/`prepare` and the
+ * dialect runners are preserved. Writes (`insert`/`update`/`delete`) and every other surface run as plain
+ * Drizzle, unchanged.
  *
  * ```ts
  * const db = reactiveDrizzle(baseDb)
  * const todos = await db.select().from(todosTable).live() // Live<Todo[]>
  * ```
+ *
+ * Only chains that start from this db's own `select()` are reactive. A CTE-prefixed read
+ * (`db.with(cte).select()…`) goes through Drizzle's ordinary `with()` facade and is NOT reactive — it has
+ * no `.live()`. Lift the CTE into the select (a sub-query) if you need the result live.
  */
-function reactiveDrizzle<TDb extends { select: (...args: any[]) => any }>(baseDb: TDb): Reactive<TDb> {
+function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb): Reactive<TDb> {
   // Capture the per-request carrier NOW (context-bearing, before the body's first await). The returned
   // proxy closes over it, so `db.select()…live()` even post-await uses the CAPTURED carrier.
   const carrier = acquireCarrier()

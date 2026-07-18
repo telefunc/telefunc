@@ -16,6 +16,11 @@ import { reactiveDrizzle } from './reactiveDrizzle.js'
 import { acquireCarrier, captureMutation } from './dbLiveRuntime.js'
 import { wrapLiveSelect } from './readCapture.js'
 
+// These tests drive the proxy over FAKE dbs (the engine is mocked). reactiveDrizzle's real-db constraint
+// is a TYPE surface — proven against real Drizzle in the contract spec — so here we call through a cast
+// that lets a stub db past it; the runtime behaviour under test is unchanged.
+const reactive = (db: object) => reactiveDrizzle(db as never)
+
 // The runtime type contract (row types survive the terminal `.live()`, teeth) lives in the dedicated
 // HKT contract spec, exercised against REAL Drizzle builders — a hand-rolled db can't stand in for the
 // HKT seam. These tests own the PROXY behaviour: direct-return, select-wrapping, plain-field forwarding.
@@ -30,7 +35,7 @@ describe('reactiveDrizzle — client surface', () => {
 
   it('returns the proxied db DIRECTLY (no accessor), capturing the carrier once up front', () => {
     const base = { tag: 'base', select: () => ({}) }
-    const db = reactiveDrizzle(base)
+    const db = reactive(base)
     // The db itself — not a function you must call to acquire it. The old `()` accessor is gone.
     expect(typeof db).toBe('object')
     // The carrier is captured NOW (before the body's first await), not lazily per read.
@@ -39,14 +44,14 @@ describe('reactiveDrizzle — client surface', () => {
 
   it('plain fields forward untouched (observable-equivalence)', () => {
     const base = { tag: 'base', select: () => ({}) }
-    const db = reactiveDrizzle(base) as unknown as { tag: string }
+    const db = reactive(base) as unknown as { tag: string }
     expect(db.tag).toBe('base')
   })
 
   it('select() routes through the read-capture engine with this db’s own base builder + the carrier', () => {
     const baseBuilder = { from: () => ({}) }
     const base = { select: vi.fn(() => baseBuilder) }
-    const db = reactiveDrizzle(base) as unknown as { select: () => unknown }
+    const db = reactive(base) as unknown as { select: () => unknown }
 
     const built = db.select()
     expect(base.select).toHaveBeenCalledTimes(1)
@@ -68,7 +73,7 @@ describe('reactiveDrizzle — client surface', () => {
     }
     vi.mocked(wrapLiveSelect).mockReturnValue(liveBuilder)
     const base = { select: () => ({}) } // base builder: no `.live`
-    const db = reactiveDrizzle(base) as unknown as { select: () => typeof liveBuilder }
+    const db = reactive(base) as unknown as { select: () => typeof liveBuilder }
 
     const live = await db.select().from(0).live()
     expect(live).toEqual({ data: rows })
@@ -79,8 +84,23 @@ describe('reactiveDrizzle — client surface', () => {
   it('writes route through the mutation seam (plain today); the seam sees op + carrier', () => {
     const insert = vi.fn()
     const base = { select: () => ({}), insert }
-    const db = reactiveDrizzle(base) as unknown as { insert: unknown }
+    const db = reactive(base) as unknown as { insert: unknown }
     void db.insert // property access drives the proxy get
     expect(captureMutation).toHaveBeenCalledWith('insert', expect.any(Function), { __dbLiveCarrier: true })
+  })
+
+  it('CTE-prefixed reads are NOT reactive: with() is forwarded unwrapped, so its builders carry no .live()', () => {
+    // Only the proxy's OWN select() is wrapped. `with()` returns Drizzle's ordinary facade untouched, so
+    // its select builders never gain a terminal `.live()` — the runtime matches the type contract, which
+    // rejects `db.with(cte).select()…live()`.
+    const cteBuilder = { from: () => ({ where: () => ({}) }) }
+    const facade = { select: () => cteBuilder }
+    const base = { select: () => ({}), with: () => facade }
+    const db = reactive(base) as unknown as {
+      with: (cte: unknown) => { select: () => { from: (t: unknown) => Record<string, unknown> } }
+    }
+    const built = db.with('sq').select().from('sq')
+    expect(built.live).toBeUndefined() // no synthesized terminal on a with()-facade builder
+    expect(wrapLiveSelect).not.toHaveBeenCalled() // the engine never wrapped a with() builder
   })
 })

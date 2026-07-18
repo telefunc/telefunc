@@ -73,7 +73,9 @@ interface ReactiveMockDb {
   tag: string
   select(): LiveChain
 }
-const acquire = (): ReactiveMockDb => reactiveDrizzle(baseDb) as unknown as ReactiveMockDb
+// baseDb is a hand-rolled stub, not a real Drizzle db; cast past reactiveDrizzle's real-db type constraint
+// (a TYPE surface covered by the contract spec) — the carrier lifecycle under test is runtime, not types.
+const acquire = (): ReactiveMockDb => reactiveDrizzle(baseDb as never) as unknown as ReactiveMockDb
 
 beforeEach(() => {
   engine.minted.length = 0
@@ -142,6 +144,6 @@ describe('db.live runtime — carrier lifecycle', () => {
   it('reactiveDrizzle throws outside a telefunction (no context to capture)', () => {
     // No provideTelefuncContext here (and afterEach flushed any prior test's null timer), so
     // getRawContext() is null at call time → the read guard fires.
-    expect(() => reactiveDrizzle(baseDb)).toThrow(/reactiveDrizzle\(db\) must be called inside a telefunction/)
+    expect(() => reactiveDrizzle(baseDb as never)).toThrow(/reactiveDrizzle\(db\) must be called inside a telefunction/)
   })
 })
