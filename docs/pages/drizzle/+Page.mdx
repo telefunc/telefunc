@@ -45,7 +45,7 @@ export async function onAddTodo(text: string) {
 }
 ```
 
-The read returns a `Live<Todo[]>`. The write is ordinary Drizzle — but because it ran through the reactive `db`, Telefunc knows which rows changed and invalidates exactly the live queries that read them.
+The read returns a `Live<Todo[]>`. The write is ordinary Drizzle — but because it ran through the reactive `db`, Telefunc knows which rows changed and invalidates the live queries that read them — precisely where it can identify the rows, and deliberately coarsely where it cannot (see Precision & limits).
 
 > `reactiveDrizzle(db)` binds to nothing request-scoped — call it at module level, or inside a telefunction, before or after an `await`. There are no usage rules to remember.
 
@@ -87,10 +87,15 @@ const openCount = Live.derived(() => todos.data.filter((t) => !t.done).length)
 The built-in default fans writes out **within one process** — enough for development and a single server. Running more than one server process requires a shared transport, or a write on one will not reach a live query on another:
 
 ```ts
-const rdb = reactiveDrizzle(db, { changeTransport: myRedisChangeTransport })
+const rdb = reactiveDrizzle(db, {
+  changeTransport: myRedisChangeTransport,
+  changeNamespace: 'orders-db', // which database this is
+})
 ```
 
 > This transport is dedicated to live queries and is independent of your app's `config.broadcast.transport`.
+
+`changeNamespace` is **required** with an injected transport, and names the logical database: identical on every server that talks to the same database, and different for every other database sharing the broker. Without it two databases would exchange row changes, and a `users` row from one would be applied to the other's `users` query. With the built-in default it is derived from your connection, so there is nothing to pass.
 
 A transport carries an opaque string — Telefunc encodes the change itself, so you never have to make `BigInt`, `Date` or byte columns survive your serializer:
 
@@ -104,7 +109,7 @@ type ChangeTransport = {
 Two rules make it correct:
 
 - **Resolve `subscribe()` once the subscription really exists** — after Redis acknowledges `SUBSCRIBE`, not when the command is sent. A live read waits on that promise, so resolving early re-opens the gap it closes, and rejecting fails the read rather than admitting one that could miss writes. Likewise resolve `unsubscribe()` only once the listener is detached.
-- **Deliver each message to a subscriber at most once.** Row-level invalidation is not idempotent, so a transport that can redeliver must deduplicate before calling back.
+- **Deliver each payload at least once, byte for byte.** You do not have to deduplicate or preserve order: every message carries its publisher and a sequence number, so Telefunc drops repeats itself and falls back to a coarse refetch if it sees a gap or a reordering.
 
 
 ## Precision & limits
@@ -113,9 +118,11 @@ Live queries are **precise where that can be proven, and deliberately coarse —
 
 Capturing a write precisely means recovering the rows it changed. That needs a connection whose session Telefunc can prove is its own, a usable primary key, and a way to read the changed rows back:
 
+The rows below are read top to bottom: a write is precise only if no coarse row also applies to it. An `UPSERT` on PGlite is coarse, not precise.
+
 | Write | Behaviour |
 | --- | --- |
-| On PGlite | **Precise** — the rows are captured for you |
+| On PGlite, for an ordinary insert/update/delete | **Precise** — the rows are captured for you |
 | On SQLite or a pinned PostgreSQL client, using a **full-row** `.returning()` | **Precise** — your own `RETURNING` supplies the rows |
 | On SQLite or a pinned PostgreSQL client, *without* `.returning()` | **Coarse** — the plain driver result can't be reproduced faithfully, so the rows aren't captured |
 | A **partial** `.returning({ id })` — on any dialect | **Coarse** — a projection is not a full row image, and widening it would mean inventing the missing columns |
@@ -141,13 +148,17 @@ await db.execute(sql`select count(*) from audit_log`) // base db — invalidates
 
 #### Delivery
 
-Invalidation is best-effort pub/sub. A live read is not admitted until the transport has confirmed its subscription, so a write can't be missed in the gap between the two. Beyond that, a message dropped on an established connection delays that query's invalidation until the next write touching the table — bounded staleness, never a fabricated row.
+Invalidation is best-effort pub/sub. A live read is not admitted until the transport has confirmed its subscription, so a write can't be missed in the gap between the two.
+
+Every message carries its publisher and a sequence number, so a **detectable** loss is handled rather than ignored: a repeat is dropped, and a gap or a reordering falls back to a coarse refetch of the watched tables instead of applying a delta out of order. What that cannot cover is a message with nothing after it — if the last message from a publisher is dropped, no later message exists to reveal the gap, and that query's invalidation waits for the next write touching the table. Bounded staleness, never a fabricated row.
 
 A db subscribes while it has live queries and unsubscribes when the last one closes, so a `db` you stop using is not held open by the transport.
 
 #### Abandoned live reads
 
-A `.live()` reserves a little state — the graph it invalidates through, and a share of the db's subscription — and hands it to the client connection when the handle is serialized. A handle that is **never** returned to the client (your telefunction builds one and then throws, or returns something else) has nothing to hand it to, so that state is released when the handle is garbage-collected instead. That is not bounded: the JavaScript spec allows a finalizer never to run, and in practice it is the next GC. The amount at stake is small — usually two refcounts, since live queries reading the same rows share one graph — but it is reclaimed on the collector's schedule, not yours.
+A `.live()` reserves state — the graph it invalidates through, and a share of the db's subscription — and hands it to the client connection when the handle is serialized. A handle that is **never** returned to the client (your telefunction builds one and then throws, or returns something else) has nothing to hand it to, so that state is released when the handle is garbage-collected instead.
+
+That is not bounded: the JavaScript spec allows a finalizer never to run, and in practice it is the next GC. Nor is what it holds negligible. The reservation is a *reference*, but what that reference keeps alive is the whole graph for that query — including any hydrated row state, up to tens of thousands of rows for a stateful query. Another live query reading the same rows shares that graph and would keep it alive anyway; a *unique* abandoned query does not, and holds its graph alone until collection. Failure paths that never produce a handle at all — a failed compile, a failed snapshot read — release immediately and do not wait for the collector.
 
 
 ## See also

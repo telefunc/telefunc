@@ -1,9 +1,9 @@
-export { publishBatch, publishCoarseAll, acquireSubscription, CHANGE_TOPIC }
+export { publishBatch, publishCoarseAll, acquireSubscription, changeTopicFor }
 export type { SubscriptionRef }
 
 import { randomUUID } from 'node:crypto'
 import { registryFor } from './dbRuntime.js'
-import { type ChangeSubscription, transportFor } from './changeTransport.js'
+import { type ChangeSubscription, namespaceFor, transportFor } from './changeTransport.js'
 import { CHANGE_CODEC_VERSION, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
 import type { ChangeBatch } from '../router/events.js'
 
@@ -21,7 +21,13 @@ import type { ChangeBatch } from '../router/events.js'
 // Two obligations survive, and neither is about fan-out:
 //   - ORIGIN self-suppression — a db feeds its own graphs DIRECTLY in `ingestWrite`, before publishing, so
 //     it must drop its own echo or apply the same delta twice.
-//   - AT-MOST-ONCE per topic, which the adapter still owes: precise row deltas are not idempotent.
+//   - ORDERING, which the RUNTIME now owns rather than the adapter: every envelope carries the publisher's
+//     origin and a monotonic seq, so a duplicate is dropped and a gap or reorder coarsens. The adapter owes
+//     at-least-once delivery of the exact payload and nothing more.
+//
+// NAMESPACED per logical database (topic and envelope both). One process-wide default bus with a constant
+// topic meant two unrelated databases sharing a table name applied each other's ROW DELTAS — a wrong row in
+// a precise graph, not an over-fire. See namespaceFor() in changeTransport.ts.
 //
 // READINESS BARRIER (acquireSubscription): a live read is not admitted until the transport has ADMITTED
 // this db's subscription — which is what awaiting `subscribe()` means (changeTransport.ts). Readiness is a
@@ -35,34 +41,39 @@ import type { ChangeBatch } from '../router/events.js'
 // to close drops it. At zero the listener is detached, so a db nobody reads live is not pinned by a callback
 // closing over it.
 
-/** The one change topic for a logical database. Every runtime sharing a changeTransport exchanges changes
- *  on it; scoping several logical databases onto one transport is the adapter's namespacing concern. */
-const CHANGE_TOPIC = '__live__:changes'
+/** The change topic for ONE logical database. Namespaced, so a transport shared by several databases keeps
+ *  their streams apart rather than leaving that to every adapter to remember. */
+function changeTopicFor(db: object): string {
+  return `__live__:${namespaceFor(db)}:changes`
+}
 
-/** The publishing identity of a db — stable for its lifetime, used to drop our own echo. */
-const dbIds = new WeakMap<object, string>()
-function dbIdOf(db: object): string {
-  let id = dbIds.get(db)
-  if (!id) dbIds.set(db, (id = randomUUID()))
-  return id
+/** The publishing identity of a db — stable for its lifetime, used to drop our own echo. Its `seq` is that
+ *  identity's monotonic publication counter: the receiver's only way to tell a duplicate from a reorder from
+ *  a gap without demanding both properties from every adapter. */
+const publishers = new WeakMap<object, { origin: string; seq: number; chain: Promise<void> }>()
+function publisherOf(db: object): { origin: string; seq: number; chain: Promise<void> } {
+  let publisher = publishers.get(db)
+  if (!publisher) publishers.set(db, (publisher = { origin: randomUUID(), seq: 0, chain: Promise.resolve() }))
+  return publisher
 }
 
 /** Publish a committed batch cross-instance: ONE message, carrying the whole batch. No-op for an empty
  *  batch. Receivers slice it per table themselves. */
 function publishBatch(db: object, batch: ChangeBatch): void {
   if (batch.changes.length === 0) return
-  const origin = dbIdOf(db)
+  const header = nextHeader(db)
   let payload: string
   try {
-    payload = encodeChangePayload({ version: CHANGE_CODEC_VERSION, origin, changes: batch.changes })
+    payload = encodeChangePayload({ ...header, changes: batch.changes })
   } catch (error) {
     // A value the codec cannot carry must not cost the invalidation itself: fall back to the value-free
-    // coarse-all envelope, so remote graphs refetch instead of never hearing about the write.
+    // coarse-all envelope, so remote graphs refetch instead of never hearing about the write. It keeps the
+    // seq it already took — the stream must stay contiguous or every receiver reads a gap.
     console.error(
       '[telefunc] live: a change batch could not be encoded for the transport, so a COARSE invalidation was published instead. Remote live queries over-fetch rather than miss the write.',
       error,
     )
-    payload = encodeChangePayload({ version: CHANGE_CODEC_VERSION, origin, coarseAll: true })
+    payload = encodeChangePayload({ ...header, coarseAll: true })
   }
   publishPayload(db, payload)
 }
@@ -72,20 +83,41 @@ function publishBatch(db: object, batch: ChangeBatch): void {
  *  separate wildcard channel it used to need was an artefact of per-table fan-out. The publisher's own
  *  graphs are fed directly, and the `origin` check makes its own subscription drop this. */
 function publishCoarseAll(db: object): void {
-  publishPayload(db, encodeChangePayload({ version: CHANGE_CODEC_VERSION, origin: dbIdOf(db), coarseAll: true }))
+  publishPayload(db, encodeChangePayload({ ...nextHeader(db), coarseAll: true }))
+}
+
+/** The envelope header for the next publication, taking this db's next sequence number. */
+function nextHeader(db: object): { version: number; namespace: string; origin: string; seq: number } {
+  const publisher = publisherOf(db)
+  publisher.seq++
+  return {
+    version: CHANGE_CODEC_VERSION,
+    namespace: namespaceFor(db),
+    origin: publisher.origin,
+    seq: publisher.seq,
+  }
 }
 
 /** Hand a payload to the transport. The write that produced it has ALREADY COMMITTED, so a transport
  *  failure — thrown outright, or a rejection from an async client that publishes over a socket — is
  *  reported and dropped. It must never reject the caller's write (which succeeded) and must never surface
- *  as an unhandled rejection. */
+ *  as an unhandled rejection.
+ *
+ *  Publications are CHAINED per db so an async transport is handed them in sequence order. A receiver
+ *  tolerates reordering by coarsening, so this is not what makes the system sound — it is what stops us
+ *  manufacturing the reordering ourselves and paying the precision for it. */
 function publishPayload(db: object, payload: string): void {
-  try {
-    const published = transportFor(db).publish(CHANGE_TOPIC, payload)
-    if (isThenable(published)) published.then(undefined, reportPublishFailure)
-  } catch (error) {
-    reportPublishFailure(error)
-  }
+  const publisher = publisherOf(db)
+  const topic = changeTopicFor(db)
+  publisher.chain = publisher.chain.then(() => {
+    try {
+      const published = transportFor(db).publish(topic, payload)
+      if (isThenable(published)) return published.then(undefined, reportPublishFailure)
+    } catch (error) {
+      reportPublishFailure(error)
+    }
+    return undefined
+  })
 }
 
 function isThenable(value: void | Promise<void>): value is Promise<void> {
@@ -109,6 +141,9 @@ type SubscriptionRef = { release(): void }
 type SubscriptionState = {
   refs: number
   active: ChangeSubscription | undefined
+  /** The highest sequence number seen from each publishing origin — the ordering watermark. Cleared on
+   *  detach, which both discards state that is stale and bounds what a long-lived process accumulates. */
+  seen: Map<string, number>
   /** A subscription we asked to detach and could not confirm. Until it is confirmed gone, subscribing again
    *  could put a second listener alongside one that never left — so this blocks every new subscribe. */
   undetached: ChangeSubscription | undefined
@@ -122,7 +157,7 @@ function stateFor(db: object): SubscriptionState {
   if (!state) {
     subscriptions.set(
       db,
-      (state = { refs: 0, active: undefined, undetached: undefined, transition: Promise.resolve() }),
+      (state = { refs: 0, active: undefined, seen: new Map(), undetached: undefined, transition: Promise.resolve() }),
     )
   }
   return state
@@ -184,7 +219,7 @@ async function step(db: object, state: SubscriptionState): Promise<void> {
     state.undetached = undefined
   }
   if (state.refs > 0 && !state.active) {
-    state.active = await transportFor(db).subscribe(CHANGE_TOPIC, (payload) => receive(db, payload))
+    state.active = await transportFor(db).subscribe(changeTopicFor(db), (payload) => receive(db, state, payload))
     return
   }
   if (state.refs === 0 && state.active) {
@@ -192,6 +227,10 @@ async function step(db: object, state: SubscriptionState): Promise<void> {
     state.active = undefined // `active` means a subscription we intend to keep; from here we are letting go of it
     try {
       await active.unsubscribe()
+      // Detached: we are no longer following anyone's stream, so the per-origin sequence state is stale.
+      // Dropping it also bounds it — a long-lived process does not accumulate an entry per peer that ever
+      // restarted. Re-subscribing sees every origin as first-seen and coarsens, which is the sound reading.
+      state.seen.clear()
     } catch (error) {
       state.undetached = active // its listener's status is now UNKNOWN — block subscribing until it is not
       throw error
@@ -206,20 +245,42 @@ function reportUnsubscribeFailure(error: unknown): void {
   )
 }
 
-/** One delivered payload. Decodes, drops our own echo, and feeds the rest into this db's graphs. */
-function receive(db: object, payload: string): void {
+/** One delivered payload. Decodes, drops what is not ours, orders what is, and feeds the rest into this
+ *  db's graphs. */
+function receive(db: object, state: SubscriptionState, payload: string): void {
   const envelope = decodeChangePayload(payload)
   if (!envelope) {
     // Unreadable — an unknown codec version, or a payload the transport mangled. `origin` is unreadable
     // too, so this may even be our own echo: coarsening costs a redundant refetch, while applying a guessed
     // row would be wrong at any price.
     console.error(
-      `[telefunc] live: an undecodable payload arrived on "${CHANGE_TOPIC}" (unknown codec version, or a transport that does not deliver the exact string it was given). Coarsening every watched table rather than interpreting it.`,
+      `[telefunc] live: an undecodable payload arrived on "${changeTopicFor(db)}" (unknown codec version, or a transport that does not deliver the exact string it was given). Coarsening every watched table rather than interpreting it.`,
     )
     coarsenWatched(db)
     return
   }
-  if (envelope.origin === dbIdOf(db)) return // our own batch — these graphs were fed directly in ingestWrite
+  // ANOTHER DATABASE's changes. Only reachable through an adapter that delivers beyond the topic it was
+  // given; dropping is right, because a foreign database's rows say nothing about ours — coarsening on them
+  // would be a spurious refetch, and applying them would be a wrong row.
+  if (envelope.namespace !== namespaceFor(db)) return
+  if (envelope.origin === publisherOf(db).origin) return // our own batch — fed directly in ingestWrite
+
+  // ORDERING. The adapter owes us at-least-once and nothing more, so a payload here may be a duplicate, may
+  // be out of order, and may follow a gap. `seq` is contiguous per origin, which makes all three decidable:
+  //   seq === expected  → in order, apply precisely
+  //   seq  >  expected  → something was lost or is late; we cannot know what, so COARSEN and move the
+  //                       watermark up. Anything below it is then already covered.
+  //   seq <=  last      → a duplicate, or a straggler the coarsen above already accounted for → DROP
+  // A first-seen origin at seq 1 is a fresh stream; above 1 we joined mid-stream and coarsen the same way.
+  // The invariant: a change is applied at most once, and anything not applied precisely is over-fired.
+  const last = state.seen.get(envelope.origin)
+  if (last !== undefined && envelope.seq <= last) return
+  const expected = last === undefined ? 1 : last + 1
+  state.seen.set(envelope.origin, envelope.seq)
+  if (envelope.seq !== expected) {
+    coarsenWatched(db)
+    return
+  }
   if ('coarseAll' in envelope) {
     // A mutation whose touched tables are unknowable happened on ANOTHER instance: coarsen every table WE
     // watch. Sound over-fire; never a fabricated row.

@@ -34,7 +34,7 @@ describe('changeTransport — set-once, frozen at first use', () => {
     expect(() => setChangeTransport(db, createInMemoryChangeTransport())).toThrow(/already in use/)
   })
 
-  it('re-registering the SAME transport is a no-op (the per-request reactiveDrizzle call is idempotent)', () => {
+  it('re-registering the SAME transport is a no-op (a repeated reactiveDrizzle call is idempotent)', () => {
     const db = {}
     const chosen = createInMemoryChangeTransport()
     setChangeTransport(db, chosen)

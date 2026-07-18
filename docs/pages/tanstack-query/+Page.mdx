@@ -38,7 +38,7 @@ function Todos({ userId }) {
 
 > This wraps the `queryFn`, not the hook, so it works unchanged with the React, Vue, Solid and Svelte adapters.
 
-The server side is <Link href="/drizzle">`@telefunc/drizzle`</Link>: `onGetTodos` ends its query with `.live()`, and a write through the same reactive db invalidates exactly the queries that read the changed rows.
+The server side is <Link href="/drizzle">`@telefunc/drizzle`</Link>: `onGetTodos` ends its query with `.live()`, and a write through the same reactive db invalidates the queries that read the changed rows (precisely where the rows can be identified, coarsely where they cannot).
 
 #### Pass the telefunction directly
 

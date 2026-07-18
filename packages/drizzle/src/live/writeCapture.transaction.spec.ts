@@ -17,7 +17,7 @@ vi.mock('./dbRuntime.js', async (importActual) => {
 import { ingestWrite } from './dbRuntime.js'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
 import { createInMemoryChangeTransport, setChangeTransport } from './changeTransport.js'
-import { CHANGE_TOPIC } from './writeTransport.js'
+import { changeTopicFor } from './writeTransport.js'
 import type { ChangeBatch } from '../router/events.js'
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
@@ -138,7 +138,7 @@ describe('write capture — RAW SQL inside a transaction', () => {
     const transport = createInMemoryChangeTransport()
     setChangeTransport(db, transport)
     const seen: string[] = []
-    await transport.subscribe(CHANGE_TOPIC, (payload) => seen.push(payload))
+    await transport.subscribe(changeTopicFor(db), (payload) => seen.push(payload))
     return seen
   }
 

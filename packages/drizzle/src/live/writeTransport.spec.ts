@@ -12,6 +12,7 @@
 // transport: what these tests exercise is the same path a Redis adapter runs.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { CHANGE_CODEC_VERSION } from './changeCodec.js'
 import type { TableChange } from '../router/events.js'
 
 // The mocked registry is PER-DB and tracks registered graphs, so watchedTables() answers truthfully — the
@@ -31,9 +32,14 @@ vi.mock('./dbRuntime.js', () => ({
   ingestWrite: vi.fn(),
 }))
 
-import { type ChangeTransport, createInMemoryChangeTransport, setChangeTransport } from './changeTransport.js'
+import {
+  type ChangeTransport,
+  createInMemoryChangeTransport,
+  setChangeNamespace,
+  setChangeTransport,
+} from './changeTransport.js'
 import { registryFor } from './dbRuntime.js'
-import { CHANGE_TOPIC, acquireSubscription, publishBatch, publishCoarseAll } from './writeTransport.js'
+import { acquireSubscription, changeTopicFor, publishBatch, publishCoarseAll } from './writeTransport.js'
 
 /** A minimal registered graph — only its `tables` matter to watchedTables(). */
 const watching = (table: string) => ({ tables: [table] }) as never
@@ -51,11 +57,15 @@ async function freshDb() {
   return { db, transport }
 }
 
-/** Two dbs on ONE transport — the multi-instance path in a single process. */
+/** Two runtimes over ONE logical database, on one transport — the multi-instance path in a single process.
+ *  They SHARE a `$client`, which is what makes them the same database: that is how two drizzle objects over
+ *  one connection appear, and it is the identity the namespace is derived from. Two dbs with different
+ *  clients are different databases and deliberately do NOT exchange changes (see the isolation suite). */
 async function twoInstances() {
   const transport = createInMemoryChangeTransport()
-  const dbA = {}
-  const dbB = {}
+  const $client = { connection: 'shared' }
+  const dbA = { $client }
+  const dbB = { $client }
   setChangeTransport(dbA, transport)
   setChangeTransport(dbB, transport)
   await acquireSubscription(dbA)
@@ -64,10 +74,17 @@ async function twoInstances() {
 }
 
 /** Everything that reached the wire, as raw payloads — what a broker would actually carry. */
-async function wireTap(transport: ChangeTransport) {
+async function wireTap(transport: ChangeTransport, db: object) {
   const seen: string[] = []
-  await transport.subscribe(CHANGE_TOPIC, (payload) => seen.push(payload))
+  await transport.subscribe(changeTopicFor(db), (payload) => seen.push(payload))
   return seen
+}
+
+/** Publications are CHAINED per db so an async transport receives them in sequence order, which defers the
+ *  first one by a microtask. The local graphs were already fed synchronously by ingestWrite; only the
+ *  REMOTE hop is deferred, so a test that watches the wire has to let the chain run. */
+const flush = async () => {
+  for (let i = 0; i < 5; i++) await Promise.resolve()
 }
 
 beforeEach(() => {
@@ -81,10 +98,10 @@ describe('write transport — one topic, one publication per batch', () => {
     // Under per-table fan-out this needed k copies plus an apply-once rule to cancel k-1 of them.
     const { transport, dbA } = await twoInstances()
     const changes = [change('users'), change('posts')]
-    const wire = await wireTap(transport)
+    const wire = await wireTap(transport, dbA)
 
     publishBatch(dbA, { changes })
-
+    await flush()
     expect(wire).toHaveLength(1) // ONE message on the wire for a two-table commit
     expect(engine.ingest).toHaveBeenCalledTimes(1) // ...and one ingest on the OTHER instance
     expect(engine.ingest).toHaveBeenCalledWith({ changes }) // carrying the whole batch — the router slices it
@@ -95,13 +112,15 @@ describe('write transport — one topic, one publication per batch', () => {
     // The batch carries the publishing db's `origin`, so its own subscription drops the round-trip; its
     // graphs were already fed directly in ingestWrite.
     publishBatch(db, { changes: [change('users')] })
+    await flush()
     expect(engine.ingest).not.toHaveBeenCalled()
   })
 
   it('an empty batch publishes nothing', async () => {
     const { db, transport } = await freshDb()
-    const wire = await wireTap(transport)
+    const wire = await wireTap(transport, db)
     publishBatch(db, { changes: [] })
+    await flush()
     expect(wire).toEqual([])
   })
 
@@ -109,6 +128,7 @@ describe('write transport — one topic, one publication per batch', () => {
     const { dbA } = await twoInstances()
     const changes = [change('users')]
     publishBatch(dbA, { changes })
+    await flush()
     expect(engine.ingest).toHaveBeenCalledTimes(1) // ONLY B applied
     expect(engine.ingest).toHaveBeenCalledWith({ changes })
   })
@@ -124,6 +144,7 @@ describe('write transport — one topic, one publication per batch', () => {
       note: null,
     }
     publishBatch(dbA, { changes: [{ table: 'events', kind: 'insert', new: row }] })
+    await flush()
 
     const [batch] = engine.ingest.mock.calls[0] as [{ changes: TableChange[] }]
     const received = (batch.changes[0] as unknown as { new: typeof row }).new
@@ -143,6 +164,7 @@ describe('write transport — coarse-all rides the SAME topic', () => {
     const { dbA, dbB } = await twoInstances()
     registryFor(dbB).router.register(watching('ledger'))
     publishCoarseAll(dbA)
+    await flush()
     expect(engine.ingest).toHaveBeenCalledTimes(1)
     expect(engine.ingest).toHaveBeenCalledWith({ changes: [{ table: 'ledger', kind: 'coarse' }] })
   })
@@ -151,12 +173,14 @@ describe('write transport — coarse-all rides the SAME topic', () => {
     const { db } = await freshDb()
     registryFor(db).router.register(watching('users'))
     publishCoarseAll(db) // its own graphs were already fed directly by the local coarse batch
+    await flush()
     expect(engine.ingest).not.toHaveBeenCalled()
   })
 
   it('a coarse-all with nothing watched ingests nothing', async () => {
     const { dbA } = await twoInstances() // B has no registered graphs
     publishCoarseAll(dbA)
+    await flush()
     expect(engine.ingest).not.toHaveBeenCalled()
   })
 })
@@ -167,7 +191,7 @@ describe('write transport — a payload that cannot be trusted is never guessed 
     registryFor(db).router.register(watching('users'))
     const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    transport.publish(CHANGE_TOPIC, '{"version":999,"origin":"elsewhere","changes":[]}') // a future codec
+    transport.publish(changeTopicFor(db), '{"version":999,"namespace":"ns","origin":"elsewhere","seq":1,"changes":[]}') // a future codec
 
     expect(engine.ingest).toHaveBeenCalledWith({ changes: [{ table: 'users', kind: 'coarse' }] })
     expect(reported).toHaveBeenCalled() // and it is reported, not silently absorbed
@@ -182,6 +206,7 @@ describe('write transport — a payload that cannot be trusted is never guessed 
     circular.self = circular // defeats any serializer
 
     publishBatch(dbA, { changes: [{ table: 'users', kind: 'insert', new: circular }] })
+    await flush()
 
     // The invalidation still crossed — value-free, so B refetches instead of never hearing about the write.
     expect(engine.ingest).toHaveBeenCalledWith({ changes: [{ table: 'users', kind: 'coarse' }] })
@@ -226,8 +251,161 @@ describe('write transport — an async publish failure never reaches the committ
     const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     expect(() => publishBatch(db, { changes: [change('users')] })).not.toThrow()
+    await flush()
 
     expect(reported).toHaveBeenCalled()
     reported.mockRestore()
+  })
+})
+
+// ── logical-database isolation ───────────────────────────────────────
+//
+// The default bus is one process-wide object and the topic used to be one constant, so EVERY reactive db
+// shared a stream. Two unrelated databases that both have a `users` table then applied each other's row
+// deltas — a wrong row into a precise graph, not a harmless over-fire. Identity now rides the topic and the
+// envelope: derived from the connection by default, or named explicitly for a shared/injected transport.
+describe('write transport — unrelated databases never see each other', () => {
+  it('two DIFFERENT databases on one transport do NOT cross-apply, even with the same table name', async () => {
+    const transport = createInMemoryChangeTransport()
+    const writer = { $client: { connection: 'db-one' } } // two genuinely different connections…
+    const bystander = { $client: { connection: 'db-two' } }
+    setChangeTransport(writer, transport)
+    setChangeTransport(bystander, transport)
+    await acquireSubscription(writer)
+    await acquireSubscription(bystander)
+    registryFor(bystander).router.register(watching('users'))
+
+    publishBatch(writer, { changes: [change('users')] })
+    await flush()
+
+    expect(engine.ingest).not.toHaveBeenCalled() // …so a `users` row from one is not a `users` row in the other
+  })
+
+  it('…while two runtimes over the SAME database still do — so the isolation is not just deafness', async () => {
+    const { dbA } = await twoInstances()
+    publishBatch(dbA, { changes: [change('users')] })
+    await flush()
+    expect(engine.ingest).toHaveBeenCalledTimes(1)
+  })
+
+  it('an explicit namespace joins runtimes that share NO connection object — the cross-process case', async () => {
+    // Different processes cannot share a `$client`, so a shared transport is paired with a stable name.
+    const transport = createInMemoryChangeTransport()
+    const serverA = {}
+    const serverB = {}
+    setChangeTransport(serverA, transport)
+    setChangeTransport(serverB, transport)
+    setChangeNamespace(serverA, 'orders-db')
+    setChangeNamespace(serverB, 'orders-db')
+    await acquireSubscription(serverA)
+    await acquireSubscription(serverB)
+
+    publishBatch(serverA, { changes: [change('users')] })
+    await flush()
+
+    expect(engine.ingest).toHaveBeenCalledTimes(1) // same name, same database, changes flow
+  })
+})
+
+// ── ordering ─────────────────────────────────────────────────────────
+//
+// The adapter contract asked for at-most-once and said nothing about ORDER, which is the wrong way round: a
+// transport can obey it to the letter and still deliver update B before update A, corrupting a precise graph
+// exactly as a duplicate would. So the envelope carries origin+seq and the runtime decides: in-order applies
+// precisely, a duplicate is dropped, and a gap or reorder coarsens. The adapter now owes at-least-once only.
+describe('write transport — the runtime, not the adapter, owns duplicate and order', () => {
+  /** Replay raw payloads at a subscriber in whatever order we choose — a compliant-but-unordered adapter. */
+  async function tappedPair() {
+    const { transport, dbA, dbB } = await twoInstances()
+    const captured: string[] = []
+    await transport.subscribe(changeTopicFor(dbA), (payload) => captured.push(payload))
+    registryFor(dbB).router.register(watching('users'))
+    return { transport, dbA, dbB, captured }
+  }
+
+  it('DROPS a redelivered payload — at-most-once is no longer the adapter’s problem', async () => {
+    const { transport, dbA, dbB, captured } = await tappedPair()
+    publishBatch(dbA, { changes: [change('users')] })
+    await flush()
+    expect(engine.ingest).toHaveBeenCalledTimes(1)
+
+    transport.publish(changeTopicFor(dbB), captured[0]!) // the very same payload again
+    expect(engine.ingest).toHaveBeenCalledTimes(1) // not applied twice
+  })
+
+  it('COARSENS on a reorder instead of applying a delta out of order', async () => {
+    const { transport, dbA, dbB, captured } = await tappedPair()
+    // Two publications, captured off the wire, then replayed to B in the WRONG order.
+    publishBatch(dbA, { changes: [change('users')] })
+    publishBatch(dbA, { changes: [change('users')] })
+    await flush()
+    engine.ingest.mockClear()
+
+    const fresh = { $client: (dbB as { $client: object }).$client } // a receiver that has seen nothing yet
+    setChangeTransport(fresh, transport)
+    await acquireSubscription(fresh)
+    registryFor(fresh).router.register(watching('users'))
+
+    transport.publish(changeTopicFor(fresh), captured[1]!) // seq 2 arrives first → a gap
+    expect(engine.ingest).toHaveBeenCalledWith({ changes: [{ table: 'users', kind: 'coarse' }] })
+
+    engine.ingest.mockClear()
+    transport.publish(changeTopicFor(fresh), captured[0]!) // seq 1 straggles in, already covered
+    expect(engine.ingest).not.toHaveBeenCalled()
+  })
+
+  it('applies IN-ORDER deliveries precisely — so the coarsening above is not just blanket degradation', async () => {
+    const { transport, dbA, dbB, captured } = await tappedPair()
+    publishBatch(dbA, { changes: [change('users')] })
+    publishBatch(dbA, { changes: [change('posts')] })
+    await flush()
+    expect(engine.ingest).toHaveBeenCalledTimes(2)
+    expect(engine.ingest).toHaveBeenNthCalledWith(1, { changes: [change('users')] })
+    expect(engine.ingest).toHaveBeenNthCalledWith(2, { changes: [change('posts')] })
+    void [transport, dbB, captured]
+  })
+})
+
+// The isolation above is DEFENCE IN DEPTH: the topic separates the streams, and the envelope check catches
+// anything that reaches us anyway. That means neither guard alone is provable by the cross-apply test —
+// removing either still leaves the other, and only removing BOTH reproduces the original defect. So each
+// gets a control aimed at it specifically, or "defence in depth" would quietly mean "one untested guard".
+describe('write transport — each isolation guard, on its own', () => {
+  it('TOPIC: a different database publishes on a topic this one is not subscribed to', async () => {
+    const transport = createInMemoryChangeTransport()
+    const listener = { $client: { connection: 'db-one' } }
+    const stranger = { $client: { connection: 'db-two' } }
+    setChangeTransport(listener, transport)
+    setChangeTransport(stranger, transport)
+    await acquireSubscription(listener)
+
+    const heard: string[] = []
+    await transport.subscribe(changeTopicFor(listener), (payload) => heard.push(payload))
+    publishBatch(stranger, { changes: [change('users')] })
+    await flush()
+
+    expect(heard).toEqual([]) // nothing was even delivered — the topics genuinely differ
+  })
+
+  it('ENVELOPE: a foreign-namespace payload delivered ONTO our topic is ignored', async () => {
+    // The case the topic cannot cover: an adapter that fans out more widely than the topic it was handed.
+    const transport = createInMemoryChangeTransport()
+    const listener = { $client: { connection: 'db-one' } }
+    setChangeTransport(listener, transport)
+    await acquireSubscription(listener)
+    registryFor(listener).router.register(watching('users'))
+
+    const foreign = JSON.stringify({
+      version: CHANGE_CODEC_VERSION,
+      namespace: 'some-other-database',
+      origin: 'elsewhere',
+      seq: 1,
+      changes: [{ table: 'users', kind: 'insert', new: { id: 1 } }],
+    })
+    transport.publish(changeTopicFor(listener), foreign)
+
+    // Not applied — and not coarsened either: another database's rows say nothing about ours, so a refetch
+    // would be spurious rather than merely cautious.
+    expect(engine.ingest).not.toHaveBeenCalled()
   })
 })

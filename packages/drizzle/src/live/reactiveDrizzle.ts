@@ -28,14 +28,19 @@ import type { Live } from 'telefunc'
 import { captureMutation, captureRawSql, emitSafely, type CaptureSink } from './writeCapture.js'
 import { ingestLocal, ingestWrite } from './dbRuntime.js'
 import { publishCoarseAll } from './writeTransport.js'
-import { type ChangeTransport, setChangeTransport } from './changeTransport.js'
+import { type ChangeTransport, setChangeNamespace, setChangeTransport } from './changeTransport.js'
 import { wrapLiveSelect } from './readCapture.js'
 import type { TableChange } from '../router/events.js'
+import { assertUsage } from '../utils/assert.js'
 
 /** Reactive-db options. `changeTransport` is the DEDICATED cross-instance transport for THIS feature's
  *  change fan-out — independent of the app's `config.broadcast.transport`; omit it to use the built-in
- *  in-process default (zero-setup dev; inject a transport-backed one for real multi-process fan-out). */
-type ReactiveOptions = { changeTransport?: ChangeTransport }
+ *  in-process default (zero-setup dev; inject a transport-backed one for real multi-process fan-out).
+ *
+ *  `changeNamespace` names the LOGICAL DATABASE these changes belong to, and is REQUIRED alongside an
+ *  injected transport: it is what keeps two databases sharing one broker from applying each other's rows.
+ *  With the in-process default it is derived from the connection instead, so it is not needed. */
+type ReactiveOptions = { changeTransport?: ChangeTransport; changeNamespace?: string }
 
 /** The driver-terminal surface an async select adds OVER the core query-builder select: the `QueryPromise`
  *  verbs (`then`/`catch`/`finally`/`execute`) plus `prepare` and each dialect's runners (SQLite
@@ -336,9 +341,17 @@ type Reactive<TDb extends ReactiveDatabase> = ReturnType<TDb['select']> extends 
  */
 function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: ReactiveOptions): Reactive<TDb> {
   const db = baseDb as object
-  // Register the dedicated change transport for this db (set-once; default = the in-process bus). Reads
-  // subscribe over it and writes publish over it — never the user's app Broadcast.
+  // An injected transport reaches other PROCESSES, where the connection-derived identity a local default
+  // uses cannot follow. Without a stable name, two databases on one broker share a topic and apply each
+  // other's row deltas — so this fails loudly rather than cross-feeding quietly.
+  assertUsage(
+    !options?.changeTransport || !!options.changeNamespace,
+    'reactiveDrizzle(db, { changeTransport }) also needs `changeNamespace`: a stable id for THIS logical database, identical on every server that shares the transport and different from any other database on it. Without it, two databases on one transport would exchange row changes.',
+  )
+  // Register the dedicated change transport + namespace for this db (both set-once; the default transport is
+  // the in-process bus). Reads subscribe over it and writes publish over it — never the user's app Broadcast.
   setChangeTransport(db, options?.changeTransport)
+  setChangeNamespace(db, options?.changeNamespace)
   // Autocommit writes ingest into THIS db's graphs immediately; a transaction buffers and flushes here once.
   const ingest: CaptureSink = (changes) => ingestWrite(db, { changes })
   // Raw SQL's coarse markers stay local — the coarse-all announcement is what reaches other instances.

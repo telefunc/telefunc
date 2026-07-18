@@ -16,7 +16,7 @@ import type { TableChange } from '../router/events.js'
 
 const roundTrip = (changes: TableChange[]): TableChange[] => {
   const decoded = decodeChangePayload(
-    encodeChangePayload({ version: CHANGE_CODEC_VERSION, origin: 'origin-a', changes }),
+    encodeChangePayload({ version: CHANGE_CODEC_VERSION, namespace: 'ns', origin: 'origin-a', seq: 1, changes }),
   )
   expect(decoded).toBeDefined()
   return (decoded as { changes: TableChange[] }).changes
@@ -67,13 +67,25 @@ describe('change codec — SQL values survive a serializing transport', () => {
   })
 
   it('round-trips a coarse-all envelope', () => {
-    const payload = encodeChangePayload({ version: CHANGE_CODEC_VERSION, origin: 'origin-a', coarseAll: true })
-    expect(decodeChangePayload(payload)).toEqual({ version: CHANGE_CODEC_VERSION, origin: 'origin-a', coarseAll: true })
+    const payload = encodeChangePayload({
+      version: CHANGE_CODEC_VERSION,
+      namespace: 'ns',
+      origin: 'origin-a',
+      seq: 1,
+      coarseAll: true,
+    })
+    expect(decodeChangePayload(payload)).toEqual({
+      version: CHANGE_CODEC_VERSION,
+      namespace: 'ns',
+      origin: 'origin-a',
+      seq: 1,
+      coarseAll: true,
+    })
   })
 
   it('preserves origin — the publisher drops its own echo by it', () => {
     const decoded = decodeChangePayload(
-      encodeChangePayload({ version: CHANGE_CODEC_VERSION, origin: 'db-42', changes: [] }),
+      encodeChangePayload({ version: CHANGE_CODEC_VERSION, namespace: 'ns', origin: 'db-42', seq: 1, changes: [] }),
     )
     expect(decoded!.origin).toBe('db-42')
   })
@@ -83,7 +95,13 @@ describe('change codec — anything untrustworthy decodes to nothing (the caller
   const rejected = (payload: string) => expect(decodeChangePayload(payload)).toBeUndefined()
 
   it('rejects an unknown codec version rather than interpreting it', () => {
-    const future = encodeChangePayload({ version: CHANGE_CODEC_VERSION + 1, origin: 'a', coarseAll: true })
+    const future = encodeChangePayload({
+      version: CHANGE_CODEC_VERSION + 1,
+      namespace: 'ns',
+      origin: 'a',
+      seq: 1,
+      coarseAll: true,
+    })
     rejected(future)
   })
 
@@ -93,14 +111,34 @@ describe('change codec — anything untrustworthy decodes to nothing (the caller
   })
 
   it('rejects a well-formed payload that is not an envelope', () => {
+    const base = { version: CHANGE_CODEC_VERSION, namespace: 'ns', origin: 'a', seq: 1 }
     rejected(JSON.stringify({ hello: 'world' }))
     rejected(JSON.stringify({ version: CHANGE_CODEC_VERSION })) // no origin
-    rejected(JSON.stringify({ version: CHANGE_CODEC_VERSION, origin: 'a' })) // neither changes nor coarseAll
+    rejected(JSON.stringify(base)) // neither changes nor coarseAll
     rejected(JSON.stringify(null))
   })
 
+  it('rejects an envelope with no usable DATABASE identity — the field that stops cross-feeding', () => {
+    // A blank or missing namespace would collapse every database onto one identity, which is the whole
+    // failure the field exists to prevent. Fail closed rather than treat it as "some database".
+    rejected(JSON.stringify({ version: CHANGE_CODEC_VERSION, origin: 'a', seq: 1, coarseAll: true }))
+    rejected(JSON.stringify({ version: CHANGE_CODEC_VERSION, namespace: '', origin: 'a', seq: 1, coarseAll: true }))
+    rejected(JSON.stringify({ version: CHANGE_CODEC_VERSION, namespace: 7, origin: 'a', seq: 1, coarseAll: true }))
+  })
+
+  it('rejects an envelope with no usable SEQUENCE — the field the ordering rules read', () => {
+    const withSeq = (seq: unknown) =>
+      JSON.stringify({ version: CHANGE_CODEC_VERSION, namespace: 'ns', origin: 'a', seq, coarseAll: true })
+    rejected(withSeq(undefined)) // absent
+    rejected(withSeq(0)) // sequences start at 1, so 0 is not a position
+    rejected(withSeq(-1))
+    rejected(withSeq(1.5))
+    rejected(withSeq('1'))
+    expect(decodeChangePayload(withSeq(1))).toBeDefined() // …and a real one still passes
+  })
+
   it('a valid envelope IS accepted — so the rejections above are not vacuous', () => {
-    const ok: ChangeEnvelope = { version: CHANGE_CODEC_VERSION, origin: 'a', changes: [] }
+    const ok: ChangeEnvelope = { version: CHANGE_CODEC_VERSION, namespace: 'ns', origin: 'a', seq: 1, changes: [] }
     expect(decodeChangePayload(encodeChangePayload(ok))).toBeDefined()
   })
 })
@@ -110,7 +148,8 @@ describe('change codec — anything untrustworthy decodes to nothing (the caller
 // (which on the in-memory transport also aborts dispatch to every later subscriber), and a change with no
 // `table` routed to nothing at all — a silently MISSED invalidation, the failure this codec exists to stop.
 describe('change codec — a change that is not a change never passes as one', () => {
-  const envelope = (changes: unknown[]) => JSON.stringify({ version: CHANGE_CODEC_VERSION, origin: 'a', changes })
+  const envelope = (changes: unknown[]) =>
+    JSON.stringify({ version: CHANGE_CODEC_VERSION, namespace: 'ns', origin: 'a', seq: 1, changes })
   const rejects = (changes: unknown[]) => expect(decodeChangePayload(envelope(changes))).toBeUndefined()
 
   it('rejects a non-object entry', () => {
@@ -156,7 +195,9 @@ describe('change codec — a change that is not a change never passes as one', (
     const withNote = (note: string) =>
       JSON.stringify({
         version: CHANGE_CODEC_VERSION,
+        namespace: 'ns',
         origin: 'a',
+        seq: 1,
         changes: [{ table: 't', kind: 'insert', new: { b: note } }],
       })
     expect(decodeChangePayload(withNote('!Bytes:999,not-a-byte'))).toBeUndefined()
@@ -282,7 +323,13 @@ describe('change codec — the rejected shapes are shapes that would SILENTLY MI
     expect(notify).toHaveBeenCalled()
 
     // 3. THE GATE. The shape from (1) never gets through the codec to reach a graph at all.
-    const payload = JSON.stringify({ version: CHANGE_CODEC_VERSION, origin: 'remote', changes: [malformed] })
+    const payload = JSON.stringify({
+      version: CHANGE_CODEC_VERSION,
+      namespace: 'ns',
+      origin: 'remote',
+      seq: 1,
+      changes: [malformed],
+    })
     expect(decodeChangePayload(payload)).toBeUndefined()
 
     await client.close()

@@ -27,14 +27,26 @@ import type { Row, TableChange } from '../router/events.js'
 
 /** Bumped when the envelope shape changes. A receiver that does not recognise the version coarsens rather
  *  than interpreting a payload it does not understand. */
-const CHANGE_CODEC_VERSION = 1
+const CHANGE_CODEC_VERSION = 2
 
-/** What one publication carries. `origin` lets the publishing runtime drop its own echo — its graphs were
- *  fed directly, before publishing. `coarseAll` is the value-free form: a mutation whose touched tables are
- *  unknowable (raw SQL, batch), or a precise batch that could not be encoded. */
+/**
+ * What one publication carries.
+ *
+ * `namespace` is the LOGICAL DATABASE the changes belong to. Without it a shared bus carries every db's row
+ * deltas to every other db, and two unrelated databases that happen to share a table name apply each other's
+ * rows into precise graphs — a wrong row, not an over-fire. The topic is namespaced too; this field is the
+ * receiver-side check for an adapter that fans out more widely than its topics say.
+ *
+ * `origin` identifies the publishing runtime, so it can drop its own echo — its graphs were fed directly,
+ * before publishing. `seq` is that origin's monotonic publication counter, which is what lets the receiver
+ * tolerate duplicates and detect reordering/gaps instead of demanding both from every adapter.
+ *
+ * `coarseAll` is the value-free form: a mutation whose touched tables are unknowable (raw SQL, batch), or a
+ * precise batch that could not be encoded.
+ */
 type ChangeEnvelope =
-  | { version: number; origin: string; changes: TableChange[] }
-  | { version: number; origin: string; coarseAll: true }
+  | { version: number; namespace: string; origin: string; seq: number; changes: TableChange[] }
+  | { version: number; namespace: string; origin: string; seq: number; coarseAll: true }
 
 /**
  * The byte-array token, deliberately inside the underlying serializer's `!`-prefixed namespace.
@@ -112,7 +124,12 @@ function bytesOf(encoded: string): Uint8Array {
 
 function isEnvelope(value: unknown): value is ChangeEnvelope {
   if (!isRecord(value)) return false
-  if (typeof value.version !== 'number' || typeof value.origin !== 'string') return false
+  if (typeof value.version !== 'number') return false
+  if (typeof value.origin !== 'string' || value.origin === '') return false
+  // A blank namespace would collapse every database onto one identity — the exact failure the field exists
+  // to prevent — and a non-integer seq would make the ordering comparisons below meaningless.
+  if (typeof value.namespace !== 'string' || value.namespace === '') return false
+  if (typeof value.seq !== 'number' || !Number.isInteger(value.seq) || value.seq < 1) return false
   if (value.coarseAll === true) return true
   return Array.isArray(value.changes) && value.changes.every(isTableChange)
 }

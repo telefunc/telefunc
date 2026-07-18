@@ -17,8 +17,10 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
   },
   replace(live, context) {
     // Serialize-time single activation, with no reservation step: the channel is created
-    // HERE, only because this Live is crossing the wire. A Live that never serializes reaches this
-    // never — no channel, no subscription — so it activates nothing and cannot leak.
+    // HERE, only because this Live is crossing the wire. A Live that never serializes reaches this never, so
+    // no channel and no source subscription are ever created for it. That bounds what THIS layer holds; a
+    // producer whose attached source reserved resources BEFORE serializing (as @telefunc/drizzle's does, to
+    // register its graph before the snapshot read) still has to reclaim those itself.
     const channel = context.createChannel<never, LiveEvent>()
     // The producer's coalesced invalidation rides the channel; the channel owns its teardown. This tap
     // MUST be installed BEFORE `activate()`: activation subscribes this Live's invalidation source, and

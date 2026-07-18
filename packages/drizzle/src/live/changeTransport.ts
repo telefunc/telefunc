@@ -1,5 +1,14 @@
 export type { ChangeTransport, ChangeSubscription }
-export { defaultChangeTransport, createInMemoryChangeTransport, transportFor, setChangeTransport }
+export {
+  defaultChangeTransport,
+  createInMemoryChangeTransport,
+  transportFor,
+  setChangeTransport,
+  setChangeNamespace,
+  namespaceFor,
+}
+
+import { randomUUID } from 'node:crypto'
 
 /**
  * The transport the Live feature fans captured writes out over — DEDICATED to Live and configured on the
@@ -18,6 +27,11 @@ export { defaultChangeTransport, createInMemoryChangeTransport, transportFor, se
  * arrays. Deliver the exact string it was given; parsing, rewriting or re-encoding it is the one way an
  * adapter can corrupt a precise row delta.
  *
+ * SCOPE — one transport can carry several LOGICAL DATABASES, so every topic and every envelope is
+ * namespaced by database identity (`changeNamespace`). An adapter is not asked to namespace anything; the
+ * package does it, because leaving it to the adapter is how two unrelated databases with a `users` table
+ * end up applying each other's row deltas.
+ *
  * CONTRACT — a custom transport MUST honor all three, or the Live guarantees silently weaken:
  *  - **`subscribe()` resolves only once the subscription is ADMITTED** — for Redis, after the broker's
  *    `SUBSCRIBE` acknowledgement, not when the command is written. Resolution IS the readiness proof a live
@@ -33,10 +47,12 @@ export { defaultChangeTransport, createInMemoryChangeTransport, transportFor, se
  *    subscription must resolve rather than throw, or that db never recovers. (Redis `UNSUBSCRIBE` is
  *    naturally idempotent; an adapter that tracks its own listeners should treat "not subscribed" as
  *    success.)
- *  - **At-most-once delivery per topic.** A transport MUST NOT redeliver the same published message to the
- *    same subscriber on the same topic. Precise row application is NOT idempotent (a stateful aggregate
- *    would count the same delta twice). A transport that can redeliver must deduplicate internally before
- *    calling the subscriber.
+ *  - **Deliver each published payload to each subscriber AT LEAST ONCE, and deliver it verbatim.** Neither
+ *    de-duplication nor FIFO ordering is asked of you: the envelope carries the publisher's identity and a
+ *    monotonic sequence, and the runtime drops duplicates and coarsens on a detected gap or reorder. This
+ *    contract used to demand at-most-once and say nothing about order — which was the wrong way round, since
+ *    an adapter obeying it to the letter could still deliver update B before update A and corrupt a precise
+ *    graph exactly as a duplicate would.
  *
  * `publish()` may return a promise (real clients publish asynchronously). It is NOT awaited by the write
  * that produced it — the database has already committed by then — but a rejection is reported rather than
@@ -124,4 +140,46 @@ function transportFor(db: object): ChangeTransport {
     resolved.set(db, transport)
   }
   return transport
+}
+
+// ── logical-database identity ─────────────────────────────────────
+//
+// Which DATABASE a change belongs to. Every topic and envelope carries it, so a bus shared by several
+// databases cannot cross-feed row deltas between them.
+//
+// Two drizzle objects over the SAME connection are the same logical database and MUST exchange changes —
+// that is the ordinary two-runtime topology. Two drizzle objects over DIFFERENT databases must not, even
+// when their tables are named alike. So the default identity is derived from the underlying client
+// (`db.$client`), which is shared by the first pair and distinct for the second.
+//
+// That identity is an object, so it cannot span processes. A caller who injects a transport is by
+// definition reaching other processes, and must supply a stable `changeNamespace` instead — see the
+// assertion in reactiveDrizzle. Deriving one automatically would mean guessing at database authority, which
+// is exactly the kind of guess this package refuses elsewhere.
+
+const configuredNamespaces = new WeakMap<object, string>()
+const derivedNamespaces = new WeakMap<object, string>()
+
+const NAMESPACE_SWAP_MESSAGE =
+  'telefunc live: the change namespace for this db is already set and cannot be replaced. `changeNamespace` identifies the logical database on a shared transport — pass the same value on every reactiveDrizzle(db, …) call for this db.'
+
+function setChangeNamespace(db: object, namespace: string | undefined): void {
+  if (namespace === undefined) return
+  const existing = configuredNamespaces.get(db)
+  if (existing !== undefined && existing !== namespace) throw new Error(NAMESPACE_SWAP_MESSAGE)
+  configuredNamespaces.set(db, namespace)
+}
+
+/** The logical-database identity for a db: the caller's `changeNamespace` if there is one, else an identity
+ *  derived from the connection this db runs on and stable for as long as that connection object lives. */
+function namespaceFor(db: object): string {
+  const configuredNamespace = configuredNamespaces.get(db)
+  if (configuredNamespace !== undefined) return configuredNamespace
+  // Key on the client when there is one, so sibling drizzle objects over one connection agree; fall back to
+  // the db itself, which is the narrower (never cross-feeding) choice when no client is exposed.
+  const connection = (db as { $client?: unknown }).$client
+  const identityOwner = typeof connection === 'object' && connection !== null ? connection : db
+  let derived = derivedNamespaces.get(identityOwner)
+  if (!derived) derivedNamespaces.set(identityOwner, (derived = `local:${randomUUID()}`))
+  return derived
 }

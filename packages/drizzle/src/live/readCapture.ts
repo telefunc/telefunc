@@ -18,6 +18,11 @@
 // in the docs. It replaces a per-request sweep that required `reactiveDrizzle(db)` to be called before the
 // body's first await — a usage rule the owner rejected — and which was in any case a leaky net: a handle
 // created after the sweep had run was never swept at all.
+//
+// What is retained until then is the GRAPH, not a counter: the token is a ref, and the ref is what keeps the
+// registry entry (and any hydrated row state) alive. A query sharing that identity keeps it alive regardless;
+// a unique one holds it alone. Paths that fail BEFORE producing a handle release immediately instead — there
+// is nothing to collect, so there is no reason to wait for a collector.
 
 export { wrapLiveSelect, compilePlanFor }
 
