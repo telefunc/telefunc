@@ -2,8 +2,16 @@
 // cannot be trusted degrades to coarse instead of to a wrong row. Both halves are asserted here — a codec
 // tested only on the happy path is how a `bigserial` id becomes a string in production.
 
-import { describe, expect, it } from 'vitest'
+import { PGlite } from '@electric-sql/pglite'
+import { eq } from 'drizzle-orm'
+import * as pg from 'drizzle-orm/pg-core'
+import { drizzle } from 'drizzle-orm/pglite'
+import { describe, expect, it, vi } from 'vitest'
 import { CHANGE_CODEC_VERSION, type ChangeEnvelope, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
+import { hydrationExecutorOf } from '../binding/hydrationExecutor.js'
+import { compileQuery } from '../compile/compile.js'
+import { extractQueryShape } from '../extract/queryShape.js'
+import { createRegistry } from '../graph/registry.js'
 import type { TableChange } from '../router/events.js'
 
 const roundTrip = (changes: TableChange[]): TableChange[] => {
@@ -133,6 +141,33 @@ describe('change codec — a change that is not a change never passes as one', (
     rejects([{ table: 'users', kind: 'delete' }])
   })
 
+  it('rejects a row-kind carrying the WRONG row field for its kind', () => {
+    // "some row field is present" is not the requirement — the requirement is the field the kind is applied
+    // FROM. An insert built from `old` routes to precisely the right graph and then invalidates nothing.
+    rejects([{ table: 'users', kind: 'insert', old: { id: 1 } }])
+    rejects([{ table: 'users', kind: 'insert', key: { id: 1 } }])
+    rejects([{ table: 'users', kind: 'update', old: { id: 1 } }])
+    rejects([{ table: 'users', kind: 'update', key: { id: 1 } }])
+  })
+
+  it('rejects a byte token whose grammar or range is wrong, rather than coercing it', () => {
+    // `Uint8Array.from` is not a validator: 999 truncates to 231 and 'not-a-byte' becomes 0, so a mangled
+    // token would arrive as a plausible byte string. The module promises a mangled payload coarsens.
+    const withNote = (note: string) =>
+      JSON.stringify({
+        version: CHANGE_CODEC_VERSION,
+        origin: 'a',
+        changes: [{ table: 't', kind: 'insert', new: { b: note } }],
+      })
+    expect(decodeChangePayload(withNote('!Bytes:999,not-a-byte'))).toBeUndefined()
+    expect(decodeChangePayload(withNote('!Bytes:256'))).toBeUndefined()
+    expect(decodeChangePayload(withNote('!Bytes:-1'))).toBeUndefined()
+    expect(decodeChangePayload(withNote('!Bytes:1.5'))).toBeUndefined()
+    expect(decodeChangePayload(withNote('!Bytes:1, 2'))).toBeUndefined()
+    expect(decodeChangePayload(withNote('!Bytes:'))).toBeDefined() // …but the empty token is legitimate
+    expect(decodeChangePayload(withNote('!Bytes:0,255'))).toBeDefined() // …as are the range's edges
+  })
+
   it('rejects the WHOLE envelope for one bad entry — a partly-valid batch has no safe partial reading', () => {
     rejects([
       { table: 'users', kind: 'coarse' },
@@ -146,6 +181,7 @@ describe('change codec — a change that is not a change never passes as one', (
       { table: 'users', kind: 'insert', new: { id: 1 } },
       { table: 'users', kind: 'update', new: { id: 1 }, key: { id: 1 } },
       { table: 'users', kind: 'delete', key: { id: 1 } },
+      { table: 'users', kind: 'delete', old: { id: 1 } }, // an old-image retraction identifies the row too
     ]
     expect(decodeChangePayload(envelope(valid))).toBeDefined()
     for (const change of valid) expect(decodeChangePayload(envelope([change]))).toBeDefined()
@@ -179,5 +215,76 @@ describe('change codec — the byte tag cannot be forged by ordinary row data', 
     expect(out.empty).toBeInstanceOf(Uint8Array)
     expect([...out.empty]).toEqual([])
     expect(out.fake).toBe('!Bytes:7,8') // the string stayed a string
+  })
+})
+
+// WHY the shape rules above are the shapes they are. Rejecting `{ kind:'insert', old:{…} }` looks pedantic
+// until you watch it: it routes to precisely the right graph and then invalidates NOTHING, because an insert
+// is applied from its post-image. That is a silently missed invalidation manufactured INSIDE the boundary
+// whose entire job is to fail closed — strictly worse than a malformed payload, which at least coarsens.
+//
+// So this drives the real thing: a REAL PGlite-hydrated stateful join graph, through the REAL router, with
+// the REAL registry sink. The middle assertion is the control that can disagree — the same row as a
+// well-formed insert MUST invalidate, or the first assertion would pass for an inert graph rather than for
+// the missing post-image.
+describe('change codec — the rejected shapes are shapes that would SILENTLY MISS', () => {
+  const users = pg.pgTable('users', {
+    id: pg.integer('id').primaryKey(),
+    teamId: pg.integer('team_id'),
+    name: pg.text('name'),
+  })
+  const teams = pg.pgTable('teams', { id: pg.integer('id').primaryKey(), region: pg.text('region') })
+
+  /** A users⋈teams graph seeded from real PGlite and asserted LIVE — a coarse graph would invalidate on
+   *  anything and make the whole comparison vacuous. */
+  async function hydratedJoin() {
+    const client = new PGlite()
+    const db = drizzle({ client })
+    await client.exec('create table users (id int primary key, team_id int, name text)')
+    await client.exec('create table teams (id int primary key, region text)')
+    await client.query("insert into teams (id, region) values (1, 'eu')")
+    await client.query("insert into users (id, team_id, name) values (1, 1, 'a')")
+
+    const registry = createRegistry({ maxStateRowsPerInput: 1e9 })
+    const shape = extractQueryShape(db.select().from(users).innerJoin(teams, eq(users.teamId, teams.id)), {
+      dialect: 'pg',
+    })
+    const notify = vi.fn()
+    const { graph, token } = await registry.acquire({
+      instanceKey: 'codec-consequence',
+      tables: shape.tables,
+      rlsEnabled: false,
+      compilePlan: () => compileQuery(shape),
+      executor: hydrationExecutorOf(db),
+      notify,
+    })
+    token.redeem() // seam 1: an UN-redeemed token joins no sink, so notify could never fire
+    notify.mockClear()
+    expect(graph.state()).toBe('live') // precise, not coarse — otherwise everything below is vacuous
+    return { client, registry, notify }
+  }
+
+  it('an insert built from `old` invalidates NOTHING on a real graph — and the codec rejects it', async () => {
+    const { client, registry, notify } = await hydratedJoin()
+    // PHYSICAL column names: a captured row comes from the driver (`.returning()`), so the graph keys its
+    // join on `team_id`, not the drizzle property `teamId`. Using the property name made the first version of
+    // this test's CONTROL fail to fire — which is exactly what a control is for.
+    const row = { id: 2, team_id: 1, name: 'b' }
+    const malformed = { table: 'users', kind: 'insert', old: row } as unknown as TableChange
+
+    // 1. THE HARM. Routed correctly, applied from nothing.
+    registry.router.ingest({ changes: [malformed] })
+    expect(notify).not.toHaveBeenCalled()
+
+    // 2. THE CONTROL. The same row, well-formed, DOES invalidate — so the silence above is the missing
+    //    post-image and not an inert graph.
+    registry.router.ingest({ changes: [{ table: 'users', kind: 'insert', new: row }] })
+    expect(notify).toHaveBeenCalled()
+
+    // 3. THE GATE. The shape from (1) never gets through the codec to reach a graph at all.
+    const payload = JSON.stringify({ version: CHANGE_CODEC_VERSION, origin: 'remote', changes: [malformed] })
+    expect(decodeChangePayload(payload)).toBeUndefined()
+
+    await client.close()
   })
 })

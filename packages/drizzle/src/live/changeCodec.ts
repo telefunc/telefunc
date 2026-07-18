@@ -87,11 +87,27 @@ function decodeChangePayload(payload: string): ChangeEnvelope | undefined {
   return decoded.version === CHANGE_CODEC_VERSION ? decoded : undefined
 }
 
-/** A token's payload back to bytes. An empty token is the empty array — `''.split(',')` would otherwise
- *  yield `[NaN]`. */
+/** One byte: decimal digits only, no sign, no exponent, no whitespace — exactly what the encoder writes. */
+const BYTE_PATTERN = /^(?:0|[1-9][0-9]*)$/
+
+/** A token's payload back to bytes, GRAMMAR-CHECKED. `Uint8Array.from` is not a validator: it truncates
+ *  (`999` → 231) and turns `NaN` into 0, so a mangled token would quietly become a plausible byte string
+ *  rather than being rejected. Throwing here reaches decode's catch and coarsens, which is what this
+ *  module's contract promises for a payload that arrives mangled.
+ *
+ *  An empty token is the empty array — `''.split(',')` would otherwise yield `['']`. */
 function bytesOf(encoded: string): Uint8Array {
   if (encoded === '') return new Uint8Array()
-  return Uint8Array.from(encoded.split(',').map(Number))
+  const parts = encoded.split(',')
+  const bytes = new Uint8Array(parts.length)
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index]!
+    if (!BYTE_PATTERN.test(part)) throw new Error(`malformed byte token: ${part}`)
+    const byte = Number(part)
+    if (byte > 255) throw new Error(`byte out of range: ${part}`)
+    bytes[index] = byte
+  }
+  return bytes
 }
 
 function isEnvelope(value: unknown): value is ChangeEnvelope {
@@ -106,8 +122,12 @@ const KINDS = new Set(['insert', 'update', 'delete', 'coarse'])
 /** One change, validated field by field. ONE bad entry fails the whole envelope: a partly-valid batch has
  *  no safe partial interpretation, and the coarse fallback covers all of it soundly.
  *
- *  A row-kind carrying no row data is rejected too. It would route to the right graph and then have nothing
- *  to apply — the quiet half of this failure mode, where an invalidation is neither delivered nor reported. */
+ *  The row requirement is per KIND, not "some row field present". Checking merely that one of the three
+ *  arrived accepts `{ kind:'insert', old:{…} }` — which routes to exactly the right graph and then applies
+ *  nothing, because an insert is applied from its post-image. A hydrated stateful graph reports
+ *  `invalidated: false` for it: a silently MISSED invalidation, produced inside the boundary whose whole job
+ *  is to fail closed. So: insert and update need the post-image they are applied from; a delete needs
+ *  something identifying the row it retracts. */
 function isTableChange(value: unknown): value is TableChange {
   if (!isRecord(value)) return false
   if (typeof value.table !== 'string' || value.table === '') return false
@@ -116,7 +136,8 @@ function isTableChange(value: unknown): value is TableChange {
     if (value[field] !== undefined && !isRow(value[field])) return false
   }
   if (value.kind === 'coarse') return true
-  return value.old !== undefined || value.new !== undefined || value.key !== undefined
+  if (value.kind === 'delete') return value.key !== undefined || value.old !== undefined
+  return value.new !== undefined // insert / update — both are applied from the post-image
 }
 
 /** A row is a plain object of columns. A Date is a fine column VALUE; it is not a row. */
