@@ -120,10 +120,14 @@ type ReactivePgDb<TDb> = Omit<TDb, 'select'> & {
   select<TSelection extends PgSelectedFields>(fields: TSelection): PgSelectBuilder<TSelection, PgReactiveSelectHKT>
 }
 
-// ── SQLite (its select HKT carries the extra `TRunResult` slot) ─────────────────────────────────────
+// ── SQLite (its select carries extra `TResultType` ('sync'|'async') + `TRunResult` slots) ───────────
+// node-sqlite is SYNC (`resultType: 'sync'`), so its run/all/get/values return VALUES, not Promises. Both
+// slots are DERIVED from the input db's own select builder and threaded through — hard-coding 'async' here
+// would make the reactive terminals lie about a sync driver.
 interface SQLiteReactiveSelectHKT extends SQLiteSelectHKTBase {
   _type: SQLiteReactiveSelect<
     this['tableName'],
+    Assume<this['resultType'], 'sync' | 'async'>,
     this['runResult'],
     Assume<this['selection'], ColumnsSelection>,
     this['selectMode'],
@@ -136,6 +140,7 @@ interface SQLiteReactiveSelectHKT extends SQLiteSelectHKTBase {
 }
 type SQLiteReactiveSelect<
   TTableName extends string | undefined,
+  TResultType extends 'sync' | 'async',
   TRunResult,
   TSelection extends ColumnsSelection,
   TSelectMode extends SelectMode,
@@ -145,7 +150,7 @@ type SQLiteReactiveSelect<
   TResult extends any[],
   TSelectedFields extends ColumnsSelection,
 > = SQLiteSelectBase<
-  SQLiteReactiveSelectHKT,
+  SQLiteReactiveSelectHKT & { resultType: TResultType },
   TTableName,
   TRunResult,
   TSelection,
@@ -159,7 +164,7 @@ type SQLiteReactiveSelect<
   AsyncTerminals<
     SQLiteAsyncSelectBase<
       TTableName,
-      'async',
+      TResultType,
       TRunResult,
       TSelection,
       TSelectMode,
@@ -170,7 +175,7 @@ type SQLiteReactiveSelect<
       TSelectedFields
     >,
     SQLiteSelectBase<
-      SQLiteReactiveSelectHKT,
+      SQLiteReactiveSelectHKT & { resultType: TResultType },
       TTableName,
       TRunResult,
       TSelection,
@@ -181,12 +186,34 @@ type SQLiteReactiveSelect<
       TResult,
       TSelectedFields
     >
-  > & { live(): Promise<Live<TResult>> }
-type ReactiveSQLiteDb<TDb> = Omit<TDb, 'select'> & {
-  select(): SQLiteSelectBuilder<undefined, unknown, SQLiteReactiveSelectHKT>
+  > & { readonly _: { readonly resultType: TResultType } } & { live(): Promise<Live<TResult>> }
+/** The run-result the input sqlite db's own select builder carries (node-sqlite: NodeSQLiteRunResult). */
+type SqliteRunResultOf<TDb extends { select: (...args: any[]) => any }> = ReturnType<
+  TDb['select']
+> extends SQLiteSelectBuilder<any, infer TRunResult, any>
+  ? TRunResult
+  : unknown
+/** The result mode ('sync'/'async') the input sqlite db's own select builder carries (node-sqlite: 'sync'). */
+type SqliteResultTypeOf<TDb extends { select: (...args: any[]) => any }> = ReturnType<
+  TDb['select']
+> extends SQLiteSelectBuilder<any, any, infer THKT>
+  ? THKT extends { resultType: infer TResultType extends 'sync' | 'async' }
+    ? TResultType
+    : 'async'
+  : 'async'
+type ReactiveSQLiteDb<TDb extends { select: (...args: any[]) => any }> = Omit<TDb, 'select'> & {
+  select(): SQLiteSelectBuilder<
+    undefined,
+    SqliteRunResultOf<TDb>,
+    SQLiteReactiveSelectHKT & { resultType: SqliteResultTypeOf<TDb> }
+  >
   select<TSelection extends SQLiteSelectedFields>(
     fields: TSelection,
-  ): SQLiteSelectBuilder<TSelection, unknown, SQLiteReactiveSelectHKT>
+  ): SQLiteSelectBuilder<
+    TSelection,
+    SqliteRunResultOf<TDb>,
+    SQLiteReactiveSelectHKT & { resultType: SqliteResultTypeOf<TDb> }
+  >
 }
 
 // ── MySQL ───────────────────────────────────────────────────────────────────────────────────────

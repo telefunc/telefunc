@@ -3,10 +3,11 @@ import * as telefunc from '../index.js'
 
 // The public live surface exported from 'telefunc' is exactly TWO concepts: a `Live<T>` (read `.data`)
 // and `Live.derived(…)`. The producer cell and its surviving verbs (invalidate/onInvalidate/close plus
-// the activation lifecycle) are INTERNAL — reachable only via `telefunc/__internal` (bindings) or not at
-// all. The delta-push verbs (set/update/onData) and the tag statics were DELETED outright — gone, not
-// hidden — as were the legacy request-bag/tag functions (addLiveSource/takeLiveSources/liveTag/
-// invalidateTag), removed with the old TanStack wrapper path.
+// the activation lifecycle) are INTERNAL — a server-side binding reaches them via the extension host
+// (`TelefuncServerExtension.setup(host)` → `host.createLive`), not via any public 'telefunc' export. The
+// delta-push verbs (set/update/onData) and the tag statics were DELETED outright — gone, not hidden — as
+// were the legacy request-bag/tag functions (addLiveSource/takeLiveSources/liveTag/invalidateTag), removed
+// with the old TanStack wrapper path.
 describe('telefunc live exports', () => {
   it('exports the Live namespace; the legacy bag/tag functions are gone', () => {
     const Live = (telefunc as Record<string, unknown>).Live as Record<string, unknown>

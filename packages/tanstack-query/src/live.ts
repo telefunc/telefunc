@@ -77,18 +77,19 @@ function live<T, TArgs extends unknown[]>(
 }
 
 /**
- * Reject anything that isn't a real telefunction. The value form (`live(onGetTodos, id)`) MUST be the only
- * spelling that works: a wrapper — `live(() => onGetTodos(id))` or, worse, `live(async () => { await x; return
- * onGetTodos(id) })` — silently disconnects cancellation. `withContext` sets the per-call context only for
- * the synchronous window in which the passed function runs; a telefunction the wrapper calls AFTER an await
- * sees no pending context, so the query's abort signal never reaches the request and cancellation quietly
- * does nothing. We catch this up front instead of letting it fail silently at runtime.
+ * Reject a plain/unmarked wrapper. Pass the telefunction directly (`live(onGetTodos, id)`); a wrapper —
+ * `live(() => onGetTodos(id))` or, worse, `live(async () => { await x; return onGetTodos(id) })` — silently
+ * disconnects cancellation. `withContext` sets the per-call context only for the synchronous window in which
+ * the passed function runs; a telefunction the wrapper calls AFTER an await sees no pending context, so the
+ * query's abort signal never reaches the request and cancellation quietly does nothing. We catch this up
+ * front instead of letting it fail silently at runtime.
  *
  * The check is the generated client stub's `_key` marker (telefunc's client transform stamps it on every
- * telefunction; a plain function has none). This is a RUNTIME guard BY DESIGN: a compile-time brand would
- * require telefunc to brand every telefunction's client stub TYPE — a client-typegen feature that resolves
- * telefunction types from source today — which is out of scope here. So the enforcement is the throw below,
- * not the type.
+ * telefunction; a plain function has none). It rejects plain/unmarked wrappers — not a determined forgery
+ * (the marker is a writable runtime property, so a decorator that copies `_key` can still slip past; that's
+ * accepted). This is a RUNTIME guard BY DESIGN: a compile-time brand would require telefunc to brand every
+ * telefunction's client stub TYPE — a client-typegen feature (telefunction types resolve from source today)
+ * that is out of scope here. So the enforcement is the throw below, not the type.
  */
 function assertTelefunction(fn: unknown): void {
   if (typeof fn !== 'function' || typeof (fn as { _key?: unknown })._key !== 'string') {

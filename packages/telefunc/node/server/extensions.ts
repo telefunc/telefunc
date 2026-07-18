@@ -10,10 +10,11 @@ import type {
 
 type TelefuncServerExtension = {
   name: string
-  /** Called ONCE when the extension is registered (`config.extensions.push(ext)`), before any request,
-   *  with the host toolkit. This is the sanctioned seam for a server-side integration (e.g. an ORM
-   *  binding) to reach reactive primitives — a `Live` producer and per-request cleanup — WITHOUT importing
-   *  telefunc internals. Stash the host and use it from your integration's request-time code. */
+  /** Called ONCE, SYNCHRONOUSLY, when the extension is registered (`config.extensions.push(ext)`) — which
+   *  may be at import time OR lazily mid-request (as @telefunc/drizzle registers on first use). Receives the
+   *  host toolkit: the sanctioned seam for a server-side integration (e.g. an ORM binding) to reach reactive
+   *  primitives — a `Live` producer and per-request cleanup — WITHOUT importing telefunc internals. Stash
+   *  the host and use it from your integration's request-time code. */
   setup?: (host: TelefuncExtensionHost) => void
   /** Lifecycle hooks (run in context — `getContext()`/`getRawContext()` work). */
   hooks?: {
@@ -43,11 +44,12 @@ type TelefuncExtensionHost = {
    */
   createLive<T>(initialData: T): LiveProducer<T>
   /**
-   * Register a `cleanup` to run ONCE after this request's response is serialized, on EVERY outcome
-   * (success, a body/shield throw before serialize, or a serialize failure). MUST be called inside a
-   * telefunction, before the body's first await (while the request context is live) — it binds to THAT
-   * request's context, so it fires even after the ambient context has nulled in sync mode. GUARANTEE:
-   * exactly-once; a throwing cleanup is isolated and never corrupts the response.
+   * Register a `cleanup` to run ONCE after the request's execute→serialize pipeline SETTLES, on EVERY
+   * outcome — success, a body/shield throw before serialize, or a serialize failure (on failure there may
+   * be no serialized response at all; the cleanup still runs). MUST be called inside a telefunction, before
+   * the body's first await (while the request context is live) — it binds to THAT request's context, so it
+   * fires even after the ambient context has nulled in sync mode. GUARANTEE: exactly-once; a throwing
+   * cleanup is isolated and never corrupts the response.
    */
   onRequestCleanup(cleanup: () => void): void
 }

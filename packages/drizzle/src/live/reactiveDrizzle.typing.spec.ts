@@ -114,11 +114,19 @@ async function pgDriverTerminals() {
   const one: boolean = rows[0]!.done
   void one
 }
-async function sqliteDriverTerminals() {
-  const db = reactiveDrizzle(sqliteBase)
-  const q = db.select().from(sqliteTodos)
-  // SQLite runners are all present (prepare/run/all/get/values/execute), not just `then`.
-  void [q.prepare, q.run, q.all, q.get, q.values, q.execute]
+function sqliteDriverTerminals() {
+  const base = sqliteBase.select().from(sqliteTodos)
+  const reactive = reactiveDrizzle(sqliteBase).select().from(sqliteTodos)
+  // node-sqlite is SYNC: run/all/get/values return VALUES, not Promises. Assigning the reactive terminal's
+  // return type into the base builder's proves they match EXACTLY — a Promise mismatch (the old bug) fails
+  // here. (Name-existence would have passed even with the wrong sync/async mode.)
+  const run: ReturnType<typeof base.run> = null as unknown as ReturnType<typeof reactive.run>
+  const all: ReturnType<typeof base.all> = null as unknown as ReturnType<typeof reactive.all>
+  const get: ReturnType<typeof base.get> = null as unknown as ReturnType<typeof reactive.get>
+  const values: ReturnType<typeof base.values> = null as unknown as ReturnType<typeof reactive.values>
+  const execute: ReturnType<typeof base.execute> = null as unknown as ReturnType<typeof reactive.execute>
+  const prepared: ReturnType<typeof base.prepare> = null as unknown as ReturnType<typeof reactive.prepare>
+  void [run, all, get, values, execute, prepared]
 }
 async function mysqlDriverTerminals() {
   const db = reactiveDrizzle(mysqlBase)

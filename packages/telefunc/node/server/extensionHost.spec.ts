@@ -43,7 +43,7 @@ describe('extension host — setup delivers the reactive toolkit', () => {
     const context = getRawContext()!
     const cleanup = vi.fn()
     host!.onRequestCleanup(cleanup)
-    expect(cleanup).not.toHaveBeenCalled() // inert until the response is serialized
+    expect(cleanup).not.toHaveBeenCalled() // inert until the execute→serialize pipeline settles
     drainPostSerializeDisposers(context)
     expect(cleanup).toHaveBeenCalledTimes(1)
     drainPostSerializeDisposers(context) // idempotent — a second drain does not re-run it
