@@ -77,17 +77,35 @@ function createInMemoryChangeTransport(): ChangeTransport {
  *  own transport. Shared (not per-db) so two in-process instances fan out to each other. */
 const defaultChangeTransport: ChangeTransport = createInMemoryChangeTransport()
 
-/** Per-db transport override (advanced): `reactiveDrizzle(db, { changeTransport })` registers one here.
- *  SET-ONCE per db — subscriptions are established lazily against whichever transport is resolved, so a
- *  mid-life swap would orphan them; pass the same transport instance consistently across a db's requests. */
-const overrides = new WeakMap<object, ChangeTransport>()
+// SET-ONCE, ENFORCED. Subscriptions and their proven-listening readiness are established against whichever
+// transport a db RESOLVED, so a later swap would leave readiness proven on a transport nobody is listening on
+// (remote writes silently missed). The resolution is therefore FROZEN at first use — including when the
+// resolution is the DEFAULT — and a later, different transport throws instead of being silently ignored.
+const configured = new WeakMap<object, ChangeTransport>() // explicit override, registered before first use
+const resolved = new WeakMap<object, ChangeTransport>() // frozen at first use (an override OR the default)
+
+const SWAP_MESSAGE =
+  'telefunc live: the change transport for this db is already in use and cannot be replaced. `changeTransport` is set-once per db (the default counts as a resolution) — pass the same transport instance on every reactiveDrizzle(db, …) call for this db, or use a distinct db instance.'
 
 function setChangeTransport(db: object, transport: ChangeTransport | undefined): void {
   if (!transport) return
-  if (!overrides.has(db)) overrides.set(db, transport)
+  const frozen = resolved.get(db)
+  if (frozen !== undefined) {
+    if (frozen !== transport) throw new Error(SWAP_MESSAGE) // already resolved (incl. default) → refuse the swap
+    return
+  }
+  const existing = configured.get(db)
+  if (existing !== undefined && existing !== transport) throw new Error(SWAP_MESSAGE)
+  configured.set(db, transport)
 }
 
-/** The transport for a db: its registered override, else the shared in-process default. */
+/** The transport for a db — its registered override, else the shared in-process default — FROZEN on first
+ *  call so every later subscription, publish and readiness proof refers to the same transport identity. */
 function transportFor(db: object): ChangeTransport {
-  return overrides.get(db) ?? defaultChangeTransport
+  let transport = resolved.get(db)
+  if (!transport) {
+    transport = configured.get(db) ?? defaultChangeTransport
+    resolved.set(db, transport)
+  }
+  return transport
 }
