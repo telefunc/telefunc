@@ -33,6 +33,19 @@ export type {
 }
 
 import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
+
+/** Shield contract, read by the server to validate a client's incoming `publish()` payload against the
+ *  room's declared message type (`Pub`). Like `Broadcast`, this is auto-generated from the type: declare
+ *  `Room<Meta, PMeta, Message>` and every client publish is validated against `Message` at the server
+ *  ingress, rejected with a `ShieldValidationError` before any guard or handler runs — no separate
+ *  shield to write. `Pub` defaults to `unknown` (validates anything) until you declare it. A phantom
+ *  type-only field, erased at runtime. */
+type RoomShield<Pub> = {
+  readonly [TELEFUNC_SHIELDS]: {
+    data: Pub
+  }
+}
 
 /** Room metadata (e.g. topic). Must be serializable. */
 type RoomMeta = Record<string, unknown>
@@ -309,7 +322,7 @@ type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = Participant
    *  `useSyncExternalStore(room.onChange, room.snapshot)` is the entire React adapter.
    *  Participants appear once the member view loads (subscribing `onChange` loads it). */
   snapshot(): RoomSnapshotView<M, P>
-}
+} & RoomShield<Pub>
 
 /**
  * Your own participant handle, returned by `join()`. One type, same on server and client —
@@ -367,7 +380,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   /** You left. `cause.type` says how — `'left'` (you), `'removed'` (kicked, with the kick's
    *  `reason`), `'closed'` (the room), `'disconnected'` (the connection died). */
   onLeave(callback: (cause: LeaveCause) => void): () => void
-}
+} & RoomShield<Pub>
 
 /** Another room member: subscribe to just their messages, observe their metadata and lifecycle.
  *  Returnable from a telefunction — it arrives bound to its room's live view: the backing room

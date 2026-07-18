@@ -6,6 +6,7 @@ import {
   onGetRoom,
   onGetRoomTail,
   onGetOrCreateRoom,
+  onGetTypedRoom,
   onGetGuardedRoom,
   onGetAuditRoom,
   onGetAudit,
@@ -247,6 +248,38 @@ function Room() {
         }}
       >
         Guarded publish & send
+      </button>
+
+      <button
+        id="test-room-shield"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-shield:${crypto.randomUUID()}`
+          // A room declared with a message type — `Room.create<…, ChatMsg>` inside the telefunction.
+          const room = await onGetTypedRoom(roomId)
+          const me = await room.join({ meta: { name: 'A' } })
+          const received: string[] = []
+          room.subscribe((data) => received.push(data.text))
+
+          // A well-typed payload sails through the shield auto-generated from the declared type.
+          const okAck = await me.publish({ kind: 'chat', text: 'hi' }).then(
+            () => true,
+            () => false,
+          )
+          // A malformed payload — cast past the compile-time type, as an untyped or hostile client could
+          // send — is rejected at the server ingress by that same auto-generated shield, before any handler.
+          const badError = await me.publish({ kind: 'chat' } as unknown as { kind: 'chat'; text: string }).then(
+            () => null,
+            (err: Error) => err.name,
+          )
+
+          await pollUntil(() => {
+            setResult(JSON.stringify({ okAck, badError, received }))
+            return { done: received.length >= 1 }
+          })
+        }}
+      >
+        Shielded publish
       </button>
 
       <h2>Returnable member view</h2>

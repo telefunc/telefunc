@@ -1679,6 +1679,112 @@ describe('room stub channel', () => {
     expect(serverRoom.count).toBe(1) // the room is unharmed
   })
 
+  it("shields a client publish against the room's declared message type", async () => {
+    const { stub, peer } = await createServedRoom('shield')
+    // The verifier the build transform generates from `Room<…, { text: string }>`, installed on the
+    // publish-ingress slot exactly as `roomReplacer` does (see `RoomShield` and the room replacer).
+    stub._publishShield = (v: unknown) =>
+      typeof (v as { text?: unknown }).text === 'string' ? true : '`data.text` should be `string`'
+    const { id } = await joinViaStub(stub, peer, 1)
+
+    await stub._onPeerPublishAckReqMessage(stringify({ __r: 'data', from: id, data: { text: 42 } }), 2)
+    await stub._onPeerPublishAckReqMessage(stringify({ __r: 'data', from: id, data: { text: 'hi' } }), 3)
+    await settle()
+
+    const acks = peer.decoded().filter((f) => f.tag === TAG.ACK_RES)
+    const bad = acks.find((f) => f.ackedSeq === 2)
+    expect(bad.status).toBe(ACK_STATUS.SHIELD_ERROR) // the client rebuilds a ShieldValidationError from this
+    expect(bad.text).toContain('should be `string`')
+    expect(acks.find((f) => f.ackedSeq === 3).status).toBe(ACK_STATUS.OK) // the valid payload publishes
+  })
+
+  it('leaves server-side publishes unshielded — only client input crosses the shield', async () => {
+    const { serverRoom, stub } = await createServedRoom('shield-server')
+    stub._publishShield = () => 'reject everything' // even a total-reject shield...
+    const alice = await serverRoom.join({ meta: { name: 'A' } })
+    // ...never runs on a trusted server-side publish: it doesn't pass through the client ingress.
+    await expect(alice.publish({ anything: true })).resolves.toBeDefined()
+  })
+
+  it("shields a standalone participant's client publish on its own channel (req-publish)", async () => {
+    const serverRoom = (await Room.create('shield-participant')) as ServerRoom
+    const me = await serverRoom.join({ meta: { name: 'A' } })
+
+    // Serialize the standalone participant through the real participant replacer, with the room's `data`
+    // shield present in `context.validators` exactly as auto-generation supplies it — the replacer hands
+    // it to `bindParticipantStubChannel`, which runs it at the `req-publish` ingress (its own channel).
+    let channel: ServerChannel | undefined
+    const context = {
+      createChannel: () => (channel = new ServerChannel()),
+      registerChannel: () => {},
+      sendStream: () => {
+        throw new Error('unused')
+      },
+      validators: new Map([
+        [
+          'data',
+          (v: unknown) =>
+            typeof (v as { text?: unknown }).text === 'string' ? true : '`data.text` should be `string`',
+        ],
+      ]),
+      passScope: new Map(),
+    } as unknown as ServerReplacerContext
+    stringify(me, {
+      replacer: createStreamingReplacer(
+        () => context,
+        () => {},
+        [],
+      ),
+    })
+
+    const frames: Uint8Array[] = []
+    channel!._attachPeer(
+      new IndexedPeer({ send: (f) => frames.push(f) }, 7, new ReplayBuffer(1024 * 1024, 60_000, 1024 * 1024)),
+    )
+    const ackFor = (seq: number) =>
+      frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((f) => f.tag === TAG.ACK_RES && f.ackedSeq === seq)
+
+    await channel!._onPeerAckReqMessage(JSON.stringify({ __r: 'req-publish', data: { text: 42 } }), 1)
+    await channel!._onPeerAckReqMessage(JSON.stringify({ __r: 'req-publish', data: { text: 'hi' } }), 2)
+    await settle()
+
+    expect(ackFor(1)!.status).toBe(ACK_STATUS.SHIELD_ERROR) // the malformed payload is rejected at the ingress
+    expect(ackFor(1)!.text).toContain('should be `string`')
+    expect(ackFor(2)!.status).toBe(ACK_STATUS.OK) // the valid payload publishes
+  })
+
+  it("the room replacer installs the room's auto-generated data shield onto the stub", async () => {
+    const serverRoom = (await Room.create('shield-wiring')) as ServerRoom
+    // The one wiring line under test: `roomReplacer` must lift `context.validators`' `data` verifier — the
+    // shield the transform auto-generates from `Pub` — onto the stub's `_publishShield`, and nowhere else.
+    let stub: RoomStubChannel | undefined
+    const context = {
+      createChannel: () => {
+        throw new Error('unused')
+      },
+      registerChannel: (ch: unknown) => {
+        if (ch instanceof RoomStubChannel) stub = ch
+      },
+      sendStream: () => {
+        throw new Error('unused')
+      },
+      validators: new Map([['data', (v: unknown) => (v === 'ok' ? true : 'only `ok` allowed')]]),
+      passScope: new Map(),
+    } as unknown as ServerReplacerContext
+    stringify(serverRoom, {
+      replacer: createStreamingReplacer(
+        () => context,
+        () => {},
+        [],
+      ),
+    })
+
+    expect(stub?._publishShield).toBeDefined()
+    expect(stub!._publishShield!('nope')).toBe('only `ok` allowed') // the verifier the replacer lifted across
+    expect(stub!._publishShield!('ok')).toBe(true)
+    expect(stub!._validators.get('data')).toBeUndefined() // never the request-validation map (no request shielding)
+  })
+
   it('the error contract matches telefunc across the wire: bug hidden, RoomError shown, Abort carried', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('wire-errors')
     Room.guard(serverRoom, {

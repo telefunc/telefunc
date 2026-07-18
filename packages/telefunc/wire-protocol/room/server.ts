@@ -3,6 +3,9 @@ export { Room, ServerRoom, ServerLocalParticipant, reportRoomError }
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
+import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
+import type { ShieldValidator } from '../../node/server/shield.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
@@ -611,6 +614,8 @@ const ROOM_DM_ACK_TIMEOUT_MS = 60_000
  */
 class ServerRoom implements Room {
   readonly [SERVER_ROOM_BRAND] = true
+  /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
+  declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
 
   /** @internal — the room generation (`RoomConfigRecord.gen`) this handle is bound to. Every
    *  authority-side legality check (join, mutate, close) and every member record this handle writes
@@ -1546,6 +1551,20 @@ class ServerRoom implements Room {
     }
   }
 
+  /** @internal — validate a client publish payload against the room's declared message type (`Pub`),
+   *  auto-generated from the type (see `RoomShield`). `validate` is the room's `data` shield, carried on
+   *  the ingress channel's own `_publishShield` slot — deliberately *not* the channel's `_validators` map,
+   *  which the base channel runs against every request envelope (`_dispatchAckReq`): a room stub multiplexes
+   *  join/leave/dm through that path, so the payload is shielded explicitly here, not as a request side effect.
+   *  A fail throws a `ShieldValidationError` the ack encoder turns into a `SHIELD_ERROR`. A no-op when nothing
+   *  declared `Pub` (`unknown` generates no verifier). Both publish ingresses (room stub, standalone-participant
+   *  stub) run it before the payload is admitted. */
+  _shieldPublishData(validate: ShieldValidator | undefined, data: unknown): void {
+    if (!validate) return
+    const result = validate(data)
+    if (result !== true) throw new ShieldValidationError(result)
+  }
+
   /** @internal — a client publish arriving on a room stub. The client's envelope is only a
    *  claim: membership is validated against this stub, and the publish path re-stamps the verified
    *  `fromMeta` — nothing client-supplied reaches the room stream except the payload itself. */
@@ -1558,6 +1577,11 @@ class ServerRoom implements Room {
       if (!hasRoomTag(envelope) || envelope.__r !== 'data') throw new RoomError('Malformed room publish')
       const publish = envelope as RoomDataPublish
       this._assertStubMember(stub, publish.from)
+      // Shield the payload against the room's declared message type (`Pub`) — auto-generated, run only
+      // on client-originated publishes (a server-side `me.publish()` is trusted and never comes here).
+      // A fail rides the publish ack as `SHIELD_ERROR` (see `roomAckError`), rejecting the client's
+      // `publish()` with a `ShieldValidationError` before the payload reaches a guard or the room.
+      this._shieldPublishData(stub._publishShield, publish.data)
       return await this._publishText(publish.from, publish.data, publish.retain)
     }
     // Read only the sender prefix to check membership; the full validating unframe happens once, in

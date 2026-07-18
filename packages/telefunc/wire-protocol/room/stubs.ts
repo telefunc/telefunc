@@ -6,6 +6,7 @@ import { isObject } from '../../utils/isObject.js'
 import { ROOM_TAIL_ATTACH_TIMEOUT_MS, ROOM_TAIL_HOLD_MAX } from '../constants.js'
 import type { ChannelPublishAck } from '../channel.js'
 import type { ServerChannel } from '../server/channel.js'
+import type { ShieldValidator } from '../../node/server/shield.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from './server.js'
@@ -61,6 +62,12 @@ class RoomStubChannel extends ServerBroadcast {
   _adoptSelfSuppressed(set: Set<string>): void {
     this._selfSuppressed = set
   }
+  /** @internal — the publish shield auto-generated from the room's declared message type (`Pub`),
+   *  installed by `roomReplacer` at serialization time and consulted at the publish ingress
+   *  (`ServerRoom._publishFromStub` → `_shieldPublishData`). Undefined when `Pub` is `unknown`. Kept off
+   *  `_validators` on purpose: that map drives the base channel's request-envelope validation, which a
+   *  room stub must not shield (it multiplexes join/leave/dm through the same `_dispatchAckReq` path). */
+  _publishShield?: ShieldValidator
   /** @internal — the client's declared binary wants, per member and track (`sub-binary`). */
   _binaryWants: BinaryWants = { everyMember: emptyTrackWants(), members: {} }
   /** @internal — whether the client subscribes to the whole text lane (the broadcast-sub ctrl). */
@@ -289,6 +296,7 @@ class RoomStubChannel extends ServerBroadcast {
 function bindParticipantStubChannel(
   channel: ServerChannel<unknown, unknown>,
   participant: ServerLocalParticipant,
+  publishShield?: ShieldValidator,
 ): void {
   // A throwing request maps onto the channel's native ack status (see `roomAckError`) — identical to
   // the shared room stub. Every request here is ack-bearing, so a throw rejects the client's request.
@@ -298,6 +306,7 @@ function bindParticipantStubChannel(
     const req = msg as ParticipantStubRequest
     switch (req.__r) {
       case 'req-publish':
+        participant._room._shieldPublishData(publishShield, req.data) // reject a malformed payload before publish
         return await participant.publish(req.data, req.retain ? { retain: true } : undefined)
       case 'req-set-meta':
         await participant.setMeta(isObject(req.meta) ? req.meta : {})

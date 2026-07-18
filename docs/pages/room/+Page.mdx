@@ -158,6 +158,19 @@ A member's `publish()` reaches both room-level subscribers (with `from`) and tha
 onCursorMove((pos) => me.publish({ pos }, { coalesce: 'cursor' }))
 ```
 
+### Validating messages
+
+Declare the room's message type and every client `publish()` is checked against it at the server, before any guard or subscriber runs. Pass it as the third type parameter to `Room.create` / `Room.get` / `Room.getOrCreate`:
+
+```ts
+type ChatMsg = { kind: 'chat'; text: string }
+const room = await Room.get<ChatMeta, MemberMeta, ChatMsg>(roomId)
+```
+
+`publish()` and `subscribe()` are now typed to `ChatMsg` end to end, and that same type becomes a runtime contract: a client that sends anything else, an untyped caller or a tampered payload, has its `publish()` rejected with a `ShieldValidationError` before the message reaches a guard, a subscriber, or the room. It's Telefunc's <Link href="/shield">shield</Link>, auto-generated from the type; there's no separate shield to write.
+
+The shield checks shape, not authorization: it guarantees the payload matches the declared type, never that this sender is allowed to send it. Gate who may do what in a guard's `onBeforePublish`, on `identity` (see <Link href="#moderation">Moderation</Link>), and reach for a guard too for the semantic rules a type can't state, like a non-empty body or a length cap.
+
 ### Direct messages
 
 `send()` delivers to one participant. No one else receives it, and it never shows up on `subscribe()`:
@@ -474,7 +487,7 @@ type RoomOptions = {
 - `Room.setMeta(id, meta)` replaces the room's metadata wholesale; `Room.setAttributes(id, attributes)` merges per key (a key set to `undefined` is removed). Both propagate to observers.
 - `Room.removeParticipant(id, target)` and `Room.send(id, target, data)` take one participant ref for `target`: `{ id }` for a single membership (throws when unknown), or `{ identity }` for every membership of an identity at once (an idempotent sweep or fan-out). `removeParticipant` carries its `reason` in that object: `{ id, reason? }` or `{ identity, reason? }`.
 - `Room.getParticipants(id, target?)` is a server-side point-in-time read (no live view, no subscription). Omit `target` for the whole roster; pass `{ identity }` to read one user's memberships, the cheap "is this user online" check that doesn't load the roster. `[]` for an absent identity.
-- Typed metadata: `Room.get<ChatMeta, MemberMeta>(id)` types `room.meta`, `join`/`setMeta`, and `from.meta` everywhere; `Room.list<ChatMeta>()` types each `RoomInfo.meta`. These type parameters are unchecked assertions you supply.
+- Typed generics: `Room.get<ChatMeta, MemberMeta, ChatMsg>(id)` types `room.meta`, `join`/`setMeta`, and `from.meta` (the first two generics) and `publish`/`subscribe` (the third, the message type); `Room.list<ChatMeta>()` types each `RoomInfo.meta`. The metadata generics are unchecked assertions you supply; the message type is different, it is enforced at runtime (see <Link href="#validating-messages">Validating messages</Link>).
 
 ### `Room`
 

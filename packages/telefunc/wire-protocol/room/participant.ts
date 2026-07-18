@@ -2,6 +2,7 @@ export { ParticipantBase }
 export type { InboxMessage }
 
 import type { ChannelPublishAck } from '../channel.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { RoomError, toRoomFailure, DM_PARTICIPANT_LEFT, type DmReply } from './protocol.js'
 import type {
   BinaryPublishOptions,
@@ -39,6 +40,8 @@ type InboxMessage = {
 const PENDING_INBOX_MAX_COUNT = 64
 
 abstract class ParticipantBase implements LocalParticipant {
+  /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
+  declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   readonly id: string
   readonly identity: string | null
   readonly selfDelivery: boolean

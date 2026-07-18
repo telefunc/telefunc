@@ -87,6 +87,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { isAbort, createAbortError } from '../../shared/Abort.js'
+import { isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ACK_STATUS } from '../shared-ws.js'
 import type { AckResultStatus } from '../shared-ws.js'
@@ -573,12 +574,15 @@ function roomFailureError(res: RoomFailure): Error {
 /** Map a caught room error onto the channel's native ack status — the wire form of the same
  *  three-way contract as `toRoomFailure`, for every operation that rides a channel ack (all stub
  *  requests + publishes). A carried `Abort` → `ABORT` (value); a `RoomError` → `ERROR` (its safe
- *  message); anything else is a bug → reported here, replaced with `ROOM_BUG_MESSAGE`. The client
- *  channel rebuilds an `AbortError`/`Error` from the status, so no `{ ok: false }` envelope is
- *  needed — the awaiting request promise simply rejects. */
+ *  message); a publish that failed its shield → `SHIELD_ERROR` (the client rebuilds a
+ *  `ShieldValidationError`, the same class every telefunc shield fail throws); anything else is a
+ *  bug → reported here, replaced with `ROOM_BUG_MESSAGE`. The client channel rebuilds the matching
+ *  error from the status, so no `{ ok: false }` envelope is needed — the awaiting request promise
+ *  simply rejects. */
 function roomAckError(err: unknown, report: (err: unknown) => void): { text: string; status: AckResultStatus } {
   if (isAbort(err)) return { text: stringify(err.abortValue), status: ACK_STATUS.ABORT }
   if (isRoomError(err)) return { text: err.message, status: ACK_STATUS.ERROR }
+  if (isShieldValidationError(err)) return { text: err.message, status: ACK_STATUS.SHIELD_ERROR }
   report(err)
   return { text: ROOM_BUG_MESSAGE, status: ACK_STATUS.ERROR }
 }

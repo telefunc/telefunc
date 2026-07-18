@@ -1,6 +1,7 @@
 export { ClientRoom, ClientRoomParticipant, ClientStandaloneParticipant }
 
 import { assertUsage } from '../../utils/assert.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import type { ClientBroadcast, ClientChannel } from '../client/channel.js'
 import {
@@ -56,6 +57,8 @@ type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err:
  * the serialized snapshot; the relayed event stream keeps it fresh from there.
  */
 class ClientRoom implements Room {
+  /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
+  declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly _stub: ClientBroadcast
   private readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()

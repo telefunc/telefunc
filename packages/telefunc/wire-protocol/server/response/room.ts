@@ -42,6 +42,11 @@ const roomReplacer: ReplacerType<RoomContract, ServerReplacerContext> = {
   replace(serverRoom, context) {
     const stub = new RoomStubChannel(serverRoom)
     context.registerChannel(stub)
+    // The publish shield, auto-generated from the room's declared message type (`Pub`, see `RoomShield`),
+    // lives in `context.validators` under the `data` slot. Install it on the stub's dedicated
+    // `_publishShield` — never its `_validators` map, which the base channel runs against every request
+    // envelope (join/leave/dm); the payload is shielded at the publish ingress (`_publishFromStub`).
+    stub._publishShield = context.validators.get('data')
     // Adopt this response's echo drop-set for the room: any co-returned self-suppressing member
     // (either serialization order) lands in the same set, and the relay gate reads it at source.
     stub._adoptSelfSuppressed(roomSelfSuppressSet(context, serverRoom))
@@ -114,7 +119,11 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantContract, ServerRepla
   },
   replace(participant, context) {
     const channel = context.createChannel()
-    bindParticipantStubChannel(channel, participant)
+    // Same publish shield as the room stub, for a standalone participant that publishes through its own
+    // channel (`req-publish`) rather than the room stub. The `data` verifier auto-generated from the
+    // participant value's declared message type (see `RoomShield`) is handed straight to the binding,
+    // which runs it at the publish ingress — kept off `channel._validators` for the same reason as the stub.
+    bindParticipantStubChannel(channel, participant, context.validators.get('data'))
     // selfDelivery off: bind this member's id onto its room's stub drop-set for this response, so the
     // server drops its echo at the source. If the room isn't co-returned there's no stub to adopt the
     // set and it's discarded with the pass — a clean no-op, never leaking to another client's stub.

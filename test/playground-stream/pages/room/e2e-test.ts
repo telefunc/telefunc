@@ -161,6 +161,21 @@ function testRoom() {
     })
   })
 
+  test('room: the declared message type is shielded at runtime — a malformed publish is rejected', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-shield')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ okAck: boolean; badError: string | null; received: string[] }>('#room-result')
+
+      expect(r.okAck).toBe(true) // the well-typed payload is admitted
+      // The shield auto-generated from `Room<…, ChatMsg>` rejects the malformed payload at the ingress;
+      // the branded error rides home over the wire and rejects the client's `publish()` promise.
+      expect(r.badError).toBe('ShieldValidationError')
+      expect(r.received).deep.equal(['hi']) // only the valid payload ever reached the room
+    })
+  })
+
   test('room: room-authored messages, admin kick and close reach the client', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-admin')
