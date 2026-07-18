@@ -156,6 +156,11 @@ const headings = [
   },
   {
     level: 2,
+    title: '`@telefunc/drizzle`',
+    url: '/drizzle',
+  },
+  {
+    level: 2,
     title: '`@telefunc/tanstack-query`',
     url: '/tanstack-query',
   },

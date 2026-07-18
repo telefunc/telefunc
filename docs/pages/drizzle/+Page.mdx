@@ -1,0 +1,130 @@
+import { Link } from '@brillout/docpress'
+import { TelefuncStreamBeta, PoweredByTelefuncStream } from '../../components'
+
+<TelefuncStreamBeta />
+
+Live queries for [Drizzle ORM](https://orm.drizzle.team) — write an ordinary Drizzle query, end it with `.live()`, and Telefunc keeps the result current. When a write changes rows the query cares about, the clients reading it are told to refetch. Nothing to subscribe to, no invalidation keys to maintain: the dependencies come from the SQL you already wrote.
+
+<PoweredByTelefuncStream pkg="drizzle" />
+
+## Install
+
+```bash
+npm install @telefunc/drizzle
+```
+
+That's it — there is nothing to register. `reactiveDrizzle()` is imported where you use it, and `Live` is part of Telefunc itself.
+
+
+## Usage
+
+Wrap your Drizzle `db` at the top of a telefunction, then terminate a query with `.live()`:
+
+```ts
+// Todos.telefunc.ts
+// Environment: server
+
+import { reactiveDrizzle } from '@telefunc/drizzle'
+import { eq } from 'drizzle-orm'
+import { db } from './db'
+import { todos } from './schema'
+
+export async function onGetTodos(userId: number) {
+  const rdb = reactiveDrizzle(db)
+  return rdb.select().from(todos).where(eq(todos.userId, userId)).live()
+}
+
+export async function onAddTodo(text: string) {
+  const rdb = reactiveDrizzle(db)
+  await rdb.insert(todos).values({ text })
+}
+```
+
+The read returns a `Live<Todo[]>`. The write is ordinary Drizzle — but because it ran through the reactive `db`, Telefunc knows which rows changed and invalidates exactly the live queries that read them.
+
+> **Call `reactiveDrizzle(db)` before the body's first `await`.** It binds to the current request, which is only reachable synchronously. Calling it later throws with that message rather than failing quietly.
+
+Everything except `.live()` is the ordinary Drizzle builder — `await` the same chain for plain rows, and `execute`/`prepare`/the dialect runners all behave as before:
+
+```ts
+const rows = await rdb.select().from(todos)          // Todo[]     — plain read
+const live = await rdb.select().from(todos).live()   // Live<Todo[]> — live read
+```
+
+> Forgetting `.live()` is a *compile* error at the boundary, not a silent bug: `Todo[]` is not a `Live<Todo[]>`.
+
+
+## Reading a live value
+
+A `Live<T>` is `{ readonly data: T }` — `.data` is the current snapshot:
+
+```ts
+// Environment: client
+const todos = await onGetTodos(userId)
+todos.data // Todo[]
+```
+
+The snapshot does not mutate in place. When the server signals that it is stale, an adapter refetches and swaps in a fresh handle — see <Link href="/tanstack-query">`@telefunc/tanstack-query`</Link>, which does this for you.
+
+#### `Live.derived()`
+
+Compose a live value from others. Reading a dependency's `.data` inside the callback registers it, and the derived value goes stale whenever a dependency does:
+
+```ts
+import { Live } from 'telefunc'
+
+const openCount = Live.derived(() => todos.data.filter((t) => !t.done).length)
+```
+
+
+## Multi-process deployments
+
+The built-in default fans writes out **within one process** — enough for development and a single server. Running more than one server process requires a shared transport, or a write on one will not reach a live query on another:
+
+```ts
+const rdb = reactiveDrizzle(db, { changeTransport: myRedisChangeTransport })
+```
+
+> This transport is dedicated to live queries and is independent of your app's `config.broadcast.transport`.
+
+
+## Precision & limits
+
+Live queries are **precise where that can be proven, and deliberately coarse — never wrong — everywhere else.** A coarse invalidation refetches more than strictly necessary; it never delivers a stale or fabricated row.
+
+Capturing a write precisely means recovering the rows it changed. That needs a connection whose session Telefunc can prove is its own, a usable primary key, and a way to read the changed rows back:
+
+| Write | Behaviour |
+| --- | --- |
+| On PGlite | **Precise** — the rows are captured for you |
+| On SQLite or a pinned PostgreSQL client, using `.returning()` | **Precise** — your own `RETURNING` supplies the rows |
+| On SQLite or a pinned PostgreSQL client, *without* `.returning()` | **Coarse** — the plain driver result can't be reproduced faithfully, so the rows aren't captured |
+| On a pooled PostgreSQL connection | **Coarse** — a pool can't prove which session ran the query |
+| On MySQL | **Coarse** — no `RETURNING` to capture rows from |
+| `UPSERT` / `ON CONFLICT`, a primary-key-changing update, or a table with no usable primary key | **Coarse** — the affected rows can't be identified unambiguously |
+
+Reads have one over-fire of their own: a plain single-table `select` keeps no row state, so an update to a row it reads can invalidate it even when the visible result is unchanged. Joins and aggregates track this exactly.
+
+#### Raw SQL
+
+A raw statement's tables are unknowable without parsing it, so running one on the reactive db invalidates **every** table that db has a live query on:
+
+```ts
+await rdb.execute(sql`update todos set done = true`) // invalidates everything this db watches
+```
+
+That keeps raw SQL correct and usable, but noisy — and it applies to raw **reads** too. Run raw reads on your base `db` (the one you still hold) to avoid it:
+
+```ts
+await db.execute(sql`select count(*) from audit_log`) // base db — invalidates nothing
+```
+
+#### Delivery
+
+Invalidation is best-effort pub/sub. A live read is not admitted until its subscription is proven listening, so a write can't be missed in the gap between the two. Beyond that, a message dropped on an established connection delays that query's invalidation until the next write touching the table — bounded staleness, never a fabricated row.
+
+
+## See also
+
+- <Link href="/tanstack-query" /> — the client adapter that refetches live queries for you
+- <Link href="/stream" />
