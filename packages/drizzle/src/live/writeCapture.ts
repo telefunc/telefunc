@@ -1,4 +1,4 @@
-export { captureMutation, emitSafely, captureRawSql }
+export { captureMutation, emitSafely, captureRawSql, planCapture }
 export type { CaptureSink }
 
 import { type Column, SQL, type Table, getTableColumns, getTableName, is, isTable } from 'drizzle-orm'
