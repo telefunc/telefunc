@@ -34,6 +34,10 @@ const watching = (table: string) => ({ tables: [table] }) as never
 const change = (table: string): TableChange => ({ table, kind: 'insert', new: { id: 1 } })
 let counter = 0
 const remoteId = () => `remote-${counter++}`
+const batchId = () => `batch-${counter++}`
+
+/** One published batch: every copy carries the SAME id, which is what makes them duplicates. */
+const remoteBatch = (changes: TableChange[]) => ({ id: batchId(), origin: remoteId(), changes })
 
 // A fresh db + its own injected transport per test → no cross-test subscriber leakage.
 function freshDb() {
@@ -54,7 +58,7 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
     const changes = [change('users'), change('posts')]
     await ensureSubscribed(db, ['users', 'posts'])
     // A REMOTE instance's publish: the same batch on each touched table's topic.
-    const message = { origin: remoteId(), tables: ['users', 'posts'], changes }
+    const message = remoteBatch(changes)
     transport.publish(batchTopic('users'), message)
     transport.publish(batchTopic('posts'), message)
     expect(engine.ingest).toHaveBeenCalledTimes(1) // the second topic's delivery is deduped
@@ -65,7 +69,7 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
     const { db, transport } = freshDb()
     const changes = [change('users'), change('posts')]
     await ensureSubscribed(db, ['users']) // only subscribed to one of the two touched topics
-    transport.publish(batchTopic('users'), { origin: remoteId(), tables: ['users', 'posts'], changes })
+    transport.publish(batchTopic('users'), remoteBatch(changes))
     expect(engine.ingest).toHaveBeenCalledTimes(1)
     expect(engine.ingest).toHaveBeenCalledWith({ changes }) // the whole batch, not just this table's slice
   })
@@ -73,7 +77,7 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
   it('a LOCAL write is NOT double-applied: its own round-trip is deduped (fed directly, not via transport)', async () => {
     const { db } = freshDb()
     await ensureSubscribed(db, ['users'])
-    // publishBatch pre-marks its id seen, then publishes — the local subscriber must drop the round-trip.
+    // The batch carries the publishing db's `origin`, so its own subscription drops the round-trip.
     publishBatch(db, { changes: [change('users')] })
     expect(engine.ingest).not.toHaveBeenCalled() // the local instance already fed its graphs directly
   })
@@ -82,7 +86,7 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
     const { db, transport } = freshDb()
     const changes = [change('users')]
     await ensureSubscribed(db, ['users'])
-    transport.publish(batchTopic('users'), { origin: remoteId(), tables: ['users'], changes })
+    transport.publish(batchTopic('users'), remoteBatch(changes))
     expect(engine.ingest).toHaveBeenCalledTimes(1)
     expect(engine.ingest).toHaveBeenCalledWith({ changes })
   })
@@ -113,19 +117,23 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
     expect(engine.ingest).not.toHaveBeenCalled()
   })
 
-  it('cross-topic dedupe is DETERMINISTIC: an arbitrarily DELAYED second-topic copy still applies only once', async () => {
-    // The old count-bounded id memory failed exactly here: once the id aged out, the delayed copy applied a
-    // SECOND time (precise application is not idempotent). The origin+owning-table rule has no memory to age.
+  it('dedupe is not COUNT-bounded: 5,000 unrelated batches later, the second-topic copy is still dropped', async () => {
+    // The original count-bounded `seen` set failed exactly here: after SEEN_CAP unrelated ids the original
+    // aged out and the delayed copy applied a SECOND time. The APPLIED marker expires on TIME, not on count,
+    // so no volume of unrelated traffic can evict a marker that is still inside its skew window.
     const { db, transport } = freshDb()
     const changes = [change('users'), change('posts')]
     await ensureSubscribed(db, ['users', 'posts'])
-    const message = { origin: remoteId(), tables: ['users', 'posts'], changes }
-    transport.publish(batchTopic('users'), message) // owning table → applied
+    const message = remoteBatch(changes)
+    transport.publish(batchTopic('users'), message) // first copy → applied
+    // Unrelated traffic: each is a genuinely distinct batch, so each SHOULD apply. They exist to push the
+    // original far down the marker set — which is exactly what evicted it under the old count bound.
     for (let i = 0; i < 5000; i++) {
-      transport.publish(batchTopic('users'), { origin: remoteId(), tables: ['unwatched'], changes: [] })
+      transport.publish(batchTopic('users'), remoteBatch([change('users')]))
     }
-    transport.publish(batchTopic('posts'), message) // delayed copy, far beyond any id window → still dropped
-    expect(engine.ingest).toHaveBeenCalledTimes(1)
+    transport.publish(batchTopic('posts'), message) // second copy of the ORIGINAL, 5,000 ids later
+    const appliedOriginal = engine.ingest.mock.calls.filter(([batch]) => batch.changes === changes)
+    expect(appliedOriginal).toHaveLength(1) // dropped, despite the volume in between
   })
 
   it('TWO dbs sharing one transport: A publishes → B applies, A suppresses its own round-trip (per-db dedupe)', async () => {
@@ -143,5 +151,63 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
     publishBatch(dbA, { changes }) // A commits a write (its own graphs were already fed directly)
     expect(engine.ingest).toHaveBeenCalledTimes(1) // ONLY B applied; A deduped its own round-trip
     expect(engine.ingest).toHaveBeenCalledWith({ changes })
+  })
+})
+
+// The two scenarios that killed the previous "owner = first subscribed table of the batch" rule. Both come
+// from the same defect: that rule consulted the MUTABLE readiness map at delivery time, so which copy was
+// entitled to apply depended on receiver state that could differ between copies. Ownership is now decided by
+// arrival order alone, which no later state change can revise.
+describe('write transport — ownership cannot depend on mutable subscription state', () => {
+  /** A transport whose subscription for a chosen topic is registered but NOT yet delivering — the real state
+   *  of an async SUBSCRIBE that has not been acked. `ensureSubscribed` has already recorded the topic in its
+   *  readiness map by then, which is precisely what the old rule misread as "listening". */
+  function gatedTransport(deadTopic: string) {
+    const topics = new Map<string, Set<(message: never) => void>>()
+    return {
+      publish(topic: string, message: never) {
+        if (topic === batchTopic(deadTopic)) return // subscription not live yet: this copy is dropped
+        for (const onMessage of topics.get(topic) ?? []) onMessage(message)
+      },
+      subscribe(topic: string, onMessage: (message: never) => void) {
+        const set = topics.get(topic) ?? new Set()
+        set.add(onMessage)
+        topics.set(topic, set)
+        return () => set.delete(onMessage)
+      },
+    }
+  }
+
+  it('a batch is applied even when a PENDING subscription would have been named its owner', async () => {
+    // dbX holds a live read on `posts` (proven) and is mid-subscribe on `users` (recorded, not yet
+    // delivering). A remote batch touches both. The old rule named `users` the owner because it came first
+    // in the batch's table list and was present in the readiness map — but that topic delivered nothing, and
+    // the `posts` copy deferred to it. Net: the batch was DROPPED (Evaluator probe: 0 fires).
+    const db = {}
+    const transport = gatedTransport('users')
+    setChangeTransport(db, transport as never)
+    await ensureSubscribed(db, ['posts']) // proven and delivering
+    void ensureSubscribed(db, ['users']) // recorded in readiness; its topic never delivers
+    const changes = [change('users'), change('posts')]
+    const message = remoteBatch(changes) as never
+    transport.publish(batchTopic('users'), message) // dropped by the gate
+    transport.publish(batchTopic('posts'), message) // the only copy that arrives — it must apply
+    expect(engine.ingest).toHaveBeenCalledTimes(1)
+    expect(engine.ingest).toHaveBeenCalledWith({ changes })
+  })
+
+  it('a subscription added BETWEEN two copies of one batch cannot make the second apply again', async () => {
+    // The double-apply half. Copy 1 arrives on `posts` and applies. THEN a new live read subscribes `users`,
+    // growing the readiness map. Under the old rule the delayed `users` copy would now compute a DIFFERENT
+    // owner (`users`, which it is on) and apply the same precise changes a second time — and precise
+    // application is not idempotent.
+    const { db, transport } = freshDb()
+    const changes = [change('users'), change('posts')]
+    await ensureSubscribed(db, ['posts'])
+    const message = remoteBatch(changes)
+    transport.publish(batchTopic('posts'), message) // copy 1 → applied
+    await ensureSubscribed(db, ['users']) // the subscribed set CHANGES between copies
+    transport.publish(batchTopic('users'), message) // copy 2 → must be dropped
+    expect(engine.ingest).toHaveBeenCalledTimes(1)
   })
 })

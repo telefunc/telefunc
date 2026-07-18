@@ -40,20 +40,34 @@ assertUsage(
   `the wildcard topic ${WILDCARD_TABLE} must be reserved in ir/relation.ts, or a relation could claim it`,
 )
 
-// DE-DUPLICATION IS DETERMINISTIC AND STATELESS — no id memory, so no eviction hole and no unbounded growth.
-// (An earlier count-bounded `seen` set was unsound: once an id aged out, a delayed copy of the same batch on
-// another subscribed topic applied twice, and precise application is NOT idempotent.)
+// CROSS-TOPIC DE-DUPLICATION — apply-once-on-first-receipt.
 //
-// A batch carries `origin` (the publishing db) and `tables` (every table it touched, stable order). A
-// receiver on (db, table) applies it iff BOTH:
+// This layer publishes ONE batch to EACH touched table's topic (decision #5: per-table fan-out, and the whole
+// batch travels so a multi-table transaction stays ONE atomic tick). A db subscribed to several of those
+// topics therefore receives several copies of the same batch and must apply exactly one: precise row
+// application is NOT idempotent — a stateful aggregate would count the same delta twice.
+//
+// A receiver applies a copy iff BOTH:
 //   1. `origin !== dbIdOf(db)` — a db never applies its own batch through the transport (its graphs were fed
 //      DIRECTLY in ingestWrite); and
-//   2. `table` is the FIRST of the batch's tables that this db is subscribed to — so a db subscribed to
-//      several of a batch's tables applies it on exactly one of them, whichever comes first.
-// Soundness rests on one invariant: a db's subscription set and its `readiness` entry are established in the
-// SAME synchronous step (see ensureSubscribed), and a topic only delivers batches published after it was
-// subscribed. So every delivery of a given batch to a given db sees the same subscribed set, and rule (2)
-// selects the same single topic for all of them.
+//   2. it is the FIRST copy of that batch id this db has seen — recorded in a short-lived APPLIED marker.
+//
+// SOUNDNESS INVARIANT, and why the previous rule failed it. The earlier rule picked an owner topic — "the
+// first of the batch's tables this db is subscribed to" — by consulting the `readiness` map AT DELIVERY TIME.
+// That map is mutable: a later live read adds entries. Two consequences, both real:
+//   - a PENDING subscription could be named owner while its topic was not yet actually listening, so the copy
+//     that would have applied never arrived and every other copy deferred to it — the batch was DROPPED; and
+//   - if the subscribed set changed BETWEEN two copies of one batch, the two copies could compute different
+//      owners and both apply — a DOUBLE-APPLY.
+// The rule's stated invariant ("every delivery of a given batch sees the same subscribed set") was simply not
+// true. Ownership must not depend on mutable receiver state, so it now depends on nothing but arrival order.
+//
+// The marker is time-bounded, which is sound only against an EXPLICIT transport guarantee — see the
+// `MAX_FANOUT_SKEW_MS` clause on the ChangeTransport contract: all copies of one published batch reach a
+// given subscriber within that window, or the transport delivers none of them. So once the window has passed
+// no further copy can arrive, and expiring the marker cannot resurrect a duplicate. This is an ARGUED bound
+// tied to a stated contract, not a silent cap: the earlier count-bounded `seen` set had no such guarantee —
+// after 4,096 unrelated ids the original aged out and a delayed copy applied twice.
 
 /** The publishing identity of a db — stable for the db's lifetime, used to drop our own round-trip. */
 const dbIds = new WeakMap<object, string>()
@@ -63,22 +77,40 @@ function dbIdOf(db: object): string {
   return id
 }
 
-/** The first of `tables` this db is subscribed to — the ONE topic allowed to apply the batch. */
-function owningTable(db: object, tables: readonly string[]): string | undefined {
-  const subscribed = readiness.get(db)
-  if (!subscribed) return undefined
-  for (const table of tables) if (subscribed.has(table)) return table
-  return undefined
+/** How far apart copies of ONE published batch may reach a given subscriber. The transport contract requires
+ *  all copies within this window (or none delivered), so an APPLIED marker older than it can be forgotten
+ *  without risking a duplicate application. The built-in default transport delivers synchronously inside the
+ *  publish loop, so its real skew is zero; the window exists for transport-backed deployments. */
+const MAX_FANOUT_SKEW_MS = 30_000
+
+/** Batch ids this db has already applied, with the time their marker may be forgotten. Keyed by db so a
+ *  discarded db is collectable; bounded by the batches ARRIVING within one skew window, not by a fixed count. */
+const applied = new WeakMap<object, Map<string, number>>()
+
+/** Admit a batch copy for application — true for the FIRST copy this db sees, false for every later one.
+ *  This is the whole cross-topic dedupe decision, and it reads no mutable subscription state. */
+function admitBatch(db: object, batchId: string): boolean {
+  let seen = applied.get(db)
+  if (!seen) applied.set(db, (seen = new Map()))
+  const now = Date.now()
+  // Entries share one TTL, so the Map's insertion order is expiry order: stop at the first live entry.
+  for (const [id, expiresAt] of seen) {
+    if (expiresAt > now) break
+    seen.delete(id)
+  }
+  if (seen.has(batchId)) return false
+  seen.set(batchId, now + MAX_FANOUT_SKEW_MS)
+  return true
 }
 
 /** Publish a committed batch cross-instance over the db's changeTransport: one message per touched table's
- *  topic, all carrying the same id. The id is pre-marked seen so this instance drops its own round-tripped
- *  copy (it already fed its graphs directly). No-op for an empty batch. */
+ *  topic, every copy carrying the SAME batch id so a receiver subscribed to several of those topics applies
+ *  exactly one of them. No-op for an empty batch. */
 function publishBatch(db: object, batch: ChangeBatch): void {
   if (batch.changes.length === 0) return
   const transport = transportFor(db)
-  const tables = [...new Set(batch.changes.map((change) => change.table))] // stable order; drives rule (2)
-  const message = { origin: dbIdOf(db), tables, changes: batch.changes }
+  const tables = [...new Set(batch.changes.map((change) => change.table))]
+  const message = { id: randomUUID(), origin: dbIdOf(db), changes: batch.changes }
   for (const table of tables) transport.publish(batchTopic(table), message)
 }
 
@@ -154,7 +186,7 @@ function subscribeAndProbe(db: object, table: string): Promise<void> {
         }
         return
       }
-      if (owningTable(db, message.tables) !== table) return // another of our subscribed topics applies it
+      if (!admitBatch(db, message.id)) return // an earlier copy of this batch (another topic) already applied
       registryFor(db).router.ingest({ changes: message.changes })
     })
     let attempts = 0

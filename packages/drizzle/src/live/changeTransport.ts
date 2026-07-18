@@ -8,13 +8,12 @@ import type { TableChange } from '../router/events.js'
  * PROBE (a unique token the publisher awaits back to prove its OWN subscription is listening — see the
  * readiness barrier in writeTransport.ts). The two are discriminated structurally (`'probe' in message`).
  *
- * A batch carries `origin` (the publishing db's identity) and `tables` (every table it touched, in a stable
- * order). Together these make cross-topic de-duplication DETERMINISTIC and STATELESS — no id memory, so no
- * eviction hole: a receiver drops the batch if it published it, and otherwise applies it on exactly one
- * topic (see `writeTransport.ts`).
+ * A batch carries `id` (the same on every copy of one published batch) and `origin` (the publishing db's
+ * identity). A receiver drops the batch if it published it, and otherwise applies the FIRST copy it sees —
+ * see the apply-once rule and its soundness invariant in `writeTransport.ts`.
  */
 type ChangeMessage =
-  | { origin: string; tables: string[]; changes: TableChange[] }
+  | { id: string; origin: string; changes: TableChange[] }
   | { origin: string; coarseAll: true }
   | { probe: string }
 
@@ -46,10 +45,16 @@ type ChangeMessage =
  *    `.live()` and captured writes).
  *  - **At-most-once delivery per topic.** A transport MUST NOT redeliver the same published message to the
  *    same subscriber on the same topic. Precise row application is NOT idempotent (a stateful aggregate would
- *    count the same delta twice), and this layer keeps NO id memory to catch it — the cross-topic duplicates
- *    that this layer itself creates (one batch on each touched table's topic) are removed deterministically
- *    by the origin + owning-table rule in writeTransport.ts, not by remembering ids. A transport that can
- *    redeliver must deduplicate internally before calling the subscriber.
+ *    count the same delta twice). A transport that can redeliver must deduplicate internally before calling
+ *    the subscriber.
+ *  - **Bounded fan-out skew (30s).** This layer publishes one batch to EACH touched table's topic, so a
+ *    subscriber of several of them receives several copies and applies only the first (`writeTransport.ts`).
+ *    The marker that suppresses the rest is remembered for a bounded window, so a transport MUST deliver ALL
+ *    copies of one published batch to a given subscriber within **30 seconds** of the first, or deliver NONE
+ *    of them. A transport that can strand one copy for longer would let it apply a second time, corrupting
+ *    exact operator state. (Both the in-memory default — which delivers synchronously inside the publish
+ *    loop, skew zero — and ordinary Redis pub/sub satisfy this comfortably; a store-and-forward queue with
+ *    unbounded retry does NOT, and must collapse the fan-out itself.)
  *  - **Structure preservation.** Change rows carry ordinary SQL values — BigInt, Date, byte arrays, NULL,
  *    composite keys — so a serializing transport MUST round-trip these faithfully (plain `JSON` does not:
  *    it throws on BigInt and drops Date/byte types). The in-memory default delivers by reference (same
