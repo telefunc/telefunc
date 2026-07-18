@@ -19,7 +19,8 @@ import type {
   SetOp,
   SetOpKind,
 } from '../ir/types.js'
-import { colRefOf, collectTables, realTableNameOf, tableOf, tableRefOf } from './columns.js'
+import { relationIdOf } from '../ir/relation.js'
+import { colRefOf, collectTables, relationKeyOf, tableOf, tableRefOf } from './columns.js'
 import { extractPredicate } from './predicate.js'
 import { type SqlToken, readAggCall, tokenize } from './sqlChunks.js'
 
@@ -36,13 +37,13 @@ function extractQueryShape(builder: unknown, opts: { dialect: Dialect }): QueryS
   const dialect = opts.dialect
   const tables = new Set<string>()
   const from = tableRefOf(config.table)
-  tables.add(from.name)
+  tables.add(from.id)
 
   const joins: JoinShape[] = []
   for (const join of config.joins ?? []) {
     if (!isTable(join.table)) return coarse(renderedRelationsFromSQL(builder), 'non-table join')
     const table = tableRefOf(join.table)
-    tables.add(table.name)
+    tables.add(table.id)
     joins.push({ type: joinType(join.joinType), table, on: predicateInto(join.on, dialect, tables) })
   }
 
@@ -54,7 +55,7 @@ function extractQueryShape(builder: unknown, opts: { dialect: Dialect }): QueryS
   let groupByOpaque = false
   for (const expr of config.groupBy ?? []) {
     if (is(expr, Column)) {
-      tables.add(realTableNameOf(tableOf(expr)))
+      tables.add(relationKeyOf(tableOf(expr)))
       groupBy.push(colRefOf(expr))
     } else {
       groupByOpaque = true
@@ -110,11 +111,13 @@ function crossCheckRenderedTables(shape: QueryShape, rendered: string[]): QueryS
   return coarse([...shape.tables, ...rendered], `extraction omitted rendered relation(s): ${missing.join(', ')}`)
 }
 
-/** Relations named after FROM/JOIN in the rendered SQL, across every dialect's identifier
- *  quoting: double quotes (pg/sqlite) and backticks (mysql). Requiring a quoted name
- *  avoids matching the word "from" inside a string literal; drizzle never emits bracket
- *  quoting, so brackets are (correctly) not recognized. The relation is the last quoted
- *  segment of a possibly schema-qualified reference. */
+/** Relation IDENTITIES (see ir/relation.ts) named after FROM/JOIN in the rendered SQL, across every
+ *  dialect's identifier quoting: double quotes (pg/sqlite) and backticks (mysql). Requiring a quoted
+ *  name avoids matching the word "from" inside a string literal; drizzle never emits bracket quoting,
+ *  so brackets are (correctly) not recognized. A reference renders with exactly the qualification its
+ *  declaration carries — `"analytics"."users"` for a pgSchema table, bare `"users"` otherwise — so the
+ *  identity built from the rendered segments equals the one `tableRefOf` builds from the declaration.
+ *  That equality is what lets the cross-check below compare the two sets. */
 function renderedRelationsFromSQL(builder: unknown): string[] {
   const toSQL = (builder as { toSQL?: () => { sql: string } }).toSQL
   if (typeof toSQL !== 'function') return []
@@ -127,13 +130,15 @@ function renderedRelationsFromSQL(builder: unknown): string[] {
   const quoted = '(?:"(?:[^"]|"")*"|`(?:[^`]|``)*`)'
   const relationRe = new RegExp(`\\b(?:from|join)\\s+(${quoted}(?:\\s*\\.\\s*${quoted})?)`, 'gi')
   const segmentRe = new RegExp(quoted, 'g')
-  const names = new Set<string>()
+  const ids = new Set<string>()
   for (let m = relationRe.exec(sqlText); m !== null; m = relationRe.exec(sqlText)) {
     const segments = m[1]!.match(segmentRe) ?? []
-    const last = segments[segments.length - 1]
-    if (last) names.add(unquote(last))
+    const name = segments[segments.length - 1]
+    if (!name) continue
+    const schema = segments.length > 1 ? segments[segments.length - 2] : undefined
+    ids.add(relationIdOf({ name: unquote(name), schema: schema && unquote(schema) }))
   }
-  return [...names]
+  return [...ids]
 }
 
 function unquote(segment: string): string {
@@ -256,7 +261,7 @@ function distinctOf(value: SQL | boolean | { on: unknown[] } | undefined, tables
     const columns = (value as { on: unknown[] }).on
       .filter((c): c is Column => is(c, Column))
       .map((c) => {
-        tables.add(realTableNameOf(tableOf(c)))
+        tables.add(relationKeyOf(tableOf(c)))
         return colRefOf(c)
       })
     return { on: 'columns', columns }
@@ -266,7 +271,7 @@ function distinctOf(value: SQL | boolean | { on: unknown[] } | undefined, tables
 
 function orderKeyOf(entry: unknown, tables: Set<string>): OrderKey {
   if (is(entry, Column)) {
-    tables.add(realTableNameOf(tableOf(entry)))
+    tables.add(relationKeyOf(tableOf(entry)))
     return { expr: { kind: 'col', ref: colRefOf(entry) }, direction: 'asc' }
   }
   if (is(entry, SQL)) {
@@ -303,7 +308,7 @@ function extractProjection(
 
   const visit = (as: string | undefined, value: unknown): void => {
     if (is(value, Column)) {
-      tables.add(realTableNameOf(tableOf(value)))
+      tables.add(relationKeyOf(tableOf(value)))
       items.push({ kind: 'col', ref: colRefOf(value), as })
       return
     }
@@ -314,7 +319,7 @@ function extractProjection(
     if (is(value, SQL)) {
       const agg = readAggCall(value)
       if (agg) {
-        if (agg.arg) tables.add(realTableNameOf(tableOf(agg.arg)))
+        if (agg.arg) tables.add(relationKeyOf(tableOf(agg.arg)))
         items.push({
           kind: 'agg',
           call: { fn: agg.fn, arg: agg.arg ? colRefOf(agg.arg) : undefined, star: agg.star, distinct: agg.distinct },
@@ -375,7 +380,7 @@ function collectColumnRefs(sql: SQL, tables: Set<string>): ColRef[] {
   const seen = new Set<string>()
   walkTokens(tokenize(sql.queryChunks), {
     onColumn: (column) => {
-      tables.add(realTableNameOf(tableOf(column)))
+      tables.add(relationKeyOf(tableOf(column)))
       const ref = colRefOf(column)
       const key = `${ref.table}.${ref.column}`
       if (!seen.has(key)) {

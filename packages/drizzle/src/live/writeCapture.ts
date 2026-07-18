@@ -1,16 +1,23 @@
 export { captureMutation, emitSafely, captureRawSql, planCapture }
 export type { CaptureSink }
 
-import { type Column, SQL, type Table, getTableColumns, getTableName, is, isTable } from 'drizzle-orm'
+import { type Column, SQL, type Table, getTableColumns, is, isTable } from 'drizzle-orm'
 import { dialectOf, driverOf, isSingleSession } from '../binding/database.js'
-import { primaryKeyOf } from '../extract/columns.js'
+import { primaryKeyOf, relationKeyOf } from '../extract/columns.js'
+import { describeRelationId } from '../ir/relation.js'
 import { ingestWrite, registryFor } from './dbRuntime.js'
 import { publishCoarseAll } from './writeTransport.js'
 import type { Row, TableChange } from '../router/events.js'
 
 // The write-capture engine. `reactiveDrizzle`'s proxy routes insert/update/delete here. The write runs as
 // plain Drizzle; the terminal is intercepted to capture the changed rows and feed a `ChangeBatch` to the
-// db's graphs (via the sink). Under decision #3's "new + old-PK only" contract:
+// db's graphs (via the sink).
+//
+// Every emitted `TableChange.table` is a schema-qualified relation IDENTITY (`relationKeyOf`, see
+// ir/relation.ts) — NOT the bare table name. The read side registers its graphs under the same identity, so
+// a write to `a.users` reaches live queries on `a.users` and not the different physical table `b.users`.
+//
+// Under decision #3's "new + old-PK only" contract:
 //   INSERT  → { kind:'insert', new: full row }
 //   DELETE  → { kind:'delete', key: PK }        (retraction by old PK)
 //   UPDATE  → { kind:'update', new: full row, key: PK }   (key = old PK = new PK; non-PK-changing only)
@@ -125,20 +132,20 @@ function runDirectTerminal(
 }
 
 function directChanges(result: unknown, builder: object, table: Table, op: Op, db: object): TableChange[] {
-  const tableName = getTableName(table)
+  const relationId = relationKeyOf(table)
   const plan = planCapture(builder, table, op, db)
   if (plan.mode === 'precise' && plan.callerReturning && Array.isArray(result)) {
     const rows = result as Row[]
-    if (coversAllColumns(rows, plan.columns)) return changesOf(op, tableName, rows, plan.pk)
+    if (coversAllColumns(rows, plan.columns)) return changesOf(op, relationId, rows, plan.pk)
   }
-  return [coarse(tableName)]
+  return [coarse(relationId)]
 }
 
 /** A PREPARED write: the statement executes later (possibly many times), and its per-execution row images
  *  are not re-planned here — so every execution fails closed to COARSE for the target table rather than
  *  running uncaptured. Result shape and sync/async-ness are preserved. */
 function wrapPrepared(prepared: unknown, table: Table, sink: CaptureSink): unknown {
-  const tableName = getTableName(table)
+  const relationId = relationKeyOf(table)
   return new Proxy(prepared as object, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver)
@@ -154,11 +161,11 @@ function wrapPrepared(prepared: unknown, table: Table, sink: CaptureSink): unkno
         const result = (value as (...a: unknown[]) => unknown).apply(target, args)
         if (isThenable(result)) {
           return Promise.resolve(result).then((rows) => {
-            emitSafely(sink, [coarse(tableName)])
+            emitSafely(sink, [coarse(relationId)])
             return rows
           })
         }
-        emitSafely(sink, [coarse(tableName)])
+        emitSafely(sink, [coarse(relationId)])
         return result
       }
     },
@@ -207,19 +214,21 @@ async function runWrite(
   sink: CaptureSink,
   executeArgs?: unknown[],
 ): Promise<unknown> {
-  const tableName = getTableName(table)
+  const relationId = relationKeyOf(table)
   const plan = planCapture(builder, table, op, db)
 
   if (plan.mode === 'coarse') {
     const result = await runBase(builder, executeArgs) // run the caller's write untouched
-    emitSafely(sink, [{ table: tableName, kind: 'coarse' }]) // fail-closed: over-invalidate, never guess
+    emitSafely(sink, [{ table: relationId, kind: 'coarse' }]) // fail-closed: over-invalidate, never guess
     return result
   }
 
   if (plan.callerReturning) {
     // The caller asked for rows — run their write, and capture only if the rows carry the FULL image.
     const rows = (await runBase(builder, executeArgs)) as Row[]
-    const changes = coversAllColumns(rows, plan.columns) ? changesOf(op, tableName, rows, plan.pk) : [coarse(tableName)]
+    const changes = coversAllColumns(rows, plan.columns)
+      ? changesOf(op, relationId, rows, plan.pk)
+      : [coarse(relationId)]
     emitSafely(sink, changes)
     return rows
   }
@@ -228,7 +237,7 @@ async function runWrite(
   // driver result reconstructed from it (verified faithful for this driver).
   const full = (builder as { returning: () => unknown }).returning()
   const rows = (await runBase(full, executeArgs)) as Row[]
-  emitSafely(sink, changesOf(op, tableName, rows, plan.pk))
+  emitSafely(sink, changesOf(op, relationId, rows, plan.pk))
   return plan.reconstruct(rows)
 }
 
@@ -255,10 +264,11 @@ function emitSafely(sink: CaptureSink, changes: TableChange[]): void {
   }
 }
 
-/** The diagnostics seam for a contained capture fault. */
-function reportCaptureFault(error: unknown, tableName: string): void {
+/** The diagnostics seam for a contained capture fault. Takes a relation IDENTITY and renders it the way a
+ *  human wrote it (`a.users`), since this reaches an operator's logs. */
+function reportCaptureFault(error: unknown, relationId: string): void {
   console.error(
-    `[telefunc] live write-capture failed for table "${tableName}". The write COMMITTED and its result is unaffected; live queries on this table may be stale until the next write.`,
+    `[telefunc] live write-capture failed for table "${describeRelationId(relationId)}". The write COMMITTED and its result is unaffected; live queries on this table may be stale until the next write.`,
     error,
   )
 }

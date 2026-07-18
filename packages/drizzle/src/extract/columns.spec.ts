@@ -1,5 +1,6 @@
 import { alias, integer, pgSchema, pgTable, primaryKey, text, varchar } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
+import { relationIdOf } from '../ir/relation.js'
 import {
   colRefOf,
   primaryKeyOf,
@@ -23,10 +24,24 @@ const memberships = pgTable(
 )
 
 describe('table & column resolution', () => {
-  it('tableRefOf carries real name, alias, schema and primary key', () => {
-    expect(tableRefOf(users)).toEqual({ name: 'users', alias: 'users', schema: undefined, primaryKey: ['id'] })
+  it('tableRefOf carries real name, alias, schema, routing identity and primary key', () => {
+    expect(tableRefOf(users)).toEqual({
+      name: 'users',
+      alias: 'users',
+      schema: undefined,
+      id: 'users', // unqualified → the plain identity form
+      primaryKey: ['id'],
+    })
     const secured = pgSchema('app').table('acct', { id: integer('id').primaryKey() })
-    expect(tableRefOf(secured)).toMatchObject({ name: 'acct', schema: 'app' })
+    expect(tableRefOf(secured)).toMatchObject({
+      name: 'acct',
+      schema: 'app',
+      id: relationIdOf({ name: 'acct', schema: 'app' }),
+    })
+    // The identity — not the bare name — is what separates same-named relations in different schemas.
+    const other = pgSchema('other').table('acct', { id: integer('id').primaryKey() })
+    expect(tableRefOf(secured).id).not.toBe(tableRefOf(other).id)
+    expect(tableRefOf(secured).name).toBe(tableRefOf(other).name)
   })
 
   it('aliased tables resolve to the real relation name', () => {

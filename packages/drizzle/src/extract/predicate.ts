@@ -2,7 +2,7 @@ export { extractPredicate, parsePredicate, toNNF, conjunctsOf }
 
 import type { Column, SQL } from 'drizzle-orm'
 import type { CompareOp, Dialect, Predicate, ScalarExpr, SqlSource } from '../ir/types.js'
-import { colRefOf, collectTables, realTableNameOf, tableOf } from './columns.js'
+import { colRefOf, collectTables, relationKeyOf, tableOf } from './columns.js'
 import { type SqlToken, isText, splitOn, stripParens, textOf, tokenize } from './sqlChunks.js'
 
 type PredicateResult = { predicate: Predicate; tables: string[]; exact: boolean }
@@ -84,7 +84,7 @@ function parseAtom(tokens: SqlToken[], ctx: ParseContext, src: SqlSource): Predi
   // `(col is [not] null)` — drizzle fuses the closing paren into the operator text
   const nullMatch = matchIsNull(tokens)
   if (nullMatch) {
-    ctx.tables.add(realTableNameOf(tableOf(nullMatch.column)))
+    ctx.tables.add(relationKeyOf(tableOf(nullMatch.column)))
     return { kind: 'isNull', expr: { kind: 'col', ref: colRefOf(nullMatch.column) }, negated: nullMatch.negated, src }
   }
 
@@ -94,7 +94,7 @@ function parseAtom(tokens: SqlToken[], ctx: ParseContext, src: SqlSource): Predi
   if (op === undefined) return null
   const leftRef = colRefOf(first.column)
   const left: ScalarExpr = { kind: 'col', ref: leftRef }
-  ctx.tables.add(realTableNameOf(tableOf(first.column)))
+  ctx.tables.add(relationKeyOf(tableOf(first.column)))
 
   const compareOp = COMPARE_OPS[op]
   if (compareOp && tokens.length === 3) {
@@ -150,7 +150,7 @@ function parseAtom(tokens: SqlToken[], ctx: ParseContext, src: SqlSource): Predi
 
 function readScalar(token: SqlToken, ctx: ParseContext): ScalarExpr | null {
   if (token.kind === 'column') {
-    ctx.tables.add(realTableNameOf(tableOf(token.column)))
+    ctx.tables.add(relationKeyOf(tableOf(token.column)))
     return { kind: 'col', ref: colRefOf(token.column) }
   }
   if (token.kind === 'param') return { kind: 'lit', value: token.value }
@@ -202,7 +202,7 @@ function isSelectBuilder(value: unknown): boolean {
 function collectTokenTables(token: SqlToken, into: Set<string>): void {
   switch (token.kind) {
     case 'column':
-      into.add(realTableNameOf(tableOf(token.column)))
+      into.add(relationKeyOf(tableOf(token.column)))
       return
     case 'opaque':
       collectTables(token.value, into)

@@ -35,6 +35,7 @@ function fakeSeed(): SeedDescriptor {
   return {
     inputId: 'users',
     table: 'users',
+    relationId: 'users',
     alias: 'users',
     primaryKey: ['id'],
     columns: '*',

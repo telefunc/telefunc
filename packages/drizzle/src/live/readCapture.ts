@@ -24,6 +24,7 @@ import { hydrationExecutorOf } from '../binding/hydrationExecutor.js'
 import { schemaFingerprint } from '../extract/columns.js'
 import { identityOf } from '../extract/identity.js'
 import { extractQueryShape } from '../extract/queryShape.js'
+import { parseRelationId } from '../ir/relation.js'
 import type { QueryShape } from '../ir/types.js'
 import type { ReadToken } from '../graph/registry.js'
 import { registryFor } from './dbRuntime.js'
@@ -152,10 +153,13 @@ function tableObjectsOf(builder: unknown): Table[] {
 }
 
 /** Whether any referenced relation has (or may have) row-level security — `true`/`'unknown'` both
- *  gate the graph to born-coarse (never assume off). */
+ *  gate the graph to born-coarse (never assume off). `tables` carries ROUTING identities, so each is
+ *  decoded back to the schema/name pair the catalog probe addresses: a schema-qualified relation is
+ *  probed in ITS schema rather than assumed to live in `public`. */
 async function anyRlsEnabled(db: object, tables: string[]): Promise<boolean> {
-  for (const table of tables) {
-    if ((await rlsEnabledOf(db, table)) !== false) return true
+  for (const id of tables) {
+    const { name, schema } = parseRelationId(id)
+    if ((await rlsEnabledOf(db, name, schema ? { schema } : undefined)) !== false) return true
   }
   return false
 }

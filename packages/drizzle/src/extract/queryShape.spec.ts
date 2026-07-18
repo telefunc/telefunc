@@ -8,6 +8,7 @@ import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
 import * as pgCore from 'drizzle-orm/pg-core'
 import * as sqliteCore from 'drizzle-orm/sqlite-core'
 import { describe, expect, it, vi } from 'vitest'
+import { relationIdOf } from '../ir/relation.js'
 import type { CoarseShape, Predicate, ProjItem, SelectShape } from '../ir/types.js'
 import { crossCheckRenderedTables, extractQueryShape, renderedRelationsFromSQL } from './queryShape.js'
 
@@ -309,7 +310,7 @@ describe('extractQueryShape — coarse fallback', () => {
     const onlyA: SelectShape = {
       kind: 'select',
       dialect: 'pg',
-      from: { name: 'A', alias: 'A', primaryKey: [] },
+      from: { name: 'A', alias: 'A', id: relationIdOf({ name: 'A' }), primaryKey: [] },
       joins: [],
       projection: { items: [], star: true },
       groupBy: [],
@@ -332,13 +333,16 @@ describe('renderedRelationsFromSQL — every dialect quoting', () => {
 
   it('double-quoted (pg/sqlite) identifiers, schema-qualified and aliased', () => {
     expect(rel('select * from "users" inner join "teams" on 1=1')).toEqual(['users', 'teams'])
-    expect(rel('select * from "a"."users"')).toEqual(['users'])
+    // A rendered schema qualification is KEPT in the identity — dropping it to the bare name is what let
+    // a write on `a.users` reach a live query on `b.users`.
+    expect(rel('select * from "a"."users"')).toEqual([relationIdOf({ name: 'users', schema: 'a' })])
+    expect(rel('select * from "a"."users"')).not.toEqual(rel('select * from "b"."users"'))
     expect(rel('select * from "users" "u"')).toEqual(['users']) // alias not captured
   })
 
   it('backtick (mysql) identifiers, schema-qualified', () => {
     expect(rel('select * from `users` inner join `teams` on 1=1')).toEqual(['users', 'teams'])
-    expect(rel('select * from `db`.`users`')).toEqual(['users'])
+    expect(rel('select * from `db`.`users`')).toEqual([relationIdOf({ name: 'users', schema: 'db' })])
   })
 
   it('bracket quoting is never recognized — drizzle emits none', () => {

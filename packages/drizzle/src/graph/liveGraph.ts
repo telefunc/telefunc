@@ -93,9 +93,10 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
     byTable.clear()
     oneShot = []
     for (const descriptor of graph.seeds) {
-      const list = byTable.get(descriptor.table) ?? []
+      // Indexed by ROUTING identity (not the SQL name), because that is what `change.table` carries.
+      const list = byTable.get(descriptor.relationId) ?? []
       list.push(descriptor)
-      byTable.set(descriptor.table, list)
+      byTable.set(descriptor.relationId, list)
     }
     seed = createSeed({
       descriptors: graph.seeds,

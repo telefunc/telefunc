@@ -58,6 +58,9 @@ type SeedDescriptor = {
   /** The relation's schema when the query names a schema-qualified table (pgSchema): the seed reads
    *  `"schema"."table"`, so a same-named relation in another schema is never read via the search path. */
   schema?: string
+  /** The relation's ROUTING identity (ir/relation.ts) — what incoming changes are matched on. Distinct
+   *  from `table`/`schema`, which address the relation in the seed's SQL. */
+  relationId: string
   alias: string
   primaryKey: string[]
   columns: string[] | '*'
@@ -128,7 +131,7 @@ function coarsePlan(tables: string[]): GraphPlan {
 
 function statelessPlan(shape: SelectShape): GraphPlan {
   const { inputs } = pushdownOf(shape)
-  const baseReal = new Set(inputs.map((plan) => plan.table))
+  const baseReal = new Set(inputs.map((plan) => plan.relationId))
   const extraTables = new Set(shape.tables.filter((table) => !baseReal.has(table)))
   const windowDirty = hasLimit(shape)
   const projectFn = projectFnOf(shape)
@@ -153,7 +156,7 @@ function statelessEvaluator(
       for (const change of commit) {
         if (extraTables.has(change.table) && rowChanged(change)) dirty = true
         for (const plan of inputs) {
-          if (plan.table !== change.table) continue
+          if (plan.relationId !== change.table) continue
           const delta = applyChange(plan, change)
           if (delta.dirty) dirty = true
           if (windowDirty) {
@@ -266,7 +269,7 @@ function statefulGraph(shape: SelectShape): StatefulGraph {
       assertUsage(input, `seedInput: unknown input id ${inputId}`)
       const data: Array<[Row, number]> = []
       for (const raw of rows)
-        for (const entry of applyChange(input.plan, { table: input.plan.table, kind: 'insert', new: raw }).data)
+        for (const entry of applyChange(input.plan, { table: input.plan.relationId, kind: 'insert', new: raw }).data)
           data.push(entry)
       if (data.length > 0) input.builder.sendData(new MultiSet(data))
     },
@@ -291,6 +294,7 @@ function descriptorOf(plan: InputPlan): SeedDescriptor {
     inputId: plan.alias,
     table: plan.table,
     schema: plan.schema,
+    relationId: plan.relationId,
     alias: plan.alias,
     primaryKey: plan.primaryKey,
     columns: plan.columns,
@@ -318,7 +322,7 @@ function buildBranch(
     const builder = graph.newInput<Row>()
     register(registry, plan, builder)
     streams.set(plan.alias, builder)
-    covered.add(plan.table)
+    covered.add(plan.relationId)
   }
 
   const existsSpecs = specs.map((leaf) => buildExistsSpec(graph, leaf, registry, covered))
@@ -428,7 +432,7 @@ function buildExistsSpec(
   const innerPlan = inputs.find((plan) => plan.alias === inner.from.alias)!
   const builder = graph.newInput<Row>()
   register(registry, innerPlan, builder)
-  covered.add(innerPlan.table)
+  covered.add(innerPlan.relationId)
   const innerKeyName = qualifiedKey(correlation.inner.table, correlation.inner.column)
   const innerKeys = builder.pipe(keyBy((row: Row) => correlationKey(row, innerKeyName)))
   return { outerKey: qualifiedKey(correlation.outer.table, correlation.outer.column), innerKeys }
@@ -437,17 +441,19 @@ function buildExistsSpec(
 // ── Shared helpers ──────────────────────────────────────────────────
 
 function register(registry: Map<string, FeedInput[]>, plan: InputPlan, builder?: RootStreamBuilder<Row>): void {
-  const list = registry.get(plan.table) ?? []
+  const list = registry.get(plan.relationId) ?? []
   list.push({ plan, builder })
-  registry.set(plan.table, list)
+  registry.set(plan.relationId, list)
 }
 
-/** Register an inner subquery / scalar-subquery table as a dirty-only input: it has no
- *  dataflow sink, but a change to it fires the dirty witness (the scalar-subquery row). */
-function registerDirtyTable(registry: Map<string, FeedInput[]>, table: string): void {
+/** Register an inner subquery / scalar-subquery relation as a dirty-only input: it has no
+ *  dataflow sink, but a change to it fires the dirty witness (the scalar-subquery row). Keyed by
+ *  routing identity; it is never seeded, so it needs no SQL-addressable name. */
+function registerDirtyTable(registry: Map<string, FeedInput[]>, relationId: string): void {
   const plan: InputPlan = {
-    alias: table,
-    table,
+    alias: relationId,
+    table: relationId,
+    relationId,
     primaryKey: [],
     columns: '*',
     residual: { kind: 'true' },

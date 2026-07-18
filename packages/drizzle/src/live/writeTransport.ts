@@ -3,7 +3,9 @@ export { publishBatch, publishCoarseAll, ensureSubscribed, batchTopic, WILDCARD_
 import { randomUUID } from 'node:crypto'
 import { registryFor } from './dbRuntime.js'
 import { type ChangeMessage, transportFor } from './changeTransport.js'
+import { RESERVED_RELATION_NAMES } from '../ir/relation.js'
 import type { ChangeBatch } from '../router/events.js'
+import { assertUsage } from '../utils/assert.js'
 
 // Cross-instance write transport. A committed batch is published (with a unique id) to EACH touched table's
 // topic `__live__:{table}` over the db's DEDICATED changeTransport (never the user's app Broadcast — see
@@ -26,8 +28,17 @@ const batchTopic = (table: string): string => `__live__:${table}`
  *  rides the same subscribe + readiness-probe machinery by being treated as a reserved "table". It carries
  *  ONLY coarse-all directives: a mutation whose touched tables are unknowable (raw SQL) coarsens the
  *  publisher's own watched tables locally, but a table watched ONLY on another instance would otherwise
- *  never hear about it — a missed invalidation. A receiver of a coarse-all coarsens ITS OWN watched tables. */
+ *  never hear about it — a missed invalidation. A receiver of a coarse-all coarsens ITS OWN watched tables.
+ *
+ *  Every OTHER topic is keyed by a relation IDENTITY (ir/relation.ts), so this literal must never be one:
+ *  `relationIdOf` reserves it (a table actually named `*` takes the framed form instead) and the assertion
+ *  below fails the build-time contract if the two ever drift apart. The wildcard itself is deliberately
+ *  NOT qualified — it addresses every relation, not one. */
 const WILDCARD_TABLE = '*'
+assertUsage(
+  RESERVED_RELATION_NAMES.includes(WILDCARD_TABLE),
+  `the wildcard topic ${WILDCARD_TABLE} must be reserved in ir/relation.ts, or a relation could claim it`,
+)
 
 // DE-DUPLICATION IS DETERMINISTIC AND STATELESS — no id memory, so no eviction hole and no unbounded growth.
 // (An earlier count-bounded `seen` set was unsound: once an id aged out, a delayed copy of the same batch on

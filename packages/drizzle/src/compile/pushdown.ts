@@ -19,6 +19,9 @@ type InputPlan = {
   table: string
   /** Schema of a schema-qualified relation (pgSchema); rendered into the seed's read SQL. */
   schema?: string
+  /** The relation's ROUTING identity (ir/relation.ts) — what incoming changes are matched on. `table`
+   *  and `schema` address the relation in SQL; this addresses it in the change stream. */
+  relationId: string
   primaryKey: string[]
   /** The demanded db columns (pruned), or `'*'` when the whole row is observable
    *  (SELECT *) so any column change must be seen. */
@@ -39,20 +42,20 @@ type InputDelta = { data: Array<[Row, number]>; dirty: boolean }
  *  that reference more than one input (the join/where stage owns those). */
 function pushdownOf(shape: SelectShape): { inputs: InputPlan[]; crossResidual?: Predicate } {
   const refs = [shape.from, ...shape.joins.map((join) => join.table)]
-  const realToAliases = new Map<string, string[]>()
+  const relationToAliases = new Map<string, string[]>()
   for (const ref of refs) {
-    const list = realToAliases.get(ref.name) ?? []
+    const list = relationToAliases.get(ref.id) ?? []
     list.push(ref.alias)
-    realToAliases.set(ref.name, list)
+    relationToAliases.set(ref.id, list)
   }
 
   const demand = demandOf(shape)
-  const opaque = opaqueAliases(shape, realToAliases)
+  const opaque = opaqueAliases(shape, relationToAliases)
 
   const perAlias = new Map<string, Predicate[]>()
   const cross: Predicate[] = []
   for (const conjunct of shape.where ? conjunctsOf(shape.where) : []) {
-    const aliases = predicateAliases(conjunct, realToAliases)
+    const aliases = predicateAliases(conjunct, relationToAliases)
     if (aliases.size <= 1) {
       const alias = aliases.size === 1 ? [...aliases][0]! : shape.from.alias
       const list = perAlias.get(alias) ?? []
@@ -73,6 +76,7 @@ function pushdownOf(shape: SelectShape): { inputs: InputPlan[]; crossResidual?: 
       alias: ref.alias,
       table: ref.name,
       schema: ref.schema,
+      relationId: ref.id,
       primaryKey: ref.primaryKey,
       columns,
       residual: requalify(residual),
@@ -157,15 +161,15 @@ function demandOf(shape: SelectShape): Map<string, Set<string>> {
 /** Aliases whose contribution the compiler cannot evaluate exactly — an opaque
  *  projection expression, a window function, or an opaque ORDER key. Their inputs fire a
  *  dirty witness on any change past the WHERE gate. */
-function opaqueAliases(shape: SelectShape, realToAliases: Map<string, string[]>): Set<string> {
+function opaqueAliases(shape: SelectShape, relationToAliases: Map<string, string[]>): Set<string> {
   const set = new Set<string>()
-  const addReal = (real: string) => {
-    for (const alias of realToAliases.get(real) ?? []) set.add(alias)
+  const addRelation = (id: string) => {
+    for (const alias of relationToAliases.get(id) ?? []) set.add(alias)
   }
   for (const item of shape.projection.items) {
     if (item.kind !== 'opaque') continue
     for (const ref of item.columns) set.add(ref.table)
-    for (const real of item.tables) addReal(real)
+    for (const id of item.tables) addRelation(id)
   }
   for (const key of shape.orderBy) {
     if (key.expr.kind === 'opaque') for (const ref of key.expr.columns) set.add(ref.table)
@@ -179,12 +183,12 @@ function opaqueAliases(shape: SelectShape, realToAliases: Map<string, string[]>)
 }
 
 /** The aliases a conjunct references — column refs by their own alias, plus every alias
- *  of a real table named in an opaque/exists leaf (which carries real names, not refs). */
-function predicateAliases(pred: Predicate, realToAliases: Map<string, string[]>): Set<string> {
+ *  of a relation named in an opaque/exists leaf (which carries relation IDENTITIES, not refs). */
+function predicateAliases(pred: Predicate, relationToAliases: Map<string, string[]>): Set<string> {
   const set = new Set<string>()
   eachCol(pred, (ref) => set.add(ref.table))
-  eachLeafTable(pred, (real) => {
-    for (const alias of realToAliases.get(real) ?? []) set.add(alias)
+  eachLeafTable(pred, (id) => {
+    for (const alias of relationToAliases.get(id) ?? []) set.add(alias)
   })
   return set
 }
@@ -223,7 +227,7 @@ function eachCol(pred: Predicate, visit: (ref: ColRef) => void): void {
   }
 }
 
-function eachLeafTable(pred: Predicate, visit: (real: string) => void): void {
+function eachLeafTable(pred: Predicate, visit: (relationId: string) => void): void {
   switch (pred.kind) {
     case 'and':
     case 'or':
@@ -234,7 +238,7 @@ function eachLeafTable(pred: Predicate, visit: (real: string) => void): void {
       return
     case 'exists':
     case 'unknown':
-      for (const real of pred.tables) visit(real)
+      for (const id of pred.tables) visit(id)
       return
     default:
       return

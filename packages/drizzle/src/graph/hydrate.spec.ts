@@ -47,6 +47,7 @@ function compositeDescriptor(): SeedDescriptor {
   return {
     inputId: 'memberships',
     table: 'memberships',
+    relationId: 'memberships',
     alias: 'memberships',
     primaryKey: ['user_id', 'team_id'],
     columns: ['user_id', 'team_id', 'role'],
@@ -57,7 +58,7 @@ function compositeDescriptor(): SeedDescriptor {
 // ── liveGraph fakes (for the abort/inert cases) ─────────────────────
 
 function fakeSeed(inputId: string, table: string, primaryKey: string[] = ['id']): SeedDescriptor {
-  return { inputId, table, alias: inputId, primaryKey, columns: '*', residual: { kind: 'true' } }
+  return { inputId, table, relationId: table, alias: inputId, primaryKey, columns: '*', residual: { kind: 'true' } }
 }
 function statefulFake(seeds: SeedDescriptor[]): StatefulGraph {
   const noFire = { invalidated: false }

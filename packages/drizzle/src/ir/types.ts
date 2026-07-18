@@ -26,13 +26,15 @@ export type SqlSource = unknown
 
 // ── Tables & columns ────────────────────────────────────────────────
 
-/** A base table as it appears in a query: its real (unaliased) name — the name
- *  write events arrive under — plus the alias it is referenced by, its schema,
+/** A base table as it appears in a query: its real (unaliased) name and schema — the
+ *  pair that addresses it in SQL — plus the alias it is referenced by, its schema-
+ *  qualified routing identity (the key write events arrive under, see ir/relation.ts),
  *  and the database names of its primary-key columns (empty when none is usable). */
 export type TableRef = {
   name: string
   alias: string
   schema?: string
+  id: string
   primaryKey: string[]
 }
 
@@ -167,7 +169,7 @@ export type SelectShape = {
   offset?: Bound
   setOps: SetOp[]
   window: boolean // a window function appears in the projection
-  tables: string[] // every real table name this shape reads (routing dependency set)
+  tables: string[] // every relation IDENTITY this shape reads (routing dependency set; see ir/relation.ts)
 }
 
 /** The sound fallback: the shape could not be read precisely, so anything touching
