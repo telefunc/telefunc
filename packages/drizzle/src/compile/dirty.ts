@@ -70,7 +70,12 @@ type DirtySink = {
   reset(): void
 }
 
-function createDirtySink(): DirtySink {
+/** The audit seam: TAPPING a stream IS observing it, so every tap — wherever a stage makes it — accounts
+ *  for the inputs behind that stream. Wiring this here rather than at each call site is what keeps the
+ *  stranded-input audit correct for stages that tap internally (set-ops, joins, window, aggregate). */
+type TapObserver = { consume(stream: IStreamBuilder<unknown>): void }
+
+function createDirtySink(observer?: TapObserver): DirtySink {
   let fired = false
   const taps: IStreamBuilder<number>[] = []
   return {
@@ -78,6 +83,7 @@ function createDirtySink(): DirtySink {
       fired = true
     },
     tap(stream) {
+      observer?.consume(stream)
       taps.push(stream.pipe(map(() => DIRTY)))
     },
     buildTerminal() {

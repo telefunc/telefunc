@@ -36,6 +36,7 @@ import type { Correlation, Predicate, QueryShape, SelectShape } from '../ir/type
 import { assertUsage } from '../utils/assert.js'
 import { applyAggregate } from './aggregateStage.js'
 import { type DirtySink, createDirtySink } from './dirty.js'
+import { type InputAudit, createInputAudit } from './inputAudit.js'
 import { type ExistsSpec, applyExists, correlationKey } from './existsStage.js'
 import { applyJoins, joinsExact } from './joinStage.js'
 import { type Change, type InputPlan, applyChange, pushdownOf } from './pushdown.js'
@@ -192,7 +193,8 @@ type SeedInput = { descriptor: SeedDescriptor; plan: InputPlan; builder: RootStr
 
 function statefulGraph(shape: SelectShape): StatefulGraph {
   const graph = new D2()
-  const dirty = createDirtySink()
+  const audit = createInputAudit()
+  const dirty = createDirtySink(audit)
   const registry = new Map<string, FeedInput[]>()
   const genesis: RootStreamBuilder<Row>[] = []
   let dataFired = false
@@ -200,8 +202,9 @@ function statefulGraph(shape: SelectShape): StatefulGraph {
 
   const combined =
     shape.setOps.length > 0
-      ? buildSetOps(graph, shape, registry, genesis, dirty)
-      : buildBranch(graph, shape, registry, genesis, dirty)
+      ? buildSetOps(graph, shape, registry, genesis, dirty, audit)
+      : buildBranch(graph, shape, registry, genesis, dirty, audit)
+  audit.consume(combined)
   if (combined) {
     combined.pipe(
       consolidate(),
@@ -211,6 +214,8 @@ function statefulGraph(shape: SelectShape): StatefulGraph {
     )
   }
   dirty.buildTerminal()
+  // Every fed input must be observable BEFORE the graph is sealed — see inputAudit.ts.
+  audit.assertNoStrandedInputs()
   graph.finalize()
 
   // Materialize each ungrouped aggregate's unit-group zero row (a net-zero poke touches the
@@ -311,6 +316,7 @@ function buildBranch(
   registry: Map<string, FeedInput[]>,
   genesis: RootStreamBuilder<Row>[],
   dirty: DirtySink,
+  audit: InputAudit,
 ): IStreamBuilder<string> | undefined {
   const { specs, rest } = extractExists(shape)
   const trimmed: SelectShape = { ...shape, where: rest }
@@ -321,18 +327,24 @@ function buildBranch(
   for (const plan of inputs) {
     const builder = graph.newInput<Row>()
     register(registry, plan, builder)
+    audit.declare(builder, plan.relationId)
     streams.set(plan.alias, builder)
     covered.add(plan.relationId)
   }
 
-  const existsSpecs = specs.map((leaf) => buildExistsSpec(graph, leaf, registry, covered))
+  const existsRoots: Array<IStreamBuilder<Row>> = []
+  const existsSpecs = specs.map((leaf) => buildExistsSpec(graph, leaf, registry, covered, audit, existsRoots))
   // Scalar/negated-subquery inner tables (not a base input, not a set-op branch) fire dirty
   // on any change — the scalar-subquery row.
   for (const table of subqueryInnerTables(trimmed)) if (!covered.has(table)) registerDirtyTable(registry, table)
 
   const joined = applyJoins(trimmed, streams, crossResidual, dirty)
   if (joined.kind === 'degrade') {
-    for (const stream of streams.values()) dirty.tap(stream)
+    // Tap EVERY stream built for this branch, not just the base inputs. The EXISTS inner roots were
+    // already created and registered above, so leaving them untapped strands them exactly like the
+    // set-op arms once were: fed on every change, observed by nothing. The audit catches this shape now,
+    // but the tap is what makes the degradation SOUND.
+    for (const stream of [...streams.values(), ...existsRoots]) dirty.tap(stream)
     return undefined
   }
   const afterExists = applyExists(joined.stream, existsSpecs)
@@ -346,9 +358,16 @@ function buildBranch(
 
   const windowed = applyWindow(shape, rows, dirty)
   const projected = windowed.pipe(map(projectRowWith(shape)))
-  if (shape.distinct.on === true) return dedupeStrings(projected)
-  if (shape.distinct.on === 'columns') dirty.tap(projected) // DISTINCT ON → dirty at its input
-  return projected
+  // Consuming this branch's output accounts for every root behind it. Linking (rather than marking them
+  // accounted here) is what makes an ABANDONED branch detectable: the roots stay unaccounted until some
+  // caller actually consumes the stream.
+  const out = shape.distinct.on === true ? dedupeStrings(projected) : projected
+  audit.link(out, [...streams.values(), ...existsRoots])
+  if (shape.distinct.on === 'columns') {
+    audit.link(projected, [...streams.values(), ...existsRoots])
+    dirty.tap(projected) // DISTINCT ON → dirty at its input
+  }
+  return out
 }
 
 /** SQL DISTINCT over the projected tuples: 1→2 multiplicity edges are silent. */
@@ -366,8 +385,9 @@ function buildSetOps(
   registry: Map<string, FeedInput[]>,
   genesis: RootStreamBuilder<Row>[],
   dirty: DirtySink,
+  audit: InputAudit,
 ): IStreamBuilder<string> | undefined {
-  const main = buildBranch(graph, { ...shape, setOps: [] }, registry, genesis, dirty)
+  const main = buildBranch(graph, { ...shape, setOps: [] }, registry, genesis, dirty, audit)
   const branches: SetOpBranch[] = []
   let degrade = false
   for (const op of shape.setOps) {
@@ -375,7 +395,8 @@ function buildSetOps(
     // can't be built exactly, or one carrying per-arm ORDER/LIMIT/OFFSET (which selects WHICH rows
     // the arm contributes — unsound to ignore under a downstream UNION distinct, where a bounded
     // arm's row swap can add a value new to the union), forces a dirty degradation.
-    const stream = op.right.kind === 'select' ? buildBranch(graph, op.right, registry, genesis, dirty) : undefined
+    const stream =
+      op.right.kind === 'select' ? buildBranch(graph, op.right, registry, genesis, dirty, audit) : undefined
     if (stream) branches.push({ kind: op.type, stream })
     if (!stream || op.orderBy.length > 0 || op.limit !== undefined || op.offset !== undefined) degrade = true
   }
@@ -386,7 +407,9 @@ function buildSetOps(
   // invalidation, not a safe over-fire. `dirtyOnly` was already written for this case: its `main` parameter
   // is optional and it guards with `if (main)`.
   if (degrade || !main) return dirtyOnly(main, branches, dirty)
-  return applySetOps(main, branches, dirty)
+  const combined = applySetOps(main, branches, dirty)
+  audit.link(combined ?? main, [main, ...branches.map((branch) => branch.stream)])
+  return combined
 }
 
 /** A dirty-only fallback: tap the main branch and every built set-op branch so any change
@@ -430,6 +453,8 @@ function buildExistsSpec(
   leaf: ExistsLeaf,
   registry: Map<string, FeedInput[]>,
   covered: Set<string>,
+  audit: InputAudit,
+  roots: Array<IStreamBuilder<Row>>,
 ): ExistsSpec {
   const inner = leaf.inner as SelectShape
   const correlation = leaf.correlations![0] as Correlation
@@ -437,6 +462,8 @@ function buildExistsSpec(
   const innerPlan = inputs.find((plan) => plan.alias === inner.from.alias)!
   const builder = graph.newInput<Row>()
   register(registry, innerPlan, builder)
+  audit.declare(builder, innerPlan.relationId)
+  roots.push(builder)
   covered.add(innerPlan.relationId)
   const innerKeyName = qualifiedKey(correlation.inner.table, correlation.inner.column)
   const innerKeys = builder.pipe(keyBy((row: Row) => correlationKey(row, innerKeyName)))

@@ -1,3 +1,4 @@
+import { eq, exists } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { extractQueryShape } from '../extract/queryShape.js'
@@ -7,6 +8,7 @@ import { isDirtySetOp } from './setOpsStage.js'
 const members = pg.pgTable('members', { id: pg.integer('id').primaryKey(), name: pg.text('name') })
 const admins = pg.pgTable('admins', { id: pg.integer('id').primaryKey(), name: pg.text('name') })
 const guests = pg.pgTable('guests', { id: pg.integer('id').primaryKey(), name: pg.text('name') })
+const visitors = pg.pgTable('visitors', { id: pg.integer('id').primaryKey(), name: pg.text('name') })
 const qb = new pg.QueryBuilder()
 
 const run = (builder: unknown): CompiledGraph =>
@@ -97,5 +99,21 @@ describe('setOpsStage — a degraded MAIN branch must not silence the arms', () 
     const graph = run(crossJoinedMain())
     expect(graph.apply([insM({ id: 2, name: 'm' })]).invalidated).toBe(true)
     expect(graph.apply([insA({ id: 3, name: 'a' })]).invalidated).toBe(true)
+  })
+
+  it('an EXISTS INNER of the degraded main branch also still invalidates', () => {
+    // The SECOND instance of the same stranded-input class. `buildBranch` registers the EXISTS inner
+    // stream BEFORE `applyJoins`; on join degradation it tapped only its own base streams and returned
+    // before `applyExists`, so the EXISTS inner was left built, registered and fed — observed by nothing.
+    // A write to a table that appears ONLY inside the EXISTS therefore did not invalidate.
+    const graph = run(
+      qb
+        .select({ id: members.id })
+        .from(members)
+        .crossJoin(admins) // no equi key → the main branch degrades
+        .where(exists(qb.select({ id: guests.id }).from(guests).where(eq(guests.id, members.id))))
+        .union(qb.select({ id: visitors.id }).from(visitors)),
+    )
+    expect(graph.apply([insG({ id: 1, name: 'g' })]).invalidated).toBe(true)
   })
 })
