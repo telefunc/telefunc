@@ -26,8 +26,10 @@ import type {
 import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/mysql-core/async/select'
 import type { Live } from 'telefunc'
 import { acquireCarrier } from './dbLiveRuntime.js'
-import { captureMutation } from './writeCapture.js'
+import { captureMutation, type CaptureSink } from './writeCapture.js'
+import { ingestWrite } from './dbRuntime.js'
 import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
+import type { TableChange } from '../router/events.js'
 
 /** The driver-terminal surface an async select adds OVER the core query-builder select: the `QueryPromise`
  *  verbs (`then`/`catch`/`finally`/`execute`) plus `prepare` and each dialect's runners (SQLite
@@ -329,7 +331,10 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb): Reactive<TD
   // Capture the per-request carrier NOW (context-bearing, before the body's first await). The returned
   // proxy closes over it, so `db.select()…live()` even post-await uses the CAPTURED carrier.
   const carrier = acquireCarrier()
-  return new Proxy(baseDb as object, {
+  const db = baseDb as object
+  // Autocommit writes ingest into THIS db's graphs immediately; a transaction buffers and flushes here once.
+  const ingest: CaptureSink = (changes) => ingestWrite(db, { changes })
+  return new Proxy(db, {
     get(target, prop, receiver) {
       if (prop === 'select') {
         // Wrap ONLY this db's own select builders: the returned chain is live-capable (`.live()` routes
@@ -339,14 +344,63 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb): Reactive<TD
           return wrapLiveSelect(baseBuilder, carrier as unknown as ReadCarrier, target)
         }
       }
-      if (prop === 'insert' || prop === 'update' || prop === 'delete') {
+      if (isWriteOp(prop)) {
         // Writes run as plain Drizzle, then feed their change into this db's graphs (via captureMutation →
-        // ingestWrite) so the live reads they affect refetch. Capture is keyed to `target` (the db) so it
-        // reaches the SAME registry the reads acquired from.
+        // ingestWrite) so the live reads they affect refetch. Keyed to `db` (the top db) so it reaches the
+        // SAME registry the reads acquired from; no sink → autocommit ingest.
         const base = Reflect.get(target, prop, receiver) as (...a: unknown[]) => unknown
-        return captureMutation(prop, base.bind(target), target)
+        return captureMutation(prop, base.bind(target), db)
+      }
+      if (prop === 'transaction') {
+        // Writes INSIDE the transaction must capture too (a forwarded raw tx db would bypass capture) — and
+        // buffer until the commit boundary, so one committed transaction is one atomic graph tick.
+        return wrapTransaction(target, db, ingest)
       }
       return Reflect.get(target, prop, receiver)
     },
   }) as unknown as Reactive<TDb>
+}
+
+function isWriteOp(prop: string | symbol): prop is 'insert' | 'update' | 'delete' {
+  return prop === 'insert' || prop === 'update' || prop === 'delete'
+}
+
+/** Wrap `db.transaction(cb)`: the callback gets a proxied tx db whose writes BUFFER; on outer COMMIT the
+ *  whole buffer flushes as ONE `ChangeBatch` to `enclosingSink` (the top db's graphs, or a parent tx's
+ *  buffer for a savepoint), so a committed transaction is one atomic graph tick. A rollback rejects and
+ *  never flushes → its changes are discarded. `topDb` is the session the reads acquired from — capture
+ *  reads its dialect/single-session/driver from it (a tx db isn't recognized as its own driver). */
+function wrapTransaction(txHost: object, topDb: object, enclosingSink: CaptureSink) {
+  return (callback: (tx: unknown) => unknown, config?: unknown) => {
+    const buffer: TableChange[] = []
+    const buffered: CaptureSink = (changes) => {
+      for (const change of changes) buffer.push(change)
+    }
+    const baseTransaction = (txHost as { transaction: (cb: unknown, c?: unknown) => unknown }).transaction.bind(txHost)
+    return Promise.resolve(baseTransaction((tx: object) => callback(txProxy(tx, topDb, buffered)), config)).then(
+      (result) => {
+        // Reached ONLY on COMMIT (a rollback / savepoint-rollback rejects and skips this) → flush once.
+        if (buffer.length > 0) enclosingSink(buffer)
+        return result
+      },
+    )
+  }
+}
+
+/** The proxy over a transaction db: writes buffer (via `sink`); a nested `transaction` is a SAVEPOINT whose
+ *  buffer flushes into THIS one on release (and is discarded on savepoint-rollback); reads + everything else
+ *  pass through as plain Drizzle (a live read inside a write transaction is out of scope). */
+function txProxy(txDb: object, topDb: object, sink: CaptureSink): unknown {
+  return new Proxy(txDb, {
+    get(target, prop, receiver) {
+      if (isWriteOp(prop)) {
+        const base = Reflect.get(target, prop, receiver) as (...a: unknown[]) => unknown
+        return captureMutation(prop, base.bind(target), topDb, sink) // session props from topDb; run on tx; buffer
+      }
+      if (prop === 'transaction') {
+        return wrapTransaction(target, topDb, sink) // nested → flush into THIS tx's buffer on release
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
 }
