@@ -1,13 +1,14 @@
 // Write-capture CORRECTNESS per dialect (real drivers). Drives captureMutation directly with a custom sink,
 // so it asserts BOTH the change(s) emitted AND the caller-visible result (which must equal plain drizzle's).
-// Slice 2: precise via hidden RETURNING (new + old-PK); fail-closed COARSE for everything outside the
-// contract (PK-changing update, UPSERT, no/composite PK, partial-returning, unverified driver/sqlite-no-ret).
+// Precise via hidden RETURNING (new + old-PK), single OR composite PK (slice 5 lifted composite from coarse);
+// fail-closed COARSE for everything outside the contract (PK-changing update, UPSERT, no PK, partial-returning,
+// MySQL, unverified driver / sqlite-no-returning).
 
 import { PGlite } from '@electric-sql/pglite'
 import { integer, pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
 import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { integer as sInt, sqliteTable, text as sText } from 'drizzle-orm/sqlite-core'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { captureMutation } from './writeCapture.js'
 import type { TableChange } from '../router/events.js'
@@ -102,16 +103,46 @@ describe('write capture — fail-closed COARSE (safe over-fire, never a wrong ro
     expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
   })
 
-  it('composite / multi-column PK → coarse (single-column PK only in this slice)', async () => {
-    const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
-    await wrapped(composite).values({ a: 1, b: 2, v: 'k' })
-    expect(batches).toEqual([[{ table: 'composite', kind: 'coarse' }]])
+  it('composite PK-changing update (SET touches a PK column) → coarse', async () => {
+    await pg.insert(composite).values({ a: 7, b: 8, v: 'p' })
+    const { wrapped, batches } = capturing(pg, 'update', pg.update.bind(pg))
+    await wrapped(composite)
+      .set({ a: 70 })
+      .where(and(eq(composite.a, 7), eq(composite.b, 8)))
+    expect(batches).toEqual([[{ table: 'composite', kind: 'coarse' }]]) // old composite key unrecoverable → coarse
   })
 
   it('raw insert-from-SELECT → coarse', async () => {
     const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
     await wrapped(users).select(pg.select({ id: users.id, name: users.name }).from(users).where(eq(users.id, 99)))
     expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+  })
+})
+
+describe('write capture — composite PK precise (slice 5)', () => {
+  it('composite PK INSERT (no returning): emits {insert, new: full row}; result reconstructed', async () => {
+    const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
+    const result = await wrapped(composite).values({ a: 1, b: 2, v: 'k' })
+    expect(batches).toEqual([[{ table: 'composite', kind: 'insert', new: { a: 1, b: 2, v: 'k' } }]])
+    expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 })
+  })
+
+  it('composite PK DELETE (no returning): emits {delete, key: BOTH PK columns}', async () => {
+    await pg.insert(composite).values({ a: 3, b: 4, v: 'd' })
+    const { wrapped, batches } = capturing(pg, 'delete', pg.delete.bind(pg))
+    await wrapped(composite).where(and(eq(composite.a, 3), eq(composite.b, 4)))
+    expect(batches).toEqual([[{ table: 'composite', kind: 'delete', key: { a: 3, b: 4 } }]])
+  })
+
+  it('composite PK UPDATE non-PK-changing: emits {update, new, key: BOTH PK columns}', async () => {
+    await pg.insert(composite).values({ a: 5, b: 6, v: 'u' })
+    const { wrapped, batches } = capturing(pg, 'update', pg.update.bind(pg))
+    await wrapped(composite)
+      .set({ v: 'u2' })
+      .where(and(eq(composite.a, 5), eq(composite.b, 6)))
+    expect(batches).toEqual([
+      [{ table: 'composite', kind: 'update', new: { a: 5, b: 6, v: 'u2' }, key: { a: 5, b: 6 } }],
+    ])
   })
 })
 

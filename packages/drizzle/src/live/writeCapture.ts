@@ -3,6 +3,7 @@ export type { CaptureSink }
 
 import { type Column, SQL, type Table, getTableColumns, getTableName, is, isTable } from 'drizzle-orm'
 import { dialectOf, driverOf, isSingleSession } from '../binding/database.js'
+import { primaryKeyOf } from '../extract/columns.js'
 import { ingestWrite } from './dbRuntime.js'
 import type { Row, TableChange } from '../router/events.js'
 
@@ -14,9 +15,10 @@ import type { Row, TableChange } from '../router/events.js'
 //   UPDATE  → { kind:'update', new: full row, key: PK }   (key = old PK = new PK; non-PK-changing only)
 //
 // PRECISION is gated + fails closed (emit one {table, kind:'coarse'}) — safe over-fire, never a wrong row:
-//   - PG/SQLite only (MySQL has no RETURNING → pre-write-SELECT is a later slice);
+//   - PG/SQLite only (MySQL has no RETURNING → precise MySQL needs a pre-write SELECT + a live MySQL test
+//     lane that does not exist in this package yet → deferred; MySQL stays sound-coarse);
 //   - single-session only (decision #6: pooled connections can't prove session authority → coarse);
-//   - single-column PK only (no/ambiguous or composite PK → coarse);
+//   - a resolvable PK (single OR composite); a table with no PK → coarse (a retraction can't be keyed);
 //   - not an UPSERT / ON CONFLICT, not a raw-SQL/insert-from-select write;
 //   - not a PK-CHANGING update (SET touches the PK column → the old PK can't be recovered from RETURNING
 //     without a pre-write SELECT, which decision #3 forbids on PG/SQLite → coarse);
@@ -114,10 +116,10 @@ type Plan =
 /** Decide precise vs coarse for one write — every ambiguity fails closed to coarse. */
 function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   const dialect = dialectOf(db)
-  if (dialect === 'mysql') return { mode: 'coarse' } // no RETURNING; MySQL pre-write SELECT is a later slice
+  if (dialect === 'mysql') return { mode: 'coarse' } // no RETURNING; precise MySQL (pre-write SELECT) deferred
   if (!isSingleSession(db)) return { mode: 'coarse' } // decision #6: pooled → coarse
-  const pk = singleColumnPkFields(table)
-  if (pk.length !== 1) return { mode: 'coarse' } // no / ambiguous / composite PK → coarse
+  const pk = pkFieldsOf(table)
+  if (pk.length === 0) return { mode: 'coarse' } // no resolvable PK → a retraction can't be keyed → coarse
   const config = writeConfigOf(builder)
   if (!config) return { mode: 'coarse' } // unrecognized builder shape (version drift) → coarse
   if (hasOnConflict(config, dialect)) return { mode: 'coarse' } // UPSERT / ON CONFLICT
@@ -168,12 +170,20 @@ function coversAllColumns(rows: Row[], columns: string[]): boolean {
 
 // ── builder introspection (version-brittle, guarded — mirrors drizzleShape.ts) ───────────────────────
 
-/** The PK columns' FIELD names (the keys `.returning()` rows use). Only single-column, column-level PKs
- *  are read here; a composite PK leaves the columns' `.primary` false → empty → the caller coarsens. */
-function singleColumnPkFields(table: Table): string[] {
-  return Object.entries(getTableColumns(table))
-    .filter(([, column]) => (column as Column).primary === true)
-    .map(([field]) => field)
+/** The PK columns' FIELD names (the keys `.returning()` rows use) — single OR composite. `primaryKeyOf`
+ *  resolves the PK's DATABASE column names (composite keys live in the table's extra-config builder); those
+ *  are translated back to field names via the table's column map, since a `.returning()` row is keyed by
+ *  field, not db column. A PK column that doesn't resolve to a field (or no PK at all) yields `[]` → the
+ *  caller coarsens (fail-closed). */
+function pkFieldsOf(table: Table): string[] {
+  const columnNames = primaryKeyOf(table)
+  if (columnNames.length === 0) return []
+  const fieldByColumnName = new Map<string, string>()
+  for (const [field, column] of Object.entries(getTableColumns(table))) {
+    fieldByColumnName.set((column as Column).name, field)
+  }
+  const fields = columnNames.map((name) => fieldByColumnName.get(name))
+  return fields.every((field): field is string => field !== undefined) ? (fields as string[]) : []
 }
 
 type WriteConfig = {
