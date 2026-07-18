@@ -25,6 +25,7 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
+    "@brillout/json-serializer": "^0.5.25",
     "@tanstack/db-ivm": "0.1.18"
   },
   "peerDependencies": {
