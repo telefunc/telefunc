@@ -61,17 +61,23 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
     get(target, prop, receiver) {
       // EVERY promise terminal routes through the captured run. `.catch()`/`.finally()` used to reach the
       // raw QueryPromise and execute the write uncaptured — a systematic missed invalidation.
-      if (prop === 'then') {
+      //
+      // Each is gated on the underlying builder ACTUALLY having it. An insert builder before `.values()`
+      // has none of them, so synthesizing them made `db.insert(t)` spuriously thenable: `await` on an
+      // unfinished chain would run a write the caller never asked for, and `typeof b.then === 'function'`
+      // lied about a proxy that is transparent except for `.live()`.
+      const has = (name: string): boolean => typeof Reflect.get(target, name, receiver) === 'function'
+      if (prop === 'then' && has('then')) {
         return (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>
           runWrite(target, table, op, db, sink).then(onFulfilled, onRejected)
       }
-      if (prop === 'catch') {
+      if (prop === 'catch' && has('catch')) {
         return (onRejected?: (e: unknown) => unknown) => runWrite(target, table, op, db, sink).catch(onRejected)
       }
-      if (prop === 'finally') {
+      if (prop === 'finally' && has('finally')) {
         return (onFinally?: () => void) => runWrite(target, table, op, db, sink).finally(onFinally)
       }
-      if (prop === 'execute') {
+      if (prop === 'execute' && has('execute')) {
         return (...args: unknown[]) => runWrite(target, table, op, db, sink, args)
       }
       // Driver terminals that execute DIRECTLY (SQLite's run/all/get/values — SYNCHRONOUS on node:sqlite).
@@ -80,11 +86,7 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
       // proxy that is supposed to be transparent except for `.live()` — then died inside the interceptor
       // ("Cannot read properties of undefined") instead of with the driver's own error. Mirrors the
       // `prepare` guard below and the raw-SQL guard in reactiveDrizzle.
-      if (
-        typeof prop === 'string' &&
-        (DIRECT_TERMINALS.has(prop) || isTerminalValues(prop, target)) &&
-        typeof Reflect.get(target, prop, receiver) === 'function'
-      ) {
+      if (typeof prop === 'string' && (DIRECT_TERMINALS.has(prop) || isTerminalValues(prop, target)) && has(prop)) {
         return (...args: unknown[]) => runDirectTerminal(target, prop, args, table, op, db, sink)
       }
       // A prepared write executes LATER; hand back a wrapped prepared query so each execution invalidates.

@@ -405,7 +405,13 @@ function isRawSqlOp(prop: string | symbol): boolean {
     // reads, and its effect is unknowable without resolving the view's definition. It used to fall through
     // to plain Drizzle and commit with nothing captured and nothing published — the same silent bypass
     // `tx.execute` had. Coarsening it is sound and it is a rare, deliberate operation.
-    prop === 'refreshMaterializedView'
+    prop === 'refreshMaterializedView' ||
+    // `db.batch([...])` runs a list of statements that may include writes (libSQL, D1, Neon-HTTP,
+    // sqlite-proxy). Reconstructing which rows each item touched would mean re-planning every statement in
+    // the list, so it takes the same coarse-all path — AFTER the batch completes, with the caller's result
+    // handed back untouched. Rejecting it before execution was the alternative and is worse: batch is a
+    // legitimate API, and coarse-all is sound.
+    prop === 'batch'
   )
 }
 

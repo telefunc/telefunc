@@ -340,11 +340,19 @@ describe('write capture — SQLite (node-sqlite)', () => {
     // `typeof builder.get === 'function'` reported true and calling it died inside the interceptor
     // ("Cannot read properties of undefined") instead of with the driver's own error.
     const { wrapped } = capturing(pg, 'insert', pg.insert.bind(pg))
-    const builder = wrapped(users).values({ id: 901, name: 'shape' })
-    const plain = pg.insert(users).values({ id: 902, name: 'shape' })
-    for (const terminal of ['run', 'all', 'get']) {
-      expect(typeof builder[terminal]).toBe(typeof (plain as unknown as Record<string, unknown>)[terminal])
-    }
+    const terminals = ['run', 'all', 'get', 'then', 'catch', 'finally', 'execute']
+    const shapeOf = (o: unknown) =>
+      Object.fromEntries(terminals.map((t) => [t, typeof (o as Record<string, unknown>)[t]]))
+
+    // The INITIAL builder, before `.values()`: plain Drizzle has NONE of these. Synthesizing `then` here
+    // made `await db.insert(t)` thenable, so awaiting an unfinished chain would run a write the caller
+    // never asked for.
+    expect(shapeOf(wrapped(users))).toEqual(shapeOf(pg.insert(users)))
+
+    // And after `.values()`, where PG still has no run/all/get but does have the promise verbs.
+    expect(shapeOf(wrapped(users).values({ id: 901, name: 'shape' }))).toEqual(
+      shapeOf(pg.insert(users).values({ id: 902, name: 'shape' })),
+    )
   })
 
   it('the CHAIN .values(rows) still only BUILDS — it must not execute mid-chain', async () => {

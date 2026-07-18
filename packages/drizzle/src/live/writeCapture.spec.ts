@@ -5,7 +5,7 @@
 
 import { PGlite } from '@electric-sql/pglite'
 import { sql } from 'drizzle-orm'
-import { integer, pgSchema, pgTable, text } from 'drizzle-orm/pg-core'
+import { integer, pgMaterializedView, pgSchema, pgTable, text } from 'drizzle-orm/pg-core'
 import { drizzle } from 'drizzle-orm/pglite'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { getRawContext, provideTelefuncContext } from 'telefunc'
@@ -21,6 +21,7 @@ const posts = pgTable('posts', { id: integer('id').primaryKey(), body: text('bod
 
 // Same relation NAME, different schemas — two physically distinct tables that a bare-name routing
 // identity conflates (review finding #6).
+const usersView = pgMaterializedView('users_mv', { id: integer('id') }).existing()
 const aUsers = pgSchema('a').table('users', { id: integer('id').primaryKey() })
 const bUsers = pgSchema('b').table('users', { id: integer('id').primaryKey() })
 
@@ -38,6 +39,7 @@ beforeAll(async () => {
   await client.exec('create table a.users (id int primary key); create table b.users (id int primary key)')
   await client.query('insert into a.users (id) values (1)')
   await client.query('insert into b.users (id) values (1)')
+  await client.exec('create materialized view users_mv as select id from users')
 })
 afterAll(async () => {
   await client.close()
@@ -115,6 +117,83 @@ describe('write capture — a raw write reaches a remote live query exactly ONCE
 
     expect(ingestSpy).toHaveBeenCalledTimes(1) // one write, one delivery — not two
     ingestSpy.mockRestore()
+  })
+})
+
+// Mutations that are NOT insert/update/delete and NOT raw SQL, but change what a live query reads. Both
+// fell straight through the reactive proxy to plain Drizzle and committed with nothing captured and nothing
+// published — the same silent-bypass class as `tx.execute`.
+//
+// Neither exists on PGlite (they ship on libSQL / D1 / Neon-HTTP / sqlite-proxy), so the methods are
+// attached to a REAL reactive db here: that exercises the actual proxy interception and the actual coarse
+// path, with only the driver method itself simulated. Each case pins BOTH halves — the caller's result comes
+// back untouched, AND the live query is invalidated.
+describe('write capture — non-SQL mutations still invalidate (refreshMaterializedView, batch)', () => {
+  type ExoticDb = {
+    select: () => { from: (t: unknown) => { live: () => Promise<unknown> } }
+    refreshMaterializedView: (view: unknown) => Promise<string>
+    batch: (items: unknown[]) => Promise<string[]>
+    transaction: (cb: (tx: ExoticDb) => unknown) => Promise<unknown>
+  }
+
+  /** A reactive db whose base carries the exotic driver methods, returning a recognisable sentinel. */
+  function exoticDb() {
+    const base = drizzle({ client }) as unknown as Record<string, unknown>
+    base.refreshMaterializedView = async () => 'refreshed-sentinel'
+    base.batch = async (items: unknown[]) => items.map((_, i) => `batch-result-${i}`)
+    return reactiveDrizzle(base as never) as unknown as ExoticDb
+  }
+
+  it('refreshMaterializedView invalidates a live query, and returns the driver result unchanged', async () => {
+    provideTelefuncContext({})
+    const db = exoticDb()
+    const live = await db.select().from(users).live()
+    activate(live)
+    const invalidated = onInvalidate(live)
+
+    const result = await db.refreshMaterializedView({})
+    await tick()
+
+    expect(result).toBe('refreshed-sentinel') // the caller's result is plain Drizzle's
+    expect(invalidated).toHaveBeenCalledTimes(1) // ...and it was not a silent no-op
+  })
+
+  it('batch invalidates a live query, and returns every item result unchanged', async () => {
+    provideTelefuncContext({})
+    const db = exoticDb()
+    const live = await db.select().from(users).live()
+    activate(live)
+    const invalidated = onInvalidate(live)
+
+    const result = await db.batch([{}, {}])
+    await tick()
+
+    expect(result).toEqual(['batch-result-0', 'batch-result-1'])
+    expect(invalidated).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshMaterializedView is intercepted INSIDE a transaction too, flushing on commit', async () => {
+    // No stub here: PGlite's own transaction object really does expose refreshMaterializedView, so this
+    // drives the REAL driver method against a REAL materialized view. The tx db is a different object from
+    // the top-level one, and the proxy must intercept there as well — that is exactly how `tx.execute`
+    // slipped through once already.
+    provideTelefuncContext({})
+    const rdb = reactiveDrizzle(drizzle({ client })) as unknown as {
+      select: () => { from: (t: unknown) => { live: () => Promise<unknown> } }
+      transaction: (
+        cb: (tx: { refreshMaterializedView: (v: unknown) => Promise<unknown> }) => unknown,
+      ) => Promise<unknown>
+    }
+    const live = await rdb.select().from(users).live()
+    activate(live)
+    const invalidated = onInvalidate(live)
+
+    await rdb.transaction(async (tx) => {
+      await tx.refreshMaterializedView(usersView)
+    })
+    await tick()
+
+    expect(invalidated).toHaveBeenCalledTimes(1)
   })
 })
 

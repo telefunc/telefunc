@@ -97,8 +97,9 @@ Capturing a write precisely means recovering the rows it changed. That needs a c
 | Write | Behaviour |
 | --- | --- |
 | On PGlite | **Precise** — the rows are captured for you |
-| On SQLite or a pinned PostgreSQL client, using `.returning()` | **Precise** — your own `RETURNING` supplies the rows |
+| On SQLite or a pinned PostgreSQL client, using a **full-row** `.returning()` | **Precise** — your own `RETURNING` supplies the rows |
 | On SQLite or a pinned PostgreSQL client, *without* `.returning()` | **Coarse** — the plain driver result can't be reproduced faithfully, so the rows aren't captured |
+| A **partial** `.returning({ id })` — on any dialect | **Coarse** — a projection is not a full row image, and widening it would mean inventing the missing columns |
 | On a pooled PostgreSQL connection | **Coarse** — a pool can't prove which session ran the query |
 | On MySQL | **Coarse** — no `RETURNING` to capture rows from |
 | `UPSERT` / `ON CONFLICT`, a primary-key-changing update, or a table with no usable primary key | **Coarse** — the affected rows can't be identified unambiguously |
