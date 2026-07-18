@@ -16,6 +16,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import type { TelefuncServerExtension } from './extensions.js'
+import { telefuncExtensionHost } from './extensionHost.js'
 import type {
   ReplacerType,
   ReviverType,
@@ -251,6 +252,9 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
                     registerShieldType(name, verify)
                   }
                 }
+                // Hand the extension the host toolkit so an integration can reach reactive primitives
+                // (a Live producer, per-request cleanup) without importing telefunc internals.
+                ext.setup?.(telefuncExtensionHost)
               }
               return target.length
             }

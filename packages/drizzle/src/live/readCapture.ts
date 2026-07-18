@@ -1,8 +1,9 @@
 // The engine read-capture. `reactiveDrizzle(db).select(...)` produces a CHAINABLE
 // live-builder (via wrapLiveSelect) whose terminal `.live()` runs the pipeline: extractQueryShape →
-// compileQuery → registry.acquire (eager-async hydrate in the prologue) → new LiveCell(rows) +
-// attachSource → Live<Row[]>. Awaiting the same builder (no `.live()`) forwards to plain rows. The
-// wire replacer activates the handle at SERIALIZE time,
+// compileQuery → registry.acquire (eager-async hydrate in the prologue) → host.createLive(rows) +
+// attachSource → Live<Row[]>. The `Live` producer + the request cleanup come from telefunc's extension
+// HOST (getTelefuncHost()), never telefunc internals. Awaiting the same builder (no `.live()`) forwards to
+// plain rows. The wire replacer activates the handle at SERIALIZE time,
 // synchronously redeeming the read token (subscribe-at-redeem + the seqAtRead fence) via the source's
 // `subscribe`; on the last owning channel's close it releases the lease. A handle that is never
 // serialized never activates, so its token stays un-redeemed and the request's finally-sweep
@@ -13,8 +14,8 @@ export { wrapLiveSelect, disposeUnredeemedReads, compilePlanFor }
 export type { ReadCarrier }
 
 import { type Table, isTable } from 'drizzle-orm'
-import type { Live } from 'telefunc'
-import { LiveCell } from 'telefunc/__internal'
+import type { Live, LiveProducer } from 'telefunc'
+import { getTelefuncHost } from './telefuncHost.js'
 import { type GraphPlan, coarsePlan, compileQuery } from '../compile/compile.js'
 import type { Row } from '../compile/rowSpace.js'
 import { selectConfigOf } from '../binding/drizzleShape.js'
@@ -91,7 +92,7 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
   // notify is set to forward to the (not-yet-created) Live; it is only ever CALLED at redeem-time or
   // later (a graph invalidation), by which point `live` exists — an un-redeemed token is inert, so no
   // fire reaches this before activation.
-  let live: LiveCell<Row[]> | undefined
+  let live: LiveProducer<Row[]> | undefined
   const { graph, token } = await registryFor(db).acquire({
     instanceKey,
     tables: shape.tables,
@@ -108,7 +109,7 @@ async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: objec
   carrier.mintedTokens.push(entry)
 
   const initialRows = (await builder) as Row[] // the initial result is a plain read; the graph signals staleness
-  live = new LiveCell<Row[]>(initialRows)
+  live = getTelefuncHost().createLive<Row[]>(initialRows)
   live.attachSource({
     subscribe: () => {
       // Serialize-time activation (SYNC): redeem the token — subscribe its notify to the graph's sink

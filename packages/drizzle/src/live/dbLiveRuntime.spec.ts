@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getRawContext, provideTelefuncContext } from 'telefunc'
-import { drainPostSerializeDisposers } from 'telefunc/__internal'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
 import type { DbLiveCarrier } from './reactiveDrizzle.js'
 
@@ -8,10 +7,12 @@ import type { DbLiveCarrier } from './reactiveDrizzle.js'
 // The db.live runtime wiring gate. Proves the
 // CARRIER lifecycle under PRODUCTION SYNC mode: the carrier is captured before the body's first
 // await, so a POST-await `db.select()…live()` still tracks its read token on the captured carrier even
-// after `getRawContext()` has nulled (the sync-mode / no-async_hooks reality), and the finally-sweep
+// after `getRawContext()` has nulled (the sync-mode / no-async_hooks reality), and the request cleanup
 // releases a token that was never activated (net-zero). The engine's real token mechanics live in the
 // readCapture engine tests; here a FAKE `wrapLiveSelect` (mocked) isolates the sync-context concern with a
-// controllable token, while the REAL `acquireCarrier` + `disposeUnredeemedReads` run the lifecycle.
+// controllable token, and a FAKE extension host captures the cleanup `acquireCarrier` registers (so the
+// test can drive the post-serialize drain WITHOUT reaching telefunc internals), while the REAL
+// `acquireCarrier` + `disposeUnredeemedReads` run the lifecycle.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
@@ -19,9 +20,26 @@ const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 type FakeToken = { release: () => void }
 type FakeEntry = { token: FakeToken; redeemed: boolean }
 
-// Hoisted engine state the mocked `wrapLiveSelect` writes to — hoisted because the `vi.mock` factory is
-// lifted above the imports, so it must close over hoisted state. Reset per test in `beforeEach`.
-const engine = vi.hoisted(() => ({ minted: [] as FakeEntry[], released: [] as FakeToken[] }))
+// Hoisted engine state the mocked `wrapLiveSelect` + fake host write to — hoisted because the `vi.mock`
+// factories are lifted above the imports, so they must close over hoisted state. Reset per test.
+const engine = vi.hoisted(() => ({
+  minted: [] as FakeEntry[],
+  released: [] as FakeToken[],
+  cleanups: [] as Array<() => void>,
+}))
+
+// Fake the extension host: `onRequestCleanup` records the cleanup `acquireCarrier` registers, so the test
+// drives the post-serialize drain by invoking it — without reaching into telefunc's internals. `createLive`
+// is unused here (the fake `wrapLiveSelect` mints directly, bypassing captureAndBuild).
+vi.mock('./telefuncHost.js', () => ({
+  getTelefuncHost: () => ({
+    createLive: (initialData: unknown) => initialData,
+    onRequestCleanup: (cleanup: () => void) => {
+      engine.cleanups.push(cleanup)
+    },
+  }),
+}))
+const drain = () => engine.cleanups.forEach((cleanup) => cleanup())
 
 // Fake ONLY the engine's `wrapLiveSelect`; keep the REAL `disposeUnredeemedReads` (and everything else)
 // so the real carrier lifecycle — `acquireCarrier`'s finally-sweep — runs end-to-end against
@@ -80,6 +98,7 @@ const acquire = (): ReactiveMockDb => reactiveDrizzle(baseDb as never) as unknow
 beforeEach(() => {
   engine.minted.length = 0
   engine.released.length = 0
+  engine.cleanups.length = 0
 })
 // Flush the sync-mode null timer scheduled by provideTelefuncContext so it never leaks into the next test.
 afterEach(async () => {
@@ -106,15 +125,15 @@ describe('db.live runtime — carrier lifecycle', () => {
     expect(engine.minted).toHaveLength(1)
     expect(engine.minted[0]!.redeemed).toBe(false) // never serialized/activated in this unit
 
-    // The finally-sweep (registered by acquireCarrier on the captured context) releases it — net-zero.
-    drainPostSerializeDisposers(context!)
+    // The cleanup (registered by acquireCarrier through the host, bound to the captured context) releases
+    // the un-activated token — net-zero.
+    drain()
     expect(engine.released).toHaveLength(1)
     expect(engine.released[0]).toBe(engine.minted[0]!.token)
   })
 
   it('sweep skips an ACTIVATED token: a serialized (redeemed) handle keeps its channel-owned lease', async () => {
     provideTelefuncContext({})
-    const context = getRawContext()
 
     const db = acquire()
     await db.select().from({}).live()
@@ -123,7 +142,7 @@ describe('db.live runtime — carrier lifecycle', () => {
     // Simulate serialize-time activation (the wire replacer redeems the token).
     engine.minted[0]!.redeemed = true
 
-    drainPostSerializeDisposers(context!)
+    drain()
     expect(engine.released).toHaveLength(0) // activated → skipped; its lease is channel-owned
   })
 
