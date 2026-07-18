@@ -16,7 +16,7 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     return typeof value === 'object' && value !== null && LIVE_BRAND in value
   },
   replace(live, context) {
-    // Serialize-time single activation (quota deleted — no reservation step): the channel is created
+    // Serialize-time single activation, with no reservation step: the channel is created
     // HERE, only because this Live is crossing the wire. A Live that never serializes reaches this
     // never — no channel, no subscription — so it activates nothing and cannot leak.
     const channel = context.createChannel<never, LiveEvent>()

@@ -36,7 +36,7 @@ beforeEach(() => {
 })
 afterEach(() => errorSpy.mockRestore())
 
-describe('R1 post-serialize drain runs on every runTelefunc outcome', () => {
+describe('post-serialize drain runs on every runTelefunc outcome', () => {
   it('body-throw BEFORE serialize → the minted disposer still drains (net-zero)', async () => {
     let drained = 0
     register('bodyThrows', async () => {

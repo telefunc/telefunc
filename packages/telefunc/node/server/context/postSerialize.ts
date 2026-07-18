@@ -7,9 +7,10 @@ import type { Context } from './context.js'
 // request's `context` object (NOT an ambient `getRawContext()` lookup, which nulls at the first macrotask
 // in sync mode): the registrar captures the context while it is live (before the body's first await), and
 // the drain — in `runTelefunc`'s outer finally around execute+serialize — holds the SAME object via
-// `runContext.context`. This is how the reactive-drizzle binding releases db.live read tokens that were
-// minted but never activated (never serialized / result removed / serialize failed), without any db.live-
-// specific code in core.
+// `runContext.context`. Any extension can register here to release a resource it acquired during the
+// request but that never reached the wire (result removed, serialize failed, or simply never serialized);
+// `@telefunc/drizzle` is the first caller, releasing unactivated live-read tokens, but nothing about this
+// seam is specific to it.
 
 const DISPOSERS = Symbol.for('telefunc.postSerializeDisposers')
 

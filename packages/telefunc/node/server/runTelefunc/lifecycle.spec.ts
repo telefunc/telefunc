@@ -96,7 +96,7 @@ describe('lifecycle — result transform chain', () => {
     expect(calls).toEqual(['E1.result', 'E2.result'])
   })
 
-  it('result-hook runs ONLY for an extension the request activated (pre-PR gate); `data` is that payload', async () => {
+  it('result-hook runs ONLY for an extension the request activated; `data` is that payload', async () => {
     const seen: Record<string, unknown[]> = { E1: [], F: [] }
     await run(
       [

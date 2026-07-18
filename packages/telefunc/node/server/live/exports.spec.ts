@@ -31,7 +31,8 @@ describe('telefunc live exports', () => {
 
   it('the producer cell is NOT publicly reachable', () => {
     // `LiveCell` is the boundary: unexported from the package root, so the producer verbs cannot be
-    // reached from 'telefunc'. Bindings import it from 'telefunc/__internal' instead.
+    // reached from 'telefunc'. Nor from 'telefunc/__internal' — a binding receives a producer through
+    // the extension host's `setup(host)` instead, never by importing the class.
     expect((telefunc as Record<string, unknown>).LiveCell).toBeUndefined()
     expect((telefunc as Record<string, unknown>).ClientLive).toBeUndefined()
   })
