@@ -68,4 +68,21 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
     expect(engine.ingest).toHaveBeenCalledTimes(1)
     expect(engine.ingest).toHaveBeenCalledWith({ changes })
   })
+
+  it('TWO dbs sharing one transport: A publishes → B applies, A suppresses its own round-trip (per-db dedupe)', async () => {
+    // The multi-instance path in one process: dbA + dbB, distinct registries, one shared transport. A's
+    // publish must reach B (a DIFFERENT db) while A drops its own echo. A GLOBAL seen-set would let A's
+    // pre-mark suppress B too — this is the exact bug the per-db scoping fixes.
+    const transport = createInMemoryChangeTransport()
+    const dbA = {}
+    const dbB = {}
+    setChangeTransport(dbA, transport)
+    setChangeTransport(dbB, transport)
+    const changes = [change('users')]
+    await ensureSubscribed(dbA, ['users']) // both instances hold a live read on the table
+    await ensureSubscribed(dbB, ['users'])
+    publishBatch(dbA, { changes }) // A commits a write (its own graphs were already fed directly)
+    expect(engine.ingest).toHaveBeenCalledTimes(1) // ONLY B applied; A deduped its own round-trip
+    expect(engine.ingest).toHaveBeenCalledWith({ changes })
+  })
 })

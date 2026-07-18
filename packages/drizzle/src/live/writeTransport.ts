@@ -22,12 +22,21 @@ import type { ChangeBatch } from '../router/events.js'
 
 const batchTopic = (table: string): string => `__live__:${table}`
 
-// Batch ids already applied on THIS instance — the dedupe window. Bounded FIFO: it only needs to outlive
-// in-flight redelivery of the same batch across a subscriber's several topics, so an old id aging out is
-// harmless (that batch is long applied).
+// Batch ids already applied on a GIVEN db — the dedupe window, scoped PER DB (not global): a db drops its
+// OWN round-trip and same-batch-via-another-topic, but a DIFFERENT db (another instance sharing the
+// transport, even in the same process) must still receive and apply a batch this db published. A global set
+// would make instance A's publish suppress instance B's legitimate receipt. Bounded FIFO per db: it only
+// needs to outlive in-flight redelivery of the same batch across a subscriber's several topics, so an old id
+// aging out is harmless (that batch is long applied).
 const SEEN_CAP = 4096
-const seen = new Set<string>()
-function markSeen(id: string): void {
+const seenByDb = new WeakMap<object, Set<string>>()
+function seenSetOf(db: object): Set<string> {
+  let seen = seenByDb.get(db)
+  if (!seen) seenByDb.set(db, (seen = new Set()))
+  return seen
+}
+function markSeen(db: object, id: string): void {
+  const seen = seenSetOf(db)
   if (seen.has(id)) return
   seen.add(id)
   if (seen.size > SEEN_CAP) seen.delete(seen.values().next().value as string)
@@ -40,7 +49,7 @@ function publishBatch(db: object, batch: ChangeBatch): void {
   if (batch.changes.length === 0) return
   const transport = transportFor(db)
   const message = { id: randomUUID(), changes: batch.changes }
-  markSeen(message.id)
+  markSeen(db, message.id) // pre-mark on THIS db so its own round-trip is dropped (fed directly already)
   for (const table of new Set(batch.changes.map((change) => change.table))) {
     transport.publish(batchTopic(table), message)
   }
@@ -99,8 +108,8 @@ function subscribeAndProbe(db: object, table: string): Promise<void> {
         }
         return
       }
-      if (seen.has(message.id)) return // dedupe: our own round-trip, or this batch already applied via another topic
-      markSeen(message.id)
+      if (seenSetOf(db).has(message.id)) return // dedupe (per-db): our own round-trip, or same batch via another topic
+      markSeen(db, message.id)
       registryFor(db).router.ingest({ changes: message.changes })
     })
     let attempts = 0

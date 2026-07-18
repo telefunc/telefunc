@@ -19,6 +19,13 @@ type ChangeMessage = { id: string; changes: TableChange[] } | { probe: string }
  * for Live.) It mirrors the Broadcast publish/subscribe SHAPE; the default is an in-process dedicated
  * channel-space (below), and a multi-process deployment injects a transport-backed implementation.
  *
+ * DEPLOYMENT TRUTH — assume NO cross-server magic from the default: the built-in default fans out
+ * **in-process only** (one Node process). A multi-process / multi-server deployment MUST inject a shared,
+ * transport-backed ChangeTransport (Redis/Postgres-backed, or telefunc's Broadcast wired to a real
+ * transport) via `reactiveDrizzle(db, { changeTransport })`, or a write on one server will not reach a live
+ * query on another. (Telefunc's own default Broadcast adapter is likewise process-local — nothing
+ * cross-process is silently provided here.)
+ *
  * CONTRACT — a custom transport MUST honor both, or the Live guarantees silently weaken:
  *  - **Self-delivery (loopback).** A message published to a topic is delivered to EVERY current subscriber
  *    of that topic, INCLUDING the publisher's own subscription. The readiness barrier proves a subscription
