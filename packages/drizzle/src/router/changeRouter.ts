@@ -30,6 +30,10 @@ type Router = {
   register(graph: RoutableGraph): void
   unregister(graph: RoutableGraph): void
   ingest(batch: ChangeBatch): void
+  /** Every table that currently has at least one registered graph. The write side needs this for a
+   *  mutation whose touched tables are UNKNOWABLE (raw SQL): it coarsens exactly the tables something is
+   *  actually watching, rather than guessing or silently missing them. */
+  watchedTables(): string[]
 }
 
 function createRouter(config: { notify: (identityKey: string) => void }): Router {
@@ -44,7 +48,15 @@ function createRouter(config: { notify: (identityKey: string) => void }): Router
       }
     },
     unregister(graph) {
-      for (const table of graph.tables) index.get(table)?.delete(graph)
+      for (const table of graph.tables) {
+        const set = index.get(table)
+        if (!set) continue
+        set.delete(graph)
+        if (set.size === 0) index.delete(table) // keep watchedTables() free of emptied entries
+      }
+    },
+    watchedTables() {
+      return [...index.keys()]
     },
     ingest(batch) {
       const touched = new Set<RoutableGraph>()

@@ -26,7 +26,7 @@ import type {
 import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/mysql-core/async/select'
 import type { Live } from 'telefunc'
 import { acquireCarrier } from './dbLiveRuntime.js'
-import { captureMutation, emitSafely, type CaptureSink } from './writeCapture.js'
+import { captureMutation, captureRawSql, emitSafely, type CaptureSink } from './writeCapture.js'
 import { ingestWrite } from './dbRuntime.js'
 import { type ChangeTransport, setChangeTransport } from './changeTransport.js'
 import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
@@ -369,6 +369,15 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
         // buffer until the commit boundary, so one committed transaction is one atomic graph tick.
         return wrapTransaction(target, db, ingest)
       }
+      if (isRawSqlOp(prop)) {
+        // Raw SQL (`db.run(sql`…`)`, `db.execute(sql`…`)`, …) can mutate anything, and its touched tables are
+        // unknowable without parsing — so it fails closed by coarsening every table this db has a graph on,
+        // rather than executing silently uncaptured.
+        const base = Reflect.get(target, prop, receiver)
+        if (typeof base === 'function') {
+          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), db, ingest)
+        }
+      }
       return Reflect.get(target, prop, receiver)
     },
   }) as unknown as Reactive<TDb>
@@ -376,6 +385,12 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
 
 function isWriteOp(prop: string | symbol): prop is 'insert' | 'update' | 'delete' {
   return prop === 'insert' || prop === 'update' || prop === 'delete'
+}
+
+/** The db-level RAW SQL execution surfaces — they bypass the builder entirely, so they need their own
+ *  fail-closed capture (coarsen this db's watched tables). */
+function isRawSqlOp(prop: string | symbol): boolean {
+  return prop === 'run' || prop === 'execute' || prop === 'all' || prop === 'get' || prop === 'values'
 }
 
 /** Wrap `db.transaction(cb)`: the callback gets a proxied tx db whose writes BUFFER; on outer COMMIT the

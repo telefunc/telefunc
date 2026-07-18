@@ -1,10 +1,10 @@
-export { captureMutation, emitSafely }
+export { captureMutation, emitSafely, captureRawSql }
 export type { CaptureSink }
 
 import { type Column, SQL, type Table, getTableColumns, getTableName, is, isTable } from 'drizzle-orm'
 import { dialectOf, driverOf, isSingleSession } from '../binding/database.js'
 import { primaryKeyOf } from '../extract/columns.js'
-import { ingestWrite } from './dbRuntime.js'
+import { ingestWrite, registryFor } from './dbRuntime.js'
 import type { Row, TableChange } from '../router/events.js'
 
 // The write-capture engine. `reactiveDrizzle`'s proxy routes insert/update/delete here. The write runs as
@@ -51,12 +51,32 @@ function captureMutation(
 function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: CaptureSink): unknown {
   return new Proxy(builder as object, {
     get(target, prop, receiver) {
+      // EVERY promise terminal routes through the captured run. `.catch()`/`.finally()` used to reach the
+      // raw QueryPromise and execute the write uncaptured — a systematic missed invalidation.
       if (prop === 'then') {
         return (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>
           runWrite(target, table, op, db, sink).then(onFulfilled, onRejected)
       }
+      if (prop === 'catch') {
+        return (onRejected?: (e: unknown) => unknown) => runWrite(target, table, op, db, sink).catch(onRejected)
+      }
+      if (prop === 'finally') {
+        return (onFinally?: () => void) => runWrite(target, table, op, db, sink).finally(onFinally)
+      }
       if (prop === 'execute') {
         return (...args: unknown[]) => runWrite(target, table, op, db, sink, args)
+      }
+      // Driver terminals that execute DIRECTLY (SQLite's run/all/get/values — SYNCHRONOUS on node:sqlite).
+      if (typeof prop === 'string' && DIRECT_TERMINALS.has(prop)) {
+        return (...args: unknown[]) => runDirectTerminal(target, prop, args, table, op, db, sink)
+      }
+      // A prepared write executes LATER; hand back a wrapped prepared query so each execution invalidates.
+      if (prop === 'prepare') {
+        const prepare = Reflect.get(target, prop, receiver)
+        if (typeof prepare === 'function') {
+          return (...args: unknown[]) =>
+            wrapPrepared((prepare as (...a: unknown[]) => unknown).apply(target, args), table, sink)
+        }
       }
       const value = Reflect.get(target, prop, receiver)
       if (typeof value !== 'function') return value
@@ -66,6 +86,109 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
       }
     },
   })
+}
+
+/** Driver terminals that run the statement immediately rather than through the QueryPromise (SQLite).
+ *  NOTE: `values` is deliberately ABSENT — on a write builder `.values({…})` is the insert builder's own
+ *  method, not a terminal; treating it as one would execute the statement mid-chain. (At the DB level
+ *  `db.values(sql`…`)` IS a raw execution surface — see `isRawSqlOp` in reactiveDrizzle.) */
+const DIRECT_TERMINALS = new Set(['run', 'all', 'get'])
+
+const isThenable = (value: unknown): value is PromiseLike<unknown> =>
+  typeof value === 'object' && value !== null && typeof (value as { then?: unknown }).then === 'function'
+
+/** Run a DIRECT driver terminal and capture it. The caller's result must come back with its exact shape AND
+ *  sync/async-ness (node:sqlite is synchronous), so we cannot substitute a hidden RETURNING here: the write
+ *  fails closed to COARSE — except when the caller's own `.returning()` already yields a full row image,
+ *  which is precise for free. Sync in, sync out; thenable in, thenable out. */
+function runDirectTerminal(
+  builder: object,
+  prop: string,
+  args: unknown[],
+  table: Table,
+  op: Op,
+  db: object,
+  sink: CaptureSink,
+): unknown {
+  const base = (builder as Record<string, (...a: unknown[]) => unknown>)[prop]!
+  const result = base.apply(builder, args)
+  const emit = (rows: unknown) => emitSafely(sink, directChanges(rows, builder, table, op, db))
+  if (isThenable(result)) {
+    return Promise.resolve(result).then((rows) => {
+      emit(rows)
+      return rows
+    })
+  }
+  emit(result)
+  return result
+}
+
+function directChanges(result: unknown, builder: object, table: Table, op: Op, db: object): TableChange[] {
+  const tableName = getTableName(table)
+  const plan = planCapture(builder, table, op, db)
+  if (plan.mode === 'precise' && plan.callerReturning && Array.isArray(result)) {
+    const rows = result as Row[]
+    if (coversAllColumns(rows, plan.columns)) return changesOf(op, tableName, rows, plan.pk)
+  }
+  return [coarse(tableName)]
+}
+
+/** A PREPARED write: the statement executes later (possibly many times), and its per-execution row images
+ *  are not re-planned here — so every execution fails closed to COARSE for the target table rather than
+ *  running uncaptured. Result shape and sync/async-ness are preserved. */
+function wrapPrepared(prepared: unknown, table: Table, sink: CaptureSink): unknown {
+  const tableName = getTableName(table)
+  return new Proxy(prepared as object, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver)
+      if (typeof value !== 'function') return value
+      const isTerminal =
+        prop === 'then' ||
+        prop === 'catch' ||
+        prop === 'finally' ||
+        prop === 'execute' ||
+        (typeof prop === 'string' && DIRECT_TERMINALS.has(prop))
+      if (!isTerminal) return (...args: unknown[]) => (value as (...a: unknown[]) => unknown).apply(target, args)
+      return (...args: unknown[]) => {
+        const result = (value as (...a: unknown[]) => unknown).apply(target, args)
+        if (isThenable(result)) {
+          return Promise.resolve(result).then((rows) => {
+            emitSafely(sink, [coarse(tableName)])
+            return rows
+          })
+        }
+        emitSafely(sink, [coarse(tableName)])
+        return result
+      }
+    },
+  })
+}
+
+/** Wrap a RAW-SQL execution surface on the reactive db (`db.run(sql\`…\`)`, `db.execute(sql\`…\`)`, …). The
+ *  touched tables are unknowable without parsing SQL, so — per the owner disposition — this coarsens EVERY
+ *  table that currently has a registered graph on this db (safe over-fire, keeps raw SQL usable) as ONE batch
+ *  at completion. Two honest bounds: a raw READ also over-fires (sound, just noisy), and a raw write to a
+ *  table nothing on THIS db watches emits nothing — an instance watching only on another db is not reached. */
+function captureRawSql(base: (...a: unknown[]) => unknown, db: object, sink: CaptureSink) {
+  return (...args: unknown[]) => {
+    const result = base(...args)
+    const emit = () => {
+      const tables = registryFor(db).router.watchedTables()
+      if (tables.length > 0)
+        emitSafely(
+          sink,
+          tables.map((table) => ({ table, kind: 'coarse' as const })),
+        )
+    }
+    if (isThenable(result)) {
+      return Promise.resolve(result).then((rows) => {
+        emit()
+        return rows
+      })
+    }
+    emit()
+    return result
+  }
 }
 
 async function runWrite(

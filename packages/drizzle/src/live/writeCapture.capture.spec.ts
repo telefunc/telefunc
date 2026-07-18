@@ -10,7 +10,8 @@ import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { integer as sInt, sqliteTable, text as sText } from 'drizzle-orm/sqlite-core'
 import { and, eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { captureMutation } from './writeCapture.js'
+import { captureMutation, captureRawSql } from './writeCapture.js'
+import { registryFor } from './dbRuntime.js'
 import type { TableChange } from '../router/events.js'
 
 const users = pgTable('users', { id: integer('id').primaryKey(), name: text('name') })
@@ -146,6 +147,80 @@ describe('write capture — a capture fault NEVER fails a committed write (isola
     const result = await wrapped(users).values({ id: 31, name: 'still-committed' })
     expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 })
     expect(calls).toBe(2) // precise attempt + coarse fallback attempt, both contained
+  })
+})
+
+describe('write capture — EVERY execution terminal captures (no silent bypass)', () => {
+  // Review blocker: only `then`/`execute` were intercepted, so `.catch()`/`.finally()` reached the raw
+  // QueryPromise — the row committed and NOTHING was emitted (a systematic missed invalidation).
+  it('.catch() executes through the captured run', async () => {
+    const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
+    const result = await wrapped(users)
+      .values({ id: 40, name: 'catch' })
+      .catch(() => 'unexpected')
+    expect(result).not.toBe('unexpected') // it resolved, not rejected
+    expect(batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 40, name: 'catch' } }]])
+  })
+
+  it('.finally() executes through the captured run', async () => {
+    const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
+    let ran = false
+    await wrapped(users)
+      .values({ id: 41, name: 'finally' })
+      .finally(() => {
+        ran = true
+      })
+    expect(ran).toBe(true)
+    expect(batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 41, name: 'finally' } }]])
+  })
+
+  it('a PREPARED write invalidates on every execution (fails closed to coarse, never uncaptured)', async () => {
+    const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
+    const prepared = wrapped(users).values({ id: 42, name: 'prepared' }).prepare('cap_prepared')
+    await prepared.execute()
+    expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+  })
+})
+
+describe('write capture — RAW SQL fails closed over the db’s watched tables', () => {
+  // Review blocker: raw DB SQL was not intercepted at all — `reactive.run(sql`insert …`)` persisted a row and
+  // published NOTHING. Owner disposition: coarsen every table with a registered graph on this db.
+  it('coarsens exactly the tables that currently have registered graphs', () => {
+    const db = {}
+    const emitted: TableChange[][] = []
+    const graph = {
+      tables: ['users', 'notes'],
+      apply: () => ({}) as never,
+      notifyKey: () => 'g',
+      fault() {},
+      coarsen() {},
+    }
+    registryFor(db).router.register(graph)
+    const run = captureRawSql(
+      () => 'driver-result',
+      db,
+      (changes) => emitted.push(changes),
+    )
+    expect(run()).toBe('driver-result') // the caller's raw result is untouched
+    expect(emitted).toEqual([
+      [
+        { table: 'users', kind: 'coarse' },
+        { table: 'notes', kind: 'coarse' },
+      ],
+    ])
+    registryFor(db).router.unregister(graph)
+  })
+
+  it('emits nothing when the db has no registered graphs (nothing to invalidate)', () => {
+    const db = {}
+    const emitted: TableChange[][] = []
+    const run = captureRawSql(
+      () => 'ok',
+      db,
+      (changes) => emitted.push(changes),
+    )
+    expect(run()).toBe('ok')
+    expect(emitted).toEqual([])
   })
 })
 
