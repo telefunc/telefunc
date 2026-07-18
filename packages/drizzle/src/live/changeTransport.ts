@@ -4,12 +4,16 @@ export { defaultChangeTransport, createInMemoryChangeTransport, transportFor, se
 import type { TableChange } from '../router/events.js'
 
 /**
- * A message on a table's change topic (`__live__:{table}`): either a committed write BATCH (a globally
- * unique `id` + the changes) or a readiness PROBE (a unique token the publisher awaits back to prove its
- * OWN subscription is listening — see the readiness barrier in writeTransport.ts). The two are discriminated
- * structurally (`'probe' in message`).
+ * A message on a table's change topic (`__live__:{table}`): either a committed write BATCH or a readiness
+ * PROBE (a unique token the publisher awaits back to prove its OWN subscription is listening — see the
+ * readiness barrier in writeTransport.ts). The two are discriminated structurally (`'probe' in message`).
+ *
+ * A batch carries `origin` (the publishing db's identity) and `tables` (every table it touched, in a stable
+ * order). Together these make cross-topic de-duplication DETERMINISTIC and STATELESS — no id memory, so no
+ * eviction hole: a receiver drops the batch if it published it, and otherwise applies it on exactly one
+ * topic (see `writeTransport.ts`).
  */
-type ChangeMessage = { id: string; changes: TableChange[] } | { probe: string }
+type ChangeMessage = { origin: string; tables: string[]; changes: TableChange[] } | { probe: string }
 
 /**
  * The transport the Live feature fans captured writes out over — DEDICATED to Live and configured on the
@@ -33,6 +37,12 @@ type ChangeMessage = { id: string; changes: TableChange[] } | { probe: string }
  *    publisher's own messages back makes the probe time out → the live read FAILS CLOSED (rejects) rather
  *    than admitting a read that could silently miss remote writes. (Redis pub/sub and the in-memory default
  *    both self-deliver.)
+ *  - **At-most-once delivery per topic.** A transport MUST NOT redeliver the same published message to the
+ *    same subscriber on the same topic. Precise row application is NOT idempotent (a stateful aggregate would
+ *    count the same delta twice), and this layer keeps NO id memory to catch it — the cross-topic duplicates
+ *    that this layer itself creates (one batch on each touched table's topic) are removed deterministically
+ *    by the origin + owning-table rule in writeTransport.ts, not by remembering ids. A transport that can
+ *    redeliver must deduplicate internally before calling the subscriber.
  *  - **Structure preservation.** Change rows carry ordinary SQL values — BigInt, Date, byte arrays, NULL,
  *    composite keys — so a serializing transport MUST round-trip these faithfully (plain `JSON` does not:
  *    it throws on BigInt and drops Date/byte types). The in-memory default delivers by reference (same

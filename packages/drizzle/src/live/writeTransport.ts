@@ -22,24 +22,35 @@ import type { ChangeBatch } from '../router/events.js'
 
 const batchTopic = (table: string): string => `__live__:${table}`
 
-// Batch ids already applied on a GIVEN db — the dedupe window, scoped PER DB (not global): a db drops its
-// OWN round-trip and same-batch-via-another-topic, but a DIFFERENT db (another instance sharing the
-// transport, even in the same process) must still receive and apply a batch this db published. A global set
-// would make instance A's publish suppress instance B's legitimate receipt. Bounded FIFO per db: it only
-// needs to outlive in-flight redelivery of the same batch across a subscriber's several topics, so an old id
-// aging out is harmless (that batch is long applied).
-const SEEN_CAP = 4096
-const seenByDb = new WeakMap<object, Set<string>>()
-function seenSetOf(db: object): Set<string> {
-  let seen = seenByDb.get(db)
-  if (!seen) seenByDb.set(db, (seen = new Set()))
-  return seen
+// DE-DUPLICATION IS DETERMINISTIC AND STATELESS — no id memory, so no eviction hole and no unbounded growth.
+// (An earlier count-bounded `seen` set was unsound: once an id aged out, a delayed copy of the same batch on
+// another subscribed topic applied twice, and precise application is NOT idempotent.)
+//
+// A batch carries `origin` (the publishing db) and `tables` (every table it touched, stable order). A
+// receiver on (db, table) applies it iff BOTH:
+//   1. `origin !== dbIdOf(db)` — a db never applies its own batch through the transport (its graphs were fed
+//      DIRECTLY in ingestWrite); and
+//   2. `table` is the FIRST of the batch's tables that this db is subscribed to — so a db subscribed to
+//      several of a batch's tables applies it on exactly one of them, whichever comes first.
+// Soundness rests on one invariant: a db's subscription set and its `readiness` entry are established in the
+// SAME synchronous step (see ensureSubscribed), and a topic only delivers batches published after it was
+// subscribed. So every delivery of a given batch to a given db sees the same subscribed set, and rule (2)
+// selects the same single topic for all of them.
+
+/** The publishing identity of a db — stable for the db's lifetime, used to drop our own round-trip. */
+const dbIds = new WeakMap<object, string>()
+function dbIdOf(db: object): string {
+  let id = dbIds.get(db)
+  if (!id) dbIds.set(db, (id = randomUUID()))
+  return id
 }
-function markSeen(db: object, id: string): void {
-  const seen = seenSetOf(db)
-  if (seen.has(id)) return
-  seen.add(id)
-  if (seen.size > SEEN_CAP) seen.delete(seen.values().next().value as string)
+
+/** The first of `tables` this db is subscribed to — the ONE topic allowed to apply the batch. */
+function owningTable(db: object, tables: readonly string[]): string | undefined {
+  const subscribed = readiness.get(db)
+  if (!subscribed) return undefined
+  for (const table of tables) if (subscribed.has(table)) return table
+  return undefined
 }
 
 /** Publish a committed batch cross-instance over the db's changeTransport: one message per touched table's
@@ -48,11 +59,9 @@ function markSeen(db: object, id: string): void {
 function publishBatch(db: object, batch: ChangeBatch): void {
   if (batch.changes.length === 0) return
   const transport = transportFor(db)
-  const message = { id: randomUUID(), changes: batch.changes }
-  markSeen(db, message.id) // pre-mark on THIS db so its own round-trip is dropped (fed directly already)
-  for (const table of new Set(batch.changes.map((change) => change.table))) {
-    transport.publish(batchTopic(table), message)
-  }
+  const tables = [...new Set(batch.changes.map((change) => change.table))] // stable order; drives rule (2)
+  const message = { origin: dbIdOf(db), tables, changes: batch.changes }
+  for (const table of tables) transport.publish(batchTopic(table), message)
 }
 
 // Bounded probe schedule — a proven-listening handshake tops out at ~1s before failing the read closed.
@@ -108,8 +117,8 @@ function subscribeAndProbe(db: object, table: string): Promise<void> {
         }
         return
       }
-      if (seenSetOf(db).has(message.id)) return // dedupe (per-db): our own round-trip, or same batch via another topic
-      markSeen(db, message.id)
+      if (message.origin === dbIdOf(db)) return // our own batch — these graphs were fed directly in ingestWrite
+      if (owningTable(db, message.tables) !== table) return // another of our subscribed topics applies it
       registryFor(db).router.ingest({ changes: message.changes })
     })
     let attempts = 0

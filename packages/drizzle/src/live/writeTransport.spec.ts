@@ -35,8 +35,8 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
     const { db, transport } = freshDb()
     const changes = [change('users'), change('posts')]
     await ensureSubscribed(db, ['users', 'posts'])
-    // A REMOTE instance's publish: the same batch (one id) on each touched table's topic.
-    const message = { id: remoteId(), changes }
+    // A REMOTE instance's publish: the same batch on each touched table's topic.
+    const message = { origin: remoteId(), tables: ['users', 'posts'], changes }
     transport.publish(batchTopic('users'), message)
     transport.publish(batchTopic('posts'), message)
     expect(engine.ingest).toHaveBeenCalledTimes(1) // the second topic's delivery is deduped
@@ -47,7 +47,7 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
     const { db, transport } = freshDb()
     const changes = [change('users'), change('posts')]
     await ensureSubscribed(db, ['users']) // only subscribed to one of the two touched topics
-    transport.publish(batchTopic('users'), { id: remoteId(), changes })
+    transport.publish(batchTopic('users'), { origin: remoteId(), tables: ['users', 'posts'], changes })
     expect(engine.ingest).toHaveBeenCalledTimes(1)
     expect(engine.ingest).toHaveBeenCalledWith({ changes }) // the whole batch, not just this table's slice
   })
@@ -64,9 +64,24 @@ describe('write transport — per-table topics + batch-ID dedupe', () => {
     const { db, transport } = freshDb()
     const changes = [change('users')]
     await ensureSubscribed(db, ['users'])
-    transport.publish(batchTopic('users'), { id: remoteId(), changes })
+    transport.publish(batchTopic('users'), { origin: remoteId(), tables: ['users'], changes })
     expect(engine.ingest).toHaveBeenCalledTimes(1)
     expect(engine.ingest).toHaveBeenCalledWith({ changes })
+  })
+
+  it('cross-topic dedupe is DETERMINISTIC: an arbitrarily DELAYED second-topic copy still applies only once', async () => {
+    // The old count-bounded id memory failed exactly here: once the id aged out, the delayed copy applied a
+    // SECOND time (precise application is not idempotent). The origin+owning-table rule has no memory to age.
+    const { db, transport } = freshDb()
+    const changes = [change('users'), change('posts')]
+    await ensureSubscribed(db, ['users', 'posts'])
+    const message = { origin: remoteId(), tables: ['users', 'posts'], changes }
+    transport.publish(batchTopic('users'), message) // owning table → applied
+    for (let i = 0; i < 5000; i++) {
+      transport.publish(batchTopic('users'), { origin: remoteId(), tables: ['unwatched'], changes: [] })
+    }
+    transport.publish(batchTopic('posts'), message) // delayed copy, far beyond any id window → still dropped
+    expect(engine.ingest).toHaveBeenCalledTimes(1)
   })
 
   it('TWO dbs sharing one transport: A publishes → B applies, A suppresses its own round-trip (per-db dedupe)', async () => {
