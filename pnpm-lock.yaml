@@ -549,6 +549,9 @@ importers:
 
   test/playground-stream:
     dependencies:
+      '@electric-sql/pglite':
+        specifier: 0.5.4
+        version: 0.5.4
       '@tailwindcss/vite':
         specifier: ^4.2.1
         version: 4.3.1(vite@8.0.16(@types/node@24.0.10)(esbuild@0.27.3)(jiti@2.7.0))
@@ -561,6 +564,9 @@ importers:
       '@tanstack/react-query':
         specifier: ^5.95.2
         version: 5.101.0(react@19.2.4)
+      '@telefunc/drizzle':
+        specifier: workspace:*
+        version: link:../../packages/drizzle
       '@telefunc/redis':
         specifier: workspace:*
         version: link:../../packages/redis
@@ -585,6 +591,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.0.2
         version: 6.0.2(vite@8.0.16(@types/node@24.0.10)(esbuild@0.27.3)(jiti@2.7.0))
+      drizzle-orm:
+        specifier: 1.0.0-rc.4
+        version: 1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.4)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@24.0.10))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76)
       hono:
         specifier: ^4.10.4
         version: 4.10.4
@@ -10940,6 +10949,16 @@ snapshots:
       postgres: 3.4.9
       zod: 3.25.76
 
+  drizzle-orm@1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.4)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@24.0.10))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76):
+    optionalDependencies:
+      '@cloudflare/workers-types': 4.20260615.1
+      '@electric-sql/pglite': 0.5.4
+      '@types/pg': 8.20.0
+      mysql2: 3.23.0(@types/node@24.0.10)
+      pg: 8.22.0
+      postgres: 3.4.9
+      zod: 3.25.76
+
   dunder-proto@1.0.1:
     dependencies:
       call-bind-apply-helpers: 1.0.2
@@ -12865,6 +12884,19 @@ snapshots:
       lru.min: 1.1.4
       named-placeholders: 1.1.6
       sql-escaper: 1.5.1
+
+  mysql2@3.23.0(@types/node@24.0.10):
+    dependencies:
+      '@types/node': 24.0.10
+      aws-ssl-profiles: 1.1.2
+      denque: 2.1.0
+      generate-function: 2.3.1
+      iconv-lite: 0.7.3
+      long: 5.3.2
+      lru.min: 1.1.4
+      named-placeholders: 1.1.6
+      sql-escaper: 1.5.1
+    optional: true
 
   named-placeholders@1.1.6:
     dependencies:
