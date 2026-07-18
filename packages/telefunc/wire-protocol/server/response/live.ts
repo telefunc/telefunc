@@ -24,7 +24,11 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     // MUST be installed BEFORE `activate()`: activation subscribes this Live's invalidation source, and
     // a source that replays a catch-up synchronously on subscribe would fire with no tap attached
     // otherwise — the client would keep a snapshot it should have refetched.
-    const offInvalidate = live.onInvalidate(() => void channel.send({ kind: 'invalidate' }))
+    // The signal IS the message — its arrival is the event, so nothing is carried. Wire-compatible in
+    // both directions: no client version has ever branched on the payload (the reviver's listener
+    // discards its argument), and `LiveEvent` is internal, never exported, so nothing outside this
+    // package can be typed against the old shape.
+    const offInvalidate = live.onInvalidate(() => void channel.send(undefined))
     // Deferred activation, refcounted by cell-local leases: cascade-activate this cell's pending
     // deps/source (idempotent — a dep also returned elsewhere activates exactly once). This channel
     // holds one lease; its permanent close releases it, tearing down on the last owner.

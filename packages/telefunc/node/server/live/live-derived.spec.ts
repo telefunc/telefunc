@@ -72,10 +72,10 @@ describe('Live.derived — deferred cascade activation + cell-local leasing', ()
     const derivedChannel = server.created[0]!
     a.invalidate()
     await flush()
-    expect(derivedChannel.sends).toEqual([{ kind: 'invalidate' }])
+    expect(derivedChannel.sends).toEqual([undefined])
     b.invalidate()
     await flush()
-    expect(derivedChannel.sends).toEqual([{ kind: 'invalidate' }, { kind: 'invalidate' }])
+    expect(derivedChannel.sends).toEqual([undefined, undefined])
   })
 
   it('zero-dep derived is inert (no dep subscriptions) but serializes as a normal live cell', async () => {
@@ -86,7 +86,7 @@ describe('Live.derived — deferred cascade activation + cell-local leasing', ()
     // It behaves as an ordinary cell on its own channel: driving it emits, with no cascade to speak of.
     asCell(derived).invalidate()
     await flush()
-    expect(server.created[0]!.sends).toEqual([{ kind: 'invalidate' }])
+    expect(server.created[0]!.sends).toEqual([undefined])
   })
 
   it('shared-dep-activated-once — a dep both returned and read by a derived activates its source ONCE', () => {
@@ -115,7 +115,7 @@ describe('Live.derived — deferred cascade activation + cell-local leasing', ()
       expect(teardown).not.toHaveBeenCalled() // a still holds the derived's lease
       a.invalidate()
       await flush()
-      expect(derivedChannel!.sends).toEqual([{ kind: 'invalidate' }]) // derived still fires
+      expect(derivedChannel!.sends).toEqual([undefined]) // derived still fires
       derivedChannel!.fireClose()
       expect(teardown).toHaveBeenCalledTimes(1) // last owner → torn down exactly once
     }
@@ -131,7 +131,7 @@ describe('Live.derived — deferred cascade activation + cell-local leasing', ()
       expect(teardown).not.toHaveBeenCalled() // a still holds its own channel's lease
       a.invalidate()
       await flush()
-      expect(aChannel!.sends).toEqual([{ kind: 'invalidate' }]) // the dep still fires on its own channel
+      expect(aChannel!.sends).toEqual([undefined]) // the dep still fires on its own channel
       aChannel!.fireClose()
       expect(teardown).toHaveBeenCalledTimes(1) // last owner → torn down exactly once
     }

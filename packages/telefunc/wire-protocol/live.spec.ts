@@ -129,7 +129,7 @@ describe('Live wire replacer/reviver + serialize-time single activation', () => 
     live.invalidate()
     live.invalidate() // coalesced → one invalidate event per microtask window
     await tick()
-    expect(channel.sends).toEqual([{ kind: 'invalidate' }])
+    expect(channel.sends).toEqual([undefined])
   })
 
   it('the revived consumer .data is the wire snapshot; onInvalidate observes channel events', () => {
@@ -146,7 +146,7 @@ describe('Live wire replacer/reviver + serialize-time single activation', () => 
     const onInvalidate = vi.fn()
     revived.onInvalidate(onInvalidate)
 
-    channel.deliver({ kind: 'invalidate' })
+    channel.deliver(undefined)
     expect(onInvalidate).toHaveBeenCalledTimes(1)
     expect(revived.data).toBe('a') // invalidation-only: `.data` stays the wire snapshot
   })

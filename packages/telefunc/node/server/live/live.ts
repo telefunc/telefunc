@@ -44,13 +44,16 @@ const Live: {
   derived: (compute) => LiveCell.derived(compute),
 }
 
-/** What travels once a Live crosses the wire: a stale signal telling the client to refetch. The
- *  channel/wire layer lives in its own module — this one is the in-memory cell. */
-type LiveEvent = { kind: 'invalidate' }
+/** What travels once a Live crosses the wire: a stale signal telling the client to refetch. The SIGNAL
+ *  is the whole message — its arrival is the event, so it carries no payload. (It used to carry a
+ *  `{ kind: 'invalidate' }` tag; nothing ever branched on it, in any version — the client listener has
+ *  always discarded the argument.) The channel/wire layer lives in its own module — this one is the
+ *  in-memory cell. */
+type LiveEvent = undefined
 
 /** @internal The consumer-side subscription behind a `Live<T>` — the seam adapters bind to (invalidate
  *  → refetch). Deliberately NOT on the public `Live<T>`: a user reads `.data`, and only an adapter needs
- *  the tap. Satisfied by both the revived client handle and a server `LiveCell`.
+ *  the tap. Satisfied by the revived client handle.
  *
  *  Shared as a TYPE ONLY (via `telefunc/__internal`), never a runtime helper: the adapters that consume
  *  it ship to the BROWSER, and `telefunc/__internal` is a server entry (no browser condition) — so a
@@ -87,7 +90,6 @@ class LiveCell<T> {
   private currentData: T
   private closed = false
   private invalidateTaps: Array<() => void> = []
-  private closeCallbacks: Array<(err?: Error) => void> = []
   // One coalesced invalidation per microtask window — many `invalidate`s in one window deliver once.
   private pendingInvalidate = false
   private flushScheduled = false
@@ -122,25 +124,11 @@ class LiveCell<T> {
     return addTap(this.invalidateTaps, callback)
   }
 
-  onClose(callback: (err?: Error) => void): void {
-    if (this.closed) {
-      callback()
-      return
-    }
-    this.closeCallbacks.push(callback)
-  }
-
+  /** Stop invalidating. `closed` is read by `invalidate` (a closed cell never fires again); nothing
+   *  observes the transition, so there is no close-notification to deliver. */
   close(): Promise<void> {
-    if (this.closed) return Promise.resolve()
     this.closed = true
-    const callbacks = this.closeCallbacks
-    this.closeCallbacks = []
-    for (const callback of callbacks) callback()
     return Promise.resolve()
-  }
-
-  get isClosed(): boolean {
-    return this.closed
   }
 
   /** Computed sugar: run `fn` once (tracking which deps' `.data` were read), snapshot the value, and

@@ -8,11 +8,7 @@ import type { Live, LiveEvent, LiveSubscription } from '../../../node/server/liv
 /** The revived consumer handle. Publicly it is just `Live<T>` — a user reads `.data`, seeded from the
  *  wire snapshot. Internally it carries the invalidation tap an adapter binds (to refetch), plus the
  *  channel lifecycle. */
-type ClientLiveHandle<T> = Live<T> &
-  LiveSubscription & {
-    onClose(callback: (err?: Error) => void): void
-    readonly isClosed: boolean
-  }
+type ClientLiveHandle<T> = Live<T> & LiveSubscription
 
 const liveReviver: ReviverType<LiveContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_LIVE,
@@ -45,14 +41,8 @@ function createClientLive<T>(data: T, channel: ClientChannel<never, LiveEvent>):
     onInvalidate(callback) {
       return addTap(invalidateTaps, callback)
     },
-    onClose(callback) {
-      channel.onClose(callback)
-    },
     close() {
       return channel.close().then(() => undefined)
-    },
-    get isClosed() {
-      return channel.isClosed
     },
   }
 }

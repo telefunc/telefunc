@@ -12,7 +12,6 @@ describe('Live core cell', () => {
     live.invalidate() // the primitive is invalidation-only — the value is a fixed snapshot
     await tick()
     expect(live.data).toBe(12) // a telefunction returns the cell itself; `.data` is all a consumer reads
-    expect(live.isClosed).toBe(false)
   })
 
   it('onInvalidate fires once per coalesced window; unsubscribe is idempotent; a late tap does not replay', async () => {
@@ -53,24 +52,9 @@ describe('Live core cell', () => {
     const onInvalidate = vi.fn()
     live.onInvalidate(onInvalidate)
     await live.close()
-    expect(live.isClosed).toBe(true)
     expect(() => live.invalidate()).not.toThrow()
     await tick()
     expect(onInvalidate).not.toHaveBeenCalled()
     expect(live.data).toBe('a')
-  })
-
-  it('close fires onClose once (idempotent); a late onClose fires immediately', async () => {
-    const live = new LiveCell('a')
-    const onClose = vi.fn()
-    live.onClose(onClose)
-    await live.close()
-    expect(onClose).toHaveBeenCalledTimes(1)
-    await live.close() // idempotent — no second fire
-    expect(onClose).toHaveBeenCalledTimes(1)
-    // An onClose registered after close fires immediately.
-    const late = vi.fn()
-    live.onClose(late)
-    expect(late).toHaveBeenCalledTimes(1)
   })
 })
