@@ -20,6 +20,10 @@ const composite = pgTable('composite', { a: integer('a'), b: integer('b'), v: te
 ])
 const sqUsers = sqliteTable('users', { id: sInt('id').primaryKey(), name: sText('name') })
 
+// Resolved ONCE at module load: the SQLite lane is then reported as SKIPPED (visible in the run summary) on
+// a runtime without node:sqlite, instead of returning early inside the test and counting as a PASS.
+const nodeSqlite = await import('node:sqlite').catch(() => null)
+
 let pgClient: PGlite
 let pg: ReturnType<typeof pgDrizzle>
 
@@ -252,25 +256,26 @@ describe('write capture — composite PK precise (slice 5)', () => {
 })
 
 describe('write capture — SQLite (node-sqlite)', () => {
-  it('no-returning → coarse (lastInsertRowid unreconstructible); caller .returning() → precise', async () => {
-    let DatabaseSync: unknown
-    try {
-      ;({ DatabaseSync } = await import('node:sqlite'))
-    } catch {
-      return // node:sqlite unavailable — skip
-    }
-    const { drizzle } = await import('drizzle-orm/node-sqlite')
-    const client = new (DatabaseSync as new (p: string) => unknown)(':memory:') as never
-    const db = drizzle(client)
-    await db.run(sql`create table users (id integer primary key, name text)`)
+  // The lane must be VISIBLY skipped when node:sqlite is unavailable, never silently return and count as a
+  // PASS (that made an unsupported runtime look like a green SQLite lane). Availability is resolved once at
+  // module load so vitest reports the case as SKIPPED in the summary.
+  it.skipIf(!nodeSqlite)(
+    'no-returning → coarse (lastInsertRowid unreconstructible); caller .returning() → precise',
+    async () => {
+      const { DatabaseSync } = nodeSqlite!
+      const { drizzle } = await import('drizzle-orm/node-sqlite')
+      const client = new (DatabaseSync as new (p: string) => unknown)(':memory:') as never
+      const db = drizzle(client)
+      await db.run(sql`create table users (id integer primary key, name text)`)
 
-    const noRet = capturing(db, 'insert', db.insert.bind(db))
-    await noRet.wrapped(sqUsers).values({ id: 1, name: 'a' })
-    expect(noRet.batches).toEqual([[{ table: 'users', kind: 'coarse' }]]) // reconstruction not provable → coarse
+      const noRet = capturing(db, 'insert', db.insert.bind(db))
+      await noRet.wrapped(sqUsers).values({ id: 1, name: 'a' })
+      expect(noRet.batches).toEqual([[{ table: 'users', kind: 'coarse' }]]) // reconstruction not provable → coarse
 
-    const withRet = capturing(db, 'insert', db.insert.bind(db))
-    const rows = await withRet.wrapped(sqUsers).values({ id: 2, name: 'b' }).returning()
-    expect(rows).toEqual([{ id: 2, name: 'b' }])
-    expect(withRet.batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 2, name: 'b' } }]])
-  })
+      const withRet = capturing(db, 'insert', db.insert.bind(db))
+      const rows = await withRet.wrapped(sqUsers).values({ id: 2, name: 'b' }).returning()
+      expect(rows).toEqual([{ id: 2, name: 'b' }])
+      expect(withRet.batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 2, name: 'b' } }]])
+    },
+  )
 })
