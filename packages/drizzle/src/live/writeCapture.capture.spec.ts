@@ -20,9 +20,41 @@ const composite = pgTable('composite', { a: integer('a'), b: integer('b'), v: te
 ])
 const sqUsers = sqliteTable('users', { id: sInt('id').primaryKey(), name: sText('name') })
 
-// Resolved ONCE at module load: the SQLite lane is then reported as SKIPPED (visible in the run summary) on
-// a runtime without node:sqlite, instead of returning early inside the test and counting as a PASS.
-const nodeSqlite = await import('node:sqlite').catch(() => null)
+// The SQLite lane runs only where it CAN run, and says out loud when it cannot.
+//
+// Module presence is not enough. `node:sqlite` is still stabilising, and drizzle rc.4's node-sqlite driver
+// calls APIs that some Node versions' statements do not have — Node 23 lacks `stmt.setReturnArrays`, so CI
+// exploded with `TypeError: stmt.setReturnArrays is not a function` on a plain `create table`. A presence
+// check reported the lane as available and then failed the suite; the gate has to ask whether the DRIVER
+// works here, not whether the module resolves.
+//
+// So this probes the real path once at module load: build a drizzle db over node:sqlite and run the
+// statement that broke. Any failure disables the lane with a reason that names the missing capability, and
+// the reason is appended to the test titles so the run summary shows WHY it skipped rather than a bare
+// strikethrough. The lane keeps running wherever the driver genuinely works.
+type SqliteLane = { ok: true; DatabaseSync: SqliteCtor } | { ok: false; reason: string }
+type SqliteCtor = new (path: string) => { close?: () => void }
+
+const sqliteLane: SqliteLane = await probeSqliteLane()
+const laneNote = sqliteLane.ok ? '' : ` — SKIPPED: ${sqliteLane.reason}`
+
+async function probeSqliteLane(): Promise<SqliteLane> {
+  const mod = await import('node:sqlite').catch(() => null)
+  if (!mod) return { ok: false, reason: 'node:sqlite is not available on this runtime' }
+  const DatabaseSync = mod.DatabaseSync as unknown as SqliteCtor
+  let client: { close?: () => void } | undefined
+  try {
+    const { drizzle } = await import('drizzle-orm/node-sqlite')
+    client = new DatabaseSync(':memory:')
+    await drizzle(client as never).run(sql`create table capability_probe (id integer primary key)`)
+    return { ok: true, DatabaseSync }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return { ok: false, reason: `drizzle's node-sqlite driver cannot run on this runtime (${detail})` }
+  } finally {
+    client?.close?.()
+  }
+}
 
 let pgClient: PGlite
 let pg: ReturnType<typeof pgDrizzle>
@@ -256,16 +288,19 @@ describe('write capture — composite PK precise (slice 5)', () => {
 })
 
 describe('write capture — SQLite (node-sqlite)', () => {
-  // The lane must be VISIBLY skipped when node:sqlite is unavailable, never silently return and count as a
-  // PASS (that made an unsupported runtime look like a green SQLite lane). Availability is resolved once at
-  // module load so vitest reports the case as SKIPPED in the summary.
-  it.skipIf(!nodeSqlite)(
-    'no-returning → coarse (lastInsertRowid unreconstructible); caller .returning() → precise',
+  /** A drizzle db over a fresh in-memory node:sqlite. Only reached when the lane probe succeeded. */
+  async function sqliteDb() {
+    const { drizzle } = await import('drizzle-orm/node-sqlite')
+    const { DatabaseSync } = sqliteLane as { DatabaseSync: SqliteCtor }
+    return drizzle(new DatabaseSync(':memory:') as never)
+  }
+
+  // Skipped VISIBLY (with the capability that is missing) rather than silently returning and counting as a
+  // PASS — an unsupported runtime must not look like a green SQLite lane.
+  it.skipIf(!sqliteLane.ok)(
+    `no-returning → coarse (lastInsertRowid unreconstructible); caller .returning() → precise${laneNote}`,
     async () => {
-      const { DatabaseSync } = nodeSqlite!
-      const { drizzle } = await import('drizzle-orm/node-sqlite')
-      const client = new (DatabaseSync as new (p: string) => unknown)(':memory:') as never
-      const db = drizzle(client)
+      const db = await sqliteDb()
       await db.run(sql`create table users (id integer primary key, name text)`)
 
       const noRet = capturing(db, 'insert', db.insert.bind(db))
@@ -282,11 +317,8 @@ describe('write capture — SQLite (node-sqlite)', () => {
   // `values` names two different things on a write chain and only one executes. Both directions matter: miss
   // the terminal and a real write runs uncaptured; treat the chain method as a terminal and `.values(rows)`
   // fires the statement mid-chain, breaking every insert.
-  it.skipIf(!nodeSqlite)('the TERMINAL .values() executes — and is captured, not bypassed', async () => {
-    const { DatabaseSync } = nodeSqlite!
-    const { drizzle } = await import('drizzle-orm/node-sqlite')
-    const client = new (DatabaseSync as new (p: string) => unknown)(':memory:') as never
-    const db = drizzle(client)
+  it.skipIf(!sqliteLane.ok)(`the TERMINAL .values() executes — and is captured, not bypassed${laneNote}`, async () => {
+    const db = await sqliteDb()
     await db.run(sql`create table users (id integer primary key, name text)`)
     const rowCount = () =>
       (db.$client as { prepare(s: string): { get(): { c: number } } }).prepare('select count(*) c from users').get().c
