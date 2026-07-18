@@ -28,8 +28,14 @@ import type { Live } from 'telefunc'
 import { acquireCarrier } from './dbLiveRuntime.js'
 import { captureMutation, type CaptureSink } from './writeCapture.js'
 import { ingestWrite } from './dbRuntime.js'
+import { type ChangeTransport, setChangeTransport } from './changeTransport.js'
 import { wrapLiveSelect, type ReadCarrier } from './readCapture.js'
 import type { TableChange } from '../router/events.js'
+
+/** Reactive-db options. `changeTransport` is the DEDICATED cross-instance transport for THIS feature's
+ *  change fan-out — independent of the app's `config.broadcast.transport`; omit it to use the built-in
+ *  in-process default (zero-setup dev; inject a transport-backed one for real multi-process fan-out). */
+type ReactiveOptions = { changeTransport?: ChangeTransport }
 
 /** The driver-terminal surface an async select adds OVER the core query-builder select: the `QueryPromise`
  *  verbs (`then`/`catch`/`finally`/`execute`) plus `prepare` and each dialect's runners (SQLite
@@ -326,12 +332,19 @@ type DbLiveCarrier = { readonly __dbLiveCarrier: true }
  * Only chains that start from this db's own `select()` are reactive. A CTE-prefixed read
  * (`db.with(cte).select()…`) goes through Drizzle's ordinary `with()` facade and is NOT reactive — it has
  * no `.live()`. Lift the CTE into the select (a sub-query) if you need the result live.
+ *
+ * For multi-process deployments, pass `{ changeTransport }` to fan writes across instances over a dedicated
+ * Live transport (independent of the app's `config.broadcast.transport`); omitted, an in-process default is
+ * used (zero-setup, fans out only within the process).
  */
-function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb): Reactive<TDb> {
+function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: ReactiveOptions): Reactive<TDb> {
   // Capture the per-request carrier NOW (context-bearing, before the body's first await). The returned
   // proxy closes over it, so `db.select()…live()` even post-await uses the CAPTURED carrier.
   const carrier = acquireCarrier()
   const db = baseDb as object
+  // Register the dedicated change transport for this db (set-once; default = the in-process bus). Reads
+  // subscribe over it and writes publish over it — never the user's app Broadcast.
+  setChangeTransport(db, options?.changeTransport)
   // Autocommit writes ingest into THIS db's graphs immediately; a transaction buffers and flushes here once.
   const ingest: CaptureSink = (changes) => ingestWrite(db, { changes })
   return new Proxy(db, {

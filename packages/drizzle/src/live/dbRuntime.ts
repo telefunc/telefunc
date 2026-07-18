@@ -32,5 +32,5 @@ function registryFor(db: object): Registry {
  *  instance drops its own round-trip (see writeTransport dedupe), so there is no double-apply. */
 function ingestWrite(db: object, batch: ChangeBatch): void {
   registryFor(db).router.ingest(batch)
-  publishBatch(batch)
+  publishBatch(db, batch)
 }

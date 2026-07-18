@@ -70,10 +70,12 @@ function wrapLiveSelect(baseBuilder: unknown, carrier: ReadCarrier, db: object):
 async function captureAndBuild(builder: unknown, carrier: ReadCarrier, db: object): Promise<Live<Row[]>> {
   const dialect = dialectOf(db)
   const shape = extractQueryShape(builder, { dialect })
-  // Subscribe this db to the read's tables' topics so a write on ANOTHER instance reaches this graph. (The
-  // db-scoped readiness barrier — proving the subscription is listening before the read is admitted — is a
-  // later slice; here it is established at read acquisition.)
-  ensureSubscribed(db, shape.tables)
+  // READINESS BARRIER: subscribe this db to the read's tables' topics AND await proof the subscriptions are
+  // LISTENING — before both the graph hydrate (registry.acquire) and the snapshot read below. This closes
+  // the window where a write on another instance, landing between our read and a not-yet-listening
+  // subscription, would be missed. Fails the read closed if a subscription can't be proven listening. Only
+  // live reads reach here — a plain awaited builder or a non-Live telefunction never subscribes.
+  await ensureSubscribed(db, shape.tables)
   const env = {
     dialect,
     semanticEnvironmentKey: await semanticEnvironmentKeyOf(db),
