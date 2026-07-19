@@ -7,8 +7,17 @@ export default {
   // cert from Caddy's auto-generated local CA — Chromium has no reason to trust that CA, so
   // we tell it to skip cert validation. Same flag is harmless for non-docker tests that
   // already speak HTTP or have a real cert chain.
+  //
+  // The fake-media flags give headless Chromium a synthetic camera + microphone and
+  // auto-approve capture prompts, so the Discord Clone suite exercises real getUserMedia /
+  // getDisplayMedia → WebCodecs pipelines. Harmless for suites that never touch media.
   chromiumLaunchOptions: {
-    args: ['--ignore-certificate-errors'],
+    args: [
+      '--ignore-certificate-errors',
+      '--use-fake-ui-for-media-stream',
+      '--use-fake-device-for-media-stream',
+      '--auto-select-desktop-capture-source=Entire screen',
+    ],
   },
 }
 
@@ -49,6 +58,12 @@ function getCiJobs() {
       // Tests use bash-only syntax (`fuser`, `rm -rf`, `2>/dev/null`) and the docker test needs Linux containers => Ubuntu-only
       setups: setupModern,
       // Fans out one CI runner per `.test-*.test.ts` so the suite runs in parallel instead of sequentially
+      splitFiles: true,
+    },
+    {
+      name: 'Discord Clone',
+      // Media pipelines (fake camera/mic, screen capture) are tuned on Linux runners => Ubuntu-only
+      setups: setupModern,
       splitFiles: true,
     },
     {
