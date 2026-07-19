@@ -306,6 +306,51 @@ describe('extractQueryShape — coarse fallback', () => {
     warn.mockRestore()
   })
 
+  // What `untrackable` actually costs, pinned. The rejection reads as though CTE, subquery and raw-SQL
+  // reads were the population it turns away; they are not — each recovers its real relations from the
+  // rendered SQL and routes soundly. Only a read that depends on NO relation reaches the rejection, and
+  // for those a live subscription would be meaningless rather than merely coarse. Pinned because it is
+  // the whole argument for leaving the rejection in place: if a shape below ever starts coming back
+  // `untrackable`, a real read has silently joined that population and the trade needs re-deciding.
+  describe('the untrackable rejection turns away only relation-less reads', () => {
+    const cte = pgQb.$with('sq').as(pgQb.select().from(pgUsers))
+
+    it('a CTE-prefixed read recovers the CTE body’s real relation, so it is trackable', () => {
+      const shape = extractQueryShape(pgQb.with(cte).select().from(cte), { dialect: 'pg' })
+      expect((shape as CoarseShape).untrackable).toBeUndefined()
+      // `users` is the routable one. `sq` is the CTE's own name, recovered as an inert extra: no change
+      // ever carries it, and a real table of that name would only over-invalidate. Over-coverage is the
+      // safe direction — the read still hears every write to `users`.
+      expect(new Set(shape.tables)).toEqual(new Set(['users', 'sq']))
+    })
+
+    it('a subquery in FROM recovers the inner relation, so it is trackable', () => {
+      const shape = extractQueryShape(pgQb.select().from(pgQb.select().from(pgUsers).as('s')), { dialect: 'pg' })
+      expect((shape as CoarseShape).untrackable).toBeUndefined()
+      expect(shape.tables).toContain('users')
+    })
+
+    it('a raw-SQL FROM naming a quoted table is trackable', () => {
+      const shape = extractQueryShape(pgQb.select().from(sql`"users"` as never), { dialect: 'pg' })
+      expect((shape as CoarseShape).untrackable).toBeUndefined()
+      expect(shape.tables).toContain('users')
+    })
+
+    it('a read with no FROM depends on no relation, so there is nothing to subscribe to', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const shape = extractQueryShape(pgQb.select({ n: sql<number>`1` }), { dialect: 'pg' })
+      expect(shape as CoarseShape).toMatchObject({ tables: [], untrackable: true })
+      warn.mockRestore()
+    })
+
+    it('a read FROM a set-returning function depends on no relation either', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const shape = extractQueryShape(pgQb.select().from(sql`generate_series(1, 10)` as never), { dialect: 'pg' })
+      expect(shape as CoarseShape).toMatchObject({ tables: [], untrackable: true })
+      warn.mockRestore()
+    })
+  })
+
   it('unit cross-check: rendered A JOIN B, extracted A → coarse; complete extraction passes', () => {
     const onlyA: SelectShape = {
       kind: 'select',
