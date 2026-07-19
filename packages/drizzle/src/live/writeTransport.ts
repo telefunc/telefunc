@@ -105,13 +105,21 @@ function nextHeader(db: object): { version: number; namespace: string; origin: s
  *
  *  Publications are CHAINED per db so an async transport is handed them in sequence order. A receiver
  *  tolerates reordering by coarsening, so this is not what makes the system sound — it is what stops us
- *  manufacturing the reordering ourselves and paying the precision for it. */
+ *  manufacturing the reordering ourselves and paying the precision for it.
+ *
+ *  The transport is resolved HERE, at enqueue, and not inside the chain callback: a publication belongs to
+ *  the transport ERA of the write that produced it. The peers owed this message are the ones that were
+ *  listening when the write committed, and they are reachable on the transport that was current then — so a
+ *  rotation at a quiescent boundary (changeTransport.ts) must not drag an already-committed write's message
+ *  onto a new transport whose subscribers were not there for it, while the old transport's listeners, who
+ *  were, never hear it. Resolving late would do exactly that, silently, for any publish still queued. */
 function publishPayload(db: object, payload: string): void {
   const publisher = publisherOf(db)
   const topic = changeTopicFor(db)
+  const transport = transportFor(db)
   publisher.chain = publisher.chain.then(() => {
     try {
-      const published = transportFor(db).publish(topic, payload)
+      const published = transport.publish(topic, payload)
       if (isThenable(published)) return published.then(undefined, reportPublishFailure)
     } catch (error) {
       reportPublishFailure(error)

@@ -555,3 +555,49 @@ describe('write transport — the quiescent boundary', () => {
     warn.mockRestore()
   })
 })
+
+// Rotation (changeTransport.ts) is admitted at a quiescent boundary, and a db with no live read is
+// quiescent — including one that has just WRITTEN. Publications are queued, so the era a publication is
+// resolved in is the difference between reaching the peers who were listening when the write committed and
+// reaching a set of subscribers who were not there for it while the first set never hear about it.
+describe('write transport — a publication belongs to the transport era of its write', () => {
+  const recording = () => {
+    const published: string[] = []
+    const transport: ChangeTransport = {
+      publish: (_topic, payload) => {
+        published.push(payload)
+      },
+      subscribe: async () => ({ unsubscribe: () => {} }),
+    }
+    return { transport, published }
+  }
+
+  it('a QUEUED publication goes to the transport its write committed on, not one rotated in afterwards', async () => {
+    const db = {}
+    const a = recording()
+    const b = recording()
+    setChangeTransport(db, a.transport, true)
+
+    publishBatch(db, { changes: [change('users')] }) // committed and enqueued in A's era…
+    setChangeTransport(db, b.transport, true) // …rotated before the chain's microtask runs
+    await flush()
+
+    expect(a.published).toHaveLength(1) // the write's own era hears it
+    expect(b.published).toHaveLength(0) // subscribers who were not there for it do not
+  })
+
+  it('and writes AFTER the rotation go to the new transport — the era moves, it is not pinned', async () => {
+    const db = {}
+    const a = recording()
+    const b = recording()
+    setChangeTransport(db, a.transport, true)
+    publishBatch(db, { changes: [change('users')] })
+    setChangeTransport(db, b.transport, true)
+    await flush()
+
+    publishBatch(db, { changes: [change('users')] })
+    await flush()
+    expect(a.published).toHaveLength(1) // still just the pre-rotation write
+    expect(b.published).toHaveLength(1) // the post-rotation one landed here
+  })
+})
