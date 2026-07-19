@@ -349,6 +349,21 @@ describe('staged-state cleanup — all six paths', () => {
     expect(h.ws.terminated()).toBe(true) // the attempt can never commit, so the probe is released too
   })
 
+  // The other half of the release, and the one the claimed-session lookup CANNOT cover: a reconcile
+  // naming no session destroys nothing, so nothing is "claimed" here — but the staged wire still
+  // rotates away from the session its stage is bound to, and live-session equality would refuse that
+  // stage's barrier from this point on. Without the vacated-session leg the record leaks to the TTL.
+  test('path 4c — a session-less reconcile on the STAGED WIRE ITSELF releases the stage', async () => {
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+
+    await h.sse.deliver(reconcileFrame({ open: [{ id: 'A', ix: 0, lastSeq: 1, initial: true }] }))
+
+    expect(h.sse.sessionId()).not.toBe(s0) // it really did rotate away
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(empty)
+  })
+
   test('path 4b — and the record does not survive a rotate-then-close either', async () => {
     // The leak as the reviewer described it: close cleanup looks up the CURRENT session, so without
     // the eager release above nothing on the close path can find a record still keyed by the old one.
@@ -387,6 +402,75 @@ describe('staged-state cleanup — all six paths', () => {
       probe.close()
       expect(h.mux._getUpgradeResourceSnapshot()).toEqual(empty)
     }
+  })
+})
+
+describe('a stage dies with the session it depends on, whoever claims it', () => {
+  const empty = { records: 0, reverseRecords: 0, bytes: 0 }
+  const barrier = (sessionId: string, upgradeId = 'upg-1') =>
+    reconcileFrame({ sessionId, upgrade: true, barrier: true, upgradeId, open: [{ id: 'A', ix: 0, lastSeq: 1 }] })
+
+  // ── F6 ── The eager release keyed off the RECONCILING WIRE's current session, but the destructive
+  // rotation is driven by `ctrl.sessionId`. Those differ on a reconnect race: a fresh or replacement
+  // connection can name the staged session while holding no session (or a different one) of its own.
+  // The stage then survives something that has already consumed everything it depends on.
+  test('another connection claiming the staged session releases the stage', async () => {
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+
+    // A replacement connection — currently sessionless — claims S0. `reconcileSession` removes S0
+    // from the registry and deletes its FIN finalizer, then rotates onto this wire.
+    const sse2 = h.makeWire('sse-conn-2')
+    await sse2.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
+
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(empty)
+    expect(h.ws.terminated()).toBe(true)
+  })
+
+  // The end state that makes F6 a HIGH rather than a leak: all three equality legs still compare
+  // STRING-equal against a session that is already semantically dead. The original wire still reports
+  // S0 because nothing wrote to its transport, so the barrier sails through `upgradeId`, through
+  // `getSessionId(connection) === stage.prevSessionId`, and commits a SECOND rotation — emitting
+  // COMMITTED with no FIN available (its finalizer was deleted by the claim) and leaving the claiming
+  // connection holding stale handles whose eventual close detaches the newly committed probe peer.
+  test('and the original wire can no longer commit its stale-but-string-equal barrier', async () => {
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+    const sse2 = h.makeWire('sse-conn-2')
+    await sse2.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
+
+    // The original wire's barrier. Every equality leg it is checked against still matches.
+    expect(h.sse.sessionId()).toBe(s0)
+    await h.sse.deliver(barrier(s0))
+
+    expect(h.ws.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(0) // ← zero COMMITTED
+    expect(h.ws.sessionId()).toBeUndefined() // ← and no second rotation
+    expect(h.sse.sent.filter((f) => f.tag === TAG.FIN)).toHaveLength(0)
+  })
+
+  // THE DISCRIMINATOR. A reconcile that names NO session destroys nothing: `reconcileSession` skips
+  // the whole previous-session block, so S0 keeps its registry entry AND its FIN finalizer, and a
+  // later commit against it is still completely coherent. Clearing the stage here would abort a
+  // healthy upgrade every time an unrelated connection attached by channel id. So the invalidation
+  // must key off the session actually being CLAIMED — not off "some reconcile happened somewhere".
+  test('control: a session-less reconcile from another connection leaves the stage alone', async () => {
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+
+    const sse2 = h.makeWire('sse-conn-2')
+    await sse2.deliver(reconcileFrame({ open: [{ id: 'A', ix: 0, lastSeq: 1, initial: true }] }))
+
+    expect(h.mux._getUpgradeResourceSnapshot()).toMatchObject({ records: 1, reverseRecords: 1 })
+    expect(h.ws.terminated()).toBe(false)
+
+    // And the upgrade still commits, coherently: COMMITTED on the probe, FIN on the old wire.
+    await h.sse.deliver(barrier(s0))
+
+    expect(h.ws.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(1)
+    expect(h.sse.sent.filter((f) => f.tag === TAG.FIN)).toHaveLength(1)
   })
 })
 

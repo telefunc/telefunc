@@ -402,14 +402,33 @@ class ChannelMux {
       if (frame.payload.barrier) {
         return this.handleBarrier(entry, connection, frame.payload, rawFrame.byteLength, violation)
       }
-      // This reconcile is about to rotate THIS wire's session away, which kills any stage keyed to
-      // it — live-session equality would refuse that stage's barrier from here on. Release it now
-      // rather than leave a dead record for the TTL to reap: the wire may well close first, and
-      // close cleanup looks up the wire's CURRENT session, so it would walk straight past a record
-      // still keyed by the old one and leak the record, its bytes and its timer.
-      const currentSessionId = entry.transport.getSessionId(connection)
-      if (currentSessionId !== undefined) {
-        const staleProbe = this.stagedByPrevSession.get(currentSessionId)
+      // A stage cannot outlive the session it commits against, so this reconcile must release any
+      // stage bound to a session it is about to consume or vacate. TWO sessions qualify, and they
+      // are NOT the same one:
+      //
+      //   · `ctrl.sessionId` — the session this reconcile CLAIMS. `reconcileSession` removes it from
+      //     the registry and deletes its FIN finalizer, and it does so no matter which connection
+      //     asked. A reconnect can name it from a wire that holds no session of its own, so keying
+      //     only off the reconciling wire misses it entirely — and the stage then survives something
+      //     that already consumed everything it depends on. The original wire still reports the old
+      //     id (nothing wrote to its transport), so its later barrier passes every equality leg while
+      //     being STRING-equal to a session that is semantically dead: it would commit a second
+      //     rotation, emit COMMITTED with no FIN available, and leave the claimant holding stale
+      //     handles whose close detaches the freshly committed probe peer.
+      //   · the reconciling wire's CURRENT session — which it is about to rotate away from. Nothing
+      //     destroys that session here, but the stage can never commit against it again (live-session
+      //     equality would refuse the barrier), and close cleanup looks up the wire's NEW id, so the
+      //     record would leak with its bytes and its timer until the TTL.
+      //
+      // A reconcile naming NO session is deliberately not covered: it destroys nothing — the
+      // previous-session block is skipped entirely, so the staged session keeps both its registry
+      // entry and its finalizer and a later commit against it is still coherent. Releasing there
+      // would abort a healthy upgrade every time an unrelated connection attached by channel id.
+      const claimedSessionId = frame.payload.sessionId
+      const vacatedSessionId = entry.transport.getSessionId(connection)
+      for (const doomed of [claimedSessionId, vacatedSessionId]) {
+        if (doomed === undefined) continue
+        const staleProbe = this.stagedByPrevSession.get(doomed)
         if (staleProbe !== undefined) this.abandonStage(staleProbe)
       }
       return this.reconcile(entry, connection, frame.payload)
