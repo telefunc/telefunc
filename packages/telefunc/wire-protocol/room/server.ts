@@ -16,7 +16,6 @@ import {
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
-  ROOM_TAIL_HOLD_MAX,
   ROOM_TRACKS_PER_MEMBER_MAX,
 } from '../constants.js'
 import {
@@ -69,6 +68,7 @@ import {
   mergeTrackWants,
   binaryWantsCovers,
   sanitizeBinaryWants,
+  pushBoundedTail,
   wantsAnyBinary,
   type BinaryWants,
   type MemberWants,
@@ -1270,9 +1270,8 @@ class ServerRoom implements Room {
       }
     } else if (this._tail) {
       // Tail, pre-attach: no stub yet, but `Room.get({ tail })` opened ingestion — hold the message so
-      // the stub inherits it on attach. Bounded FIFO; the client dedupes any overlap with history.
-      this._tailHold.push({ serialized, ord: event.ord, from: event.from })
-      if (this._tailHold.length > ROOM_TAIL_HOLD_MAX) this._tailHold.shift()
+      // the stub inherits it on attach. Bounded by count and total size; the client dedupes any overlap.
+      pushBoundedTail(this._tailHold, { serialized, ord: event.ord, from: event.from })
     }
   }
 

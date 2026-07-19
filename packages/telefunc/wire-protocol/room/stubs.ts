@@ -3,7 +3,7 @@ export { RoomStubChannel, bindParticipantStubChannel }
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isObject } from '../../utils/isObject.js'
-import { ROOM_TAIL_ATTACH_TIMEOUT_MS, ROOM_TAIL_HOLD_MAX } from '../constants.js'
+import { ROOM_TAIL_ATTACH_TIMEOUT_MS } from '../constants.js'
 import type { ChannelPublishAck } from '../channel.js'
 import type { ServerChannel } from '../server/channel.js'
 import type { ShieldValidator } from '../../node/server/shield.js'
@@ -13,6 +13,7 @@ import { reportRoomError, type ServerLocalParticipant, type ServerRoom } from '.
 import type { ParticipantMeta, RoomSendReceipt } from './types.js'
 import {
   binaryWantsCovers,
+  pushBoundedTail,
   DM_PARTICIPANT_LEFT,
   emptyTrackWants,
   RoomError,
@@ -257,8 +258,7 @@ class RoomStubChannel extends ServerBroadcast {
   _holdTail(serialized: string, ord: RoomOrder, from: string): void {
     const hold = this._tailPending
     if (!hold) return
-    hold.push({ serialized, ord, from })
-    if (hold.length > ROOM_TAIL_HOLD_MAX) hold.shift()
+    pushBoundedTail(hold, { serialized, ord, from })
   }
 
   /** @internal — the client's first text want declares the selector: flush the held tail it now

@@ -16,6 +16,7 @@ import {
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
+  ROOM_TAIL_HOLD_BYTES_MAX,
   ROOM_TRACKS_PER_MEMBER_MAX,
 } from '../constants.js'
 import { ACK_STATUS, TAG, decode, encodePublishText, encodePublishBinary } from '../shared-ws.js'
@@ -40,6 +41,7 @@ import {
   roomIdentityKvPrefix,
   unframeMemberId,
   sanitizeBinaryWants,
+  pushBoundedTail,
   type RoomMemberRecord,
   type RoomSnapshotMetadata,
 } from './protocol.js'
@@ -849,6 +851,23 @@ describe('selective binary delivery', () => {
     expect(wide.length).toBeLessThanOrEqual(64)
     expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [wide] }, members: {} })).toBeNull()
     expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: ['camera'] }, members: {} })).not.toBeNull()
+  })
+
+  it('bounds the tail hold by total size, not just count — and drops a single oversize entry', () => {
+    const hold: Array<{ serialized: string; ord: { seq: number; timestamp: number }; from: string }> = []
+    const chunk = 'x'.repeat(300_000) // the 1 MiB size budget binds well before the 256 count would
+    for (let i = 0; i < 20; i++) pushBoundedTail(hold, { serialized: chunk, ord: { seq: i, timestamp: 1 }, from: 'a' })
+    expect(hold.reduce((n, e) => n + e.serialized.length, 0)).toBeLessThanOrEqual(ROOM_TAIL_HOLD_BYTES_MAX)
+    expect(hold.length).toBeLessThan(20) // the size cap evicted before the count cap could
+
+    const len = hold.length
+    pushBoundedTail(hold, {
+      serialized: 'y'.repeat(ROOM_TAIL_HOLD_BYTES_MAX + 1),
+      ord: { seq: 99, timestamp: 2 },
+      from: 'a',
+    })
+    expect(hold.some((e) => e.serialized[0] === 'y')).toBe(false) // a single over-budget entry is never held
+    expect(hold.length).toBeLessThanOrEqual(len)
   })
 
   it('a member-scoped listener still brings up the room text lane', async () => {

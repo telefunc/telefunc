@@ -248,11 +248,16 @@ export const ROOM_MEMBER_TTL_MS = 120_000
 export const ROOM_MEMBER_KV_TTL_MS = ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS
 
 /** Max text messages held for a `Room.get({ tail })` client that hasn't subscribed yet — bounded on
- *  the room until a stub attaches, then on that stub until the client's first text subscribe. Count-
- *  capped, drop-oldest: paired with the per-message ingress cap (`CHANNEL_MESSAGE_LIMIT_BYTES`), a
- *  count bound caps total tail memory without a second byte budget. The tail carries the *recent*
- *  live messages a prompt subscriber would otherwise miss, not full history — that's `tail: N`. */
+ *  the room until a stub attaches, then on that stub until the client's first text subscribe. Drop-
+ *  oldest under BOTH this count cap and a total-size cap (`ROOM_TAIL_HOLD_BYTES_MAX`): the count bound
+ *  alone left ~256× the per-message ingress limit of headroom, and a server-side `me.publish()` isn't
+ *  ingress-capped at all. The tail carries the *recent* live messages a prompt subscriber would
+ *  otherwise miss, not full history — that's `tail: N`. */
 export const ROOM_TAIL_HOLD_MAX = 256
+/** Total held tail size, the size half of the two-part bound (the count half is `ROOM_TAIL_HOLD_MAX`).
+ *  Measured as serialized-string length — a tight proxy for encoded/heap bytes. A single entry larger
+ *  than the whole budget is dropped, never held; the tail is best-effort. */
+export const ROOM_TAIL_HOLD_BYTES_MAX = 1024 * 1024
 /** How long a `Room.get({ tail })` hold lingers without progress before it's dropped and its text
  *  ingestion released: pre-attach, waiting to be serialized into a response; post-attach, waiting for
  *  the client's first subscribe. Generous — the contract is a prompt subscribe, this only bounds misuse. */

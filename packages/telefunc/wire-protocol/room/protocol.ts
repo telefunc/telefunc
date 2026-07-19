@@ -55,6 +55,7 @@ export {
   wantsAnyBinary,
   binaryWantsCovers,
   sanitizeBinaryWants,
+  pushBoundedTail,
 }
 export type {
   RoomConfigRecord,
@@ -89,6 +90,7 @@ import { isObject } from '../../utils/isObject.js'
 import { isAbort, createAbortError } from '../../shared/Abort.js'
 import { isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
+import { ROOM_TAIL_HOLD_MAX, ROOM_TAIL_HOLD_BYTES_MAX } from '../constants.js'
 import { ACK_STATUS } from '../shared-ws.js'
 import type { AckResultStatus } from '../shared-ws.js'
 import type { ChannelPublishInfo } from '../channel.js'
@@ -371,6 +373,23 @@ type RoomOrder = { seq: number; timestamp: number }
  *  with `a !== b` means `a` is at-or-after `b`. */
 function roomOrderBefore(a: RoomOrder, b: RoomOrder): boolean {
   return a.timestamp < b.timestamp || (a.timestamp === b.timestamp && a.seq < b.seq)
+}
+
+/** One tail-entry: a held recent text message (see `ROOM_TAIL_HOLD_MAX`). */
+type TailEntry = { serialized: string; ord: RoomOrder; from: string }
+
+/** Append to a tail hold, drop-oldest under BOTH the count cap and the total-size cap. A single entry
+ *  larger than the whole size budget is dropped, never held — the tail is best-effort. Shared by the
+ *  room's pre-attach hold (`ServerRoom._tailHold`) and the per-stub hold (`RoomStubChannel._holdTail`)
+ *  so neither can grow to ~256 × the ingress limit, nor be fed an uncapped server-side `me.publish()`. */
+function pushBoundedTail(hold: TailEntry[], entry: TailEntry): void {
+  if (entry.serialized.length > ROOM_TAIL_HOLD_BYTES_MAX) return
+  hold.push(entry)
+  let size = 0
+  for (const e of hold) size += e.serialized.length
+  while (hold.length > ROOM_TAIL_HOLD_MAX || size > ROOM_TAIL_HOLD_BYTES_MAX) {
+    size -= hold.shift()!.serialized.length
+  }
 }
 
 /** A participant's message. Published on the room's one text key. `fromMeta` is the sender's meta
