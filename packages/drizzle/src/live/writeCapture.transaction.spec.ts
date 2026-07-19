@@ -14,7 +14,7 @@ vi.mock('./dbRuntime.js', async (importActual) => {
   const actual = await importActual<typeof import('./dbRuntime.js')>()
   return { ...actual, ingestWrite: vi.fn(), ingestLocal: vi.fn() }
 })
-import { ingestLocal, ingestWrite } from './dbRuntime.js'
+import { ingestLocal, ingestWrite, registryFor } from './dbRuntime.js'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
 import { createInMemoryChangeTransport, setChangeTransport } from './changeTransport.js'
 import { changeTopicFor } from './writeTransport.js'
@@ -230,5 +230,64 @@ describe('write capture — a raw-mixing transaction costs ONE remote message an
     await tick()
     expect(vi.mocked(ingestWrite)).toHaveBeenCalledTimes(1) // the ordinary publishing flush — unchanged
     expect(vi.mocked(ingestLocal)).not.toHaveBeenCalled()
+  })
+})
+
+// The rank-9 gate's blocker: raw coarse markers used to be materialized at STATEMENT time, snapshotting the
+// watch-set of a moment inside the still-open transaction. A graph registering between the raw statement and
+// COMMIT was absent from them — unreachable by the local flush, and origin-suppressed out of the remote
+// coarse-all (its own publisher's echo) — so it NEVER heard about the committed rows. Markers are now
+// computed at the outer commit, against the watch-set that exists when the transaction actually lands.
+describe('write capture — raw markers are computed at COMMIT, not at statement time', () => {
+  /** A minimal routable graph, registered on the REAL router (registryFor is unmocked) so watchedTables()
+   *  answers truthfully; the flush itself is observed on the mocked ingestLocal. */
+  const watcher = (table: string) =>
+    ({
+      tables: [table],
+      apply: () => ({ invalidated: false }),
+      notifyKey: () => table,
+      fault() {},
+      reseed() {},
+    }) as never
+
+  it('a graph registering AFTER the raw statement but BEFORE commit is in the flushed markers', async () => {
+    provideTelefuncContext({})
+    const fresh = drizzle({ client })
+    const db = reactiveDrizzle(fresh) as unknown as ReactiveDb & { execute: (q: unknown) => Promise<unknown> }
+
+    await db.transaction(async (tx) => {
+      await (tx as unknown as { execute: (q: unknown) => Promise<unknown> }).execute(
+        sql`insert into users (id, name) values (30, 'late')`,
+      )
+      // A live read is admitted MID-TRANSACTION, after the raw statement ran: the Evaluator's schedule.
+      registryFor(fresh).router.register(watcher('users'))
+    })
+    await tick()
+
+    expect(await base.select().from(users).where(eq(users.id, 30))).toHaveLength(1) // really committed
+    expect(vi.mocked(ingestLocal)).toHaveBeenCalledTimes(1)
+    const [, batch] = vi.mocked(ingestLocal).mock.calls[0]!
+    // The late graph's table IS in the commit flush — statement-time markers would have missed it.
+    expect((batch as ChangeBatch).changes).toEqual(
+      expect.arrayContaining([expect.objectContaining({ table: 'users', kind: 'coarse' })]),
+    )
+  })
+
+  it('a raw-only transaction with NO watcher at statement time still coarsens the one present at commit', async () => {
+    provideTelefuncContext({})
+    const fresh = drizzle({ client })
+    const db = reactiveDrizzle(fresh) as unknown as ReactiveDb & { execute: (q: unknown) => Promise<unknown> }
+
+    await db.transaction(async (tx) => {
+      await (tx as unknown as { execute: (q: unknown) => Promise<unknown> }).execute(
+        sql`insert into posts (id, body) values (30, 'raw-late')`,
+      )
+      registryFor(fresh).router.register(watcher('posts'))
+    })
+    await tick()
+
+    expect(vi.mocked(ingestLocal)).toHaveBeenCalledWith(fresh, {
+      changes: [{ table: 'posts', kind: 'coarse' }],
+    })
   })
 })

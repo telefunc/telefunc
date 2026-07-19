@@ -26,7 +26,7 @@ import type {
 import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/mysql-core/async/select'
 import type { Live } from 'telefunc'
 import { captureMutation, captureRawSql, emitSafely, type CaptureSink } from './writeCapture.js'
-import { ingestLocal, ingestWrite } from './dbRuntime.js'
+import { ingestLocal, ingestWrite, registryFor } from './dbRuntime.js'
 import { publishCoarseAll } from './writeTransport.js'
 import { type ChangeTransport, configureChanges } from './changeTransport.js'
 import { wrapLiveSelect } from './readCapture.js'
@@ -376,7 +376,17 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
       if (prop === 'transaction') {
         // Writes INSIDE the transaction must capture too (a forwarded raw tx db would bypass capture) — and
         // buffer until the commit boundary, so one committed transaction is one atomic graph tick.
-        return wrapTransaction(target, db, ingest, localIngest, () => publishCoarseAll(db))
+        return wrapTransaction(
+          target,
+          db,
+          ingest,
+          localIngest,
+          () => publishCoarseAll(db),
+          () =>
+            registryFor(db)
+              .router.watchedTables()
+              .map((table) => ({ table, kind: 'coarse' as const })),
+        )
       }
       if (isRawSqlOp(prop)) {
         // Raw SQL (`db.run(sql`…`)`, `db.execute(sql`…`)`, …) can mutate anything, and its touched tables are
@@ -439,6 +449,10 @@ function wrapTransaction(
   enclosingSink: CaptureSink,
   enclosingLocalSink: CaptureSink,
   enclosingAnnounce: () => void,
+  /** The coarse markers a committed raw statement owes THIS db's own graphs, computed AT COMMIT — the top
+   *  level supplies the real thing; a savepoint supplies nothing and promotes intent, so the markers are
+   *  computed exactly once, against the watch-set as it stands when the transaction actually lands. */
+  commitCoarseMarkers: () => TableChange[] = () => [],
 ) {
   return (callback: (tx: unknown) => unknown, config?: unknown) => {
     const buffer: TableChange[] = []
@@ -465,7 +479,18 @@ function wrapTransaction(
       // commit. This used to be defended as the price of atomicity ("splitting the raw markers out would
       // make two local ticks"), which was a false dichotomy: the whole buffer still lands in ONE local tick
       // here; only the redundant remote copy is dropped.
-      if (buffer.length > 0) emitSafely(announcePending ? enclosingLocalSink : enclosingSink, buffer)
+      //
+      // The raw statement's coarse markers are computed HERE, at commit, not when the statement ran. The
+      // buffer only ever carried INTENT for raw SQL, because statement-time markers snapshot the watch-set
+      // of an earlier moment: a graph registering between the raw statement and this commit would be absent
+      // from them, unreachable by this local flush — and the remote coarse-all below is its own publisher's
+      // echo, origin-suppressed locally — so it would NEVER hear about the committed rows.
+      if (announcePending) {
+        const merged = [...buffer, ...commitCoarseMarkers()]
+        if (merged.length > 0) emitSafely(enclosingLocalSink, merged)
+      } else if (buffer.length > 0) {
+        emitSafely(enclosingSink, buffer)
+      }
       // For a SAVEPOINT this promotes the intent into the parent's; at the top level it publishes.
       if (announcePending) {
         try {
@@ -482,6 +507,10 @@ function wrapTransaction(
   }
 }
 
+/** A raw statement inside a transaction contributes NO markers at statement time — see the raw branch in
+ *  txProxy. Named so the call site says what is happening rather than passing an anonymous no-op. */
+const DROP_MARKERS: CaptureSink = () => {}
+
 /** The proxy over a transaction db: writes buffer (via `sink`); a nested `transaction` is a SAVEPOINT whose
  *  buffer flushes into THIS one on release (and is discarded on savepoint-rollback); reads + everything else
  *  pass through as plain Drizzle (a live read inside a write transaction is out of scope). */
@@ -497,18 +526,18 @@ function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () =>
       }
       if (isRawSqlOp(prop)) {
         // `tx.execute(sql`…`)` used to pass straight through, so a raw write committed with NOTHING
-        // published — the same silent bypass the top-level db already fixed. Its coarse markers go into the
-        // transaction buffer and its announcement waits for the outer COMMIT.
+        // published — the same silent bypass the top-level db already fixed.
         //
-        // Unlike the autocommit path, these markers are NOT local-only: they share the transaction's single
-        // buffer, which flushes as one published batch. Splitting them out to avoid the redundant per-table
-        // publication would mean ingesting them separately from the transaction's precise changes — two local
-        // graph ticks for one commit, breaking the one-commit-one-atomic-tick guarantee. A remote watcher of
-        // an affected table therefore refetches twice for a transaction that mixes raw SQL with ORM writes;
-        // atomicity is worth more than the spare refetch.
+        // Inside a transaction, raw SQL records INTENT ONLY (`announce`); its coarse markers are NOT
+        // materialized here. Markers name the tables being watched, and the watch-set at statement time is
+        // the wrong one — a live read admitted between this statement and the outer COMMIT would be missing
+        // from them, unreachable by the commit flush, and origin-suppressed out of the remote coarse-all:
+        // it would never hear about the committed rows at all. The outer commit computes the markers
+        // against the watch-set that exists when the transaction actually lands, and flushes them with the
+        // ORM buffer in one atomic local tick; the single coarse-all carries the remote side.
         const base = Reflect.get(target, prop, receiver)
         if (typeof base === 'function') {
-          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), topDb, sink, announce)
+          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), topDb, DROP_MARKERS, announce)
         }
       }
       return Reflect.get(target, prop, receiver)
