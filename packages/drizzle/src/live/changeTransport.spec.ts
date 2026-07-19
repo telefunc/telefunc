@@ -18,7 +18,7 @@ describe('changeTransport — set-once, frozen at first use', () => {
   it('freezes the DEFAULT on first use: a later different transport THROWS (never silently ignored)', () => {
     const db = {}
     expect(transportFor(db)).toBe(defaultChangeTransport) // first use resolves + freezes the default
-    expect(() => setChangeTransport(db, createInMemoryChangeTransport())).toThrow(/already in use/)
+    expect(() => setChangeTransport(db, createInMemoryChangeTransport())).toThrow(/change transport/)
     expect(transportFor(db)).toBe(defaultChangeTransport) // and the resolution is unchanged
   })
 
@@ -27,14 +27,14 @@ describe('changeTransport — set-once, frozen at first use', () => {
     const chosen = createInMemoryChangeTransport()
     setChangeTransport(db, chosen)
     expect(transportFor(db)).toBe(chosen)
-    expect(() => setChangeTransport(db, createInMemoryChangeTransport())).toThrow(/already in use/)
+    expect(() => setChangeTransport(db, createInMemoryChangeTransport())).toThrow(/change transport/)
     expect(transportFor(db)).toBe(chosen)
   })
 
   it('rejects a conflicting override registered BEFORE first use too', () => {
     const db = {}
     setChangeTransport(db, createInMemoryChangeTransport())
-    expect(() => setChangeTransport(db, createInMemoryChangeTransport())).toThrow(/already in use/)
+    expect(() => setChangeTransport(db, createInMemoryChangeTransport())).toThrow(/change transport/)
   })
 
   it('re-registering the SAME transport is a no-op (a repeated reactiveDrizzle call is idempotent)', () => {
@@ -53,6 +53,55 @@ describe('changeTransport — set-once, frozen at first use', () => {
     setChangeTransport(dbA, chosen)
     expect(transportFor(dbA)).toBe(chosen)
     expect(transportFor(dbB)).toBe(defaultChangeTransport)
+  })
+
+  // The freeze exists to protect live subscriptions and the readiness they proved. Where there is no such
+  // thing to protect, it has nothing to enforce — so it does not.
+  describe('the quiescent exception', () => {
+    it('rotates a resolved transport when the db is quiescent, and later reads resolve to the NEW one', () => {
+      const db = {}
+      const first = createInMemoryChangeTransport()
+      configureChanges(db, { transport: first, quiescent: true })
+      expect(transportFor(db)).toBe(first) // resolved and frozen…
+
+      const second = createInMemoryChangeTransport()
+      configureChanges(db, { transport: second, quiescent: true })
+      // …and unfrozen by the rotation: `transportFor` must RE-RESOLVE rather than hand back the old
+      // resolution, or the swap would be accepted and then quietly ignored — the worst of both.
+      expect(transportFor(db)).toBe(second)
+    })
+
+    it('rotates away from the DEFAULT: one publish-only write does not freeze the db forever', () => {
+      const db = {}
+      expect(transportFor(db)).toBe(defaultChangeTransport) // a write resolved the default
+      const injected = createInMemoryChangeTransport()
+      configureChanges(db, { transport: injected, namespace: 'orders', quiescent: true })
+      expect(transportFor(db)).toBe(injected)
+    })
+
+    it('does NOT rotate while the db is in use — the mid-subscription swap stays forbidden', () => {
+      const db = {}
+      const held = createInMemoryChangeTransport()
+      configureChanges(db, { transport: held, quiescent: true })
+      transportFor(db)
+      expect(() => configureChanges(db, { transport: createInMemoryChangeTransport(), quiescent: false })).toThrow(
+        /change transport/,
+      )
+      expect(transportFor(db)).toBe(held)
+    })
+
+    it('a quiescent rotation still installs atomically: a rejected namespace leaves the transport alone', () => {
+      const db = {}
+      const held = createInMemoryChangeTransport()
+      configureChanges(db, { transport: held, namespace: 'orders', quiescent: true })
+      transportFor(db)
+      // Quiescence admits a TRANSPORT swap; it says nothing about the logical database's identity, which
+      // stays set-once. The namespace throw must take the transport down with it.
+      expect(() =>
+        configureChanges(db, { transport: createInMemoryChangeTransport(), namespace: 'other', quiescent: true }),
+      ).toThrow(/change namespace/)
+      expect(transportFor(db)).toBe(held)
+    })
   })
 })
 
@@ -89,7 +138,7 @@ describe('changeTransport — database identity, derived and frozen', () => {
     // while the listener stays on the old one is a systematic miss, not an over-fire.
     const db = { $client: {} }
     const derived = namespaceFor(db) // resolves + freezes
-    expect(() => setChangeNamespace(db, 'orders')).toThrow(/already in use/)
+    expect(() => setChangeNamespace(db, 'orders')).toThrow(/change namespace/)
     expect(namespaceFor(db)).toBe(derived) // and the resolution is unchanged
   })
 
@@ -97,7 +146,7 @@ describe('changeTransport — database identity, derived and frozen', () => {
     const db = {}
     setChangeNamespace(db, 'orders')
     expect(namespaceFor(db)).toBe('orders')
-    expect(() => setChangeNamespace(db, 'other')).toThrow(/already in use/)
+    expect(() => setChangeNamespace(db, 'other')).toThrow(/change namespace/)
     expect(() => setChangeNamespace(db, 'orders')).not.toThrow()
     expect(namespaceFor(db)).toBe('orders')
   })
@@ -118,7 +167,7 @@ describe('changeTransport — database identity, derived and frozen', () => {
     const chosen = createInMemoryChangeTransport()
     setChangeNamespace(db, 'orders')
     // The namespace conflicts, so the whole install must fail — including the transport beside it.
-    expect(() => configureChanges(db, { transport: chosen, namespace: 'different' })).toThrow(/already in use/)
+    expect(() => configureChanges(db, { transport: chosen, namespace: 'different' })).toThrow(/change namespace/)
     expect(transportFor(db)).toBe(defaultChangeTransport) // NOT the half-installed `chosen`
   })
 })

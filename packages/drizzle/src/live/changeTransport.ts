@@ -117,39 +117,59 @@ function createInMemoryChangeTransport(): ChangeTransport {
  *  own transport. Shared (not per-db) so two in-process instances fan out to each other. */
 const defaultChangeTransport: ChangeTransport = createInMemoryChangeTransport()
 
-// SET-ONCE, ENFORCED. Subscriptions and their proven-listening readiness are established against whichever
-// transport a db RESOLVED, so a later swap would leave readiness proven on a transport nobody is listening on
-// (remote writes silently missed). The resolution is therefore FROZEN at first use — including when the
-// resolution is the DEFAULT — and a later, different transport throws instead of being silently ignored.
+// SET-ONCE WHILE IN USE. Subscriptions and their proven-listening readiness are established against whichever
+// transport a db RESOLVED, so swapping one out from under them would leave readiness proven on a transport
+// nobody is listening on (remote writes silently missed). The resolution is therefore frozen at first use —
+// including when the resolution is the DEFAULT — and a later, different transport throws.
+//
+// The exception is QUIESCENCE. What the freeze protects is live subscriptions and the readiness they proved;
+// once a db has no refs, no attached listener, nothing whose detachment went unconfirmed, and no transition
+// still in flight (`isQuiescent`, writeTransport.ts), there is no such thing left to strand. A db that only
+// ever PUBLISHED — resolving the default on a write, with no live read anywhere — is quiescent by that
+// definition too, and need not be frozen to the default forever on the strength of one write. Rotation there
+// lets a client be replaced, or a test reset, without minting a new db object. Mid-subscription swaps stay
+// forbidden, which is the case the freeze was written for.
 const configured = new WeakMap<object, ChangeTransport>() // explicit override, registered before first use
 const resolved = new WeakMap<object, ChangeTransport>() // frozen at first use (an override OR the default)
 
 const SWAP_MESSAGE =
-  'telefunc live: the change transport for this db is already in use and cannot be replaced. `changeTransport` is set-once per db (the default counts as a resolution) — pass the same transport instance on every reactiveDrizzle(db, …) call for this db, or use a distinct db instance.'
+  'telefunc live: the change transport for this db is in use and cannot be replaced. `changeTransport` can only be swapped while the db is quiescent — no live query holding a subscription, and none still detaching (the default counts as a resolution). Pass the same transport instance on every reactiveDrizzle(db, …) call for this db, close its live queries before rotating, or use a distinct db instance.'
 
 /** Reject a transport that conflicts with this db's existing one, WITHOUT recording anything. */
-function checkChangeTransport(db: object, transport: ChangeTransport | undefined): void {
+function checkChangeTransport(db: object, transport: ChangeTransport | undefined, quiescent: boolean): void {
   if (!transport) return
+  if (quiescent) return // nothing subscribed, nothing detaching — no listener or readiness proof to strand
   const frozen = resolved.get(db)
   if (frozen !== undefined && frozen !== transport) throw new Error(SWAP_MESSAGE) // resolved (incl. default)
   const existing = configured.get(db)
   if (existing !== undefined && existing !== transport) throw new Error(SWAP_MESSAGE)
 }
 
-function setChangeTransport(db: object, transport: ChangeTransport | undefined): void {
+function setChangeTransport(db: object, transport: ChangeTransport | undefined, quiescent = false): void {
   if (!transport) return
-  checkChangeTransport(db, transport)
-  if (resolved.get(db) !== undefined) return // already resolved to this same transport — nothing to record
+  checkChangeTransport(db, transport, quiescent)
+  if (resolved.get(db) === transport) return // already resolved to this same transport — nothing to record
+  // A quiescent rotation to a DIFFERENT transport: unfreeze, so the next `transportFor` re-resolves to the
+  // new one instead of handing back the old resolution.
+  resolved.delete(db)
   configured.set(db, transport)
 }
 
 /** Install a db's whole change configuration ATOMICALLY: validate every part first, then commit. Setting
  *  them one at a time can install the transport and then throw on the namespace, leaving a db configured
- *  with a transport its identity does not match. */
-function configureChanges(db: object, options: { transport?: ChangeTransport; namespace?: string } = {}): void {
-  checkChangeTransport(db, options.transport)
+ *  with a transport its identity does not match.
+ *
+ *  `quiescent` is the caller's assertion that this db currently holds no live subscription — it is what
+ *  admits a transport rotation. The namespace is NOT rotatable on the same terms: it identifies the logical
+ *  database itself, and changing it moves future publications to a topic that remote listeners are not on. */
+function configureChanges(
+  db: object,
+  options: { transport?: ChangeTransport; namespace?: string; quiescent?: boolean } = {},
+): void {
+  const quiescent = options.quiescent ?? false
+  checkChangeTransport(db, options.transport, quiescent)
   checkChangeNamespace(db, options.namespace)
-  setChangeTransport(db, options.transport)
+  setChangeTransport(db, options.transport, quiescent)
   setChangeNamespace(db, options.namespace)
 }
 

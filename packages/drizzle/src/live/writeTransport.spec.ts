@@ -48,7 +48,7 @@ import {
   setChangeTransport,
 } from './changeTransport.js'
 import { registryFor } from './dbRuntime.js'
-import { acquireSubscription, changeTopicFor, publishBatch, publishCoarseAll } from './writeTransport.js'
+import { acquireSubscription, changeTopicFor, isQuiescent, publishBatch, publishCoarseAll } from './writeTransport.js'
 
 /** A minimal registered graph — only its `tables` matter to watchedTables(). */
 const watching = (table: string) => ({ tables: [table] }) as never
@@ -499,5 +499,59 @@ describe('write transport — a first-unknown coarse-all closes the bet', () => 
 
     transport.publish(changeTopicFor(receiver), captured[0]!) // seq 1 straggles in — already covered
     expect(ingest).toHaveBeenCalledTimes(1) // …no redundant second coarsening
+  })
+})
+
+// Quiescence is what admits a change-transport rotation (changeTransport.ts). It has to mean the strong
+// thing — nobody holding a ref, no listener attached, no unconfirmed detach, and no transition still in
+// flight — because a db that merely LOOKS idle would let a swap strand a live listener on the old transport.
+describe('write transport — the quiescent boundary', () => {
+  it('a db that never had a live read is quiescent', () => {
+    expect(isQuiescent({})).toBe(true)
+  })
+
+  it('is NOT quiescent while a ref is held, and is again once it is released and settled', async () => {
+    const db = {}
+    setChangeTransport(db, createInMemoryChangeTransport())
+    const ref = await acquireSubscription(db)
+    expect(isQuiescent(db)).toBe(false)
+    ref.release()
+    await flush()
+    expect(isQuiescent(db)).toBe(true)
+  })
+
+  it('is NOT quiescent mid-detach, before the unsubscribe has confirmed', async () => {
+    const db = {}
+    let confirmDetach: (() => void) | undefined
+    setChangeTransport(db, {
+      publish: () => {},
+      subscribe: async () => ({ unsubscribe: () => new Promise<void>((resolve) => (confirmDetach = resolve)) }),
+    })
+    const ref = await acquireSubscription(db)
+    ref.release()
+    await flush()
+    // `active` is cleared before its detach is awaited, so refs===0 and active===undefined ALREADY hold
+    // here. Only the in-flight transition distinguishes this from a finished detach — rotating now would
+    // swap the transport out from under a listener that is still attached to it.
+    expect(isQuiescent(db)).toBe(false)
+    confirmDetach!()
+    await flush()
+    expect(isQuiescent(db)).toBe(true)
+  })
+
+  it('is NOT quiescent while a detach is UNCONFIRMED, and the sequence state is not silently inherited', async () => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const db = {}
+    setChangeTransport(db, {
+      publish: () => {},
+      subscribe: async () => ({ unsubscribe: () => Promise.reject(new Error('broker unreachable')) }),
+    })
+    const ref = await acquireSubscription(db)
+    ref.release()
+    await flush()
+    // The listener's status is unknown, so there is nothing safe to rotate to: a new transport would leave
+    // the old listener attached and the next precise batch applied twice.
+    expect(isQuiescent(db)).toBe(false)
+    warn.mockRestore()
   })
 })

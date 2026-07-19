@@ -111,6 +111,8 @@ Two rules make it correct:
 - **Resolve `subscribe()` once the subscription really exists** — after Redis acknowledges `SUBSCRIBE`, not when the command is sent. A live read waits on that promise, so resolving early re-opens the gap it closes, and rejecting fails the read rather than admitting one that could miss writes. Likewise resolve `unsubscribe()` only once the listener is detached.
 - **Deliver each payload at least once, byte for byte.** You do not have to deduplicate or preserve order: every message carries its publisher and a sequence number, so Telefunc drops repeats itself and falls back to a coarse refetch if it sees a gap or a reordering.
 
+A db keeps the transport it first used, so a *different* one passed while live queries are running is an error rather than a silent swap — subscriptions and their readiness were established on the first one, and moving out from under them would strand a listener where nobody publishes. Once a db is **quiescent** — no live query holding a subscription, and none still detaching — there is nothing left to strand, and passing a different transport rotates it. That is what lets you replace a client, or reset between tests, without building a new db object. A db that has only ever *written* is quiescent too: one write resolving the default does not lock it there.
+
 
 ## Precision & limits
 

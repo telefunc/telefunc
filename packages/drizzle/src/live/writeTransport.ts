@@ -1,4 +1,4 @@
-export { publishBatch, publishCoarseAll, acquireSubscription, changeTopicFor }
+export { publishBatch, publishCoarseAll, acquireSubscription, changeTopicFor, isQuiescent }
 export type { SubscriptionRef }
 
 import { randomUUID } from 'node:crypto'
@@ -150,6 +150,9 @@ type SubscriptionState = {
    *  could put a second listener alongside one that never left — so this blocks every new subscribe. */
   undetached: ChangeSubscription | undefined
   transition: Promise<void>
+  /** Transitions started and not yet settled. `active` is cleared BEFORE its detach is awaited, so without
+   *  this a db mid-detach would look identical to one that had finished detaching. */
+  settling: number
 }
 
 const subscriptions = new WeakMap<object, SubscriptionState>()
@@ -159,7 +162,14 @@ function stateFor(db: object): SubscriptionState {
   if (!state) {
     subscriptions.set(
       db,
-      (state = { refs: 0, active: undefined, seen: new Map(), undetached: undefined, transition: Promise.resolve() }),
+      (state = {
+        refs: 0,
+        active: undefined,
+        seen: new Map(),
+        undetached: undefined,
+        transition: Promise.resolve(),
+        settling: 0,
+      }),
     )
   }
   return state
@@ -201,12 +211,29 @@ async function acquireSubscription(db: object): Promise<SubscriptionRef> {
  *  detached, so an old callback and a new one never both receive the same batch — which for a precise row
  *  delta would be a double-apply, not a harmless duplicate. */
 function reconcile(db: object, state: SubscriptionState): Promise<void> {
+  state.settling++
   const next = state.transition.then(
     () => step(db, state),
     () => step(db, state), // one failed transition must not wedge the chain behind it
   )
   state.transition = next
-  return next
+  // The counter is decremented by the handler, not by whoever awaits: an unobserved transition still has
+  // to settle, or a db would look permanently mid-transition because nobody happened to await its release.
+  return next.finally(() => {
+    state.settling--
+  })
+}
+
+/** Nobody wants this db's change subscription, no listener is attached, nothing is left whose detachment we
+ *  could not confirm, and no transition is still in flight. That is the only boundary at which the db's
+ *  change transport can be swapped without stranding a listener or a readiness proof — see
+ *  `configureChanges`. It is also the point at which `seen` is provably empty (a confirmed detach clears it,
+ *  and a failed one leaves `undetached` set), so a rotated-in transport cannot inherit a stale sequence
+ *  baseline and drop a live message as a duplicate. */
+function isQuiescent(db: object): boolean {
+  const state = subscriptions.get(db)
+  if (!state) return true // never had a live read at all
+  return state.refs === 0 && !state.active && !state.undetached && state.settling === 0
 }
 
 /** One transition toward the desired state. Anything that changed the refcount during an await has already

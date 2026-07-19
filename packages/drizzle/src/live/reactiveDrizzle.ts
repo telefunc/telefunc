@@ -27,7 +27,7 @@ import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/
 import type { Live } from 'telefunc'
 import { captureMutation, captureRawSql, emitSafely, type CaptureSink } from './writeCapture.js'
 import { ingestLocal, ingestWrite, registryFor } from './dbRuntime.js'
-import { publishCoarseAll } from './writeTransport.js'
+import { isQuiescent, publishCoarseAll } from './writeTransport.js'
 import { type ChangeTransport, configureChanges } from './changeTransport.js'
 import { wrapLiveSelect } from './readCapture.js'
 import { probeOldNewReturning } from '../binding/database.js'
@@ -349,10 +349,16 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
     !options?.changeTransport || !!options.changeNamespace,
     'reactiveDrizzle(db, { changeTransport }) also needs `changeNamespace`: a stable id for THIS logical database, identical on every server that shares the transport and different from any other database on it. Without it, two databases on one transport would exchange row changes.',
   )
-  // Register the dedicated change transport + namespace for this db (both set-once; the default transport is
-  // the in-process bus). Installed ATOMICALLY — a db must never end up with one and not the other. Reads
-  // subscribe over it and writes publish over it — never the user's app Broadcast.
-  configureChanges(db, { transport: options?.changeTransport, namespace: options?.changeNamespace })
+  // Register the dedicated change transport + namespace for this db (the default transport is the in-process
+  // bus). Installed ATOMICALLY — a db must never end up with one and not the other. Reads subscribe over it
+  // and writes publish over it — never the user's app Broadcast. The namespace is set-once; the transport is
+  // set-once WHILE IN USE, and `isQuiescent` is what says whether this db currently has a live subscription
+  // to strand — the one boundary at which rotating it is safe.
+  configureChanges(db, {
+    transport: options?.changeTransport,
+    namespace: options?.changeNamespace,
+    quiescent: isQuiescent(db),
+  })
   // Ask this connection ONCE, here at setup, whether it can return both images of a changed row. Nothing
   // waits on the answer; it lands long before any request and simply lets later writes be more precise.
   probeOldNewReturning(db)
