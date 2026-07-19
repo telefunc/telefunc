@@ -1884,35 +1884,40 @@ class SseTransport implements ClientChannelTransport {
 
   /** The barrier is this wire's last frame. It is never concurrent with another upstream POST,
    *  never retried, and never an ordinary outbox item — all three would let it commit out of order
-   *  with frames the server then drops as post-rotation stragglers. */
+   *  with frames the server then drops as post-rotation stragglers. The two upstream shapes share
+   *  nothing but that contract. */
   async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
-    if (this.streamRequest.tag === 'active') {
-      assert(!this.flushing && this.outbox.length === 0)
-      const frame = buildFrame()
-      this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
-      this.streamRequest.body.push(frame.frame)
-      // Body closed, fetch NOT awaited. That await is the round-trip this design removes, and it
-      // never meant "server acknowledged" anyway — `sse.ts` void-dispatches the response. Nothing
-      // here awaits, so the attempt deadline has no window to interrupt and needs none.
-      this.closeStreamRequest()
-      return 'emitted'
-    }
+    if (this.streamRequest.tag === 'active') return this.emitBarrierStreamRequest(buildFrame)
+    return this.emitBarrierBatch(buildFrame, signal)
+  }
 
-    // Batch mode. Two POSTs in flight at once have no defined server-side dispatch order — entry
-    // into the shared recv chain is the order each body is READ — so a barrier racing an earlier
-    // POST can commit ahead of its frames, which then land post-rotation and are dropped silently.
-    // `gracefulDrain` is the natural quiesce; if it times out with a POST still in flight we keep
-    // waiting rather than racing it, because a concurrent barrier is the wrong direction to be
-    // impatient in. What bounds the wait is the ATTEMPT SIGNAL, not a shorter timeout.
+  /** Streaming upstream: append to the open body and close it. Nothing here awaits, so the attempt
+   *  deadline has no window to interrupt and needs none. The fetch is deliberately NOT awaited —
+   *  that await is the round-trip this design removes, and `sse.ts` void-dispatches the response
+   *  anyway, so it never meant "server acknowledged". */
+  private emitBarrierStreamRequest(buildFrame: () => OutboundFrame): BarrierEmission {
+    assert(this.streamRequest.tag === 'active' && !this.flushing && this.outbox.length === 0)
+    const frame = buildFrame()
+    this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
+    this.streamRequest.body.push(frame.frame)
+    this.closeStreamRequest()
+    return 'emitted'
+  }
+
+  /** Batch upstream: quiesce, then send the barrier in its own final POST. Two POSTs in flight have
+   *  no defined server-side dispatch order — entry into the shared recv chain is the order each body
+   *  is READ — so a barrier racing an earlier POST can commit ahead of frames the server then drops
+   *  as stragglers. If the quiesce times out with a POST still in flight we keep waiting rather than
+   *  racing it; what bounds the wait is the ATTEMPT SIGNAL, not a shorter timeout. */
+  private async emitBarrierBatch(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
     await this.gracefulDrain(UPGRADE_DRAIN_TIMEOUT_MS)
     while (this.flushing) {
       // Checked BEFORE the abort: a wire that already died has its own recovery in flight, and
       // reporting it wedged here would reconnect a second time on top of that one.
       if (!this.hasWire()) return 'not-emitted'
-      // Aborted with a flush STILL in flight. Nothing was written, so this stays a pre-barrier
-      // outcome — but the POST that owns the flush gate may never settle, and until it does every
-      // `flushOutbox` returns at that guard. Merely un-gating the connection here would leave a
-      // wire that reports itself healthy and silently carries nothing.
+      // Aborted with a flush STILL in flight. Nothing was written, so this stays pre-barrier — but
+      // the POST owning the flush gate may never settle, and until it does every `flushOutbox`
+      // returns at that guard, leaving a wire that reports itself healthy and carries nothing.
       if (signal.aborted) return 'wedged'
       await raceAbort(new Promise<void>((resolve) => this.drainCallbacks.push(resolve)), signal)
     }
@@ -1921,12 +1926,11 @@ class SseTransport implements ClientChannelTransport {
     // Whatever the quiesce left behind rides along in this same final POST, barrier LAST.
     const queued = this.outbox.splice(0, this.outbox.length).map((entry) => entry.frame)
     queued.push(buildFrame().frame)
-    // Past this line the barrier is on the wire and the server may already have read it, so no
-    // later abort can claim otherwise. The await is raced only so a hanging POST cannot outlive the
-    // attempt deadline — the verdict stays `'emitted'` either way, which is what keeps the caller
-    // on the sticky both-wires fallback instead of a generic reconnect.
-    const post = this.sendStandalonePost(queued)
-    await raceAbort(post, signal)
+    // Past this line the barrier is on the wire and the server may already have read it, so no later
+    // abort can claim otherwise. The await is raced only so a hanging POST cannot outlive the attempt
+    // deadline — the verdict stays `'emitted'` either way, which keeps the caller on the sticky
+    // both-wires fallback instead of a generic reconnect.
+    await raceAbort(this.sendStandalonePost(queued), signal)
     return 'emitted'
   }
 
