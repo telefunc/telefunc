@@ -40,17 +40,23 @@ function Todos({ userId }) {
 
 The server side is <Link href="/drizzle">`@telefunc/drizzle`</Link>: `onGetTodos` ends its query with `.live()`, and a write through the same reactive db invalidates the queries that read the changed rows (precisely where the rows can be identified, coarsely where they cannot).
 
-#### Pass the telefunction directly
+#### Call the telefunction synchronously
 
 ```js
-// ❌ Broken: the abort signal never reaches the request
-queryFn: live(() => onGetTodos(userId))
-
 // ✅ Pass the telefunction and its arguments
 queryFn: live(onGetTodos, userId)
+
+// ✅ Or call it inside a synchronous closure
+queryFn: live(() => onGetTodos(userId))
+
+// ❌ Broken: the telefunction is reached after an await, so the abort signal never reaches the request
+queryFn: live(async () => {
+  await somethingElse()
+  return onGetTodos(userId)
+})
 ```
 
-> TanStack Query cancels an in-flight fetch by aborting a signal, and `live()` attaches that signal to the call it issues. A wrapper closure calls the telefunction outside that window, so cancellation would silently do nothing. This is caught at runtime rather than left to fail quietly.
+> TanStack Query cancels an in-flight fetch by aborting a signal, and `live()` attaches that signal to the call it issues — for the synchronous window in which your function runs. A telefunction reached only *after* an `await` runs outside that window, so cancellation would silently do nothing. `live()` detects that the call never picked the signal up and throws, rather than leaving it to fail quietly.
 
 
 ## Cleanup

@@ -15,27 +15,38 @@ vi.mock('telefunc/client', async () => await import('../../telefunc/client/withC
 import { getPendingContext } from '../../telefunc/client/withContext.js'
 import { live } from './live.js'
 
-/** Brand a fake exactly the way telefunc's client transform brands a real telefunction stub — a string
- *  `_key`. `live()`'s runtime guard accepts only branded functions; a plain wrapper carries no `_key` and
- *  is rejected. Every fake telefunction below is passed through this, mirroring what the client sees. */
-function stub<F extends (...args: never[]) => unknown>(fn: F): F {
-  return Object.assign(fn, { _key: 'test.telefunc:onGet' })
-}
+type Observed = { signal?: AbortSignal; calls: number }
 
-/** A stand-in for a telefunction: it takes its signal from the pending call context, exactly as the
- *  generated stub does, stays in flight until released, and is branded like a real client stub. */
-function makeFakeTelefunction<T>(handle: Live<T>) {
-  const observed: { signal?: AbortSignal; calls: number } = { calls: 0 }
-  let release: (() => void) | undefined
-  const call = (): Promise<Live<T>> => {
+/** Make a fake behave like a generated telefunction stub, where it counts: `remoteTelefunctionCall` reads
+ *  `getPendingContext()` as its very first statement, and that read — which NULLS the slot — is exactly
+ *  what `live()` uses as proof that a telefunction was reached. A fake that skipped it would not be a
+ *  telefunction at all; it would be the wrapper case these tests are meant to distinguish from.
+ *  `observed` records what the stub saw, so cancellation can be checked at the call itself. */
+function stub<F extends (...args: never[]) => unknown>(fn: F): F & { observed: Observed } {
+  const observed: Observed = { calls: 0 }
+  const stubbed = (...args: never[]) => {
     observed.calls++
     observed.signal = getPendingContext()?.signal
-    return new Promise<Live<T>>((resolve) => {
-      release = () => resolve(handle)
-    })
+    return fn(...args)
   }
-  return { call: stub(call), observed, release: () => release?.() }
+  return Object.assign(stubbed, { observed }) as F & { observed: Observed }
 }
+
+/** A stand-in for a telefunction that stays in flight until released. */
+function makeFakeTelefunction<T>(handle: Live<T>) {
+  let release: (() => void) | undefined
+  const call = stub(
+    (): Promise<Live<T>> =>
+      new Promise<Live<T>>((resolve) => {
+        release = () => resolve(handle)
+      }),
+  )
+  return { call, observed: call.observed, release: () => release?.() }
+}
+
+/** The context TanStack hands a `queryFn`, for the tests that call it directly. */
+const queryFnContext = (client: QueryClient, signal: AbortSignal) =>
+  ({ client, queryKey: ['todos'], signal, meta: undefined }) as never
 
 const tick = () => new Promise<void>((resolve) => queueMicrotask(() => resolve()))
 
@@ -266,23 +277,68 @@ describe('live() — cancelling a query cancels the telefunction request', () =>
 
     // Attaching an abort listener would never have fired here — an already-aborted signal does not
     // replay. The only way not to issue a doomed request is to check before starting.
-    await expect(
-      queryFn({ client: queryClient, queryKey: ['todos'], signal: controller.signal, meta: undefined } as never),
-    ).rejects.toThrow(/aborted/)
+    await expect(queryFn(queryFnContext(queryClient, controller.signal))).rejects.toThrow(/aborted/)
     expect(fake.observed.calls).toBe(0)
   })
 
-  it('rejects a wrapper: a delayed call runs outside the signal window, so live() throws up front', () => {
+  it('a SYNCHRONOUS wrapper works, and the signal still reaches the telefunction', async () => {
+    const queryClient = new QueryClient()
     const fake = makeFakeTelefunction(makeFakeLive('v1').handle)
-    // A delayed wrapper reaches the telefunction only AFTER an await — outside withContext's synchronous
-    // context window — which is exactly how cancellation silently detaches. It carries no telefunction
-    // `_key`, so live() rejects it immediately instead of building a queryFn that drops the signal. The
-    // value form (`live(fake.call)`, above) is the only spelling that works.
-    const wrapper = async () => {
+    // `live(() => onGetTodos(id))` reaches the telefunction inside the per-call context window, so the
+    // stub picks the signal up exactly as it does for the direct form. This spelling used to be rejected
+    // on the premise that "any wrapper detaches cancellation" — only DELAYED wrappers do.
+    const observer = new QueryObserver(queryClient, {
+      queryKey: ['todos'],
+      queryFn: live(() => fake.call()),
+    })
+    const unsub = observer.subscribe(() => {})
+    await flush()
+
+    expect(fake.observed.calls).toBe(1)
+    expect(fake.observed.signal).toBeInstanceOf(AbortSignal) // the signal crossed the closure
+    void queryClient.cancelQueries({ queryKey: ['todos'] })
+    await flush()
+    expect(fake.observed.signal!.aborted).toBe(true) // and cancelling really does abort the request
+    fake.release()
+    await flush()
+    unsub()
+  })
+
+  it('a DELAYED wrapper throws at fetch time — and its call really did lose the signal', async () => {
+    const queryClient = new QueryClient()
+    const fake = makeFakeTelefunction(makeFakeLive('v1').handle)
+    const queryFn = live(async () => {
       await tick()
       return fake.call()
-    }
-    expect(() => live(wrapper)).toThrow(/telefunction/)
-    expect(fake.observed.calls).toBe(0) // rejected before the wrapper — and its telefunction call — ever ran
+    })
+    const controller = new AbortController()
+
+    await expect(queryFn(queryFnContext(queryClient, controller.signal))).rejects.toThrow(/did not call a telefunction/)
+    // The distinctness gate for the throw above: the wrapper is not rejected on suspicion, it is rejected
+    // because the context was demonstrably not taken. Its telefunction DOES run — one call, after the
+    // window closed — and it sees no signal at all. That is the silent cancellation loss, made loud.
+    await flush()
+    expect(fake.observed.calls).toBe(1)
+    expect(fake.observed.signal).toBeUndefined()
+  })
+
+  it('a function that reaches no telefunction throws the same way, and its handle is not left open', async () => {
+    const queryClient = new QueryClient()
+    const fake = makeFakeLive('v1')
+    // Not passed through `stub`, so it never reads the pending context — indistinguishable, from the
+    // signal's point of view, from the delayed wrapper: nothing consumed the context.
+    const queryFn = live(() => Promise.resolve(fake.handle))
+
+    await expect(queryFn(queryFnContext(queryClient, new AbortController().signal))).rejects.toThrow(
+      /did not call a telefunction/,
+    )
+    // The rejected call is already away; whatever it resolves to must not be left holding a channel.
+    await flush()
+    expect(fake.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('a non-function is rejected up front, before any fetch', () => {
+    expect(() => live(undefined as never)).toThrow(/expects a telefunction/)
+    expect(() => live(42 as never)).toThrow(/a number/)
   })
 })

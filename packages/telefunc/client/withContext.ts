@@ -1,4 +1,4 @@
-export { withContext, getPendingContext }
+export { withContext, withContextChecked, getPendingContext }
 export type { ClientCallContext, StreamTransport }
 
 import { getGlobalObject } from '../utils/getGlobalObject.js'
@@ -47,14 +47,37 @@ type ClientCallContext = {
  *  ```
  */
 function withContext<F extends (...args: any[]) => any>(telefunc: F, context: ClientCallContext): F {
-  return ((...args: any[]) => {
-    globalObject.pendingContext = context
-    try {
-      return telefunc(...args)
-    } finally {
-      globalObject.pendingContext = null
-    }
-  }) as F
+  return ((...args: any[]) => withContextChecked(telefunc, context, ...(args as Parameters<F>)).result) as F
+}
+
+/** `withContext`, plus the answer to "did a telefunction actually pick this context up?".
+ *
+ *  Calls `telefunc(...args)` inside the pending-context window and reports whether the context was
+ *  CONSUMED during that synchronous window. A caller that must not silently lose the context — e.g. a
+ *  query adapter attaching a cancellation signal — can then fail loudly instead of issuing a request
+ *  that quietly ignores it.
+ *
+ *  The consumption bit is not extra state: `getPendingContext()` NULLS the slot as it reads, so the slot
+ *  no longer holding OUR context is itself the proof that something read it. A counter would NOT work
+ *  here — `getGlobalObject` is keyed by filename, so a second copy of this module reuses whichever object
+ *  registered the key first and any field added later is silently missing from it. `pendingContext` is
+ *  the one field every copy agrees on, and identity comparison needs nothing else.
+ *
+ *  `consumed` is true for a direct telefunction call and for a SYNCHRONOUS wrapper around one
+ *  (`() => onGetPosts(id)`); it is false when the function never reaches a telefunction, or reaches one
+ *  only after an `await` — by which time the window has closed. */
+function withContextChecked<F extends (...args: any[]) => any>(
+  telefunc: F,
+  context: ClientCallContext,
+  ...args: Parameters<F>
+): { result: ReturnType<F>; consumed: boolean } {
+  globalObject.pendingContext = context
+  try {
+    const result = telefunc(...args)
+    return { result, consumed: globalObject.pendingContext !== context }
+  } finally {
+    globalObject.pendingContext = null
+  }
 }
 
 // Global because the caller may wrap the telefunc in a closure — e.g. `() => onGetPosts()` —

@@ -1,7 +1,7 @@
 export { live }
 
 import { hashKey, type QueryClient, type QueryFunctionContext, type QueryKey } from '@tanstack/query-core'
-import { withContext } from 'telefunc/client'
+import { withContextChecked } from 'telefunc/client'
 import type { Live } from 'telefunc'
 // TYPE-ONLY (erased at build): `telefunc/__internal` is a server entry with no browser condition, so a
 // runtime import would pull the server context/tagHub graph into this browser bundle. The taps already
@@ -45,6 +45,12 @@ function registryFor(client: QueryClient): Registry {
  * })
  * ```
  *
+ * A synchronous closure works too — `live(() => onGetTodos(todoListId))` — because it reaches the
+ * telefunction inside the same per-call context window. What does NOT work is reaching it after an
+ * `await` (`live(async () => { await x; return onGetTodos(id) })`): the window has closed by then and
+ * the query's cancellation signal would never reach the request. That case throws at fetch time rather
+ * than cancelling silently — see the consumption check below.
+ *
  * `data` is the value itself (`Todo[]`), not the handle — the wrapper unwraps it.
  *
  * This wraps the `queryFn`, not the hook, so it works unchanged with the React, Vue, Solid and Svelte
@@ -54,17 +60,20 @@ function live<T, TArgs extends unknown[]>(
   telefunction: (...args: TArgs) => Live<T> | Promise<Live<T>>,
   ...args: TArgs
 ): (context: QueryFunctionContext) => Promise<T> {
-  assertTelefunction(telefunction)
+  assertCallable(telefunction)
   return async (context) => {
     // TanStack cancels an in-flight fetch by aborting this signal (see `cancelRefetch` below), and the
     // telefunction should hear about it rather than be abandoned mid-request.
     //
     // The signal has to be in scope when the telefunction actually RUNS: the generated stub reads its
-    // per-call context (this signal) synchronously at call time. `withContext` sets that context around
-    // the call and forwards the args, so `live(onGetTodos, id)` issues `onGetTodos(id)` with the signal
-    // attached — no user wrapper closure to thread it through, and nothing to abort after the fact.
+    // per-call context (this signal) synchronously at call time. `withContextChecked` sets that context
+    // around the call, forwards the args, and reports back whether a telefunction actually picked it up
+    // — so `live(onGetTodos, id)` and `live(() => onGetTodos(id))` both attach the signal, and anything
+    // that reaches the telefunction later (or not at all) is caught here instead of failing silently.
     if (context.signal.aborted) throw abortError() // already cancelled — don't start the request at all
-    const handle = await withContext(telefunction, { signal: context.signal })(...args)
+    const { result, consumed } = withContextChecked(telefunction, { signal: context.signal }, ...args)
+    if (!consumed) throw contextLostError(result)
+    const handle = await result
     if (context.signal.aborted) {
       // Cancelled while in flight: the handle still arrived, so close it or its channel leaks.
       void subscriptionOf(handle)
@@ -76,30 +85,56 @@ function live<T, TArgs extends unknown[]>(
   }
 }
 
-/**
- * Reject a plain/unmarked wrapper. Pass the telefunction directly (`live(onGetTodos, id)`); a wrapper —
- * `live(() => onGetTodos(id))` or, worse, `live(async () => { await x; return onGetTodos(id) })` — silently
- * disconnects cancellation. `withContext` sets the per-call context only for the synchronous window in which
- * the passed function runs; a telefunction the wrapper calls AFTER an await sees no pending context, so the
- * query's abort signal never reaches the request and cancellation quietly does nothing. We catch this up
- * front instead of letting it fail silently at runtime.
- *
- * The check is the generated client stub's `_key` marker (telefunc's client transform stamps it on every
- * telefunction; a plain function has none). It rejects plain/unmarked wrappers — not a determined forgery
- * (the marker is a writable runtime property, so a decorator that copies `_key` can still slip past; that's
- * accepted). This is a RUNTIME guard BY DESIGN: a compile-time brand would require telefunc to brand every
- * telefunction's client stub TYPE — a client-typegen feature (telefunction types resolve from source today)
- * that is out of scope here. So the enforcement is the throw below, not the type.
- */
-function assertTelefunction(fn: unknown): void {
-  if (typeof fn !== 'function' || typeof (fn as { _key?: unknown })._key !== 'string') {
-    throw new Error(
-      'live() expects a telefunction — pass it and its arguments directly, e.g. live(onGetTodos, todoListId). ' +
-        'It was given a plain function (a wrapper like live(() => onGetTodos(todoListId))?), which detaches the ' +
-        "query's cancellation signal from the request: the telefunction call runs outside the signal's context " +
-        'window, so cancelling the query would silently do nothing.',
-    )
+/** Everything callable gets past here; whether it actually reaches a telefunction is decided at fetch
+ *  time by the consumption check, which is the question that matters. This only rejects what could never
+ *  be called at all — caught up front, since there is nothing to learn by waiting for the first fetch. */
+function assertCallable(fn: unknown): void {
+  if (typeof fn !== 'function') {
+    throw new Error(`live() expects a telefunction, e.g. live(onGetTodos, todoListId). It was given ${describe(fn)}.`)
   }
+}
+
+/**
+ * The function ran without any telefunction picking up the per-call context — so the query's cancellation
+ * signal did not reach a request, and cancelling this query would silently do nothing.
+ *
+ * Two shapes land here. A function that calls no telefunction at all. And the dangerous one: a wrapper
+ * that reaches its telefunction only AFTER an await (`live(async () => { await x; return onGetTodos(id) })`),
+ * by which time the synchronous context window has closed. A wrapper that calls the telefunction
+ * synchronously — `live(() => onGetTodos(id))` — consumes the context and never gets here.
+ *
+ * This replaces an earlier `_key` brand check on the passed function. That check asked whether the
+ * argument LOOKED like a generated stub, which both rejected the valid synchronous closure and could be
+ * satisfied by copying a writable property; this asks whether the context was actually taken, which is
+ * the property the signal's delivery genuinely depends on.
+ */
+function contextLostError(result: unknown): Error {
+  // The call is already away and may still resolve to a real handle. We are throwing, so nobody will
+  // await it: swallow the rejection (an unhandled one would crash a strict runtime for a mistake we are
+  // already reporting) and close it if it turns out to be a Live handle, as the cancellation path does.
+  void Promise.resolve(result)
+    .then((value) => {
+      if (isLiveHandle(value))
+        void subscriptionOf(value)
+          .close()
+          .catch(() => {})
+    })
+    .catch(() => {})
+  return new Error(
+    'live() was given a function that did not call a telefunction while its per-call context was active. ' +
+      'Pass the telefunction and its arguments — live(onGetTodos, todoListId) — or call it synchronously ' +
+      'inside a wrapper — live(() => onGetTodos(todoListId)). A wrapper that reaches the telefunction after ' +
+      "an await runs outside that window, so the query's cancellation signal never reaches the request and " +
+      'cancelling the query would silently do nothing.',
+  )
+}
+
+function isLiveHandle(value: unknown): value is Live<unknown> {
+  return typeof (value as { close?: unknown } | null | undefined)?.close === 'function'
+}
+
+function describe(value: unknown): string {
+  return value === null ? 'null' : `a ${typeof value}`
 }
 
 /** The `@internal` consumer seam: a re-type, not a conversion. */
