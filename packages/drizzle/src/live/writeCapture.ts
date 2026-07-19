@@ -31,7 +31,7 @@ import {
   substituteFullRow,
   substituteOldNew,
 } from './writeSubstitution.js'
-import { publishCoarseAll } from './writeTransport.js'
+import { publishCoarseAll } from './changeRuntime.js'
 import type { Row, TableChange } from '../router/events.js'
 
 // The write-capture INTERCEPTION facade. `reactiveDrizzle`'s proxy routes insert/update/delete here. The

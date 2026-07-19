@@ -26,8 +26,8 @@ vi.mock('./dbRuntime.js', () => ({
   ingestWrite: vi.fn(),
 }))
 
-import { setChangeTransport } from './changeTransport.js'
-import { acquireSubscription } from './writeTransport.js'
+import { setChangeTransport } from './changeRuntime.js'
+import { acquireSubscription } from './changeRuntime.js'
 
 /** A broker whose SUBSCRIBE and UNSUBSCRIBE are both acknowledged by hand.
  *

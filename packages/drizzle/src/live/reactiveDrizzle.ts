@@ -27,8 +27,8 @@ import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/
 import type { Live } from 'telefunc'
 import { captureMutation, captureRawSql, emitSafely, type CaptureSink } from './writeCapture.js'
 import { ingestLocal, ingestWrite, registryFor } from './dbRuntime.js'
-import { isQuiescent, publishCoarseAll } from './writeTransport.js'
-import { type ChangeTransport, configureChanges } from './changeTransport.js'
+import { configureChangeRuntime, publishCoarseAll } from './changeRuntime.js'
+import type { ChangeTransport } from './changeTransport.js'
 import { wrapLiveSelect } from './readCapture.js'
 import { probeOldNewReturning } from '../binding/database.js'
 import type { TableChange } from '../router/events.js'
@@ -352,12 +352,11 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
   // Register the dedicated change transport + namespace for this db (the default transport is the in-process
   // bus). Installed ATOMICALLY — a db must never end up with one and not the other. Reads subscribe over it
   // and writes publish over it — never the user's app Broadcast. The namespace is set-once; the transport is
-  // set-once WHILE IN USE, and `isQuiescent` is what says whether this db currently has a live subscription
-  // to strand — the one boundary at which rotating it is safe.
-  configureChanges(db, {
+  // set-once WHILE IN USE; whether this db currently holds a subscription that a rotation would strand is
+  // the change runtime's own state, so it decides that itself rather than being told.
+  configureChangeRuntime(db, {
     transport: options?.changeTransport,
     namespace: options?.changeNamespace,
-    quiescent: isQuiescent(db),
   })
   // Ask this connection ONCE, here at setup, whether it can return both images of a changed row. Nothing
   // waits on the answer; it lands long before any request and simply lets later writes be more precise.

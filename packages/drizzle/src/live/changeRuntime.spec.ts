@@ -41,14 +41,17 @@ vi.mock('./dbRuntime.js', () => ({
   ingestWrite: vi.fn(),
 }))
 
+import { type ChangeTransport, createInMemoryChangeTransport } from './changeTransport.js'
+import { registryFor } from './dbRuntime.js'
 import {
-  type ChangeTransport,
-  createInMemoryChangeTransport,
+  acquireSubscription,
+  changeTopicFor,
+  isQuiescent,
+  publishBatch,
+  publishCoarseAll,
   setChangeNamespace,
   setChangeTransport,
-} from './changeTransport.js'
-import { registryFor } from './dbRuntime.js'
-import { acquireSubscription, changeTopicFor, isQuiescent, publishBatch, publishCoarseAll } from './writeTransport.js'
+} from './changeRuntime.js'
 
 /** A minimal registered graph — only its `tables` matter to watchedTables(). */
 const watching = (table: string) => ({ tables: [table] }) as never
@@ -502,6 +505,48 @@ describe('write transport — a first-unknown coarse-all closes the bet', () => 
   })
 })
 
+describe('write transport — a confirmed detach drops the sequence state it can no longer follow', () => {
+  it('after re-subscribing, an origin is FIRST-SEEN again rather than judged against a stale watermark', async () => {
+    // A detach means we stop following everyone's stream, so the watermarks describe a position we no longer
+    // hold. Keeping them lets the NEXT subscription judge live traffic against a number from the previous
+    // one — and since anything at or below a watermark is dropped as a duplicate, that is a silent missed
+    // invalidation rather than an over-fire. (It also bounds the map: a long-lived process would otherwise
+    // accumulate an entry per peer that ever restarted.)
+    //
+    // Honest about what this pins: it asserts the stated invariant — re-subscribing sees every origin as
+    // first-seen — by replaying a payload across the cycle. Removing `seen.clear()` survived the entire
+    // suite before this case existed, because the state it clears had no observable consequence anywhere.
+    const { transport, dbA, dbB } = await twoInstances()
+    const captured: string[] = []
+    await transport.subscribe(changeTopicFor(dbA), (payload) => captured.push(payload))
+    publishBatch(dbA, { changes: [change('users')] }) // seq 1
+    await flush()
+
+    const receiver = { $client: (dbB as { $client: object }).$client }
+    setChangeTransport(receiver, transport)
+    registryFor(receiver).router.register(watching('users'))
+    const ingest = vi.fn()
+    engine.perDb.set(receiver, ingest)
+
+    const first = await acquireSubscription(receiver)
+    transport.publish(changeTopicFor(receiver), captured[0]!) // seq 1 — the baseline for this subscription
+    expect(ingest).toHaveBeenCalledTimes(1)
+
+    first.release() // …detach confirms, and the watermark for that origin goes with it
+    await flush()
+    const second = await acquireSubscription(receiver)
+    try {
+      transport.publish(changeTopicFor(receiver), captured[0]!)
+      // Judged against a CLEARED map, seq 1 is a fresh baseline and is applied. Judged against the stale one
+      // (last 1, unknownBelow 1) it sits at the watermark and is dropped as a duplicate — no second call.
+      expect(ingest).toHaveBeenCalledTimes(2)
+    } finally {
+      second.release()
+      await flush()
+    }
+  })
+})
+
 // Quiescence is what admits a change-transport rotation (changeTransport.ts). It has to mean the strong
 // thing — nobody holding a ref, no listener attached, no unconfirmed detach, and no transition still in
 // flight — because a db that merely LOOKS idle would let a swap strand a live listener on the old transport.
@@ -576,10 +621,10 @@ describe('write transport — a publication belongs to the transport era of its 
     const db = {}
     const a = recording()
     const b = recording()
-    setChangeTransport(db, a.transport, true)
+    setChangeTransport(db, a.transport)
 
     publishBatch(db, { changes: [change('users')] }) // committed and enqueued in A's era…
-    setChangeTransport(db, b.transport, true) // …rotated before the chain's microtask runs
+    setChangeTransport(db, b.transport) // …rotated before the chain's microtask runs
     await flush()
 
     expect(a.published).toHaveLength(1) // the write's own era hears it
@@ -590,9 +635,9 @@ describe('write transport — a publication belongs to the transport era of its 
     const db = {}
     const a = recording()
     const b = recording()
-    setChangeTransport(db, a.transport, true)
+    setChangeTransport(db, a.transport)
     publishBatch(db, { changes: [change('users')] })
-    setChangeTransport(db, b.transport, true)
+    setChangeTransport(db, b.transport)
     await flush()
 
     publishBatch(db, { changes: [change('users')] })
@@ -623,7 +668,7 @@ describe('write transport — a transport rotation is an OBSERVABLE cut, not an 
     const ingest = vi.fn()
     engine.perDb.set(receiver, ingest)
 
-    setChangeTransport(writer, transportA, true)
+    setChangeTransport(writer, transportA)
     publishBatch(writer, { changes: [change('users')] }) // seq 1 → A. R is on B: it never arrives, ever.
     await flush()
     expect(ingest).not.toHaveBeenCalled() // …confirmed unreachable, not merely late
@@ -634,7 +679,7 @@ describe('write transport — a transport rotation is an OBSERVABLE cut, not an 
   it('the first post-rotation publication cuts: the receiver coarsens instead of betting precise', async () => {
     const { writer, transportB, ingest } = await crossEra()
 
-    setChangeTransport(writer, transportB, true) // W rotates to B — quiescent, it has only written
+    setChangeTransport(writer, transportB) // W rotates to B — quiescent, it has only written
     publishBatch(writer, { changes: [change('users')] }) // seq 2 → B, carrying the cut
     await flush()
 
@@ -648,7 +693,7 @@ describe('write transport — a transport rotation is an OBSERVABLE cut, not an 
 
   it('a redelivered cut does not coarsen twice', async () => {
     const { writer, transportB, ingest } = await crossEra()
-    setChangeTransport(writer, transportB, true)
+    setChangeTransport(writer, transportB)
     const wire: string[] = []
     await transportB.subscribe(changeTopicFor(writer), (payload) => wire.push(payload))
     publishBatch(writer, { changes: [change('users')] })
@@ -699,14 +744,14 @@ describe('write transport — one publication resolves its transport exactly onc
     const writer = {}
     const a = recorder()
     const b = recorder()
-    setChangeTransport(writer, a.transport, true)
+    setChangeTransport(writer, a.transport)
     publishBatch(writer, { changes: [change('users')] }) // seq 1 → A, establishing the era
     await flush()
 
     // The attack: an enumerable getter on the row, evaluated by the encoder, rotates the transport.
     const row = {
       get id() {
-        setChangeTransport(writer, b.transport, true)
+        setChangeTransport(writer, b.transport)
         return 1
       },
     }
@@ -733,7 +778,7 @@ describe('write transport — one publication resolves its transport exactly onc
   it('CONTROL: with no re-entrant rotation the same shape publishes normally and unmarked', async () => {
     const writer = {}
     const a = recorder()
-    setChangeTransport(writer, a.transport, true)
+    setChangeTransport(writer, a.transport)
     publishBatch(writer, { changes: [change('users')] })
     const row = {
       get id() {

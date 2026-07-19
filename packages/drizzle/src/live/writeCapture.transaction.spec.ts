@@ -16,8 +16,8 @@ vi.mock('./dbRuntime.js', async (importActual) => {
 })
 import { ingestLocal, ingestWrite, registryFor } from './dbRuntime.js'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
-import { createInMemoryChangeTransport, setChangeTransport } from './changeTransport.js'
-import { changeTopicFor } from './writeTransport.js'
+import { createInMemoryChangeTransport } from './changeTransport.js'
+import { changeTopicFor, setChangeTransport } from './changeRuntime.js'
 import type { ChangeBatch } from '../router/events.js'
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))

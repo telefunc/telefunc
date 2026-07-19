@@ -45,7 +45,7 @@ const CHANGE_CODEC_VERSION = 3
  * precise batch that could not be encoded.
  *
  * `eraCut` marks the first publication after this origin CHANGED TRANSPORT. It exists because the receiver's
- * deferred baseline (writeTransport.ts) rests on a dichotomy that a transport rotation breaks: a sequence
+ * deferred baseline (changeSequence.ts) rests on a dichotomy that a transport rotation breaks: a sequence
  * below the first one seen was either published before the receiver was admitted (already in its snapshot)
  * or is still owed to it by an at-least-once adapter. A message published on the PREVIOUS transport is
  * neither — it was published after admission, and it is not deliverable on the transport the receiver is

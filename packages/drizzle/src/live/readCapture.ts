@@ -41,7 +41,7 @@ import { parseRelationId } from '../ir/relation.js'
 import type { QueryShape } from '../ir/types.js'
 import type { ReadToken } from '../graph/registry.js'
 import { registryFor } from './dbRuntime.js'
-import { acquireSubscription, type SubscriptionRef } from './writeTransport.js'
+import { acquireSubscription, type SubscriptionRef } from './changeRuntime.js'
 
 /** What one live read holds between `.live()` and either its activation or its collection: the graph's
  *  read token and the db's change-subscription ref. The two have exactly the same owner at every moment,

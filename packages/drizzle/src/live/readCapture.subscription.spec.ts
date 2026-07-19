@@ -61,7 +61,7 @@ vi.mock('./telefuncHost.js', () => ({
   }),
 }))
 
-import { setChangeTransport } from './changeTransport.js'
+import { setChangeTransport } from './changeRuntime.js'
 import { wrapLiveSelect } from './readCapture.js'
 
 /** A broker that counts what the runtime asked of it. With `autoAdmit` off the SUBSCRIBE stays

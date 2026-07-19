@@ -2,13 +2,13 @@ export { registryFor, ingestWrite, ingestLocal }
 
 import { type Registry, createRegistry } from '../graph/registry.js'
 import type { ChangeBatch } from '../router/events.js'
-import { publishBatch } from './writeTransport.js'
+import { publishBatch } from './changeRuntime.js'
 
 // The db-scoped reactive runtime: ONE registry per db instance owns BOTH paths — reads acquire graphs
 // from it (`registryFor(db).acquire(...)`), and captured writes feed those same graphs through it
 // (`ingestWrite(db, batch)` → `registryFor(db).router.ingest(...)`). Keyed by db object identity via a
 // WeakMap, and genuinely weak: the change subscription that a live read establishes is refcounted and
-// detached at the last release (writeTransport.ts), so nothing pins a db whose live queries have all
+// detached at the last release (changeRuntime.ts), so nothing pins a db whose live queries have all
 // closed. This ownership lives here (not inside the read engine) so the write path and the read path share
 // the exact same graphs — a write invalidates precisely the live reads that were built against the same db.
 
@@ -30,7 +30,7 @@ function registryFor(db: object): Registry {
  *  each `TableChange` to the local graphs watching that table (or coarsens them for a `kind:'coarse'`
  *  change) — the DIRECT local feed, invalidating exactly the live reads this write affects. Then the whole
  *  batch is published ONCE so OTHER instances feed it into their own graphs; the local instance drops its
- *  own echo by origin (see writeTransport), so there is no double-apply. */
+ *  own echo by origin (see changeRuntime), so there is no double-apply. */
 function ingestWrite(db: object, batch: ChangeBatch): void {
   registryFor(db).router.ingest(batch)
   publishBatch(db, batch)

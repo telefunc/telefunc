@@ -1,16 +1,31 @@
-export { publishBatch, publishCoarseAll, acquireSubscription, changeTopicFor, isQuiescent }
+export { configureChangeRuntime, setChangeTransport, setChangeNamespace }
+export { transportFor, namespaceFor, changeTopicFor }
+export { publishBatch, publishCoarseAll, acquireSubscription, isQuiescent }
 export type { SubscriptionRef }
 
 import { randomUUID } from 'node:crypto'
 import { registryFor } from './dbRuntime.js'
-import { type ChangeSubscription, type ChangeTransport, namespaceFor, transportFor } from './changeTransport.js'
 import { CHANGE_CODEC_VERSION, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
+import { type ChangeSubscription, type ChangeTransport, defaultChangeTransport } from './changeTransport.js'
+import { type OriginSequence, observeEnvelopeSequence, withBaselineBetClosed } from './changeSequence.js'
 import type { ChangeBatch } from '../router/events.js'
 
-// Cross-instance change transport. A committed batch is published ONCE, to ONE topic per logical database,
-// over the db's DEDICATED changeTransport (never the user's app Broadcast — see changeTransport.ts). A
-// receiver feeds the whole batch into its own graphs via `router.ingest`; the router already slices it per
-// table and notifies each affected graph at most once, so one message is one atomic graph tick.
+// THE CHANGE RUNTIME for one logical database — everything that is true of a db's presence on the change
+// bus, in one place: which transport and namespace it resolved, what it has published, who is subscribed on
+// its behalf, whether it is quiescent, and what to do with each delivery.
+//
+// These were split across a "transport config" file and a "write transport" file, divided by implementation
+// history rather than by responsibility. The split LEAKED: the caller had to read quiescence out of one and
+// hand it to the other so a rotation could be admitted, which made a private state machine's internals part
+// of the calling convention — and let two entry points carry contradictory contracts (a direct
+// `setChangeTransport` froze unconditionally, while the configured path honoured quiescence). One rule now,
+// read from this module's own state. The deletion test settles the merge: remove this abstraction and its
+// state and reconciliation logic reappear across configuration, publish and subscription callers alike.
+//
+// A committed batch is published ONCE, to ONE topic per logical database, over the db's DEDICATED
+// changeTransport (never the user's app Broadcast — see changeTransport.ts). A receiver feeds the whole
+// batch into its own graphs via `router.ingest`; the router already slices it per table and notifies each
+// affected graph at most once, so one message is one atomic graph tick.
 //
 // SINGLE TOPIC, deliberately. Receiver filtering is the router's job — it ignores tables no graph watches —
 // and publishing a copy per touched table instead would buy that filtering at the price of a correctness
@@ -21,13 +36,14 @@ import type { ChangeBatch } from '../router/events.js'
 // Two obligations survive, and neither is about fan-out:
 //   - ORIGIN self-suppression — a db feeds its own graphs DIRECTLY in `ingestWrite`, before publishing, so
 //     it must drop its own echo or apply the same delta twice.
-//   - ORDERING, which the RUNTIME now owns rather than the adapter: every envelope carries the publisher's
-//     origin and a monotonic seq, so a duplicate is dropped and a gap or reorder coarsens. The adapter owes
-//     at-least-once delivery of the exact payload and nothing more.
+//   - ORDERING, which the RUNTIME owns rather than the adapter: every envelope carries the publisher's
+//     origin and a monotonic seq, so a duplicate is dropped and a gap or reorder coarsens. The rules
+//     themselves are a pure transition — see changeSequence.ts. The adapter owes at-least-once delivery of
+//     the exact payload and nothing more.
 //
 // NAMESPACED per logical database (topic and envelope both). One process-wide default bus with a constant
 // topic meant two unrelated databases sharing a table name applied each other's ROW DELTAS — a wrong row in
-// a precise graph, not an over-fire. See namespaceFor() in changeTransport.ts.
+// a precise graph, not an over-fire.
 //
 // READINESS BARRIER (acquireSubscription): a live read is not admitted until the transport has ADMITTED
 // this db's subscription — which is what awaiting `subscribe()` means (changeTransport.ts). Readiness is a
@@ -41,11 +57,157 @@ import type { ChangeBatch } from '../router/events.js'
 // to close drops it. At zero the listener is detached, so a db nobody reads live is not pinned by a callback
 // closing over it.
 
+// ── which transport this db resolved ───────────────────────────────
+//
+// SET-ONCE WHILE IN USE. Subscriptions and their proven-listening readiness are established against whichever
+// transport a db RESOLVED, so swapping one out from under them would leave readiness proven on a transport
+// nobody is listening on (remote writes silently missed). The resolution is therefore frozen while there is
+// something to protect — and a later, different transport throws.
+//
+// QUIESCENCE IS THE WHOLE RULE, and it is read HERE rather than asserted by a caller. What the freeze
+// protects is live subscriptions and the readiness they proved; once a db has no refs, no attached listener,
+// nothing whose detachment went unconfirmed, and no transition still in flight (`isQuiescent`), there is no
+// such thing left to strand. A db that has only ever PUBLISHED — resolving the default on a write, with no
+// live read anywhere — is quiescent by that definition too, and is NOT frozen to the default forever on the
+// strength of one write. Rotation there lets a client be replaced, or a test reset, without minting a new db
+// object. Mid-subscription swaps stay forbidden, which is the case the freeze was written for.
+const configured = new WeakMap<object, ChangeTransport>() // explicit override, registered before first use
+const resolved = new WeakMap<object, ChangeTransport>() // frozen at first use (an override OR the default)
+
+const SWAP_MESSAGE =
+  'telefunc live: the change transport for this db is in use and cannot be replaced. `changeTransport` can only be swapped while the db is quiescent — no live query holding a subscription, and none still detaching (the default counts as a resolution). Pass the same transport instance on every reactiveDrizzle(db, …) call for this db, close its live queries before rotating, or use a distinct db instance.'
+
+/** Reject a transport that conflicts with this db's existing one, WITHOUT recording anything. */
+function checkChangeTransport(db: object, transport: ChangeTransport | undefined): void {
+  if (!transport) return
+  if (isQuiescent(db)) return // nothing subscribed, nothing detaching — no listener or readiness proof to strand
+  const frozen = resolved.get(db)
+  if (frozen !== undefined && frozen !== transport) throw new Error(SWAP_MESSAGE) // resolved (incl. default)
+  // NOT redundant with the check above. A subscription makes the db non-quiescent SYNCHRONOUSLY (`refs++`,
+  // `settling++`) while the `transportFor` that resolves it runs a microtask later — so there is a real
+  // window in which a db is in use and has an override registered but no resolution yet. A rotation admitted
+  // in that window would be resolved by the very subscription now being established. Pinned by test.
+  const existing = configured.get(db)
+  if (existing !== undefined && existing !== transport) throw new Error(SWAP_MESSAGE)
+}
+
+function setChangeTransport(db: object, transport: ChangeTransport | undefined): void {
+  if (!transport) return
+  checkChangeTransport(db, transport)
+  if (resolved.get(db) === transport) return // already resolved to this same transport — nothing to record
+  // A quiescent rotation to a DIFFERENT transport: unfreeze, so the next `transportFor` re-resolves to the
+  // new one instead of handing back the old resolution.
+  resolved.delete(db)
+  configured.set(db, transport)
+}
+
+/** Install a db's whole change configuration ATOMICALLY: validate every part first, then commit. Setting
+ *  them one at a time can install the transport and then throw on the namespace, leaving a db configured
+ *  with a transport its identity does not match.
+ *
+ *  Whether a rotation is admissible is decided HERE, from this module's own subscription state — the caller
+ *  neither knows nor shuttles it. The namespace is NOT rotatable on the same terms: it identifies the
+ *  logical database itself, and changing it moves future publications to a topic that remote listeners are
+ *  not on. */
+function configureChangeRuntime(db: object, options: { transport?: ChangeTransport; namespace?: string } = {}): void {
+  checkChangeTransport(db, options.transport)
+  checkChangeNamespace(db, options.namespace)
+  setChangeTransport(db, options.transport)
+  setChangeNamespace(db, options.namespace)
+}
+
+/** The transport for a db — its registered override, else the shared in-process default — FROZEN on first
+ *  call so every later subscription, publish and readiness proof refers to the same transport identity. */
+function transportFor(db: object): ChangeTransport {
+  let transport = resolved.get(db)
+  if (!transport) {
+    transport = configured.get(db) ?? defaultChangeTransport
+    resolved.set(db, transport)
+  }
+  return transport
+}
+
+// ── logical-database identity ─────────────────────────────────────
+//
+// Which DATABASE a change belongs to. Every topic and envelope carries it, so a bus shared by several
+// databases cannot cross-feed row deltas between them.
+//
+// Two drizzle objects over the SAME connection are the same logical database and MUST exchange changes —
+// that is the ordinary two-runtime topology. Two drizzle objects over DIFFERENT databases must not, even
+// when their tables are named alike. So the default identity is derived from the underlying client
+// (`db.$client`), which is shared by the first pair and distinct for the second.
+//
+// That identity is an object, so it cannot span processes. A caller who injects a transport is by
+// definition reaching other processes, and must supply a stable `changeNamespace` instead — see the
+// assertion in reactiveDrizzle. Deriving one automatically would mean guessing at database authority, which
+// is exactly the kind of guess this package refuses elsewhere.
+//
+// SET-ONCE, like the transport but WITHOUT the quiescent exception: subscriptions are admitted on the topic
+// a db RESOLVED, so changing the identity afterwards would move future publications to a new topic while the
+// live listener stays on the old one — a systematic miss rather than an over-fire. Quiescence cannot rescue
+// that, because the identity is what REMOTE instances agree on, and their subscriptions are not observable
+// from here.
+
+const configuredNamespaces = new WeakMap<object, string>() // explicit, registered before first use
+const resolvedNamespaces = new WeakMap<object, string>() // frozen at first use (explicit OR derived)
+const derivedNamespaces = new WeakMap<object, string>() // per identity owner, shared by sibling dbs
+
+const NAMESPACE_SWAP_MESSAGE =
+  'telefunc live: the change namespace for this db is already in use and cannot be replaced. `changeNamespace` identifies the logical database on a shared transport (a derived one counts as a resolution) — pass the same value on every reactiveDrizzle(db, …) call for this db, or use a distinct db instance.'
+
+/** Reject a namespace that conflicts with this db's existing one, WITHOUT recording anything. Splitting
+ *  the check from the commit is what lets the whole configuration be validated before any of it is
+ *  installed — otherwise a transport could be installed and then a namespace throw, leaving the db
+ *  half-configured. */
+function checkChangeNamespace(db: object, namespace: string | undefined): void {
+  if (namespace === undefined) return
+  const frozen = resolvedNamespaces.get(db)
+  if (frozen !== undefined && frozen !== namespace) throw new Error(NAMESPACE_SWAP_MESSAGE)
+  const existing = configuredNamespaces.get(db)
+  if (existing !== undefined && existing !== namespace) throw new Error(NAMESPACE_SWAP_MESSAGE)
+}
+
+function setChangeNamespace(db: object, namespace: string | undefined): void {
+  if (namespace === undefined) return
+  checkChangeNamespace(db, namespace)
+  configuredNamespaces.set(db, namespace)
+}
+
+/** The logical-database identity for a db: the caller's `changeNamespace` if there is one, else an identity
+ *  derived from the connection this db runs on — FROZEN on first call, so every later topic, envelope and
+ *  admitted subscription refers to the same database. */
+function namespaceFor(db: object): string {
+  let namespace = resolvedNamespaces.get(db)
+  if (namespace === undefined) {
+    namespace = configuredNamespaces.get(db) ?? derivedNamespaceFor(db)
+    resolvedNamespaces.set(db, namespace)
+  }
+  return namespace
+}
+
+/** An identity shared by every db over the same connection. Drizzle clients are not all plain objects —
+ *  `postgres-js` hands back its `sql` client as a FUNCTION — and a function is both a valid WeakMap key and
+ *  a real client, so excluding it would silently split one database into two namespaces and drop every
+ *  sibling invalidation. Anything that cannot key a WeakMap falls back to the db itself, which is the
+ *  narrower choice: it can miss a sibling, but it can never cross-feed a stranger. */
+function derivedNamespaceFor(db: object): string {
+  const connection = (db as { $client?: unknown }).$client
+  const identityOwner =
+    (typeof connection === 'object' && connection !== null) || typeof connection === 'function'
+      ? (connection as object)
+      : db
+  let derived = derivedNamespaces.get(identityOwner)
+  if (!derived) derivedNamespaces.set(identityOwner, (derived = `local:${randomUUID()}`))
+  return derived
+}
+
 /** The change topic for ONE logical database. Namespaced, so a transport shared by several databases keeps
  *  their streams apart rather than leaving that to every adapter to remember. */
 function changeTopicFor(db: object): string {
   return `__live__:${namespaceFor(db)}:changes`
 }
+
+// ── publishing ──────────────────────────────────────────────────────
 
 /** The publishing identity of a db — stable for its lifetime, used to drop our own echo. Its `seq` is that
  *  identity's monotonic publication counter: the receiver's only way to tell a duplicate from a reorder from
@@ -149,12 +311,12 @@ function nextHeader(
  *  tolerates reordering by coarsening, so this is not what makes the system sound — it is what stops us
  *  manufacturing the reordering ourselves and paying the precision for it.
  *
- *  The transport is resolved HERE, at enqueue, and not inside the chain callback: a publication belongs to
- *  the transport ERA of the write that produced it. The peers owed this message are the ones that were
- *  listening when the write committed, and they are reachable on the transport that was current then — so a
- *  rotation at a quiescent boundary (changeTransport.ts) must not drag an already-committed write's message
- *  onto a new transport whose subscribers were not there for it, while the old transport's listeners, who
- *  were, never hear it. Resolving late would do exactly that, silently, for any publish still queued.
+ *  The transport is resolved at ENQUEUE, and not inside the chain callback: a publication belongs to the
+ *  transport ERA of the write that produced it. The peers owed this message are the ones that were listening
+ *  when the write committed, and they are reachable on the transport that was current then — so a rotation
+ *  at a quiescent boundary must not drag an already-committed write's message onto a new transport whose
+ *  subscribers were not there for it, while the old transport's listeners, who were, never hear it.
+ *  Resolving late would do exactly that, silently, for any publish still queued.
  *
  *  The instance is handed in by the caller rather than resolved here, so that ONE resolution decides both the
  *  era this publication is stamped with and the transport it goes to — see `nextHeader`. (`topic` is safe to
@@ -184,6 +346,8 @@ function reportPublishFailure(error: unknown): void {
   )
 }
 
+// ── subscription lifetime ───────────────────────────────────────────
+
 /** One owner's hold on this db's change subscription. Released when that owner is done — the read token it
  *  was minted for, or the channel lease that token redeemed into. */
 type SubscriptionRef = { release(): void }
@@ -194,11 +358,9 @@ type SubscriptionRef = { release(): void }
 type SubscriptionState = {
   refs: number
   active: ChangeSubscription | undefined
-  /** Per publishing origin: the highest sequence seen (`last`), and the sequence below which nothing has
-   *  been accounted for yet (`unknownBelow` — the outstanding baseline bet, 0 once a coarsen has covered
-   *  it). Cleared on detach, which both discards state that is stale and bounds what a long-lived process
-   *  accumulates. */
-  seen: Map<string, { last: number; unknownBelow: number }>
+  /** Per publishing origin, the ordering position this db has reached — see changeSequence.ts. Cleared on
+   *  detach, which both discards state that is stale and bounds what a long-lived process accumulates. */
+  seen: Map<string, OriginSequence>
   /** A subscription we asked to detach and could not confirm. Until it is confirmed gone, subscribing again
    *  could put a second listener alongside one that never left — so this blocks every new subscribe. */
   undetached: ChangeSubscription | undefined
@@ -280,9 +442,9 @@ function reconcile(db: object, state: SubscriptionState): Promise<void> {
 /** Nobody wants this db's change subscription, no listener is attached, nothing is left whose detachment we
  *  could not confirm, and no transition is still in flight. That is the only boundary at which the db's
  *  change transport can be swapped without stranding a listener or a readiness proof — see
- *  `configureChanges`. It is also the point at which `seen` is provably empty (a confirmed detach clears it,
- *  and a failed one leaves `undetached` set), so a rotated-in transport cannot inherit a stale sequence
- *  baseline and drop a live message as a duplicate. */
+ *  `configureChangeRuntime`. It is also the point at which `seen` is provably empty (a confirmed detach
+ *  clears it, and a failed one leaves `undetached` set), so a rotated-in transport cannot inherit a stale
+ *  sequence baseline and drop a live message as a duplicate. */
 function isQuiescent(db: object): boolean {
   const state = subscriptions.get(db)
   if (!state) return true // never had a live read at all
@@ -327,8 +489,10 @@ function reportUnsubscribeFailure(error: unknown): void {
   )
 }
 
-/** One delivered payload. Decodes, drops what is not ours, orders what is, and feeds the rest into this
- *  db's graphs. */
+// ── one delivered payload ───────────────────────────────────────────
+
+/** DECODE → ADMIT SCOPE → CLASSIFY ORDERING → ROUTE. Each step answers one question, and the ordering rules
+ *  it defers to are a pure transition (changeSequence.ts) rather than branches inlined into this callback. */
 function receive(db: object, state: SubscriptionState, payload: string): void {
   const envelope = decodeChangePayload(payload)
   if (!envelope) {
@@ -347,95 +511,17 @@ function receive(db: object, state: SubscriptionState, payload: string): void {
   if (envelope.namespace !== namespaceFor(db)) return
   if (envelope.origin === publisherOf(db).origin) return // our own batch — fed directly in ingestWrite
 
-  // ORDERING. The adapter owes us at-least-once and nothing more, so a payload here may be a duplicate, may
-  // be out of order, and may follow a gap. `seq` is contiguous per origin, which makes all three decidable:
-  //   seq === expected  → in order, apply precisely
-  //   seq  >  expected  → something was lost or is late; we cannot know what, so COARSEN and move the
-  //                       watermark up. Anything below it is then already covered.
-  //   seq <=  last      → a duplicate, or a straggler the coarsen above already accounted for → DROP
-  //
-  // DEFERRED BASELINE. A receiver that subscribes — or RE-subscribes, which clears the watermarks — has no
-  // position for a publisher already running, and cannot tell "this is simply my next one" from "this
-  // overtook the one before it". Coarsening pre-emptively for that would pay on EVERY resubscribe against a
-  // busy peer, and `graph.coarsen()` is terminal — the graphs alive at that moment would stay coarse for the
-  // rest of their lives. So instead the first message from an unknown origin is taken PRECISELY, and the
-  // sequences below it are recorded as unaccounted-for (`unknownBelow`).
-  //
-  // That bet rests on the adapter contract's NO-BACKLOG clause (changeTransport.ts): a subscription only
-  // receives what was published after it was admitted. Given that, the sequences below the first one we see
-  // fall into exactly two cases:
-  //   - published BEFORE our admission → the readiness barrier means our snapshot was read after admission,
-  //     so they are already IN the data, and they will never be delivered to us. Nothing to apply.
-  //   - published AFTER admission → the adapter owes us at-least-once, so each one MUST still be delivered.
-  //     It arrives late and below the watermark, and THAT is the signal we coarsen on.
-  // A reorder is therefore always eventually observable, so we can wait for proof instead of guessing.
-  //
-  // A REPLAY/BACKLOG transport breaks this, which is why the clause is written down rather than assumed: a
-  // pre-admission payload delivered after admission is already in the snapshot, and taking it as the
-  // baseline would apply it a second time. It is indistinguishable from a legitimate first message — an
-  // unknown origin's opening sequence looks the same either way — so there is no cheap runtime detection to
-  // fall back on, and the obligation is carried by the contract and pinned against the shipped default
-  // transport instead. (Once an origin HAS a watermark, a late pre-admission payload is a straggler and
-  // coarsens like any other; only the very first message from an origin is exposed.)
-  //
-  // The cost of a wrong bet, stated honestly: between the precise baseline and the straggler's arrival, a
-  // precise graph is serving a result that is missing one delta — briefly INCORRECT BY OMISSION, not merely
-  // stale — and the straggler's coarsen corrects it. Same class as the documented drop-after-readiness
-  // limit, and unlike that one it closes deterministically rather than waiting for the next write.
-  //
-  // THE INVARIANT: a change is applied at most once; anything not applied precisely is over-fired; and any
-  // sequence skipped by a baseline bet is either already in the snapshot or still owed to us by the adapter.
-  // ERA CUT — the publisher changed transport, and it is telling us so because we could not have worked it
-  // out. The deferred baseline below rests on a dichotomy that a rotation breaks: a sequence under the first
-  // one we see is either pre-admission (already in our snapshot) or still owed to us by an at-least-once
-  // adapter. Messages from the publisher's PREVIOUS era are neither — published after we were admitted, but
-  // onto a transport we were never subscribed to, so no straggler can ever arrive to correct a wrong bet and
-  // the hole would be permanent rather than brief. So we do NOT bet precise across a cut: coarsen once, and
-  // take this sequence as the watermark. Everything below it is thereby accounted for, from either era.
-  //
-  // The cost is one reseed per watched graph per rotation, and rotation only happens at a quiescent boundary
-  // — rare by construction. Coarse is recoverable; a permanently missing delta is not.
-  const trackedAtCut = state.seen.get(envelope.origin)
-  if (envelope.eraCut) {
-    // A redelivery of a cut we already acted on: at-least-once means we may see it twice, and coarsening
-    // again would buy a redundant reseed (or, mid-reseed, risk the storm guard's terminal demotion).
-    if (trackedAtCut !== undefined && envelope.seq <= trackedAtCut.last) return
-    state.seen.set(envelope.origin, { last: envelope.seq, unknownBelow: 0 })
-    coarsenWatched(db)
-    return
-  }
+  const { decision, next } = observeEnvelopeSequence(state.seen.get(envelope.origin), envelope)
+  if (next) state.seen.set(envelope.origin, next)
+  if (decision === 'drop') return
+  if (decision === 'coarsen') return coarsenWatched(db)
 
-  const tracked = trackedAtCut
-  if (tracked === undefined) {
-    // The bet. Everything below this sequence is unaccounted for until it either proves irrelevant (never
-    // arrives, because it predates admission) or arrives as a straggler.
-    state.seen.set(envelope.origin, { last: envelope.seq, unknownBelow: envelope.seq })
-  } else if (envelope.seq <= tracked.last) {
-    // At or below the watermark: either a sequence we skipped, or a redelivery of one we already handled.
-    // `unknownBelow` is what tells them apart — a duplicate is not evidence of anything and must not coarsen.
-    if (envelope.seq >= tracked.unknownBelow) return // already seen → duplicate → drop
-    tracked.unknownBelow = 0 // the bet was wrong; one coarsen covers the whole unaccounted region
-    coarsenWatched(db)
-    return
-  } else if (envelope.seq !== tracked.last + 1) {
-    // A real gap. Applying this before the ones it overtook would apply a delta out of order, so coarsen —
-    // which also accounts for everything below it, closing any outstanding bet.
-    tracked.last = envelope.seq
-    tracked.unknownBelow = 0
-    coarsenWatched(db)
-    return
-  } else {
-    tracked.last = envelope.seq
-  }
   if ('coarseAll' in envelope) {
     // A mutation whose touched tables are unknowable happened on ANOTHER instance: coarsen every table WE
-    // watch. Sound over-fire; never a fabricated row.
-    //
-    // This also CLOSES any outstanding baseline bet. Coarsening rebuilds every watched graph from the
-    // database, which accounts for every lower sequence as surely as a gap does — so a later straggler must
-    // not trigger a second one. Leaving the bet open would buy a redundant reseed at best, and at worst a
-    // terminal demotion, if that straggler landed while this reseed was still in flight.
-    state.seen.get(envelope.origin)!.unknownBelow = 0
+    // watch. Sound over-fire; never a fabricated row. It also CLOSES any outstanding baseline bet, since
+    // coarsening accounts for every lower sequence as surely as a gap does — so a later straggler must not
+    // trigger a second one.
+    state.seen.set(envelope.origin, withBaselineBetClosed(state.seen.get(envelope.origin)!))
     coarsenWatched(db)
     return
   }
