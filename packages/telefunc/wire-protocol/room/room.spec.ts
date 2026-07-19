@@ -3086,6 +3086,22 @@ describe('snapshot() and onChange()', () => {
     expect(sawCounts[sawCounts.length - 1]).toBe(1) // the onChange that fired already saw the roster
   })
 
+  it('exposes onChange/snapshot detached — the documented useSyncExternalStore(room.onChange, room.snapshot)', () => {
+    // React stores the two callbacks and invokes them with NO receiver. As plain prototype methods they
+    // deref `this === undefined` and throw on first render; bound arrow properties survive the detachment.
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('snap-detached', { count: 0 }))
+    const getSnapshot = clientRoom.snapshot // extracted exactly as useSyncExternalStore stores it
+    const subscribe = clientRoom.onChange
+    expect(() => getSnapshot()).not.toThrow()
+    let unsubscribe: () => void = () => {}
+    expect(() => {
+      unsubscribe = subscribe(() => {})
+    }).not.toThrow()
+    expect(typeof unsubscribe).toBe('function')
+    unsubscribe()
+  })
+
   it('close fires exactly one onChange, and it sees the emptied, closed room', async () => {
     // applyClosed applies the whole transition (leave callbacks, roster clear) before its single bump,
     // so a subscriber reading snapshot() during close sees only the final closed-and-empty room — never

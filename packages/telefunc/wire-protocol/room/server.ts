@@ -760,11 +760,11 @@ class ServerRoom implements Room {
     return this._state.onAnnounce(callback)
   }
 
-  onChange(callback: () => void): () => void {
-    return this._state.onChange(callback)
-  }
+  // Arrow-valued, not prototype methods: the documented `useSyncExternalStore(room.onChange, room.snapshot)`
+  // passes both detached (React calls them with no receiver), so they must stay bound to survive it.
+  onChange = (callback: () => void): (() => void) => this._state.onChange(callback)
 
-  snapshot(): RoomSnapshotView {
+  snapshot = (): RoomSnapshotView => {
     // Snapshot consumers want the member view — load it (need-driven, single-flight); the
     // arrival lands as an onChange, and the next snapshot() is complete.
     if (!this._state.rosterKnown) void this._ensureRoster().catch(reportRoomError)

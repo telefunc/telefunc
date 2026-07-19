@@ -220,14 +220,13 @@ class ClientRoom implements Room {
     return this._state.onAnnounce(callback)
   }
 
-  onChange(callback: () => void): () => void {
-    return this._state.onChange(callback)
-  }
+  // Arrow-valued, not prototype methods: the documented `useSyncExternalStore(room.onChange, room.snapshot)`
+  // passes both detached, so React calls them with no receiver. Bound properties survive that; a plain method
+  // would deref `this === undefined` and throw on the first render (see the twin on `ServerRoom`).
+  onChange = (callback: () => void): (() => void) => this._state.onChange(callback)
 
-  snapshot(): RoomSnapshotView {
-    // The roster streams in right behind the response — its arrival is an onChange.
-    return this._state.snapshot()
-  }
+  // The roster streams in right behind the response — its arrival is an onChange.
+  snapshot = (): RoomSnapshotView => this._state.snapshot()
 
   // ── Requests & publishes (used by ClientRoomParticipant) ──
 
