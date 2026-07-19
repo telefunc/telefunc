@@ -144,7 +144,7 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
       apply: (changes) => graph.apply(changes),
       notifyKey: () => request.instanceKey,
       fault: () => graph.fault(),
-      coarsen: () => graph.coarsen(),
+      reseed: () => graph.reseed(),
     }
     // Register inputs with the router BEFORE the graph's seed reads (activate-before-read):
     // no event window can slip between the read and registration.
@@ -172,7 +172,10 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
     async acquire(request) {
       const existing = instances.get(request.instanceKey)
       if (existing) {
-        await existing.graph.ready() // a concurrent acquire during the initial seed blocks until precise
+        // Blocks until the CURRENT seed cycle lands. That is the initial seed for a graph still warming,
+        // and a RESEED for one rebuilding its baseline after an image-less event — `ready()` is re-armed
+        // per cycle, so this cannot return early on a promise the previous cycle resolved.
+        await existing.graph.ready()
         return attach(existing, request)
       }
 

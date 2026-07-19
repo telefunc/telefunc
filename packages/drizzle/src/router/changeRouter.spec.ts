@@ -12,14 +12,14 @@ import type { ApplyOutcome } from '../graph/liveGraph.js'
 import { type RoutableGraph, createRouter } from './changeRouter.js'
 import type { ChangeBatch, TableChange } from './events.js'
 
-type FakeGraph = { graph: RoutableGraph; applyLog: TableChange[][]; coarsenCalls: { n: number } }
+type FakeGraph = { graph: RoutableGraph; applyLog: TableChange[][]; reseedCalls: { n: number } }
 function fakeGraph(
   tables: string[],
   key: string,
   opts: { throwOnApply?: boolean; throwOnce?: boolean; invalidated?: boolean } = {},
 ): FakeGraph {
   const applyLog: TableChange[][] = []
-  const coarsenCalls = { n: 0 }
+  const reseedCalls = { n: 0 }
   let faulted = false
   const graph: RoutableGraph = {
     tables,
@@ -33,12 +33,12 @@ function fakeGraph(
     fault: () => {
       faulted = true
     },
-    coarsen: () => {
-      coarsenCalls.n++
+    reseed: () => {
+      reseedCalls.n++
       faulted = true // an explicit coarse event permanently demotes, exactly like fault
     },
   }
-  return { graph, applyLog, coarsenCalls }
+  return { graph, applyLog, reseedCalls }
 }
 
 const ins = (table: string, id: number): TableChange => ({ table, kind: 'insert', new: { id } })
@@ -132,13 +132,13 @@ describe('notify ≤1 per graph AND per identity; a throwing apply is isolated',
 // ── G3 — in-batch coarse marker ─────────────────────────────────────
 
 describe('an in-batch coarse marker demotes the graph, never feeds it a row', () => {
-  it('a coarse marker calls coarsen (not apply) and coarse-notifies the identity', () => {
+  it('a coarse marker calls reseed (not apply) and notifies the identity', () => {
     const notified: string[] = []
     const router = createRouter({ notify: (k) => notified.push(k) })
     const g = fakeGraph(['users'], 'C')
     router.register(g.graph)
     router.ingest(batch([coarse('users')]))
-    expect(g.coarsenCalls.n).toBe(1) // demoted to coarse via the labelled coarsen()
+    expect(g.reseedCalls.n).toBe(1) // routed to the labelled reseed()
     expect(g.applyLog.length).toBe(0) // NEVER fed the image-less change — no fabrication reaches apply
     expect(notified).toEqual(['C']) // coarse-notified so its subscribers re-read
   })
@@ -148,7 +148,7 @@ describe('an in-batch coarse marker demotes the graph, never feeds it a row', ()
     const g = fakeGraph(['users'], 'C')
     router.register(g.graph)
     router.ingest(batch([ins('users', 1), coarse('users')])) // one commit: precise + image-less together
-    expect(g.coarsenCalls.n).toBe(1)
+    expect(g.reseedCalls.n).toBe(1)
     expect(g.applyLog.length).toBe(0) // atomic single tick: the precise change is moot once the graph is coarse
   })
 
@@ -159,9 +159,9 @@ describe('an in-batch coarse marker demotes the graph, never feeds it a row', ()
     router.register(onUsers.graph)
     router.register(onTeams.graph)
     router.ingest(batch([coarse('users'), ins('teams', 5)]))
-    expect(onUsers.coarsenCalls.n).toBe(1) // watches users → demoted
+    expect(onUsers.reseedCalls.n).toBe(1) // watches users → reseeded
     expect(onUsers.applyLog.length).toBe(0)
-    expect(onTeams.coarsenCalls.n).toBe(0) // watches only teams → unaffected by the users coarse marker
+    expect(onTeams.reseedCalls.n).toBe(0) // watches only teams → unaffected by the users coarse marker
     expect(onTeams.applyLog.length).toBe(1) // its precise change applies normally
   })
 })

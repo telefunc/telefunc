@@ -227,3 +227,176 @@ describe('a graph fires at most once per batch', () => {
     expect(graph.invalidationSeq() - before).toBe(1) // ≤1 fire per batch
   })
 })
+
+// ── reseed: coarse is a recoverable state ────────────────────────────
+//
+// An image-less event (raw SQL anywhere, a detected transport gap) used to demote a graph PERMANENTLY —
+// `coarsen()` frees the operator state and sets `coarse` with no path back — so one raw statement on any
+// instance cost every watching graph its precision for life. `reseed()` invalidates and then rebuilds the
+// baseline from the database instead, keeping the graph's identity and subscribers.
+
+/** A hydration executor whose scans can be held open, so a test can observe a reseed IN FLIGHT. */
+function gatedExecutor(rowsFor: (table: string) => Row[]) {
+  const pending: Array<() => void> = []
+  let hold = false
+  const executor: HydrationExecutor = {
+    scan: async (descriptor) => {
+      if (hold) await new Promise<void>((resolve) => pending.push(resolve))
+      return rowsFor(descriptor.table)
+    },
+  }
+  // `release` also STOPS holding: the seed scans its descriptors sequentially, so a release that only
+  // drained the queue would let the next descriptor's scan block again and hang the seed forever.
+  return {
+    executor,
+    hold: () => (hold = true),
+    releaseAll: () => {
+      hold = false
+      pending.splice(0).forEach((resolve) => resolve())
+    },
+  }
+}
+
+describe('reseed — an image-less event rebuilds precise state instead of surrendering it', () => {
+  it('a live stateful graph RESEEDS: it fires, stays live, and is precise afterwards', async () => {
+    const graph = await seededJoin([{ id: 1, teamId: 10 }], [{ id: 10, region: 'eu' }])
+    const before = graph.invalidationSeq()
+
+    graph.reseed()
+    await settle(graph)
+
+    expect(graph.invalidationSeq()).toBeGreaterThan(before) // subscribers were told
+    expect(graph.state()).toBe('live') // …and it did NOT surrender precision (coarsen() would give 'coarse')
+    // Still precise: an ordinary row change is classified, not blanket-fired.
+    const irrelevant = graph.apply([{ table: 'users', kind: 'insert', new: { id: 2, teamId: 999 } }])
+    expect(irrelevant.invalidated).toBe(false) // a coarse graph would have fired here
+  })
+
+  it('a STATELESS graph fires but never re-hydrates — it has no history to rebuild', async () => {
+    const scans: string[] = []
+    const spec: LiveGraphSpec = {
+      kind: 'stateless',
+      instanceKey: 'stateless',
+      tables: ['users'],
+      instantiate: () =>
+        compileQuery(extractQueryShape(qb.select().from(users), { dialect: 'pg' })).instantiate() as never,
+    }
+    const graph = createLiveGraph(spec)
+    await settle(graph)
+    const before = graph.invalidationSeq()
+
+    graph.reseed()
+    await settle(graph)
+
+    expect(graph.invalidationSeq()).toBeGreaterThan(before) // invalidated…
+    expect(graph.state()).toBe('live') // …still live, not demoted
+    expect(scans).toEqual([]) // …and no database round trip at all
+  })
+
+  it('STORM GUARD: a coarse event arriving mid-reseed demotes instead of queueing another', async () => {
+    const gated = gatedExecutor((table) => (table === 'users' ? [{ id: 1, teamId: 10 }] : [{ id: 10 }]))
+    const spec: LiveGraphSpec = {
+      kind: 'stateful',
+      instanceKey: 'storm',
+      tables: ['users', 'teams'],
+      instantiate: () =>
+        compileQuery(
+          extractQueryShape(qb.select().from(users).innerJoin(teams, eq(teams.id, users.teamId)), { dialect: 'pg' }),
+        ).instantiate() as StatefulGraph,
+      executor: gated.executor,
+      maxStateRows: 1e9,
+    }
+    const graph = createLiveGraph(spec)
+    await settle(graph)
+    expect(graph.state()).toBe('live')
+
+    gated.hold()
+    graph.reseed() // in flight, waiting on the held scan
+    expect(graph.state()).toBe('seeding')
+
+    graph.reseed() // the second one arrives while the first is still running
+    expect(graph.state()).toBe('coarse') // fail-closed, and no second re-hydrate was queued
+
+    gated.releaseAll()
+    await settle(graph)
+    expect(graph.state()).toBe('coarse') // the demote is terminal; the in-flight scan cannot revive it
+  })
+
+  it('a reseed that CANNOT run falls back to demoting (no usable PK)', async () => {
+    // Same fallback the initial seed has: a descriptor with no primary key cannot shadow-resolve.
+    const graph = createLiveGraph({
+      kind: 'stateful',
+      instanceKey: 'nopk',
+      tables: ['users'],
+      instantiate: () => statefulFake([fakeSeed('users', 'users', [])]),
+      executor: { scan: async () => [] },
+      maxStateRows: 1e9,
+    })
+    await settle(graph)
+    expect(graph.state()).toBe('coarse') // born coarse — nothing to reseed
+    graph.reseed()
+    expect(graph.state()).toBe('coarse')
+  })
+})
+
+// The miss the recon found BEFORE this was built. A write landing DURING a reseed is buffered and folded
+// into the new baseline by the synchronous cut — silently, because the buffer deliberately does not fire.
+// For an INITIAL seed that is right: nobody is subscribed yet, and the reader is covered by the redeem
+// fence. For a RESEED it is not — subscribers exist, and a write that committed after their refetch would
+// be absorbed and never announced. This is the seqAtRead fence aimed at subscribers, not at the reader.
+describe('reseed — a write landing mid-reseed is announced, not absorbed', () => {
+  /** The join graph used by both cases, over a gated executor so the scan can be held open. */
+  function racingJoin(gated: ReturnType<typeof gatedExecutor>, instanceKey: string): LiveGraph {
+    return createLiveGraph({
+      kind: 'stateful',
+      instanceKey,
+      tables: ['users', 'teams'],
+      instantiate: () =>
+        compileQuery(
+          extractQueryShape(qb.select().from(users).innerJoin(teams, eq(teams.id, users.teamId)), { dialect: 'pg' }),
+        ).instantiate() as StatefulGraph,
+      executor: gated.executor,
+      maxStateRows: 1e9,
+    })
+  }
+  const gatedRows = (table: string) => (table === 'users' ? [{ id: 1, teamId: 10 }] : [{ id: 10 }])
+  /** Let the seed's async scans reach their first await; start() kicks them off, it does not run them. */
+  const drain = async () => {
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+  }
+
+  it('fires AGAIN at the cut when the scan raced a write', async () => {
+    const gated = gatedExecutor(gatedRows)
+    const graph = racingJoin(gated, 'race')
+    await settle(graph)
+
+    gated.hold()
+    graph.reseed()
+    await drain() // let the scan actually reach its await before we hold or release anything
+    const afterStart = graph.invalidationSeq() // the one invalidation the client already received
+
+    // A write commits while the scan is open: buffered, then folded into the baseline by the cut.
+    graph.apply([{ table: 'users', kind: 'insert', new: { id: 2, teamId: 10 } }])
+
+    gated.releaseAll()
+    await settle(graph)
+
+    expect(graph.state()).toBe('live')
+    expect(graph.invalidationSeq()).toBeGreaterThan(afterStart) // announced, not silently absorbed
+  })
+
+  it('does NOT fire again when nothing raced — so the fire above is attributable to the race', async () => {
+    const gated = gatedExecutor(gatedRows)
+    const graph = racingJoin(gated, 'norace')
+    await settle(graph)
+
+    gated.hold()
+    graph.reseed()
+    await drain()
+    const afterStart = graph.invalidationSeq()
+    gated.releaseAll()
+    await settle(graph)
+
+    expect(graph.invalidationSeq()).toBe(afterStart) // exactly one invalidation for an uneventful reseed
+  })
+})

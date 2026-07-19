@@ -229,6 +229,7 @@ describe('write capture — RAW SQL fails closed over the db’s watched tables'
       apply: () => ({}) as never,
       notifyKey: () => 'g',
       fault() {},
+      reseed() {},
       coarsen() {},
     }
     registryFor(db).router.register(graph)

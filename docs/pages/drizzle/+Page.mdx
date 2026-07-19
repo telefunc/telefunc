@@ -116,6 +116,8 @@ Two rules make it correct:
 
 Live queries are **precise where that can be proven, and deliberately coarse — never wrong — everywhere else.** A coarse invalidation refetches more than strictly necessary; it never delivers a stale or fabricated row.
 
+Coarse is also **temporary rather than permanent**. When something happens that Telefunc cannot describe row by row — a raw statement on any server, a migration, a gap detected in the change stream — the affected queries refetch and then rebuild their tracking from the database, so they go back to being precise. Under a burst of such events they stop trying and stay coarse until the next fresh read, which is the safe direction.
+
 Capturing a write precisely means recovering the rows it changed. That needs a connection whose session Telefunc can prove is its own, a usable primary key, and a way to read the changed rows back:
 
 The rows below are read top to bottom: a write is precise only if no coarse row also applies to it. An `UPSERT` on PGlite is coarse, not precise.

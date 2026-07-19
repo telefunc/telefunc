@@ -21,9 +21,10 @@ type RoutableGraph = {
   notifyKey(): string
   /** A caught apply() throw permanently demotes this graph to coarse — its precise state is corrupt. */
   fault(): void
-  /** An in-batch coarse marker for one of this graph's tables → intentionally demote to coarse
-   *  (an image-less mutation the source can't represent precisely); never fed a row. */
-  coarsen(): void
+  /** An in-batch coarse marker for one of this graph's tables (an image-less mutation the source cannot
+   *  represent precisely): invalidate, then REBUILD precise state from the database rather than
+   *  surrendering it permanently. Never fed a row. */
+  reseed(): void
 }
 
 type Router = {
@@ -31,7 +32,7 @@ type Router = {
   unregister(graph: RoutableGraph): void
   ingest(batch: ChangeBatch): void
   /** Every table that currently has at least one registered graph. The write side needs this for a
-   *  mutation whose touched tables are UNKNOWABLE (raw SQL): it coarsens exactly the tables something is
+   *  mutation whose touched tables are UNKNOWABLE (raw SQL): it reaches exactly the tables something is
    *  actually watching, rather than guessing or silently missing them. */
   watchedTables(): string[]
 }
@@ -70,7 +71,7 @@ function createRouter(config: { notify: (identityKey: string) => void }): Router
           // mutation precisely, so demote this graph to coarse and feed it NO row (applying a
           // fabricated/partial row would corrupt exact operator/shadow state). One commit = one tick:
           // any precise changes in the same slice are moot once the graph is coarse.
-          graph.coarsen()
+          graph.reseed()
           invalidated = true
         } else {
           try {
