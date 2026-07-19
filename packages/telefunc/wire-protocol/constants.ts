@@ -96,6 +96,14 @@ export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
 export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
+/** CLIENT-side deadline for one barrier-upgrade attempt, armed when the `PREPARE` goes out and
+ *  disarmed once the handoff is entered — deliberately excluding the 3 s probe, which
+ *  `WS_PROBE_TIMEOUT_MS` already bounds. It is the only watchdog over that window, and it is not
+ *  redundant with the server's stage TTL: a barrier the server finds STALE is refused SILENTLY (no
+ *  `COMMITTED`, no termination, old session intact), so nothing on the wire would ever end such an
+ *  attempt. From handoff entry onwards `UPGRADE_HANDOFF_JOIN_TIMEOUT_MS` takes over. */
+export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
+
 /** Overall barrier-upgrade attempt deadline, from the moment the server accepts a PREPARE until
  *  the barrier commits. NON-refreshing on purpose: a client that pings but never barriers would
  *  otherwise hold its stage open forever, since PING resets only the liveness timer. On expiry the

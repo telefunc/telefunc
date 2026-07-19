@@ -25,6 +25,7 @@ import {
   UPGRADE_HANDOFF_BUFFER_BYTES,
   UPGRADE_HANDOFF_BUFFER_FRAMES,
   UPGRADE_HANDOFF_JOIN_TIMEOUT_MS,
+  UPGRADE_ATTEMPT_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
   WS_PROBE_TIMEOUT_MS,
   type ChannelTransport,
@@ -35,7 +36,15 @@ import { createPushReadableStream, type PushReadableStream } from '../push-reada
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
 import { ACK_STATUS, TAG, decode, encode, isChannelDataFrame, payloadBytes } from '../shared-ws.js'
-import type { AckResultStatus, ChannelFrame, DecodedFrame, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
+import type {
+  AckResultStatus,
+  ChannelFrame,
+  DecodedFrame,
+  PreparePayload,
+  ReadyPayload,
+  ReconcilePayload,
+  ReconciledPayload,
+} from '../shared-ws.js'
 import { encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
 
@@ -46,11 +55,22 @@ type BufferedFrame = {
 }
 
 /** Probe wire returned by `WsTransport.probe`. Liveness is the consumer's responsibility
- *  until the swap commits — typically driven via a transient Heartbeat. */
+ *  until the swap commits — typically driven via a transient Heartbeat.
+ *
+ *  `send`/`onFrame` exist so the barrier upgrade can exchange `PREPARE`/`READY` on the probed
+ *  socket WITHOUT that socket becoming the transport: nothing about the connection may move to the
+ *  new wire until the server has committed the barrier, so adopting the `WsTransport` early — the
+ *  obvious alternative — would put a sessionless wire in `this.transport` for a whole round-trip. */
 type ProbeWire = {
   ping: () => void
   onPong: (cb: () => void) => void
   onClose: (cb: () => void) => void
+  /** Raw frame onto the probed socket. Best-effort: a dead socket is a failed attempt, which the
+   *  attempt deadline and `onClose` already handle. */
+  send: (frame: Uint8Array<ArrayBuffer>) => void
+  /** Every non-PONG frame the probed socket receives, with the raw byte length the handoff buffer
+   *  accounts against. PONG stays with `onPong` — it is liveness, not protocol. */
+  onFrame: (cb: (frame: DecodedFrame, byteLength: number) => void) => void
   close: () => void
 }
 
@@ -180,9 +200,15 @@ type ClientChannelTransport = {
   /** Phase 1 of upgrade drain — gate still down, user sends keep flowing. Returns when the
    *  wire is naturally empty or `timeoutMs` elapses, whichever comes first. */
   gracefulDrain(timeoutMs: number): Promise<void>
-  /** Phase 2 of upgrade drain — caller has gated user sends. After this resolves, every
-   *  frame the client pushed on this transport has been server-acknowledged. */
+  /** Phase 2 of the LEGACY upgrade drain — caller has gated user sends. After this resolves, every
+   *  frame the client pushed on this transport has been server-acknowledged. Kept as-is: it is what
+   *  the flow against a server without `barrierUpgrade` still runs. */
   forceDrain(): Promise<void>
+  /** Barrier-flow replacement for `forceDrain`. Puts the barrier out as this wire's FINAL frame and
+   *  returns — without waiting for any server acknowledgment, which is the round-trip the whole
+   *  design exists to remove. `buildFrame` is a thunk rather than a frame so the payload's cursors
+   *  are read at the actual moment of emission, after any mode-specific quiesce. */
+  emitBarrier(buildFrame: () => OutboundFrame): Promise<void>
   /** Connection constructs the Heartbeat (with the funnel-bound onDead) and hands it over.
    *  Transport's frame receive path routes PONG to it directly (`heartbeat?.resetPong()`). */
   attachHeartbeat(hb: Heartbeat): void
@@ -213,10 +239,17 @@ type ConnectionState =
 type UpgradeState =
   | { tag: 'none' }
   | { tag: 'probing'; attempt: AbortController }
+  /** `PREPARE` sent, awaiting `READY`. Deliberately UNGATED (`inDrain` stays false): the old wire is
+   *  still fully live and authoritative for this whole window, so gating here would buy nothing and
+   *  cost every user send a round-trip. Gating starts one transition later, at `draining`. */
+  | { tag: 'preparing'; attempt: AbortController }
   | { tag: 'draining'; attempt: AbortController }
   | {
       tag: 'handoff'
       from: ClientChannelTransport
+      /** The barrier attempt this handoff is waiting to have COMMITTED, or `null` on the legacy
+       *  flow. Non-null means exactly one RECONCILED can settle it — the one echoing this id. */
+      upgradeId: string | null
       buffer: HandoffBuffer
       /** ONE budget across both buffers — see `UPGRADE_HANDOFF_BUFFER_*`. */
       bufferedBytes: number
@@ -277,6 +310,16 @@ class ClientConnection implements MuxConnection {
    *  can run from both `handleReconciled` and `_onTransportOpen` — transport-open and the
    *  first RECONCILED can arrive in either order on the SSE path. */
   private serverTransports: ReconciledPayload['transports'] | null = null
+  /** Whether the server understands `PREPARE`/`READY`/barrier reconciles, from the last settled
+   *  RECONCILED (it rides EVERY one, so this is a pure capability bit — what discriminates a
+   *  COMMITTED from an ordinary reconciled is `upgradeId`, not this). Load-bearing rather than
+   *  merely an optimization: an older server decode-asserts on tag `0x07` and terminates the wire
+   *  permanently, so no `PREPARE` byte may be written before this has been seen. */
+  private barrierUpgrade = false
+  /** Set for exactly one synchronous `_onTransportOpen`: the one the barrier commit's transport
+   *  flip triggers. See `probeAndUpgrade`'s flip block for why a second RECONCILE there is
+   *  destructive rather than merely wasteful. */
+  private suppressReconcileOnOpen = false
   /** RECONCILE sent, awaiting RECONCILED. SSE sets it true during connecting since the
    *  initial reconcile is baked into the openStream POST body. Bounded by `reconcileTimer`:
    *  written only via `enterReconciling`/`exitReconciling` so the deadline can never outlive
@@ -339,18 +382,28 @@ class ClientConnection implements MuxConnection {
     this.state = { tag: 'open', upgrade: { tag: 'probing', attempt } }
   }
 
-  private enterUpgradeDraining(attempt: AbortController): void {
+  private enterUpgradePreparing(attempt: AbortController): void {
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'probing' && this.state.upgrade.attempt === attempt)
+    this.state = { tag: 'open', upgrade: { tag: 'preparing', attempt } }
+  }
+
+  /** Reached from `probing` on the legacy flow and from `preparing` on the barrier flow — the two
+   *  differ in what proves the new wire is usable, not in what gating means once it is. */
+  private enterUpgradeDraining(attempt: AbortController): void {
+    assert(this.state.tag === 'open')
+    const u = this.state.upgrade
+    assert((u.tag === 'probing' || u.tag === 'preparing') && u.attempt === attempt)
     this.state = { tag: 'open', upgrade: { tag: 'draining', attempt } }
   }
 
-  private enterUpgradeHandoff(from: ClientChannelTransport): void {
+  private enterUpgradeHandoff(from: ClientChannelTransport, upgradeId: string | null = null): void {
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'draining')
     this.state = {
       tag: 'open',
       upgrade: {
         tag: 'handoff',
         from,
+        upgradeId,
         buffer: { old: [], new: [] },
         bufferedBytes: 0,
         bufferedFrames: 0,
@@ -367,7 +420,7 @@ class ClientConnection implements MuxConnection {
   private exitUpgradeAttempt(attempt: AbortController): void {
     if (this.state.tag !== 'open') return
     const u = this.state.upgrade
-    if (u.tag !== 'probing' && u.tag !== 'draining') return
+    if (u.tag !== 'probing' && u.tag !== 'preparing' && u.tag !== 'draining') return
     if (u.attempt !== attempt) return
     this.state = { tag: 'open', upgrade: { tag: 'none' } }
   }
@@ -663,8 +716,10 @@ class ClientConnection implements MuxConnection {
   _onTransportOpen(transport: ClientChannelTransport): void {
     if (this.closed) return
     if (transport !== this.transport) return
+    const suppressReconcile = this.suppressReconcileOnOpen
+    this.suppressReconcileOnOpen = false
     this.enterOpen()
-    if (this.transport.sendReconcileOnOpen) {
+    if (this.transport.sendReconcileOnOpen && !suppressReconcile) {
       this.sendReconcileBatch(this.stageReconcileBatch())
       return
     }
@@ -878,6 +933,17 @@ class ClientConnection implements MuxConnection {
   }
 
   private handleReconciled(ctrl: ReconciledPayload): void {
+    // A BARRIER handoff is settled by exactly one reconciled: the COMMITTED echoing this attempt's
+    // `upgradeId`. Any other reconciled arriving in that window — above all a delayed ordinary one
+    // still in flight from the OLD wire — would otherwise be consumed as the commit and complete a
+    // handoff the server never performed, retiring a live SSE session against a WS that holds no
+    // session at all. Checked BEFORE the apply, which is itself unchanged; the legacy flow leaves
+    // `upgradeId` null and never enters this branch.
+    if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff' && this.state.upgrade.upgradeId !== null) {
+      if (ctrl.upgradeId !== this.state.upgrade.upgradeId) return
+      // Consumed. The follow-up reconciled for any channel registered mid-attempt is ordinary.
+      this.state.upgrade.upgradeId = null
+    }
     this.transport.applyReconciledSettings(ctrl)
     // Split settlement, but ONLY for the reconcile that settles a handoff. The rest of the apply —
     // the C2S ungate, the flow-control reset, `installHeartbeat` — must NOT be deferred with it.
@@ -891,6 +957,7 @@ class ClientConnection implements MuxConnection {
     this.tryCompleteUpgradeHandoff()
     if (outcome.reconcileComplete) {
       this.serverTransports = ctrl.transports
+      this.barrierUpgrade = ctrl.barrierUpgrade === true
       this.startTtlIfIdle()
       this.flushPendingRegisterReconcile()
       this.maybeStartUpgrade()
@@ -928,7 +995,7 @@ class ClientConnection implements MuxConnection {
     if (this.closed) return
     if (this.state.tag === 'open') {
       const u = this.state.upgrade
-      if (u.tag === 'probing' || u.tag === 'draining') {
+      if (u.tag === 'probing' || u.tag === 'preparing' || u.tag === 'draining') {
         u.attempt.abort()
         this.exitUpgradeAttempt(u.attempt)
       } else if (u.tag === 'handoff') {
@@ -958,8 +1025,15 @@ class ClientConnection implements MuxConnection {
     // either go on the old wire now (entering the upgrade drain naturally) or have
     // their deferred releases settled before the handoff RECONCILE is built.
     this.flushPendingRegisterReconcile()
+    // Which flow to run is decided once, up front, so a RECONCILED landing mid-attempt can never
+    // switch flows halfway. `sessionId` is a PREPARE field the server hard-requires; the gate on
+    // this path is a SETTLED reconciled so there always is one, but the barrier flow must not be
+    // the thing that discovers otherwise.
+    const sessionId = this.sessionId
+    const useBarrier = this.barrierUpgrade && sessionId !== null
     const attempt = new AbortController()
     this.enterUpgradeProbing(attempt)
+    let attemptDeadline: ReturnType<typeof setTimeout> | null = null
     try {
       const from = this.transport
       const to = TRANSPORT_REGISTRY[targetTransport](this.telefuncUrl, this.connectionOptions, this)
@@ -987,26 +1061,105 @@ class ClientConnection implements MuxConnection {
         { once: true },
       )
 
-      if (!(await this.drainOldWire(from, attempt))) {
-        // Aborted: stay on the old wire. The `finally` exits the attempt and flushes any queued
-        // register-reconcile, whose batch carries the frames buffered during the drain. With none
-        // queued that flush no-ops, so drain those buffered frames onto the old wire here instead.
-        if (this.registerReconcileTimer === null) {
-          for (const frame of this.drainBufferedFrames(this.channels, undefined)) this.transport.sendFrame(frame)
+      if (!useBarrier) {
+        // ── Legacy flow (server without `barrierUpgrade`) ── drain the old wire to a standstill,
+        //    then adopt the new one and let it send its own RECONCILE. Two round-trips, unchanged.
+        if (!(await this.drainOldWire(from, attempt))) {
+          this.rollbackToOldWire()
+          return
         }
+        probeHeartbeat.stop()
+        this.transport = to
+        this.enterUpgradeHandoff(from)
+        to.start()
+        return
+      }
+
+      // ── Barrier flow ── PREPARE stages the new wire while the old one stays fully live; READY
+      //    licenses the gate; the barrier is the old wire's FINAL frame and commits the swap
+      //    server-side, so the new wire never has to reconcile for itself.
+      const upgradeId = crypto.randomUUID()
+      const pendingProbeFrames: { frame: DecodedFrame; byteLength: number }[] = []
+      let onReady: ((payload: ReadyPayload) => void) | null = null
+      probe.onFrame((frame, byteLength) => {
+        if (frame.tag === TAG.READY) {
+          onReady?.(frame.payload)
+          return
+        }
+        // The COMMITTED can beat the transport flip. HELD, not dropped — replayed through the
+        // ordinary receive path right after the flip, where the handoff buffer takes it.
+        pendingProbeFrames.push({ frame, byteLength })
+      })
+
+      // The ONLY watchdog over PREPARE→handoff-entry. A barrier the server finds stale is refused
+      // SILENTLY — no COMMITTED, no termination, nothing rotates — so without this a refused
+      // attempt would sit in `preparing`/`draining` for the connection's lifetime.
+      attemptDeadline = setTimeout(() => attempt.abort(), UPGRADE_ATTEMPT_TIMEOUT_MS)
+      // Armed BEFORE the PREPARE leaves. Nothing forbids a server from answering within the same
+      // turn, and a resolver installed afterwards would simply miss that READY and wedge the
+      // attempt until its deadline.
+      const readyP = new Promise<ReadyPayload | null>((resolve) => {
+        onReady = resolve
+        attempt.signal.addEventListener('abort', () => resolve(null), { once: true })
+      })
+      this.enterUpgradePreparing(attempt)
+      probe.send(this.buildPrepareFrame(upgradeId, sessionId))
+      const ready = await readyP
+      // A READY naming another attempt is worth exactly as much as none: it says nothing about
+      // whether OUR stage was installed.
+      if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
+        // Pre-barrier failure. Nothing has left that could rotate the session, so the old wire
+        // keeps it and the rule is simply "continue". Aborting is also what closes the probe.
+        attempt.abort()
+        this.rollbackToOldWire()
+        return
+      }
+
+      // Gate down. From here the old wire carries exactly one more frame, and the payload is built
+      // inside `emitBarrier` — at emission — so its cursors reflect everything delivered since.
+      this.enterUpgradeDraining(attempt)
+      await from.emitBarrier(() => this.buildReconcileFrame({ upgradeId }))
+
+      if (attempt.signal.aborted) {
+        // The barrier MAY already have reached the server, so no wire can be trusted to still hold
+        // the session — the single rule past this point is to abandon BOTH and reconcile afresh.
+        this.abortUpgradeAndReconnectSse(new NetworkError('Upgrade barrier attempt timed out', true))
         return
       }
 
       probeHeartbeat.stop()
       this.transport = to
-      this.enterUpgradeHandoff(from)
-      to.start()
+      this.enterUpgradeHandoff(from, upgradeId)
+      // The flip must NOT fire `sendReconcileOnOpen`. The barrier already WAS this attempt's
+      // reconcile; a second one, on a wire that is about to acquire a session, rotates that session
+      // a second time, deletes the FIN finalizer the barrier just installed, and re-opens every
+      // channel — all while still passing a happy-path test. Suppression spans only the synchronous
+      // adoption of the probed socket: a socket that instead has to CONNECT (the probe died between
+      // commit and flip) opens later, after the flag is back down, and correctly reconciles itself.
+      this.suppressReconcileOnOpen = true
+      try {
+        to.start()
+      } finally {
+        this.suppressReconcileOnOpen = false
+      }
+      for (const held of pendingProbeFrames) this._onTransportFrame(held.frame, to, held.byteLength)
     } finally {
+      // Disarmed before the attempt is released, so a deadline can never fire against a committed
+      // handoff — where `probe.close()` would be closing the LIVE transport's socket.
+      if (attemptDeadline) clearTimeout(attemptDeadline)
       this.exitUpgradeAttempt(attempt)
       // No-op unless the attempt aborted with a registration deferred behind it (the gate
       // blocks while a handoff is still in flight).
       this.flushPendingRegisterReconcile()
     }
+  }
+
+  /** Attempt ended before anything committed: stay on the old wire. The `finally` exits the attempt
+   *  and flushes any queued register-reconcile, whose batch carries the frames buffered meanwhile.
+   *  With none queued that flush no-ops, so drain those buffered frames onto the old wire here. */
+  private rollbackToOldWire(): void {
+    if (this.registerReconcileTimer !== null) return
+    for (const frame of this.drainBufferedFrames(this.channels, undefined)) this.transport.sendFrame(frame)
   }
 
   /** Two-phase drain. Returns false if the probe aborted; caller rolls back state. */
@@ -1077,7 +1230,7 @@ class ClientConnection implements MuxConnection {
     if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
     if (this.state.tag === 'open') {
       const u = this.state.upgrade
-      if (u.tag === 'probing' || u.tag === 'draining') u.attempt.abort()
+      if (u.tag === 'probing' || u.tag === 'preparing' || u.tag === 'draining') u.attempt.abort()
       if (u.tag === 'handoff') {
         if (u.joinTimer) clearTimeout(u.joinTimer)
         u.from.detachHeartbeat()
@@ -1101,24 +1254,51 @@ class ClientConnection implements MuxConnection {
 
   // ── Protocol internals ──
 
-  buildReconcileFrame(): OutboundFrame {
+  /** `barrier` turns this into the OLD wire's final frame: authoritative membership plus cursors
+   *  that must be read HERE, at emission, not when the attempt was staged. */
+  buildReconcileFrame(barrier?: { upgradeId: string }): OutboundFrame {
     this.enterReconciling()
     this.reconcileIxes = new Set()
     const open: ReconcilePayload['open'] = []
     for (const [ix, entry] of this.channels) {
+      const isInitial = entry.state.tag !== 'open' && entry.state.initial
+      // A barrier carries ESTABLISHED channels only — the server rejects `initial: true` there,
+      // because `attach` would park the commit mid-flight waiting for a channel to appear. Such a
+      // channel is left out of `reconcileIxes` as well, so the settling `applyReconciled` reads it
+      // as registered-after-the-fact and stages the ordinary follow-up RECONCILE for it. Leaving it
+      // IN `reconcileIxes` instead would classify it as server-omitted and release it — killing a
+      // channel the user just opened.
+      if (barrier && isInitial) continue
       this.reconcileIxes.add(ix)
       const payloadEntry: ReconcilePayload['open'][number] = {
         id: entry.channel.id,
         ix,
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
-      if (entry.state.tag !== 'open' && entry.state.initial) payloadEntry.initial = true
+      if (isInitial) payloadEntry.initial = true
       open.push(payloadEntry)
     }
     const reconcile: ReconcilePayload = { open }
     if (this.sessionId) reconcile.sessionId = this.sessionId
-    if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') reconcile.upgrade = true
+    if (barrier) {
+      reconcile.barrier = true
+      reconcile.upgrade = true
+      reconcile.upgradeId = barrier.upgradeId
+    } else if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') reconcile.upgrade = true
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
+  }
+
+  /** Identity only — no cursors. Anything captured here is stale by the time the barrier commits,
+   *  and replaying from a stale watermark would burst past the peer's flow-control credit. Must NOT
+   *  go through `buildReconcileFrame`: `enterReconciling` would gate every user send for the whole
+   *  `PREPARE`→`READY` window, which is precisely what leaving `preparing` ungated buys back. */
+  private buildPrepareFrame(upgradeId: string, sessionId: string): Uint8Array<ArrayBuffer> {
+    const open: PreparePayload['open'] = []
+    for (const [ix, entry] of this.channels) {
+      if (entry.state.tag !== 'open' && entry.state.initial) continue
+      open.push({ id: entry.channel.id, ix })
+    }
+    return encode.prepare({ upgradeId, sessionId, open })
   }
 
   drainBufferedFramesForReconcile(isInitialBatch: boolean): OutboundFrame[] {
@@ -1330,9 +1510,17 @@ class WsTransport implements ClientChannelTransport {
 
     let onPong: (() => void) | null = null
     let onClose: (() => void) | null = null
+    let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
     ws.onmessage = ({ data }: MessageEvent) => {
-      const frame = decode(new Uint8Array(data as ArrayBuffer))
-      if (frame.tag === TAG.PONG) onPong?.()
+      const raw = new Uint8Array(data as ArrayBuffer)
+      const frame = decode(raw)
+      if (frame.tag === TAG.PONG) {
+        onPong?.()
+        return
+      }
+      // Forwarded rather than discarded: the barrier flow's READY arrives here, and so can the
+      // COMMITTED, when the server answers the barrier before the transport flip has run.
+      onFrame?.(frame, raw.byteLength)
     }
     ws.onclose = () => {
       if (this.probedWs === ws) this.probedWs = null
@@ -1373,6 +1561,14 @@ class WsTransport implements ClientChannelTransport {
       onClose: (cb) => {
         onClose = cb
       },
+      send: (frame) => {
+        try {
+          ws.send(frame)
+        } catch {}
+      },
+      onFrame: (cb) => {
+        onFrame = cb
+      },
       close: () => {
         if (this.probedWs === ws) this.probedWs = null
         try {
@@ -1388,6 +1584,12 @@ class WsTransport implements ClientChannelTransport {
 
   forceDrain(): Promise<void> {
     return Promise.resolve()
+  }
+
+  /** Unreachable by construction — `UPGRADE_PATH` only ever upgrades SSE→WS, so a WS wire is never
+   *  the one a barrier is emitted on. Mirrors `SseTransport.probe`'s stance on the same asymmetry. */
+  async emitBarrier(): Promise<void> {
+    throw new Error('WS transport does not emit an upgrade barrier')
   }
 
   start(): void {
@@ -1593,6 +1795,40 @@ class SseTransport implements ClientChannelTransport {
     }
     if (!this.flushing && this.outbox.length === 0) return
     await new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
+  }
+
+  /** The barrier is this wire's last frame. It is never concurrent with another upstream POST,
+   *  never retried, and never an ordinary outbox item — all three would let it commit out of order
+   *  with frames the server then drops as post-rotation stragglers. */
+  async emitBarrier(buildFrame: () => OutboundFrame): Promise<void> {
+    if (this.streamRequest.tag === 'active') {
+      assert(!this.flushing && this.outbox.length === 0)
+      const frame = buildFrame()
+      this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
+      this.streamRequest.body.push(frame.frame)
+      // Body closed, fetch NOT awaited. That await is the round-trip this design removes, and it
+      // never meant "server acknowledged" anyway — `sse.ts` void-dispatches the response.
+      this.closeStreamRequest()
+      return
+    }
+
+    // Batch mode. Two POSTs in flight at once have no defined server-side dispatch order — entry
+    // into the shared recv chain is the order each body is READ — so a barrier racing an earlier
+    // POST can commit ahead of its frames, which then land post-rotation and are dropped silently.
+    // `gracefulDrain` is the natural quiesce; if it times out with a POST still in flight we keep
+    // waiting rather than racing it. The attempt deadline is what bounds this, never a concurrent
+    // barrier — the wrong direction to be impatient in.
+    await this.gracefulDrain(UPGRADE_DRAIN_TIMEOUT_MS)
+    while (this.flushing) {
+      if (!this.hasWire()) return
+      await new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
+    }
+    if (!this.hasWire()) return
+    this.flushScheduler.cancel()
+    // Whatever the quiesce left behind rides along in this same final POST, barrier LAST.
+    const queued = this.outbox.splice(0, this.outbox.length).map((entry) => entry.frame)
+    queued.push(buildFrame().frame)
+    await this.sendStandalonePost(queued)
   }
 
   start(): void {
@@ -1827,14 +2063,18 @@ class SseTransport implements ClientChannelTransport {
     const delay = Math.max(0, this.getFrameDeadline(frame.kind) - Date.now())
     setTimeout(() => {
       if (this.flushing) {
-        void this.sendConcurrentPost([frame.frame])
+        void this.sendStandalonePost([frame.frame])
       } else {
         this.sendFrame(frame)
       }
     }, delay)
   }
 
-  private async sendConcurrentPost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
+  /** One POST that stands outside the outbox/flush cycle: no retry, no re-queue on failure, and no
+   *  effect on `flushing`. The heartbeat uses it to slip a ping past an in-flight flush; the barrier
+   *  uses it AFTER quiescing, precisely because it is the one send path that cannot be retried into
+   *  a post-commit straggler. */
+  private async sendStandalonePost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
     if (!this.hasWire()) return
     assert(this.transportAbort)
     try {
