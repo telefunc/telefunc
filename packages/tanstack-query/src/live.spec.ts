@@ -12,22 +12,27 @@ vi.mock('telefunc/client', async () => await import('../../telefunc/client/withC
 // remoteTelefunctionCall.ts). It is not public API, so a faithful fake telefunction reads it the same
 // way the real one does — a fake that got its signal by any other route would prove nothing about
 // whether a real telefunction receives it.
-import { getPendingContext } from '../../telefunc/client/withContext.js'
+import { getPendingContext, withContextChecked } from '../../telefunc/client/withContext.js'
+import { markContextConsumer } from '../../telefunc/client/callAttribution.js'
 import { live } from './live.js'
 
 type Observed = { signal?: AbortSignal; calls: number }
 
-/** Make a fake behave like a generated telefunction stub, where it counts: `remoteTelefunctionCall` reads
- *  `getPendingContext()` as its very first statement, and that read — which NULLS the slot — is exactly
- *  what `live()` uses as proof that a telefunction was reached. A fake that skipped it would not be a
- *  telefunction at all; it would be the wrapper case these tests are meant to distinguish from.
+/** Make a fake behave like a generated telefunction stub in the two ways that matter.
+ *  `remoteTelefunctionCall` reads `getPendingContext()` as its very first statement, and STAMPS the call it
+ *  returns with the context that read consumed — and it is the stamp, not the read, that `live()` checks.
+ *  A fake that only did the read would be indistinguishable from a wrapper that consumes the context and
+ *  returns something else, which is precisely the case these tests exist to separate.
  *  `observed` records what the stub saw, so cancellation can be checked at the call itself. */
 function stub<F extends (...args: never[]) => unknown>(fn: F): F & { observed: Observed } {
   const observed: Observed = { calls: 0 }
   const stubbed = (...args: never[]) => {
     observed.calls++
-    observed.signal = getPendingContext()?.signal
-    return fn(...args)
+    const context = getPendingContext()
+    observed.signal = context?.signal
+    const call = fn(...args)
+    if (context && typeof call === 'object' && call !== null) markContextConsumer(call, context)
+    return call
   }
   return Object.assign(stubbed, { observed }) as F & { observed: Observed }
 }
@@ -313,7 +318,7 @@ describe('live() — cancelling a query cancels the telefunction request', () =>
     })
     const controller = new AbortController()
 
-    await expect(queryFn(queryFnContext(queryClient, controller.signal))).rejects.toThrow(/did not call a telefunction/)
+    await expect(queryFn(queryFnContext(queryClient, controller.signal))).rejects.toThrow(/telefunction call/)
     // The distinctness gate for the throw above: the wrapper is not rejected on suspicion, it is rejected
     // because the context was demonstrably not taken. Its telefunction DOES run — one call, after the
     // window closed — and it sees no signal at all. That is the silent cancellation loss, made loud.
@@ -330,7 +335,7 @@ describe('live() — cancelling a query cancels the telefunction request', () =>
     const queryFn = live(() => Promise.resolve(fake.handle))
 
     await expect(queryFn(queryFnContext(queryClient, new AbortController().signal))).rejects.toThrow(
-      /did not call a telefunction/,
+      /telefunction call/,
     )
     // The rejected call is already away; whatever it resolves to must not be left holding a channel.
     await flush()
@@ -340,5 +345,74 @@ describe('live() — cancelling a query cancels the telefunction request', () =>
   it('a non-function is rejected up front, before any fetch', () => {
     expect(() => live(undefined as never)).toThrow(/expects a telefunction/)
     expect(() => live(42 as never)).toThrow(/a number/)
+  })
+
+  // A consumption bit says SOMETHING took the context. These are the schedules where something did, and the
+  // handle that came back still never saw the signal — so only attributing the context to the RETURNED call
+  // separates them. Each is paired with the passing shape it differs from by one step, so the tests cannot
+  // both pass by the check being uniformly strict.
+  describe('the context must be taken by the call that is RETURNED', () => {
+    it('calls a telefunction, drops it, and returns another: consumed, but the wrong handle', async () => {
+      const queryClient = new QueryClient()
+      const dropped = makeFakeTelefunction(makeFakeLive('a').handle)
+      const returned = makeFakeLive('b')
+      // A consumes the context and is thrown away; B is handed back untouched by it. Under a bare
+      // consumption test this passes and the query silently loses cancellation.
+      const queryFn = live(() => {
+        void dropped.call()
+        return Promise.resolve(returned.handle)
+      })
+
+      await expect(queryFn(queryFnContext(queryClient, new AbortController().signal))).rejects.toThrow(
+        /telefunction call/,
+      )
+      expect(dropped.observed.calls).toBe(1) // the consuming call really did happen…
+      expect(dropped.observed.signal).toBeInstanceOf(AbortSignal) // …and really did take the context
+      await flush()
+      expect(returned.close).toHaveBeenCalledTimes(1) // the handle that came back is not left open
+    })
+
+    it('CONTROL: returning that same call instead of dropping it passes', async () => {
+      const queryClient = new QueryClient()
+      const fake = makeFakeTelefunction(makeFakeLive('a').handle)
+      // One step apart from the case above: the call it made is the value it returns.
+      const observer = new QueryObserver(queryClient, { queryKey: ['todos'], queryFn: live(() => fake.call()) })
+      const unsub = observer.subscribe(() => {})
+      await flush()
+      expect(fake.observed.calls).toBe(1)
+      fake.release()
+      await flush()
+      expect(queryClient.getQueryData(['todos'])).toBe('a')
+      unsub()
+    })
+
+    it('a NESTED checked call takes its own context, so the outer one is not satisfied by it', async () => {
+      const queryClient = new QueryClient()
+      const fake = makeFakeTelefunction(makeFakeLive('v1').handle)
+      const innerContext = { signal: new AbortController().signal }
+      // The inner window consumes and stamps with ITS context, then closes. The call handed outward is real
+      // and was made in a window — just not this query's — so its signal is the inner one, not the query's.
+      const queryFn = live(() => withContextChecked(fake.call, innerContext).result)
+
+      await expect(queryFn(queryFnContext(queryClient, new AbortController().signal))).rejects.toThrow(
+        /telefunction call/,
+      )
+      expect(fake.observed.calls).toBe(1)
+      expect(fake.observed.signal).toBe(innerContext.signal) // it got the INNER signal — the query's never arrived
+      fake.release()
+    })
+
+    it('CONTROL: the same call without the nested window passes', async () => {
+      const queryClient = new QueryClient()
+      const fake = makeFakeTelefunction(makeFakeLive('v1').handle)
+      const observer = new QueryObserver(queryClient, { queryKey: ['todos'], queryFn: live(() => fake.call()) })
+      const unsub = observer.subscribe(() => {})
+      await flush()
+      expect(fake.observed.calls).toBe(1)
+      expect(fake.observed.signal).toBeInstanceOf(AbortSignal)
+      fake.release()
+      await flush()
+      unsub()
+    })
   })
 })

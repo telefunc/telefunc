@@ -95,18 +95,21 @@ function assertCallable(fn: unknown): void {
 }
 
 /**
- * The function ran without any telefunction picking up the per-call context — so the query's cancellation
- * signal did not reach a request, and cancelling this query would silently do nothing.
+ * The value the function returned is not a telefunction call that took this query's per-call context — so
+ * the cancellation signal did not reach the request behind it, and cancelling this query would silently do
+ * nothing.
  *
- * Two shapes land here. A function that calls no telefunction at all. And the dangerous one: a wrapper
- * that reaches its telefunction only AFTER an await (`live(async () => { await x; return onGetTodos(id) })`),
- * by which time the synchronous context window has closed. A wrapper that calls the telefunction
- * synchronously — `live(() => onGetTodos(id))` — consumes the context and never gets here.
+ * Three shapes land here. A function that calls no telefunction at all. A wrapper that reaches its
+ * telefunction only AFTER an await (`live(async () => { await x; return onGetTodos(id) })`), by which time
+ * the window has closed. And the one a mere consumption test cannot see: a wrapper that calls a
+ * telefunction and returns something ELSE — the call it made took the context, but the handle handed back
+ * is a different one the signal never reached. Nested checked calls are the same shape, the inner call
+ * having taken a context that is not this one.
  *
  * This replaces an earlier `_key` brand check on the passed function. That check asked whether the
  * argument LOOKED like a generated stub, which both rejected the valid synchronous closure and could be
- * satisfied by copying a writable property; this asks whether the context was actually taken, which is
- * the property the signal's delivery genuinely depends on.
+ * satisfied by copying a writable property. Asking instead which context the RETURNED call consumed tests
+ * the property the signal's delivery actually depends on, and fails closed on everything it cannot attribute.
  */
 function contextLostError(result: unknown): Error {
   // The call is already away and may still resolve to a real handle. We are throwing, so nobody will
@@ -121,11 +124,11 @@ function contextLostError(result: unknown): Error {
     })
     .catch(() => {})
   return new Error(
-    'live() was given a function that did not call a telefunction while its per-call context was active. ' +
-      'Pass the telefunction and its arguments — live(onGetTodos, todoListId) — or call it synchronously ' +
-      'inside a wrapper — live(() => onGetTodos(todoListId)). A wrapper that reaches the telefunction after ' +
-      "an await runs outside that window, so the query's cancellation signal never reaches the request and " +
-      'cancelling the query would silently do nothing.',
+    'live() needs a telefunction call, but the function it was given returned something else. ' +
+      'Pass the telefunction and its arguments — live(onGetTodos, todoListId) — or RETURN the call from a ' +
+      'synchronous wrapper — live(() => onGetTodos(todoListId)). A wrapper that reaches the telefunction only ' +
+      'after an await, or that returns a value other than the call it made, hands back something the ' +
+      "query's cancellation signal was never attached to — so cancelling the query would silently do nothing.",
   )
 }
 

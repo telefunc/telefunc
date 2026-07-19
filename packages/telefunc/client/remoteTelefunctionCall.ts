@@ -8,6 +8,7 @@ import { isBrowser } from '../utils/isBrowser.js'
 import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
 import { getPendingContext } from './withContext.js'
+import { markContextConsumer } from './callAttribution.js'
 import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/async-generator-interface.js'
 
 function remoteTelefunctionCall(
@@ -78,6 +79,11 @@ function remoteTelefunctionCall(
 
   setAbortController(telefunctionReturnPromise, abortController)
   addAsyncGeneratorInterface(telefunctionReturnPromise, abortController)
+
+  // Attribute the context to THIS call, here, where the consumed context and the object the caller will
+  // receive both exist — nowhere else can pair them. A checked caller (`withContextChecked`) verifies the
+  // value it got back is the call that took its context, rather than trusting that something did.
+  if (callClientContext) markContextConsumer(telefunctionReturnPromise, callClientContext)
 
   return telefunctionReturnPromise
 }
