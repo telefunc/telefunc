@@ -130,8 +130,16 @@ class SseConnectionTransport {
   }
 
   /** Long-lived client→server upload POST. Body streams over the connection's lifetime;
-   *  each frame is dispatched fire-and-forget so the loop never blocks the body, and the
-   *  mux emits `reconciled` inline whenever one fires. */
+   *  each frame is dispatched WITHOUT being awaited inside the loop, so a slow dispatch never
+   *  stalls the body, and the mux emits `reconciled` inline whenever one fires.
+   *
+   *  The dispatches are retained rather than discarded, and EOF awaits them all before the
+   *  response resolves. That makes body-end a real drain point: when this POST completes, every
+   *  frame it carried has finished its recv-chain turn. Previously the promises were dropped on
+   *  the floor (`void`), so the response could resolve with frames still queued behind an
+   *  unfinished turn — and a client treating POST completion as "the server has processed
+   *  everything I sent" was simply wrong. The batch path already had this property via
+   *  `drainDeferred`; this brings the streaming path in line. */
   private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
@@ -139,11 +147,20 @@ class SseConnectionTransport {
     // its handshake timeout to commit to using this wire as its upload channel.
     this.sendNow(connection, encode.streamRequestOpenAck())
     if (!(await this.waitReady(connection))) return badRequest()
+    // Settled dispatches are evicted as they complete, so a long-lived upload does not
+    // accumulate one retained promise per frame for the connection's lifetime.
+    const inFlight = new Set<Promise<unknown>>()
     while (true) {
       const raw = await reader.readLengthPrefixedBytesOrNull()
       if (!raw || connection.closed) break
-      void this.mux.onConnectionRawMessage(connection, raw)
+      const dispatch = this.mux.onConnectionRawMessage(connection, raw)
+      inFlight.add(dispatch)
+      const evict = () => inFlight.delete(dispatch)
+      // `then(evict, evict)` rather than `.finally()`: it cannot itself produce an unhandled
+      // rejection if a dispatch ever rejects.
+      dispatch.then(evict, evict)
     }
+    if (inFlight.size > 0) await Promise.allSettled(inFlight)
     return okResponse()
   }
 
