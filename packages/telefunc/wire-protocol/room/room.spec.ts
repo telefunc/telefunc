@@ -3102,6 +3102,19 @@ describe('snapshot() and onChange()', () => {
     unsubscribe()
   })
 
+  it('snapshot() hands out frozen metadata — a consumer cannot mutate it into live state', async () => {
+    const room = await Room.create('snap-frozen', { meta: { topic: 'x' } })
+    await room.join({ meta: { name: 'A' }, identity: 'u1' })
+    const snap = room.snapshot()
+    expect(snap.participants.length).toBe(1)
+    expect(Object.isFrozen(snap.meta)).toBe(true)
+    expect(Object.isFrozen(snap.participants[0]!.meta)).toBe(true)
+    expect(() => {
+      ;(snap.meta as { topic?: string }).topic = 'HACKED' // strict-mode write to a frozen object throws
+    }).toThrow()
+    expect(room.meta.topic).toBe('x') // the live room meta is untouched
+  })
+
   it('close fires exactly one onChange, and it sees the emptied, closed room', async () => {
     // applyClosed applies the whole transition (leave callbacks, roster clear) before its single bump,
     // so a subscriber reading snapshot() during close sees only the final closed-and-empty room — never

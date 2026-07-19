@@ -305,14 +305,21 @@ class RoomState {
    *  until something actually changes (the `useSyncExternalStore` contract). */
   snapshot(): RoomSnapshotView {
     if (this._snapshotCache?.version === this._stateVersion) return this._snapshotCache.value
+    // Freeze a shallow copy of every `meta`, not the live object: the snapshot promises immutability, but
+    // the live `entry.meta`/`this.meta` are replaced (never mutated) on update, and freezing them in place
+    // would also freeze objects the app may still hold. A frozen copy makes `snap.meta.x = …` throw instead
+    // of silently leaking into live state, without touching the live refs. (Top-level; nested app data is the
+    // app's own — same shallow boundary as the rest of the view.)
     const participants = Object.freeze(
       [...this._members.values()]
         .filter((entry) => !entry.hidden)
-        .map(({ id, identity, meta, joinedAt }) => Object.freeze({ id, identity, meta, joinedAt })),
+        .map(({ id, identity, meta, joinedAt }) =>
+          Object.freeze({ id, identity, meta: Object.freeze({ ...meta }), joinedAt }),
+        ),
     )
     const value = Object.freeze({
       id: this.roomId,
-      meta: this.meta,
+      meta: Object.freeze({ ...this.meta }),
       count: this.count,
       isClosed: this.closed,
       participants,
