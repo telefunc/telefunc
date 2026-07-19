@@ -108,6 +108,9 @@ async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 3_
 
 type ReceivedPayload = { kind: 'text'; value: unknown } | { kind: 'binary'; bytes: Uint8Array }
 
+/** The shape `handoffBuffered()` reads out of the connection's private upgrade state. */
+type UpgradeStateShape = { tag: string; bufferedFrames: number; bufferedBytes: number }
+
 type HarnessClientChannel = {
   readonly id: string
   isClosed: boolean
@@ -281,6 +284,12 @@ type UpgradeHarness = {
    *  read the real field or to not gate the fix at all. Reading the REAL array — never a mirrored
    *  tally — is what stops this from becoming a co-set proxy for the bug it exists to catch. */
   bufferedSendCount(): number
+  /** Live handoff-buffer accounting, or null once the handoff has ended (committed or fallen back).
+   *
+   *  These are the SAME two fields the cap is enforced against — read straight off the state, never
+   *  a tally maintained beside it. A parallel counter would stay correct exactly when the
+   *  enforcement broke, which is the one case the assertion exists to catch. */
+  handoffBuffered(): { frames: number; bytes: number } | null
   dispose(): void
 }
 
@@ -393,6 +402,12 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
       connection.send(channels[channelIndex] as never, data)
     },
     bufferedSendCount: () => (connection as unknown as { sendBuffer: unknown[] }).sendBuffer.length,
+    handoffBuffered: () => {
+      const state = (connection as unknown as { state: { tag: string; upgrade?: UpgradeStateShape } }).state
+      const upgrade = state.tag === 'open' ? state.upgrade : undefined
+      if (upgrade?.tag !== 'handoff') return null
+      return { frames: upgrade.bufferedFrames, bytes: upgrade.bufferedBytes }
+    },
     dispose: () => {
       downstream?.close()
       socket.close()

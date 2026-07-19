@@ -158,4 +158,40 @@ describe('R2 — handoff join deadline and shared buffer budget', () => {
 
     expect(h.channels[0]!.received).toEqual([])
   })
+
+  // ── Shared budget: the SHARING itself ──────────────────────────────────────────────────────
+  // Every test above floods ONE wire, so an implementation with independent per-source limits
+  // would pass the whole file while permitting almost twice the intended total. This is the case
+  // that discriminates: each partition stays comfortably under the limit and only their SUM
+  // exceeds it. It also exercises the fallback's asymmetry — the old prefix is delivered in full,
+  // the new buffer is discarded whole — which the single-source tests cannot show, because there
+  // the old partition is empty.
+  test('a flood split across BOTH wires trips the budget neither partition would trip alone', async () => {
+    const h = (harness = await createUpgradeHarness(['A']))
+
+    const CHUNK = 512 * 1024
+    const OLD_FRAMES = 9 // 4.5 MiB
+    const NEW_FRAMES = 8 // 4.0 MiB — sum 8.5 MiB, over the 8 MiB budget; neither half is close
+    const chunk = (seq: number) => encode.binary(0, new Uint8Array(CHUNK), seq)
+
+    for (let seq = 1; seq <= OLD_FRAMES; seq++) h.sse.pushFrame(chunk(seq))
+    // The SSE frames travel a real ReadableStream, so wait for the accounting to show them rather
+    // than sleeping — this is also the assertion that the old partition alone is well under.
+    await waitUntil(() => (h.handoffBuffered()?.frames ?? 0) === OLD_FRAMES, 'old-wire frames buffered')
+    const oldOnly = h.handoffBuffered()!
+    expect(oldOnly.bytes).toBeLessThan(UPGRADE_HANDOFF_BUFFER_BYTES)
+
+    for (let seq = OLD_FRAMES + 1; seq <= OLD_FRAMES + NEW_FRAMES; seq++) {
+      // Stop at the trip: a real WS is disposed by the fallback and would deliver nothing further.
+      if (h.handoffBuffered() === null) break
+      h.ws.pushFrame(chunk(seq))
+    }
+    // The new partition on its own never approached the budget either.
+    expect((NEW_FRAMES * CHUNK) / UPGRADE_HANDOFF_BUFFER_BYTES).toBeLessThan(1)
+
+    await waitForFallback(h, OVERFLOW_BUDGET_MS)
+
+    // Old prefix delivered in full; not one frame of the new buffer.
+    expect(h.channels[0]!.received).toHaveLength(OLD_FRAMES)
+  })
 })
