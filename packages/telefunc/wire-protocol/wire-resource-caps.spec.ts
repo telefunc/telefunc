@@ -33,7 +33,17 @@ import { encodeSseRequestMetadata } from './sse-request.js'
 import { encodeU32 } from './frame.js'
 import { encode } from './shared-ws.js'
 import { createMuxHarness, reconcileFrame, settle, textFrame } from './upgrade-mux-harness.js'
-import { WIRE_MAX_RAW_FRAME_BYTES, WIRE_MAX_RECV_BACKLOG_BYTES, WIRE_MAX_RECV_BACKLOG_FRAMES } from './constants.js'
+import {
+  UPGRADE_MAX_FRAME_BYTES,
+  UPGRADE_MAX_ID_BYTES,
+  UPGRADE_MAX_OPEN_ENTRIES,
+  UPGRADE_MAX_STAGED_BYTES,
+  UPGRADE_MAX_STAGED_RECORDS,
+  UPGRADE_STAGE_TTL_MS,
+  WIRE_MAX_RAW_FRAME_BYTES,
+  WIRE_MAX_RECV_BACKLOG_BYTES,
+  WIRE_MAX_RECV_BACKLOG_FRAMES,
+} from './constants.js'
 
 let harness: ReturnType<typeof createMuxHarness> | null = null
 afterEach(() => {
@@ -311,6 +321,31 @@ describe('shipped default values', () => {
   // The bridge for the raw-frame ceiling is the real-SSE row above: it declares
   // `WIRE_MAX_RAW_FRAME_BYTES + 1` against a default-constructed (module-global) mux, so a
   // production path that stopped reading the constant would not terminate that connection.
+
+  test('a default-constructed mux binds each limit field to ITS OWN constant', () => {
+    // The row that closes the blind spot BETWEEN the other two kinds. Injecting a small limit proves
+    // enforcement dereferences `limits.<field>`; pinning a constant proves that constant holds its
+    // agreed number. Neither can see a `DEFAULT_MUX_LIMITS` that assigned the RIGHT constants to the
+    // WRONG fields — `maxRecvBacklogFrames: WIRE_MAX_RECV_BACKLOG_BYTES` silently ships a 67,108,864
+    // frame ceiling with every other test still green. Read off the resolved limits object itself,
+    // so this compares the values enforcement compares rather than a restatement of them.
+    //
+    // All nine fields, not just T7's three: the defect is a property of the object literal, and the
+    // six upgrade fields are exposed to it identically.
+    const limits = (harness = createMuxHarness()).mux._getResourceLimits()
+
+    expect(limits).toEqual({
+      maxFrameBytes: UPGRADE_MAX_FRAME_BYTES,
+      maxOpenEntries: UPGRADE_MAX_OPEN_ENTRIES,
+      maxIdBytes: UPGRADE_MAX_ID_BYTES,
+      maxStagedRecords: UPGRADE_MAX_STAGED_RECORDS,
+      maxStagedBytes: UPGRADE_MAX_STAGED_BYTES,
+      stageTtlMs: UPGRADE_STAGE_TTL_MS,
+      maxRawFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
+      maxRecvBacklogBytes: WIRE_MAX_RECV_BACKLOG_BYTES,
+      maxRecvBacklogFrames: WIRE_MAX_RECV_BACKLOG_FRAMES,
+    })
+  })
 
   test('a default-constructed mux charges the backlog fields it enforces on', async () => {
     // The bridge for the backlog pair. A 64 MiB / 50k overflow is not reachable in a unit test, so

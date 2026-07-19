@@ -872,6 +872,16 @@ class ChannelMux {
     }
   }
 
+  /** @internal @test-only The resolved limits object ITSELF — the very reference every comparison
+   *  above dereferences, not a copy of it. Exists because the mechanism/value split has a blind spot
+   *  neither half can see: injected-limit tests prove enforcement reads `limits.<field>`, and
+   *  constant tests prove each exported constant holds its agreed number, but NOTHING between them
+   *  observes which constant `DEFAULT_MUX_LIMITS` bound to which field. Swapping two of them leaves
+   *  both halves true and the shipped ceiling wrong. */
+  _getResourceLimits(): Readonly<MuxResourceLimits> {
+    return this.limits
+  }
+
   /** @internal @test-only Beside `_getUpgradeResourceSnapshot` rather than folded into it: that one
    *  is server-global, this one is per-connection, and merging them would force a shape where one
    *  half is meaningless. Reads the enforcement fields themselves. Null once the wire is gone. */
