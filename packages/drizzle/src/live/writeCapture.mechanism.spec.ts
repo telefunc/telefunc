@@ -15,7 +15,7 @@ import { PGlite } from '@electric-sql/pglite'
 import { customType, integer, pgTable, text } from 'drizzle-orm/pg-core'
 import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { captureMutation } from './writeCapture.js'
 import { probeOldNewReturning } from '../binding/database.js'
 import type { TableChange } from '../router/events.js'
@@ -57,6 +57,10 @@ function capturing(db: object, op: 'insert' | 'update' | 'delete', method: (t: n
   ) as AnyBuilder
   return { wrapped, batches }
 }
+
+/** Drizzle marks a write builder's `config` protected. These tests reach it on purpose — sealing it is the
+ *  whole point — so the reach is named once here rather than cast at each site. */
+const configOf = (builder: unknown): Record<string, unknown> => (builder as { config: Record<string, unknown> }).config
 
 async function fresh(ddl = DDL) {
   const client = new PGlite()
@@ -246,6 +250,87 @@ describe('mechanism — a seam capture cannot install on costs PRECISION, never 
     Object.preventExtensions(builder)
 
     await expect(builder).resolves.toEqual([{ mine: 'a' }]) // their projection, not capture's widened row
+    expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+    await client.close()
+  })
+
+  it('a FROZEN drizzle config: capture cannot even write its RETURNING, and the write is untouched', async () => {
+    // One phase earlier than the sealed-builder case above, and the same principle. Rewriting the builder's
+    // RETURNING is an assignment into drizzle's own `config`, which a caller is free to have frozen — so
+    // building the substituted statement is fallible too, and used to throw a TypeError out of a write the
+    // database would have accepted, before the caller's statement ever ran.
+    const { client, db } = await fresh(PLAIN_DDL)
+
+    // THE ORACLE: plain drizzle never calls `.returning()`, so a frozen config costs it nothing.
+    const plainBuilder = db.insert(plainUsers).values({ id: 1, name: 'plain' })
+    Object.freeze(configOf(plainBuilder))
+    await expect(plainBuilder).resolves.toEqual({ rows: [], fields: [], affectedRows: 1 })
+
+    const { wrapped, batches } = capturing(db, 'insert', db.insert.bind(db))
+    const builder = wrapped(plainUsers).values({ id: 2, name: 'captured' })
+    Object.freeze(builder.config)
+
+    await expect(builder).resolves.toEqual({ rows: [], fields: [], affectedRows: 1 })
+    expect((await client.query('select id, name from users order by id')).rows).toEqual([
+      { id: 1, name: 'plain' },
+      { id: 2, name: 'captured' },
+    ])
+    expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+    // Nothing was written to the config, so nothing is written back to it: `returning` never appeared.
+    expect('returning' in builder.config).toBe(false)
+    await client.close()
+  })
+
+  it('a FROZEN config under a caller’s own RETURNING: their projection survives untouched', async () => {
+    // The other side of the same phase. Here `returning` already EXISTS on the frozen config, so the
+    // substitution's overwrite is rejected rather than its insertion — and the caller's own selection has to
+    // come back through unharmed, by never having been replaced in the first place.
+    const { client, db } = await fresh(PLAIN_DDL)
+    const { wrapped, batches } = capturing(db, 'insert', db.insert.bind(db))
+    const builder = wrapped(plainUsers).values({ id: 1, name: 'a' }).returning({ mine: plainUsers.name })
+    const callerSelection = builder.config.returning
+    Object.freeze(builder.config)
+
+    await expect(builder).resolves.toEqual([{ mine: 'a' }])
+    expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+    // The very same selection object the caller built — not an equal one restored over the top of it.
+    expect(builder.config.returning).toBe(callerSelection)
+    await client.close()
+  })
+
+  it('restoring touches ONLY what changed — a refused construction writes nothing back', async () => {
+    // The companion defect: `restore()` assigned both fields unconditionally, so on a config that rejects
+    // assignment the cleanup threw on the way out of an already-decided statement. Comparing before
+    // assigning means a config nothing was written to is a config nothing is written back to.
+    const { client, db } = await fresh(PLAIN_DDL)
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { wrapped } = capturing(db, 'insert', db.insert.bind(db))
+      const builder = wrapped(plainUsers).values({ id: 1, name: 'a' })
+      Object.freeze(builder.config)
+      await expect(builder).resolves.toEqual({ rows: [], fields: [], affectedRows: 1 })
+
+      // Capture reports that it could not BUILD its statement — that degradation is expected and loud…
+      const said = errors.mock.calls.map((call) => String(call[0]))
+      expect(said.some((line) => line.includes('could not build the statement'))).toBe(true)
+      // …but it never reports a failed RESTORE, because it never attempted an assignment it did not need.
+      expect(said.some((line) => line.includes('could not restore the query builder'))).toBe(false)
+    } finally {
+      errors.mockRestore()
+      await client.close()
+    }
+  })
+
+  it('a single NON-WRITABLE returning property is refused the same way as a frozen config', async () => {
+    // Narrower than `Object.freeze`: the config is otherwise ordinary and only the one property capture
+    // wants is locked. The refusal must key off the assignment failing, not off the object being frozen.
+    const { client, db } = await fresh(PLAIN_DDL)
+    const { wrapped, batches } = capturing(db, 'insert', db.insert.bind(db))
+    const builder = wrapped(plainUsers).values({ id: 1, name: 'a' })
+    Object.defineProperty(builder.config, 'returning', { value: undefined, writable: false, configurable: false })
+
+    await expect(builder).resolves.toEqual({ rows: [], fields: [], affectedRows: 1 })
+    expect((await client.query('select id, name from users')).rows).toEqual([{ id: 1, name: 'a' }])
     expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
     await client.close()
   })

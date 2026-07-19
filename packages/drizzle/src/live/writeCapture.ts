@@ -679,6 +679,58 @@ function callerDecoderFor(builder: unknown, positions: number[]): CallerDecode |
   }
 }
 
+/** BUILD the substituted statement and its tap — the whole of what capture does to the builder BEFORE any
+ *  statement runs, gathered into one fallible phase.
+ *
+ *  Two things can refuse here, and they refuse the same way. Rewriting the builder's RETURNING is an
+ *  assignment into drizzle's own `config`, which a caller is free to have frozen — `Object.freeze` on it
+ *  makes `.returning()` throw. Installing the tap is a property definition on the builder, which a
+ *  non-extensible builder rejects. Neither is a reason the caller's write should fail: nothing has run, the
+ *  statement they wrote is still perfectly executable, and the only thing lost is capture's precision.
+ *
+ *  So neither throws. Both come back as a refusal, the builder is put back to whatever it actually was, and
+ *  the caller's own statement runs as written (coarse). Returning a VALUE rather than throwing is what keeps
+ *  a construction failure structurally incapable of reaching the SQLSTATE classification below and being read
+ *  as the caller's database error — it never enters that path at all. */
+function buildSubstitution(
+  substitute: () => unknown,
+  callerDecode: CallerDecode | undefined,
+  relationId: string,
+): { substituted: unknown; tap: Tap } | typeof SUBSTITUTION_REFUSED {
+  let substituted: unknown
+  try {
+    substituted = substitute()
+  } catch (error) {
+    reportSubstitutionUnbuildable(relationId, error)
+    return SUBSTITUTION_REFUSED
+  }
+  const tap = tapRawRows(substituted, callerDecode)
+  if (tap === TAP_UNPLACEABLE) {
+    reportTapUnplaceable(relationId)
+    return SUBSTITUTION_REFUSED
+  }
+  return { substituted, tap }
+}
+
+/** Capture could not even WRITE its RETURNING onto the builder — a frozen or read-only drizzle `config`, or
+ *  a builder shape that has drifted from the pinned one. No statement ran. */
+function reportSubstitutionUnbuildable(relationId: string, error: unknown): void {
+  report(
+    `[telefunc] live: Telefunc could not build the statement it uses to capture a write on "${describeRelationId(relationId)}" (its RETURNING clause could not be applied to the query builder). The write runs exactly as you wrote it and is unaffected; live queries on this table over-invalidate.`,
+    error,
+  )
+}
+
+/** The builder could not be put back the way the caller left it. Contained — the statement is already decided
+ *  — but it means a LATER execution of this same builder would run capture's selection, so it is never
+ *  silent. */
+function reportRestoreFailed(relationId: string, error: unknown): void {
+  report(
+    `[telefunc] live: Telefunc could not restore the query builder it borrowed to capture a write on "${describeRelationId(relationId)}". This write is unaffected, but re-executing that same builder may return Telefunc's columns instead of yours — this is a bug in Telefunc's capture, please report it.`,
+    error,
+  )
+}
+
 /** The tap could not be placed, so this write runs exactly as the caller wrote it and capture coarsens. Rare
  *  enough to be worth saying out loud: it means the builder shape drifted from the one capture is pinned to. */
 function reportTapUnplaceable(relationId: string): void {
@@ -728,10 +780,22 @@ async function runSubstituted(
   // BOTH halves of it: `.returning()` writes `returning` (what executes) and `returningFields` (what
   // `getSelectedFields()` reports), so restoring only the first leaves the builder describing a selection it
   // no longer runs.
+  //
+  // ONLY WHAT ACTUALLY CHANGED, never a blind assignment. A frozen or read-only `config` rejects assignment,
+  // and restoring is bookkeeping that runs on the way OUT of a decided statement — so a restore that throws
+  // would replace the caller's result with capture's own housekeeping failure, which is this file's whole
+  // failure class arriving one phase later. Comparing first means a config nothing was written to is a config
+  // nothing is written back to, so the frozen case never assigns at all.
   const restore = () => {
     if (!config) return
-    config.returning = callerReturning
-    config.returningFields = callerReturningFields
+    try {
+      if (config.returning !== callerReturning) config.returning = callerReturning
+      if (config.returningFields !== callerReturningFields) config.returningFields = callerReturningFields
+    } catch (error) {
+      // Contained, never silent: the builder is left describing capture's selection, so a later execution of
+      // this same builder would run capture's statement. Reported rather than raised — see `report`.
+      reportRestoreFailed(relationId, error)
+    }
   }
   // INSIDE A TRANSACTION the recovery needs a savepoint, because PostgreSQL aborts the whole transaction on
   // the refused statement and re-running would only get "current transaction is aborted". Without one — an
@@ -751,19 +815,22 @@ async function runSubstituted(
       restore()
       return SUBSTITUTION_REFUSED
     }
-    // Everything that can touch the builder now sits INSIDE the try, so every exit runs `restore()`. The tap
-    // is placed after the substitution but before the statement, and a builder that cannot be shadowed
-    // refuses the substitution instead of failing a write the database would have accepted.
-    let tap: Tap | undefined
+    // ── PHASE ONE: BUILD the substituted statement. Fallible, and NOTHING HAS RUN — which is what makes
+    //    every failure in it capture's alone. Kept a separate phase from execution precisely so that can be
+    //    true by construction rather than by classification: a synchronous failure here cannot reach the
+    //    SQLSTATE reasoning below and be mistaken for the caller's database error, because there is no
+    //    database error to mistake it for. The answer to all of them is the same — do not substitute.
+    const built = buildSubstitution(substitute, callerDecode, relationId)
+    if (built === SUBSTITUTION_REFUSED) {
+      await savepoint.release() // nothing ran, so there is nothing to rewind
+      restore() // whatever the construction managed to write before failing, and nothing else
+      return SUBSTITUTION_REFUSED
+    }
+    const { substituted, tap } = built
+
+    // ── PHASE TWO: RUN it. From here a failure may or may not be the caller's, which is what the rest of
+    //    this function is about.
     try {
-      const substituted = substitute()
-      const placed = tapRawRows(substituted, callerDecode)
-      if (placed === TAP_UNPLACEABLE) {
-        await savepoint.release() // nothing ran, so there is nothing to rewind
-        reportTapUnplaceable(relationId)
-        return SUBSTITUTION_REFUSED
-      }
-      tap = placed
       const rows = (await runBase(substituted, executeArgs)) as Row[]
       await savepoint.release()
       return { rows, raw: tap.observed(), caller: tap.callerResult() }
@@ -775,7 +842,7 @@ async function runSubstituted(
       //
       // Keyed on REACHED rather than on the rows: a driver that answered with a shape capture cannot read
       // still applied the write, and the table must coarsen for it even though no count can be given.
-      if (tap?.reached()) {
+      if (tap.reached()) {
         await savepoint.release()
         return { captureError: error, raw: tap.observed(), caller: tap.callerResult() }
       }
@@ -789,7 +856,7 @@ async function runSubstituted(
       reportSubstitutionRefused(relationId, error)
       return SUBSTITUTION_REFUSED
     } finally {
-      tap?.release()
+      tap.release()
       restore()
     }
   }
