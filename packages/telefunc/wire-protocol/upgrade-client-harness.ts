@@ -13,14 +13,23 @@
 // both faster and not timing-pinned.
 
 export { installWebSocketStub, createUpgradeHarness, waitUntil, reconciledPayload }
-export type { StubWebSocket, UpgradeHarness, HarnessClientChannel }
+export type { StubWebSocket, UpgradeHarness, UpgradeHarnessOptions, HarnessClientChannel }
 
 import { parse } from '@brillout/json-serializer/parse'
 
 import { uint8ArrayToBase64url } from './base64url.js'
 import { ClientConnection } from './client/connection.js'
 import { concat, decodeU32 } from './frame.js'
-import { TAG, decode, encode, type ChannelFrame, type DecodedFrame, type ReconciledPayload } from './shared-ws.js'
+import {
+  TAG,
+  decode,
+  encode,
+  type ChannelFrame,
+  type DecodedFrame,
+  type PreparePayload,
+  type ReconcilePayload,
+  type ReconciledPayload,
+} from './shared-ws.js'
 
 // ── globalThis.WebSocket stub ────────────────────────────────────────────────────────────────
 
@@ -41,6 +50,11 @@ class StubWebSocket {
   readonly sent: DecodedFrame[] = []
   /** Answer PINGs with PONGs, as any live server does — this is what makes `probe()` succeed. */
   autoPong = true
+  /** Server-side reaction to a client frame, invoked synchronously from `send`. Assigned at
+   *  CONSTRUCTION (via `installWebSocketStub`) rather than after the socket surfaces in `sockets`:
+   *  the barrier client sends its `PREPARE` the moment `probe()` resolves, which is sooner than any
+   *  awaiting harness can reach in and attach a listener. */
+  onSent: ((socket: StubWebSocket, frame: DecodedFrame) => void) | null = null
 
   constructor(readonly url: string) {
     setTimeout(() => {
@@ -53,8 +67,10 @@ class StubWebSocket {
   send(data: ArrayBufferView | ArrayBuffer): void {
     const bytes =
       data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-    this.sent.push(decode(bytes as Uint8Array<ArrayBuffer>))
+    const frame = decode(bytes as Uint8Array<ArrayBuffer>)
+    this.sent.push(frame)
     if (this.autoPong && bytes[0] === TAG.PING) setTimeout(() => this.emit(encode.pong()), 0)
+    this.onSent?.(this, frame)
   }
 
   close(_code?: number): void {
@@ -73,12 +89,16 @@ class StubWebSocket {
 
 /** Installs the stub on `globalThis` and returns every socket the code under test opens.
  *  Call `restore()` in `afterEach`. */
-function installWebSocketStub(): { sockets: StubWebSocket[]; restore: () => void } {
+function installWebSocketStub(onSent?: (socket: StubWebSocket, frame: DecodedFrame) => void): {
+  sockets: StubWebSocket[]
+  restore: () => void
+} {
   const sockets: StubWebSocket[] = []
   const previous = (globalThis as Record<string, unknown>).WebSocket
   const Stub = class extends StubWebSocket {
     constructor(url: string) {
       super(url)
+      this.onSent = onSent ?? null
       sockets.push(this)
     }
   }
@@ -157,10 +177,17 @@ function createHarnessChannel(id: string): HarnessClientChannel {
 
 /** Server settings the client is happy with and that keep timers out of the way: a 100 s ping
  *  interval means no heartbeat fires inside any test's budget. */
-function reconciledPayload(open: ReconciledPayload['open'], sessionId = crypto.randomUUID()): ReconciledPayload {
+function reconciledPayload(
+  open: ReconciledPayload['open'],
+  sessionId = crypto.randomUUID(),
+  /** Capability advertisement. Absent by default, so every spec written before the barrier flow
+   *  existed keeps driving the LEGACY upgrade — the byte-for-byte wire it was written against. */
+  barrierUpgrade = false,
+): ReconciledPayload {
   return {
     sessionId,
     open,
+    ...(barrierUpgrade ? { barrierUpgrade: true as const } : undefined),
     reconnectTimeout: 60_000,
     idleTimeout: 60_000,
     pingInterval: 100_000,
@@ -239,6 +266,38 @@ async function parseBlobBody(blob: Blob): Promise<{ metadata: Record<string, unk
   return { metadata, frames }
 }
 
+/** Mock-server behaviour. Every default reproduces the pre-barrier harness exactly, so the specs
+ *  written against it keep driving the legacy flow on the legacy wire. */
+type UpgradeHarnessOptions = {
+  /** Advertise `barrierUpgrade` on every RECONCILED — this alone is what puts the client on the
+   *  barrier flow, which is the whole point of the capability gate. */
+  barrierUpgrade?: boolean
+  /** What the server does with the client's `PREPARE`.
+   *  - `ready`: stage it and answer `READY` (synchronously — a server may legally answer in the
+   *    same turn, and a client that only listens afterwards would miss it).
+   *  - `withhold`: accept it and say nothing. The client has no wire event to react to; only its
+   *    attempt deadline can end this.
+   *  - `terminate`: close the wire, as an OLD server does on decoding an unknown tag. */
+  prepare?: 'ready' | 'withhold' | 'terminate'
+  /** What the server does with the client's barrier.
+   *  - `commit`: `FIN` on the old wire, `COMMITTED` on the staged one.
+   *  - `refuse`: NOTHING — the real silent refusal a stale barrier gets. Nothing is terminated,
+   *    nothing rotates, and no frame ever tells the client. Deliberately indistinguishable on the
+   *    wire from a server that simply stopped, because server-side it is.
+   *  - `fin-only` / `committed-only`: one limb of the join, to exercise the other's deadline. */
+  barrier?: 'commit' | 'refuse' | 'fin-only' | 'committed-only'
+  /** Which limb of the commit goes first. The real server runs the old session's finalizer inside
+   *  `reconcile` and delivers the reconciled after it, so `fin-first` is the production ordering. */
+  commitOrder?: 'fin-first' | 'committed-first'
+  /** Answer ordinary RECONCILEs arriving on the SSE downstream AFTER the first one.
+   *
+   *  Off by default because it changes the wire every existing spec was written against. It is what
+   *  closes T2's declared gap: without it a post-fallback reconnect never settles, so `maybeStartUpgrade`
+   *  is never reached, and any assertion that `upgradeDisabled` suppressed a second attempt would be
+   *  a gate that cannot fail. */
+  autoReconcile?: boolean
+}
+
 type UpgradeHarness = {
   readonly channels: HarnessClientChannel[]
   /** Old wire. `pushFrame` is the server→client direction; `upstream` is what the client sent. */
@@ -290,6 +349,24 @@ type UpgradeHarness = {
    *  a tally maintained beside it. A parallel counter would stay correct exactly when the
    *  enforcement broke, which is the one case the assertion exists to catch. */
   handoffBuffered(): { frames: number; bytes: number } | null
+  /** Every WS socket the client has opened, in order. A SECOND one after a fallback is the
+   *  unambiguous signal that `upgradeDisabled` failed to stick. */
+  readonly sockets: StubWebSocket[]
+  /** `PREPARE` payloads the server received, in order. Empty is the legacy-flow expectation — and
+   *  on its own a vacuous assertion, so every spec that checks it pairs it with proof that the
+   *  legacy upgrade DID happen. */
+  readonly prepares: PreparePayload[]
+  /** Barrier reconcile payloads the server received, in order. */
+  readonly barriers: ReconcilePayload[]
+  /** The connection's live upgrade tag — `'none' | 'probing' | 'preparing' | 'draining' |
+   *  'handoff'` — read straight off the state machine, never mirrored. */
+  upgradeTag(): string
+  /** Register another channel on the SAME connection, exactly as a `ClientChannel` constructor
+   *  does. Used to open one mid-attempt, when registrations are deferred. */
+  register(id: string): HarnessClientChannel
+  /** Answer the recorded `PREPARE` by hand. Pairs with `prepare: 'withhold'`, which is what holds
+   *  the client in `preparing` long enough for a test to act inside the staging window. */
+  sendReady(upgradeId?: string): void
   dispose(): void
 }
 
@@ -301,27 +378,102 @@ type UpgradeHarness = {
  * sent its handoff RECONCILE on the WS wire, and neither FIN nor the WS RECONCILED has arrived —
  * so every frame pushed on either wire lands in `state.upgrade.buffer` (`connection.ts:734`).
  */
-async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<UpgradeHarness> {
-  const stub = installWebSocketStub()
+async function createUpgradeHarness(
+  channelIds: string[] = ['A'],
+  options: UpgradeHarnessOptions = {},
+): Promise<UpgradeHarness> {
+  const opts = {
+    barrierUpgrade: false,
+    prepare: 'ready' as const,
+    barrier: 'commit' as const,
+    commitOrder: 'fin-first' as const,
+    autoReconcile: false,
+    ...options,
+  }
   const channels = channelIds.map(createHarnessChannel)
   const upstream: DecodedFrame[] = []
+  const prepares: PreparePayload[] = []
+  const barriers: ReconcilePayload[] = []
   let downstream: ReturnType<typeof makeSseDownstream> | null = null
   let sseTornDown = false
   let sseConnects = 0
+  /** The probe wire the server staged, i.e. the one the COMMITTED belongs on. */
+  let stagedSocket: StubWebSocket | null = null
+  /** Armed only after the harness has answered the FIRST reconcile itself, so `autoReconcile`
+   *  cannot double-answer it. */
+  let autoReconcileArmed = false
+
+  const openOf = (open: { ix: number; lastSeq: number }[]) => open.map((e) => ({ ix: e.ix, lastSeq: e.lastSeq }))
+
+  // ── Server: the WS (staged probe) direction ──
+  const stub = installWebSocketStub((socket, frame) => {
+    if (frame.tag !== TAG.PREPARE) return
+    prepares.push(frame.payload)
+    if (opts.prepare === 'terminate') {
+      // What an OLD server does with tag 0x07: `decode` asserts, the wire is terminated
+      // permanently. The old SSE session is untouched — that is the property under test.
+      socket.close()
+      return
+    }
+    if (opts.prepare === 'withhold') return
+    stagedSocket = socket
+    socket.emit(encode.ready({ upgradeId: frame.payload.upgradeId }))
+  })
+
+  // ── Server: the SSE (old wire) upstream direction ──
+  const onUpstreamFrame = (frame: DecodedFrame): void => {
+    if (frame.tag !== TAG.RECONCILE) return
+    const ctrl = frame.payload
+    if (ctrl.barrier) {
+      barriers.push(ctrl)
+      if (opts.barrier === 'refuse') return
+      const commit = () => {
+        if (!stagedSocket) return
+        stagedSocket.emit(
+          encode.reconciled({
+            ...reconciledPayload(openOf(ctrl.open), undefined, opts.barrierUpgrade),
+            upgradeId: ctrl.upgradeId,
+          }),
+        )
+      }
+      const fin = () => downstream?.pushFrame(encode.fin())
+      if (opts.barrier === 'fin-only') return void fin()
+      if (opts.barrier === 'committed-only') return void commit()
+      if (opts.commitOrder === 'fin-first') {
+        fin()
+        commit()
+      } else {
+        commit()
+        fin()
+      }
+      return
+    }
+    if (!autoReconcileArmed || !opts.autoReconcile) return
+    downstream?.pushFrame(encode.reconciled(reconciledPayload(openOf(ctrl.open), undefined, opts.barrierUpgrade)))
+  }
 
   const fetchImpl = (async (_url: string, init: RequestInit) => {
     const body = init.body as unknown
 
     if (body instanceof Blob) {
       const { metadata, frames } = await parseBlobBody(body)
-      for (const raw of frames) upstream.push(decode(raw as Uint8Array<ArrayBuffer>))
-      if (metadata.streamResponse !== true) return new Response('', { status: 200 })
+      const decoded = frames.map((raw) => decode(raw as Uint8Array<ArrayBuffer>))
+      for (const frame of decoded) upstream.push(frame)
+      if (metadata.streamResponse !== true) {
+        for (const frame of decoded) onUpstreamFrame(frame)
+        return new Response('', { status: 200 })
+      }
       sseConnects += 1
       const sse = makeSseDownstream()
       downstream = sse
       init.signal?.addEventListener('abort', () => (sseTornDown = true), { once: true })
       sse.comment()
       sse.pushFrame(encode.streamRequestOpenAck())
+      // Reacted to only once this POST's OWN downstream exists. A connect POST carries the
+      // connection's initial RECONCILE, so answering it any earlier would push the RECONCILED onto
+      // the PREVIOUS (already aborted) stream — the client would never settle, and would reconnect
+      // forever. Invisible until something reconnects, which is exactly the fallback path.
+      for (const frame of decoded) onUpstreamFrame(frame)
       return new Response(sse.stream as BodyInit, {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
@@ -340,7 +492,9 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
             first = false // metadata header
             continue
           }
-          upstream.push(decode(chunk))
+          const frame = decode(chunk)
+          upstream.push(frame)
+          onUpstreamFrame(frame)
         }
         resolve(new Response('', { status: 200 }))
       })().catch(reject)
@@ -350,13 +504,20 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
   // Same `connectionKey` for every channel ⇒ `getOrCreate` returns the one instance and registers
   // each channel on it, exactly as `ClientChannel`'s constructor does in production.
   const connectionKey = crypto.randomUUID()
-  let connection!: ClientConnection
-  for (const channel of channels) {
-    connection = ClientConnection.getOrCreate('http://upgrade.test.local/_telefunc', channel as never, {
+  const telefuncUrl = 'http://upgrade.test.local/_telefunc'
+  const registerChannel = (channel: HarnessClientChannel): ClientConnection =>
+    ClientConnection.getOrCreate(telefuncUrl, channel as never, {
       transports: ['sse', 'ws'],
       fetchImpl,
       connectionKey,
     })
+  let connection!: ClientConnection
+  for (const channel of channels) connection = registerChannel(channel)
+
+  const upgradeTag = (): string => {
+    const state = (connection as unknown as { state: { tag: string; upgrade?: { tag: string } } }).state
+    if (state.tag !== 'open') return state.tag
+    return state.upgrade?.tag ?? 'none'
   }
 
   const firstReconcile = (): (DecodedFrame & { tag: typeof TAG.RECONCILE }) | undefined =>
@@ -370,18 +531,37 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
   if (open.length !== channels.length) {
     throw new Error(`Harness expected ${channels.length} channel(s) in the first RECONCILE, got ${open.length}`)
   }
-  downstream!.pushFrame(encode.reconciled(reconciledPayload(open.map((entry) => ({ ix: entry.ix, lastSeq: 0 })))))
+  downstream!.pushFrame(
+    encode.reconciled(
+      reconciledPayload(
+        open.map((entry) => ({ ix: entry.ix, lastSeq: 0 })),
+        undefined,
+        opts.barrierUpgrade,
+      ),
+    ),
+  )
+  autoReconcileArmed = true
 
   // 2) The upgrade probe opens a WS. The stub auto-pongs, so `probe()` resolves.
   await waitUntil(() => stub.sockets.length > 0, 'WS probe socket opened')
   const socket = stub.sockets[0]!
 
-  // 3) `drainOldWire` closes the streamRequest body and awaits the POST; then the transport flips
-  //    and `_onTransportOpen(ws)` emits the handoff RECONCILE (`upgrade: true`).
-  await waitUntil(
-    () => socket.sent.some((f) => f.tag === TAG.RECONCILE && f.payload.upgrade === true),
-    'client entered the upgrade handoff',
-  )
+  // 3) Drive to the point each flow makes both wires observable.
+  if (!opts.barrierUpgrade) {
+    // Legacy: `drainOldWire` closes the streamRequest body and awaits the POST; then the transport
+    // flips and `_onTransportOpen(ws)` emits the handoff RECONCILE (`upgrade: true`).
+    await waitUntil(
+      () => socket.sent.some((f) => f.tag === TAG.RECONCILE && f.payload.upgrade === true),
+      'client entered the upgrade handoff',
+    )
+  } else if (opts.prepare !== 'ready') {
+    // No READY is coming, so the attempt cannot progress past `preparing`. Stop at the PREPARE.
+    await waitUntil(() => prepares.length > 0, 'client sent its PREPARE')
+  } else {
+    // Barrier: the old wire's FINAL frame is the barrier itself; the transport flip follows it
+    // synchronously, so this is also the point at which the client is in the handoff.
+    await waitUntil(() => barriers.length > 0, 'client emitted its upgrade barrier')
+  }
 
   return {
     channels,
@@ -395,7 +575,25 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
       pushFrame: (frame) => socket.emit(frame),
       sent: socket.sent,
     },
-    inHandoff: () => socket.sent.some((f) => f.tag === TAG.RECONCILE && f.payload.upgrade === true),
+    // Read off the live state machine rather than inferred from the wire: on the barrier flow the
+    // new wire never sends a RECONCILE at all, so the legacy wire-signal would read false forever.
+    inHandoff: () => upgradeTag() === 'handoff',
+    sockets: stub.sockets,
+    prepares,
+    barriers,
+    upgradeTag,
+    register: (id) => {
+      const channel = createHarnessChannel(id)
+      channels.push(channel)
+      registerChannel(channel)
+      return channel
+    },
+    sendReady: (upgradeId) => {
+      const id = upgradeId ?? prepares.at(-1)?.upgradeId
+      if (id === undefined) throw new Error('sendReady() called before the client sent a PREPARE')
+      stagedSocket = socket
+      socket.emit(encode.ready({ upgradeId: id }))
+    },
     handoffDrained: () => sseTornDown,
     sseConnects: () => sseConnects,
     send: (channelIndex, data) => {
@@ -411,6 +609,13 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
     dispose: () => {
       downstream?.close()
       socket.close()
+      // Tear down the CONNECTION, not just its wires. A harness whose upgrade was still in flight
+      // otherwise keeps reconnecting after its test ends, and the WS sockets it opens land in the
+      // NEXT test's stub array — which is precisely the observable the stickiness and
+      // socket-identity specs assert on. Reaching for the private method is deliberate: there is no
+      // public teardown, and leaving the leak in place would make those assertions read the wrong
+      // connection's behaviour.
+      ;(connection as unknown as { dispose: () => void }).dispose()
       stub.restore()
     },
   }
