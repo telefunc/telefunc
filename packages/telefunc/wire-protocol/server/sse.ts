@@ -176,7 +176,12 @@ class SseConnectionTransport {
     connection.pendingDispatches.add(drain)
     try {
       const outcome = await drain
-      if (outcome !== null && !connection.closed) this.mux.sendReconciled(connection, outcome)
+      // `connection.closed` guards the wrong wire once a barrier commit sets `deliverTo`: the
+      // reconciled belongs to the staged WS, and this SSE connection is the one the client is
+      // deliberately retiring. `mux.send` already no-ops on a connection with no live entry.
+      if (outcome !== null && (outcome.deliverTo !== undefined || !connection.closed)) {
+        this.mux.sendReconciled(connection, outcome)
+      }
     } finally {
       connection.pendingDispatches.delete(drain)
     }
@@ -199,7 +204,9 @@ class SseConnectionTransport {
     } finally {
       connection.resolveReady()
     }
-    if (outcome === null || connection.closed) return
+    // Same `deliverTo` exception as `handleBatchPost`: a barrier commit's reconciled is bound for
+    // the staged WS, so this connection being closed must not suppress it.
+    if (outcome === null || (outcome.deliverTo === undefined && connection.closed)) return
     if (connection.pendingDispatches.size > 0) await Promise.allSettled(connection.pendingDispatches)
     this.mux.sendReconciled(connection, outcome)
   }

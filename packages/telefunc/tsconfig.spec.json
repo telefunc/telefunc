@@ -31,7 +31,10 @@
     "wire-protocol/upgrade.handoff-order.spec.ts",
     "wire-protocol/upgrade.loss.spec.ts",
     "wire-protocol/upgrade.wire-codec.spec.ts",
-    "wire-protocol/upgrade.staging.spec.ts"
+    "wire-protocol/upgrade.staging.spec.ts",
+    "wire-protocol/upgrade.barrier.spec.ts",
+    "wire-protocol/upgrade.barrier-batch.spec.ts",
+    "wire-protocol/upgrade.admission-caps.spec.ts"
   ],
   "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"]
 }

@@ -30,7 +30,7 @@ import {
   type ReconcilePayload,
   type ReconciledPayload,
 } from './shared-ws.js'
-import { CHANNEL_TRANSPORT } from './constants.js'
+import { CHANNEL_TRANSPORT, UPGRADE_MAX_ID_BYTES, UPGRADE_MAX_OPEN_ENTRIES } from './constants.js'
 import { createMuxHarness, reconcileFrame, settle } from './upgrade-mux-harness.js'
 
 let harness: ReturnType<typeof createMuxHarness> | null = null
@@ -41,11 +41,11 @@ afterEach(() => {
 
 // ===== Codec =====
 
-/** The admission caps T4 will enforce (plan Phase 2 § Limits). Encoded here so the "max shape"
- *  round-trips are sized to the largest payload the protocol will ever legally carry, not to an
- *  arbitrary big number. */
-const MAX_OPEN_ENTRIES = 1024
-const MAX_ID_BYTES = 256
+/** The admission caps T4 enforces, imported rather than restated: the "max shape" round-trips
+ *  below must be sized to the largest payload the protocol will ever LEGALLY carry, and a local
+ *  copy would let the codec's idea of "maximum" drift silently away from the server's. */
+const MAX_OPEN_ENTRIES = UPGRADE_MAX_OPEN_ENTRIES
+const MAX_ID_BYTES = UPGRADE_MAX_ID_BYTES
 
 const maxOpenList = (): PreparePayload['open'] =>
   Array.from({ length: MAX_OPEN_ENTRIES }, (_, ix) => ({ id: String(ix).padStart(MAX_ID_BYTES, 'x'), ix }))
@@ -198,10 +198,13 @@ describe('the additions change no server behavior', () => {
     expect(reconciled?.tag === TAG.RECONCILED && reconciled.payload.barrierUpgrade).toBe(true)
   })
 
-  test('a barrier:true RECONCILE still routes through the unchanged dispatch to reconcile', async () => {
-    // T3 adds the FIELD, not its handling. The server must treat this frame as the ordinary
-    // reconcile it has always been: answer it with a RECONCILED that re-sessions the wire and
-    // re-attaches ix 0 — and above all NOT terminate the connection as a protocol violation.
+  // ── UPDATED BY T4 ── This test previously asserted the opposite: that a `barrier: true` reconcile
+  // still routed through the unchanged dispatch to the ordinary `reconcile`, because T3 added the
+  // FIELD and not its handling. T4 adds the handling, so the frame is now routed to the barrier
+  // commit path — and a barrier naming no staged upgrade is a protocol violation rather than a
+  // free destructive rotation. That inversion is the point of the flag, and it is asserted here so
+  // the codec spec cannot silently claim inertness the server no longer has.
+  test('a barrier:true RECONCILE is now routed to the commit path, not the ordinary reconcile', async () => {
     const h = (harness = createMuxHarness())
     const s0 = await connectSse(h)
 
@@ -210,18 +213,16 @@ describe('the additions change no server behavior', () => {
     )
     await settle()
 
-    expect(h.sse.terminated()).toBe(false)
-    const answers = h.sse.sent.filter((f) => f.tag === TAG.RECONCILED)
-    expect(answers).toHaveLength(2)
-    const settled = answers[1]
-    expect(settled?.tag === TAG.RECONCILED && settled.payload.open).toEqual([{ ix: 0, lastSeq: 0 }])
-    // Same wire, rotated session — the ordinary reconcile outcome.
-    expect(h.sse.sessionId()).not.toBe(s0)
+    expect(h.sse.terminated()).toBe(true)
+    // Refused BEFORE any side effect: no second reconciled, no rotation.
+    expect(h.sse.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(1)
+    expect(h.sse.sessionId()).toBe(s0)
   })
 
-  test('control: the identical reconcile WITHOUT the barrier fields produces the same outcome', async () => {
-    // Without this twin, the test above would pass on a server that ignored the frame entirely
-    // in some new barrier-specific way. Pairing them proves the two paths are the same path.
+  test('control: the identical reconcile WITHOUT the barrier fields is still an ordinary reconcile', async () => {
+    // The discriminator for the test above, and now load-bearing: it proves the rejection is caused
+    // by the `barrier` flag specifically and not by anything else in the frame. Byte-for-byte the
+    // same reconcile minus that one field still rotates the wire exactly as it always has.
     const h = (harness = createMuxHarness())
     const s0 = await connectSse(h)
 

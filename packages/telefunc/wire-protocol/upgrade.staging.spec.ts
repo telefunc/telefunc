@@ -144,10 +144,12 @@ describe('pre-COMMITTED probe-wire policy', () => {
 
     await h.ws.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
 
+    // Scoped to the rotation the guard exists to prevent. The stage cleanup that ALSO happens on a
+    // violation is asserted by cleanup path 5 below, on its own, so a regression in either is
+    // reported by the test named for it.
     expect(h.ws.terminated()).toBe(true)
     expect(h.ws.sessionId()).toBeUndefined() // ← the rotation the guard exists to prevent
     expect(h.ws.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(0)
-    expect(h.mux._getUpgradeResourceSnapshot()).toMatchObject({ records: 0, reverseRecords: 0, bytes: 0 })
     expect(h.sse.terminated()).toBe(false)
     await expectSseStillDelivers(h, chA)
   })

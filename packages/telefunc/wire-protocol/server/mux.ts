@@ -43,6 +43,13 @@ type ReconcileOutcome = {
   sessionId: string
   openList: ReconciledPayload['open']
   finalizeUpgrade: (() => void) | null
+  /** Set only by a barrier commit: the reconcile ran on the OLD wire's recv chain but belongs to
+   *  the staged probe wire, so its `reconciled` must be delivered there instead of to the
+   *  connection that hosted the turn. Absent on every ordinary reconcile. */
+  deliverTo?: unknown
+  /** Set only by a barrier commit — this is what makes the frame a COMMITTED rather than an
+   *  ordinary RECONCILED, so a delayed one can never be consumed as the commit of an attempt. */
+  upgradeId?: string
 }
 
 /** Admission limits for the barrier upgrade. Named immutable defaults in production; tests
@@ -89,6 +96,11 @@ type UpgradeResourceSnapshot = {
   bytes: number
 }
 
+/** Which wire dies if this turn throws. Defaults to the wire the frame arrived on; the barrier
+ *  branch retargets it to the staged probe wire, because a rejected commit must leave the old SSE
+ *  session untouched — killing the connection whose chain merely HOSTED the turn inverts the rule. */
+type ViolationTarget = { connection: unknown }
+
 const textEncoder = new TextEncoder()
 
 type MuxServerOptions = {
@@ -123,6 +135,11 @@ type ConnectionState = {
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
   closed: { isPermanent: boolean } | null
+  /** Set on the OLD wire once its barrier has committed. The barrier is that wire's final frame
+   *  by contract, so anything after it is a violation — and it has to be caught by name, because
+   *  the routing lookup below would otherwise swallow it silently (the connection still reports
+   *  the rotated-away session id, so `sessions.get` misses for every ix). */
+  retiredByBarrier: boolean
 }
 
 type ConnectionEntry = {
@@ -202,7 +219,14 @@ class ChannelMux {
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
     this.connectionEntries.set(connection, {
-      state: { pingTimer: null, terminatePermanently: null, reconciling: false, recvChain: null, closed: null },
+      state: {
+        pingTimer: null,
+        terminatePermanently: null,
+        reconciling: false,
+        recvChain: null,
+        closed: null,
+        retiredByBarrier: false,
+      },
       transport: transport as ServerTransport<unknown>,
     })
     const connId = transport.getConnId(connection)
@@ -223,9 +247,13 @@ class ChannelMux {
   }
 
   sendReconciled(connection: unknown, outcome: ReconcileOutcome): void {
+    // A barrier commit ran on the old wire's chain but reconciled the STAGED wire, so its
+    // `reconciled` belongs there. Every ordinary reconcile leaves `deliverTo` absent and is
+    // unaffected; resolution stays inside `connectionEntries` either way (see `send`).
     this.send(
-      connection,
+      outcome.deliverTo !== undefined ? outcome.deliverTo : connection,
       encode.reconciled({
+        upgradeId: outcome.upgradeId,
         sessionId: outcome.sessionId,
         open: outcome.openList,
         reconnectTimeout: this.options.reconnectTimeout,
@@ -293,14 +321,20 @@ class ChannelMux {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
     const exec = async (): Promise<ReconcileOutcome | null> => {
+      const violation: ViolationTarget = { connection }
       try {
-        const pending = this.handleFrame(entry, connection, rawFrame)
+        const pending = this.handleFrame(entry, connection, rawFrame, violation)
         return pending ? ((await pending) ?? null) : null
       } catch {
+        const target = violation.connection
+        // `target === connection` is every pre-existing path, and resolves to the entry captured
+        // above exactly as before. Only a barrier retargets, and then the wire may already be gone.
+        const targetEntry = target === connection ? entry : this.connectionEntries.get(target)
+        if (!targetEntry) return null
         // A wire being torn down can never commit its stage.
-        this.clearStage(connection)
-        entry.state.terminatePermanently = true
-        entry.transport.terminateConnection(connection)
+        this.clearStage(target)
+        targetEntry.state.terminatePermanently = true
+        targetEntry.transport.terminateConnection(target)
         return null
       }
     }
@@ -314,6 +348,7 @@ class ChannelMux {
     entry: ConnectionEntry,
     connection: unknown,
     rawFrame: Uint8Array<ArrayBuffer>,
+    violation: ViolationTarget,
   ): null | Promise<ReconcileOutcome | null> {
     const frame = decode(rawFrame)
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, connection, frame.payload, rawFrame.byteLength)
@@ -321,9 +356,12 @@ class ChannelMux {
       // The dispatch hole: RECONCILE is handled here, ABOVE the session-less guard below, so
       // without this line a reconcile on a staged probe wire would run the destructive rotation
       // and step around the stage entirely. A barrier-flagged copy is equally wrong on this wire —
-      // the barrier belongs on the OLD one — and saying so by name beats relying on a downstream
-      // check to reject it as a side effect.
+      // the barrier belongs on the OLD one — and saying so by name beats relying on the
+      // live-session check downstream to reject it as a side effect.
       if (this.stagedUpgrades.has(connection)) throw new ProtocolViolationError()
+      if (frame.payload.barrier) {
+        return this.handleBarrier(entry, connection, frame.payload, rawFrame.byteLength, violation)
+      }
       return this.reconcile(entry, connection, frame.payload)
     }
     if (frame.tag === TAG.PING) {
@@ -333,6 +371,9 @@ class ChannelMux {
     }
     const sessionId = entry.transport.getSessionId(connection)
     if (!sessionId) throw new ProtocolViolationError()
+    // Post-barrier traffic on the retired old wire. Caught here rather than left to the routing
+    // lookup below, which drops it with no throw, no counter and nothing to alert on.
+    if (entry.state.retiredByBarrier) throw new ProtocolViolationError()
     // PONG/FIN/RECONCILED are server→client only; a client sending one is a violation.
     if (isConnCtrlTag(frame.tag)) throw new ProtocolViolationError()
     // Frame for an ix that's no longer in the session — client closed the channel and the
@@ -341,7 +382,7 @@ class ChannelMux {
     return null
   }
 
-  // ── Barrier upgrade: staging ────────────────────────────────────────
+  // ── Barrier upgrade: staging + commit ───────────────────────────────
 
   /** Validates, installs ONE metadata-only record, enqueues `READY` and RETURNS. Nothing is ever
    *  awaited on the probe wire's recv chain: leaving a turn pending there would retain every later
@@ -384,8 +425,61 @@ class ChannelMux {
     return null
   }
 
-  /** Idempotent, and the ONLY writer that RETIRES staged accounting — so every cleanup path
-   *  refunds the byte charge and both map entries by construction rather than by discipline. */
+  /** The barrier arrives on the OLD wire and commits the staged probe wire. It runs as an ordinary
+   *  turn on that wire's `recvChain`, so the happens-before edge over every earlier old-wire frame
+   *  already exists by construction — nothing here awaits anything cross-wire.
+   *
+   *  Commits by handing the STAGED connection's entry to the existing, unmodified `reconcile`: the
+   *  send closure, `setSessionId`, the new finalizer and `state.reconciling` all bind to the probe
+   *  wire because that is the entry they are given. The one thing that must bind to the old wire —
+   *  FIN — does so untouched, since `buildUpgradeFinalizer` reads the PREVIOUS session's finalizer,
+   *  registered against the old connection on its own reconcile. */
+  private handleBarrier(
+    entry: ConnectionEntry,
+    connection: unknown,
+    ctrl: ReconcilePayload,
+    rawByteLength: number,
+    violation: ViolationTarget,
+  ): Promise<ReconcileOutcome> {
+    const sessionId = ctrl.sessionId
+    if (!sessionId) throw new ProtocolViolationError()
+    const wsConnection = this.stagedByPrevSession.get(sessionId)
+    if (wsConnection === undefined) throw new ProtocolViolationError()
+    const stage = this.stagedUpgrades.get(wsConnection)
+    if (!stage) throw new ProtocolViolationError()
+
+    // From here every failure is the staged wire's: a rejected commit must leave the old SSE
+    // session fully intact. Clearing first also makes the stage single-use — a duplicate barrier
+    // finds nothing and can never rotate twice.
+    violation.connection = wsConnection
+    this.clearStage(wsConnection)
+
+    this.validateUpgradeFrame(ctrl.open, rawByteLength)
+    // TWO checks for two distinct defects; neither substitutes for the other. The id closes stale
+    // settlement (a delayed ordinary reconciled consumed as this attempt's commit). The live-session
+    // equality closes concurrent rotation: an intervening register-reconcile can rotate the old wire
+    // S0→S1 underneath a stage for S0, and committing against dead S0 sends no FIN at all while
+    // leaving S1 holding handles to channels already re-attached to the probe wire.
+    if (ctrl.upgradeId !== stage.upgradeId) throw new ProtocolViolationError()
+    if (entry.transport.getSessionId(connection) !== stage.prevSessionId) throw new ProtocolViolationError()
+
+    // `state.closed` is deliberately NOT also checked: `onConnectionClosed` deletes the entry in
+    // the same breath as it sets that flag, so a closed wire is always simply absent here. A
+    // second condition would read as defence and be unreachable — verified by mutation.
+    const wsEntry = this.connectionEntries.get(wsConnection)
+    if (!wsEntry) throw new ProtocolViolationError()
+
+    // The old wire is spent: the barrier is its final frame by contract.
+    entry.state.retiredByBarrier = true
+    return this.reconcile(wsEntry, wsConnection, ctrl).then((outcome) => ({
+      ...outcome,
+      deliverTo: wsConnection,
+      upgradeId: stage.upgradeId,
+    }))
+  }
+
+  /** Idempotent, and the ONLY writer of the staged accounting — so every one of the six cleanup
+   *  paths refunds the byte charge and both map entries by construction rather than by discipline. */
   private clearStage(wsConnection: unknown): void {
     const stage = this.stagedUpgrades.get(wsConnection)
     if (!stage) return
