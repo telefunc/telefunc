@@ -432,7 +432,7 @@ type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] }
 /** Global demand for one of a member's own published tracks, pushed to that member's stub
  *  (`onDemand`) whenever the owning node's aggregate count changes. `track` is `null` for the
  *  default `publishBinary()` lane. `count` is the approximate number of interested subscribers. */
-type RoomDemandEvent = { __r: 'demand'; member: string; track: string | null; count: number }
+type RoomDemandEvent = { __r: 'demand'; member: string; track: string | null; wanted: boolean }
 
 /** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
  *  privacy: only the target's owning node subscribes, only its holder receives the relay.
@@ -493,7 +493,7 @@ type ParticipantStubNotice =
   | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
   | { __r: 'p-meta'; meta: ParticipantMeta }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
-  | { __r: 'demand'; track: string | null; count: number }
+  | { __r: 'demand'; track: string | null; wanted: boolean }
 
 /** Which members' streams a holder wants on the text lane — `all` for room-level listeners,
  *  or a specific member set for participant-scoped ones. */

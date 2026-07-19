@@ -413,8 +413,8 @@ function bindParticipantStubChannel(
   })
 
   // Demand updates for this member's own tracks (onDemand) — forwarded to the client holder.
-  const unlistenDemand = participant.onDemand((track, count) => {
-    void channel.send({ __r: 'demand', track, count }).catch(() => {})
+  const unlistenDemand = participant.onDemand((track, wanted) => {
+    void channel.send({ __r: 'demand', track, wanted }).catch(() => {})
   })
 
   const unlistenLeave = participant.onLeave((cause) => {

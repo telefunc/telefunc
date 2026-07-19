@@ -50,7 +50,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private _leftCause: LeaveCause | null = null
   private _leaveCbs: Array<(cause: LeaveCause) => void> = []
   private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => unknown> = []
-  private readonly _demandCbs: Array<(track: string | null, count: number) => void> = []
+  private readonly _demandCbs: Array<(track: string | null, wanted: boolean) => void> = []
   /** DMs delivered before the first `listen()` — held bounded, flushed on attach, then never
    *  allocated again (`null` = flushed or empty; zero steady-state cost). An entry carries an
    *  `ackResolve` when the sender awaits a reply — resolved when the hold flushes (or on leave). */
@@ -187,7 +187,7 @@ abstract class ParticipantBase implements LocalParticipant {
     return null
   }
 
-  onDemand(callback: (track: string | null, count: number) => void): () => void {
+  onDemand(callback: (track: string | null, wanted: boolean) => void): () => void {
     this._demandCbs.push(callback)
     return () => {
       const i = this._demandCbs.indexOf(callback)
@@ -195,12 +195,12 @@ abstract class ParticipantBase implements LocalParticipant {
     }
   }
 
-  /** @internal — the global demand for one of this member's tracks changed (see the room's
-   *  demand aggregation). `track` is `null` for the default `publishBinary()` lane. */
-  _onDemand(track: string | null, count: number): void {
+  /** @internal — whether any node wants one of this member's tracks flipped (see the room's demand
+   *  aggregation). `track` is `null` for the default `publishBinary()` lane. */
+  _onDemand(track: string | null, wanted: boolean): void {
     for (const cb of [...this._demandCbs]) {
       try {
-        cb(track, count)
+        cb(track, wanted)
       } catch (err) {
         this._reportError(err)
       }

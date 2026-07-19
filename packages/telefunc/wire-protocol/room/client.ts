@@ -313,8 +313,8 @@ class ClientRoom implements Room {
         this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
         return
       case 'demand':
-        // Global demand for one of our own members' tracks changed (onDemand).
-        this._localParticipants.get(event.member)?._onDemand(event.track, event.count)
+        // Whether anyone wants one of our own members' tracks flipped (onDemand).
+        this._localParticipants.get(event.member)?._onDemand(event.track, event.wanted)
         return
       case 'dm': {
         // Relayed from this member's private inbox — only its own stub ever receives it.
@@ -526,7 +526,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       if (!hasRoomTag(notice)) return
       const msg = notice as ParticipantStubNotice
       if (msg.__r === 'p-meta') this._meta = msg.meta
-      else if (msg.__r === 'demand') this._onDemand(msg.track, msg.count)
+      else if (msg.__r === 'demand') this._onDemand(msg.track, msg.wanted)
       else if (msg.__r === 'dm') {
         const inbox: InboxMessage = {
           from: msg.from,

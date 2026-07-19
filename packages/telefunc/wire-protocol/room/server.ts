@@ -668,7 +668,7 @@ class ServerRoom implements Room {
     this._demand = new RoomDemand(
       (event) => void publishCtrl(roomId, { __r: 'want', ...event }).catch(reportRoomError),
       (id) => this._ownsMember(id),
-      (member, track, count) => this._deliverDemand(member, track, count),
+      (member, track, wanted) => this._deliverDemand(member, track, wanted),
     )
   }
 
@@ -1757,18 +1757,18 @@ class ServerRoom implements Room {
     return false
   }
 
-  /** Route a member's freshly-changed global demand count (aggregated by `RoomDemand`) to its
-   *  holder — the local participant's `onDemand`, or the one client stub it joined through. */
-  private _deliverDemand(member: string, track: string, count: number): void {
+  /** Route a member's freshly-changed track demand (aggregated by `RoomDemand`) to its holder —
+   *  the local participant's `onDemand`, or the one client stub it joined through. */
+  private _deliverDemand(member: string, track: string, wanted: boolean): void {
     const trackOut = track === DEFAULT_TRACK ? null : track
     const local = this._localParticipants.get(member)
     if (local) {
-      local._onDemand(trackOut, count)
+      local._onDemand(trackOut, wanted)
       return
     }
     for (const stub of this._stubs) {
       if (stub._stubMembers.has(member)) {
-        stub._relayDemand({ __r: 'demand', member, track: trackOut, count })
+        stub._relayDemand({ __r: 'demand', member, track: trackOut, wanted })
         return
       }
     }

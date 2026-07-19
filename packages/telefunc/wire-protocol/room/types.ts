@@ -363,12 +363,13 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
    *  sender (the last handler's return wins). Returns an unlisten function. */
   listen(callback: (data: unknown, from: Sender<P> | null) => unknown): () => void
 
-  /** Watch the live demand for your own published tracks: `(track, count)` fires when the number
-   *  of subscribers to one of your streams changes (`track` is `null` for the default
-   *  `publishBinary()` lane). `count === 0` means nobody is watching — the event-driven signal to
-   *  pause the encoder; a later non-zero fires when a viewer returns, so you can resume without
-   *  polling. Aggregated across all server nodes. Returns an unsubscribe function. */
-  onDemand(callback: (track: string | null, count: number) => void): () => void
+  /** Watch whether anyone wants your published tracks: `(track, wanted)` fires when a stream of yours
+   *  goes watched↔unwatched (`track` is `null` for the default `publishBinary()` lane). `wanted === false`
+   *  means nobody anywhere is watching — the event-driven signal to pause the encoder; `true` fires when a
+   *  viewer returns, so you can resume without polling. It's a boolean, not a count: demand is aggregated
+   *  across all server nodes, and a node reports only "any" (not how many), so the system can know *whether*
+   *  a track is wanted but never the precise subscriber number. Returns an unsubscribe function. */
+  onDemand(callback: (track: string | null, wanted: boolean) => void): () => void
   /** Replace your metadata wholesale. Propagates to all observers in real time. */
   setMeta(meta: P): Promise<void>
   /** Merge into your metadata per key — other keys keep their value, a key set to `undefined`

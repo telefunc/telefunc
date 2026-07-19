@@ -305,17 +305,17 @@ member.subscribeBinary((data, { meta, track }) => video.decode(data, { key: meta
 
 **Subscribe only to what you render.** Watching 9 of 500 cameras? Subscribe to those 9 members, and the other 491 streams never reach you; your server never fetches them at all. The same holds per track: stop watching a screen share and its bytes stop flowing to you.
 
-**Pause the encoder when nobody's watching.** `onDemand` fires when demand for one of your tracks changes. `0` means nobody anywhere is watching; a later non-zero means a viewer returned:
+**Pause the encoder when nobody's watching.** `onDemand` fires when a track of yours goes watched or unwatched. `wanted` is `false` when nobody anywhere is watching; `true` when a viewer returns:
 
 ```js
-me.onDemand((track, count) => {
-  if (track === 'screen') count === 0 ? encoder.pause() : encoder.resume()
+me.onDemand((track, wanted) => {
+  if (track === 'screen') wanted ? encoder.resume() : encoder.pause()
 })
 ```
 
 Each `publishBinary()` receipt also reports `receivers`, the track's live subscription count at that moment. Use it to react while you're publishing; use `onDemand` to learn when to resume once you've paused.
 
-Across nodes, `onDemand`'s `count` is aggregated by gossip on the control lane, so it converges rather than updating instantly: a viewer on another node takes a beat to reflect. That's exactly what an encoder pause/resume wants (a signal, not a hard gate), and on a single node it's exact. Treat `count === 0` as "resume when it goes non-zero," not a real-time interlock.
+Across nodes, `onDemand`'s `wanted` is aggregated by gossip on the control lane, so it converges rather than updating instantly: a viewer on another node takes a beat to reflect. That's exactly what an encoder pause/resume wants (a signal, not a hard gate). It's a boolean, not a count, on purpose: a node reports only whether it has any watcher, so the room learns whether a track is wanted, never how many want it. Treat `wanted === false` as "resume when it flips true," not a real-time interlock.
 
 **Seed late subscribers with a keyframe.** A subscriber that joins mid-stream can't apply your deltas until it gets a keyframe. Mark keyframes `{ retain: true }` and the server keeps the last one per track, replaying it to every new subscriber before any live frame:
 
@@ -518,7 +518,7 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 | `send(to, data, { ack: true })` | Confirmed send: waits for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting if the recipient leaves — or with the handler's `Abort` (a plain throw is hidden as a bug). |
 | `listen(cb)` | Receive private messages: `(data, from)`, `from` is `null` for room-authored. Return a value to reply to a `send(…, { ack: true })` sender; `throw Abort(value)` to reject them with it. |
 | `setMeta(meta)` / `setAttributes(partial)` | Replace / merge your metadata. |
-| `onDemand(cb)` | `(track, count)` when demand for one of your tracks changes; `count === 0` means nobody watching. |
+| `onDemand(cb)` | `(track, wanted)` when a track of yours goes watched or unwatched; `wanted === false` means nobody watching. |
 | `leave()` / `onLeave(cb)` | Leave / observe your own departure: `cause.type` is `'left' \| 'removed' \| 'closed' \| 'disconnected'`. |
 
 Read-only: `id`, `meta`, `identity`, `selfDelivery`. A participant leaves automatically when its holder's connection is gone (`cause: 'disconnected'`).
