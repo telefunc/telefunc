@@ -30,10 +30,14 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     // producer whose attached source reserved resources BEFORE serializing (as the read-capture engine's
     // does, to register its graph before the snapshot read) still has to reclaim those itself.
     const channel = context.createChannel<never, LiveEvent>()
-    // The producer's coalesced invalidation rides the channel; the channel owns its teardown. This tap
-    // MUST be installed BEFORE `activate()`: activation subscribes this Live's invalidation source, and a
-    // source that replays a catch-up synchronously on subscribe would fire with no tap attached otherwise
-    // — the client would keep a snapshot it should have refetched.
+    // The producer's coalesced invalidation rides the channel; the channel owns its teardown.
+    //
+    // The tap is installed BEFORE `activate()` so that subscription ordering can never matter. Inherited
+    // from core with a stronger claim than it can carry ("MUST … otherwise the client keeps a stale
+    // snapshot"): a mutation moving this below `activate()` SURVIVES the suite, because `invalidate()`
+    // defers to a microtask — a source replaying a catch-up synchronously on subscribe sets the pending
+    // flag and flushes after the tap is attached either way. Kept in this order regardless, since it costs
+    // nothing and removes the question; recorded as defence in depth rather than a proven invariant.
     // The signal IS the message — its arrival is the event, so nothing is carried.
     const offInvalidate = live.onInvalidate(() => void channel.send(undefined))
     // Deferred activation, refcounted by cell-local leases: cascade-activate this cell's pending

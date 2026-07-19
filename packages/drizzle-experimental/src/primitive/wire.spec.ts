@@ -90,10 +90,13 @@ describe('the Live wire — server replacer', () => {
     expect(subscribe).not.toHaveBeenCalled()
   })
 
-  it('the invalidation tap is installed BEFORE activation — a source that replays on subscribe is not lost', () => {
-    // The ordering bug this guards: activation subscribes the source, and a source that fires a catch-up
-    // synchronously ON subscribe would emit with no tap attached — the client keeps a snapshot it should
-    // have refetched. Asserted by making the source do exactly that.
+  it('a source that replays a catch-up synchronously on subscribe still reaches the wire', () => {
+    // NARROWED to what this can actually observe. It was written as "the tap is installed BEFORE
+    // activate()", and a mutation that moved the tap AFTER activate() SURVIVED it — because
+    // `invalidate()` always defers to a microtask, so a synchronous replay sets the pending flag and
+    // flushes later, by which time the tap is attached in either order. That is the observer-above-a-
+    // coalescer shape: the assertion could not see the ordering it named. The tap ordering in
+    // wireServer.ts is therefore defence in depth, not a mutation-gated invariant — said so there too.
     const { serverContext, channels } = harness()
     const cell = new LiveCell('a')
     cell.attachSource({
