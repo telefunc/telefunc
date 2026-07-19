@@ -128,6 +128,20 @@ function raceAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<void
   })
 }
 
+/** What `emitBarrier` did — and, when it wrote nothing, whether the wire it declined to write on
+ *  can still carry traffic afterwards. The three outcomes take three different recovery paths, so
+ *  collapsing any two of them silently corrupts one of the cases. */
+type BarrierEmission =
+  /** The barrier bytes may already have reached the server, so no wire can be trusted to hold the
+   *  session: abandon both and reconcile afresh, upgrades sticky-disabled. */
+  | 'emitted'
+  /** Nothing written and the wire is fine: stay on it, upgrades still enabled. */
+  | 'not-emitted'
+  /** Nothing written, but a POST that may never settle owns the flush gate. Every later flush would
+   *  return at that guard, so the wire is de facto dead however healthy it looks — the connection
+   *  must recover it rather than keep pretending. Still a PRE-barrier outcome: not sticky. */
+  | 'wedged'
+
 type OutboundFrameKind = 'reconcile' | 'control' | 'flow-control' | 'ack' | 'data' | 'heartbeat'
 
 type OutboundFrame = {
@@ -234,7 +248,7 @@ type ClientChannelTransport = {
    *  barrier byte reached the wire, so the server's session is untouched and the caller simply
    *  stays on it. `'emitted'` means the barrier may already have committed, so no wire can be
    *  trusted and the caller must abandon both. Guessing either way corrupts a live session. */
-  emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<'emitted' | 'not-emitted'>
+  emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission>
   /** Connection constructs the Heartbeat (with the funnel-bound onDead) and hands it over.
    *  Transport's frame receive path routes PONG to it directly (`heartbeat?.resetPong()`). */
   attachHeartbeat(hb: Heartbeat): void
@@ -1169,12 +1183,25 @@ class ClientConnection implements MuxConnection {
       this.enterUpgradeDraining(attempt)
       const emission = await from.emitBarrier(() => this.buildReconcileFrame({ upgradeId }), attempt.signal)
 
+      if (emission === 'wedged') {
+        // Pre-barrier — nothing was written, so upgrades stay ENABLED and a later settled RECONCILED
+        // may try again — but the old wire cannot make progress: a POST that may never settle owns
+        // its flush gate, so released frames would sit in the outbox behind a guard that never
+        // opens. Lifting the connection gate alone would leave it looking healthy and mute.
+        //
+        // Recovery is the ordinary transport-loss path, which is exactly what a dead wire gets and
+        // is certified since T2: fresh SSE connect, and the frames still in `sendBuffer` released
+        // after its RECONCILED. Deliberately NOT drained into the new wire's outbox first — the
+        // reconnect's initial batch would then carry them AHEAD of the replay of frames the wedged
+        // POST swallowed, and the server would dup-drop the older ones.
+        attempt.abort()
+        this.recoverWedgedOldWire(new NetworkError('Upgrade aborted with the old wire stalled', true))
+        return
+      }
       if (emission === 'not-emitted') {
-        // The attempt ended — deadline, dead wire — with not one barrier byte written. In batch
-        // mode that is the common shape: emission must quiesce first, and a POST that never answers
-        // means the barrier is never even built. The server's session is therefore exactly where it
-        // was, so this is a PRE-barrier failure and the old wire simply carries on;
-        // `exitUpgradeAttempt` in the `finally` lifts the gate this branch is still under.
+        // The attempt ended with not one barrier byte written and the wire still usable, so the
+        // server's session is exactly where it was: stay on it. `exitUpgradeAttempt` in the
+        // `finally` lifts the gate this branch is still under.
         attempt.abort()
         this.rollbackToOldWire()
         return
@@ -1227,6 +1254,29 @@ class ClientConnection implements MuxConnection {
       // blocks while a handoff is still in flight).
       this.flushPendingRegisterReconcile()
     }
+  }
+
+  /** The attempt ended pre-barrier on a wire that can no longer make progress.
+   *
+   *  A replacement transport rather than a reset of the wedged one: the stalled POST still owns
+   *  that instance's flush gate and will only let go if and when it settles, so the instance is
+   *  unusable for as long as it exists. Replacing it also makes the stalled POST's eventual
+   *  settlement harmless — it reports loss against a transport that is no longer
+   *  `this.transport`, which `_onTransportClosed` already ignores, so the successor wire is never
+   *  abandoned by a straggler.
+   *
+   *  Sequenced frames the wedged POST swallowed are not lost: they are still in the per-channel
+   *  replay buffers, and `applyReconciled` re-sends everything past the server's reported
+   *  `lastSeq`. Unsequenced C2S ctrl on a dying wire remains the pre-existing, documented gap.
+   *
+   *  NOT sticky: nothing was emitted, so this attempt cost the connection a reconnect, not its
+   *  ability to upgrade later. */
+  private recoverWedgedOldWire(err: Error): void {
+    const wedged = this.transport
+    this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
+    wedged.abandonActiveTransport()
+    wedged.dispose()
+    this.handleTransportLoss(err)
   }
 
   /** Attempt ended before anything committed: stay on the old wire. The `finally` exits the attempt
@@ -1663,7 +1713,7 @@ class WsTransport implements ClientChannelTransport {
 
   /** Unreachable by construction — `UPGRADE_PATH` only ever upgrades SSE→WS, so a WS wire is never
    *  the one a barrier is emitted on. Mirrors `SseTransport.probe`'s stance on the same asymmetry. */
-  async emitBarrier(): Promise<'emitted' | 'not-emitted'> {
+  async emitBarrier(): Promise<BarrierEmission> {
     throw new Error('WS transport does not emit an upgrade barrier')
   }
 
@@ -1875,7 +1925,7 @@ class SseTransport implements ClientChannelTransport {
   /** The barrier is this wire's last frame. It is never concurrent with another upstream POST,
    *  never retried, and never an ordinary outbox item — all three would let it commit out of order
    *  with frames the server then drops as post-rotation stragglers. */
-  async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<'emitted' | 'not-emitted'> {
+  async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
     if (this.streamRequest.tag === 'active') {
       assert(!this.flushing && this.outbox.length === 0)
       const frame = buildFrame()
@@ -1896,9 +1946,14 @@ class SseTransport implements ClientChannelTransport {
     // impatient in. What bounds the wait is the ATTEMPT SIGNAL, not a shorter timeout.
     await this.gracefulDrain(UPGRADE_DRAIN_TIMEOUT_MS)
     while (this.flushing) {
-      // Every exit above the build below is honestly `'not-emitted'`: the barrier frame has not
-      // even been constructed, let alone written, so the old session is exactly as it was.
-      if (!this.hasWire() || signal.aborted) return 'not-emitted'
+      // Checked BEFORE the abort: a wire that already died has its own recovery in flight, and
+      // reporting it wedged here would reconnect a second time on top of that one.
+      if (!this.hasWire()) return 'not-emitted'
+      // Aborted with a flush STILL in flight. Nothing was written, so this stays a pre-barrier
+      // outcome — but the POST that owns the flush gate may never settle, and until it does every
+      // `flushOutbox` returns at that guard. Merely un-gating the connection here would leave a
+      // wire that reports itself healthy and silently carries nothing.
+      if (signal.aborted) return 'wedged'
       await raceAbort(new Promise<void>((resolve) => this.drainCallbacks.push(resolve)), signal)
     }
     if (!this.hasWire() || signal.aborted) return 'not-emitted'

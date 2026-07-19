@@ -140,36 +140,94 @@ describe('F1 — held pre-flip frames obey the handoff cap and its fallback', ()
 })
 
 describe('F2 — the attempt deadline can interrupt batch-mode emission', () => {
-  test('a prior POST hangs before the barrier: the attempt gives up and un-gates the old wire', async () => {
+  test('a prior POST hangs before the barrier: C2S traffic actually RESUMES on the wire', async () => {
+    // ── The observer here is the whole point of this test ────────────────────────────────────
+    // The obvious assertion — that `sendBuffer` drained — reads the queue ABOVE the transport and
+    // proves only that frames changed hands. The hung POST still owns `SseTransport.flushing`, so
+    // released frames land in the outbox and every later `flushOutbox` returns at that guard: the
+    // connection reports itself healthy while the wire is permanently mute. So the oracle is
+    // BELOW the transport — a POST body the mock server actually received.
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval'] })
+    const h = await barrierHarness({ batchMode: true, prepare: 'withhold', barrier: 'refuse', autoReconcile: true })
+    expect(h.upgradeTag()).toBe('preparing')
+
+    // A batch POST the server reads and then never answers. `flushing` stays true, so the barrier
+    // can never be emitted: sending it alongside would put two POSTs on the wire with no defined
+    // server-side dispatch order, which is the one thing emission must never do.
+    h.setBatchPostsHang(true)
+    h.send(0, '"stuck"')
+    await waitUntil(() => h.batchPosts.length > 0, 'the batch POST is in flight', 6_000)
+    const postsWhileWedged = h.batchPosts.length
+
+    h.sendReady()
+    await waitUntil(() => h.upgradeTag() === 'draining', 'READY gated the wire for emission', 6_000)
+    h.send(0, '"gated"')
+    expect(h.bufferedSendCount()).toBeGreaterThan(0)
+
+    // The wire is answering again from here, so nothing but the wedge itself is under test.
+    h.setBatchPostsHang(false)
+    await vi.advanceTimersByTimeAsync(UPGRADE_ATTEMPT_TIMEOUT_MS + 500)
+
+    // A wedged flush means that wire is de facto dead, so recovery is the ordinary transport-loss
+    // path — the same one a dead wire gets, certified since T2.
+    await waitUntil(() => h.sseConnects() === 2, 'the stalled wire was recovered by a reconnect', 8_000)
+
+    // Not one barrier byte was written, so the classification stays PRE-barrier. The oracle for
+    // "not sticky" is behavioural rather than a flag read: the settled RECONCILED on the fresh wire
+    // is allowed to start ANOTHER attempt, which a sticky `upgradeDisabled` would have forbidden.
+    expect(h.barriers).toHaveLength(0)
+    await waitUntil(() => h.prepares.length === 2, 'upgrades are still enabled after the recovery', 8_000)
+
+    // THE assertion this test exists for. Above the transport everything already looked fine before
+    // the fix, so the oracle has to be a specific payload the mock server RECEIVED — not a POST
+    // count, which the recovery's own reconnect POSTs would satisfy on their own.
+    const textsOnWire = () =>
+      h.batchPosts
+        .flat()
+        .filter((f): f is DecodedFrame & { tag: typeof TAG.TEXT } => f.tag === TAG.TEXT)
+        .map((f) => f.text)
+    expect(h.batchPosts.length).toBeGreaterThan(postsWhileWedged)
+    h.send(0, '"after-recovery"')
+    await waitUntil(
+      () => textsOnWire().includes('"after-recovery"'),
+      'a frame sent AFTER the deadline reached the server',
+      8_000,
+    )
+    expect(h.channels[0]!.isClosed).toBe(false)
+
+    // Order is preserved across the recovery. `"stuck"` reappears because the wedged POST swallowed
+    // it and the certified replay path re-sent it from the server's reported `lastSeq`; `"gated"`
+    // follows it rather than jumping the queue, because gated frames are released by the
+    // post-RECONCILED drain instead of being carried in the reconnect's initial batch.
+    const texts = textsOnWire()
+    expect(texts).toContain('"stuck"')
+    expect(texts.indexOf('"stuck"')).toBeLessThan(texts.indexOf('"gated"'))
+    expect(texts.indexOf('"gated"')).toBeLessThan(texts.indexOf('"after-recovery"'))
+  }, 30_000)
+
+  test('control: a pre-barrier abort on an IDLE wire does not force a reconnect', async () => {
+    // The discriminator for the recovery above. A wedged flush is what makes the wire unusable;
+    // an attempt that ends with nothing in flight must leave the connection exactly where it was,
+    // or every ordinary pre-barrier timeout would cost a needless reconnect and replay.
     vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval'] })
     const h = await barrierHarness({ batchMode: true, prepare: 'withhold', barrier: 'refuse' })
     expect(h.upgradeTag()).toBe('preparing')
 
-    // A batch POST that the server reads and then never answers. `flushing` stays true, so the
-    // barrier can never be emitted: sending it alongside would put two POSTs on the wire with no
-    // defined server-side dispatch order, which is the one thing emission must never do.
-    h.setBatchPostsHang(true)
-    h.send(0, '"stuck"')
-    await waitUntil(() => h.batchPosts.length > 0, 'the batch POST is in flight', 6_000)
-
-    h.sendReady()
-    await waitUntil(() => h.upgradeTag() === 'draining', 'READY gated the wire for emission', 6_000)
-    // Gated: a send now is held back rather than put on the wire.
-    h.send(0, '"gated"')
-    expect(h.bufferedSendCount()).toBeGreaterThan(0)
-
+    // No POST in flight, and READY never arrives — so the deadline fires while the emitter has not
+    // even been reached.
     await vi.advanceTimersByTimeAsync(UPGRADE_ATTEMPT_TIMEOUT_MS + 500)
-    await waitUntil(() => h.upgradeTag() === 'none', 'the attempt deadline released the gate', 6_000)
+    await waitUntil(() => h.upgradeTag() === 'none', 'the attempt deadline released the attempt', 6_000)
 
-    // Not one barrier byte was written, so this is a PRE-barrier failure: the old wire keeps its
-    // session, no fresh reconcile, and upgrades are not disabled.
     expect(h.barriers).toHaveLength(0)
     expect(h.sseConnects()).toBe(1)
-    // Un-gated: the held frame was released and a new send is not held back.
-    expect(h.bufferedSendCount()).toBe(0)
-    h.send(0, '"after"')
-    expect(h.bufferedSendCount()).toBe(0)
     expect(h.channels[0]!.isClosed).toBe(false)
+
+    // Still the same live wire, still carrying traffic in both directions.
+    const before = h.batchPosts.length
+    h.send(0, '"idle-abort"')
+    await waitUntil(() => h.batchPosts.length > before, 'the untouched wire still carries sends', 6_000)
+    h.sse.pushFrame(encode.text(0, '"downstream"', 1))
+    await waitUntil(() => h.channels[0]!.received.length === 1, 'and still delivers downstream')
   }, 30_000)
 
   test('the barrier POST itself hangs: sticky post-barrier fallback, not a generic reconnect', async () => {
