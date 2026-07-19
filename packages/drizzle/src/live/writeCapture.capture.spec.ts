@@ -14,6 +14,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { captureMutation, captureRawSql } from './writeCapture.js'
 import { oldNewProvenOf, oldNewReturningOf, probeOldNewReturning } from '../binding/database.js'
 import { registryFor } from './dbRuntime.js'
+import { compileQuery } from '../compile/compile.js'
+import { extractQueryShape } from '../extract/queryShape.js'
+import { createLiveGraph } from '../graph/liveGraph.js'
+import { QueryBuilder } from 'drizzle-orm/pg-core'
 import type { TableChange } from '../router/events.js'
 
 const users = pgTable('users', { id: integer('id').primaryKey(), name: text('name') })
@@ -603,7 +607,10 @@ describe('write capture — a version number is believed only until a statement 
     const screen = (text: unknown) => {
       const sql = String(text)
       if (/create temp table/i.test(sql)) throw DENIED()
-      if (/\bold\."/i.test(sql)) throw REJECTED()
+      // Matches capture's OLD-image CORRELATION NAME, not the literal `old.`: the images are bound via
+      // `RETURNING WITH (OLD AS …)` now, and a fake still matching the old spelling would quietly stop
+      // refusing anything and assert the opposite of its own title.
+      if (/tf_old__/i.test(sql)) throw REJECTED()
     }
     const wrap = <T extends object>(target: T): T =>
       new Proxy(target, {
@@ -794,5 +801,98 @@ describe('write capture — a statement CAPTURE substituted never fails the call
     expect(attempts).toBe(1) // ONE attempt — the caller's error was not retried
     expect(batches).toEqual([]) // a write that did not happen invalidates nothing
     await real.close()
+  })
+})
+
+// THE ROW-KEY SPACE, end to end. A captured row arrives keyed by drizzle FIELD names; the graph reads
+// PHYSICAL column names (`rowSpace.projectRaw` looks up the seed descriptor's columns, which the compiler
+// derived from SQL). Where a column is MAPPED — `teamId: integer('team_id')` — those two disagree, and a
+// change emitted in field space matches nothing: the write is captured precisely and then invalidates
+// NOTHING. Every other case in this file uses columns whose field and column names are identical, which is
+// exactly why that could ship unnoticed.
+//
+// So this asserts the CONSEQUENCE — a real compiled graph fires — rather than the shape of the change.
+describe('write capture — an emitted change lands in the space the graphs actually read', () => {
+  const members = pgTable('members', {
+    id: integer('id').primaryKey(),
+    teamId: integer('team_id'), // MAPPED: field `teamId`, column `team_id`
+  })
+
+  /** A live stateless graph over `select … where team_id = 10`, registered on the db's router so a captured
+   *  write reaches it exactly as it would in production. */
+  async function watching(db: object) {
+    const graph = createLiveGraph({
+      kind: 'stateless',
+      instanceKey: 'members-team-10',
+      tables: ['members'],
+      instantiate: () =>
+        compileQuery(
+          extractQueryShape(
+            new QueryBuilder()
+              .select({ id: members.id, teamId: members.teamId })
+              .from(members)
+              .where(eq(members.teamId, 10)),
+            { dialect: 'pg' },
+          ),
+        ).instantiate() as never,
+    })
+    await graph.ready()
+    // Registered the way the REGISTRY registers one in production (`buildInstance`), rather than handing the
+    // router a LiveGraph directly — a LiveGraph is not itself routable, and casting past that would have the
+    // test exercise a shape production never builds.
+    const routable = {
+      tables: ['members'],
+      apply: (changes: Parameters<typeof graph.apply>[0]) => graph.apply(changes),
+      notifyKey: () => 'members-team-10',
+      fault: () => graph.fault(),
+      reseed: () => graph.reseed(),
+    }
+    registryFor(db).router.register(routable)
+    return { graph, routable }
+  }
+
+  it('a write to a MAPPED column invalidates the live query that selects on it', async () => {
+    const client = new PGlite()
+    const db = pgDrizzle({ client })
+    await client.exec('create table members (id int primary key, team_id int)')
+    const { graph, routable } = await watching(db)
+    const before = graph.invalidationSeq()
+
+    // The default sink — ingestWrite → router → graph, the real path.
+    const insert = captureMutation('insert', db.insert.bind(db) as (...a: unknown[]) => unknown, db) as AnyBuilder
+    await insert(members).values({ id: 1, teamId: 10 })
+
+    expect(graph.invalidationSeq()).toBeGreaterThan(before) // fired: the change was readable
+    // …and it is CLASSIFIED, not blanket-fired: a row outside the predicate leaves it alone. Without this
+    // the case would also pass for a graph that simply coarsens on everything.
+    const after = graph.invalidationSeq()
+    await insert(members).values({ id: 2, teamId: 99 })
+    expect(graph.invalidationSeq()).toBe(after)
+
+    registryFor(db).router.unregister(routable)
+    await client.close()
+  })
+})
+
+// The two images are bound to CORRELATION NAMES, not written as bare `old.col` / `new.col`. Bare names are
+// resolved against the query's own scope first, so on a table literally named `old` they select that
+// TABLE's post-update row — a wrong old image, reported as precise.
+describe('write capture — the OLD image survives a table named "old"', () => {
+  const old = pgTable('old', { id: integer('id').primaryKey(), v: integer('v') })
+
+  it('captures the real previous value, not the table’s own post-update row', async () => {
+    const client = new PGlite()
+    const db = pgDrizzle({ client })
+    await client.exec('create table old (id int primary key, v int)')
+    expect(await probeOldNewReturning(db)).toBe(true)
+    await db.insert(old).values({ id: 1, v: 10 })
+
+    const { wrapped, batches } = capturing(db, 'update', db.update.bind(db))
+    await wrapped(old).set({ v: 11 }).where(eq(old.id, 1))
+
+    expect(batches).toEqual([
+      [{ table: 'old', kind: 'update', old: { id: 1, v: 10 }, new: { id: 1, v: 11 }, key: { id: 1 } }],
+    ])
+    await client.close()
   })
 })

@@ -136,6 +136,8 @@ describe('capture planning — fail-closed branches have executable controls', (
       callerReturning: true,
       pk: ['id'],
       columns: ['id', 'name'],
+      physical: { id: 'id', name: 'name' },
+      callerFields: new Set(['id', 'name']),
       positional: ['id', 'name'],
     })
   })

@@ -374,13 +374,7 @@ async function runWrite(
     // is the NEW one. The caller's result is rebuilt from whichever they would have been given.
     return plan.reconstruct(pairs.map((pair) => (op === 'delete' ? pair.old : pair.new)))
   }
-  const rows = await runSubstituted(
-    () => (builder as { returning: () => unknown }).returning(),
-    builder,
-    tx,
-    executeArgs,
-    relationId,
-  )
+  const rows = await runSubstituted(() => substituteFullRow(builder, table), builder, tx, executeArgs, relationId)
   if (rows === SUBSTITUTION_REFUSED) return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
   emitSafely(sink, captureOrCoarse(op, relationId, rows, plan))
   return plan.reconstruct(rows)
@@ -416,6 +410,9 @@ async function runSubstituted(
 ): Promise<Row[] | typeof SUBSTITUTION_REFUSED> {
   const config = writeConfigOf(builder)
   const callerReturning = config?.returning
+  // Restored on EVERY exit, not just the failing ones. The substitution overwrites the builder's RETURNING
+  // in place, so leaving it overwritten after a SUCCESSFUL capture means a second `await` of the same
+  // builder re-runs capture's statement and hands the caller capture's rows instead of their own result.
   const restore = () => {
     if (config) config.returning = callerReturning
   }
@@ -434,7 +431,6 @@ async function runSubstituted(
       await savepoint.release()
       return rows
     } catch (error) {
-      restore()
       if (!isSubstitutionFault(error)) {
         // The caller's own error. Their transaction is aborted exactly as plain Drizzle would have left it,
         // so the savepoint is abandoned rather than rolled back to — rewinding would HIDE their failure.
@@ -444,6 +440,8 @@ async function runSubstituted(
       await savepoint.rewind() // un-abort the transaction so the caller's statement can still run
       reportSubstitutionRefused(relationId, error)
       return SUBSTITUTION_REFUSED
+    } finally {
+      restore()
     }
   }
   // Serialization happens one level up, around the WHOLE write — see `wrapWrite`. It has to: this attempt's
@@ -576,15 +574,36 @@ function reportSavepointBookkeepingFailed(relationId: string, statement: string,
   )
 }
 
-/** Whether an error is one capture's substituted RETURNING could have caused. Reads the SQLSTATE CLASS (the
- *  first two characters), walking the cause chain because drizzle re-throws driver errors wrapped. */
+/** Whether an error is one capture's substituted RETURNING could have caused.
+ *
+ *  Two questions, in order. Did the DATABASE reject the statement — that is a SQLSTATE, and its class says
+ *  whose fault it is. Or did nothing reach the database at all, in which case the failure came from code
+ *  that only ran BECAUSE capture asked for rows.
+ *
+ *  That second case is not hypothetical: a `customType` whose `fromDriver` throws explodes while decoding
+ *  rows the caller never requested. The write COMMITS and the caller is handed the decoder's error — a
+ *  committed write reported as a failure, which is the worst form of this whole class of bug. Such an error
+ *  carries no SQLSTATE, because no database refused anything. */
 function isSubstitutionFault(error: unknown): boolean {
+  const state = sqlStateOf(error)
+  // NO SQLSTATE means the database never refused anything — so the statement may well have COMMITTED and
+  // the failure came afterwards, in capture's own handling of the result. That case must never be recovered
+  // by re-running the write: it would apply it a second time. It is handled where it arises instead, in the
+  // isolated post-commit domain (`captureResult`), and cannot reach here.
+  if (state === undefined) return false
+  return SUBSTITUTION_FAULT_CLASSES.has(state.slice(0, 2))
+}
+
+/** The first SQLSTATE in the cause chain — drizzle re-throws driver errors wrapped, and the code lives on
+ *  the original. SQLSTATEs are exactly five characters, which is what tells one apart from a transport
+ *  code like `ECONNRESET`. */
+function sqlStateOf(error: unknown): string | undefined {
   for (let current = error, depth = 0; current != null && depth < 5; depth++) {
     const code = (current as { code?: unknown }).code
-    if (typeof code === 'string' && SUBSTITUTION_FAULT_CLASSES.has(code.slice(0, 2))) return true
+    if (typeof code === 'string' && code.length === 5) return code
     current = (current as { cause?: unknown }).cause
   }
-  return false
+  return undefined
 }
 
 /** `42` insufficient privilege / syntax error / undefined column, `0A` feature not supported, `28` invalid
@@ -599,20 +618,77 @@ type Images = { old: Row; new: Row }
 
 /** Replace the statement's RETURNING with one that asks for BOTH images of every column.
  *
- *  Aliases are POSITIONAL (`o0`/`n0`, …) rather than name-derived: capture owns every alias in this list, so
- *  positional ones are injective by construction, while any name-based scheme (`old_id`) could be made to
- *  collide by a table that has a column of that name. Each expression is mapped through its own column, so
- *  values arrive decoded exactly as drizzle would decode them anywhere else (a `timestamp` comes back a
- *  `Date`, not a string). */
+ *  The two images are bound to CORRELATION NAMES via `RETURNING WITH (OLD AS …, NEW AS …)` rather than
+ *  written as bare `old.col` / `new.col`. Bare names are resolved against the query's own scope first, so
+ *  on a table literally named `old` they silently select that TABLE's post-update row: an update to
+ *  `old` returned {old: 11, new: 11} where the truth was {old: 10, new: 11} — a wrong row image reported
+ *  as precise. Verified on PGlite. One form, applied unconditionally: a rule that only engages for names
+ *  that look dangerous is a rule that is never exercised until it matters.
+ *
+ *  `WITH (…)` must sit immediately after RETURNING, which drizzle's builder has no clause for — so it
+ *  rides the FIRST selected expression, where it lands in exactly that position. The emitted SQL is
+ *  `returning with (old as "tf_old__", new as "tf_new__") "tf_old__"."id", …`.
+ *
+ *  Aliases are POSITIONAL (`o0`/`n0`, …): capture owns every alias here, so positional ones are injective
+ *  by construction where a name-derived scheme could be made to collide by a column of that name.
+ *
+ *  Each expression is decoded through its own column, so values arrive exactly as drizzle would decode them
+ *  anywhere else — and through `safeDecoder`, so a user's `fromDriver` cannot throw into a write that has
+ *  already committed (see `DECODE_FAILED`). */
+const OLD_IMAGE = 'tf_old__'
+const NEW_IMAGE = 'tf_new__'
+
+// ── the post-commit failure domain ──────────────────────────────────
+//
+// Once the substituted statement SUCCEEDS the write is committed and irreversible. Everything capture does
+// with the result after that point — decoding values, splitting the two images, verifying the row, building
+// changes — happens for capture's benefit, not the caller's, and must not be able to fail their write.
+//
+// The sharp edge is DECODING. A `customType` whose `fromDriver` throws explodes while mapping rows the
+// caller never asked for: the row commits and they are handed the decoder's error, a successful write
+// reported as a failure. And it cannot be recovered by re-running, because re-running would write twice.
+//
+// So capture decodes through its OWN mappers, which never throw. A value that will not decode becomes
+// `DECODE_FAILED`, the image is then untrustworthy, and the write coarsens — while the caller still gets
+// their faithfully reconstructed plain result, because the ROW COUNT survived.
+
+/** A value whose own decoder threw. Never emitted: its presence coarsens the write. */
+const DECODE_FAILED = Symbol('telefunc: value could not be decoded')
+
+/** Whether any captured value failed to decode — checked before a row is trusted as an image. */
+function hasUndecodable(row: Row): boolean {
+  for (const value of Object.values(row)) if (value === DECODE_FAILED) return true
+  return false
+}
+
 function substituteOldNew(builder: unknown, table: Table, fields: string[]): unknown {
   const columns = getTableColumns(table)
   const selection: Record<string, SQL.Aliased | SQL> = {}
   fields.forEach((field, index) => {
     const column = columns[field] as Column
     const name = sql.identifier(column.name)
-    selection[`o${index}`] = sql`old.${name}`.mapWith(column)
-    selection[`n${index}`] = sql`new.${name}`.mapWith(column)
+    const oldRef = sql`${sql.identifier(OLD_IMAGE)}.${name}`
+    selection[`o${index}`] = (
+      index === 0
+        ? sql`with (old as ${sql.identifier(OLD_IMAGE)}, new as ${sql.identifier(NEW_IMAGE)}) ${oldRef}`
+        : oldRef
+    ).mapWith(column)
+    selection[`n${index}`] = sql`${sql.identifier(NEW_IMAGE)}.${name}`.mapWith(column)
   })
+  return (builder as { returning: (selection: unknown) => unknown }).returning(selection)
+}
+
+/** Replace the RETURNING with capture's own full-row selection.
+ *
+ *  Built explicitly rather than via a bare `.returning()` so the DECODERS can be chosen per column: a
+ *  column the CALLER asked for keeps its real decoder, because their own statement would have decoded it
+ *  identically and must fail identically; every other column — the ones capture added — decodes safely and
+ *  can never throw into a committed write. */
+function substituteFullRow(builder: unknown, table: Table): unknown {
+  const selection: Record<string, SQL.Aliased | SQL> = {}
+  for (const [field, column] of Object.entries(getTableColumns(table))) {
+    selection[field] = sql`${sql.identifier((column as Column).name)}`.mapWith(column as Column)
+  }
   return (builder as { returning: (selection: unknown) => unknown }).returning(selection)
 }
 
@@ -679,7 +755,16 @@ function reportCaptureFault(error: unknown, relationId: string): void {
 /** What a precise plan carries into capture: the PK fields a retraction is keyed by, the columns a full
  *  image must contain, and — only when the RETURNING selection already IS the full image — the table field
  *  each returned POSITION carries, which is what lets SQLite's positional `.values()` rows be named. */
-type PrecisePlan = { pk: string[]; columns: string[]; positional?: string[] }
+type PrecisePlan = {
+  pk: string[]
+  columns: string[]
+  positional?: string[]
+  /** field name → PHYSICAL column name, for translating an emitted change into the graph's row space. */
+  physical: Record<string, string>
+  /** The table fields the CALLER's own RETURNING asked for. Those keep their real decoders; everything else
+   *  in capture's substituted selection decodes safely. Empty when they asked for no rows at all. */
+  callerFields: ReadonlySet<string>
+}
 
 type Plan =
   | { mode: 'coarse' }
@@ -709,7 +794,14 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   if (hasOnConflict(config, dialect)) return { mode: 'coarse' } // UPSERT / ON CONFLICT
   if (op === 'insert' && hasRawValues(config)) return { mode: 'coarse' } // raw-SQL values clause
 
-  const columns = Object.keys(getTableColumns(table))
+  const tableColumns = getTableColumns(table)
+  const columns = Object.keys(tableColumns)
+  // field name → physical column name. Built here so every precise plan carries it and no emission path can
+  // forget to translate (see `physicalRow`).
+  const physical = Object.fromEntries(
+    Object.entries(tableColumns).map(([field, column]) => [field, (column as Column).name]),
+  )
+  const noCallerFields: ReadonlySet<string> = EMPTY_FIELDS
   // BOTH images, where the connection is known to produce them (`RETURNING old.*, new.*`, PostgreSQL 18+).
   // An INSERT has no old image and needs none. The capability is probed once per db and is only ever `true`
   // when a real statement proved it — so this branch adds precision where it exists and changes nothing
@@ -730,19 +822,39 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
     const selection = callerSelection(config.returning, table)
     // Not reproducible from a row image — a nested alias path, or a raw `SQL` expression the DATABASE
     // computed. Run exactly what the caller wrote and let `captureMismatch` fail it closed, as before.
-    if (!selection) return { mode: 'precise', callerReturning: true, pk, columns }
+    if (!selection)
+      return { mode: 'precise', callerReturning: true, pk, columns, physical, callerFields: noCallerFields }
     const project = (rows: Row[]) => rows.map((row) => projectRow(row, selection))
+    const callerFields = new Set(selection.map((entry) => entry.field))
     // Both images are worth SUBSTITUTING for even when the caller's own RETURNING would have sufficed:
     // their result is reproducible from the image they would have been handed, and the old row is what
     // makes a stateless update exact and a key change describable.
-    if (images) return { mode: 'precise', callerReturning: false, pk, columns, reconstruct: project, images }
+    if (images)
+      return {
+        mode: 'precise',
+        callerReturning: false,
+        pk,
+        columns,
+        physical,
+        callerFields,
+        reconstruct: project,
+        images,
+      }
     // Already the full image: nothing to widen, and the returned order is what names SQLite's positional rows.
     if (isFullImage(selection, columns))
-      return { mode: 'precise', callerReturning: true, pk, columns, positional: selection.map((s) => s.field) }
+      return {
+        mode: 'precise',
+        callerReturning: true,
+        pk,
+        columns,
+        physical,
+        callerFields,
+        positional: selection.map((entry) => entry.field),
+      }
     // A PARTIAL or aliased projection is not a reason to give up. Widen the executed RETURNING to the whole
     // row, capture THAT, and project the caller's own columns back out of it. The caller sees exactly the
     // result they asked for; capture sees a real full row. No column is invented — this is the same row.
-    return { mode: 'precise', callerReturning: false, pk, columns, reconstruct: project }
+    return { mode: 'precise', callerReturning: false, pk, columns, physical, callerFields, reconstruct: project }
   }
 
   // No caller returning → capture must SUBSTITUTE a hidden full RETURNING and hand the caller back a
@@ -754,6 +866,8 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
       callerReturning: false,
       pk,
       columns,
+      physical,
+      callerFields: noCallerFields,
       // PGlite's plain no-returning result is `{ rows: [], fields: [], affectedRows: N }`; affectedRows =
       // the RETURNING row count. Verified empirically against PGlite 18.3.
       reconstruct: (rows) => ({ rows: [], fields: [], affectedRows: rows.length }),
@@ -767,7 +881,9 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
 // ── change construction ─────────────────────────────────────────────
 
 /** Why a captured row set cannot be trusted as a full, identifiable image. `undefined` = it can. */
-type CaptureMismatch = { rowIndex: number; reason: 'missing-columns' | 'missing-key'; detail: string } | undefined
+type CaptureMismatch =
+  | { rowIndex: number; reason: 'missing-columns' | 'missing-key' | 'undecodable'; detail: string }
+  | undefined
 
 /** THE CAPTURE OBSERVATION SEAM — the last check between a captured row set and precise change events.
  *
@@ -787,6 +903,10 @@ function captureMismatch(rows: Row[], columns: string[], pk: string[], op: Op): 
   for (const [rowIndex, row] of rows.entries()) {
     const missing = columns.filter((column) => !(column in row))
     if (missing.length > 0) return { rowIndex, reason: 'missing-columns', detail: missing.join(', ') }
+    // A value whose own decoder threw. Capture asked for it, so the failure is contained here rather than
+    // raised at the caller — but an image with a hole in it is not an image, so the write coarsens.
+    const undecodable = columns.filter((column) => row[column] === DECODE_FAILED)
+    if (undecodable.length > 0) return { rowIndex, reason: 'undecodable', detail: undecodable.join(', ') }
     // A retraction is keyed by PK, so an absent or NULL key value would key it to nothing. Inserts carry the
     // whole row and need no key.
     if (op === 'insert') continue
@@ -799,7 +919,7 @@ function captureMismatch(rows: Row[], columns: string[], pk: string[], op: Op): 
 /** Precise changes when the captured rows are a trustworthy full image, else ONE coarse marker. */
 function captureOrCoarse(op: Op, relationId: string, rows: Row[], plan: PrecisePlan): TableChange[] {
   const mismatch = captureMismatch(rows, plan.columns, plan.pk, op)
-  if (!mismatch) return changesOf(op, relationId, rows, plan.pk)
+  if (!mismatch) return changesOf(op, relationId, rows, plan)
   reportCaptureMismatch(relationId, mismatch)
   return [coarse(relationId)]
 }
@@ -814,6 +934,7 @@ function reportCaptureMismatch(relationId: string, mismatch: NonNullable<Capture
  *  one the change is built from: an UPDATE is decided by both, a DELETE only by the row that was removed
  *  (PostgreSQL returns NEW as all-NULL for a delete, which is not a row and is never treated as one). */
 function captureBothOrCoarse(op: Op, relationId: string, pairs: Images[], plan: PrecisePlan): TableChange[] {
+  const emitted = (row: Row) => physicalRow(row, plan.physical)
   const decisive = op === 'delete' ? [] : pairs.map((pair) => pair.new)
   const mismatch =
     captureMismatch(
@@ -828,28 +949,55 @@ function captureBothOrCoarse(op: Op, relationId: string, pairs: Images[], plan: 
   }
   return pairs.map(({ old, new: fresh }) =>
     op === 'delete'
-      ? { table: relationId, kind: 'delete', old, key: keyOf(old, plan.pk) }
+      ? { table: relationId, kind: 'delete', old: emitted(old), key: keyOf(old, plan) }
       : // The key is taken from the OLD image on purpose: it addresses the row as the graph knows it, which
         // is what makes an update that MOVES the key describable rather than coarse.
-        { table: relationId, kind: 'update', old, new: fresh, key: keyOf(old, plan.pk) },
+        { table: relationId, kind: 'update', old: emitted(old), new: emitted(fresh), key: keyOf(old, plan) },
   )
 }
 
-function changesOf(op: Op, table: string, rows: Row[], pk: string[]): TableChange[] {
+function changesOf(op: Op, table: string, rows: Row[], plan: PrecisePlan): TableChange[] {
   return rows.map((row) => {
-    if (op === 'insert') return { table, kind: 'insert', new: row }
-    if (op === 'delete') return { table, kind: 'delete', key: keyOf(row, pk) }
-    return { table, kind: 'update', new: row, key: keyOf(row, pk) }
+    const emitted = physicalRow(row, plan.physical)
+    if (op === 'insert') return { table, kind: 'insert', new: emitted }
+    if (op === 'delete') return { table, kind: 'delete', key: keyOf(row, plan) }
+    return { table, kind: 'update', new: emitted, key: keyOf(row, plan) }
   })
 }
 
-function keyOf(row: Row, pk: string[]): Row {
+// ── the row-key space a change is emitted in ────────────────────────
+//
+// A captured row arrives keyed by drizzle FIELD names (`teamId`), because that is what a `.returning()`
+// row is. The graph reads PHYSICAL column names (`team_id`) — `rowSpace.projectRaw` looks up the seed
+// descriptor's columns, which the compiler derived from SQL. Emitting field keys therefore fired changes
+// into a space the graphs do not read: a mapped column silently matched nothing.
+//
+// This translation is deliberately the LAST step and applies ONLY to what is emitted. Verification
+// (`captureMismatch`) and the caller's own result stay in field space, where the driver's rows live — the
+// two spaces are kept apart rather than one being converted into the other early and used for both.
+
+/** A captured row re-keyed by physical column name. A field with no known column is dropped rather than
+ *  passed through under a name the graph would misread. */
+function physicalRow(row: Row, physical: Record<string, string>): Row {
+  const out: Row = {}
+  for (const [field, value] of Object.entries(row)) {
+    const column = physical[field]
+    if (column !== undefined) out[column] = value
+  }
+  return out
+}
+
+/** The retraction key, in the same physical space as the row it addresses. */
+function keyOf(row: Row, plan: PrecisePlan): Row {
   const key: Row = {}
-  for (const field of pk) key[field] = row[field]
+  for (const field of plan.pk) key[plan.physical[field] ?? field] = row[field]
   return key
 }
 
 const coarse = (table: string): TableChange => ({ table, kind: 'coarse' })
+
+/** Shared empty set — a write with no caller RETURNING has no fields the caller owns. */
+const EMPTY_FIELDS: ReadonlySet<string> = new Set<string>()
 
 // ── builder introspection (version-brittle, guarded — mirrors drizzleShape.ts) ───────────────────────
 
