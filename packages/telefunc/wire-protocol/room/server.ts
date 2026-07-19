@@ -859,9 +859,11 @@ class ServerRoom implements Room {
     await kv.delete(roomMemberKvKey(this.id, id)) // record first — a lingering marker resolves to nothing
     if (identity !== null) await kv.delete(roomIdentityMemberKvKey(this.id, identity, id))
     if (hidden) await kv.delete(roomHiddenMemberKvKey(this.id, id))
-    // A leaving member's per-track streams end, so their retained frames go too. Room close
-    // prefix-sweeps whatever a leave races past.
+    // A leaving member's per-track streams end, so their retained frames go too — binary per
+    // (member, track), and the room's one retained-text slot if this member still owns it. Room
+    // close prefix-sweeps whatever a leave races past.
     await this._dropRetainedBinary(id)
+    await dropRetainedTextOwnedBy(this.id, id)
     this._applyLeave(id, cause)
     await publishCtrl(this.id, { __r: 'leave', id, ...leaveCauseToWire(cause) })
   }
@@ -2185,6 +2187,18 @@ async function resolveIdentityMembers(kv: RoomKV, roomId: string, identity: stri
   return members
 }
 
+/** Delete the room's single retained-text slot iff `memberId` still owns it (the stored envelope's
+ *  `from`). One atomic compare-delete: if a newer retained message from someone else has replaced the
+ *  slot since, it's left untouched. Called on a member's leave and kick so a departed member's pinned
+ *  message doesn't outlive them — symmetric with retained binary — and a ghost's meta/identity stops
+ *  replaying to every late joiner. Durable room-level state belongs on a hidden participant, which
+ *  never leaves. */
+async function dropRetainedTextOwnedBy(roomId: string, memberId: string): Promise<void> {
+  await retainedKv(roomId).update(roomRetainedTextKey(roomId), (raw) =>
+    raw !== null && (parse(raw) as RoomDataEnvelope).from === memberId ? null : KV_KEEP,
+  )
+}
+
 /** Remove one member from KV — its record, its identity marker (if any) — then announce the leave.
  *  The admin-side counterpart to `_removeMember` (which also applies the leave to a live view). */
 async function evictMember(
@@ -2199,10 +2213,12 @@ async function evictMember(
   // No local state here to tell whether the member was hidden — delete the marker unconditionally
   // (a no-op when it was a presence member).
   await kv.delete(roomHiddenMemberKvKey(roomId, memberId))
-  // Drop the kicked member's retained binary frames too (a kick doesn't run `_removeMember`) — on the
-  // authority tier where retained frames live (see `retainedKv`).
+  // Drop the kicked member's retained frames too (a kick doesn't run `_removeMember`) — on the
+  // authority tier where retained frames live (see `retainedKv`). Binary is per (member, track);
+  // text is the room's one slot, cleared only if this member still owns it.
   const retained = retainedKv(roomId)
   for (const key of await retained.keys(roomRetainedBinaryMemberPrefix(roomId, memberId))) await retained.delete(key)
+  await dropRetainedTextOwnedBy(roomId, memberId)
   await publishCtrl(roomId, { __r: 'leave', id: memberId, ...leaveCauseToWire(cause) })
 }
 

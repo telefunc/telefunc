@@ -2294,6 +2294,44 @@ describe('room stub channel', () => {
     expect(dataFramesOf(peer)).toEqual(['newer'])
   })
 
+  it('a leaving member takes their retained text with them — a later subscriber gets nothing', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-text-leave')
+    const alice = await serverRoom.join({ meta: { name: 'Alice' } })
+    await alice.publish('pinned', { retain: true })
+    await alice.leave()
+
+    stub._onPeerBroadcastSubscribe(false) // a late subscribe
+    await settle()
+
+    expect(dataFramesOf(peer)).toEqual([]) // reaped on leave — symmetric with retained binary
+  })
+
+  it("a member's leave clears the retained text only if they still own it — a newer owner's survives", async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('retain-text-owned')
+    const alice = await serverRoom.join({ meta: { name: 'Alice' } })
+    const bob = await serverRoom.join({ meta: { name: 'Bob' } })
+    await alice.publish('alice-pinned', { retain: true })
+    await bob.publish('bob-pinned', { retain: true }) // the slot is Bob's now — last write wins
+    await alice.leave() // Alice no longer owns it — the compare-delete must leave Bob's untouched
+
+    stub._onPeerBroadcastSubscribe(false)
+    await settle()
+
+    expect(dataFramesOf(peer)).toEqual(['bob-pinned'])
+  })
+
+  it('kicking a member drops their retained text too', async () => {
+    const owner = (await Room.create('retain-text-kick')) as ServerRoom
+    const cam = await owner.join({ meta: { name: 'cam' } })
+    await cam.publish('pinned', { retain: true })
+    const adapter = getBroadcastAdapter()
+    expect(await adapter.get!(roomRetainedTextKey('retain-text-kick'))).not.toBeNull() // retained
+
+    await Room.removeParticipant('retain-text-kick', { id: cam.id })
+
+    expect(await adapter.get!(roomRetainedTextKey('retain-text-kick'))).toBeNull() // swept on kick
+  })
+
   it('replays the last retained frame of every (member, track) a client starts watching', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('retain-binary')
     const cam = await serverRoom.join({ meta: { name: 'cam' } })
