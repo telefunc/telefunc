@@ -1,5 +1,7 @@
 // RESOLUTION: which transport and which logical-database identity a db resolves to, and the exactly-one
-// rule for when either may change. (Publish/subscribe/ordering live in changeRuntime.spec.ts.)
+// rule for when either may change. (Publish lives in changeRuntime.publish.spec.ts, ordering and the
+// transport-era cut in changeRuntime.ordering.spec.ts, subscription teardown in
+// changeRuntime.lifecycle.spec.ts.)
 //
 // The transport is SET-ONCE WHILE IN USE, and the resolution is frozen at first use — including when that
 // resolution is the built-in default. Review blocker: the default was never recorded, so a later

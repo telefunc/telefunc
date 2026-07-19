@@ -419,4 +419,4 @@ describe('differential oracle against LIVE-HYDRATED stateful graphs', () => {
 })
 
 // The one-shot seed-race guard (a change routed during the scan lands exactly once, precise from
-// tick one) is proven directly in liveGraph.spec against a real compiled graph + gated scan.
+// tick one) is proven directly in liveGraph.lifecycle.spec against a real compiled graph + gated scan.

@@ -116,6 +116,31 @@ describe('changeSequence — era cut', () => {
       next: { last: 6, unknownBelow: 0 },
     })
   })
+
+  it('COARSENS for a cut OVERTAKEN under an open bet, keeping the higher watermark', () => {
+    // The row that separates "redelivery" from "the bet was wrong". No FIFO is owed, so the publisher's
+    // post-rotation seq 6 can arrive before the cut at seq 5: we first-see 6, bet precise on everything
+    // under it, and the cut lands BELOW the watermark. Reading that as a duplicate is what leaves the
+    // receiver permanently without the previous era — nothing under 6 is deliverable, because it was
+    // published onto a transport this receiver was never subscribed to.
+    //
+    // Coarsen closes the bet; the watermark stays at 6, because sequences up to 6 have already been applied
+    // and moving it down to 5 would re-apply 6.
+    expect(observeEnvelopeSequence({ last: 6, unknownBelow: 6 }, { seq: 5, eraCut: true })).toEqual({
+      decision: 'coarsen',
+      next: { last: 6, unknownBelow: 0 },
+    })
+  })
+
+  it('and DROPS that same cut once the bet is closed — the discrimination is the bet, not the sequence', () => {
+    // The control for the case above: identical `last` and identical cut sequence, differing ONLY in whether
+    // the bet is open. With it closed the region below is already accounted for, so the cut is a genuine
+    // at-least-once redelivery and coarsening again would buy a redundant reseed — or, mid-reseed, risk the
+    // storm guard's terminal demotion. Without this pair, "always coarsen a cut" would pass the case above.
+    expect(observeEnvelopeSequence({ last: 6, unknownBelow: 0 }, { seq: 5, eraCut: true })).toEqual({
+      decision: 'drop',
+    })
+  })
 })
 
 describe('changeSequence — closing a bet without moving', () => {

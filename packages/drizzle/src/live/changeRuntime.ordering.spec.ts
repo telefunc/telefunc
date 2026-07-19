@@ -257,6 +257,52 @@ describe('write transport — a transport rotation is an OBSERVABLE cut, not an 
     expect(batch.changes.map((c) => c.table)).toEqual(['users'])
   })
 
+  it('a cut OVERTAKEN by the publication after it still coarsens — no FIFO is owed', async () => {
+    // The adapter owes AT-LEAST-ONCE and nothing whatsoever about order, so the post-rotation seq 3 can
+    // reach a receiver before the seq 2 that carries the cut. Read as a plain redelivery, that cut is
+    // swallowed: the receiver keeps a precise baseline over an era whose messages went to a transport it was
+    // never on, and no straggler can ever correct it. The hole `eraCut` exists to close, reopened by the
+    // order it arrived in.
+    const $client = { connection: 'shared' }
+    const writer = { $client }
+    const transportA = createInMemoryChangeTransport()
+    const transportB = createInMemoryChangeTransport()
+
+    setChangeTransport(writer, transportA)
+    publishBatch(writer, { changes: [change('users')] }) // seq 1 → A: unreachable from B, forever
+    await flush()
+
+    const wire: string[] = []
+    await transportB.subscribe(changeTopicFor(writer), (payload) => wire.push(payload))
+    setChangeTransport(writer, transportB) // rotate — quiescent, the writer has only written
+    publishBatch(writer, { changes: [change('users')] }) // seq 2 → B, carrying the cut
+    publishBatch(writer, { changes: [change('users')] }) // seq 3 → B, an ordinary one after it
+    await flush()
+
+    // The fixture is what this case claims it is, asserted rather than assumed: the CUT is on seq 2, and
+    // seq 3 carries none. A test built on the wrong payload would pass for the wrong reason.
+    expect(decodeChangePayload(wire[0]!)).toMatchObject({ seq: 2, eraCut: true })
+    expect('eraCut' in (decodeChangePayload(wire[1]!) as object)).toBe(false)
+
+    // A receiver admitted only NOW, so it has no history and no backlog: both payloads are new to it.
+    const receiver = { $client }
+    setChangeTransport(receiver, transportB)
+    await acquireSubscription(receiver)
+    registryFor(receiver).router.register(watching('users'))
+    const ingest = vi.fn()
+    engine.perDb.set(receiver, ingest)
+
+    transportB.publish(changeTopicFor(receiver), wire[1]!) // seq 3 FIRST → precise baseline, bet left open
+    expect(ingest).toHaveBeenCalledTimes(1)
+    const [baseline] = ingest.mock.calls[0] as [{ changes: TableChange[] }]
+    expect(baseline.changes[0]!.kind).toBe('insert') // it really did bet precise
+
+    transportB.publish(changeTopicFor(receiver), wire[0]!) // …then the overtaken cut at seq 2
+    expect(ingest).toHaveBeenCalledTimes(2) // NOT dropped as a duplicate
+    const [corrected] = ingest.mock.calls[1] as [{ changes: TableChange[] }]
+    expect(corrected.changes.every((c) => c.kind === 'coarse')).toBe(true) // the cut still lands
+  })
+
   it('a redelivered cut does not coarsen twice', async () => {
     const { writer, transportB, ingest } = await crossEra()
     setChangeTransport(writer, transportB)

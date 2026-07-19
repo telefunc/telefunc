@@ -1,7 +1,7 @@
 // The engine read-capture pipeline. Proves wrapLiveSelect end-to-end against a REAL
 // PGlite db + the telefunc Live primitive: builder → IR → compile → registry.acquire (eager hydrate)
 // → Live; the serialize-time activation redeems the token into a channel lease. The seqAtRead fence's
-// seq-comparison is covered by registry.spec — here we exercise the real redeem/lease wiring behind the
+// seq-comparison is covered by registry.notify.spec — here we exercise the real redeem/lease wiring behind the
 // seam, and what happens to a read that never reaches the wire at all.
 //
 // NOTHING in this file provides a telefunc request context, deliberately: the read-capture engine binds to

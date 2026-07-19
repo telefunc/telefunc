@@ -2,7 +2,7 @@
 // is σ-bounded, not table size), C3 (the seed scan is the σ-pruned in-memory baseline; single +
 // composite PK), a seed exceeding the per-input state bound → coarse, a scan error → coarse (never a
 // partial seed), and abort — a late scan completion after destroy / retire is inert (never seeds a
-// dead graph). The one-shot seed-race replay is proven in liveGraph.spec; the drain-loop / journal
+// dead graph). The one-shot seed-race replay is proven in liveGraph.lifecycle.spec; the drain-loop / journal
 // it replaced are gone. Deterministic — deferred promises, never timers.
 
 import { gt, sql } from 'drizzle-orm'

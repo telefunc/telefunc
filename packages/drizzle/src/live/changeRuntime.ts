@@ -474,7 +474,10 @@ async function step(db: object, state: SubscriptionState): Promise<void> {
       await active.unsubscribe()
       // Detached: we are no longer following anyone's stream, so the per-origin sequence state is stale.
       // Dropping it also bounds it — a long-lived process does not accumulate an entry per peer that ever
-      // restarted. Re-subscribing sees every origin as first-seen and coarsens, which is the sound reading.
+      // restarted. Re-subscribing then sees every origin as FIRST-SEEN, which the automaton takes precisely
+      // while recording an open baseline bet (changeSequence.ts) — not a coarsen. Keeping the watermarks
+      // instead would judge live traffic against a position we no longer hold, and anything at or below one
+      // is dropped as a duplicate: a silent missed invalidation rather than an over-fire.
       state.seen.clear()
     } catch (error) {
       state.undetached = active // its listener's status is now UNKNOWN — block subscribing until it is not

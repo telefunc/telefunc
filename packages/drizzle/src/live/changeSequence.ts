@@ -78,9 +78,23 @@ function observeEnvelopeSequence(tracked: OriginSequence | undefined, header: Se
   // The cost is one reseed per watched graph per rotation, and rotation only happens at a quiescent boundary
   // — rare by construction. Coarse is recoverable; a permanently missing delta is not.
   if (header.eraCut) {
-    // A redelivery of a cut we already acted on: at-least-once means we may see it twice, and coarsening
-    // again would buy a redundant reseed (or, mid-reseed, risk the storm guard's terminal demotion).
-    if (tracked !== undefined && header.seq <= tracked.last) return { decision: 'drop' }
+    if (tracked !== undefined && header.seq <= tracked.last) {
+      // BELOW AN OPEN BET, a cut is not a redelivery — it is the proof the bet was wrong, and the one
+      // straggler that can never be corrected by a later one. No FIFO is owed, so the publisher's
+      // post-rotation seq n+1 can overtake the cut at seq n: we first-see n+1, bet precise on everything
+      // under it, and the cut then arrives below the watermark. Reading that as a duplicate leaves the bet
+      // open forever — nothing below it is deliverable, because it belongs to a transport era we were never
+      // subscribed to. That is the permanent hole `eraCut` exists to close, reopened by the drop.
+      //
+      // So coarsen, which accounts for the whole unaccounted region, and CLOSE the bet. The watermark does
+      // NOT move down to this cut: we have already seen higher sequences and must not re-apply them.
+      if (header.seq < tracked.unknownBelow)
+        return { decision: 'coarsen', next: { last: tracked.last, unknownBelow: 0 } }
+      // A cut covered by a CLOSED bet is a genuine redelivery: at-least-once means we may see it twice, and
+      // coarsening again would buy a redundant reseed (or, mid-reseed, risk the storm guard's terminal
+      // demotion).
+      return { decision: 'drop' }
+    }
     return { decision: 'coarsen', next: { last: header.seq, unknownBelow: 0 } }
   }
 
