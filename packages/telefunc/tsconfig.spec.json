@@ -29,7 +29,8 @@
     "wire-protocol/upgrade.settlement-cleanup.spec.ts",
     "wire-protocol/upgrade.abort-swallow.spec.ts",
     "wire-protocol/upgrade.handoff-order.spec.ts",
-    "wire-protocol/upgrade.loss.spec.ts"
+    "wire-protocol/upgrade.loss.spec.ts",
+    "wire-protocol/upgrade.wire-codec.spec.ts"
   ],
   "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"]
 }

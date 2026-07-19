@@ -20,6 +20,8 @@ export type {
   ChannelDataFrame,
   ReconcilePayload,
   ReconciledPayload,
+  PreparePayload,
+  ReadyPayload,
   ServerCtrlTag,
   WirePublishInfo,
 }
@@ -71,6 +73,13 @@ const TAG = {
    *  within `STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS` before declaring the transport open —
    *  confirms the half-duplex streaming wire round-trips end-to-end. */
   STREAM_REQUEST_OPEN_ACK: 0x06 as const,
+  /** Client → server on the probe wire: stage a barrier-commit upgrade. JSON payload
+   *  (`PreparePayload`). Membership identity only — cursors are deliberately absent, they
+   *  would be stale by the time the barrier commits. */
+  PREPARE: 0x07 as const,
+  /** Server → client once the upgrade is staged. JSON payload (`ReadyPayload`). On receipt the
+   *  client gates new sends and emits the barrier `RECONCILE` as the old transport's last frame. */
+  READY: 0x08 as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -134,6 +143,26 @@ type ReconcilePayload = {
    *  least once) omit `initial`; the server fails them fast if they're missing rather than
    *  stalling the entire reconcile. */
   open: { id: string; ix: number; lastSeq: number; initial?: true }[]
+  /** Set on the barrier reconcile — the old transport's FINAL frame, carrying authoritative
+   *  membership and barrier-fresh cursors. Ordinary reconciles omit it and are unaffected. */
+  barrier?: true
+  /** Pairs the frame with its staged upgrade record. Mandatory whenever `barrier` is set. */
+  upgradeId?: string
+}
+
+/** Stages a barrier-commit upgrade on the probe wire, before that wire is the transport.
+ *  Identity only: `lastSeq` is intentionally absent, because cursors captured here are stale
+ *  by commit time and replaying from them would burst past the peer's flow-control credit. */
+type PreparePayload = {
+  upgradeId: string
+  sessionId: string
+  open: { id: string; ix: number }[]
+}
+
+/** The server's acknowledgment that the upgrade is staged. Echoes `upgradeId` so a client can
+ *  never act on a `READY` belonging to an abandoned attempt. */
+type ReadyPayload = {
+  upgradeId: string
 }
 
 /** Per-channel acknowledgment: the server confirms each `ix` it attached and tells the
@@ -149,6 +178,14 @@ type ReconciledPayload = {
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
+  /** Echoed on the reconciled that COMMITS a barrier upgrade, so a delayed ordinary reconciled
+   *  can never be consumed as the commit of an in-flight attempt. */
+  upgradeId?: string
+  /** Capability advertisement: this server understands `PREPARE`/`READY`/barrier reconciles.
+   *  Load-bearing — an unknown tag on an older server is a decode assert, which permanently
+   *  terminates the wire, so the client must see this before sending its first `PREPARE` byte.
+   *  Absent ⇒ legacy upgrade flow. */
+  barrierUpgrade?: true
 }
 
 /** Ack result outcome on the wire — same byte value in memory and on the wire.
@@ -204,6 +241,8 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.RECONCILED; payload: ReconciledPayload }
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
+  | { tag: typeof TAG.PREPARE; payload: PreparePayload }
+  | { tag: typeof TAG.READY; payload: ReadyPayload }
 
 /** Ctrl frame tags the client receives from the server. */
 type ServerCtrlTag =
@@ -217,6 +256,7 @@ type ServerCtrlTag =
   | typeof TAG.BDP_PING_ACK
   | typeof TAG.FIN
   | typeof TAG.RECONCILED
+  | typeof TAG.READY
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
@@ -315,6 +355,8 @@ const encode = {
   reconcile: (payload: ReconcilePayload) => encodeJsonFrame(TAG.RECONCILE, payload),
   reconciled: (payload: ReconciledPayload) => encodeJsonFrame(TAG.RECONCILED, payload),
   streamRequestOpenAck: () => encodeBareFrame(TAG.STREAM_REQUEST_OPEN_ACK),
+  prepare: (payload: PreparePayload) => encodeJsonFrame(TAG.PREPARE, payload),
+  ready: (payload: ReadyPayload) => encodeJsonFrame(TAG.READY, payload),
 
   // ── Per-channel ctrls ──
   close(index: number, timeoutMs: number): Uint8Array<ArrayBuffer> {
@@ -416,6 +458,10 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.RECONCILED, payload: JSON.parse(textDecoder.decode(payload)) as ReconciledPayload }
     case TAG.STREAM_REQUEST_OPEN_ACK:
       return { tag: TAG.STREAM_REQUEST_OPEN_ACK }
+    case TAG.PREPARE:
+      return { tag: TAG.PREPARE, payload: JSON.parse(textDecoder.decode(payload)) as PreparePayload }
+    case TAG.READY:
+      return { tag: TAG.READY, payload: JSON.parse(textDecoder.decode(payload)) as ReadyPayload }
 
     case TAG.CLOSE:
       assert(payload.length >= 4, 'CLOSE payload too short')

@@ -170,6 +170,9 @@ class ChannelMux {
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
         transports: this.options.transports,
+        // Capability advertisement. Safe to send unconditionally: neither payload is schema-
+        // validated, so an older client simply ignores the unknown field.
+        barrierUpgrade: true,
       }),
     )
     // Sends are sync; firing the upgrade finalizer here can't reorder anything on the new wire.
