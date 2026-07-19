@@ -221,6 +221,11 @@ type UpgradeState =
       /** ONE budget across both buffers — see `UPGRADE_HANDOFF_BUFFER_*`. */
       bufferedBytes: number
       bufferedFrames: number
+      /** Channel ixes the settling RECONCILED omitted, held back instead of released — see
+       *  `releaseDeferredOmitted`. Lives on the state rather than in `handleReconciled` because
+       *  FIN and RECONCILED can arrive in either order, so the reconcile that fills this list is
+       *  often not the call that completes the handoff. */
+      deferredOmitted: number[]
       finReceived: boolean
       joinTimer: ReturnType<typeof setTimeout> | null
     }
@@ -349,6 +354,7 @@ class ClientConnection implements MuxConnection {
         buffer: { old: [], new: [] },
         bufferedBytes: 0,
         bufferedFrames: 0,
+        deferredOmitted: [],
         finReceived: false,
         // Armed HERE, not on FIN arrival: the join deadline has to bound both limbs from the
         // moment two wires are live, or the missing-FIN limb has no watchdog at all.
@@ -369,12 +375,13 @@ class ClientConnection implements MuxConnection {
   private exitUpgradeHandoff(): {
     from: ClientChannelTransport
     buffer: HandoffBuffer
+    deferredOmitted: number[]
     joinTimer: ReturnType<typeof setTimeout> | null
   } {
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'handoff')
-    const { from, buffer, joinTimer } = this.state.upgrade
+    const { from, buffer, deferredOmitted, joinTimer } = this.state.upgrade
     this.state = { tag: 'open', upgrade: { tag: 'none' } }
-    return { from, buffer, joinTimer }
+    return { from, buffer, deferredOmitted, joinTimer }
   }
 
   private canSendImmediately(): boolean {
@@ -811,13 +818,15 @@ class ClientConnection implements MuxConnection {
   private tryCompleteUpgradeHandoff(): void {
     if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'handoff') return
     if (!this.state.upgrade.finReceived || this.reconciling) return
-    const { from, buffer, joinTimer } = this.exitUpgradeHandoff()
+    const { from, buffer, deferredOmitted, joinTimer } = this.exitUpgradeHandoff()
     if (joinTimer) clearTimeout(joinTimer)
     from.detachHeartbeat()
     from.abandonActiveTransport()
     from.dispose()
     // ENTIRE old buffer first, then the new one — never interleaved by arrival order.
     for (const frame of buffer.old) this.dispatchFrame(frame)
+    // Only now is it settled which omitted channels had a real terminal frame in flight.
+    this.releaseDeferredOmitted(deferredOmitted)
     for (const frame of buffer.new) this.dispatchFrame(frame)
     // Registrations deferred while the upgrade was in flight can go out now.
     this.flushPendingRegisterReconcile()
@@ -846,7 +855,11 @@ class ClientConnection implements MuxConnection {
 
   private handleReconciled(ctrl: ReconciledPayload): void {
     this.transport.applyReconciledSettings(ctrl)
-    const outcome = this.applyReconciled(ctrl)
+    // Split settlement, but ONLY for the reconcile that settles a handoff. The rest of the apply —
+    // the C2S ungate, the flow-control reset, `installHeartbeat` — must NOT be deferred with it.
+    const deferredOmitted =
+      this.state.tag === 'open' && this.state.upgrade.tag === 'handoff' ? this.state.upgrade.deferredOmitted : null
+    const outcome = this.applyReconciled(ctrl, deferredOmitted)
     this.installHeartbeat(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
@@ -895,12 +908,13 @@ class ClientConnection implements MuxConnection {
         u.attempt.abort()
         this.exitUpgradeAttempt(u.attempt)
       } else if (u.tag === 'handoff') {
-        const { from, buffer, joinTimer } = this.exitUpgradeHandoff()
+        const { from, buffer, deferredOmitted, joinTimer } = this.exitUpgradeHandoff()
         if (joinTimer) clearTimeout(joinTimer)
         from.detachHeartbeat()
         from.abandonActiveTransport()
         from.dispose()
         for (const frame of buffer.old) this.dispatchFrame(frame)
+        this.releaseDeferredOmitted(deferredOmitted)
       }
     }
     this.upgradeDisabled = true
@@ -1116,7 +1130,10 @@ class ClientConnection implements MuxConnection {
     for (const frame of reconcileBatch.movedBufferedFrames) target.push(frame)
   }
 
-  private applyReconciled(ctrl: ReconciledPayload): ReconcileOutcome {
+  /** `deferredOmitted` is non-null ONLY while an upgrade handoff is settling. On every ordinary
+   *  reconcile it is null and this function behaves exactly as it did before R4 — the one added
+   *  branch is guarded on it. */
+  private applyReconciled(ctrl: ReconciledPayload, deferredOmitted: number[] | null): ReconcileOutcome {
     this.sessionId = ctrl.sessionId
     if (ctrl.reconnectTimeout) this.reconnectTimeoutMs = ctrl.reconnectTimeout
     if (ctrl.idleTimeout) this.idleTimeoutMs = ctrl.idleTimeout
@@ -1142,6 +1159,14 @@ class ClientConnection implements MuxConnection {
         continue
       }
       if (!serverMap.has(ix)) {
+        if (deferredOmitted) {
+          // A handoff is settling and the old wire's buffer may still hold a terminal ABORT/ERROR
+          // for this channel. Releasing now would make `closeRemoteChannel` a no-op when that
+          // frame finally drains, and the server's real abort value — terminal, seq-less, and
+          // unreproducible by any later reconnect — would die there. Hold it back instead.
+          deferredOmitted.push(ix)
+          continue
+        }
         const err = new NetworkError('Channel not acknowledged by server after reconnect', true)
         this.releaseChannel(ix, entry.channel, err)
         entry.channel._onTransportClose(err)
@@ -1164,6 +1189,20 @@ class ClientConnection implements MuxConnection {
     }
 
     return { frames: releaseFrames, channelsToOpen, reconcileComplete: !hasNewChannels }
+  }
+
+  /** Second half of the split settlement. Channels the settling RECONCILED omitted were held back
+   *  until the old wire's buffer drained; any that a real ABORT/ERROR closed during that drain are
+   *  already gone from `this.channels`, and whatever is still present genuinely vanished
+   *  server-side and gets exactly today's generic release. */
+  private releaseDeferredOmitted(ixes: number[]): void {
+    for (const ix of ixes) {
+      const entry = this.channels.get(ix)
+      if (!entry) continue
+      const err = new NetworkError('Channel not acknowledged by server after reconnect', true)
+      this.releaseChannel(ix, entry.channel, err)
+      entry.channel._onTransportClose(err)
+    }
   }
 
   private closeRemoteChannel(ix: number, err?: Error): void {
