@@ -106,6 +106,11 @@ class RoomState {
   private _stateVersion = 0
   private _snapshotCache: { version: number; value: RoomSnapshotView } | null = null
   private readonly _changeCbs: Array<() => void> = []
+  /** Reconcile coalescing: while a batch is open, `_bumpState` still advances the version (so
+   *  `snapshot()` recomputes) but holds the single `onChange` until the batch closes — a reconcile that
+   *  touched N members invalidates the view once, not once per member. Re-entrant via the depth count. */
+  private _changeBatchDepth = 0
+  private _changeDeferred = false
 
   private readonly _members = new Map<string, MemberEntry>()
   private readonly _onListenersChanged: () => void
@@ -328,10 +333,29 @@ class RoomState {
     return value
   }
 
-  /** State changed observably — invalidate the snapshot and tell `onChange` subscribers. */
+  /** State changed observably — invalidate the snapshot (via the version) and tell `onChange`
+   *  subscribers, unless a change batch is open, in which case the single notification is deferred to
+   *  its close (see `_batchChange`). */
   private _bumpState(): void {
     this._stateVersion++
-    this._fireAll(this._changeCbs)
+    if (this._changeBatchDepth > 0) this._changeDeferred = true
+    else this._fireAll(this._changeCbs)
+  }
+
+  /** Run `fn` with `onChange` coalesced: bumps inside still advance the version, but the subscriber
+   *  notification fires once when the outermost batch closes, and only if something actually bumped.
+   *  Semantic callbacks (`onJoin`/`onLeave`/`onUpdate`) still fire per event — only the snapshot-
+   *  invalidation signal is batched. */
+  private _batchChange<T>(fn: () => T): T {
+    this._changeBatchDepth++
+    try {
+      return fn()
+    } finally {
+      if (--this._changeBatchDepth === 0 && this._changeDeferred) {
+        this._changeDeferred = false
+        this._fireAll(this._changeCbs)
+      }
+    }
   }
 
   /** Membership changed: guard async KV reconciles against going stale, and narrate the change. */
@@ -510,81 +534,84 @@ class RoomState {
    *  path (event or reconcile) learns of it first, the other is absorbed as an echo. Returns
    *  whether anything drifted, so the owner can re-sync downstream views (client stubs). */
   reconcile(members: MemberSnapshot[], rosterOmitsHidden = false): boolean {
-    // A client's streamed roster carries only presence members (hidden ones are server-only), so a
-    // hidden entry it holds is a directly-granted handle, not roster-managed — never reap it here.
-    const roster = rosterOmitsHidden ? members.filter((m) => !m.hidden) : members
-    const keepsHidden = (id: string) => rosterOmitsHidden && this.isHidden(id)
-    if (!this._rosterKnown) {
-      // First load: silent — but entries can already exist (pre-roster join events, revived
-      // views). Those objects must survive: listeners hang off them and revived handles must
-      // stay `===` with the view. Keep the object, refresh the facts; entries the authoritative
-      // roster doesn't know left before the load — their leave is narrated like any other.
-      this._rosterKnown = true
+    // Coalesce the whole resync into one `onChange`: a reconcile that drifts N members invalidates the
+    // view once, not once per member, while each member's onJoin/onLeave/onUpdate still fires as usual.
+    return this._batchChange(() => {
+      // A client's streamed roster carries only presence members (hidden ones are server-only), so a
+      // hidden entry it holds is a directly-granted handle, not roster-managed — never reap it here.
+      const roster = rosterOmitsHidden ? members.filter((m) => !m.hidden) : members
+      const keepsHidden = (id: string) => rosterOmitsHidden && this.isHidden(id)
+      if (!this._rosterKnown) {
+        // First load: silent — but entries can already exist (pre-roster join events, revived
+        // views). Those objects must survive: listeners hang off them and revived handles must
+        // stay `===` with the view. Keep the object, refresh the facts; entries the authoritative
+        // roster doesn't know left before the load — their leave is narrated like any other.
+        this._rosterKnown = true
+        const seen = new Set<string>()
+        for (const member of roster) {
+          seen.add(member.id)
+          const existing = this._members.get(member.id)
+          if (!existing) {
+            this._createEntry(member)
+            continue
+          }
+          if (member.metaSeq > existing.metaSeq) {
+            existing.meta = member.meta
+            existing.metaSeq = member.metaSeq
+          }
+          existing.joinedAt = member.joinedAt
+          for (const track of member.tracks ?? []) existing.tracks.add(track)
+        }
+        for (const id of [...this._members.keys()]) {
+          if (!seen.has(id) && !keepsHidden(id)) this.applyLeave(id)
+        }
+        // Bump strictly after the roster is populated: the batch's single `onChange` fires at close, so
+        // a subscriber that synchronously reads `snapshot()` (the `useSyncExternalStore` contract) sees
+        // the full roster — the silent `_createEntry`s above never bump, so this is what invalidates it.
+        this._bumpMembership()
+        return false
+      }
+
+      let drifted = false
+      let silentChange = false // a `tracks` refresh no applier narrated (`joinedAt` is immutable)
       const seen = new Set<string>()
       for (const member of roster) {
         seen.add(member.id)
-        const existing = this._members.get(member.id)
-        if (!existing) {
-          this._createEntry(member)
-          continue
-        }
-        if (member.metaSeq > existing.metaSeq) {
-          existing.meta = member.meta
-          existing.metaSeq = member.metaSeq
-        }
-        existing.joinedAt = member.joinedAt
-        for (const track of member.tracks ?? []) existing.tracks.add(track)
-      }
-      for (const id of [...this._members.keys()]) {
-        if (!seen.has(id) && !keepsHidden(id)) this.applyLeave(id)
-      }
-      // Bump strictly after the roster is populated: an `onChange` subscriber that synchronously
-      // reads `snapshot()` (the `useSyncExternalStore` contract) would otherwise cache an empty
-      // roster under the new version, and the silent `_createEntry`s above never re-invalidate it.
-      this._bumpMembership()
-      return false
-    }
-
-    let drifted = false
-    let silentChange = false // a `tracks` refresh no applier narrated (`joinedAt` is immutable)
-    const seen = new Set<string>()
-    for (const member of roster) {
-      seen.add(member.id)
-      const entry = this._members.get(member.id)
-      if (!entry) {
-        this.applyJoin(member.id, member.meta, member.joinedAt, member.identity, member.hidden)
-        const created = this._members.get(member.id)
-        if (created) {
-          created.metaSeq = member.metaSeq
-          for (const track of member.tracks ?? []) created.tracks.add(track)
-        }
-        drifted = true
-      } else {
-        if (member.metaSeq > entry.metaSeq) {
-          this.applyParticipantMeta(member.id, member.meta, entry.meta, member.metaSeq)
+        const entry = this._members.get(member.id)
+        if (!entry) {
+          this.applyJoin(member.id, member.meta, member.joinedAt, member.identity, member.hidden)
+          const created = this._members.get(member.id)
+          if (created) {
+            created.metaSeq = member.metaSeq
+            for (const track of member.tracks ?? []) created.tracks.add(track)
+          }
           drifted = true
-        }
-        entry.joinedAt = member.joinedAt
-        for (const track of member.tracks ?? []) {
-          if (!entry.tracks.has(track)) {
-            entry.tracks.add(track)
-            silentChange = true
+        } else {
+          if (member.metaSeq > entry.metaSeq) {
+            this.applyParticipantMeta(member.id, member.meta, entry.meta, member.metaSeq)
+            drifted = true
+          }
+          entry.joinedAt = member.joinedAt
+          for (const track of member.tracks ?? []) {
+            if (!entry.tracks.has(track)) {
+              entry.tracks.add(track)
+              silentChange = true
+            }
           }
         }
       }
-    }
-    for (const id of [...this._members.keys()]) {
-      if (!seen.has(id) && !keepsHidden(id)) {
-        this.applyLeave(id)
-        drifted = true
+      for (const id of [...this._members.keys()]) {
+        if (!seen.has(id) && !keepsHidden(id)) {
+          this.applyLeave(id)
+          drifted = true
+        }
       }
-    }
-    // The drift appliers (applyJoin/applyParticipantMeta/applyLeave) each bump once per real change, so
-    // drift needs no trailing bump — one there would re-fire `onChange` for a settle already narrated. A
-    // silent `tracks` refresh no applier covered still needs one, so the snapshot doesn't strand it; an
-    // echo reconcile that changed nothing — every event already applied through the live path — fires none.
-    if (silentChange) this._bumpMembership()
-    return drifted
+      // Every applier bump (join/meta/leave) and the tracks-only refresh below coalesce into the one
+      // batched `onChange`. A tracks-only refresh no applier narrated still needs its own bump so the
+      // snapshot isn't stranded; an echo reconcile that changed nothing bumps nothing, so it fires none.
+      if (silentChange) this._bumpMembership()
+      return drifted
+    })
   }
 
   // ── Private ──

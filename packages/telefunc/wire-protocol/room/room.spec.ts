@@ -3174,25 +3174,30 @@ describe('snapshot() and onChange()', () => {
     expect(clientRoom.snapshot()).toBe(loaded) // the snapshot reference stays stable
   })
 
-  it('a drift reconcile fires one onChange per discovered change, with no redundant trailing bump', () => {
+  it('a drift reconcile fires exactly one onChange for the whole batch, not one per member', () => {
     const fake = createFakeStub()
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('drift-reconcile', { count: 0 }))
     const alice = crypto.randomUUID()
     const bob = crypto.randomUUID()
+    const carol = crypto.randomUUID()
     fake.emit({ __r: 'roster', members: [{ id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0, identity: 'u1' }] })
     const changes: number[] = []
+    const joins: string[] = []
     clientRoom.onChange(() => changes.push(1))
+    clientRoom.onJoin((m) => joins.push(m.id))
 
-    // A later roster that adds Bob — drift, replayed through applyJoin (which bumps once). The reconcile
-    // must not add a second, redundant bump on top of the applier's.
+    // A later roster that adds two members at once — both drift, replayed through applyJoin. The
+    // snapshot invalidation is coalesced to one for the whole reconcile; onJoin still fires per member.
     fake.emit({
       __r: 'roster',
       members: [
         { id: alice, meta: { name: 'A' }, joinedAt: 1, metaSeq: 0, identity: 'u1' },
         { id: bob, meta: { name: 'B' }, joinedAt: 2, metaSeq: 0, identity: null },
+        { id: carol, meta: { name: 'C' }, joinedAt: 3, metaSeq: 0, identity: null },
       ],
     })
-    expect(changes).toEqual([1]) // exactly one — applyJoin's bump alone
+    expect(changes).toEqual([1]) // one invalidation for the batch, not one per drifted member
+    expect(joins).toEqual([bob, carol]) // per-member semantic events still fire once each
   })
 
   it('an onChange subscriber that reads snapshot() on first roster load sees the roster, not an empty cache', () => {
