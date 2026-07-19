@@ -96,6 +96,27 @@ export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
 export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
+/** Overall barrier-upgrade attempt deadline, from the moment the server accepts a PREPARE until
+ *  the barrier commits. NON-refreshing on purpose: a client that pings but never barriers would
+ *  otherwise hold its stage open forever, since PING resets only the liveness timer. On expiry the
+ *  stage is dropped and the old SSE session is left completely untouched — the client falls back. */
+export const UPGRADE_STAGE_TTL_MS = 10_000
+
+/** Admission caps for PREPARE and `barrier: true` RECONCILE frames ONLY. An ordinary RECONCILE
+ *  keeps its existing uncapped contract; narrowing that would be a behavior change to a certified
+ *  path. 256 KiB matches one text replay-lane budget; the entry/id caps bound what the JSON decoder
+ *  allocated, which the byte cap alone does not (1024 ids of 256 B is a very different object graph
+ *  from one 256 KiB id). */
+export const UPGRADE_MAX_FRAME_BYTES = 256 * 1024
+export const UPGRADE_MAX_OPEN_ENTRIES = 1_024
+export const UPGRADE_MAX_ID_BYTES = 256
+
+/** Global staged-upgrade budget per server instance. Both units are necessary: thousands of empty
+ *  stages still cost sockets, timers, Maps and closures, so a byte cap alone does not bound them.
+ *  At capacity the server rejects the NEW probe only — every existing stage and SSE session lives. */
+export const UPGRADE_MAX_STAGED_RECORDS = 1_024
+export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
+
 /** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
  *  wire dead and reconnecting. A downstream that stalls without erroring (bytes stop, no FIN)
  *  otherwise wedges the connection: the upstream keeps sending pings but `handlePongTimeout`

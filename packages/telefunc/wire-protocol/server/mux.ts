@@ -1,13 +1,22 @@
 export { ChannelMux, getChannelMux }
-export type { ReconcileOutcome, ServerTransport }
+export type { ReconcileOutcome, ServerTransport, UpgradeResourceLimits, UpgradeResourceSnapshot }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
-import { CHANNEL_PING_INTERVAL_MIN_MS, type ChannelTransports } from '../constants.js'
+import {
+  CHANNEL_PING_INTERVAL_MIN_MS,
+  UPGRADE_MAX_FRAME_BYTES,
+  UPGRADE_MAX_ID_BYTES,
+  UPGRADE_MAX_OPEN_ENTRIES,
+  UPGRADE_MAX_STAGED_BYTES,
+  UPGRADE_MAX_STAGED_RECORDS,
+  UPGRADE_STAGE_TTL_MS,
+  type ChannelTransports,
+} from '../constants.js'
 import { TAG, decode, encode, isConnCtrlTag } from '../shared-ws.js'
-import type { ChannelFrame, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
+import type { ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
 
@@ -35,6 +44,52 @@ type ReconcileOutcome = {
   openList: ReconciledPayload['open']
   finalizeUpgrade: (() => void) | null
 }
+
+/** Admission limits for the barrier upgrade. Named immutable defaults in production; tests
+ *  construct a `ChannelMux` with small values so the mechanism runs through the REAL enforcement
+ *  path rather than a parallel accountant. */
+type UpgradeResourceLimits = {
+  maxFrameBytes: number
+  maxOpenEntries: number
+  maxIdBytes: number
+  maxStagedRecords: number
+  maxStagedBytes: number
+  stageTtlMs: number
+}
+
+const DEFAULT_UPGRADE_LIMITS: UpgradeResourceLimits = Object.freeze({
+  maxFrameBytes: UPGRADE_MAX_FRAME_BYTES,
+  maxOpenEntries: UPGRADE_MAX_OPEN_ENTRIES,
+  maxIdBytes: UPGRADE_MAX_ID_BYTES,
+  maxStagedRecords: UPGRADE_MAX_STAGED_RECORDS,
+  maxStagedBytes: UPGRADE_MAX_STAGED_BYTES,
+  stageTtlMs: UPGRADE_STAGE_TTL_MS,
+})
+
+/** A PREPARE the server accepted, awaiting its barrier on the OLD wire. Metadata only — no
+ *  application payload is ever staged. */
+type StagedUpgrade = {
+  upgradeId: string
+  /** The session the barrier must still name AND the old wire must still hold. */
+  prevSessionId: string
+  /** Wire bytes charged against the global staged budget; refunded on every cleanup path. */
+  bytes: number
+  timer: ReturnType<typeof setTimeout>
+}
+
+/** Read-only view of the staged-upgrade accounting, for tests. Derived from the SAME fields
+ *  admission reads — a snapshot maintained in parallel would stay correct while enforcement
+ *  broke, which is precisely the bug it exists to reveal. */
+type UpgradeResourceSnapshot = {
+  /** `stagedUpgrades.size` — the record count admission compares against `maxStagedRecords`. */
+  records: number
+  /** `stagedByPrevSession.size`. Equal to `records` unless a cleanup path leaked one side. */
+  reverseRecords: number
+  /** The running charge admission compares against `maxStagedBytes`. */
+  bytes: number
+}
+
+const textEncoder = new TextEncoder()
 
 type MuxServerOptions = {
   reconnectTimeout: number
@@ -92,10 +147,21 @@ class ChannelMux {
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream connection, and catches a duplicate-connId reconnect racing teardown. */
   private readonly connectionsByConnId = new Map<string, unknown>()
+  /** Accepted PREPAREs awaiting their barrier, keyed by the staged probe (WS) connection. */
+  private readonly stagedUpgrades = new Map<unknown, StagedUpgrade>()
+  /** REQUIRED reverse index, not an optimization: the barrier arrives on the OLD wire carrying
+   *  only a session id, and the server has no other way back to the staged probe wire. */
+  private readonly stagedByPrevSession = new Map<string, unknown>()
+  private stagedBytes = 0
+  private readonly upgradeLimits: UpgradeResourceLimits
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
   private resolvedOptions: MuxServerOptions | null = null
+
+  constructor(upgradeLimits: Partial<UpgradeResourceLimits> = {}) {
+    this.upgradeLimits = { ...DEFAULT_UPGRADE_LIMITS, ...upgradeLimits }
+  }
 
   private get options(): MuxServerOptions {
     return (this.resolvedOptions ??= resolveMuxServerOptions())
@@ -191,8 +257,17 @@ class ChannelMux {
     if (connId !== null && this.connectionsByConnId.get(connId) === connection) {
       this.connectionsByConnId.delete(connId)
     }
+    // ⚠️ Placement is load-bearing: this must sit ABOVE the session-less early return below. A
+    // staged probe wire has no session id by definition, so cleanup placed any lower would never
+    // run and every abandoned attempt would leak two map entries and a live timer, permanently,
+    // keyed by a dead object.
+    this.clearStage(connection)
     const sessionId = entry.transport.getSessionId(connection)
     if (!sessionId) return // Closed before reconciling — nothing to clean up.
+    // The OLD wire died with a stage pending on it: the barrier can never arrive now. Cleared
+    // before `detachSession` so the ordering is unambiguous rather than incidental.
+    const stagedWs = this.stagedByPrevSession.get(sessionId)
+    if (stagedWs !== undefined) this.clearStage(stagedWs)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
     // permanent tears them down. The session-level finalizer is dropped on any close;
     // reconcile rebuilds it on next attach.
@@ -222,6 +297,8 @@ class ChannelMux {
         const pending = this.handleFrame(entry, connection, rawFrame)
         return pending ? ((await pending) ?? null) : null
       } catch {
+        // A wire being torn down can never commit its stage.
+        this.clearStage(connection)
         entry.state.terminatePermanently = true
         entry.transport.terminateConnection(connection)
         return null
@@ -239,7 +316,16 @@ class ChannelMux {
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | Promise<ReconcileOutcome | null> {
     const frame = decode(rawFrame)
-    if (frame.tag === TAG.RECONCILE) return this.reconcile(entry, connection, frame.payload)
+    if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, connection, frame.payload, rawFrame.byteLength)
+    if (frame.tag === TAG.RECONCILE) {
+      // The dispatch hole: RECONCILE is handled here, ABOVE the session-less guard below, so
+      // without this line a reconcile on a staged probe wire would run the destructive rotation
+      // and step around the stage entirely. A barrier-flagged copy is equally wrong on this wire —
+      // the barrier belongs on the OLD one — and saying so by name beats relying on a downstream
+      // check to reject it as a side effect.
+      if (this.stagedUpgrades.has(connection)) throw new ProtocolViolationError()
+      return this.reconcile(entry, connection, frame.payload)
+    }
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
       this.send(connection, encode.pong())
@@ -253,6 +339,78 @@ class ChannelMux {
     // server reconciled it out, but a frame was still in flight. Drop silently.
     this.sessions.get(sessionId, (frame as ChannelFrame).index)?.channel._dispatchFrame(frame as ChannelFrame)
     return null
+  }
+
+  // ── Barrier upgrade: staging ────────────────────────────────────────
+
+  /** Validates, installs ONE metadata-only record, enqueues `READY` and RETURNS. Nothing is ever
+   *  awaited on the probe wire's recv chain: leaving a turn pending there would retain every later
+   *  raw frame in a closure on the promise chain, which is the unbounded holding area this design
+   *  exists not to build. */
+  private handlePrepare(
+    entry: ConnectionEntry,
+    connection: unknown,
+    payload: PreparePayload,
+    rawByteLength: number,
+  ): null {
+    const limits = this.upgradeLimits
+    // Charged before anything is installed, so a rejected PREPARE leaves no trace to clean up.
+    this.validateUpgradeFrame(payload.open, rawByteLength)
+    if (!payload.upgradeId || typeof payload.upgradeId !== 'string') throw new ProtocolViolationError()
+    if (!payload.sessionId || typeof payload.sessionId !== 'string') throw new ProtocolViolationError()
+    // A PREPARE belongs on a probe wire that is not yet anyone's transport. On an already-
+    // sessioned connection it is newly reachable (this branch sits above the session-less guard)
+    // and always wrong.
+    if (entry.transport.getSessionId(connection)) throw new ProtocolViolationError()
+    // One stage per probe wire AND one per old session. Replace-semantics would have to cancel the
+    // old timer anyway, and a compliant client never sends a second PREPARE.
+    if (this.stagedUpgrades.has(connection)) throw new ProtocolViolationError()
+    if (this.stagedByPrevSession.has(payload.sessionId)) throw new ProtocolViolationError()
+    // Global budget: rejects the NEW probe only. Existing stages and every SSE session are
+    // untouched, so a flood cannot evict an in-progress upgrade.
+    if (this.stagedUpgrades.size >= limits.maxStagedRecords) throw new ProtocolViolationError()
+    if (this.stagedBytes + rawByteLength > limits.maxStagedBytes) throw new ProtocolViolationError()
+
+    const timer = unrefTimer(setTimeout(() => this.clearStage(connection), limits.stageTtlMs))
+    this.stagedUpgrades.set(connection, {
+      upgradeId: payload.upgradeId,
+      prevSessionId: payload.sessionId,
+      bytes: rawByteLength,
+      timer,
+    })
+    this.stagedByPrevSession.set(payload.sessionId, connection)
+    this.stagedBytes += rawByteLength
+    this.send(connection, encode.ready({ upgradeId: payload.upgradeId }))
+    return null
+  }
+
+  /** Idempotent, and the ONLY writer that RETIRES staged accounting — so every cleanup path
+   *  refunds the byte charge and both map entries by construction rather than by discipline. */
+  private clearStage(wsConnection: unknown): void {
+    const stage = this.stagedUpgrades.get(wsConnection)
+    if (!stage) return
+    clearTimeout(stage.timer)
+    this.stagedUpgrades.delete(wsConnection)
+    // Identity-guarded for the same reason `connectionsByConnId` is: a stale clear must not evict
+    // a later stage that legitimately re-used this session id.
+    if (this.stagedByPrevSession.get(stage.prevSessionId) === wsConnection) {
+      this.stagedByPrevSession.delete(stage.prevSessionId)
+    }
+    this.stagedBytes -= stage.bytes
+  }
+
+  /** Applies to PREPARE and `barrier: true` RECONCILE only — an ordinary reconcile keeps its
+   *  existing uncapped contract. */
+  private validateUpgradeFrame(open: ReconcilePayload['open'] | PreparePayload['open'], rawByteLength: number): void {
+    const limits = this.upgradeLimits
+    if (rawByteLength > limits.maxFrameBytes) throw new ProtocolViolationError()
+    if (!Array.isArray(open)) throw new ProtocolViolationError()
+    if (open.length > limits.maxOpenEntries) throw new ProtocolViolationError()
+    for (const channel of open) {
+      if (typeof channel?.id !== 'string') throw new ProtocolViolationError()
+      // UTF-8 bytes rather than UTF-16 units: the cap bounds what the decoder actually allocated.
+      if (textEncoder.encode(channel.id).byteLength > limits.maxIdBytes) throw new ProtocolViolationError()
+    }
   }
 
   // ── Reconcile + attach ──────────────────────────────────────────────
@@ -439,6 +597,21 @@ class ChannelMux {
     this.sessionFinalizers.clear()
     this.connectionEntries.clear()
     this.connectionsByConnId.clear()
+    for (const stage of this.stagedUpgrades.values()) clearTimeout(stage.timer)
+    this.stagedUpgrades.clear()
+    this.stagedByPrevSession.clear()
+    this.stagedBytes = 0
+  }
+
+  /** @internal @test-only Deliberately absent from the package's documented API. Reads the SAME
+   *  fields admission enforces on — a snapshot kept in parallel would stay correct while
+   *  enforcement broke, hiding exactly the bug it was added to reveal. */
+  _getUpgradeResourceSnapshot(): UpgradeResourceSnapshot {
+    return {
+      records: this.stagedUpgrades.size,
+      reverseRecords: this.stagedByPrevSession.size,
+      bytes: this.stagedBytes,
+    }
   }
 }
 

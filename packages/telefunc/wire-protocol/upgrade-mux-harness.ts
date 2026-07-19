@@ -17,14 +17,14 @@
 // it, so config cannot vary across `dispose()` within one mux. Each harness therefore constructs
 // its own `ChannelMux` rather than sharing the module-global one.
 
-export { createMuxHarness, settle, textFrame, reconcileFrame }
+export { createMuxHarness, settle, textFrame, reconcileFrame, prepareFrame, pingFrame }
 export type { MuxHarness, HarnessWire, HarnessChannel }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 
-import { ChannelMux, type ServerTransport } from './server/mux.js'
+import { ChannelMux, type ServerTransport, type UpgradeResourceLimits } from './server/mux.js'
 import { ServerChannel } from './server/channel.js'
-import { decode, encode, type DecodedFrame, type ReconcilePayload } from './shared-ws.js'
+import { decode, encode, type DecodedFrame, type PreparePayload, type ReconcilePayload } from './shared-ws.js'
 
 /** Let every already-scheduled microtask AND macrotask turn run. `setTimeout(0)` rather than
  *  `await null`, because the recv chain hops several promise links per frame. */
@@ -61,6 +61,9 @@ type MuxHarness = {
   readonly mux: ChannelMux
   readonly sse: HarnessWire
   readonly ws: HarnessWire
+  /** An additional wire, for the invariants that need a second probe (one stage per old session)
+   *  or a replacement SSE connection. `connId: null` makes it a WS. */
+  makeWire(connId: string | null): HarnessWire
   /** Build a channel WITHOUT registering it — a reconcile naming it with `initial: true`
    *  then parks in `waitForChannelRegistration` until `register()` releases it. */
   createChannel(id: string): HarnessChannel
@@ -71,8 +74,10 @@ type MuxHarness = {
   dispose(): void
 }
 
-function createMuxHarness(): MuxHarness {
-  const mux = new ChannelMux()
+/** `upgradeLimits` are injected into the REAL `ChannelMux`, so a mechanism test at a small limit
+ *  drives the same enforcement path production runs — not a pure accountant standing beside it. */
+function createMuxHarness(upgradeLimits: Partial<UpgradeResourceLimits> = {}): MuxHarness {
+  const mux = new ChannelMux(upgradeLimits)
   const channels: HarnessChannel[] = []
 
   const makeWire = (connId: string | null): HarnessWire => {
@@ -122,6 +127,7 @@ function createMuxHarness(): MuxHarness {
     mux,
     sse: makeWire('sse-conn-1'),
     ws: makeWire(null),
+    makeWire,
     createChannel,
     registerChannel: (id) => {
       const entry = createChannel(id)
@@ -145,4 +151,12 @@ function textFrame(ix: number, seq: number, value: number): Uint8Array<ArrayBuff
 
 function reconcileFrame(payload: ReconcilePayload): Uint8Array<ArrayBuffer> {
   return encode.reconcile(payload)
+}
+
+function prepareFrame(payload: PreparePayload): Uint8Array<ArrayBuffer> {
+  return encode.prepare(payload)
+}
+
+function pingFrame(): Uint8Array<ArrayBuffer> {
+  return encode.ping()
 }
