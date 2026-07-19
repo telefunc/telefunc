@@ -32,7 +32,7 @@
 
 import { afterEach, describe, expect, test } from 'vitest'
 
-import { createMuxHarness, prepareFrame, reconcileFrame, settle, textFrame } from './upgrade-mux-harness.js'
+import { createMuxHarness, pingFrame, prepareFrame, reconcileFrame, settle, textFrame } from './upgrade-mux-harness.js'
 import { TAG, type DecodedFrame } from './shared-ws.js'
 
 let harness: ReturnType<typeof createMuxHarness> | null = null
@@ -178,10 +178,96 @@ describe('the barrier commits the staged wire', () => {
   })
 })
 
+describe('the commit is single-use and stays policy-authoritative while it runs', () => {
+  // ── F1a ── `attach` is the ONE awaitable inside `reconcile`, and it waits only for an
+  // `initial: true` entry naming an unregistered channel. Letting a barrier carry one would park
+  // the commit mid-flight, holding the probe in a state where it has no session yet and — before
+  // this guard — no stage either. Established channels only: the barrier's membership is
+  // authoritative, so a channel it names that the server does not have is simply omitted, never
+  // waited for. (Seat 1 O1: the staged contract must exclude `initial: true` waits.)
+  test('a barrier carrying an initial:true entry is refused rather than parking the commit', async () => {
+    const h = (harness = createMuxHarness())
+    const { chA, s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+    h.createChannel('B') // built but NOT registered — an `initial` entry naming it would park
+
+    await h.sse.deliver(
+      reconcileFrame({
+        sessionId: s0,
+        upgrade: true,
+        barrier: true,
+        upgradeId: 'upg-1',
+        open: [
+          { id: 'A', ix: 0, lastSeq: 1 },
+          { id: 'B', ix: 1, lastSeq: 0, initial: true },
+        ],
+      }),
+    )
+
+    // The sharp assertion is the SNAPSHOT: if the entry were accepted, `attach` would still be
+    // parked on channel B right now and the record would sit there in `committing`. An empty
+    // snapshot means the commit never started, which is the property this guard exists for.
+    // (Deliberately no `terminated()` assertions here — those belong to the Risk-6 test, and
+    // asserting them too would make this test report that finding's regressions as well as its own.)
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+    expect(reconciledOn(h.ws)).toHaveLength(0)
+    expect(h.ws.sessionId()).toBeUndefined()
+    // Pre-commit refusal: the old session is untouched and still routing.
+    expect(h.sse.sessionId()).toBe(s0)
+    await expectWireDelivers(h.sse, chA)
+  })
+
+  // ── F1b ── The stage is the probe wire's phase marker: while it exists, that wire may send only
+  // PING and its first PREPARE. `reconcile` is async, so releasing the marker at the START of the
+  // commit opens a window in which the probe is neither staged nor sessioned and a plain RECONCILE
+  // runs a SECOND destructive rotation concurrently with the one committing. The record must
+  // therefore survive as COMMITTING until the commit settles.
+  test('a plain RECONCILE on the probe cannot slip in while the commit is in flight', async () => {
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+
+    // Delivered in the same burst: the barrier's turn starts first, the intruder lands while the
+    // commit is still resolving.
+    const commit = h.sse.deliver(barrier(s0))
+    const intruder = h.ws.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
+    await Promise.all([commit, intruder])
+    await settle()
+
+    // Exactly one rotation, and it is the commit's. Counted across BOTH wires so the assertion does
+    // not also depend on `deliverTo` routing, and stated as a count rather than as "the intruder was
+    // terminated" so it does not double as a report on which wire a violation kills.
+    const minted = [...h.sse.sent, ...h.ws.sent].filter((f) => f.tag === TAG.RECONCILED)
+    expect(minted).toHaveLength(2) // the initial connect, and the commit — a served intruder makes 3
+  })
+
+  // The same invariant read through a DIFFERENT check, so that losing the record mid-commit is
+  // reported by something other than the reconcile guard: `handlePrepare`'s one-stage-per-probe rule
+  // consults the record's mere presence. If the record is released when the commit starts, a second
+  // PREPARE walks straight in and the server answers READY for an attempt it is already committing.
+  test('a second PREPARE on the probe is still refused while the commit is in flight', async () => {
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0, 'upg-1'))
+
+    const commit = h.sse.deliver(barrier(s0))
+    const second = h.ws.deliver(prepare(s0, 'upg-2'))
+    await Promise.all([commit, second])
+    await settle()
+
+    expect(h.ws.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(1)
+  })
+})
+
 describe('I1 — the barrier is ordered behind everything already on the old wire', () => {
-  /** Parks the old wire's chain on `waitForChannelRegistration`, then queues a data frame and the
-   *  barrier behind it. Returns the release handle. */
-  async function parkOldWireWithBarrierQueued(h: ReturnType<typeof createMuxHarness>, s0: string) {
+  /** Parks the old wire's chain on `waitForChannelRegistration`, stages an upgrade while it is
+   *  parked, then queues a data frame and the barrier behind the park. Returns the release handle.
+   *
+   *  ORDER MATTERS: the park is an ordinary reconcile, and an ordinary reconcile now releases any
+   *  stage keyed to the session it is about to rotate away. Staging AFTER the park is established is
+   *  therefore both necessary and the more faithful shape — a client PREPAREs on the probe while its
+   *  old wire is still busy, which is exactly the interleaving being modelled. */
+  async function parkOldWireThenStageAndQueueBarrier(h: ReturnType<typeof createMuxHarness>, s0: string) {
     const chB = h.createChannel('B') // built but NOT registered → the next reconcile parks on it
     const parked = h.sse.deliver(
       reconcileFrame({
@@ -193,6 +279,7 @@ describe('I1 — the barrier is ordered behind everything already on the old wir
       }),
     )
     await settle()
+    await h.ws.deliver(prepare(s0))
     const inflight = h.sse.deliver(textFrame(0, 2, 222))
     const barrierTurn = h.sse.deliver(barrier(s0, 'upg-1', 2))
     await settle()
@@ -212,9 +299,7 @@ describe('I1 — the barrier is ordered behind everything already on the old wir
   test('nothing commits while an earlier old-wire turn is still unfinished', async () => {
     const h = (harness = createMuxHarness())
     const { chA, s0 } = await connectSse(h)
-    await h.ws.deliver(prepare(s0))
-
-    await parkOldWireWithBarrierQueued(h, s0)
+    await parkOldWireThenStageAndQueueBarrier(h, s0)
 
     // The park is real, and the barrier sits behind BOTH earlier items.
     expect(reconciledOn(h.sse)).toHaveLength(1) // the parked reconcile has not answered
@@ -228,8 +313,7 @@ describe('I1 — the barrier is ordered behind everything already on the old wir
   test('the parked frame is dispatched before the barrier gets its turn', async () => {
     const h = (harness = createMuxHarness())
     const { chA, s0 } = await connectSse(h)
-    await h.ws.deliver(prepare(s0))
-    const parked = await parkOldWireWithBarrierQueued(h, s0)
+    const parked = await parkOldWireThenStageAndQueueBarrier(h, s0)
 
     await parked.release()
 
@@ -284,6 +368,44 @@ describe('I2 — the retired old wire rejects post-barrier frames loudly', () =>
     expect(h.ws.terminated()).toBe(false)
     await expectWireDelivers(h.ws, chA)
   })
+
+  // ── F2 ── RECONCILE is dispatched ABOVE the retired check, so a late plain reconcile on the
+  // committed-away wire would run the certified rotation there: minting a fresh session on a wire
+  // the client has already abandoned and REATTACHING the channels away from the probe that just
+  // won them. The barrier is the old wire's final SEMANTIC frame, so a reconcile after it is a
+  // violation on exactly the same terms as a data frame — the data-frame test alone misses this
+  // because the two take different dispatch paths.
+  test('a plain RECONCILE after the commit is a violation, and never re-mints on the retired wire', async () => {
+    const h = (harness = createMuxHarness())
+    const { chA, s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+    await h.sse.deliver(barrier(s0))
+    const committedSession = h.ws.sessionId()
+
+    await h.sse.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
+
+    expect(h.sse.terminated()).toBe(true)
+    expect(h.sse.sessionId()).toBe(s0) // ← no new session minted on a wire that is already spent
+    expect(reconciledOn(h.sse)).toHaveLength(1) // only its own original connect
+    // And the channel is still the committed wire's — not stolen back by the retired one.
+    expect(h.ws.sessionId()).toBe(committedSession)
+    await expectWireDelivers(h.ws, chA)
+  })
+
+  test('PING is still answered on the retired wire — it is spent, not dead', async () => {
+    // The discriminator for the two tests above: `retiredByBarrier` must reject SEMANTIC frames
+    // only. The wire stays open until the client sees FIN and drops it, and the client keeps
+    // pinging until then; rejecting PING would tear down a wire that is still doing its job.
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+    await h.sse.deliver(barrier(s0))
+
+    await h.sse.deliver(pingFrame())
+
+    expect(h.sse.terminated()).toBe(false)
+    expect(h.sse.sent.filter((f) => f.tag === TAG.PONG)).toHaveLength(1)
+  })
 })
 
 describe('validation — two checks for two distinct defects', () => {
@@ -301,59 +423,81 @@ describe('validation — two checks for two distinct defects', () => {
     expect(h.sse.sessionId()).toBe(s0) // refused before any rotation
   })
 
+  /** A second, fully independent SSE connection with its own session. */
+  async function connectSecondSse(h: ReturnType<typeof createMuxHarness>) {
+    const sse2 = h.makeWire('sse-conn-2')
+    h.registerChannel('B')
+    await sse2.deliver(reconcileFrame({ open: [{ id: 'B', ix: 0, lastSeq: 0, initial: true }] }))
+    expect(sse2.sessionId()).toBeTypeOf('string')
+    return sse2
+  }
+
   // ── live-session equality: closes CONCURRENT ROTATION ── Neither check substitutes for the other:
   // here the upgradeId matches perfectly and the frame is still poison.
-  test('a barrier is refused when the old wire has rotated out from under the stage', async () => {
+  //
+  // NOTE ON THE SCENARIO. This used to rotate the old wire out from under its own stage and then
+  // barrier from it. Releasing a stage eagerly when its session is rotated away (the leak fix) makes
+  // that path terminate at the stage lookup instead, which would have left this check with no
+  // reachable case and no killer. The equality is really "the barrier must arrive on the wire that
+  // still OWNS the staged session", and THAT is what is exercised here — a copy of a perfectly valid
+  // barrier landing on a different, live connection. Committing it would rotate a session the naming
+  // wire does not hold: no FIN would be sent, and the real old session would survive holding handles
+  // to channels re-attached to the probe, later transient-detaching live healthy channels.
+  test('a barrier is refused when it arrives on a wire that does not own the staged session', async () => {
     const h = (harness = createMuxHarness())
     const { chA, s0 } = await connectSse(h)
     await h.ws.deliver(prepare(s0, 'upg-1'))
+    const sse2 = await connectSecondSse(h)
 
-    // An ordinary register-reconcile lands on the old wire and rotates S0 → S1.
-    await h.sse.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
-    const s1 = h.sse.sessionId()
-    expect(s1).not.toBe(s0)
-    // The client, still believing S0, emits its barrier. The id check passes; only equality catches it.
-    await h.sse.deliver(barrier(s0, 'upg-1'))
+    // Correct upgradeId, correct staged session named — wrong wire. Only equality catches this.
+    await sse2.deliver(barrier(s0, 'upg-1'))
 
     expect(reconciledOn(h.ws)).toHaveLength(0)
     expect(h.ws.sessionId()).toBeUndefined()
-    // Committing against dead S0 would send NO FIN at all (its finalizer was already deleted by the
-    // rotation) and leave S1 holding handles to channels re-attached to the probe wire — which later
-    // transient-detach fires `_onPeerDisconnect` against live, healthy channels.
     expect(finsOn(h.sse)).toHaveLength(0)
-    expect(h.sse.sessionId()).toBe(s1)
-    await expectWireDelivers(h.sse, chA) // S1 is intact and routing
+    // Both real sessions survive untouched. (Which wire a rejection TERMINATES is the Risk-6 test's
+    // invariant, not this one's, so it is deliberately not asserted here.)
+    expect(h.sse.sessionId()).toBe(s0)
+    expect(sse2.sessionId()).toBeTypeOf('string')
+    await expectWireDelivers(h.sse, chA)
   })
 
   // ── Risk 6: which wire dies ── A distinct invariant from either check above, so it gets its own
-  // test — and the barrier here fails BOTH checks at once, deliberately. That is what makes this
-  // test insensitive to either check individually and sensitive ONLY to the choice of victim: with
-  // the retarget removed, the failure kills the connection whose chain merely HOSTED the turn, and
-  // an established client loses its session to a probe's misbehaviour.
+  // test — and the barrier here fails BOTH checks at once, deliberately. That is what makes it
+  // insensitive to either check individually and sensitive ONLY to the choice of victim: with the
+  // retarget removed, the failure kills the connection whose chain merely HOSTED the turn, and a
+  // bystander loses its session to a probe's misbehaviour.
   test('a rejected commit terminates the probe wire, never the wire that hosted the turn', async () => {
     const h = (harness = createMuxHarness())
     const { chA, s0 } = await connectSse(h)
     await h.ws.deliver(prepare(s0, 'upg-1'))
-    await h.sse.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] })) // rotates
-    const s1 = h.sse.sessionId()
+    const sse2 = await connectSecondSse(h)
 
-    await h.sse.deliver(barrier(s0, 'upg-WRONG')) // wrong id AND a stale session
+    await sse2.deliver(barrier(s0, 'upg-WRONG')) // wrong id AND the wrong wire
 
     expect(h.ws.terminated()).toBe(true)
+    expect(sse2.terminated()).toBe(false)
     expect(h.sse.terminated()).toBe(false)
-    expect(h.sse.sessionId()).toBe(s1)
     await expectWireDelivers(h.sse, chA)
   })
 
-  test('a barrier naming no staged upgrade is refused on the wire it arrived on', async () => {
+  // ── F4b ── A barrier whose stage is GONE (expired, or its probe closed) is refused without
+  // terminating anything. Two wrong alternatives were considered and rejected: terminating the old
+  // wire costs an established client its healthy session because a probe timed out, and there is no
+  // longer any record of which probe to terminate instead. So the commit is refused, the rotation
+  // never happens, both wires are left exactly as they were, and the client's own 10 s attempt
+  // deadline aborts the upgrade. This is a refusal, not a silent drop: no state changes and nothing
+  // the client sent is consumed — the distinction that matters against the loss PC1 records.
+  test('a barrier naming no staged upgrade is refused, and terminates neither wire', async () => {
     const h = (harness = createMuxHarness())
-    const { s0 } = await connectSse(h)
+    const { chA, s0 } = await connectSse(h)
 
     await h.sse.deliver(barrier(s0)) // no PREPARE ever happened
 
     expect(reconciledOn(h.sse)).toHaveLength(1) // only the original connect
-    expect(h.sse.terminated()).toBe(true)
     expect(h.sse.sessionId()).toBe(s0) // refused BEFORE any rotation
+    expect(h.sse.terminated()).toBe(false) // ← the established session does not pay for this
+    await expectWireDelivers(h.sse, chA)
   })
 
   test('a duplicate barrier can never rotate twice', async () => {

@@ -18,7 +18,7 @@
 // rejected by tearing down everything, which is precisely what a cap must not do. Caps exist to
 // protect the server from a probe, not to cost an established client its session.
 
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { createMuxHarness, prepareFrame, reconcileFrame, settle, textFrame } from './upgrade-mux-harness.js'
 import {

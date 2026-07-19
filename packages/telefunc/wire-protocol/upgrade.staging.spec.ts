@@ -273,6 +273,10 @@ describe('staged-state cleanup — all six paths', () => {
     expect(h.mux._getUpgradeResourceSnapshot()).toEqual(empty)
     expect(h.sse.sessionId()).toBe(s0) // the old session is untouched — the client just falls back
     expect(h.sse.terminated()).toBe(false)
+    // ── F4a ── Expiry must also TERMINATE the probe, per the timeout table. Clearing the record
+    // alone leaves a session-less WS that PING keeps alive indefinitely: the stage it was opened for
+    // is gone, nothing it can now send is legal, and the server has no reason to hold the socket.
+    expect(h.ws.terminated()).toBe(true)
   })
 
   test('path 2b — PINGing does NOT refresh the deadline', async () => {

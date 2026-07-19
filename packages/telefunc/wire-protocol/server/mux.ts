@@ -82,6 +82,13 @@ type StagedUpgrade = {
   /** Wire bytes charged against the global staged budget; refunded on every cleanup path. */
   bytes: number
   timer: ReturnType<typeof setTimeout>
+  /** `staged` until a barrier commits to this record; `committing` from then until the commit
+   *  settles. The record is the probe wire's PHASE MARKER — while it exists that wire may send only
+   *  PING and its first PREPARE — so releasing it at the start of an awaitable commit would open a
+   *  window in which the probe is neither staged nor sessioned, and a plain reconcile there would
+   *  run a second destructive rotation alongside the one committing. The phase also makes the record
+   *  single-use: a duplicate barrier can never re-enter a commit already in flight. */
+  phase: 'staged' | 'committing'
 }
 
 /** Read-only view of the staged-upgrade accounting, for tests. Derived from the SAME fields
@@ -148,6 +155,16 @@ type ConnectionEntry = {
 }
 
 class ProtocolViolationError extends Error {}
+
+/** A barrier the server cannot honour because its stage is simply GONE — expired, or its probe
+ *  closed. Distinct from a violation because there is no correct wire to kill: the probe no longer
+ *  exists to be terminated, and terminating the OLD wire would cost an established client a healthy
+ *  session because a probe timed out. The commit is refused, both wires are left exactly as they
+ *  were, and the client's own attempt deadline aborts the upgrade.
+ *
+ *  This is a refusal, not the silent drop the design forbids: nothing rotates and nothing the client
+ *  sent is consumed, which is precisely what distinguishes it from the loss PC1 records. */
+class StaleBarrierError extends Error {}
 
 function getChannelMux(): ChannelMux {
   return getGlobals().mux
@@ -325,7 +342,9 @@ class ChannelMux {
       try {
         const pending = this.handleFrame(entry, connection, rawFrame, violation)
         return pending ? ((await pending) ?? null) : null
-      } catch {
+      } catch (err) {
+        // Nobody's wire to kill — see `StaleBarrierError`. Refuse and leave both wires alone.
+        if (err instanceof StaleBarrierError) return null
         const target = violation.connection
         // `target === connection` is every pre-existing path, and resolves to the entry captured
         // above exactly as before. Only a barrier retargets, and then the wire may already be gone.
@@ -351,6 +370,17 @@ class ChannelMux {
     violation: ViolationTarget,
   ): null | Promise<ReconcileOutcome | null> {
     const frame = decode(rawFrame)
+    if (frame.tag === TAG.PING) {
+      this.resetPingTimer(connection)
+      this.send(connection, encode.pong())
+      return null
+    }
+    // Everything below this line is a SEMANTIC frame, and the barrier is the old wire's FINAL
+    // semantic frame by contract. The check has to sit above the reconcile dispatch rather than down
+    // with the data frames: a late reconcile on a committed-away wire would otherwise mint a fresh
+    // session there and reattach the channels away from the probe that just won them. PING stays
+    // legal above — the wire is spent, not dead, and the client keeps it alive until it sees FIN.
+    if (entry.state.retiredByBarrier) throw new ProtocolViolationError()
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, connection, frame.payload, rawFrame.byteLength)
     if (frame.tag === TAG.RECONCILE) {
       // The dispatch hole: RECONCILE is handled here, ABOVE the session-less guard below, so
@@ -364,16 +394,8 @@ class ChannelMux {
       }
       return this.reconcile(entry, connection, frame.payload)
     }
-    if (frame.tag === TAG.PING) {
-      this.resetPingTimer(connection)
-      this.send(connection, encode.pong())
-      return null
-    }
     const sessionId = entry.transport.getSessionId(connection)
     if (!sessionId) throw new ProtocolViolationError()
-    // Post-barrier traffic on the retired old wire. Caught here rather than left to the routing
-    // lookup below, which drops it with no throw, no counter and nothing to alert on.
-    if (entry.state.retiredByBarrier) throw new ProtocolViolationError()
     // PONG/FIN/RECONCILED are server→client only; a client sending one is a violation.
     if (isConnCtrlTag(frame.tag)) throw new ProtocolViolationError()
     // Frame for an ix that's no longer in the session — client closed the channel and the
@@ -412,12 +434,16 @@ class ChannelMux {
     if (this.stagedUpgrades.size >= limits.maxStagedRecords) throw new ProtocolViolationError()
     if (this.stagedBytes + rawByteLength > limits.maxStagedBytes) throw new ProtocolViolationError()
 
-    const timer = unrefTimer(setTimeout(() => this.clearStage(connection), limits.stageTtlMs))
+    // Expiry releases the probe as well as the record, per the timeout table: the attempt it was
+    // opened for is over, nothing it can now send is legal, and PING alone would otherwise keep a
+    // useless session-less socket alive indefinitely.
+    const timer = unrefTimer(setTimeout(() => this.abandonStage(connection), limits.stageTtlMs))
     this.stagedUpgrades.set(connection, {
       upgradeId: payload.upgradeId,
       prevSessionId: payload.sessionId,
       bytes: rawByteLength,
       timer,
+      phase: 'staged',
     })
     this.stagedByPrevSession.set(payload.sessionId, connection)
     this.stagedBytes += rawByteLength
@@ -444,38 +470,72 @@ class ChannelMux {
     const sessionId = ctrl.sessionId
     if (!sessionId) throw new ProtocolViolationError()
     const wsConnection = this.stagedByPrevSession.get(sessionId)
-    if (wsConnection === undefined) throw new ProtocolViolationError()
-    const stage = this.stagedUpgrades.get(wsConnection)
-    if (!stage) throw new ProtocolViolationError()
+    const stage = wsConnection === undefined ? undefined : this.stagedUpgrades.get(wsConnection)
+    // No stage at all, or one already committing: nothing here is any wire's fault to die for.
+    if (wsConnection === undefined || !stage) throw new StaleBarrierError()
+    if (stage.phase !== 'staged') throw new StaleBarrierError()
 
-    // From here every failure is the staged wire's: a rejected commit must leave the old SSE
-    // session fully intact. Clearing first also makes the stage single-use — a duplicate barrier
-    // finds nothing and can never rotate twice.
+    // From here every failure is the STAGED wire's: a rejected commit must leave the old session
+    // fully intact, so the wire whose chain merely HOSTS this turn is never the victim.
     violation.connection = wsConnection
+    try {
+      this.validateUpgradeFrame(ctrl.open, rawByteLength)
+      // Established channels only. `attach` is the one awaitable inside `reconcile`, and it waits
+      // only for an `initial: true` entry naming an unregistered channel — which would park the
+      // commit mid-flight. The barrier's membership is authoritative, so a channel it names that the
+      // server does not have is omitted, never waited for.
+      for (const channel of ctrl.open) if (channel.initial) throw new ProtocolViolationError()
+      // TWO checks for two distinct defects; neither substitutes for the other. The id closes stale
+      // settlement (a delayed ordinary reconciled consumed as this attempt's commit). The live-session
+      // equality closes concurrent rotation — it is what requires the barrier to arrive on the wire
+      // that still OWNS the staged session, so a copy landing anywhere else can never commit.
+      if (ctrl.upgradeId !== stage.upgradeId) throw new ProtocolViolationError()
+      if (entry.transport.getSessionId(connection) !== stage.prevSessionId) throw new ProtocolViolationError()
+
+      // `state.closed` is deliberately NOT also checked: `onConnectionClosed` deletes the entry in
+      // the same breath as it sets that flag, so a closed wire is always simply absent here. A
+      // second condition would read as defence and be unreachable — verified by mutation.
+      const wsEntry = this.connectionEntries.get(wsConnection)
+      if (!wsEntry) throw new ProtocolViolationError()
+
+      // Committed to. The record now survives as the probe's phase marker for the whole of the
+      // awaitable commit — and its TTL stays armed, so the 10 s attempt deadline still bounds an
+      // upgrade that wedges inside `reconcile` rather than being cancelled at the last moment.
+      stage.phase = 'committing'
+      // The old wire is spent: the barrier is its final semantic frame by contract.
+      entry.state.retiredByBarrier = true
+      const release = () => this.clearStage(wsConnection)
+      return this.reconcile(wsEntry, wsConnection, ctrl).then(
+        (outcome) => {
+          // Released at the session-set boundary — `reconcile` has run `setSession`/`setSessionId`,
+          // so the probe now legitimately owns a session and the pre-COMMITTED policy no longer
+          // applies to it. (The caller enqueues COMMITTED a microtask later; in that sliver the wire
+          // is an ordinary sessioned transport, on which a reconcile is legal anyway.)
+          release()
+          return { ...outcome, deliverTo: wsConnection, upgradeId: stage.upgradeId }
+        },
+        (err) => {
+          release()
+          throw err
+        },
+      )
+    } catch (err) {
+      this.clearStage(wsConnection)
+      throw err
+    }
+  }
+
+  /** Release a stage that can no longer commit, and let go of its probe with it. Clearing the record
+   *  alone would leave a session-less WS that PING keeps alive indefinitely, waiting on a commit the
+   *  server will never perform. The OLD session is never touched here — that is the entire pre-barrier
+   *  rule: an abandoned attempt costs the established client nothing. */
+  private abandonStage(wsConnection: unknown): void {
+    if (!this.stagedUpgrades.has(wsConnection)) return
     this.clearStage(wsConnection)
-
-    this.validateUpgradeFrame(ctrl.open, rawByteLength)
-    // TWO checks for two distinct defects; neither substitutes for the other. The id closes stale
-    // settlement (a delayed ordinary reconciled consumed as this attempt's commit). The live-session
-    // equality closes concurrent rotation: an intervening register-reconcile can rotate the old wire
-    // S0→S1 underneath a stage for S0, and committing against dead S0 sends no FIN at all while
-    // leaving S1 holding handles to channels already re-attached to the probe wire.
-    if (ctrl.upgradeId !== stage.upgradeId) throw new ProtocolViolationError()
-    if (entry.transport.getSessionId(connection) !== stage.prevSessionId) throw new ProtocolViolationError()
-
-    // `state.closed` is deliberately NOT also checked: `onConnectionClosed` deletes the entry in
-    // the same breath as it sets that flag, so a closed wire is always simply absent here. A
-    // second condition would read as defence and be unreachable — verified by mutation.
-    const wsEntry = this.connectionEntries.get(wsConnection)
-    if (!wsEntry) throw new ProtocolViolationError()
-
-    // The old wire is spent: the barrier is its final frame by contract.
-    entry.state.retiredByBarrier = true
-    return this.reconcile(wsEntry, wsConnection, ctrl).then((outcome) => ({
-      ...outcome,
-      deliverTo: wsConnection,
-      upgradeId: stage.upgradeId,
-    }))
+    const entry = this.connectionEntries.get(wsConnection)
+    if (!entry) return
+    entry.state.terminatePermanently = true
+    entry.transport.terminateConnection(wsConnection)
   }
 
   /** Idempotent, and the ONLY writer of the staged accounting — so every one of the six cleanup

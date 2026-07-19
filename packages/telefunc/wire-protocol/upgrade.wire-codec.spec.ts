@@ -213,10 +213,13 @@ describe('the additions change no server behavior', () => {
     )
     await settle()
 
-    expect(h.sse.terminated()).toBe(true)
-    // Refused BEFORE any side effect: no second reconciled, no rotation.
+    // Refused BEFORE any side effect: no second reconciled, no rotation. The wire itself is left
+    // alone — a barrier naming no staged upgrade is refused rather than punished, since killing this
+    // healthy session over a stale or expired attempt would cost the client far more than the
+    // upgrade was worth (see `upgrade.barrier.spec.ts`).
     expect(h.sse.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(1)
     expect(h.sse.sessionId()).toBe(s0)
+    expect(h.sse.terminated()).toBe(false)
   })
 
   test('control: the identical reconcile WITHOUT the barrier fields is still an ordinary reconcile', async () => {
