@@ -304,7 +304,7 @@ class ClientRoom implements Room {
         return
       }
       case 'update':
-        this._state.applyRoomUpdate(event.meta, event.prev, event.at, event.by)
+        this._state.applyRoomUpdate(event.meta, event.at, event.by)
         return
       case 'closed':
         this._applyClosed('closed')

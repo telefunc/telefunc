@@ -404,9 +404,12 @@ class RoomState {
   }
 
   /** Last-writer-wins by `(at, by)`: concurrent `Room.setMeta()`s converge to the same winner on
-   *  every node regardless of arrival order, and the origin's echo (same stamp) is absorbed. */
-  applyRoomUpdate(meta: RoomMeta, prev: RoomMeta, at: number, by: string): void {
+   *  every node regardless of arrival order, and the origin's echo (same stamp) is absorbed. `prev` is
+   *  derived here, not shipped: it's the meta THIS view is transitioning away from, which under LWW can
+   *  differ per node (a view that skipped an intermediate update never held the writer's `prev`). */
+  applyRoomUpdate(meta: RoomMeta, at: number, by: string): void {
     if (!stampNewer({ at, by }, this._updateStamp)) return
+    const prev = this.meta
     this._updateStamp = { at, by }
     this.meta = meta
     this._bumpState()

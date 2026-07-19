@@ -214,6 +214,18 @@ describe('Room entry point', () => {
     await expect(Room.setAttributes('gone', {})).rejects.toThrow('Room not found: gone')
   })
 
+  it('concurrent room setAttributes merge onto the latest — neither key is lost on a race', async () => {
+    await Room.create('room-attrs-race', { meta: {} })
+    // Both calls read the same empty snapshot, then race into the config compare-and-set. The merge is
+    // re-derived inside the CAS against whichever landed first, so the second builds on it — rather than
+    // clobbering it with a merge computed against the stale read (which would drop one key).
+    await Promise.all([
+      Room.setAttributes('room-attrs-race', { a: 1 }),
+      Room.setAttributes('room-attrs-race', { b: 2 }),
+    ])
+    expect((await Room.get('room-attrs-race')).meta).toEqual({ a: 1, b: 2 })
+  })
+
   it('typed publish: a declared Pub types publish() and subscribe() end to end', async () => {
     type ChatMsg = { kind: 'chat'; text: string }
     const room = await Room.create<{ topic: string }, { name: string }, ChatMsg>('typed-pub', { meta: { topic: 't' } })
@@ -236,7 +248,7 @@ describe('Room entry point', () => {
         onListenersChanged: () => {},
         onCallbackError: () => {},
       })
-      for (const e of events) state.applyRoomUpdate({ topic: e.topic }, {}, e.at, e.by)
+      for (const e of events) state.applyRoomUpdate({ topic: e.topic }, e.at, e.by)
       return state.meta
     }
     const a = { at: 5, by: 'writer-a', topic: 'from-a' }
@@ -2646,7 +2658,7 @@ describe('ClientRoom', () => {
     fake.emit({ __r: 'p-meta', id: me.id, meta: { mood: 'happy' }, prev: {}, seq: 1 })
     expect(me.meta).toEqual({ mood: 'happy' })
 
-    fake.emit({ __r: 'update', meta: { topic: 'b' }, prev: { topic: 'a' }, at: 9, by: 'w1' })
+    fake.emit({ __r: 'update', meta: { topic: 'b' }, at: 9, by: 'w1' })
     expect(clientRoom.meta).toEqual({ topic: 'b' })
 
     fake.emit({ __r: 'leave', id: me.id, cause: 'removed', reason: 'be nice' }) // kicked, told why

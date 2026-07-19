@@ -34,7 +34,6 @@ import {
   roomFailureError,
   leaveCauseFromWire,
   leaveCauseToWire,
-  stampNewer,
   frameWithMemberId,
   binaryFrameSender,
   hasRoomTag,
@@ -426,7 +425,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
 async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
   assertUsage(isObject(meta), 'Room.setMeta() meta should be an object')
   const { kv, config } = await requireRoom(id)
-  await writeRoomConfig(id, kv, config, meta)
+  await writeRoomConfig(id, kv, config, () => meta)
 }
 
 /** Merge into the room's metadata per key — provided keys replace, omitted keys keep their value,
@@ -435,41 +434,46 @@ async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
 async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
   assertUsage(isObject(attributes), 'Room.setAttributes() attributes should be an object')
   const { kv, config } = await requireRoom(id)
-  await writeRoomConfig(id, kv, config, mergeAttributes(config.meta, attributes))
+  // The merge is a mutator, not a value: `writeRoomConfig` runs it inside the compare-and-set against
+  // the config actually present, so a concurrent room `setAttributes` merges onto the latest, not the
+  // snapshot read above — no lost key on a race (mirrors `_writeMemberMeta`).
+  await writeRoomConfig(id, kv, config, (current) => mergeAttributes(current, attributes))
 }
 
-/** Commit a room-config change and converge it. The stamp is strictly after the config it derives
- *  from (hybrid-clock): one writer's back-to-back writes always order, cross-writer ties break
- *  wall-clock last-writer-wins. Everywhere the `update` event reaches converges on the `(at, by)`
- *  stamp; the KV write is a stamp-wins compare-and-set — `next` lands unless a strictly-newer config
- *  already sits there, so the winner's value is final in one atomic step (no read-back re-assert).
- *  Shared by `setMeta()` (replace) and `setAttributes()` (merge). */
-async function writeRoomConfig(id: string, kv: RoomKV, config: RoomConfigRecord, meta: RoomMeta): Promise<void> {
-  const at = Math.max(Date.now(), config.at + 1)
+/** Commit a room-config change and converge it. Both the new value (`computeMeta` — a replace for
+ *  `setMeta()`, a per-key merge for `setAttributes()`) and its hybrid-clock stamp are derived inside
+ *  the compare-and-set, against the config actually present — mirroring `_writeMemberMeta`. A concurrent
+ *  write that landed first re-runs the mutator on that fresh config, so a merge never loses a key and the
+ *  stamp is always strictly after what it overwrites (the write lands, never dropped for staleness). One
+ *  writer's back-to-back writes order; cross-writer ties break wall-clock last-writer-wins. `prev` isn't
+ *  shipped — each node derives its own local pre-value when it applies the `update` (see `applyRoomUpdate`). */
+async function writeRoomConfig(
+  id: string,
+  kv: RoomKV,
+  config: RoomConfigRecord,
+  computeMeta: (current: RoomMeta) => RoomMeta,
+): Promise<void> {
   const by = writerId()
   // Object property, not a `let`: the mutator runs inside `update`, and control-flow analysis
   // wouldn't see it reassign a plain local.
-  const decision = { outcome: 'kept' as 'wrote' | 'kept' | 'gone' }
+  const decision = { outcome: 'gone' as 'wrote' | 'gone' }
+  let at = 0
+  let meta!: RoomMeta
   await kv.update(roomConfigKvKey(id), (raw) => {
     const current = parseConfig(raw)
     // Legality is decided against the authority: a missing/closing/closed record, or one from another
-    // generation, is never resurrected or mutated by `setMeta` — the write is dropped.
+    // generation, is never resurrected or mutated — the write is dropped.
     if (current === null || current.status !== 'open' || current.gen !== config.gen) {
       decision.outcome = 'gone'
       return KV_KEEP
     }
-    const next: RoomConfigRecord = { meta, at, by, gen: current.gen, status: 'open' }
-    // Stamp-wins: `next` lands unless a strictly-newer config already sits there (that writer
-    // published its own convergence event). One atomic step, no read-back re-assert.
-    if (!stampNewer(next, current)) {
-      decision.outcome = 'kept'
-      return KV_KEEP
-    }
+    at = Math.max(Date.now(), current.at + 1) // strictly after the config we overwrite → always the winner
+    meta = computeMeta(current.meta)
     decision.outcome = 'wrote'
-    return stringify(next)
+    return stringify({ meta, at, by, gen: current.gen, status: 'open' } satisfies RoomConfigRecord)
   })
   if (decision.outcome === 'gone') throw new RoomError(`Room is closed: ${id}`)
-  if (decision.outcome === 'wrote') await publishCtrl(id, { __r: 'update', meta, prev: config.meta, at, by })
+  await publishCtrl(id, { __r: 'update', meta, at, by })
 }
 
 async function closeRoom(id: string): Promise<void> {
@@ -1361,7 +1365,7 @@ class ServerRoom implements Room {
         return
       }
       case 'update':
-        this._state.applyRoomUpdate(event.meta, event.prev, event.at, event.by)
+        this._state.applyRoomUpdate(event.meta, event.at, event.by)
         return
       case 'closed':
         this._state.applyClosed()
