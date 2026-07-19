@@ -1,7 +1,8 @@
 export { reactiveDrizzle }
 export type { Reactive }
 
-import { captureMutation, captureRawSql, type CaptureSink } from './writeCapture.js'
+import { captureMutation, captureRawSql } from './writeCapture.js'
+import type { CaptureSink } from './writeChanges.js'
 import { ingestLocal, ingestWrite } from './dbRuntime.js'
 import { configureChangeRuntime } from './changeRuntime.js'
 import type { ChangeTransport } from './changeTransport.js'

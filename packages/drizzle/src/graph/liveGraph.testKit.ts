@@ -1,6 +1,6 @@
 // Shared fixtures for the live-graph specs (lifecycle / apply).
 //
-// These two files were one file and drive the SAME real compiled `users ⋈ teams` graph. Everything here is
+// SHARED because both specs drive the SAME real compiled `users ⋈ teams` graph. Everything here is
 // deterministic — deferred/immediate promises drive the seed, never timers — and the graphs are REAL compiled
 // join graphs rather than fakes wherever the case is about behaviour rather than about born-state.
 //

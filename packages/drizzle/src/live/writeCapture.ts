@@ -1,7 +1,4 @@
 export { captureMutation, captureRawSql }
-export { emitSafely, captureMismatch } from './writeChanges.js'
-export { planCapture } from './writePlan.js'
-export type { CaptureSink } from './writeChanges.js'
 
 import { type Table, isTable } from 'drizzle-orm'
 import { demoteOldNewReturning, markOldNewProven, oldNewProvenOf } from './writeCapabilities.js'

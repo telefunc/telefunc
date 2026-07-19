@@ -1,9 +1,9 @@
 // Shared test doubles for the registry specs (acquire / notify).
 //
-// These two files were one file and drive ONE registry through the SAME fakes. The builders below are
+// SHARED because both specs drive ONE registry through the SAME fakes, and copies of them would drift — a
+// drifting fake is a spec that has quietly stopped describing the same registry. The builders below are
 // deterministic by construction — pending promises drive every async path, never timers — and everything is
-// observed THROUGH THE INTERFACE (`graph.state()` and notify), never an inspect() getter. Two copies of that
-// would drift, and a drifting fake is a spec that has quietly stopped describing the same registry.
+// observed THROUGH THE INTERFACE (`graph.state()` and notify), never an inspect() getter.
 
 import type { FireResult, GraphPlan, SeedDescriptor, StatefulGraph } from '../compile/compile.js'
 import type { Row } from '../compile/rowSpace.js'

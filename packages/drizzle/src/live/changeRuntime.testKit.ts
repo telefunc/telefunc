@@ -1,9 +1,9 @@
 // Shared fixtures for the change-runtime specs (publish / ordering / isolation / lifecycle).
 //
-// These four files were one file, and they exercise ONE subject through ONE mocked registry. That is why this
-// is a shared module rather than four copies: unlike the four-line `capturing()` helper the write-capture
-// specs each keep their own, these fixtures every file depends on identically, and four copies would drift —
-// a drifting fixture is a spec that quietly stops describing the same system.
+// SHARED rather than copied per file, because all four exercise ONE subject through ONE mocked registry and
+// depend on these fixtures identically. Copies of a fixture that large drift, and a drifting fixture is a
+// spec that has quietly stopped describing the same system. (The write-capture specs make the opposite call
+// for a four-line helper, where drift cannot change what the spec means.)
 //
 // The mocked registry itself lives in `changeRuntime.registryMock.ts`, which imports nothing from the source
 // tree; see the note there for why that separation is load-bearing rather than tidy.
@@ -11,12 +11,23 @@
 import type { ChangeTransport } from './changeTransport.js'
 import { createInMemoryChangeTransport } from './changeTransport.js'
 import { acquireSubscription, changeTopicFor, setChangeTransport } from './changeRuntime.js'
+import type { RoutableGraph } from '../router/changeRouter.js'
 import type { TableChange } from '../router/events.js'
 
 export { engine, resetEngine } from './changeRuntime.registryMock.js'
 
-/** A minimal registered graph — only its `tables` matter to watchedTables(). */
-export const watching = (table: string) => ({ tables: [table] }) as never
+/** A registered graph watching one table. Only `tables` matters to `watchedTables()`, but this satisfies the
+ *  REAL `RoutableGraph` rather than casting past it — a cast here would erase the registration contract this
+ *  shared kit exists to hold, so a change to what the router demands of a graph would not reach these specs
+ *  at all. The behavioural members are inert on purpose: the router is mocked here, and what a graph DOES
+ *  with a change is the graph specs' subject. */
+export const watching = (table: string): RoutableGraph => ({
+  tables: [table],
+  apply: () => ({ invalidated: false }),
+  notifyKey: () => table,
+  fault: () => {},
+  reseed: () => {},
+})
 
 export const change = (table: string): TableChange => ({ table, kind: 'insert', new: { id: 1 } })
 

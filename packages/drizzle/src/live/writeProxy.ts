@@ -2,7 +2,8 @@ export { isWriteOp, isRawSqlOp, captureTransactions }
 
 import { registryFor } from './dbRuntime.js'
 import { publishCoarseAll } from './changeRuntime.js'
-import { type CaptureSink, captureMutation, captureRawSql, emitSafely } from './writeCapture.js'
+import { captureMutation, captureRawSql } from './writeCapture.js'
+import { type CaptureSink, emitSafely } from './writeChanges.js'
 import type { TableChange } from '../router/events.js'
 
 // THE WRITE-SIDE PROXY MACHINERY: which db members are writes, which are raw execution surfaces, and the

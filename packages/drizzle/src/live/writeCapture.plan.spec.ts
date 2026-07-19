@@ -30,7 +30,8 @@ import { drizzle as pgPoolDrizzle } from 'drizzle-orm/node-postgres'
 import { integer, pgTable, text } from 'drizzle-orm/pg-core'
 import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { captureMismatch, planCapture } from './writeCapture.js'
+import { captureMismatch } from './writeChanges.js'
+import { planCapture } from './writePlan.js'
 
 const keyed = pgTable('keyed', { id: integer('id').primaryKey(), name: text('name') })
 const unkeyed = pgTable('unkeyed', { a: integer('a'), b: text('b') }) // NO primary key
