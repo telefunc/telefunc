@@ -638,7 +638,7 @@ describe('a default-constructed mux reads the shipped constants', () => {
     // Known and accepted limit: three fields legitimately hold 64 MiB (`maxStagedBytes`,
     // `maxRawFrameBytes`, `maxRecvBacklogBytes`), so a swap AMONG THOSE THREE is invisible here. That
     // is not a defect — swapping constants of equal value is behaviourally identical — but it means
-    // this row gates mis-binding, not identity.
+    // this row gates wrong binding, not identity.
     const limits = (harness = createMuxHarness()).mux._getResourceLimits()
 
     expect(limits).toEqual({

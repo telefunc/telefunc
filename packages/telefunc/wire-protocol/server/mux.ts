@@ -203,7 +203,7 @@ class ChannelMux {
   /** Reverse index for transports with a stable connId (SSE). Lets data POSTs locate the
    *  live stream connection, and catches a duplicate-connId reconnect racing teardown. */
   private readonly connectionsByConnId = new Map<string, unknown>()
-  /** Accepted PREPAREs awaiting their barrier, keyed by the staged probe (WS) connection. */
+  /** Accepted PREPARE stages awaiting their barrier, keyed by the staged probe (WS) connection. */
   private readonly stagedUpgrades = new Map<unknown, StagedUpgrade>()
   /** REQUIRED reverse index, not an optimization: the barrier arrives on the OLD wire carrying
    *  only a session id, and the server has no other way back to the staged probe wire. */

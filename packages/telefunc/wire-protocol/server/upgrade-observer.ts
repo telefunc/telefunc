@@ -17,7 +17,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
  * wherever a second copy of that module is loaded (dev serves a Vite-transformed copy beside Node's).
  */
 type UpgradeObservations = {
-  /** PREPAREs the server accepted and answered with READY. */
+  /** PREPARE frames the server accepted and answered with READY. */
   prepared: number
   /** Barrier commits that RESOLVED — the upgrade is done and the probe wire owns the session. */
   committed: number

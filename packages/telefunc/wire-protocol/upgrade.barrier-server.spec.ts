@@ -272,7 +272,7 @@ describe('happens-before: the barrier is ordered behind everything on the old wi
   /** Parks the old wire's chain on `waitForChannelRegistration`, stages while parked, then queues a
    *  data frame and the barrier behind the park. ORDER MATTERS: the park is an ordinary reconcile, and
    *  an ordinary reconcile releases any stage keyed to the session it rotates away — so staging AFTER
-   *  the park is both necessary and the faithful shape (a client PREPAREs while its old wire is busy). */
+   *  the park is both necessary and the faithful shape (a client sends PREPARE while its old wire is busy). */
   async function parkThenStageAndQueueBarrier(h: ReturnType<typeof createMuxHarness>, s0: string) {
     const chB = h.createChannel('B') // built but NOT registered → the next reconcile parks on it
     const parked = h.sse.deliver(
