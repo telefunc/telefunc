@@ -131,7 +131,7 @@ describe('eval3 — LIKE / ILIKE with SQL escapes', () => {
   })
 
   it('an escaped %/_ is a literal, not a wildcard', () => {
-    // pattern a\%b (pg/mysql default backslash escape) matches the literal "a%b" only
+    // pattern a\%b (pg's default backslash escape) matches the literal "a%b" only
     expect(eval3(like('a\\%b', false, '\\'), rowView({ t: 'a%b' }))).toBe(true)
     expect(eval3(like('a\\%b', false, '\\'), rowView({ t: 'axyzb' }))).toBe(false)
     expect(eval3(like('a\\_b', false, '\\'), rowView({ t: 'a_b' }))).toBe(true)

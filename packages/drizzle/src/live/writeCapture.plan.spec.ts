@@ -1,16 +1,12 @@
-// The precision DECISION, observed independently of execution. The review noted that no-PK, MySQL and
-// pooled-connection coarsening "look fail-closed" but had no executable control — and two of them cannot be
-// driven by a real write here (there is no live MySQL, and a pooled PG client would need a real server). So
-// planCapture is exercised directly: it is the single place precision is decided, which also gives the
-// count/shape mismatch an observation seam.
+// The precision DECISION, observed independently of execution. The review noted that no-PK and
+// pooled-connection coarsening "look fail-closed" but had no executable control — and a pooled PG client
+// cannot be driven by a real write here (it would need a real server). So planCapture is exercised
+// directly: it is the single place precision is decided, which also gives the count/shape mismatch an
+// observation seam.
 //
 // ISOLATION, stated honestly (verified by mutating each guard in turn):
 //  - the no-PK, UPSERT and PK-changing cases ISOLATE their guard — removing it flips exactly that case (the
 //    no-PK guard now applies to UPDATE/DELETE only, since an insert retracts nothing);
-//  - the MySQL case is OVER-DETERMINED: that db also fails the "reconstruction must be provably faithful for
-//    this driver" gate, so removing the dialect guard alone does NOT flip it. It asserts the OUTCOME (such a
-//    write can never plan precise) rather than one guard. Defence in depth, not a defect — but it is not a
-//    regression test for the dialect guard specifically.
 //  - the POOLED cases DO isolate: re-introducing a blanket `!isSingleSession(db) → coarse` gate above the
 //    returning check flips 'pooled + full .returning()' and the plan-equality case, and nothing else.
 //
@@ -24,8 +20,6 @@
 
 import { PGlite } from '@electric-sql/pglite'
 import { entityKind, sql } from 'drizzle-orm'
-import { mysqlTable, int as myInt, varchar } from 'drizzle-orm/mysql-core'
-import { drizzle as mysqlDrizzle } from 'drizzle-orm/mysql2'
 import { drizzle as pgPoolDrizzle } from 'drizzle-orm/node-postgres'
 import { integer, pgTable, text } from 'drizzle-orm/pg-core'
 import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
@@ -35,20 +29,15 @@ import { planCapture } from './writePlan.js'
 
 const keyed = pgTable('keyed', { id: integer('id').primaryKey(), name: text('name') })
 const unkeyed = pgTable('unkeyed', { a: integer('a'), b: text('b') }) // NO primary key
-const myUsers = mysqlTable('users', { id: myInt('id').primaryKey(), name: varchar('name', { length: 32 }) })
 
 // HERMETIC BY CONSTRUCTION — no sockets. Planning reads only the db's SHAPE (dialect entityKind, driver
 // entityKind, and the client constructor NAME that classifies single-session vs pooled); it never executes.
-// Pointing a real mysql2/pg client at an unroutable host used to open an actual socket, whose async
-// ENOTFOUND / PROTOCOL_CONNECTION_LOST surfaced as an unhandled error AFTER the assertions passed — the
-// suite printed green and exited 1.
+// Pointing a real pg client at an unroutable host used to open an actual socket, whose async ENOTFOUND
+// surfaced as an unhandled error AFTER the assertions passed — the suite printed green and exited 1.
 //
 // The drizzle constructors below are the REAL ones, so the dialect/driver discriminators are genuine; only
 // the client is a stub. `assertClassifierInputs` then pins every field the classifier actually reads, so if
 // drizzle changes its shape this fails loudly instead of quietly planning against a fiction.
-class Connection {
-  config = {} // drizzle's mysql2 driver writes `supportBigNumbers` here
-}
 class Pool {}
 class Client {}
 
@@ -101,16 +90,6 @@ describe('capture planning — fail-closed branches have executable controls', (
     // premise audit #4/H4. The old rule coarsened by table, not by operation, and an insert never needs the
     // key the rule was protecting. See the liveGraph case for where the win actually lands (stateless).
     expect(insertPlan(pg, pg.insert(unkeyed).values({ a: 1, b: 'x' }), unkeyed).mode).toBe('precise')
-  })
-
-  it('MySQL → coarse (no RETURNING; precise MySQL is deferred pending a live lane)', () => {
-    // A SINGLE CONNECTION, not a pool: session authority is provable here, so the ONLY reason this plans
-    // coarse is the MySQL dialect itself. (With a pool it would coarsen via the pooled guard instead and the
-    // case would pass for the wrong reason — removing the dialect guard would not flip it.)
-    const my = mysqlDrizzle({ client: asClient(new Connection()) })
-    assertClassifierInputs(my, { dialect: 'MySqlDialect', driver: 'MySql2Database', client: 'Connection' })
-    const plan = insertPlan(my, my.insert(myUsers).values({ id: 1, name: 'a' }), myUsers)
-    expect(plan.mode).toBe('coarse')
   })
 
   it('POOLED PG with NO returning → coarse (the reconstruction is unproven for node-postgres)', () => {

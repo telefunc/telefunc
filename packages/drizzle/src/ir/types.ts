@@ -4,7 +4,7 @@
 // `SqlSource` so later hydration can rebuild residual WHERE with drizzle's own
 // and(...) — the engine never inspects it, which keeps this boundary drizzle-free.
 
-export type Dialect = 'pg' | 'mysql' | 'sqlite'
+export type Dialect = 'pg' | 'sqlite'
 
 /** Three-valued truth. `undefined` is SQL's third value (a comparison touching
  *  NULL, a not-yet-captured column, or an operand the compiler could not read). */
@@ -69,7 +69,7 @@ export type Predicate =
       expr: ScalarExpr
       pattern: string | null
       caseInsensitive: boolean
-      /** SQL escape character (`\` on pg/mysql; `null` on sqlite, which has no default
+      /** SQL escape character (`\` on pg; `null` on sqlite, which has no default
        *  escape). An escaped `%`/`_` is a literal, not a wildcard. */
       escapeChar: string | null
       negated: boolean

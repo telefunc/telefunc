@@ -28,7 +28,7 @@ import { dirname, join } from 'node:path'
 import { QueryBuilder, alias, boolean, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { eval3, rowView } from '../ir/eval.js'
-import type { CompareOp, Predicate, ScalarExpr, Tri } from '../ir/types.js'
+import type { CompareOp, Dialect, Predicate, ScalarExpr, Tri } from '../ir/types.js'
 import { conjunctsOf, extractPredicate, parsePredicate, toNNF } from './predicate.js'
 
 const requireFrom = createRequire(import.meta.url)
@@ -55,7 +55,7 @@ const users = pgTable('users', { id: integer('id').primaryKey(), name: text('nam
 const qb = new QueryBuilder()
 
 type Cond = Parameters<typeof extractPredicate>[0]
-const ev = (cond: Cond, record: Record<string, unknown>, dialect?: 'pg' | 'mysql' | 'sqlite'): Tri =>
+const ev = (cond: Cond, record: Record<string, unknown>, dialect?: Dialect): Tri =>
   eval3(extractPredicate(cond, { dialect }).predicate, rowView(record))
 
 describe('extractPredicate — operators', () => {
@@ -142,9 +142,8 @@ describe('extractPredicate — operators', () => {
     expect(ev(like(todos.text, 'a.c'), { text: 'abc' })).toBe(false) // metacharacters stay literal
   })
 
-  it('sqlite/mysql LIKE is case-insensitive by dialect', () => {
+  it('sqlite LIKE is case-insensitive by dialect', () => {
     expect(ev(like(todos.text, 'buy%'), { text: 'BUY milk' }, 'sqlite')).toBe(true)
-    expect(ev(like(todos.text, 'buy%'), { text: 'BUY milk' }, 'mysql')).toBe(true)
     expect(ev(like(todos.text, 'buy%'), { text: 'BUY milk' }, 'pg')).toBe(false)
   })
 

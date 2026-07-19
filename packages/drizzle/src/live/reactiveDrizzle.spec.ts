@@ -9,6 +9,8 @@ vi.mock('./readCapture.js', () => ({
   wrapLiveSelect: vi.fn((baseBuilder: unknown) => baseBuilder),
 }))
 
+import { MySqlDialect } from 'drizzle-orm/mysql-core'
+import { PgDialect } from 'drizzle-orm/pg-core'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
 import { captureMutation } from './writeCapture.js'
 import { wrapLiveSelect } from './readCapture.js'
@@ -16,11 +18,38 @@ import { wrapLiveSelect } from './readCapture.js'
 // These tests drive the proxy over FAKE dbs (the engine is mocked). reactiveDrizzle's real-db constraint
 // is a TYPE surface — proven against real Drizzle in the contract spec — so here we call through a cast
 // that lets a stub db past it; the runtime behaviour under test is unchanged.
-const reactive = (db: object) => reactiveDrizzle(db as never)
+//
+// The stubs carry a REAL `PgDialect` because construction now rejects an unsupported database (see the
+// MySQL pin below), and that check reads the dialect's discriminator. Attached in place with
+// `Object.assign` rather than by spreading: the assertions below compare the db handed to the engine by
+// IDENTITY, and a copy would pass a different object than the caller holds.
+const pgDialect = new PgDialect()
+const reactive = (db: object) => reactiveDrizzle(Object.assign(db, { dialect: pgDialect }) as never)
 
 // The runtime type contract (row types survive the terminal `.live()`, teeth) lives in the dedicated
 // HKT contract spec, exercised against REAL Drizzle builders — a hand-rolled db can't stand in for the
 // HKT seam. These tests own the PROXY behaviour: direct-return, select-wrapping, plain-field forwarding.
+
+describe('reactiveDrizzle — an unsupported database is refused, not silently degraded', () => {
+  // MySQL has no RETURNING, so no write on it could ever be captured row by row: every write would
+  // invalidate every live query on the table. Returning a db that LOOKS reactive and quietly over-fires is
+  // the failure this pin exists to prevent, so the refusal must happen at CONSTRUCTION — before any read or
+  // write has a chance to be the thing that discovers it.
+  //
+  // The fixture carries drizzle's REAL `MySqlDialect` (from driver-free mysql-core, so no mysql2
+  // dependency): it is the exact object whose discriminator `dialectOf` reads on a real mysql2 db.
+  const mysqlDb = { dialect: new MySqlDialect(), select: () => ({}) }
+
+  it('throws AT CONSTRUCTION on a MySQL db, naming the supported set', () => {
+    expect(() => reactiveDrizzle(mysqlDb as never)).toThrow(/does not support MySQL/)
+    expect(() => reactiveDrizzle(mysqlDb as never)).toThrow(/PostgreSQL, PGlite, SQLite/)
+  })
+
+  it('…and the throw is what stops it: a supported db constructs fine through the same path', () => {
+    // The control. Without it this pin would still pass if `reactiveDrizzle` threw on EVERY db.
+    expect(() => reactive({ select: () => ({}) })).not.toThrow()
+  })
+})
 
 describe('reactiveDrizzle — client surface', () => {
   beforeEach(() => {

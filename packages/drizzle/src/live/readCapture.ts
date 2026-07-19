@@ -180,7 +180,7 @@ async function captureAndBuild(builder: unknown, db: object): Promise<Live<Row[]
 }
 
 /** The plan compiler for one query, gated on session provability: a single-session connection (a
- *  pinned pg Client / node:sqlite / single mysql Connection) compiles precisely; a POOLED-UNPINNED
+ *  pinned pg Client / node:sqlite / PGlite) compiles precisely; a POOLED-UNPINNED
  *  connection can't prove the executing session's authority (role/search_path/RLS), so precise state
  *  could hydrate from a mismatched session — force it COARSE (invalidate-on-any-change, sound). */
 function compilePlanFor(db: object, shape: QueryShape): () => GraphPlan {

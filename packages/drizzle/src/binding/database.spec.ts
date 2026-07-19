@@ -1,10 +1,9 @@
 import { PGlite } from '@electric-sql/pglite'
-import { drizzle as myDrizzle } from 'drizzle-orm/mysql2'
+import { MySqlDialect } from 'drizzle-orm/mysql-core'
 import { drizzle as pgDrizzle } from 'drizzle-orm/node-postgres'
 import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
 import { drizzle as pgliteDrizzle } from 'drizzle-orm/pglite'
 import { drizzle as pjDrizzle } from 'drizzle-orm/postgres-js'
-import { createPool } from 'mysql2'
 import { Client, Pool } from 'pg'
 import postgres from 'postgres'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -44,9 +43,9 @@ const pjSql = postgres({ host: 'pj.example', port: 6000, database: 'pjdb', user:
 const pjDb = pjDrizzle({ client: pjSql })
 cleanups.push(() => pjSql.end())
 
-const myPool = createPool({ host: 'my.example', port: 3307, database: 'mydb', user: 'myuser' })
-const myDb = myDrizzle({ client: myPool })
-cleanups.push(() => new Promise((resolve) => myPool.end(() => resolve(undefined))))
+// A db carrying drizzle's REAL `MySqlDialect` — the exact object `dialectOf` reads its discriminator off,
+// built from driver-free `mysql-core` so the rejection stays testable without a mysql2 dependency.
+const myDb = { dialect: new MySqlDialect() }
 
 afterAll(async () => {
   await Promise.allSettled(cleanups.map((c) => c()))
@@ -68,14 +67,20 @@ describe('dialect & driver detection', () => {
     expect(dialectOf(sqliteDb)).toBe('sqlite')
     expect(dialectOf(pgPoolDb)).toBe('pg')
     expect(dialectOf(pjDb)).toBe('pg')
-    expect(dialectOf(myDb)).toBe('mysql')
   })
 
   it('reads the concrete driver entityKind', () => {
     expect(driverOf(sqliteDb)).toBe('NodeSQLiteDatabase')
     expect(driverOf(pgPoolDb)).toBe('NodePgDatabase')
     expect(driverOf(pjDb)).toBe('PostgresJsDatabase')
-    expect(driverOf(myDb)).toBe('MySql2Database')
+  })
+
+  it('REJECTS MySQL by name, naming the supported set — not the generic unrecognized-dialect message', () => {
+    // The fixture carries a real MySqlDialect, so this is the discriminator a real mysql2 db would present.
+    expect(() => dialectOf(myDb)).toThrow(/does not support MySQL/)
+    expect(() => dialectOf(myDb)).toThrow(/PostgreSQL, PGlite, SQLite/)
+    // …and it is told apart from a dialect we simply do not recognize, which gets the other message.
+    expect(() => dialectOf({ dialect: {} })).toThrow(/Unrecognized drizzle dialect/)
   })
 })
 
@@ -130,6 +135,5 @@ describe('rlsEnabledOf — real catalog path, never assumes off', () => {
 
   it('reports false for engines without per-table RLS', async () => {
     await expect(rlsEnabledOf(sqliteDb, 'todos')).resolves.toBe(false)
-    await expect(rlsEnabledOf(myDb, 'users')).resolves.toBe(false)
   })
 })

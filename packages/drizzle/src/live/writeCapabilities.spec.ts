@@ -9,11 +9,9 @@
 // PostgreSQL 18 (PGlite) and against connections that cannot do it, and check that it never guesses.
 
 import { PGlite } from '@electric-sql/pglite'
-import { drizzle as myDrizzle } from 'drizzle-orm/mysql2'
 import { drizzle as pgDrizzle } from 'drizzle-orm/node-postgres'
 import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
 import { drizzle as pgliteDrizzle } from 'drizzle-orm/pglite'
-import { createPool } from 'mysql2'
 import { Pool } from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { oldNewProvenOf, oldNewReturningOf, probeOldNewReturning } from './writeCapabilities.js'
@@ -28,10 +26,6 @@ const sqliteDb = sqliteDrizzle(':memory:')
 const pgPool = new Pool({ host: 'pg.example', port: 5433, database: 'app', user: 'svc' })
 const pgPoolDb = pgDrizzle({ client: pgPool })
 cleanups.push(() => pgPool.end())
-
-const myPool = createPool({ host: 'mysql.example', port: 3307, database: 'app', user: 'svc' })
-const myDb = myDrizzle({ client: myPool })
-cleanups.push(() => new Promise((resolve) => myPool.end(() => resolve(undefined))))
 
 afterAll(async () => {
   await Promise.allSettled(cleanups.map((c) => c()))
@@ -88,7 +82,6 @@ describe('oldNewReturningOf — probed against the real connection, never assume
 
   it('a non-PostgreSQL connection probes false without running anything', async () => {
     await expect(probeOldNewReturning(sqliteDb)).resolves.toBe(false)
-    await expect(probeOldNewReturning(myDb)).resolves.toBe(false)
   })
 
   it('the probe runs ONCE per db — later calls get the same settled answer', async () => {

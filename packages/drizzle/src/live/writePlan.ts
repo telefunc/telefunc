@@ -5,6 +5,7 @@ import { type Column, SQL, type Table, getTableColumns, is } from 'drizzle-orm'
 import { dialectOf, driverOf } from '../binding/database.js'
 import { oldNewReturningOf } from './writeCapabilities.js'
 import { primaryKeyOf } from '../extract/columns.js'
+import type { Dialect } from '../ir/types.js'
 import type { Row } from '../router/events.js'
 
 // How ONE write is classified before anything runs: precise (capture can name the changed rows) or coarse
@@ -12,8 +13,6 @@ import type { Row } from '../router/events.js'
 // no statement has executed yet, and nothing in this module touches a connection.
 //
 // PRECISION is gated + fails closed (emit one {table, kind:'coarse'}) — safe over-fire, never a wrong row:
-//   - PG/SQLite only (MySQL has no RETURNING → precise MySQL needs a pre-write SELECT + a live MySQL test
-//     lane that does not exist in this package yet → deferred; MySQL stays sound-coarse);
 //   - a resolvable PK (single OR composite) for UPDATE/DELETE, whose retraction is keyed by it; an INSERT
 //     carries its whole row and retracts nothing, so a PK-less table is still exact for it;
 //   - not an UPSERT / ON CONFLICT (a returned row does not say whether it was inserted or updated), and not
@@ -72,7 +71,6 @@ type Plan =
 /** Decide precise vs coarse for one write — every ambiguity fails closed to coarse. */
 function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   const dialect = dialectOf(db)
-  if (dialect === 'mysql') return { mode: 'coarse' } // no RETURNING; precise MySQL (pre-write SELECT) deferred
   const pk = pkFieldsOf(table)
   // A retraction is keyed by the PK, so UPDATE and DELETE need one. An INSERT retracts nothing — it carries
   // its whole new row — so a table with no primary key is still captured exactly for it. (A STATEFUL graph
@@ -234,15 +232,15 @@ type WriteConfig = {
   select?: unknown
 }
 
-/** Read a write builder's `config` (typed-protected on PG/MySQL, runtime-only on SQLite — cast either way),
+/** Read a write builder's `config` (typed-protected on PG, runtime-only on SQLite — cast either way),
  *  or `null` when the shape isn't the pinned one → caller falls back to coarse. */
 function writeConfigOf(builder: unknown): WriteConfig | null {
   const config = (builder as { config?: unknown }).config
   return config !== null && typeof config === 'object' ? (config as WriteConfig) : null
 }
 
-/** ON CONFLICT / UPSERT: PG/MySQL carry a single `SQL`; SQLite a non-empty `SQL[]`. */
-function hasOnConflict(config: WriteConfig, dialect: 'pg' | 'sqlite'): boolean {
+/** ON CONFLICT / UPSERT: PG carries a single `SQL`; SQLite a non-empty `SQL[]`. */
+function hasOnConflict(config: WriteConfig, dialect: Dialect): boolean {
   if (dialect === 'sqlite') return Array.isArray(config.onConflict) && config.onConflict.length > 0
   return config.onConflict !== undefined
 }

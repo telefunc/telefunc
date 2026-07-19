@@ -24,8 +24,8 @@ function parsePredicate(condition: SQL | undefined, opts?: { dialect?: Dialect }
   const ctx: ParseContext = {
     tables: new Set(),
     exact: true,
-    caseInsensitiveLike: dialect !== 'pg', // pg LIKE is case-sensitive; mysql/sqlite are not
-    escapeChar: dialect === 'sqlite' ? null : '\\', // pg/mysql LIKE default-escape with backslash; sqlite has none
+    caseInsensitiveLike: dialect !== 'pg', // pg LIKE is case-sensitive; sqlite is not
+    escapeChar: dialect === 'sqlite' ? null : '\\', // pg LIKE default-escapes with backslash; sqlite has none
   }
   const predicate = parseExpression(tokenize(condition.queryChunks), ctx, condition)
   return { predicate, tables: [...ctx.tables], exact: ctx.exact }

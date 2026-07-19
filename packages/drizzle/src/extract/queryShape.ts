@@ -112,7 +112,9 @@ function crossCheckRenderedTables(shape: QueryShape, rendered: string[]): QueryS
 }
 
 /** Relation IDENTITIES (see ir/relation.ts) named after FROM/JOIN in the rendered SQL, across every
- *  dialect's identifier quoting: double quotes (pg/sqlite) and backticks (mysql). Requiring a quoted
+ *  identifier quoting drizzle or a raw fragment can render: double quotes (what drizzle emits on pg and
+ *  sqlite) and backticks (which SQLite also accepts as identifier quoting — verified against node:sqlite —
+ *  so a raw fragment can carry them into an otherwise-extractable query). Requiring a quoted
  *  name avoids matching the word "from" inside a string literal; drizzle never emits bracket quoting,
  *  so brackets are (correctly) not recognized. A reference renders with exactly the qualification its
  *  declaration carries — `"analytics"."users"` for a pgSchema table, bare `"users"` otherwise — so the

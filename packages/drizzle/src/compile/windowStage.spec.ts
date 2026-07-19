@@ -39,13 +39,11 @@ describe('windowStage — default NULL ordering matrix', () => {
     expect(descPg(rowOf(null), rowOf(1))).toBeLessThan(0) // null sorts before → first
   })
 
-  it('mysql + sqlite: ASC → NULLs first, DESC → NULLs last', () => {
-    for (const dialect of ['mysql', 'sqlite'] as const) {
-      const ascd = comparatorFor([orderScore('asc')], dialect)
-      expect(ascd(rowOf(null), rowOf(1))).toBeLessThan(0) // null first
-      const descd = comparatorFor([orderScore('desc')], dialect)
-      expect(descd(rowOf(null), rowOf(1))).toBeGreaterThan(0) // null last
-    }
+  it('sqlite: ASC → NULLs first, DESC → NULLs last', () => {
+    const ascd = comparatorFor([orderScore('asc')], 'sqlite')
+    expect(ascd(rowOf(null), rowOf(1))).toBeLessThan(0) // null first
+    const descd = comparatorFor([orderScore('desc')], 'sqlite')
+    expect(descd(rowOf(null), rowOf(1))).toBeGreaterThan(0) // null last
   })
 
   it('explicit NULLS FIRST/LAST overrides the dialect default', () => {

@@ -27,15 +27,21 @@ function entityKindOf(value: unknown): string | undefined {
   return (value as { constructor?: { [entityKind]?: string } } | null)?.constructor?.[entityKind]
 }
 
-/** The SQL dialect, from the db's dialect object. */
+/** The SQL dialect, from the db's dialect object — and the ONE place that decides what this package
+ *  supports. MySQL is REJECTED by name rather than falling into the unrecognized-dialect message: it is a
+ *  dialect drizzle fully supports and this package deliberately does not, and a caller deserves to be told
+ *  which of the two it is. */
 function dialectOf(db: AnyDb): Dialect {
   const kind = entityKindOf(db.dialect)
   if (kind === 'PgDialect') return 'pg'
-  if (kind === 'MySqlDialect') return 'mysql'
   if (kind === 'SQLiteDialect') return 'sqlite'
   assertUsage(
+    kind !== 'MySqlDialect',
+    'reactiveDrizzle does not support MySQL: it has no RETURNING, so a write could never be captured row by row and every write would invalidate every live query on the table. Supported databases: PostgreSQL, PGlite, SQLite.',
+  )
+  assertUsage(
     false,
-    `Unrecognized drizzle dialect (${kind ?? 'unknown'}); reactiveDrizzle targets the drizzle v1 pg/mysql/sqlite dialects.`,
+    `Unrecognized drizzle dialect (${kind ?? 'unknown'}); reactiveDrizzle supports PostgreSQL, PGlite and SQLite.`,
   )
 }
 
@@ -71,16 +77,13 @@ async function semanticEnvironmentKeyOf(db: AnyDb, opts?: { run?: RowRunner }): 
 
 /** Whether the connection is provably one session. sqlite is a single connection; PGlite is an
  *  in-process single connection; a node-postgres `Client` is single (a `Pool`'s bound client is
- *  `BoundPool`), as is a single mysql `Connection`. Pools and postgres.js are treated as pooled.
- *  PGlite is classified by its STABLE drizzle entity kind, NOT the raw client's constructor.name —
- *  PGlite's bundled client minifies (e.g. to `'O'`), which a name check misreads as pooled. */
+ *  `BoundPool`). Pools and postgres.js are treated as pooled. PGlite is classified by its STABLE
+ *  drizzle entity kind, NOT the raw client's constructor.name — PGlite's bundled client minifies
+ *  (e.g. to `'O'`), which a name check misreads as pooled. */
 function isSingleSession(db: AnyDb): boolean {
-  const dialect = dialectOf(db)
-  if (dialect === 'sqlite') return true
+  if (dialectOf(db) === 'sqlite') return true
   if (entityKindOf(db) === 'PgliteDatabase') return true // single in-process connection ⇒ precise
-  const clientKind = (db.$client as { constructor?: { name?: string } } | null)?.constructor?.name
-  if (dialect === 'pg') return clientKind === 'Client'
-  return clientKind === 'Connection' || clientKind === 'PromiseConnection'
+  return (db.$client as { constructor?: { name?: string } } | null)?.constructor?.name === 'Client'
 }
 
 async function probeAuthority(
@@ -94,10 +97,6 @@ async function probeAuthority(
       ),
     )
     return { database: str(row.database), role: str(row.role), searchPath: str(row.search_path) }
-  }
-  if (dialect === 'mysql') {
-    const row = one(await run('select database() as `database`, current_user() as role'))
-    return { database: str(row.database), role: str(row.role), searchPath: '' }
   }
   // sqlite has no roles/search_path; authority is the attached database file(s)
   const rows = await run('pragma database_list')
@@ -114,7 +113,7 @@ function failClosedKey(dialect: Dialect, driver: string): string {
 
 // ── Row-level security ──────────────────────────────────────────────
 
-/** Whether a table has row-level security. sqlite/mysql have no per-table RLS (false);
+/** Whether a table has row-level security. sqlite has no per-table RLS (false);
  *  Postgres is read from `pg_class.relrowsecurity` — `true`/`false` when the relation is
  *  found, `'unknown'` when the catalog row is missing or the query fails. Never assumes off. */
 async function rlsEnabledOf(db: AnyDb, table: string, opts?: { run?: RowRunner; schema?: string }): Promise<RlsStatus> {
@@ -139,7 +138,7 @@ async function rlsEnabledOf(db: AnyDb, table: string, opts?: { run?: RowRunner; 
 
 // ── Default row runner ──────────────────────────────────────────────
 
-/** A row runner derived from a drizzle db. sqlite runs through `db.all`; pg/mysql through
+/** A row runner derived from a drizzle db. sqlite runs through `db.all`; pg through
  *  `db.execute`. Result shapes differ per driver, so rows are normalized. */
 function rowRunnerFor(db: AnyDb): RowRunner {
   const dialect = dialectOf(db)
@@ -160,12 +159,7 @@ async function executeSql(db: AnyDb, query: SQL): Promise<Record<string, unknown
 }
 
 function normalizeRows(raw: unknown): Record<string, unknown>[] {
-  if (Array.isArray(raw)) {
-    // mysql2 returns [rows, fields]; postgres.js and sqlite return the rows array directly
-    const [head, second] = raw
-    if (Array.isArray(head) && Array.isArray(second)) return head as Record<string, unknown>[]
-    return raw as Record<string, unknown>[]
-  }
+  if (Array.isArray(raw)) return raw as Record<string, unknown>[] // postgres.js and sqlite return rows directly
   const rows = (raw as { rows?: unknown })?.rows // node-postgres wraps rows in a Result
   return Array.isArray(rows) ? (rows as Record<string, unknown>[]) : []
 }

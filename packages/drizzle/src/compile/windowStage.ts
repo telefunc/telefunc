@@ -6,7 +6,7 @@
 // degrades to a live coarse (dirty) plan. Likewise a placeholder bound, an OFFSET without
 // ORDER BY, or an opaque ORDER expression cannot be honored precisely and degrade. The
 // default NULL ordering follows the dialect matrix: pg ASC→last/DESC→first;
-// mysql+sqlite ASC→first/DESC→last; an explicit NULLS FIRST/LAST overrides.
+// sqlite ASC→first/DESC→last; an explicit NULLS FIRST/LAST overrides.
 
 export { applyWindow, comparatorFor, isTotalOrder }
 
@@ -88,7 +88,7 @@ function comparatorFor(orderBy: OrderKey[], dialect: Dialect): (a: Row, b: Row) 
 function nullsFirstOf(key: OrderKey, dialect: Dialect): boolean {
   if (key.nulls) return key.nulls === 'first'
   const ascending = key.direction === 'asc'
-  // pg: ASC→last / DESC→first; mysql & sqlite: ASC→first / DESC→last.
+  // pg: ASC→last / DESC→first; sqlite: ASC→first / DESC→last.
   return dialect === 'pg' ? !ascending : ascending
 }
 

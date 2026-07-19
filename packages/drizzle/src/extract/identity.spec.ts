@@ -82,7 +82,7 @@ describe('planKey named gates', () => {
     expect(planKeyOf({ ...base, semanticEnvironmentKey: 'env2' })).not.toBe(planKeyOf(base))
   })
   it('a dialect change changes the planKey', () => {
-    expect(planKeyOf({ ...base, dialect: 'mysql' })).not.toBe(planKeyOf(base))
+    expect(planKeyOf({ ...base, dialect: 'sqlite' })).not.toBe(planKeyOf(base))
   })
 })
 

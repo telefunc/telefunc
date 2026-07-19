@@ -3,7 +3,6 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { count, desc, eq, exists, gt, inArray, sql } from 'drizzle-orm'
-import * as mysqlCore from 'drizzle-orm/mysql-core'
 import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
 import * as pgCore from 'drizzle-orm/pg-core'
 import * as sqliteCore from 'drizzle-orm/sqlite-core'
@@ -284,7 +283,11 @@ describe('extractQueryShape — coarse fallback', () => {
     expect(new Set(shape.tables)).toEqual(new Set(['users', 'teams']))
   })
 
-  it('production cross-check discovers a MySQL backtick join the config underreports', () => {
+  it('production cross-check discovers a BACKTICK-quoted join the config underreports', () => {
+    // Backticks are not what drizzle renders, but SQLite accepts them as identifier quoting (verified
+    // against node:sqlite), so a raw fragment can carry them into an otherwise-extractable query. The
+    // cross-check is a fail-closed safety net: a quoting style it cannot read is a relation it cannot
+    // discover, which is a MISSED invalidation rather than an over-fire.
     const wrapper = {
       config: { table: pgUsers, fields: { id: pgUsers.id }, joins: [] },
       toSQL: () => ({
@@ -292,7 +295,7 @@ describe('extractQueryShape — coarse fallback', () => {
         params: [],
       }),
     }
-    const shape = extractQueryShape(wrapper, { dialect: 'mysql' })
+    const shape = extractQueryShape(wrapper, { dialect: 'sqlite' })
     expect(shape.kind).toBe('coarse')
     expect(new Set(shape.tables)).toEqual(new Set(['users', 'teams']))
   })
@@ -385,7 +388,7 @@ describe('renderedRelationsFromSQL — every dialect quoting', () => {
     expect(rel('select * from "users" "u"')).toEqual(['users']) // alias not captured
   })
 
-  it('backtick (mysql) identifiers, schema-qualified', () => {
+  it('backtick identifiers, schema-qualified (SQLite accepts backtick quoting)', () => {
     expect(rel('select * from `users` inner join `teams` on 1=1')).toEqual(['users', 'teams'])
     expect(rel('select * from `db`.`users`')).toEqual([relationIdOf({ name: 'users', schema: 'db' })])
   })
@@ -396,39 +399,6 @@ describe('renderedRelationsFromSQL — every dialect quoting', () => {
 
   it('the word "from" inside a string literal is not a relation', () => {
     expect(rel(`select * from "users" where note = 'from here'`)).toEqual(['users'])
-  })
-})
-
-// ── mysql fixtures (driver-free core QueryBuilder) ──────────────────
-describe('extractQueryShape — mysql goldens', () => {
-  const users = mysqlCore.mysqlTable('users', {
-    id: mysqlCore.int('id').primaryKey(),
-    teamId: mysqlCore.int('team_id'),
-    name: mysqlCore.varchar('name', { length: 100 }),
-  })
-  const teams = mysqlCore.mysqlTable('teams', { id: mysqlCore.int('id').primaryKey() })
-  const qb = new mysqlCore.QueryBuilder()
-  const my = (b: Parameters<typeof extractQueryShape>[0]) => extractQueryShape(b, { dialect: 'mysql' })
-
-  it('where + join + group/aggregate carry through the mysql builder', () => {
-    const joined = asSelect(
-      my(qb.select().from(users).innerJoin(teams, eq(teams.id, users.teamId)).where(eq(users.teamId, 3))),
-    )
-    expect(joined.dialect).toBe('mysql')
-    expect(joined.joins[0]!.type).toBe('inner')
-    expect(new Set(joined.tables)).toEqual(new Set(['users', 'teams']))
-
-    const grouped = asSelect(my(qb.select({ team: users.teamId, n: count() }).from(users).groupBy(users.teamId)))
-    expect(grouped.groupBy).toEqual([{ table: 'users', column: 'team_id' }])
-  })
-
-  it('ordering, limit/offset and placeholder rows carry through', () => {
-    const ordered = asSelect(my(qb.select().from(users).orderBy(desc(users.id)).limit(10).offset(5)))
-    expect(ordered.orderBy[0]).toMatchObject({ direction: 'desc' })
-    expect(ordered.limit).toEqual({ kind: 'value', value: 10 })
-    expect(ordered.offset).toEqual({ kind: 'value', value: 5 })
-    const dyn = asSelect(my(qb.select().from(users).limit(sql.placeholder('lim'))))
-    expect(dyn.limit).toEqual({ kind: 'placeholder', name: 'lim' })
   })
 })
 

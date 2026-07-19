@@ -118,7 +118,7 @@ function wrapWrite(
         return (...args: unknown[]) => start(args)
       }
       // Driver terminals that execute DIRECTLY (SQLite's run/all/get/values — SYNCHRONOUS on node:sqlite).
-      // Gated on the underlying builder ACTUALLY having the member: PG and MySQL write builders have no
+      // Gated on the underlying builder ACTUALLY having the member: PG write builders have no
       // `run`/`all`/`get`, and synthesizing one made `typeof builder.get === 'function'` report true on a
       // proxy that is supposed to be transparent except for `.live()` — then died inside the interceptor
       // ("Cannot read properties of undefined") instead of with the driver's own error. Mirrors the

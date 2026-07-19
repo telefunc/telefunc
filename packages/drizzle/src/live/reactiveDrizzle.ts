@@ -9,6 +9,7 @@ import type { ChangeTransport } from './changeTransport.js'
 import { captureTransactions, isRawSqlOp, isWriteOp } from './writeProxy.js'
 import { wrapLiveSelect } from './readCapture.js'
 import { probeOldNewReturning } from './writeCapabilities.js'
+import { dialectOf } from '../binding/database.js'
 import { assertUsage } from '../utils/assert.js'
 import type { Reactive, ReactiveDatabase } from './reactiveDrizzle.types.js'
 
@@ -54,6 +55,12 @@ type ReactiveOptions = { changeTransport?: ChangeTransport; changeNamespace?: st
  */
 function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: ReactiveOptions): Reactive<TDb> {
   const db = baseDb as object
+  // Reject an unsupported database HERE, at setup, rather than at whichever read or write happens to ask
+  // first. `dialectOf` is the single place that decides what this package targets and throws on anything
+  // else — calling it for its verdict is what makes MySQL an explicit refusal instead of a db that looks
+  // reactive and silently is not. The type surface rejects the same db (reactiveDrizzle.types.ts); this is
+  // the half that a JavaScript caller still gets.
+  dialectOf(db)
   // An injected transport reaches other PROCESSES, where the connection-derived identity a local default
   // uses cannot follow. Without a stable name, two databases on one broker share a topic and apply each
   // other's row deltas — so this fails loudly rather than cross-feeding quietly.
