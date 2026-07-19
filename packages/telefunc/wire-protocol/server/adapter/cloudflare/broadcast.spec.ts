@@ -776,8 +776,14 @@ describe('cloudflare room-state routing (hybrid tiers)', () => {
         store.set(key, value)
         return true
       },
-      async telefuncRoomStateCompareAndSet(key: string, expected: string | null, next: string | null) {
-        calls.push(`cas:${key}`)
+      async telefuncRoomStateCompareAndSet(
+        key: string,
+        expected: string | null,
+        next: string | null,
+        _ttlMs?: number,
+        replicate?: boolean,
+      ) {
+        calls.push(`cas:${key}:replicate=${replicate}`)
         if ((store.get(key) ?? null) !== expected) return false
         if (next === null) store.delete(key)
         else store.set(key, next)
@@ -835,7 +841,16 @@ describe('cloudflare room-state routing (hybrid tiers)', () => {
     const { transport, calls } = setup()
     expect(await transport.setIfAbsent('room:a:config', 'v', { partitionKey: 'p' })).toBe(true)
     expect(await transport.update('room:a:config', () => 'v2', { partitionKey: 'p' })).toBe('v2')
-    expect(calls).toEqual(['setIfAbsent:room:a:config', 'get:room:a:config', 'cas:room:a:config'])
+    // Directory `update()` replicates its CAS to the KV read replica (default).
+    expect(calls).toEqual(['setIfAbsent:room:a:config', 'get:room:a:config', 'cas:room:a:config:replicate=true'])
+  })
+
+  it('keeps an authority-only compare-and-set off the replica when consistent', async () => {
+    const { transport, calls } = setup()
+    // The `:o` order watermark is written `consistent` on every publish — its CAS must not replicate,
+    // or every semantic publish mirrors a dead-weight write to Workers KV (and risks its write ceiling).
+    await transport.update('room:a:o', () => '{"seq":1,"timestamp":1}', { partitionKey: 'p', consistent: true })
+    expect(calls).toEqual(['get:room:a:o', 'cas:room:a:o:replicate=false'])
   })
 
   it('keeps the unpartitioned room index on the replica alone', async () => {

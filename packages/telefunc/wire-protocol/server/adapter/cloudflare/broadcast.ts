@@ -119,6 +119,7 @@ type TelefuncDurableObjectStub = DurableObjectStub & {
     expected: string | null,
     next: string | null,
     ttlMs?: number,
+    replicate?: boolean,
   ): Promise<boolean>
 }
 
@@ -410,16 +411,24 @@ class CloudflareBroadcastAuthorityState {
     })
   }
 
-  roomStateCompareAndSet(key: string, expected: string | null, next: string | null, ttlMs?: number): Promise<boolean> {
+  roomStateCompareAndSet(
+    key: string,
+    expected: string | null,
+    next: string | null,
+    ttlMs?: number,
+    replicate = true,
+  ): Promise<boolean> {
     return this.runInAuthorityChain(async () => {
       const current = this.liveRoomStateValue(
         await this.state.storage.get<RoomStateEntry>(this.roomStateStorageKey(key)),
         Date.now(),
       )
       if (current !== expected) return false
-      // Compare-and-set only ever lands on directory state (config, member records) — replicate it.
-      if (next === null) await this.removeRoomState(key, true)
-      else await this.writeRoomState(key, next, ttlMs, true)
+      // Directory CAS (config, member records) mirrors to the KV read replica; an authority-only lane —
+      // the `:o` order watermark, written `consistent` on every publish — passes `replicate: false` so it
+      // stays off the replica (dead weight there, and a per-key write-ceiling risk on a hot room).
+      if (next === null) await this.removeRoomState(key, replicate)
+      else await this.writeRoomState(key, next, ttlMs, replicate)
       return true
     })
   }
@@ -602,7 +611,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       const current = await stub.telefuncRoomStateGet(key)
       const next = mutate(current)
       if (next === KV_KEEP) return current
-      if (await stub.telefuncRoomStateCompareAndSet(key, current, next, options?.ttlMs)) return next
+      if (await stub.telefuncRoomStateCompareAndSet(key, current, next, options?.ttlMs, !options?.consistent))
+        return next
     }
   }
 
