@@ -1,4 +1,4 @@
-export { testRun }
+export { testRun, testRunUpgrade }
 
 import { page, test, expect, run, getServerUrl, autoRetry } from '@brillout/test-e2e'
 import { navigate } from './e2e-utils'
@@ -15,41 +15,72 @@ import { testLiveQuery } from './pages/live-query/e2e-test'
 import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
+import { testUpgrade } from './pages/channel/upgrade-e2e-test'
 
-function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
+type RunCmd = 'pnpm dev' | 'pnpm preview'
+
+/**
+ * A failed WebSocket connection is tolerated for the ordinary suites: those run over a single
+ * transport, and a stray probe failure there is noise.
+ *
+ * It is NOT tolerable for the upgrade suite, and quietly inheriting it is the reason this is a
+ * parameter rather than a constant. `abortUpgradeAndReconnectSse` reacts to a probe failure by
+ * setting `upgradeDisabled`, which is never reset — so one tolerated failure pins the connection to
+ * SSE for its whole lifetime and every downstream upgrade assertion becomes vacuous. That is a gate
+ * that passes when its target is absent. The upgrade files therefore fail on this line, and assert
+ * completion positively via the server-side commit counter besides.
+ */
+function tolerateError(log: { logText: string }, opts: { tolerateWsConnectionFailure: boolean }) {
+  return (
+    log.logText.includes('File arguments are being consumed out of order') ||
+    log.logText.includes('multiple streaming values') ||
+    log.logText.includes('the server responded with a status of 500') ||
+    log.logText.includes('the server responded with a status of 422') ||
+    log.logText.includes('[telefunc:channel-error]') ||
+    log.logText.includes('Error: server-listener-bug') ||
+    log.logText.includes('Unexpected generator error') ||
+    log.logText.includes('[telefunc:rxjs]') ||
+    log.logText.includes('Unhandled rxjs error') ||
+    log.logText.includes('Shield Validation Error') ||
+    // Transitions between tests close the previous page's channels; the server-side
+    // Subject/Observable wire waits for a reconnect within the grace period and logs this
+    // if the browser has already navigated away.
+    log.logText.includes('Channel timed out: client did not reconnect') ||
+    log.logText.includes('The user aborted a request') ||
+    log.logText.includes('Telefunc call cancelled') ||
+    log.logText.includes('ERR_INTERNET_DISCONNECTED') ||
+    log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
+    log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
+    (opts.tolerateWsConnectionFailure &&
+      log.logText.includes('WebSocket connection to') &&
+      log.logText.includes('failed'))
+  )
+}
+
+const serverIsReadyMessage = (log: string) =>
+  // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
+  // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
+  // "Server running at" / "Accepting connections at" matcher, so the framework times
+  // out waiting for ready unless we accept these explicitly.
+  log.includes('Listening on') ||
+  log.includes('Server running at') ||
+  (log.includes('Local:') && log.includes('http://localhost:3000'))
+
+/** The SSE→WS barrier upgrade suite. Its own entry point, not a case inside `testRun`, because it
+ *  needs both a different toleration policy and `PUBLIC_ENV__CHANNEL_TRANSPORTS=['sse','ws']` —
+ *  which is the single line that enables the upgrade at all. */
+function testRunUpgrade(cmd: RunCmd) {
   run(cmd, {
-    // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
-    // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
-    // "Server running at" / "Accepting connections at" matcher, so the framework times
-    // out waiting for ready unless we accept these explicitly.
-    serverIsReadyMessage: (log) =>
-      log.includes('Listening on') ||
-      log.includes('Server running at') ||
-      (log.includes('Local:') && log.includes('http://localhost:3000')),
-    tolerateError(log) {
-      return (
-        log.logText.includes('File arguments are being consumed out of order') ||
-        log.logText.includes('multiple streaming values') ||
-        log.logText.includes('the server responded with a status of 500') ||
-        log.logText.includes('the server responded with a status of 422') ||
-        log.logText.includes('[telefunc:channel-error]') ||
-        log.logText.includes('Error: server-listener-bug') ||
-        log.logText.includes('Unexpected generator error') ||
-        log.logText.includes('[telefunc:rxjs]') ||
-        log.logText.includes('Unhandled rxjs error') ||
-        log.logText.includes('Shield Validation Error') ||
-        // Transitions between tests close the previous page's channels; the server-side
-        // Subject/Observable wire waits for a reconnect within the grace period and logs this
-        // if the browser has already navigated away.
-        log.logText.includes('Channel timed out: client did not reconnect') ||
-        log.logText.includes('The user aborted a request') ||
-        log.logText.includes('Telefunc call cancelled') ||
-        log.logText.includes('ERR_INTERNET_DISCONNECTED') ||
-        log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
-        log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
-        (log.logText.includes('WebSocket connection to') && log.logText.includes('failed'))
-      )
-    },
+    serverIsReadyMessage,
+    tolerateError: (log) => tolerateError(log, { tolerateWsConnectionFailure: false }),
+  })
+  testUpgrade(cmd === 'pnpm dev')
+}
+
+function testRun(cmd: RunCmd) {
+  run(cmd, {
+    serverIsReadyMessage,
+    tolerateError: (log) => tolerateError(log, { tolerateWsConnectionFailure: true }),
   })
 
   const isDev = cmd === 'pnpm dev'
