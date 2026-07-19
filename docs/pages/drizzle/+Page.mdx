@@ -44,16 +44,19 @@ export async function onAddTodo(text: string) {
 
 On the client, wrap the call with <Link href="/tanstack-query">`@telefunc/tanstack-query`</Link>'s `live()` and the query keeps itself current — when `onAddTodo` changes a row this query reads, the server signals it and the query refetches:
 
-```ts
+```tsx
 // Environment: client
 import { useQuery } from '@tanstack/react-query'
 import { live } from '@telefunc/tanstack-query'
 import { onGetTodos } from './Todos.telefunc'
 
-const { data: todos } = useQuery({
-  queryKey: ['todos', userId],
-  queryFn: live(onGetTodos, userId), // todos: Todo[] — the adapter unwraps the handle
-})
+function Todos({ userId }) {
+  const { data: todos } = useQuery({
+    queryKey: ['todos', userId],
+    queryFn: live(onGetTodos, userId), // todos: Todo[] — the adapter unwraps the handle
+  })
+  // ...
+}
 ```
 
 That is the loop. The adapter is what closes it: a telefunction returning a `Live` is a *snapshot* until something subscribes to its invalidations, so calling `onGetTodos(userId)` directly and reading `.data` gives you one value and no updates.
@@ -91,7 +94,7 @@ You can use Telefunc without reading this section. It is here for when you want 
 
 ### Precision
 
-Live queries are **precise where that can be proven, and deliberately coarse — never wrong — everywhere else.** A coarse invalidation refetches more than strictly necessary; it never delivers a stale or fabricated row. Coarse is also temporary: after a raw statement, a migration, or a gap detected in the change stream, the affected queries refetch, rebuild their tracking, and go back to being precise.
+Live queries are **precise where that can be proven, and deliberately coarse — never wrong — everywhere else.** A coarse invalidation refetches more than strictly necessary; it never delivers a stale or fabricated row. Coarse is usually temporary: after a raw statement, a migration, or a gap detected in the change stream, the affected queries refetch, rebuild their tracking, and go back to being precise. Not always, though — if a second coarse event lands while that rebuild is still in flight, or the rebuild fails or outgrows its row budget, the query stays coarse until something replaces it. That is deliberate: retrying under a burst is what turns one coarse event into a storm of rebuilds.
 
 Capturing a write precisely means recovering the rows it changed — and, for anything that retracts a row, a usable primary key. In practice: add `.returning()` to a write you want tracked precisely, and expect coarse for upserts, key-less retractions and computed projections.
 
@@ -105,7 +108,7 @@ Read the table top to bottom: a write is precise only if no coarse row below it 
 | With your own `.returning()` — full, or a projection like `.returning({ id })` | **Precise** on any PostgreSQL or SQLite connection, **pooled included**: the rows come from the very session that ran the statement. For a projection Telefunc widens the `RETURNING` internally and hands you back exactly the columns you asked for |
 | On **PGlite**, with no `.returning()` | **Precise** — its plain driver result can be reproduced faithfully |
 | Anything else with no `.returning()` | **Coarse** — the plain driver result can't be reproduced faithfully, so the rows aren't captured |
-| A **prepared** write with a *partial* `.returning()`, or with none | **Coarse on every driver, PGlite included** — `prepare()` freezes the statement, so Telefunc can neither add a `RETURNING` to it nor widen a projection into one. With a *full* `.returning()` a prepared write is precise on every execution: one decision covers them all |
+| A **prepared** write with a *partial* `.returning()`, or with none | **Coarse on every driver, PGlite included** — `prepare()` freezes the statement, so Telefunc can neither add a `RETURNING` to it nor widen a projection into one. With a *full* `.returning()` it is precise through the **row-returning** terminals — `execute()`, and SQLite's `all()` / `values()`. SQLite's `get()` and `run()` stay coarse: they hand back a single row and a run-result, not the row array capture reads |
 | `UPSERT` / `ON CONFLICT` | **Coarse even with `.returning()`** — a returned row doesn't say whether it was inserted or updated |
 | An update or delete on a table with **no primary key** | **Coarse even with `.returning()`** — a retraction has nothing to key on. An **insert** into a key-less table is still precise: it carries its whole row and retracts nothing |
 | A `.returning()` selecting a computed expression, like ``sql`id + 1` `` | **Coarse even with `.returning()`** — the database computed that value and it can't be recovered from the row, so nothing is guessed |
@@ -163,7 +166,7 @@ A db keeps the transport it first used, so passing a *different* one while live 
 
 ### Delivery
 
-Invalidation is best-effort pub/sub, and the guarantee is about the changes Telefunc **observes**: whatever it does see, it either applies exactly or refetches — it never guesses a delta. A repeat, a gap or a reordering is ambiguity, so it becomes a coarse refetch rather than a delta applied out of order.
+Invalidation is best-effort pub/sub, and every message Telefunc observes meets one of three fates. A message that arrives in order is **applied** as a delta. One that carries nothing new — a redelivery, or a straggler from a range already accounted for — is **dropped**, because at-least-once delivery makes duplicates ordinary traffic and refetching on each would turn a healthy transport into a storm of rebuilds. Only a genuine gap or reordering, where something may have been missed, **coarsens** into a refetch. Nothing is ever guessed: a delta is applied only where the sequence proves it fits.
 
 A live read is not admitted until the transport confirms its subscription, so a write cannot slip through the gap between the two. A server that starts listening to a publisher already running takes the first message it sees at face value; if an earlier one then arrives late, that is proof the assumption was wrong and it triggers one corrective refetch.
 
