@@ -28,7 +28,7 @@ import type { Live } from 'telefunc'
 import { captureMutation, captureRawSql, emitSafely, type CaptureSink } from './writeCapture.js'
 import { ingestLocal, ingestWrite } from './dbRuntime.js'
 import { publishCoarseAll } from './writeTransport.js'
-import { type ChangeTransport, setChangeNamespace, setChangeTransport } from './changeTransport.js'
+import { type ChangeTransport, configureChanges } from './changeTransport.js'
 import { wrapLiveSelect } from './readCapture.js'
 import type { TableChange } from '../router/events.js'
 import { assertUsage } from '../utils/assert.js'
@@ -349,9 +349,9 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
     'reactiveDrizzle(db, { changeTransport }) also needs `changeNamespace`: a stable id for THIS logical database, identical on every server that shares the transport and different from any other database on it. Without it, two databases on one transport would exchange row changes.',
   )
   // Register the dedicated change transport + namespace for this db (both set-once; the default transport is
-  // the in-process bus). Reads subscribe over it and writes publish over it — never the user's app Broadcast.
-  setChangeTransport(db, options?.changeTransport)
-  setChangeNamespace(db, options?.changeNamespace)
+  // the in-process bus). Installed ATOMICALLY — a db must never end up with one and not the other. Reads
+  // subscribe over it and writes publish over it — never the user's app Broadcast.
+  configureChanges(db, { transport: options?.changeTransport, namespace: options?.changeNamespace })
   // Autocommit writes ingest into THIS db's graphs immediately; a transaction buffers and flushes here once.
   const ingest: CaptureSink = (changes) => ingestWrite(db, { changes })
   // Raw SQL's coarse markers stay local — the coarse-all announcement is what reaches other instances.

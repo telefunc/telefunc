@@ -271,8 +271,19 @@ function receive(db: object, state: SubscriptionState, payload: string): void {
   //   seq  >  expected  → something was lost or is late; we cannot know what, so COARSEN and move the
   //                       watermark up. Anything below it is then already covered.
   //   seq <=  last      → a duplicate, or a straggler the coarsen above already accounted for → DROP
-  // A first-seen origin at seq 1 is a fresh stream; above 1 we joined mid-stream and coarsen the same way.
-  // The invariant: a change is applied at most once, and anything not applied precisely is over-fired.
+  //
+  // ADMISSION BASELINE. A receiver that subscribes — or RE-subscribes, which clears the watermarks — has no
+  // position for a publisher that is already running, and cannot distinguish "this is simply my next one"
+  // from "this overtook the one before it". So the first message from an unknown origin ESTABLISHES the
+  // baseline: it coarsens and sets the watermark, and everything in order after it is precise. Only seq 1 is
+  // taken precisely, because nothing can precede a publisher's first message.
+  //
+  // That baseline is not free. `graph.coarsen()` is terminal, so the graphs alive at that moment stay coarse
+  // for the rest of their lives (a later read compiles a fresh precise graph). The alternative — trusting
+  // whatever sequence arrives first — is unsound: if the first two are reordered, the earlier one is then
+  // dropped as a straggler and its delta is lost outright, which is a MISS rather than an over-fire.
+  //
+  // THE INVARIANT: a change is applied at most once, and anything not applied precisely is over-fired.
   const last = state.seen.get(envelope.origin)
   if (last !== undefined && envelope.seq <= last) return
   const expected = last === undefined ? 1 : last + 1

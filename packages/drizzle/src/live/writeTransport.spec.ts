@@ -409,3 +409,74 @@ describe('write transport — each isolation guard, on its own', () => {
     expect(engine.ingest).not.toHaveBeenCalled()
   })
 })
+
+// ── admission baseline ───────────────────────────────────────────────
+//
+// A receiver that subscribes (or RE-subscribes) mid-stream has no watermark for a publisher that is already
+// running, and cannot tell "seq 500 is the next one for me" from "seq 500 arrived before 499". So the first
+// message from an unknown origin establishes the baseline: it is applied COARSELY and sets the watermark,
+// and everything in order after it is precise. The cost is one coarse event per origin per subscribe — and
+// that event is not free, because a graph's coarsen() is terminal: the graphs alive at that instant stay
+// coarse for the rest of their lives (a later read builds a fresh precise graph). Accepting a first message
+// precisely instead would be unsound under exactly the reordering the last case here reproduces.
+describe('write transport — the first message from an unknown publisher sets a baseline', () => {
+  /** A receiver that has never heard of the publisher, sharing its database. */
+  async function freshReceiver(transport: ChangeTransport, $client: object) {
+    const receiver = { $client }
+    setChangeTransport(receiver, transport)
+    await acquireSubscription(receiver)
+    registryFor(receiver).router.register(watching('users'))
+    return receiver
+  }
+
+  it('joins MID-STREAM: the first message coarsens and sets the watermark, the next is precise', async () => {
+    const { transport, dbA, dbB } = await twoInstances()
+    const captured: string[] = []
+    await transport.subscribe(changeTopicFor(dbA), (payload) => captured.push(payload))
+    publishBatch(dbA, { changes: [change('users')] }) // seq 1
+    publishBatch(dbA, { changes: [change('users')] }) // seq 2
+    await flush()
+
+    const receiver = await freshReceiver(transport, (dbB as { $client: object }).$client)
+    engine.ingest.mockClear()
+
+    transport.publish(changeTopicFor(receiver), captured[1]!) // seq 2 — first thing this receiver ever sees
+    expect(engine.ingest).toHaveBeenCalledWith({ changes: [{ table: 'users', kind: 'coarse' }] })
+
+    engine.ingest.mockClear()
+    publishBatch(dbA, { changes: [change('users')] }) // seq 3 — in order from the new watermark
+    await flush()
+    expect(engine.ingest).toHaveBeenCalledWith({ changes: [change('users')] }) // …precise again
+  })
+
+  it('a publisher’s VERY FIRST message (seq 1) is precise — the baseline is not blanket coarsening', async () => {
+    // Nothing can precede seq 1, so there is nothing to have missed and no reordering to fear.
+    const { dbA } = await twoInstances()
+    publishBatch(dbA, { changes: [change('users')] })
+    await flush()
+    expect(engine.ingest).toHaveBeenCalledWith({ changes: [change('users')] })
+  })
+
+  it('FIRST TWO REORDERED: neither is applied precisely, so no delta lands out of order', async () => {
+    // The case that forbids "trust the first sequence you see". If seq 2 arrives before seq 1 and we took it
+    // as the baseline precisely, seq 1's delta would then be dropped as a straggler and lost outright.
+    const { transport, dbA, dbB } = await twoInstances()
+    const captured: string[] = []
+    await transport.subscribe(changeTopicFor(dbA), (payload) => captured.push(payload))
+    publishBatch(dbA, { changes: [change('users')] }) // seq 1
+    publishBatch(dbA, { changes: [change('posts')] }) // seq 2
+    await flush()
+
+    const receiver = await freshReceiver(transport, (dbB as { $client: object }).$client)
+    engine.ingest.mockClear()
+
+    transport.publish(changeTopicFor(receiver), captured[1]!) // seq 2 first
+    transport.publish(changeTopicFor(receiver), captured[0]!) // seq 1 second
+
+    const precise = engine.ingest.mock.calls.filter(([batch]) => {
+      const { changes } = batch as { changes: TableChange[] }
+      return changes.some((c) => c.kind !== 'coarse')
+    })
+    expect(precise).toEqual([]) // not one precise apply — everything degraded to coarse
+  })
+})

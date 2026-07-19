@@ -5,6 +5,7 @@ export {
   transportFor,
   setChangeTransport,
   setChangeNamespace,
+  configureChanges,
   namespaceFor,
 }
 
@@ -119,16 +120,30 @@ const resolved = new WeakMap<object, ChangeTransport>() // frozen at first use (
 const SWAP_MESSAGE =
   'telefunc live: the change transport for this db is already in use and cannot be replaced. `changeTransport` is set-once per db (the default counts as a resolution) — pass the same transport instance on every reactiveDrizzle(db, …) call for this db, or use a distinct db instance.'
 
-function setChangeTransport(db: object, transport: ChangeTransport | undefined): void {
+/** Reject a transport that conflicts with this db's existing one, WITHOUT recording anything. */
+function checkChangeTransport(db: object, transport: ChangeTransport | undefined): void {
   if (!transport) return
   const frozen = resolved.get(db)
-  if (frozen !== undefined) {
-    if (frozen !== transport) throw new Error(SWAP_MESSAGE) // already resolved (incl. default) → refuse the swap
-    return
-  }
+  if (frozen !== undefined && frozen !== transport) throw new Error(SWAP_MESSAGE) // resolved (incl. default)
   const existing = configured.get(db)
   if (existing !== undefined && existing !== transport) throw new Error(SWAP_MESSAGE)
+}
+
+function setChangeTransport(db: object, transport: ChangeTransport | undefined): void {
+  if (!transport) return
+  checkChangeTransport(db, transport)
+  if (resolved.get(db) !== undefined) return // already resolved to this same transport — nothing to record
   configured.set(db, transport)
+}
+
+/** Install a db's whole change configuration ATOMICALLY: validate every part first, then commit. Setting
+ *  them one at a time can install the transport and then throw on the namespace, leaving a db configured
+ *  with a transport its identity does not match. */
+function configureChanges(db: object, options: { transport?: ChangeTransport; namespace?: string } = {}): void {
+  checkChangeTransport(db, options.transport)
+  checkChangeNamespace(db, options.namespace)
+  setChangeTransport(db, options.transport)
+  setChangeNamespace(db, options.namespace)
 }
 
 /** The transport for a db — its registered override, else the shared in-process default — FROZEN on first
@@ -156,29 +171,59 @@ function transportFor(db: object): ChangeTransport {
 // definition reaching other processes, and must supply a stable `changeNamespace` instead — see the
 // assertion in reactiveDrizzle. Deriving one automatically would mean guessing at database authority, which
 // is exactly the kind of guess this package refuses elsewhere.
+//
+// SET-ONCE, like the transport and for the same reason: subscriptions are admitted on the topic a db
+// RESOLVED, so changing the identity afterwards would move future publications to a new topic while the
+// live listener stays on the old one — a systematic miss rather than an over-fire.
 
-const configuredNamespaces = new WeakMap<object, string>()
-const derivedNamespaces = new WeakMap<object, string>()
+const configuredNamespaces = new WeakMap<object, string>() // explicit, registered before first use
+const resolvedNamespaces = new WeakMap<object, string>() // frozen at first use (explicit OR derived)
+const derivedNamespaces = new WeakMap<object, string>() // per identity owner, shared by sibling dbs
 
 const NAMESPACE_SWAP_MESSAGE =
-  'telefunc live: the change namespace for this db is already set and cannot be replaced. `changeNamespace` identifies the logical database on a shared transport — pass the same value on every reactiveDrizzle(db, …) call for this db.'
+  'telefunc live: the change namespace for this db is already in use and cannot be replaced. `changeNamespace` identifies the logical database on a shared transport (a derived one counts as a resolution) — pass the same value on every reactiveDrizzle(db, …) call for this db, or use a distinct db instance.'
+
+/** Reject a namespace that conflicts with this db's existing one, WITHOUT recording anything. Splitting
+ *  the check from the commit is what lets `reactiveDrizzle` validate the whole configuration before it
+ *  installs any of it — otherwise a transport could be installed and then a namespace throw, leaving the db
+ *  half-configured. */
+function checkChangeNamespace(db: object, namespace: string | undefined): void {
+  if (namespace === undefined) return
+  const frozen = resolvedNamespaces.get(db)
+  if (frozen !== undefined && frozen !== namespace) throw new Error(NAMESPACE_SWAP_MESSAGE)
+  const existing = configuredNamespaces.get(db)
+  if (existing !== undefined && existing !== namespace) throw new Error(NAMESPACE_SWAP_MESSAGE)
+}
 
 function setChangeNamespace(db: object, namespace: string | undefined): void {
   if (namespace === undefined) return
-  const existing = configuredNamespaces.get(db)
-  if (existing !== undefined && existing !== namespace) throw new Error(NAMESPACE_SWAP_MESSAGE)
+  checkChangeNamespace(db, namespace)
   configuredNamespaces.set(db, namespace)
 }
 
 /** The logical-database identity for a db: the caller's `changeNamespace` if there is one, else an identity
- *  derived from the connection this db runs on and stable for as long as that connection object lives. */
+ *  derived from the connection this db runs on — FROZEN on first call, so every later topic, envelope and
+ *  admitted subscription refers to the same database. */
 function namespaceFor(db: object): string {
-  const configuredNamespace = configuredNamespaces.get(db)
-  if (configuredNamespace !== undefined) return configuredNamespace
-  // Key on the client when there is one, so sibling drizzle objects over one connection agree; fall back to
-  // the db itself, which is the narrower (never cross-feeding) choice when no client is exposed.
+  let namespace = resolvedNamespaces.get(db)
+  if (namespace === undefined) {
+    namespace = configuredNamespaces.get(db) ?? derivedNamespaceFor(db)
+    resolvedNamespaces.set(db, namespace)
+  }
+  return namespace
+}
+
+/** An identity shared by every db over the same connection. Drizzle clients are not all plain objects —
+ *  `postgres-js` hands back its `sql` client as a FUNCTION — and a function is both a valid WeakMap key and
+ *  a real client, so excluding it would silently split one database into two namespaces and drop every
+ *  sibling invalidation. Anything that cannot key a WeakMap falls back to the db itself, which is the
+ *  narrower choice: it can miss a sibling, but it can never cross-feed a stranger. */
+function derivedNamespaceFor(db: object): string {
   const connection = (db as { $client?: unknown }).$client
-  const identityOwner = typeof connection === 'object' && connection !== null ? connection : db
+  const identityOwner =
+    (typeof connection === 'object' && connection !== null) || typeof connection === 'function'
+      ? (connection as object)
+      : db
   let derived = derivedNamespaces.get(identityOwner)
   if (!derived) derivedNamespaces.set(identityOwner, (derived = `local:${randomUUID()}`))
   return derived
