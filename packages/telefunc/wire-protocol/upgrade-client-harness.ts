@@ -2,9 +2,9 @@
 // including the handoff window.
 //
 // Two seams are needed and neither costs a production change:
-//   - SSE: `fetchImpl` is already an option (`connection.ts:150`), exercised by `connection.spec.ts`.
-//   - WS: `connection.ts:1208` / `:1292` do a bare `new WebSocket(this.wsUrl)` and
-//     `TRANSPORT_REGISTRY` (`:1855-1862`) is a module const, not an option — so a
+//   - SSE: `fetchImpl` is already an option (`connection.ts:148`), exercised by `connection.spec.ts`.
+//   - WS: `connection.ts:1301` / `:1385` do a bare `new WebSocket(this.wsUrl)` and
+//     `TRANSPORT_REGISTRY` (`:1948-1955`) is a module const, not an option — so a
 //     `globalThis.WebSocket` stub is the only seam. No spec in the repo did this before.
 //
 // Real timers throughout. Fake timers and real `ReadableStream`s do not mix — stream-reader
@@ -64,7 +64,7 @@ class StubWebSocket {
   }
 
   /** Server→client frame. Deliberately still fires after `close()`: `ProbeWire.close`
-   *  (`connection.ts:1259-1264`) does NOT null `ws.onmessage`, so a late frame really can land
+   *  (`connection.ts:1352-1357`) does NOT null `ws.onmessage`, so a late frame really can land
    *  on a closed probe socket. A stub that silently swallowed it would hide that. */
   emit(frame: Uint8Array): void {
     this.onmessage?.({ data: new Uint8Array(frame).buffer })
@@ -112,7 +112,7 @@ type HarnessClientChannel = {
   readonly id: string
   isClosed: boolean
   /** Data payloads as the application would see them, captured at `_dispatchFrame` — i.e. BELOW
-   *  `ClientConnection.dispatchFrame`'s `trackSeq` dedup (`connection.ts:663`), which is the
+   *  `ClientConnection.dispatchFrame`'s `trackSeq` dedup (`connection.ts:695`), which is the
    *  coalescer that silently drops. Observing above it would prove nothing. */
   readonly received: ReceivedPayload[]
   /** Per-channel ctrl frames that reached the channel. */
@@ -251,11 +251,11 @@ type UpgradeHarness = {
     readonly sent: DecodedFrame[]
   }
   /** True once the client has committed to the handoff: it emits its handoff RECONCILE with
-   *  `upgrade: true` from `_onTransportOpen(ws)` (`connection.ts:1028`, `:637-639`). */
+   *  `upgrade: true` from `_onTransportOpen(ws)` (`connection.ts:1096`, `:667-669`). */
   inHandoff(): boolean
   /** True once the handoff has COMMITTED and the buffer has been drained.
    *
-   *  `tryCompleteUpgradeHandoff` (`connection.ts:774-781`) disposes the old transport and then
+   *  `tryCompleteUpgradeHandoff` (`connection.ts:821-831`) disposes the old transport and then
    *  drains the buffer, all in one synchronous block, and disposing aborts the SSE downstream
    *  fetch (`:1816-1817`). Any asynchronous observer therefore sees the abort strictly after the
    *  drain. This matters: the obvious observable — a second `_onTransportOpen` — fires from
@@ -277,7 +277,7 @@ type UpgradeHarness = {
  *
  * On return: the transport has flipped to WS, the old SSE downstream is still open, the client has
  * sent its handoff RECONCILE on the WS wire, and neither FIN nor the WS RECONCILED has arrived —
- * so every frame pushed on either wire lands in `state.upgrade.buffer` (`connection.ts:701`).
+ * so every frame pushed on either wire lands in `state.upgrade.buffer` (`connection.ts:734`).
  */
 async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<UpgradeHarness> {
   const stub = installWebSocketStub()
@@ -307,7 +307,7 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
     }
 
     // ReadableStream body → the long-lived streamRequest upload POST. It must resolve when the
-    // client closes the body, because `forceDrain` (`connection.ts:1467-1476`) awaits exactly that.
+    // client closes the body, because `forceDrain` (`connection.ts:1560-1569`) awaits exactly that.
     const stream = body as ReadableStream<Uint8Array<ArrayBuffer>>
     return await new Promise<Response>((resolve, reject) => {
       init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
@@ -340,7 +340,7 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
     upstream.find((f): f is DecodedFrame & { tag: typeof TAG.RECONCILE } => f.tag === TAG.RECONCILE)
 
   // 1) First reconcile settles on SSE. `transports: ['sse','ws']` in the reply is what arms
-  //    `maybeStartUpgrade` (`connection.ts:832`).
+  //    `maybeStartUpgrade` (`connection.ts:887`).
   await waitUntil(() => downstream !== null, 'SSE downstream opened')
   await waitUntil(() => firstReconcile() !== undefined, 'client sent its first RECONCILE')
   const open = firstReconcile()!.payload.open

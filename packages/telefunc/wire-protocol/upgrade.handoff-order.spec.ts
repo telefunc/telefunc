@@ -51,7 +51,7 @@ const frameNPlus1 = (seq: number) => encode.binary(0, new Uint8Array([1, 2, 3]),
 
 /** Finish the handoff. RECONCILED settles the new wire; FIN goes LAST on the SSE stream, so every
  *  old-wire frame pushed before it is necessarily already buffered when the drain runs (same-wire
- *  FIFO). The handoff commits only once both have landed (`connection.ts:771-773`). */
+ *  FIFO). The handoff commits only once both have landed (`connection.ts:818-820`). */
 async function completeHandoff(h: UpgradeHarness) {
   h.ws.pushFrame(encode.reconciled(reconciledPayload([{ ix: 0, lastSeq: 0 }])))
   h.sse.pushFrame(encode.fin())
