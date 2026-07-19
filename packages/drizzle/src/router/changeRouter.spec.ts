@@ -9,6 +9,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import type { ApplyOutcome } from '../graph/liveGraph.js'
+import { relationIdOf } from '../ir/relation.js'
 import { type RoutableGraph, createRouter } from './changeRouter.js'
 import type { ChangeBatch, TableChange } from './events.js'
 
@@ -163,5 +164,59 @@ describe('an in-batch coarse marker demotes the graph, never feeds it a row', ()
     expect(onUsers.applyLog.length).toBe(0)
     expect(onTeams.reseedCalls.n).toBe(0) // watches only teams → unaffected by the users coarse marker
     expect(onTeams.applyLog.length).toBe(1) // its precise change applies normally
+  })
+})
+
+// The one configuration that can silently MISS an invalidation: one physical table declared both with and
+// without a schema, read through one declaration and written through the other. The router cannot route
+// them together (whether they are the same relation depends on search_path, and on a pooled connection that
+// is unprovable), but it can refuse to let the miss be silent.
+describe('a relation declared both with and without a schema is called out, not silently missed', () => {
+  const qualified = relationIdOf({ name: 'users', schema: 'app' })
+  const unqualified = relationIdOf({ name: 'users' })
+
+  it('warns when both forms of one name appear, and names the relation', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const router = createRouter({ notify: () => {} })
+    router.register(fakeGraph([unqualified], 'k1').graph) // the READ declares it bare…
+    expect(warn).not.toHaveBeenCalled() // …nothing ambiguous yet
+    router.ingest(batch([ins(qualified, 1)])) // …the WRITE arrives schema-qualified
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]![0]).toMatch(/"users" is declared both with and without a schema/)
+    warn.mockRestore()
+  })
+
+  it('warns ONCE per name — a standing misconfiguration, not a per-batch event', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const router = createRouter({ notify: () => {} })
+    router.register(fakeGraph([unqualified], 'k1').graph)
+    router.ingest(batch([ins(qualified, 1)]))
+    router.ingest(batch([ins(qualified, 2)]))
+    router.ingest(batch([ins(unqualified, 3)]))
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it('stays quiet for two genuinely different schema-qualified relations of the same name', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const router = createRouter({ notify: () => {} })
+    router.register(fakeGraph([relationIdOf({ name: 'users', schema: 'a' })], 'k1').graph)
+    router.ingest(batch([ins(relationIdOf({ name: 'users', schema: 'b' }), 1)]))
+    // Both are qualified, so neither is ambiguous — they are simply different tables, and the qualified
+    // identity keeping them apart is the whole point. A warning here would be noise on correct usage.
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('does not route the two declarations together — the identities stay separate', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const router = createRouter({ notify: () => {} })
+    const bare = fakeGraph([unqualified], 'k1')
+    router.register(bare.graph)
+    router.ingest(batch([ins(qualified, 1)]))
+    // Diagnosing the ambiguity must not quietly become "fix" it: linking them would invalidate a query on
+    // one physical relation because an unrelated one in another schema changed.
+    expect(bare.applyLog.length).toBe(0)
+    warn.mockRestore()
   })
 })

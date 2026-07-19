@@ -11,6 +11,7 @@
 export { type RoutableGraph, type Router, createRouter }
 
 import type { ApplyOutcome } from '../graph/liveGraph.js'
+import { describeRelationId, parseRelationId } from '../ir/relation.js'
 import type { ChangeBatch, TableChange } from './events.js'
 
 /** What the router indexes and drives. Each graph yields its own identity key; a batch that touches
@@ -39,10 +40,12 @@ type Router = {
 
 function createRouter(config: { notify: (identityKey: string) => void }): Router {
   const index = new Map<string, Set<RoutableGraph>>()
+  const watchForSplitDeclaration = splitDeclarationWatch()
 
   return {
     register(graph) {
       for (const table of graph.tables) {
+        watchForSplitDeclaration(table)
         const set = index.get(table) ?? new Set()
         set.add(graph)
         index.set(table, set)
@@ -61,7 +64,10 @@ function createRouter(config: { notify: (identityKey: string) => void }): Router
     },
     ingest(batch) {
       const touched = new Set<RoutableGraph>()
-      for (const change of batch.changes) for (const graph of index.get(change.table) ?? []) touched.add(graph)
+      for (const change of batch.changes) {
+        watchForSplitDeclaration(change.table)
+        for (const graph of index.get(change.table) ?? []) touched.add(graph)
+      }
       const keys = new Set<string>()
       for (const graph of touched) {
         const slice = batch.changes.filter((change) => graph.tables.includes(change.table))
@@ -90,5 +96,46 @@ function createRouter(config: { notify: (identityKey: string) => void }): Router
       }
       for (const key of keys) config.notify(key)
     },
+  }
+}
+
+/** Watch the identities flowing through one router for the ONE configuration that can silently miss.
+ *
+ *  A relation declared without a schema gets the unqualified identity; declared with one, it gets the
+ *  qualified identity. Those are deliberately different — `a.users` and `b.users` are different physical
+ *  relations and conflating them would invalidate queries that are provably unaffected. But if a user
+ *  declares ONE physical table BOTH ways and reads through one declaration while writing through the
+ *  other, the write routes to an identity the read is not watching, and the invalidation is simply lost.
+ *
+ *  Routing them together is not the fix: whether bare `users` and `app.users` are the same relation
+ *  depends on the session's `search_path`, which resolves each unqualified name against the schemas that
+ *  actually contain it — and on a pooled connection that authority is not provable at all. Linking them
+ *  unconditionally would re-introduce the cross-schema false invalidation the qualified identity exists to
+ *  prevent. So the rule stands, but it does not have to stand SILENTLY: seeing both forms of one name is
+ *  exactly the configuration the limit describes, and saying so turns a missed invalidation into a
+ *  diagnosable one. Warned once per name — this is a standing misconfiguration, not a per-batch event. */
+function splitDeclarationWatch(): (relationId: string) => void {
+  const noted = new Set<string>() // identities already accounted for — keeps `ingest` O(1) per distinct id
+  const qualified = new Set<string>()
+  const unqualified = new Set<string>()
+  const warned = new Set<string>()
+
+  return (relationId) => {
+    if (noted.has(relationId)) return
+    noted.add(relationId)
+    let relation: { name: string; schema?: string }
+    try {
+      relation = parseRelationId(relationId)
+    } catch {
+      return // a malformed identity is not this watcher's error to raise
+    }
+    ;(relation.schema === undefined ? unqualified : qualified).add(relation.name)
+    if (warned.has(relation.name) || !qualified.has(relation.name) || !unqualified.has(relation.name)) return
+    warned.add(relation.name)
+    console.warn(
+      `[@telefunc/drizzle] the relation "${relation.name}" is declared both with and without a schema (${describeRelationId(relationId)} and its counterpart). ` +
+        'If those are the SAME physical table, a write through one declaration will not invalidate a live query that read through the other — the invalidation is lost, not delayed. ' +
+        'Declare the relation once. If they are genuinely different tables in different schemas, this is expected and can be ignored.',
+    )
   }
 }
