@@ -362,13 +362,7 @@ class ChannelMux {
       return Promise.resolve(null)
     }
     chargeBacklog(state, byteLength)
-    const exec = async (): Promise<ReconcileOutcome | null> => {
-      try {
-        return await this.runInboundTurn(entry, connection, rawFrame)
-      } finally {
-        refundBacklog(state, byteLength)
-      }
-    }
+    const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
     if (rawFrame[0] === TAG.PING) return exec()
     return this.chainRecv(entry, exec)
   }
@@ -378,18 +372,30 @@ class ChannelMux {
    *  leave QUEUED by stalling the chain and continuing to send. Rejection kills only the wire that
    *  overran, so a flood costs its author its own connection and nobody else theirs. */
   private admitInboundFrame(state: ConnectionState, byteLength: number): boolean {
-    if (byteLength > this.limits.maxRawFrameBytes) return false
-    // Bytes compare post-add and frames pre-increment, because this frame is not charged yet.
-    if (state.recvBacklogBytes + byteLength > this.limits.maxRecvBacklogBytes) return false
-    return state.recvBacklogFrames < this.limits.maxRecvBacklogFrames
+    // ⚠️ Stated as REJECTION and negated, not as an admit-form comparison. Bytes compare post-add and
+    // frames pre-increment because this frame is not charged yet — and `>=` is not the complement of
+    // `<` for a non-finite limit, which the constructor does not exclude: an injected `NaN` admits
+    // under `>=` and would reject under `<`.
+    const overBudget =
+      byteLength > this.limits.maxRawFrameBytes ||
+      state.recvBacklogBytes + byteLength > this.limits.maxRecvBacklogBytes ||
+      state.recvBacklogFrames >= this.limits.maxRecvBacklogFrames
+    return !overBudget
   }
 
-  /** One admitted frame's turn. Never rejects: a protocol violation kills the offending wire — which
-   *  is not always the wire the frame arrived on, see `ViolationTarget` — and resolves null. */
+  /** One admitted frame's turn, refund included. Never rejects: a protocol violation kills the
+   *  offending wire — not always the wire the frame arrived on, see `ViolationTarget` — and
+   *  resolves null.
+   *
+   *  ⚠️ The refund rides THIS function's `finally`, not the caller's. A frame that completes without
+   *  ever awaiting (every PING) must refund SYNCHRONOUSLY, before `dispatchInbound` returns. Wrapping
+   *  this in a second `async` layer defers the refund by a microtask, and same-stack PINGs then pile
+   *  up as unfinished backlog until the cap terminates a perfectly healthy wire. */
   private async runInboundTurn(
     entry: ConnectionEntry,
     connection: unknown,
     rawFrame: Uint8Array<ArrayBuffer>,
+    byteLength: number,
   ): Promise<ReconcileOutcome | null> {
     const violation: ViolationTarget = { connection }
     try {
@@ -404,6 +410,8 @@ class ChannelMux {
       if (!targetEntry) return null
       this.terminateWire(targetEntry, target)
       return null
+    } finally {
+      refundBacklog(entry.state, byteLength)
     }
   }
 

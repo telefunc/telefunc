@@ -34,6 +34,7 @@ import {
   globalRegisterChannel,
   lengthPrefixed,
   openSseDownstream,
+  pingFrame,
   prepareFrame,
   reconcileFrame,
   settle,
@@ -361,6 +362,26 @@ describe('per-connection recv-chain backlog', () => {
 
     expect(h.ws.terminated()).toBe(false)
     expect(chW.received).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    expect(h.ws.backlog()).toMatchObject({ frames: 0, bytes: 0 })
+  })
+
+  test('a PING refunds SYNCHRONOUSLY, so same-stack PINGs never accumulate as backlog', () => {
+    // A PING bypasses the recv chain and is handled without ever awaiting, so its refund must land
+    // before `dispatchInbound` returns. Wrap that turn in one more `async` layer and the refund slips
+    // by a microtask — at which point a transport adapter that delivers PING callbacks in a single
+    // turn kills its own healthy wire. At the shipped ceiling that takes 50,001 callbacks; with the
+    // cap at 1 the second PING is enough to see it.
+    const h = (harness = createMuxHarness({ maxRecvBacklogFrames: 1 }))
+
+    void h.ws.deliver(pingFrame())
+    // INSTRUMENT CHECK: the refund really was synchronous. Nothing has awaited yet, so a refund
+    // deferred to a microtask still reads `frames: 1` here and this row fails on its own terms —
+    // before the second PING has had any chance to be the thing that overran.
+    expect(h.ws.backlog()).toMatchObject({ frames: 0, bytes: 0 })
+
+    void h.ws.deliver(pingFrame())
+
+    expect(h.ws.terminated()).toBe(false)
     expect(h.ws.backlog()).toMatchObject({ frames: 0, bytes: 0 })
   })
 
