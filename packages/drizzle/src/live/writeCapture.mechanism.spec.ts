@@ -132,6 +132,36 @@ describe('mechanism — one builder executed CONCURRENTLY with itself', () => {
   })
 })
 
+describe('mechanism — a borrowed builder is put back in BOTH the halves `.returning()` writes', () => {
+  // `.returning()` records its selection TWICE: `returning` is what executes, and `returningFields` is what
+  // `getSelectedFields()` reports. Capture's substitution overwrites both, so restoring only the first leaves
+  // the builder DESCRIBING a selection it no longer runs — a builder that lies about itself to any caller who
+  // introspects it, and to drizzle's own `$dynamic` composition.
+  //
+  // The existing frozen-config cases pin `returning`, and pinned it alone: dropping the `returningFields`
+  // half of the restore left the whole suite green. This is the case that disagrees with that mutant.
+
+  it('a WIDENED caller projection leaves getSelectedFields() reporting the caller’s own columns', async () => {
+    const { client, db } = await fresh(PLAIN_DDL)
+    const { wrapped, batches } = capturing(db, 'insert', db.insert.bind(db))
+    // A PARTIAL projection is the case capture WIDENS: it substitutes a full-row RETURNING, captures that,
+    // and projects `mine` back out — so both halves of the caller's selection really are overwritten and
+    // really do have to come back.
+    const builder = wrapped(plainUsers).values({ id: 1, name: 'a' }).returning({ mine: plainUsers.name })
+    const callerFields = configOf(builder).returningFields
+
+    await expect(builder).resolves.toEqual([{ mine: 'a' }])
+    // The capture side genuinely widened — otherwise this test would pass without the substitution ever
+    // having overwritten anything, and the restore it claims to pin would never have been exercised.
+    expect(batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 1, name: 'a' } }]])
+
+    // BOTH halves are the caller's again — the same objects they built, not equal ones written over the top.
+    expect(configOf(builder).returningFields).toBe(callerFields)
+    expect(Object.keys(builder.getSelectedFields())).toEqual(['mine'])
+    await client.close()
+  })
+})
+
 describe('mechanism — capture must not change WHICH decode the caller’s value comes from', () => {
   // A BOTH-IMAGES statement decodes every column twice (old and new); a widened full-row statement decodes in
   // TABLE order rather than the caller's. Reusing drizzle's mapper is therefore not enough on its own: the
