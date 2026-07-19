@@ -8,6 +8,7 @@ import { installRedis } from '@telefunc/redis'
 import { config } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
+import { readUpgradeObservations, resetUpgradeObservations } from './upgrade-observations'
 
 config.channel.pingInterval = 1000
 config.shield = true
@@ -39,9 +40,14 @@ const app = new Hono()
 const USE_NATIVE = process.env.TELEFUNC_NATIVE === '1'
 console.log(`[INST=${INST}] /_telefunc adapter: ${USE_NATIVE ? 'node-native (req/res)' : 'web request'}`)
 
-app.get('/api/cleanup-state', async (c) => c.json(await getCleanupStateSnapshot()))
+// The upgrade counters ride the same channel so an e2e reads one snapshot. They are read live from
+// telefunc's global slot rather than mirrored into `cleanupState` on write: a mirror would need a
+// hook at the commit site, and a stale mirror is exactly the co-set proxy that stays correct while
+// the thing it proxies breaks.
+app.get('/api/cleanup-state', async (c) => c.json({ ...(await getCleanupStateSnapshot()), ...readUpgradeObservations() }))
 app.post('/api/cleanup-state/reset', async (c) => {
   await resetCleanupState()
+  resetUpgradeObservations()
   return c.json({ ok: true })
 })
 

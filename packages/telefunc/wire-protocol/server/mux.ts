@@ -18,6 +18,7 @@ import {
 import { TAG, decode, encode, isConnCtrlTag } from '../shared-ws.js'
 import type { ChannelFrame, PreparePayload, ReconcilePayload, ReconciledPayload } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
+import { recordUpgradeCommitted, recordUpgradePrepared } from './upgrade-observer.js'
 import type { ServerChannel } from './channel.js'
 
 // Single-instance kernel: owns channels, sessions, per-connection runtime. Transports talk
@@ -486,6 +487,9 @@ class ChannelMux {
     })
     this.stagedByPrevSession.set(payload.sessionId, connection)
     this.stagedBytes += rawByteLength
+    // Recorded once the stage is installed and about to be acknowledged — an accepted PREPARE,
+    // not merely one that arrived. Every rejection above throws before reaching this line.
+    recordUpgradePrepared()
     this.send(connection, encode.ready({ upgradeId: payload.upgradeId }))
     return null
   }
@@ -551,6 +555,11 @@ class ChannelMux {
           // applies to it. (The caller enqueues COMMITTED a microtask later; in that sliver the wire
           // is an ordinary sessioned transport, on which a reconcile is legal anyway.)
           release()
+          // The authoritative "this upgrade is done" event: the reconcile RESOLVED, so the probe
+          // wire owns the session. Recorded here rather than at the caller's COMMITTED send so a
+          // future change to how COMMITTED is delivered cannot quietly detach the e2e oracle from
+          // the commit it names.
+          recordUpgradeCommitted()
           return { ...outcome, deliverTo: wsConnection, upgradeId: stage.upgradeId }
         },
         (err) => {
