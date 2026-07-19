@@ -12,6 +12,7 @@ import {
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import {
+  ROOM_DEMAND_TTL_MS,
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_KV_TTL_MS,
@@ -25,6 +26,7 @@ import {
 import { ACK_STATUS, TAG, decode, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
 import { RoomStubChannel, bindParticipantStubChannel } from './stubs.js'
+import { RoomDemand } from './demand.js'
 import { ClientRoom } from './client.js'
 import { ServerChannel } from '../server/channel.js'
 import { createStreamingReplacer } from '../server/response/registry.js'
@@ -2875,6 +2877,37 @@ describe('ClientRoom', () => {
     unsub() // nobody watching the screen track — demand goes watched → unwatched (pause the encoder)
     await new Promise((r) => setTimeout(r, 30))
     expect(demand).toContainEqual(['screen', false])
+  })
+
+  it('sweeps a crashed reporter’s demand so a track flips back to unwanted after its lease lapses', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(1000)
+      const delivered: Array<[string, string, boolean]> = []
+      // Own every member, ignore outbound gossip, record what gets pushed to the member.
+      const demand = new RoomDemand(
+        () => {},
+        () => true,
+        (member, track, wanted) => delivered.push([member, track, wanted]),
+      )
+      demand.applyWant({ member: 'alice', track: 'screen', node: 'watcher', on: true })
+      expect(delivered).toEqual([['alice', 'screen', true]]) // a watcher on another node wants it
+
+      // A heartbeat before the lease lapses keeps it — a live watcher re-gossips within the window.
+      vi.setSystemTime(1000 + ROOM_DEMAND_TTL_MS - 1)
+      demand.heartbeat()
+      expect(delivered).toEqual([['alice', 'screen', true]])
+
+      // The watcher's node crashes (no 0-transition). Past the lease, the next heartbeat sweeps it.
+      vi.setSystemTime(1000 + ROOM_DEMAND_TTL_MS + 1)
+      demand.heartbeat()
+      expect(delivered).toEqual([
+        ['alice', 'screen', true],
+        ['alice', 'screen', false],
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("a member leaving releases its listeners — the client's declaration narrows without an unsubscribe", async () => {

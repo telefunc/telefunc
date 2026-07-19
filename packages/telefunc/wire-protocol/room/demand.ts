@@ -1,6 +1,8 @@
 export { RoomDemand }
 export type { WantGossip }
 
+import { ROOM_DEMAND_TTL_MS } from '../constants.js'
+
 /** A demand-gossip event on the room's control lane — node-to-node only, never relayed to clients. */
 type WantGossip = { member: string; track: string; node: string; on: boolean }
 
@@ -25,8 +27,10 @@ class RoomDemand {
   private readonly _instanceId = crypto.randomUUID()
   /** Composite key → [member, track] this instance currently has local demand for. */
   private _localDemand = new Map<string, [string, string]>()
-  /** Owner-side: composite key → the OTHER instance ids reporting demand. */
-  private readonly _remoteDemand = new Map<string, Set<string>>()
+  /** Owner-side: composite key → the OTHER instance ids reporting demand, each with a lease deadline.
+   *  A reporter re-gossips every heartbeat to renew its lease; one that crashes lets its lease lapse,
+   *  so `heartbeat()` sweeps it (a Set would strand a crashed reporter's demand forever). */
+  private readonly _remoteDemand = new Map<string, Map<string, number>>()
   /** Owner-side: composite keys currently pushed to the member as `wanted` (change detection). */
   private readonly _pushedWanted = new Set<string>()
 
@@ -54,15 +58,45 @@ class RoomDemand {
     if (event.node === this._instanceId) return // our own gossip echoed back
     const k = demandKey(event.member, event.track)
     if (event.on) {
-      let set = this._remoteDemand.get(k)
-      if (!set) this._remoteDemand.set(k, (set = new Set()))
-      set.add(event.node)
+      let leases = this._remoteDemand.get(k)
+      if (!leases) this._remoteDemand.set(k, (leases = new Map()))
+      leases.set(event.node, Date.now() + ROOM_DEMAND_TTL_MS) // (re)new the reporter's lease
     } else {
-      const set = this._remoteDemand.get(k)
-      set?.delete(event.node)
-      if (set && set.size === 0) this._remoteDemand.delete(k)
+      const leases = this._remoteDemand.get(k)
+      leases?.delete(event.node)
+      if (leases && leases.size === 0) this._remoteDemand.delete(k)
     }
     if (this._ownsMember(event.member)) this._recompute(event.member, event.track)
+  }
+
+  /** Called on the room heartbeat. Renews this instance's demand lease on every owner by re-gossiping
+   *  its live local demand, then sweeps remote demand whose lease lapsed — a reporter that crashed
+   *  without sending its 0-transition — recomputing any owned member it thereby stops wanting. */
+  heartbeat(): void {
+    for (const [, [member, track]] of this._localDemand)
+      this._publishWant({ member, track, node: this._instanceId, on: true })
+    const now = Date.now()
+    for (const [k, leases] of this._remoteDemand) {
+      let expired = false
+      for (const [node, expiresAt] of leases) {
+        if (expiresAt <= now) {
+          leases.delete(node)
+          expired = true
+        }
+      }
+      if (leases.size === 0) this._remoteDemand.delete(k)
+      if (expired) {
+        const sep = k.indexOf(DEMAND_SEP)
+        const member = k.slice(0, sep)
+        if (this._ownsMember(member)) this._recompute(member, k.slice(sep + 1))
+      }
+    }
+  }
+
+  /** Whether this instance has demand to keep alive or sweep — gates the room heartbeat so a pure
+   *  observer (local demand, no owned members) still refreshes its lease and isn't wrongly reaped. */
+  isActive(): boolean {
+    return this._localDemand.size > 0 || this._remoteDemand.size > 0
   }
 
   private _transition(member: string, track: string, on: boolean): void {

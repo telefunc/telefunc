@@ -1860,7 +1860,9 @@ class ServerRoom implements Room {
   }
 
   private _syncHeartbeat(): void {
-    const want = !this._state.closed && this._ownedMemberIds().length > 0
+    // Also runs for a pure observer (binary demand but no owned members), so its demand lease keeps
+    // being renewed — otherwise a live watcher on such a node would be swept as if it had crashed.
+    const want = !this._state.closed && (this._ownedMemberIds().length > 0 || this._demand.isActive())
     if (want && !this._heartbeatTimer) {
       this._heartbeatTimer = unrefTimer(
         setInterval(() => void this._heartbeatTick().catch(reportRoomError), ROOM_HEARTBEAT_INTERVAL_MS),
@@ -1875,6 +1877,9 @@ class ServerRoom implements Room {
     if (this._heartbeatBusy) return // a slow KV must not pile up overlapping ticks
     this._heartbeatBusy = true
     try {
+      // Renew this node's binary-demand lease on every owner and sweep any crashed reporter's demand.
+      // No KV — runs first so member-KV latency never delays it (the demand TTL has slack for skips).
+      this._demand.heartbeat()
       const kv = getRoomKV(this.id)
       for (const id of this._ownedMemberIds()) {
         // Bump `seenAt` with a read-modify-write, not a whole-record `set`: the update only touches

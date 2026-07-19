@@ -272,6 +272,13 @@ export const ROOM_TAIL_ATTACH_TIMEOUT_MS = 60_000
  *  an upstream key for every all-track subscriber. The unnamed default lane never counts against it. */
 export const ROOM_TRACKS_PER_MEMBER_MAX = 32
 
+/** Lease on a remote instance's binary-track demand (`onDemand`). Each instance re-gossips its live
+ *  demand every heartbeat, so a live watcher's lease is renewed well within this; a reporter that
+ *  crashed without sending its 0-transition has its demand swept once the lease lapses, so a member's
+ *  `onDemand` eventually flips back to `false` (pause the encoder) instead of staying stuck watched.
+ *  Three heartbeats: survives two missed refreshes before a live watcher is wrongly dropped. */
+export const ROOM_DEMAND_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 3
+
 /** Safety net for `send(…, { ack: true })`. The normal outcomes settle promptly — the recipient
  *  replies, leaves, or its inbox overflows — but a recipient that joined yet never `listen()`s and
  *  never leaves would strand the sender forever, so an ack unanswered this long rejects. Generous, so
