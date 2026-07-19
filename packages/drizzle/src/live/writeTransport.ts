@@ -70,7 +70,11 @@ function publisherOf(db: object): PublisherState {
  *  batch. Receivers slice it per table themselves. */
 function publishBatch(db: object, batch: ChangeBatch): void {
   if (batch.changes.length === 0) return
-  const header = nextHeader(db)
+  // ONE resolution for the whole publication — see `nextHeader`. Encoding below runs user-controlled code
+  // (a row's enumerable getter), which can rotate the transport re-entrantly; resolving again afterwards
+  // would let the header and the send disagree about which era this publication belongs to.
+  const transport = transportFor(db)
+  const header = nextHeader(db, transport)
   let payload: string
   try {
     payload = encodeChangePayload({ ...header, changes: batch.changes })
@@ -84,7 +88,7 @@ function publishBatch(db: object, batch: ChangeBatch): void {
     )
     payload = encodeChangePayload({ ...header, coarseAll: true })
   }
-  publishPayload(db, payload)
+  publishPayload(db, payload, transport)
 }
 
 /** Announce a mutation whose touched tables are UNKNOWABLE (raw SQL, batch) to every OTHER instance: each
@@ -92,7 +96,8 @@ function publishBatch(db: object, batch: ChangeBatch): void {
  *  separate wildcard channel it used to need was an artefact of per-table fan-out. The publisher's own
  *  graphs are fed directly, and the `origin` check makes its own subscription drop this. */
 function publishCoarseAll(db: object): void {
-  publishPayload(db, encodeChangePayload({ ...nextHeader(db), coarseAll: true }))
+  const transport = transportFor(db)
+  publishPayload(db, encodeChangePayload({ ...nextHeader(db, transport), coarseAll: true }), transport)
 }
 
 /** The envelope header for the next publication, taking this db's next sequence number — and marking an ERA
@@ -102,8 +107,20 @@ function publishCoarseAll(db: object): void {
  *  went to a transport it was never on or is simply about to arrive, and its deferred baseline assumes the
  *  latter — correctly, right up until a rotation makes the earlier messages undeliverable rather than late.
  *  The FIRST publication ever is not a cut: nothing precedes seq 1, so there is nothing a receiver could be
- *  betting wrong about. */
-function nextHeader(db: object): {
+ *  betting wrong about.
+ *
+ *  SINGLE RESOLUTION. `transport` is passed in rather than resolved here, because the caller must resolve it
+ *  exactly ONCE and use that same instance for both the era comparison and the send. Encoding sits between
+ *  those two points and runs user-controlled code — a row's enumerable getter, reachable from a custom
+ *  decoder's returned value — which can synchronously rotate the transport. Resolving twice let the header
+ *  decide "no cut" against the old transport while the send went to the new one: an unmarked publication on a
+ *  transport whose receivers have no history, which is precisely the permanent hole `eraCut` exists to close.
+ *  With one resolution the publication belongs wholly to the era it started in, and a rotation that lands
+ *  mid-encode is attributed to the NEXT publication, which compares against this one and marks the cut. */
+function nextHeader(
+  db: object,
+  transport: ChangeTransport,
+): {
   version: number
   namespace: string
   origin: string
@@ -112,7 +129,6 @@ function nextHeader(db: object): {
 } {
   const publisher = publisherOf(db)
   publisher.seq++
-  const transport = transportFor(db)
   const eraCut = publisher.transport !== undefined && publisher.transport !== transport
   publisher.transport = transport
   return {
@@ -138,11 +154,14 @@ function nextHeader(db: object): {
  *  listening when the write committed, and they are reachable on the transport that was current then — so a
  *  rotation at a quiescent boundary (changeTransport.ts) must not drag an already-committed write's message
  *  onto a new transport whose subscribers were not there for it, while the old transport's listeners, who
- *  were, never hear it. Resolving late would do exactly that, silently, for any publish still queued. */
-function publishPayload(db: object, payload: string): void {
+ *  were, never hear it. Resolving late would do exactly that, silently, for any publish still queued.
+ *
+ *  The instance is handed in by the caller rather than resolved here, so that ONE resolution decides both the
+ *  era this publication is stamped with and the transport it goes to — see `nextHeader`. (`topic` is safe to
+ *  derive here: the namespace is frozen on first use, so unlike the transport it cannot change underneath.) */
+function publishPayload(db: object, payload: string, transport: ChangeTransport): void {
   const publisher = publisherOf(db)
   const topic = changeTopicFor(db)
-  const transport = transportFor(db)
   publisher.chain = publisher.chain.then(() => {
     try {
       const published = transport.publish(topic, payload)

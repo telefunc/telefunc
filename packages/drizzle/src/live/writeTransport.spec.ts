@@ -12,7 +12,7 @@
 // transport: what these tests exercise is the same path a Redis adapter runs.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { CHANGE_CODEC_VERSION } from './changeCodec.js'
+import { CHANGE_CODEC_VERSION, decodeChangePayload } from './changeCodec.js'
 import type { TableChange } from '../router/events.js'
 
 // The mocked registry is PER-DB and tracks registered graphs, so watchedTables() answers truthfully — the
@@ -674,5 +674,75 @@ describe('write transport — a transport rotation is an OBSERVABLE cut, not an 
 
     const [first] = ingest.mock.calls[0] as [{ changes: TableChange[] }]
     expect(first.changes[0]!.kind).toBe('insert') // precise baseline, no coarsening
+  })
+})
+
+// The header and the send must agree about which era a publication belongs to. Encoding sits between them
+// and runs USER-CONTROLLED code — a row's enumerable getter, reachable from a custom decoder's returned
+// value — which can synchronously rotate the transport. Resolving the transport once per publication is what
+// makes that window uninteresting; resolving it twice let the header say "no cut" about the old transport
+// while the send went to the new one, which is an unmarked publication on a transport whose receivers have
+// no history: the permanent hole again, one TOCTOU wide.
+describe('write transport — one publication resolves its transport exactly once', () => {
+  const recorder = () => {
+    const published: string[] = []
+    const transport: ChangeTransport = {
+      publish: (_topic, payload) => {
+        published.push(payload)
+      },
+      subscribe: async () => ({ unsubscribe: () => {} }),
+    }
+    return { transport, published }
+  }
+
+  it('a rotation DURING encoding cannot produce an unmarked publication on the new transport', async () => {
+    const writer = {}
+    const a = recorder()
+    const b = recorder()
+    setChangeTransport(writer, a.transport, true)
+    publishBatch(writer, { changes: [change('users')] }) // seq 1 → A, establishing the era
+    await flush()
+
+    // The attack: an enumerable getter on the row, evaluated by the encoder, rotates the transport.
+    const row = {
+      get id() {
+        setChangeTransport(writer, b.transport, true)
+        return 1
+      },
+    }
+    publishBatch(writer, { changes: [{ table: 'users', kind: 'insert', new: row }] }) // seq 2
+    await flush()
+
+    // THE INVARIANT: unmarked-on-B is impossible. Single resolution yields unmarked-on-A — the publication
+    // belongs wholly to the era it began in, where it is in order and needs no marker. (The split resolved
+    // A for the header and B for the send, landing seq 2 on B with no marker and no history: a receiver
+    // there would first-see the origin at seq 2 and bet precise on a seq 1 it can never receive.)
+    expect(b.published).toHaveLength(0)
+    expect(a.published).toHaveLength(2)
+    const seq2 = decodeChangePayload(a.published[1]!)
+    expect(seq2).toMatchObject({ seq: 2 })
+    expect('eraCut' in (seq2 as object)).toBe(false) // correctly unmarked: on A, this is simply the next one
+
+    // …and the rotation is not lost, it is attributed to the NEXT publication, atomically.
+    publishBatch(writer, { changes: [change('users')] })
+    await flush()
+    expect(b.published).toHaveLength(1)
+    expect(decodeChangePayload(b.published[0]!)).toMatchObject({ seq: 3, eraCut: true })
+  })
+
+  it('CONTROL: with no re-entrant rotation the same shape publishes normally and unmarked', async () => {
+    const writer = {}
+    const a = recorder()
+    setChangeTransport(writer, a.transport, true)
+    publishBatch(writer, { changes: [change('users')] })
+    const row = {
+      get id() {
+        return 1
+      },
+    } // same getter shape, no rotation
+    publishBatch(writer, { changes: [{ table: 'users', kind: 'insert', new: row }] })
+    await flush()
+    expect(a.published).toHaveLength(2)
+    expect('eraCut' in (decodeChangePayload(a.published[1]!) as object)).toBe(false)
   })
 })
