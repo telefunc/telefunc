@@ -6,6 +6,7 @@ import {
   config,
   KV_KEEP,
   type BroadcastTransport,
+  type BroadcastUnsubscribe,
   type KvMutate,
   type RoomFrameCommit,
   type RoomFrameCommitResult,
@@ -151,26 +152,40 @@ class RedisTransport implements BroadcastTransport {
     return this._publish(this.channelKey(key, 'b'), this.seqKey(key), payload)
   }
 
-  listen(key: string, onMessage: TextOnMessage): () => void {
+  listen(key: string, onMessage: TextOnMessage): BroadcastUnsubscribe {
     const channel = this.channelKey(key, 't')
     assert(!this.textCallbacks.has(channel), `Duplicate text listener for key "${key}"`)
     this.textCallbacks.set(channel, onMessage)
-    void this.subscriber.subscribe(channel)
-    return () => {
+    const unsub: BroadcastUnsubscribe = () => {
       this.textCallbacks.delete(channel)
       void this.subscriber.unsubscribe(channel)
     }
+    unsub.ready = this._subscribeReady(channel)
+    return unsub
   }
 
-  listenBinary(key: string, onMessage: BinaryOnMessage): () => void {
+  listenBinary(key: string, onMessage: BinaryOnMessage): BroadcastUnsubscribe {
     const channel = this.channelKey(key, 'b')
     assert(!this.binaryCallbacks.has(channel), `Duplicate binary listener for key "${key}"`)
     this.binaryCallbacks.set(channel, onMessage)
-    void this.subscriber.subscribe(channel)
-    return () => {
+    const unsub: BroadcastUnsubscribe = () => {
       this.binaryCallbacks.delete(channel)
       void this.subscriber.unsubscribe(channel)
     }
+    unsub.ready = this._subscribeReady(channel)
+    return unsub
+  }
+
+  /** Real SUBSCRIBE-ack readiness (see `BroadcastUnsubscribe.ready`): a publish only reaches a Redis
+   *  subscriber once its SUBSCRIBE has taken effect, so the ack promise is the subscription's readiness.
+   *  Resolves rather than rejects on failure — a failed subscribe means the connection is down, which
+   *  ioredis re-establishes on reconnect; blocking a retained replay forever on a transient error would
+   *  be worse than proceeding degraded. */
+  private _subscribeReady(channel: string): Promise<void> {
+    return this.subscriber.subscribe(channel).then(
+      () => undefined,
+      () => undefined,
+    )
   }
 
   private readonly _onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {

@@ -8,6 +8,9 @@ import {
   getBroadcastAdapter,
   _resetBroadcastAdapterForTesting,
   type BroadcastAdapter,
+  type BroadcastBinaryOnMessage,
+  type BroadcastOnMessage,
+  type BroadcastUnsubscribe,
 } from '../server/broadcast.js'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
@@ -1676,6 +1679,47 @@ describe('one ordered semantic lane', () => {
 // relay of binary frames the client never subscribed to.
 // ───────────────────────────────────────────────────────────────────────────
 
+/** Models an asynchronous backend subscribe (Redis SUBSCRIBE, Cloudflare presence registration): while
+ *  frozen, a `subscribe` registers no local delivery yet — a publish in that window reaches only already
+ *  live subscribers — and its `.ready` stays pending until `flushSubscribes()` acks it. The in-memory
+ *  analogue of `HybridTestAdapter`'s replica lag, for exercising the retained/live handoff. */
+class LateSubscribeAdapter extends DefaultBroadcastAdapter {
+  private frozen = false
+  private readonly acks: Array<() => void> = []
+
+  freezeSubscribes(): void {
+    this.frozen = true
+  }
+  flushSubscribes(): void {
+    this.frozen = false
+    for (const ack of this.acks.splice(0)) ack()
+  }
+
+  override subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe {
+    return this.frozen ? this._deferred(() => super.subscribe(key, onMessage)) : super.subscribe(key, onMessage)
+  }
+  override subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
+    return this.frozen
+      ? this._deferred(() => super.subscribeBinary(key, onMessage))
+      : super.subscribeBinary(key, onMessage)
+  }
+
+  private _deferred(register: () => BroadcastUnsubscribe): BroadcastUnsubscribe {
+    let live: BroadcastUnsubscribe | null = null
+    let markReady!: () => void
+    const ready = new Promise<void>((resolve) => {
+      markReady = resolve
+    })
+    this.acks.push(() => {
+      live = register()
+      markReady()
+    })
+    const unsub: BroadcastUnsubscribe = () => live?.()
+    unsub.ready = ready
+    return unsub
+  }
+}
+
 describe('room stub channel', () => {
   function attachPeer(stub: RoomStubChannel) {
     const frames: Uint8Array[] = []
@@ -2533,6 +2577,53 @@ describe('room stub channel', () => {
     stub._relayBinaryLive(encodePublishBinary(framed, info), cam.id, DEFAULT_TRACK, info) // its own late live echo
 
     expect(binaryFramesOf(peer).map((r) => r.payload[0])).toEqual([7]) // delivered once — the echo dropped
+  })
+
+  it('waits for the text subscription to go live before replaying retained, so a publish racing the subscribe is not lost', async () => {
+    const adapter = new LateSubscribeAdapter()
+    _resetBroadcastAdapterForTesting(adapter)
+    const { serverRoom, stub, peer } = await createServedRoom('ready-handoff-text')
+    const alice = await serverRoom.join({ meta: { name: 'Alice' } })
+    await alice.publish('v1', { retain: true }) // the retained state before anyone subscribes
+
+    // The client subscribes while the backend subscribe is still in flight: live frames can't reach it
+    // yet, so the retained replay must not read the slot until the subscription is live.
+    adapter.freezeSubscribes()
+    stub._onPeerBroadcastSubscribe(false)
+    await settle()
+
+    // A newer retained publish lands inside the subscribe window — its live frame misses the not-yet-live
+    // subscriber, so only the retained handoff can carry it forward.
+    await alice.publish('v2', { retain: true })
+    await settle()
+
+    adapter.flushSubscribes() // the subscription goes live
+    await settle()
+
+    // Converged on the latest state. On the parent (no await-ready) the slot was read as 'v1' before 'v2'
+    // was published and 'v2's live frame was lost in the window, leaving the client stuck at 'v1'.
+    expect(dataFramesOf(peer)).toEqual(['v2'])
+  })
+
+  it('waits for the binary subscription to go live before replaying a retained frame, so a keyframe racing the subscribe is not lost', async () => {
+    const adapter = new LateSubscribeAdapter()
+    _resetBroadcastAdapterForTesting(adapter)
+    const { serverRoom, stub, peer } = await createServedRoom('ready-handoff-binary')
+    const cam = await serverRoom.join({ meta: { name: 'cam' } })
+    await cam.publishBinary(new Uint8Array([1]), { retain: true }) // the retained keyframe before anyone subscribes
+
+    adapter.freezeSubscribes()
+    stub._onPeerMessage(JSON.stringify({ __r: 'sub-binary', wants: allBinary }), 40)
+    await settle()
+
+    await cam.publishBinary(new Uint8Array([2]), { retain: true }) // newer keyframe inside the subscribe window
+    await settle()
+
+    adapter.flushSubscribes()
+    await settle()
+
+    // Same handoff as the text lane: on the parent the client is stuck at the [1] keyframe read before [2].
+    expect(binaryFramesOf(peer).map((r) => r.payload[0])).toEqual([2])
   })
 })
 

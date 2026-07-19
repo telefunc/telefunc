@@ -226,6 +226,11 @@ class MemberBucketState {
   setupInFlight = true
   teardownRequested = false
   refreshTimer: ReturnType<typeof setInterval> | null = null
+  /** Resolves once presence is first registered in KV — the point a cross-region publisher's
+   *  `listPresenceByBucket` can see this subscriber, so a retained replay awaiting it (see
+   *  `BroadcastUnsubscribe.ready`) reads the retained copy only after live frames can reach here. */
+  readonly ready: Promise<void>
+  private markReady!: () => void
   private readonly authority: TelefuncDurableObjectStub
   private readonly key: string
   private readonly locationBucket: LocationBucket
@@ -235,6 +240,15 @@ class MemberBucketState {
     this.locationBucket = locationBucket
     this.authority = authority
     this.pendingPublishes = new CloudflareBucketPublishBuffer(CHANNEL_BUFFER_LIMIT_BYTES)
+    this.ready = new Promise((resolve) => {
+      this.markReady = resolve
+    })
+  }
+
+  /** Called by the transport once presence registration settles (success or failure). Idempotent —
+   *  resolving an already-resolved promise is a no-op — so a presence refresh never re-arms it. */
+  markPresenceRegistered(): void {
+    this.markReady()
   }
 
   publish(serialized: string): Promise<BroadcastPublishResult> {
@@ -677,7 +691,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     }
     subs.add(onMessage)
     this.ensurePresence(key, locationBucket)
-    return () => {
+    const unsub: BroadcastUnsubscribe = () => {
       const s = this.textSubs.get(key)
       if (s) {
         s.delete(onMessage)
@@ -685,6 +699,10 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       }
       this.teardownPresenceIfEmpty(key)
     }
+    // Every subscriber to a key shares the one presence registration, so it shares that registration's
+    // readiness (see `BroadcastUnsubscribe.ready` and `MemberBucketState.ready`).
+    unsub.ready = this.memberStates.get(key)?.ready
+    return unsub
   }
 
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
@@ -696,7 +714,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     }
     subs.add(onMessage)
     this.ensurePresence(key, locationBucket)
-    return () => {
+    const unsub: BroadcastUnsubscribe = () => {
       const s = this.binarySubs.get(key)
       if (s) {
         s.delete(onMessage)
@@ -704,6 +722,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       }
       this.teardownPresenceIfEmpty(key)
     }
+    unsub.ready = this.memberStates.get(key)?.ready
+    return unsub
   }
 
   publish(key: string, serialized: string): Promise<BroadcastPublishResult> {
@@ -897,6 +917,9 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       await this.putPresence(key)
     } finally {
       memberState.setupInFlight = false
+      // Presence is now registered (or the write threw and its own refresh/reconnect will retry) — the
+      // subscription is as live as it gets, so release any retained replay waiting on its readiness.
+      memberState.markPresenceRegistered()
     }
 
     memberState.refreshTimer = setInterval(() => {

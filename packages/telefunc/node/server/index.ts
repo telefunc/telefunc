@@ -57,6 +57,7 @@ export { DefaultBroadcastAdapter, KV_KEEP } from '../../wire-protocol/server/bro
 export type {
   BroadcastAdapter,
   BroadcastTransport,
+  BroadcastUnsubscribe,
   KvMutate,
   RoomFrameCommit,
   RoomFrameCommitResult,

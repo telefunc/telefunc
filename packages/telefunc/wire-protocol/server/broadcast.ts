@@ -100,7 +100,12 @@ type BroadcastOnMessage = (serialized: string, info: WirePublishInfo) => void
 
 type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => void
 
-type BroadcastUnsubscribe = () => void
+/** Call to unsubscribe. `ready`, when present, resolves once the subscription is actually live at the
+ *  backend — the seam a retained replay awaits so a publish racing a just-issued subscribe can't slip
+ *  through the gap between subscribing and reading the retained value. A synchronous backend (in-memory)
+ *  leaves it absent: the subscription is live the instant `subscribe` returns. `ready` never rejects — a
+ *  backend that can't confirm resolves it anyway (degraded; its own reconnect re-establishes the sub). */
+type BroadcastUnsubscribe = (() => void) & { ready?: Promise<void> }
 
 type BroadcastAdapter = {
   subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe
@@ -144,15 +149,21 @@ type BroadcastTransport = {
   /** Send a text message. Must return the assigned seq and timestamp; report `receivers` (the
    *  key's subscriber count) when the backend can count — it powers pause-at-0 publishers. */
   send(key: string, payload: string): TransportSendResult | Promise<TransportSendResult>
-  /** Listen for text messages on a key. Called at most once per key. Return an unsubscribe function. */
-  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  /** Listen for text messages on a key. Called at most once per key. Return an unsubscribe function;
+   *  when the backend subscribe is asynchronous, attach `.ready` (see `BroadcastUnsubscribe`) so a
+   *  consumer can await live-ness before reading retained state. */
+  listen(
+    key: string,
+    onMessage: (payload: string, info: { seq: number; timestamp: number }) => void,
+  ): BroadcastUnsubscribe
   /** Send a binary message. Same contract as `send`. */
   sendBinary(key: string, payload: Uint8Array): TransportSendResult | Promise<TransportSendResult>
-  /** Listen for binary messages on a key. Called at most once per key. Return an unsubscribe function. */
+  /** Listen for binary messages on a key. Called at most once per key. Return an unsubscribe function;
+   *  attach `.ready` like `listen`. */
   listenBinary(
     key: string,
     onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
-  ): () => void
+  ): BroadcastUnsubscribe
   /** Optional KV — required by `Room` when a transport is installed. Reads the value at `key`, or `null`. */
   get?(key: string, options?: KvReadOptions): string | null | Promise<string | null>
   /** Optional KV — required by `Room` when a transport is installed. Stores `value` at `key`
@@ -184,8 +195,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private readonly transport: BroadcastTransport | null
   private readonly subscriptions = new Map<string, Set<BroadcastOnMessage>>()
   private readonly binarySubscriptions = new Map<string, Set<BroadcastBinaryOnMessage>>()
-  private readonly transportUnsubs = new Map<string, () => void>()
-  private readonly transportBinaryUnsubs = new Map<string, () => void>()
+  private readonly transportUnsubs = new Map<string, BroadcastUnsubscribe>()
+  private readonly transportBinaryUnsubs = new Map<string, BroadcastUnsubscribe>()
   /** Per-key seq counter for in-memory mode. */
   private readonly keySeqs = new Map<string, number>()
   /** In-memory KV store, used when no transport is installed. Entries expire lazily on read. */
@@ -212,7 +223,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       )
     }
 
-    return () => {
+    const unsub: BroadcastUnsubscribe = () => {
       const s = this.subscriptions.get(key)
       if (!s) return
       s.delete(onMessage)
@@ -221,6 +232,10 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
         this._releaseUnsub(this.transportUnsubs, key)
       }
     }
+    // Every subscriber to a key shares the one transport listen, so it shares that listen's readiness:
+    // an async backend surfaces it here; in-memory leaves it absent (the sub is live on return).
+    unsub.ready = this.transportUnsubs.get(key)?.ready
+    return unsub
   }
 
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -249,7 +264,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       )
     }
 
-    return () => {
+    const unsub: BroadcastUnsubscribe = () => {
       const s = this.binarySubscriptions.get(key)
       if (!s) return
       s.delete(onMessage)
@@ -258,6 +273,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
         this._releaseUnsub(this.transportBinaryUnsubs, key)
       }
     }
+    unsub.ready = this.transportBinaryUnsubs.get(key)?.ready
+    return unsub
   }
 
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult> {
@@ -411,7 +428,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     for (const onMessage of set) onMessage(data, info)
   }
 
-  private _releaseUnsub(map: Map<string, () => void>, key: string): void {
+  private _releaseUnsub(map: Map<string, BroadcastUnsubscribe>, key: string): void {
     const unsub = map.get(key)
     if (!unsub) return
     map.delete(key)

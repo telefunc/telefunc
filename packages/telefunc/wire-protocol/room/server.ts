@@ -24,6 +24,7 @@ import {
   getBroadcastAdapter,
   KV_KEEP,
   type BroadcastAdapter,
+  type BroadcastUnsubscribe,
   type KvReadOptions,
   type KvWriteOptions,
   type RoomFrameCommitResult,
@@ -691,8 +692,8 @@ class ServerRoom implements Room {
   private readonly _ctrlSub = new SubSlot()
   private readonly _textSub = new SubSlot()
   /** Upstream binary subscriptions, keyed by the full adapter key — one per wanted (member, track). */
-  private readonly _binaryKeyUnsubs = new Map<string, () => void>()
-  private readonly _dmUnsubs = new Map<string, () => void>()
+  private readonly _binaryKeyUnsubs = new Map<string, BroadcastUnsubscribe>()
+  private readonly _dmUnsubs = new Map<string, BroadcastUnsubscribe>()
   /** (member, track) pairs this instance has already announced — first publish pays the
    *  KV append + ctrl event, every further frame is a Set lookup. */
   private readonly _announcedTracks = new Map<string, Set<string>>()
@@ -1653,6 +1654,12 @@ class ServerRoom implements Room {
     prevWantsText: boolean,
     prevMemberWants: ReadonlySet<string>,
   ): Promise<void> {
+    // Wait until the shared text subscription is live at the backend before reading the retained slot.
+    // A commit stores the retained copy before it publishes, so once the subscription is live, any
+    // publish that raced this subscribe is either already in the copy we read or arrives live — never
+    // lost in the gap between subscribing and the read. A synchronous backend (in-memory) resolves
+    // instantly. See `SubSlot.ready` and `BroadcastUnsubscribe`.
+    await this._textSub.ready
     const stored = await retainedKv(this.id).get(roomRetainedTextKey(this.id))
     if (stored === null) return
     // The retained slot holds the framed message (order prefix + payload); decode to recover both.
@@ -1670,6 +1677,10 @@ class ServerRoom implements Room {
    *  frame is self-describing, so the sender/track come from the frame itself, not the key. */
   async _replayRetainedBinary(stub: RoomStubChannel, prevWants: BinaryWants): Promise<void> {
     if (!wantsAnyBinary(stub._binaryWants)) return
+    // Same handoff as the text lane (see `_replayRetainedText`): wait for the per-(member, track)
+    // subscriptions to be live before reading the retained frames, so a frame racing the subscribe rides
+    // the retained copy or the live lane instead of the gap. A synchronous backend resolves instantly.
+    await this._binaryReady()
     const kv = retainedKv(this.id)
     for (const key of await kv.keys(roomRetainedBinaryPrefix(this.id))) {
       const stored = await kv.get(key)
@@ -1841,7 +1852,11 @@ class ServerRoom implements Room {
   }
 
   /** Reconcile a map of keyed subscriptions (member IDs, adapter keys) to the wanted set. */
-  private _syncKeyedSubs(subs: Map<string, () => void>, wantedKeys: string[], subscribe: (key: string) => () => void) {
+  private _syncKeyedSubs(
+    subs: Map<string, BroadcastUnsubscribe>,
+    wantedKeys: string[],
+    subscribe: (key: string) => BroadcastUnsubscribe,
+  ) {
     const wanted = new Set(wantedKeys)
     for (const [key, unsub] of [...subs]) {
       if (!wanted.has(key)) {
@@ -1852,6 +1867,15 @@ class ServerRoom implements Room {
     for (const key of wanted) {
       if (!subs.has(key)) subs.set(key, subscribe(key))
     }
+  }
+
+  /** The binary analogue of `SubSlot.ready`: resolves once every active per-(member, track) binary
+   *  subscription this node holds is live at the backend. Awaited before a retained-binary replay so a
+   *  keyframe racing the subscribe isn't lost in the gap. A synchronous backend resolves instantly. */
+  private _binaryReady(): Promise<void> {
+    const pending: Promise<void>[] = []
+    for (const unsub of this._binaryKeyUnsubs.values()) if (unsub.ready) pending.push(unsub.ready)
+    return pending.length === 0 ? Promise.resolve() : Promise.all(pending).then(() => undefined)
   }
 
   /** Resolves once the local roster is authoritative: immediately while the live view holds it
@@ -2276,13 +2300,21 @@ async function evictMember(
 
 /** One adapter subscription, reconciled to a desired on/off state. */
 class SubSlot {
-  private _unsub: (() => void) | null = null
+  private _unsub: BroadcastUnsubscribe | null = null
 
   get active(): boolean {
     return this._unsub !== null
   }
 
-  sync(want: boolean, subscribe: () => () => void): void {
+  /** Resolves once the current subscription is live at the backend — immediately when inactive or when
+   *  the backend is synchronous (in-memory). A retained replay awaits this before reading the retained
+   *  value, so a publish racing the just-issued subscribe reaches the node (or rides the retained copy)
+   *  instead of slipping through the gap between subscribing and the read. */
+  get ready(): Promise<void> {
+    return this._unsub?.ready ?? Promise.resolve()
+  }
+
+  sync(want: boolean, subscribe: () => BroadcastUnsubscribe): void {
     if (want && !this._unsub) {
       this._unsub = subscribe()
     } else if (!want && this._unsub) {
