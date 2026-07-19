@@ -15,6 +15,8 @@ npm install @telefunc/drizzle
 
 That's it — there is nothing to register. `reactiveDrizzle()` is imported where you use it, and `Live` is part of Telefunc itself.
 
+Supported databases: **PostgreSQL** (including PGlite) and **SQLite**. MySQL is not, and `reactiveDrizzle()` says so rather than accepting it: MySQL has no `RETURNING`, so the rows a write changed can never be recovered, and every write would invalidate every live query on the table.
+
 
 ## Usage
 
@@ -131,7 +133,6 @@ The rows below are read top to bottom: a write is precise only if no coarse row 
 | A `.returning()` that selects a **computed expression**, such as ``sql`id + 1` `` | **Coarse** — the database computed that value; it cannot be recovered from the row, so nothing is guessed |
 | A **prepared** write, with a full `.returning()` | **Precise** on every execution — `prepare()` freezes the statement, so one decision covers them all |
 | Without `.returning()`, on any driver other than PGlite (including any prepared write) | **Coarse** — the plain driver result can't be reproduced faithfully, so the rows aren't captured |
-| On MySQL | **Coarse** — no `RETURNING` to capture rows from |
 | On **PostgreSQL 18 or newer**, an update or delete | **Precise, and exact** — the statement returns the row's old image alongside the new one, so a live query can tell an update it does not care about from one that moves a row in or out of its result. Older servers keep the behaviour above |
 | A **primary-key-changing update** | **Precise on PostgreSQL 18+** (the old key is in the old image); **coarse** elsewhere, where the key a retraction is addressed by is destroyed by the statement itself |
 | `UPSERT` / `ON CONFLICT` | **Coarse** — a returned row does not say whether it was inserted or updated |

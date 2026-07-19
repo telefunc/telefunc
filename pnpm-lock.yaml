@@ -343,9 +343,6 @@ importers:
       drizzle-orm:
         specifier: 1.0.0-rc.4
         version: 1.0.0-rc.4(@cloudflare/workers-types@4.20260615.1)(@electric-sql/pglite@0.5.4)(@types/pg@8.20.0)(mysql2@3.23.0(@types/node@22.10.1))(pg@8.22.0)(postgres@3.4.9)(zod@3.25.76)
-      mysql2:
-        specifier: ^3.11.0
-        version: 3.23.0(@types/node@22.10.1)
       pg:
         specifier: ^8.13.1
         version: 8.22.0
@@ -10515,7 +10512,8 @@ snapshots:
     dependencies:
       possible-typed-array-names: 1.1.0
 
-  aws-ssl-profiles@1.1.2: {}
+  aws-ssl-profiles@1.1.2:
+    optional: true
 
   axe-core@4.10.3: {}
 
@@ -11718,6 +11716,7 @@ snapshots:
   generate-function@2.3.1:
     dependencies:
       is-property: 1.0.2
+    optional: true
 
   gensync@1.0.0-beta.2: {}
 
@@ -11959,6 +11958,7 @@ snapshots:
   iconv-lite@0.7.3:
     dependencies:
       safer-buffer: 2.1.2
+    optional: true
 
   ignore@5.3.1: {}
 
@@ -12093,7 +12093,8 @@ snapshots:
 
   is-promise@4.0.0: {}
 
-  is-property@1.0.2: {}
+  is-property@1.0.2:
+    optional: true
 
   is-reference@3.0.3:
     dependencies:
@@ -12270,7 +12271,8 @@ snapshots:
 
   lodash.merge@4.6.2: {}
 
-  long@5.3.2: {}
+  long@5.3.2:
+    optional: true
 
   longest-streak@3.1.0: {}
 
@@ -12296,7 +12298,8 @@ snapshots:
     dependencies:
       yallist: 4.0.0
 
-  lru.min@1.1.4: {}
+  lru.min@1.1.4:
+    optional: true
 
   magic-string@0.30.17:
     dependencies:
@@ -12887,6 +12890,7 @@ snapshots:
       lru.min: 1.1.4
       named-placeholders: 1.1.6
       sql-escaper: 1.5.1
+    optional: true
 
   mysql2@3.23.0(@types/node@24.0.10):
     dependencies:
@@ -12904,6 +12908,7 @@ snapshots:
   named-placeholders@1.1.6:
     dependencies:
       lru.min: 1.1.4
+    optional: true
 
   nanoid@3.3.11: {}
 
@@ -13804,7 +13809,8 @@ snapshots:
 
   split2@4.2.0: {}
 
-  sql-escaper@1.5.1: {}
+  sql-escaper@1.5.1:
+    optional: true
 
   srvx@0.11.16: {}
 

@@ -37,7 +37,6 @@
     "@types/node": "^22.10.0",
     "@types/pg": "^8.11.10",
     "drizzle-orm": "1.0.0-rc.4",
-    "mysql2": "^3.11.0",
     "pg": "^8.13.1",
     "postgres": "^3.4.5",
     "telefunc": "workspace:*",
