@@ -85,6 +85,27 @@ describe('reactiveDrizzle — client surface', () => {
     expect(captureMutation).toHaveBeenCalledWith('insert', expect.any(Function), base)
   })
 
+  // EVERY write op, not just the one. The op list is a hand-maintained set, and dropping a member from it
+  // routes that verb straight to plain Drizzle — the write commits and NOTHING is captured or published,
+  // which is a silent missed invalidation rather than an error. Removing `delete` from it passed all 823
+  // tests before this case existed: every other delete test calls `captureMutation`/`planCapture` directly
+  // and so never asks whether the PROXY would have got there.
+  it.each(['insert', 'update', 'delete'] as const)('`%s` routes through the mutation seam', (op) => {
+    const base = { select: () => ({}), insert: vi.fn(), update: vi.fn(), delete: vi.fn() }
+    const db = reactive(base) as unknown as Record<string, unknown>
+    void db[op]
+    expect(captureMutation).toHaveBeenCalledWith(op, expect.any(Function), base)
+  })
+
+  it('…and a NON-write member does not, so the check above is not just matching everything', () => {
+    // The control for the case above: without it, a seam that captured every member access would satisfy
+    // all three assertions while telling us nothing about the op list.
+    const base = { select: () => ({}), insert: vi.fn(), somethingElse: vi.fn() }
+    const db = reactive(base) as unknown as Record<string, unknown>
+    void db.somethingElse
+    expect(captureMutation).not.toHaveBeenCalled()
+  })
+
   it('CTE-prefixed reads are NOT reactive: with() is forwarded unwrapped, so its builders carry no .live()', () => {
     // Only the proxy's OWN select() is wrapped. `with()` returns Drizzle's ordinary facade untouched, so
     // its select builders never gain a terminal `.live()` — the runtime matches the type contract, which
