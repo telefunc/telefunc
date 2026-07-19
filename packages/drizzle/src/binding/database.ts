@@ -37,7 +37,7 @@ function dialectOf(db: AnyDb): Dialect {
   if (kind === 'SQLiteDialect') return 'sqlite'
   assertUsage(
     kind !== 'MySqlDialect',
-    'reactiveDrizzle does not support MySQL: it has no RETURNING, so a write could never be captured row by row and every write would invalidate every live query on the table. Supported databases: PostgreSQL, PGlite, SQLite.',
+    'reactiveDrizzle does not support MySQL: with no RETURNING there is no verified row-capture lane for it, so every write would invalidate every live query on the table. Supported databases: PostgreSQL, PGlite, SQLite.',
   )
   assertUsage(
     false,

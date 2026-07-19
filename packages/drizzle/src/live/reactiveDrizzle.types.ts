@@ -207,8 +207,8 @@ type ReactiveSQLiteDb<TDb extends { select: (...args: any[]) => any }> = Omit<TD
  *  builds an ASYNC (awaitable, hydratable) query on a SUPPORTED dialect. A bare `QueryBuilder` — which
  *  type-checks a query but has no session to run it against — is deliberately excluded: a live read has
  *  nothing to hydrate from, so accepting one would type a `.live()` that could never resolve. MySQL is
- *  excluded for a different reason: it has no `RETURNING`, so no write on it could ever be captured row by
- *  row, and it is rejected at construction too (see `dialectOf`) rather than merely lacking `.live()`. */
+ *  excluded for a different reason: with no `RETURNING` there is no verified row-capture lane for it, and it
+ *  is rejected at construction too (see `dialectOf`) rather than merely lacking `.live()`. */
 type ReactiveDatabase = {
   select: (...args: any[]) => PgAsyncSelectBuilder<any> | SQLiteAsyncSelectBuilder<any, any, any>
 }

@@ -31,7 +31,7 @@ const reactive = (db: object) => reactiveDrizzle(Object.assign(db, { dialect: pg
 // HKT seam. These tests own the PROXY behaviour: direct-return, select-wrapping, plain-field forwarding.
 
 describe('reactiveDrizzle — an unsupported database is refused, not silently degraded', () => {
-  // MySQL has no RETURNING, so no write on it could ever be captured row by row: every write would
+  // MySQL has no RETURNING, and there is no verified row-capture lane for it without one: every write would
   // invalidate every live query on the table. Returning a db that LOOKS reactive and quietly over-fires is
   // the failure this pin exists to prevent, so the refusal must happen at CONSTRUCTION — before any read or
   // write has a chance to be the thing that discovers it.
