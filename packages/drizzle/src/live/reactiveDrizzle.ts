@@ -376,7 +376,7 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
       if (prop === 'transaction') {
         // Writes INSIDE the transaction must capture too (a forwarded raw tx db would bypass capture) — and
         // buffer until the commit boundary, so one committed transaction is one atomic graph tick.
-        return wrapTransaction(target, db, ingest, () => publishCoarseAll(db))
+        return wrapTransaction(target, db, ingest, localIngest, () => publishCoarseAll(db))
       }
       if (isRawSqlOp(prop)) {
         // Raw SQL (`db.run(sql`…`)`, `db.execute(sql`…`)`, …) can mutate anything, and its touched tables are
@@ -426,8 +426,20 @@ function isRawSqlOp(prop: string | symbol): boolean {
  *  whole buffer flushes as ONE `ChangeBatch` to `enclosingSink` (the top db's graphs, or a parent tx's
  *  buffer for a savepoint), so a committed transaction is one atomic graph tick. A rollback rejects and
  *  never flushes → its changes are discarded. `topDb` is the session the reads acquired from — capture
- *  reads its dialect/single-session/driver from it (a tx db isn't recognized as its own driver). */
-function wrapTransaction(txHost: object, topDb: object, enclosingSink: CaptureSink, enclosingAnnounce: () => void) {
+ *  reads its dialect/single-session/driver from it (a tx db isn't recognized as its own driver).
+ *
+ *  `enclosingLocalSink` is the SAME destination minus the remote publication. A transaction that ran raw
+ *  SQL announces itself remotely as ONE coarse-all — which reseeds every remotely-watched graph — so also
+ *  publishing its batch would make every remote watcher pay twice for one commit. The batch still flushes
+ *  locally in one tick; only the remote hop is dropped, because the coarse-all supersedes it. For a
+ *  SAVEPOINT both sinks are the parent's buffer, and the top level makes the choice once. */
+function wrapTransaction(
+  txHost: object,
+  topDb: object,
+  enclosingSink: CaptureSink,
+  enclosingLocalSink: CaptureSink,
+  enclosingAnnounce: () => void,
+) {
   return (callback: (tx: unknown) => unknown, config?: unknown) => {
     const buffer: TableChange[] = []
     const buffered: CaptureSink = (changes) => {
@@ -447,7 +459,13 @@ function wrapTransaction(txHost: object, topDb: object, enclosingSink: CaptureSi
       // Reached ONLY on COMMIT (a rollback / savepoint-rollback rejects and skips this) → flush once.
       // Isolated: the transaction has COMMITTED, so a capture/publish fault must not reject it (it degrades
       // to a coarse ingest and is reported) — the caller's result stays exactly plain Drizzle's.
-      if (buffer.length > 0) emitSafely(enclosingSink, buffer)
+      //
+      // A transaction that ran raw SQL flushes LOCAL-ONLY: its remote announcement is the single coarse-all
+      // below, and publishing the batch as well would deliver two messages — and two refetches — for one
+      // commit. This used to be defended as the price of atomicity ("splitting the raw markers out would
+      // make two local ticks"), which was a false dichotomy: the whole buffer still lands in ONE local tick
+      // here; only the redundant remote copy is dropped.
+      if (buffer.length > 0) emitSafely(announcePending ? enclosingLocalSink : enclosingSink, buffer)
       // For a SAVEPOINT this promotes the intent into the parent's; at the top level it publishes.
       if (announcePending) {
         try {
@@ -475,7 +493,7 @@ function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () =>
         return captureMutation(prop, base.bind(target), topDb, sink) // session props from topDb; run on tx; buffer
       }
       if (prop === 'transaction') {
-        return wrapTransaction(target, topDb, sink, announce) // nested → flush into THIS tx's buffer on release
+        return wrapTransaction(target, topDb, sink, sink, announce) // nested → flush into THIS tx's buffer on release
       }
       if (isRawSqlOp(prop)) {
         // `tx.execute(sql`…`)` used to pass straight through, so a raw write committed with NOTHING
