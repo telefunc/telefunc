@@ -830,6 +830,30 @@ class ClientConnection implements MuxConnection {
     for (const frame of buffer.new) this.dispatchFrame(frame)
     // Registrations deferred while the upgrade was in flight can go out now.
     this.flushPendingRegisterReconcile()
+    // ── Secondary cleanup that split settlement moved out from under its usual owners ──
+    // Ordinary settlement releases an omitted channel INSIDE `applyReconciled`, which puts that
+    // release ahead of both `applyReconciled`'s own `drainBufferedFrames` compaction and
+    // `handleReconciled`'s `startTtlIfIdle()`. Deferring the release moves it after both, and on
+    // the RECONCILED-before-FIN ordering neither ever runs again — so they are re-run here, once
+    // both drains have settled which channels actually survived.
+    this.pruneSendBufferForReleasedChannels()
+    this.startTtlIfIdle()
+  }
+
+  /** Drop queued sends whose channel is gone. `drainBufferedFrames` normally does this as a side
+   *  effect of its release pass — an entry belonging to neither `serverMap` nor `this.channels` is
+   *  simply not copied forward — but a channel released AFTER that pass keeps its entries, and no
+   *  later pass would collect them: channel indexes are monotonic and never reused, so the entries
+   *  can never be matched, released, or even mis-sent. They would just sit there. */
+  private pruneSendBufferForReleasedChannels(): void {
+    const sendBuffer = this.sendBuffer
+    if (sendBuffer.length === 0) return
+    let writeIx = 0
+    for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
+      const entry = sendBuffer[readIx]!
+      if (this.channels.has(entry.channelIx)) sendBuffer[writeIx++] = entry
+    }
+    sendBuffer.length = writeIx
   }
 
   _onTransportClosed(transport: ClientChannelTransport, rejectedInitial = false): void {

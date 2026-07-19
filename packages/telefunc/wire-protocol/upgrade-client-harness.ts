@@ -268,6 +268,19 @@ type UpgradeHarness = {
    *  SSE transport and reconnects. `handoffDrained()` cannot discriminate here, because the old
    *  wire's fetch is aborted on both the success and the fallback path. */
   sseConnects(): number
+  /** Queue a client→server send on one of the harness channels. During the handoff `reconciling`
+   *  is true, so `canSendImmediately()` is false and the frame lands in `sendBuffer` — which is
+   *  the state the settlement-cleanup tests are about. */
+  send(channelIndex: number, data: string): void
+  /** Number of entries still queued in the connection's private `sendBuffer`.
+   *
+   *  Reaching into a private field is deliberate. `sendBuffer` retention is a pure memory leak with
+   *  NO behavioural surface: a stale entry's `channelIx` can never match a future channel (indexes
+   *  are monotonic and never reused), so it is silently dropped at the next compaction and never
+   *  mis-sent. There is therefore nothing to observe from outside, and the honest options are to
+   *  read the real field or to not gate the fix at all. Reading the REAL array — never a mirrored
+   *  tally — is what stops this from becoming a co-set proxy for the bug it exists to catch. */
+  bufferedSendCount(): number
   dispose(): void
 }
 
@@ -328,8 +341,9 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
   // Same `connectionKey` for every channel ⇒ `getOrCreate` returns the one instance and registers
   // each channel on it, exactly as `ClientChannel`'s constructor does in production.
   const connectionKey = crypto.randomUUID()
+  let connection!: ClientConnection
   for (const channel of channels) {
-    ClientConnection.getOrCreate('http://upgrade.test.local/_telefunc', channel as never, {
+    connection = ClientConnection.getOrCreate('http://upgrade.test.local/_telefunc', channel as never, {
       transports: ['sse', 'ws'],
       fetchImpl,
       connectionKey,
@@ -375,6 +389,10 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
     inHandoff: () => socket.sent.some((f) => f.tag === TAG.RECONCILE && f.payload.upgrade === true),
     handoffDrained: () => sseTornDown,
     sseConnects: () => sseConnects,
+    send: (channelIndex, data) => {
+      connection.send(channels[channelIndex] as never, data)
+    },
+    bufferedSendCount: () => (connection as unknown as { sendBuffer: unknown[] }).sendBuffer.length,
     dispose: () => {
       downstream?.close()
       socket.close()
