@@ -12,6 +12,7 @@ import { isObject } from '../../utils/isObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import {
+  ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_ID_MAX_BYTES,
   ROOM_MEMBER_KV_TTL_MS,
@@ -595,12 +596,6 @@ async function sendServerDm(roomId: string, memberId: string, data: unknown): Pr
 // ---------------------------------------------------------------------------
 
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
-
-/** Safety net for `send(…, { ack: true })`. The normal outcomes settle promptly — the recipient
- *  replies, leaves, or its inbox overflows — but a recipient that joined yet never `listen()`s and
- *  never leaves would strand the sender forever, so an ack unanswered this long rejects. Generous, so
- *  a legitimately slow `listen` handler is not cut off. */
-const ROOM_DM_ACK_TIMEOUT_MS = 60_000
 
 /**
  * Server-side `Room`.
@@ -1341,7 +1336,7 @@ class ServerRoom implements Room {
     const wireText = encodePublishText(serialized, rawInfo)
     for (const stub of this._stubs) {
       if (!stub._stubMembers.has(dm.to)) continue
-      if (dm.ackId) stub._pendingAckDms.set(dm.ackId, dm.from)
+      if (dm.ackId) stub._recordAckDm(dm.ackId, dm.from, dm.to)
       stub._relayPublishText(wireText)
     }
   }
@@ -1507,11 +1502,11 @@ class ServerRoom implements Room {
       }
       case 'dm-reply': {
         // A client-held member replied to an ack DM we relayed it — route the reply to the sender.
-        // Fire-and-forget: only an `ackId` we actually relayed to this stub is honored (forged ones
-        // match nothing), which is the guard, so nothing here throws onto the (unacked) wire.
-        const sender = stub._pendingAckDms.get(req.ackId)
+        // Fire-and-forget: only an `ackId` we relayed to this stub, replied to by the very member we
+        // relayed it to and not yet expired, is honored (`_takeAckDm` is the guard) — a forged,
+        // misattributed, or stale reply matches nothing, so nothing here throws onto the (unacked) wire.
+        const sender = stub._takeAckDm(req.ackId, req.id)
         if (sender !== undefined) {
-          stub._pendingAckDms.delete(req.ackId)
           // Rebuild a clean `DmReply` from the spread fields (dropping `__r`/`id`/`ackId`),
           // preserving whether it's a value, a carried `Abort`, or an operational error.
           const reply: DmReply = req.ok

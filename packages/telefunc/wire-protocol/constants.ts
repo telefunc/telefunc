@@ -272,6 +272,18 @@ export const ROOM_TAIL_ATTACH_TIMEOUT_MS = 60_000
  *  an upstream key for every all-track subscriber. The unnamed default lane never counts against it. */
 export const ROOM_TRACKS_PER_MEMBER_MAX = 32
 
+/** Safety net for `send(…, { ack: true })`. The normal outcomes settle promptly — the recipient
+ *  replies, leaves, or its inbox overflows — but a recipient that joined yet never `listen()`s and
+ *  never leaves would strand the sender forever, so an ack unanswered this long rejects. Generous, so
+ *  a legitimately slow `listen` handler is not cut off. Doubles as the sweep age for the relay-side
+ *  correlation an ack DM leaves on the recipient's stub: past this the sender has already given up, so
+ *  the correlation can no longer settle anyone and is dropped. */
+export const ROOM_DM_ACK_TIMEOUT_MS = 60_000
+/** Max in-flight ack-DM correlations one client stub holds awaiting the client's `dm-reply`. A client
+ *  relayed ack DMs it never answers is capped here (drop-oldest) rather than accumulating correlations
+ *  for the stub's lifetime; a dropped correlation simply lets its sender time out (`ROOM_DM_ACK_TIMEOUT_MS`). */
+export const ROOM_PENDING_ACK_DMS_MAX = 1024
+
 // ===== Session routing =====
 
 /** User-facing header for sticky session routing (opaque token). */

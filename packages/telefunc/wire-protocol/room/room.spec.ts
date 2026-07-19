@@ -12,10 +12,12 @@ import {
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import {
+  ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
   ROOM_ID_MAX_BYTES,
+  ROOM_PENDING_ACK_DMS_MAX,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_BYTES_MAX,
   ROOM_TRACKS_PER_MEMBER_MAX,
@@ -1824,6 +1826,50 @@ describe('room stub channel', () => {
     // either close drop the shared seat — so it's rejected instead.
     bindParticipantStubChannel(new ServerChannel(), me)
     expect(() => bindParticipantStubChannel(new ServerChannel(), me)).toThrow(/already bound to a client/)
+  })
+
+  it('routes a relayed ack-DM reply only from the member it was relayed to', async () => {
+    const { serverRoom, stub, peer } = await createServedRoom('ackdm-verify')
+    const bob = await joinViaStub(stub, peer, 1) // bob is client-held: his ack DMs relay through this stub
+    const alice = await serverRoom.join({ meta: { name: 'alice' } })
+    await settle() // inbox subscriptions follow ownership — bob's is live now
+
+    const pending = alice.send(bob.id, 'ping', { ack: true })
+    await settle() // the ack DM relays to the stub, recording the correlation
+    const ackId = peer
+      .decoded()
+      .filter((f) => f.tag === TAG.PUBLISH)
+      .map((f) => JSON.parse(f.text) as { __r: string; ackId?: string })
+      .find((e) => e.__r === 'dm' && e.ackId)!.ackId!
+
+    // A reply forging a different member's id must not route home — only bob was relayed this ack DM.
+    const forged = { __r: 'dm-reply' as const, id: crypto.randomUUID(), ackId, ok: true as const, result: 'forged' }
+    await serverRoom._handleStubRequest(stub, forged)
+    await settle()
+    // Bob's real reply then routes to alice — the misattributed one left the correlation intact.
+    await serverRoom._handleStubRequest(stub, { __r: 'dm-reply', id: bob.id, ackId, ok: true, result: 'pong' })
+
+    expect((await pending).response).toBe('pong')
+  })
+
+  it('bounds relayed ack-DM correlations and sweeps ones past the sender’s timeout', async () => {
+    // Cap: a client relayed ack DMs it never answers can't grow the correlation map without end.
+    const capped = new RoomStubChannel((await Room.create('ackdm-cap')) as ServerRoom)
+    for (let i = 0; i <= ROOM_PENDING_ACK_DMS_MAX; i++) capped._recordAckDm(`n-${i}`, 'alice', 'bob')
+    expect(capped._takeAckDm('n-0', 'bob')).toBeUndefined() // the oldest evicts past the cap
+    expect(capped._takeAckDm(`n-${ROOM_PENDING_ACK_DMS_MAX}`, 'bob')).toBe('alice') // the newest survives
+
+    // Expiry: past the deadline the sender itself gave up at, a stale correlation is swept, not honored.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(1000)
+      const aged = new RoomStubChannel((await Room.create('ackdm-age')) as ServerRoom)
+      aged._recordAckDm('slow', 'alice', 'bob')
+      vi.setSystemTime(1000 + ROOM_DM_ACK_TIMEOUT_MS + 1)
+      expect(aged._takeAckDm('slow', 'bob')).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("the room replacer installs the room's auto-generated data shield onto the stub", async () => {
