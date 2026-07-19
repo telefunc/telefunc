@@ -315,7 +315,7 @@ describe('Room entry point', () => {
     expect(lobby.count).toBe(0)
     await expect(Room.get('closing')).rejects.toThrow('Room not found')
     await expect(lobby.join()).rejects.toThrow('Room is closed')
-    await expect(Room.close('closing')).rejects.toThrow('Room not found')
+    await expect(Room.close('closing')).resolves.toBeUndefined() // idempotent: re-closing a closed room is a no-op
     expect(await Room.list()).toEqual([])
   })
 
@@ -2344,6 +2344,34 @@ describe('room stub channel', () => {
     await getBroadcastAdapter().delete!(roomOpenFenceKey('fence-stale'))
 
     await expect(me.publish('stale')).rejects.toThrow(/closed/i)
+  })
+
+  it('an abandoned close leases the closing state — the wedged id recreates once the lease lapses', async () => {
+    const adapter = getBroadcastAdapter()
+    const realDelete = adapter.delete!
+    try {
+      vi.useFakeTimers()
+      await Room.create('abandon-close')
+      // Abandon the close: it fences open→closing, then the first sweep delete throws (a crashed node).
+      let crashed = false
+      adapter.delete = (key, options) => {
+        if (!crashed) {
+          crashed = true
+          throw new Error('crash mid-close')
+        }
+        return realDelete.call(adapter, key, options)
+      }
+      await expect(Room.close('abandon-close')).rejects.toThrow('crash mid-close')
+      adapter.delete = realDelete
+      // Wedged: the id sits in `closing` under a live lease, so a recreate loses — no stuck id resurrection.
+      await expect(Room.create('abandon-close')).rejects.toThrow(/already exists/i)
+      vi.advanceTimersByTime(120_000) // well past ROOM_CLOSE_LEASE_MS
+      // Lease lapsed: the stuck `closing` config reaped, so the id is recreatable rather than wedged forever.
+      expect(await Room.create('abandon-close')).toBeTruthy()
+    } finally {
+      adapter.delete = realDelete
+      vi.useRealTimers()
+    }
   })
 
   it('replays the last retained frame of every (member, track) a client starts watching', async () => {

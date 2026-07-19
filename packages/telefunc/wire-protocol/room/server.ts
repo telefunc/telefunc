@@ -255,10 +255,17 @@ const Room: RoomStatic = {
   getParticipants: getRoomParticipants as RoomStatic['getParticipants'],
 }
 
-/** How long a `closed` tombstone lingers before it's reaped. It exists only so a create that races or
- *  follows a close resumes the generation past the previous incarnation (so stale records/mutations
- *  can't attach); once it lapses, a fresh create simply starts a new generation at 1. */
+/** How long a `closed` tombstone lingers before it's reaped. It marks the id closed for the window so
+ *  a create that races or follows a close takes it over cleanly with a fresh incarnation id; once it
+ *  lapses, the id is simply absent and a fresh create starts clean. */
 const ROOM_TOMBSTONE_TTL_MS = 60_000
+
+/** How long a fenced `closing` config is leased before its expiry reaps it. Bounds an abandoned close
+ *  — a node that flipped open→closing then died before finalizing — so once the lease lapses the stuck
+ *  `closing` config vanishes and the id is recreatable, rather than wedged forever. A normal close
+ *  finalizes to the `closed` tombstone well within it; the fresh incarnation ignores any leftovers the
+ *  abandoned sweep left behind (they carry the old id and TTL-reap on their own). */
+const ROOM_CLOSE_LEASE_MS = ROOM_TOMBSTONE_TTL_MS
 
 /** How long the semantic-lane order watermark lingers after the last allocation. Refreshed on every
  *  `publish()`/`announce()`, so it never lapses while a room is active; it outlives a close only long
@@ -499,18 +506,28 @@ async function writeRoomConfig(
 }
 
 async function closeRoom(id: string): Promise<void> {
-  const { kv, config } = await requireRoom(id)
-  // Fence first: atomically flip open→closing at this incarnation. Any in-flight join or mutation
-  // that revalidates against the authority now sees a non-open room and is rejected rather than
-  // orphaned. Losing the compare-and-set (already closing/closed, or a newer incarnation) means
-  // someone else owns the close — nothing to do.
+  assertRoomId(id)
+  const kv = getRoomKV(id)
+  const config = await resolveConfig(kv, id)
+  // Idempotent: a room already closed (or never created) is nothing to do; one already `closing` is
+  // being swept by whoever fenced it, and its lease reclaims it into recreatability if that owner died.
+  if (config === null || config.status !== 'open') return
+  // Fence first: atomically flip open→closing at this incarnation, leased so an abandoned close (a node
+  // that fences then dies before finalizing) self-reaps instead of wedging the id (see
+  // `ROOM_CLOSE_LEASE_MS`). Any in-flight join or mutation that revalidates against the authority now
+  // sees a non-open room and is rejected rather than orphaned. Losing the compare-and-set (already
+  // closing/closed, or a newer incarnation) means someone else owns the close — nothing to do.
   let fenced = false
-  await kv.update(roomConfigKvKey(id), (raw) => {
-    const current = parseConfig(raw)
-    if (current === null || current.status !== 'open' || current.inc !== config.inc) return KV_KEEP
-    fenced = true
-    return stringify({ ...current, status: 'closing' })
-  })
+  await kv.update(
+    roomConfigKvKey(id),
+    (raw) => {
+      const current = parseConfig(raw)
+      if (current === null || current.status !== 'open' || current.inc !== config.inc) return KV_KEEP
+      fenced = true
+      return stringify({ ...current, status: 'closing' })
+    },
+    { ttlMs: ROOM_CLOSE_LEASE_MS },
+  )
   if (!fenced) return
   // Drop the open-fence first, so a publish still in flight at this incarnation fails at its
   // `commitFrame` before the sweep runs — a stale incarnation already fails, its id no longer matching.
