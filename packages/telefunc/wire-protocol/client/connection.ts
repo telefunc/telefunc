@@ -1385,12 +1385,10 @@ class ClientConnection implements MuxConnection {
       if (isInitial) payloadEntry.initial = true
       open.push(payloadEntry)
     }
-    const reconcile: ReconcilePayload = { open }
-    if (this.sessionId) reconcile.sessionId = this.sessionId
-    if (barrier) {
-      reconcile.barrier = true
-      reconcile.upgradeId = barrier.upgradeId
-    }
+    // Built in one expression rather than mutated into shape: the barrier legs are a union member,
+    // so they go on together or not at all. Key order matches the ordinary frame's.
+    const base = { open, ...(this.sessionId ? { sessionId: this.sessionId } : {}) }
+    const reconcile: ReconcilePayload = barrier ? { ...base, barrier: true, upgradeId: barrier.upgradeId } : base
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 

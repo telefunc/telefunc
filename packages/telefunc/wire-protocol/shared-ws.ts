@@ -132,6 +132,12 @@ function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
 
 // ===== Reconcile payloads (JSON-encoded after the header) =====
 
+/** The barrier reconcile is the old transport's FINAL frame, carrying authoritative membership and
+ *  barrier-fresh cursors; its `upgradeId` is what pairs the frame with its staged record. The two
+ *  legs are co-required, so they live in a union rather than as two independent optionals — a
+ *  barrier without an id cannot be constructed. The wire form stays FLAT: this is a type-level
+ *  distinction, not an encoding change. Decoding still casts untrusted JSON, so the SERVER validates
+ *  the pairing at runtime regardless (`handleBarrier`). */
 type ReconcilePayload = {
   sessionId?: string
   /** `initial: true` means this is the first reconcile for that channel — the server may
@@ -140,12 +146,7 @@ type ReconcilePayload = {
    *  least once) omit `initial`; the server fails them fast if they're missing rather than
    *  stalling the entire reconcile. */
   open: { id: string; ix: number; lastSeq: number; initial?: true }[]
-  /** Set on the barrier reconcile — the old transport's FINAL frame, carrying authoritative
-   *  membership and barrier-fresh cursors. Ordinary reconciles omit it and are unaffected. */
-  barrier?: true
-  /** Pairs the frame with its staged upgrade record. Mandatory whenever `barrier` is set. */
-  upgradeId?: string
-}
+} & ({ barrier?: undefined; upgradeId?: undefined } | { barrier: true; upgradeId: string })
 
 /** Stages a barrier-commit upgrade on the probe wire, before that wire is the transport.
  *  Identity only: `lastSeq` is intentionally absent, because cursors captured here are stale
