@@ -71,19 +71,28 @@ function captureMutation(
   db: object,
   emit?: CaptureSink,
   tx?: object,
+  txRoot?: object,
 ): (...a: unknown[]) => unknown {
   const sink: CaptureSink = emit ?? ((changes) => ingestWrite(db, { changes }))
   return (...args: unknown[]) => {
     const table = args[0]
     // insert/update/delete all take the target table as their first argument.
     if (!isTable(table)) return baseMethod(...args)
-    return wrapWrite(baseMethod(...args), table, op, db, sink, tx)
+    return wrapWrite(baseMethod(...args), table, op, db, sink, tx, txRoot)
   }
 }
 
 /** Wrap a mutation builder so its terminal (`await` / `.execute()`) runs the write and captures its change;
  *  chain methods (`values`/`set`/`where`/`returning`/…) re-wrap so the terminal stays captured. */
-function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: CaptureSink, tx?: object): unknown {
+function wrapWrite(
+  builder: unknown,
+  table: Table,
+  op: Op,
+  db: object,
+  sink: CaptureSink,
+  tx?: object,
+  txRoot?: object,
+): unknown {
   return new Proxy(builder as object, {
     get(target, prop, receiver) {
       // EVERY promise terminal routes through the captured run. `.catch()`/`.finally()` used to reach the
@@ -101,7 +110,11 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
       // Outside a transaction there is nothing to serialize and writes stay fully concurrent.
       const start = (args?: unknown[]): Promise<unknown> => {
         const run = () => runWrite(target, table, op, db, sink, tx, args)
-        return tx ? serializePerTx(tx, run) : run()
+        // Keyed by the ROOT of the physical transaction, not by this scope's own handle: a nested
+        // transaction is a SAVEPOINT on the same connection, so keying per handle gave parent and child
+        // separate queues, let their savepoints interleave, and turned a transaction plain Drizzle commits
+        // into "savepoint does not exist" → 25P02.
+        return tx ? serializePerTx(txRoot ?? tx, run) : run()
       }
       if (prop === 'then' && has('then')) {
         return (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>
@@ -140,7 +153,7 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
       if (typeof value !== 'function') return value
       return (...args: unknown[]) => {
         const next = (value as (...a: unknown[]) => unknown).apply(target, args)
-        return isWriteBuilder(next) ? wrapWrite(next, table, op, db, sink, tx) : next
+        return isWriteBuilder(next) ? wrapWrite(next, table, op, db, sink, tx, txRoot) : next
       }
     },
   })
@@ -561,14 +574,14 @@ async function openSavepoint(tx: object, relationId: string): Promise<Savepoint 
 }
 
 function reportSavepointUnavailable(relationId: string, error: unknown): void {
-  console.error(
+  report(
     `[telefunc] live: could not open a savepoint to capture a write on "${describeRelationId(relationId)}" inside a transaction. The write runs exactly as you wrote it and is unaffected; live queries on this table over-invalidate.`,
     error,
   )
 }
 
 function reportSavepointBookkeepingFailed(relationId: string, statement: string, error: unknown): void {
-  console.error(
+  report(
     `[telefunc] live: "${statement}" failed while capturing a write on "${describeRelationId(relationId)}". The surrounding transaction is likely aborted and its COMMIT will fail — this is a bug in Telefunc's capture, please report it.`,
     error,
   )
@@ -703,6 +716,21 @@ function splitImages(row: Row, fields: string[]): Images {
 
 // ── capture-fault isolation ─────────────────────────────────────────
 
+/** Every diagnostic in this file, and the only place `console.error` is called.
+ *
+ *  Non-throwing by construction, because each of these reports sits IMMEDIATELY BEFORE a recovery: the
+ *  substitution retry, a savepoint rewind, a coarse degradation. A host whose console throws — a patched or
+ *  instrumented console, a logger that rejects a circular argument — would take the recovery down with it
+ *  and turn "the write is safe" into "the write failed", which is precisely the failure this file exists to
+ *  prevent. Telling the operator is best-effort; the recovery is not. */
+function report(...args: unknown[]): void {
+  try {
+    console.error(...args)
+  } catch {
+    // A console that cannot be written to is not a reason to fail a committed write.
+  }
+}
+
 /** Emit captured changes WITHOUT ever failing the caller's write. By the time we get here the DATABASE HAS
  *  ALREADY COMMITTED, so a sink/router/transport fault must never turn a committed write into a caller-visible
  *  rejection — the caller's result and failure behaviour stay exactly plain Drizzle's. A precise feed that
@@ -727,7 +755,7 @@ function emitSafely(sink: CaptureSink, changes: TableChange[]): void {
 /** The server refused the RETURNING clause CAPTURE added — most often a role that may write the table but
  *  not read it. The caller's write is re-run as they wrote it, so the only cost is a coarse invalidation. */
 function reportSubstitutionRefused(relationId: string, error: unknown): void {
-  console.error(
+  report(
     `[telefunc] live: the database refused the RETURNING clause Telefunc added to a write on "${describeRelationId(relationId)}" (a role that can write a table but not SELECT from it does this). The write is being re-run exactly as you wrote it and is unaffected; live queries on this table over-invalidate rather than lose the write.`,
     error,
   )
@@ -736,7 +764,7 @@ function reportSubstitutionRefused(relationId: string, error: unknown): void {
 /** The server rejected a statement its own version number said it would accept. Reported once per db,
  *  because it changes how every later write on it is captured. */
 function reportOldNewDemotion(relationId: string): void {
-  console.error(
+  report(
     `[telefunc] live: this PostgreSQL server reports version 18 or newer but refused "RETURNING old.*, new.*" (first seen writing "${describeRelationId(relationId)}"). Falling back to new-image capture for this database. Live queries stay correct, with more coarse invalidation than a genuine PostgreSQL 18 would need.`,
   )
 }
@@ -744,7 +772,7 @@ function reportOldNewDemotion(relationId: string): void {
 /** The diagnostics seam for a contained capture fault. Takes a relation IDENTITY and renders it the way a
  *  human wrote it (`a.users`), since this reaches an operator's logs. */
 function reportCaptureFault(error: unknown, relationId: string): void {
-  console.error(
+  report(
     `[telefunc] live write-capture failed for table "${describeRelationId(relationId)}". The write COMMITTED and its result is unaffected; live queries on this table may be stale until the next write.`,
     error,
   )
@@ -925,7 +953,7 @@ function captureOrCoarse(op: Op, relationId: string, rows: Row[], plan: PreciseP
 }
 
 function reportCaptureMismatch(relationId: string, mismatch: NonNullable<CaptureMismatch>): void {
-  console.error(
+  report(
     `[telefunc] live write-capture fell back to COARSE for table "${describeRelationId(relationId)}": captured row ${mismatch.rowIndex} has ${mismatch.reason} (${mismatch.detail}). The write is unaffected; live queries on this table over-invalidate rather than receive a partial row.`,
   )
 }

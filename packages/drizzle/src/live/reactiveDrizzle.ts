@@ -457,6 +457,10 @@ function wrapTransaction(
    *  level supplies the real thing; a savepoint supplies nothing and promotes intent, so the markers are
    *  computed exactly once, against the watch-set as it stands when the transaction actually lands. */
   commitCoarseMarkers: () => TableChange[] = () => [],
+  /** The ROOT of the physical transaction this scope belongs to — undefined at the top level, where the
+   *  transaction drizzle is about to open BECOMES the root. A nested scope is a SAVEPOINT inside the same
+   *  physical transaction, not a transaction of its own, so it inherits the root rather than starting one. */
+  enclosingRoot?: object,
 ) {
   return (callback: (tx: unknown) => unknown, config?: unknown) => {
     const buffer: TableChange[] = []
@@ -472,7 +476,10 @@ function wrapTransaction(
     }
     const baseTransaction = (txHost as { transaction: (cb: unknown, c?: unknown) => unknown }).transaction.bind(txHost)
     return Promise.resolve(
-      baseTransaction((tx: object) => callback(txProxy(tx, topDb, buffered, bufferedAnnounce)), config),
+      baseTransaction(
+        (tx: object) => callback(txProxy(tx, topDb, buffered, bufferedAnnounce, enclosingRoot ?? tx)),
+        config,
+      ),
     ).then((result) => {
       // Reached ONLY on COMMIT (a rollback / savepoint-rollback rejects and skips this) → flush once.
       // Isolated: the transaction has COMMITTED, so a capture/publish fault must not reject it (it degrades
@@ -518,7 +525,7 @@ const DROP_MARKERS: CaptureSink = () => {}
 /** The proxy over a transaction db: writes buffer (via `sink`); a nested `transaction` is a SAVEPOINT whose
  *  buffer flushes into THIS one on release (and is discarded on savepoint-rollback); reads + everything else
  *  pass through as plain Drizzle (a live read inside a write transaction is out of scope). */
-function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () => void): unknown {
+function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () => void, root: object): unknown {
   return new Proxy(txDb, {
     get(target, prop, receiver) {
       if (isWriteOp(prop)) {
@@ -527,10 +534,13 @@ function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () =>
         // Planning and registry keying still read `topDb` — that invariant is what keeps this apart from
         // the separate question of which db owns session identity. Never the PROXY: `execute` on it is
         // intercepted as raw SQL, so a SAVEPOINT through it would coarsen the whole transaction.
-        return captureMutation(prop, base.bind(target), topDb, sink, target) // plan on topDb; run on tx; buffer
+        return captureMutation(prop, base.bind(target), topDb, sink, target, root) // plan on topDb; run on tx; buffer
       }
       if (prop === 'transaction') {
-        return wrapTransaction(target, topDb, sink, sink, announce) // nested → flush into THIS tx's buffer on release
+        // nested → flush into THIS tx's buffer on release, and stay on the ROOT's write queue: a savepoint
+        // shares one physical connection with its parent, so giving it a queue of its own lets the two
+        // interleave and destroy each other's savepoints.
+        return wrapTransaction(target, topDb, sink, sink, announce, () => [], root)
       }
       if (isRawSqlOp(prop)) {
         // `tx.execute(sql`…`)` used to pass straight through, so a raw write committed with NOTHING

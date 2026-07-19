@@ -409,3 +409,63 @@ describe('a refused substitution inside a TRANSACTION does not cost the caller t
     await owner.close()
   })
 })
+
+// A NESTED transaction is a SAVEPOINT on the same physical connection, not a transaction of its own. Keying
+// capture's write queue by each scope's own handle therefore gave parent and child SEPARATE queues, let
+// their capture savepoints interleave, and turned a transaction plain Drizzle commits into a failure
+// ("savepoint … does not exist" → 25P02).
+describe('nested scopes of ONE physical transaction share one write queue', () => {
+  async function writeOnlyDb() {
+    const real = new PGlite()
+    await real.exec('create table users (id int primary key, name text)')
+    await real.exec('create role writer nologin')
+    await real.exec('grant usage on schema public to writer')
+    await real.exec('grant insert, update, delete on users to writer')
+    await real.exec('set role writer') // capture's RETURNING is refused → every write takes the savepoint path
+    const asOwner = async () => {
+      await real.exec('reset role')
+      return real
+    }
+    return { real, asOwner, db: reactiveDrizzle(drizzle({ client: real })) as unknown as ReactiveDb }
+  }
+
+  it('a write in the parent and a write in a nested savepoint both commit', async () => {
+    provideTelefuncContext({})
+    const { db, asOwner } = await writeOnlyDb()
+    await db.transaction(async (tx) => {
+      await tx.insert(users).values({ id: 1, name: 'parent' })
+      await tx.transaction(async (nested) => {
+        await nested.insert(users).values({ id: 2, name: 'nested' })
+      })
+      await tx.insert(users).values({ id: 3, name: 'parent-again' })
+    })
+    await tick()
+
+    const owner = await asOwner()
+    expect((await owner.query('select id from users order by id')).rows).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }])
+    await owner.close()
+  })
+
+  it('interleaved parent and nested writes still commit — the queue is shared, not per scope', async () => {
+    provideTelefuncContext({})
+    const { db, asOwner } = await writeOnlyDb()
+    await db.transaction(async (tx) => {
+      // Concurrent ACROSS the scope boundary — a parent write racing a nested one. Keyed per scope these
+      // land on different queues, so the parent's capture savepoint is taken between the nested one's
+      // savepoint and its release, and the release then destroys a savepoint the other scope still needs.
+      // Both writes inside one scope would share a queue either way and prove nothing.
+      await Promise.all([
+        tx.insert(users).values({ id: 10, name: 'p1' }),
+        tx.transaction(async (nested) => {
+          await nested.insert(users).values({ id: 11, name: 'n1' })
+        }),
+      ])
+      await tx.insert(users).values({ id: 12, name: 'p2' })
+    })
+    await tick()
+
+    const owner = await asOwner()
+    expect((await owner.query('select count(*)::int c from users')).rows).toEqual([{ c: 3 }])
+    await owner.close()
+  })
+})

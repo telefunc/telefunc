@@ -896,3 +896,58 @@ describe('write capture — the OLD image survives a table named "old"', () => {
     await client.close()
   })
 })
+
+// Two properties that only show up on the SECOND look: what the builder is left holding after a capture,
+// and what happens when the machinery's own diagnostics misbehave.
+describe('write capture — capture leaves nothing of its own behind', () => {
+  it('re-awaiting the same builder gives the caller their plain result again, not capture’s rows', async () => {
+    // The substitution overwrites the builder's RETURNING IN PLACE. Restoring it only on the failure paths
+    // left a SUCCESSFUL capture with capture's own statement still attached, so a second `await` handed the
+    // caller capture's row images instead of the plain result they got the first time.
+    const client = new PGlite()
+    const db = pgDrizzle({ client })
+    await client.exec('create table users (id int primary key, name text)')
+
+    await db.insert(users).values({ id: 1, name: 'before' })
+    // An UPDATE, deliberately: re-awaiting an insert collides on the primary key, and that rejection would
+    // mask the very thing this pins. This one is idempotent, so the SECOND await is a clean observation.
+    const { wrapped, batches } = capturing(db, 'update', db.update.bind(db))
+    const builder = wrapped(users).set({ name: 'after' }).where(eq(users.id, 1))
+
+    expect(await builder).toEqual({ rows: [], fields: [], affectedRows: 1 })
+    expect(await builder).toEqual({ rows: [], fields: [], affectedRows: 1 }) // …and again, unchanged
+    expect(batches).toEqual([
+      [{ table: 'users', kind: 'update', new: { id: 1, name: 'after' }, key: { id: 1 } }],
+      [{ table: 'users', kind: 'update', new: { id: 1, name: 'after' }, key: { id: 1 } }],
+    ])
+    await client.close()
+  })
+
+  it('a console that THROWS does not turn a recovered write into a failed one', async () => {
+    // Every diagnostic sits immediately before a recovery. A host whose console throws would take the
+    // recovery down with it and turn "your write is safe" into "your write failed".
+    const client = new PGlite()
+    await client.exec('create table users (id int primary key, name text)')
+    await client.exec('create role writer nologin')
+    await client.exec('grant usage on schema public to writer')
+    await client.exec('grant insert on users to writer')
+    await client.exec('set role writer') // may write, may not SELECT → capture's RETURNING is refused
+    const db = pgDrizzle({ client })
+
+    const original = console.error
+    console.error = () => {
+      throw new Error('console exploded')
+    }
+    try {
+      const { wrapped, batches } = capturing(db, 'insert', db.insert.bind(db))
+      const result = await wrapped(users).values({ id: 1, name: 'survives' })
+      expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 })
+      expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+    } finally {
+      console.error = original
+    }
+    await client.exec('reset role')
+    expect((await client.query('select name from users where id = 1')).rows).toEqual([{ name: 'survives' }])
+    await client.close()
+  })
+})
