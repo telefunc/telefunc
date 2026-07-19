@@ -2504,6 +2504,7 @@ type FakeStub = {
   emit: (envelope: unknown) => void
   emitBinary: (framed: Uint8Array) => void
   close: () => void
+  reconnect: () => void
   published: unknown[]
   sent: Array<{ __r: string }>
   textSubscribed: () => boolean
@@ -2516,6 +2517,7 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
   const published: unknown[] = []
   const sent: Array<{ __r: string }> = []
   const closeCbs: Array<() => void> = []
+  const reconnectCbs: Array<() => void> = []
   let wireTextSubscribed = false
   let seq = 0
   const info = () => ({ key: 'fake', seq: ++seq, timestamp: 1 })
@@ -2546,11 +2548,13 @@ function createFakeStub(joinAck?: { id: string }): FakeStub {
     },
     publishBinary: async () => info(),
     onClose: (cb: () => void) => closeCbs.push(cb),
+    _onReconnect: (cb: () => void) => reconnectCbs.push(cb),
   }
   return {
     emit: (envelope) => [...textCbs].forEach((cb) => cb(envelope, info())),
     emitBinary: (framed) => [...binaryCbs].forEach((cb) => cb(framed, info())),
     close: () => [...closeCbs].forEach((cb) => cb()),
+    reconnect: () => [...reconnectCbs].forEach((cb) => cb()),
     published,
     sent,
     textSubscribed: () => wireTextSubscribed,
@@ -2591,6 +2595,22 @@ describe('ClientRoom', () => {
     fake.emit({ __r: 'join', id: bob, meta: { name: 'Bob' }, joinedAt: 2 })
     expect(joins).toEqual([bob])
     expect(clientRoom.count).toBe(2)
+  })
+
+  it('re-declares its wants after a reconnect, so a server stub that forgot them relays the lane again', async () => {
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('reconnect-wants'))
+    clientRoom.subscribeBinary(() => {}, { track: 'camera' }) // declares a sub-binary want
+    await settle()
+    const before = fake.sent.filter((m) => m.__r === 'sub-binary').length
+    expect(before).toBe(1) // declared once, up front
+
+    fake.reconnect() // the wire reconciled back onto a server that may not remember the want
+    await settle()
+
+    // Without the reconnect re-sync the client would sit on its cached `_declaredWants` and never
+    // re-send, leaving the lane silently dark on the reconnected server.
+    expect(fake.sent.filter((m) => m.__r === 'sub-binary').length).toBe(before + 1)
   })
 
   it('rejects a client-side identity join — identity is server-assigned, not client-settable', async () => {
@@ -2886,6 +2906,7 @@ describe('ClientRoom', () => {
       },
       publishBinary: async () => info(),
       onClose: () => {},
+      _onReconnect: () => {},
     }
     const clientRoom = new ClientRoom(stub as unknown as ClientBroadcast, createSnapshot('coalesce'))
     const me = await clientRoom.join({ meta: { name: 'cursor' } })

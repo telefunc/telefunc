@@ -59,6 +59,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _listeners: Array<ChannelListener<ServerToClient>> = []
   private _binaryListeners: Array<ChannelBinaryListener> = []
   private _openCallbacks: Array<() => void> = []
+  private _reconnectCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _closeError: Error | undefined
   protected _isClosed = false
@@ -242,6 +243,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._openCallbacks.push(callback)
   }
 
+  /** @internal — fires each time the transport re-opens for an already-open channel (a reconnect
+   *  reconciled this channel back), never on the first open. A consumer whose server-side state can
+   *  be rebuilt on a fresh connection (e.g. `Room` re-declaring its wants) re-establishes it here:
+   *  the client survives a blip but the server it reconnects to may not remember what it declared. */
+  _onReconnect(callback: () => void): void {
+    this._reconnectCallbacks.push(callback)
+  }
+
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     if (this._closePromise) return this._closePromise
     if (this._didTerminate) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
@@ -270,7 +279,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._isClosed) return
     this._flow.reset()
     if (batched) this._flow.useBatchTransportInitial()
+    // `_onTransportOpen` runs on the first open and again each time a reconnect reconciles this
+    // channel back (see `Connection.applyReconciled`). `_fireOpen` no-ops the second time; the
+    // re-open is what `_onReconnect` consumers care about, so fire it only when already open.
+    const reopened = this._didFireOpen
     this._fireOpen()
+    if (reopened) this._fireReconnect()
   }
 
   _onTransportMessage(data: string, bytes: number): void {
@@ -445,6 +459,16 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   // ── Private ──
+
+  private _fireReconnect(): void {
+    for (const cb of this._reconnectCallbacks) {
+      try {
+        cb()
+      } catch (err) {
+        if (this._handleCallbackError(err)) return
+      }
+    }
+  }
 
   private _fireOpen(): void {
     if (this._didFireOpen) return
