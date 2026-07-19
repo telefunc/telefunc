@@ -1,11 +1,7 @@
 import { testGenerateShield } from './generateShield.js'
 import { expect, describe, it } from 'vitest'
 
-// Every case here runs the real TypeScript transformer, and the first one additionally pays the compiler's
-// warm-up — enough to exceed vitest's 5s default under full-suite parallel load, which showed up as an
-// intermittent timeout (never an assertion failure) on a busy machine. The budget is per-suite rather than
-// on the first case because all 38 pay transformer cost; the first is just the likeliest to lose the race.
-describe('generateShield', { timeout: 30_000 }, () => {
+describe('generateShield', () => {
   it('generateShield, one telefunction', async () => {
     const src = `export function doSomething(arg: string) {
 

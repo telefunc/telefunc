@@ -6,7 +6,6 @@ export const SERIALIZER_PREFIX_STREAM = '!TelefuncStream:'
 export const SERIALIZER_PREFIX_GENERATOR = '!TelefuncGenerator:'
 export const SERIALIZER_PREFIX_PROMISE = '!TelefuncPromise:'
 export const SERIALIZER_PREFIX_CHANNEL = '!TelefuncChannel:'
-export const SERIALIZER_PREFIX_LIVE = '!TelefuncLive:'
 export const SERIALIZER_PREFIX_FUNCTION = '!TelefuncFunction:'
 export const SERIALIZER_PREFIX_BROADCAST = '!TelefuncBroadcast:'
 

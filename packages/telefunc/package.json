@@ -2,7 +2,7 @@
   "name": "telefunc",
   "version": "0.2.22",
   "scripts": {
-    "build": "rm -rf dist/ && tsc --build && tsc -p tsconfig.spec.json",
+    "build": "rm -rf dist/ && tsc --build",
     "dev": "tsc --watch",
     "========= Release": "",
     "release": "release-me patch",

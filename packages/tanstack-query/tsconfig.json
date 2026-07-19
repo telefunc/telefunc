@@ -7,16 +7,10 @@
     "skipLibCheck": true,
     "declaration": true,
     "strict": true,
-    "noUnusedLocals": true,
     "noUnusedParameters": true,
     "esModuleInterop": true,
     "noUncheckedIndexedAccess": true,
     "lib": ["DOM", "ESNext"]
   },
-  // The PRODUCTION build, and only it. Specs import telefunc's source, which drags that source into the
-  // program and pushes the inferred root up to `packages/` — emitting `dist/tanstack-query/src/client.js`
-  // while this package's `exports` points at `dist/client.js`. A clean build then ships no entry at all.
-  // Specs are typechecked by `tsconfig.spec.json` instead, which emits nothing and so cannot move the root.
-  "include": ["src/**/*.ts"],
-  "exclude": ["**/*.spec.ts"]
+  "include": ["src/**/*.ts"]
 }

@@ -16,7 +16,7 @@
     "@tanstack/ai": "^0.13.0",
     "@tanstack/ai-react": "^0.7.7",
     "@tanstack/react-query": "^5.95.2",
-    "@telefunc/drizzle": "workspace:*",
+    "@telefunc/drizzle-experimental": "workspace:*",
     "@telefunc/redis": "workspace:*",
     "@telefunc/rxjs": "workspace:*",
     "@telefunc/tanstack-query": "workspace:*",

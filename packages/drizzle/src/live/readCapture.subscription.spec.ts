@@ -49,16 +49,18 @@ vi.mock('../binding/hydrationExecutor.js', () => ({ hydrationExecutorOf: () => a
 vi.mock('../binding/drizzleShape.js', () => ({ selectConfigOf: () => null }))
 vi.mock('../compile/compile.js', () => ({ compileQuery: () => ({}), coarsePlan: () => ({}) }))
 
-/** The Live the host mints — `attachSource` is captured so a test can drive serialize-time activation and
- *  the channel close that follows it. */
+/** The Live the engine mints — `attachSource` is captured so a test can drive serialize-time activation
+ *  and the channel close that follows it. Stands in for the package's own `LiveCell`; before the boundary
+ *  move this mocked telefunc's extension host instead, which is the seam that no longer exists. */
 const host = vi.hoisted(() => ({ sources: [] as { subscribe: () => () => void }[] }))
-vi.mock('./telefuncHost.js', () => ({
-  getTelefuncHost: () => ({
-    createLive: () => ({
-      attachSource: (source: { subscribe: () => () => void }) => host.sources.push(source),
-      invalidate: vi.fn(),
-    }),
-  }),
+vi.mock('../primitive/live.js', () => ({
+  LiveCell: class {
+    constructor(readonly data: unknown) {}
+    attachSource(source: { subscribe: () => () => void }) {
+      host.sources.push(source)
+    }
+    invalidate() {}
+  },
 }))
 
 import { setChangeTransport } from './changeRuntime.js'

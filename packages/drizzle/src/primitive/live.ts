@@ -1,9 +1,21 @@
-export { Live, LiveCell }
-export type { LiveEvent, LiveSubscription }
+export { derived, LiveCell }
+export type { Live, LiveEvent, LiveSubscription }
 
-// A PRIVATE brand (global-registry symbol, like SERVER_CHANNEL_BRAND). Detection is internal only —
-// never a public surface — so this is neither exported nor exposed via a static; the wire replacer
-// reconstructs it locally via the same `Symbol.for('telefunc.Live')`.
+// THE LIVE PRIMITIVE, owned by this package rather than by telefunc core.
+//
+// It lives here because the feature is ABANDONABLE: telefunc must not carry an uncertain API on behalf of
+// an experimental package. Nothing in core knows this type exists — the wire replacer/reviver register
+// through telefunc's PUBLIC extension seams (see wireServer.ts / wireClient.ts), so deleting this package
+// leaves core exactly as it was.
+//
+// It is deliberately GENERAL-PURPOSE, not pruned to what the drizzle feature happens to need: it is a
+// value that can go stale, with derivation and a serialize-time activation lifecycle. The reactive-db
+// engine is one consumer of it, not its definition.
+//
+// A PRIVATE brand (global-registry symbol). Detection is internal only — never a public surface — so this
+// is neither exported nor exposed via a static; the wire replacer reconstructs it locally via the same
+// `Symbol.for('telefunc.Live')`. The registry symbol is what lets the two ends agree with no shared
+// import, which is precisely what keeps core out of it.
 const LIVE_BRAND = Symbol.for('telefunc.Live')
 
 /**
@@ -25,23 +37,17 @@ type Live<T> = {
 }
 
 /**
- * The `Live` namespace.
+ * Derive a live value from other live values. Reading a `Live`'s `.data` inside `compute` registers it as
+ * a dependency; the derived value goes stale when any dependency does.
+ * ```ts
+ * const count = derived(() => todos.data.length)
+ * ```
  *
- * The annotation is explicit so the emitted `.d.ts` pins the public surface to the two concepts:
- * a `Live<T>` is `{ readonly data: T }`, and `Live.derived` composes one from others. Without it,
- * inference would leak the internal `LiveCell` into the public types.
+ * The return type is annotated as `Live<R>` rather than inferred, so the emitted `.d.ts` pins the public
+ * surface to `{ readonly data: R }` instead of leaking the internal `LiveCell`.
  */
-const Live: {
-  /**
-   * Derive a live value from other live values. Reading a `Live`'s `.data` inside `compute`
-   * registers it as a dependency; the derived value goes stale when any dependency does.
-   * ```ts
-   * const count = Live.derived(() => todos.data.length)
-   * ```
-   */
-  derived<R>(compute: () => R): Live<R>
-} = {
-  derived: (compute) => LiveCell.derived(compute),
+function derived<R>(compute: () => R): Live<R> {
+  return LiveCell.derived(compute)
 }
 
 /** What travels once a Live crosses the wire: a stale signal telling the client to refetch. The SIGNAL
@@ -51,13 +57,14 @@ const Live: {
  *  in-memory cell. */
 type LiveEvent = undefined
 
-/** @internal The consumer-side subscription behind a `Live<T>` — the seam adapters bind to (invalidate
- *  → refetch). Deliberately NOT on the public `Live<T>`: a user reads `.data`, and only an adapter needs
- *  the tap. Satisfied by the revived client handle.
+/** @internal The consumer-side subscription behind a `Live<T>` — the seam the query adapter binds to
+ *  (invalidate → refetch). Deliberately NOT on the public `Live<T>`: a user reads `.data`, and only an
+ *  adapter needs the tap. Satisfied by the revived client handle.
  *
- *  Shared as a TYPE ONLY (via `telefunc/__internal`), never a runtime helper: the adapters that consume
- *  it ship to the BROWSER, and `telefunc/__internal` is a server entry (no browser condition) — so a
- *  runtime import would drag the server graph into a client bundle. A type import erases. */
+ *  Package-internal now: the `./tanstack-query` subpath imports it from here directly, which is what
+ *  severed this package's last reach into `telefunc/__internal`. Still a TYPE, never a runtime helper —
+ *  the adapter ships to the BROWSER, so a value import from a server module would drag the server graph
+ *  into a client bundle. A type import erases. */
 type LiveSubscription = {
   /** Observe stale signals. Returns an idempotent unsubscribe. */
   onInvalidate(callback: () => void): () => void
@@ -82,9 +89,13 @@ function track(cell: LiveCell<unknown>): void {
 }
 
 /** @internal The in-memory cell behind every `Live<T>`: the producer end (construct around a snapshot,
- *  drive it via `invalidate`) plus the serialize-time activation lifecycle. Unexported from the package
- *  — that IS the boundary that keeps the producer verbs off the public API, so a telefunction returns
- *  the handle directly and the wire replacer serializes it. */
+ *  drive it via `invalidate`) plus the serialize-time activation lifecycle. Not exported from the
+ *  package's public entry — that IS the boundary that keeps the producer verbs off the public API, so a
+ *  telefunction returns the handle directly and the wire replacer serializes it.
+ *
+ *  This replaces what used to be reached through telefunc's extension host (`host.createLive`): with the
+ *  cell owned here, that whole seam had no consumer left in core and was reverted. The engine now
+ *  constructs cells directly — one fewer indirection, and one fewer thing core has to carry. */
 class LiveCell<T> {
   readonly [LIVE_BRAND] = true
   private currentData: T

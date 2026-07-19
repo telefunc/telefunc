@@ -9,28 +9,40 @@
     "directory": "packages/tanstack-query"
   },
   "license": "MIT",
+  "telefunc": {
+    "server": "@telefunc/tanstack-query/server"
+  },
   "type": "module",
+  "sideEffects": [
+    "./dist/server.js"
+  ],
   "exports": {
     "./package.json": "./package.json",
     ".": {
       "types": "./dist/client.d.ts",
+      "browser": "./dist/client.js",
       "default": "./dist/client.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "worker": "./dist/server.js",
+      "default": "./dist/server.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "rm -rf dist/ && tsc -p tsconfig.json && tsc -p tsconfig.spec.json",
+    "build": "tsc --build",
     "dev": "tsc --watch"
   },
   "peerDependencies": {
     "telefunc": ">=0.2.0",
-    "@tanstack/query-core": ">=5.66.0"
+    "@tanstack/query-core": ">=5.0.0"
   },
   "devDependencies": {
     "telefunc": "workspace:*",
-    "@tanstack/query-core": "^5.66.0",
+    "@tanstack/query-core": "^5.0.0",
     "typescript": "^5.9.2"
   }
 }

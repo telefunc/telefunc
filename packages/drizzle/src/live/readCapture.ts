@@ -1,9 +1,8 @@
 // The engine read-capture. `reactiveDrizzle(db).select(...)` produces a CHAINABLE
 // live-builder (via wrapLiveSelect) whose terminal `.live()` runs the pipeline: extractQueryShape →
-// compileQuery → registry.acquire (eager-async hydrate in the prologue) → host.createLive(rows) +
-// attachSource → Live<Row[]>. The `Live` producer comes from telefunc's extension HOST
-// (getTelefuncHost()), never telefunc internals. Awaiting the same builder (no `.live()`) forwards to
-// plain rows.
+// compileQuery → registry.acquire (eager-async hydrate in the prologue) → new LiveCell(rows) +
+// attachSource → Live<Row[]>. The cell is this package's OWN primitive (src/primitive/live.ts) — telefunc
+// core knows nothing about it. Awaiting the same builder (no `.live()`) forwards to plain rows.
 //
 // NOTHING HERE IS REQUEST-SCOPED, and that is the point: `reactiveDrizzle(db)` can be called at module
 // level and shared by every telefunction. Attachment happens at SERIALIZE time — the wire replacer sees
@@ -27,8 +26,8 @@
 export { wrapLiveSelect, compilePlanFor }
 
 import { type Table, isTable } from 'drizzle-orm'
-import type { Live, LiveProducer } from 'telefunc'
-import { getTelefuncHost } from './telefuncHost.js'
+import { LiveCell } from '../primitive/live.js'
+import type { Live } from '../primitive/live.js'
 import { type GraphPlan, coarsePlan, compileQuery } from '../compile/compile.js'
 import type { Row } from '../compile/rowSpace.js'
 import { selectConfigOf } from '../binding/drizzleShape.js'
@@ -68,8 +67,8 @@ const abandonedReads = new FinalizationRegistry<ReadOwnership>((owned) => {
  *  declared in one scope share a context, so building this inline beside a strong `live` binding could
  *  retain the Live through that shared context and defeat the finalizer. A collected Live simply stops
  *  receiving invalidations, which is correct — nobody is holding it to receive them. */
-function invalidationSink(): { notify: () => void; hold: (live: LiveProducer<Row[]>) => void } {
-  let ref: WeakRef<LiveProducer<Row[]>> | undefined
+function invalidationSink(): { notify: () => void; hold: (live: LiveCell<Row[]>) => void } {
+  let ref: WeakRef<LiveCell<Row[]>> | undefined
   return {
     notify: () => ref?.deref()?.invalidate(),
     hold: (live) => {
@@ -151,7 +150,7 @@ async function captureAndBuild(builder: unknown, db: object): Promise<Live<Row[]
     }
 
     const owned: ReadOwnership = { token, subscription, redeemed: false }
-    const live = getTelefuncHost().createLive<Row[]>(rows)
+    const live = new LiveCell<Row[]>(rows)
     sink.hold(live)
     // From here the handle owns both refs: its channel lease releases them if it is serialized, and the
     // finalizer releases them if it is collected without ever being.

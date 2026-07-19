@@ -334,6 +334,9 @@ importers:
       '@electric-sql/pglite':
         specifier: 0.5.4
         version: 0.5.4
+      '@tanstack/query-core':
+        specifier: ^5.66.0
+        version: 5.101.0
       '@types/node':
         specifier: ^22.10.0
         version: 22.10.1
@@ -383,7 +386,7 @@ importers:
   packages/tanstack-query:
     devDependencies:
       '@tanstack/query-core':
-        specifier: ^5.66.0
+        specifier: ^5.0.0
         version: 5.101.0
       telefunc:
         specifier: link:../telefunc
@@ -564,7 +567,7 @@ importers:
       '@tanstack/react-query':
         specifier: ^5.95.2
         version: 5.101.0(react@19.2.4)
-      '@telefunc/drizzle':
+      '@telefunc/drizzle-experimental':
         specifier: workspace:*
         version: link:../../packages/drizzle
       '@telefunc/redis':

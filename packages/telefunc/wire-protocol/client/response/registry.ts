@@ -10,7 +10,6 @@ import { blobDownloadReviver } from './blobDownload.js'
 import { promiseReviver } from './promise.js'
 import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
-import { liveReviver } from './live.js'
 import { functionReviver } from './function.js'
 import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../shared/Abort.js'
@@ -25,7 +24,6 @@ const clientTypes = [
   fileDownloadReviver,
   blobDownloadReviver,
   promiseReviver,
-  liveReviver,
   broadcastReviver,
   channelReviver,
   functionReviver,

@@ -1,6 +1,6 @@
 export { onGetTodos, onGetNotes, onAddTodo, onAddTx, onAddCoarse }
 
-import { reactiveDrizzle } from '@telefunc/drizzle'
+import { reactiveDrizzle } from '@telefunc/drizzle-experimental'
 import { sql } from 'drizzle-orm'
 import { dbA, dbB, ensureTablesReady, notes, todos } from './db'
 

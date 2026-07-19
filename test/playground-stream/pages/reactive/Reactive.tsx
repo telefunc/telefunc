@@ -1,7 +1,7 @@
 export { Reactive }
 
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
-import { live } from '@telefunc/tanstack-query'
+import { live } from '@telefunc/drizzle-experimental/tanstack-query'
 import React from 'react'
 import { onAddCoarse, onAddTodo, onAddTx, onGetNotes, onGetTodos } from './Reactive.telefunc'
 

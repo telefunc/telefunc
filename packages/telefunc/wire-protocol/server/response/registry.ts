@@ -9,7 +9,6 @@ import { blobDownloadReplacer } from './blobDownload.js'
 import { promiseReplacer } from './promise.js'
 import { broadcastReplacer } from './broadcast.js'
 import { channelReplacer } from './channel.js'
-import { liveReplacer } from './live.js'
 import { functionReplacer } from './function.js'
 import type { ServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../shared/Abort.js'
@@ -28,7 +27,6 @@ const serverTypes = [
   fileReplacer,
   blobReplacer,
   promiseReplacer,
-  liveReplacer,
   broadcastReplacer,
   channelReplacer,
   functionReplacer,

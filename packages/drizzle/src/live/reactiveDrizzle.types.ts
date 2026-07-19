@@ -16,7 +16,7 @@ import type {
   SelectedFields as SQLiteSelectedFields,
 } from 'drizzle-orm/sqlite-core'
 import type { SQLiteAsyncSelectBase, SQLiteAsyncSelectBuilder } from 'drizzle-orm/sqlite-core/async/select'
-import type { Live } from 'telefunc'
+import type { Live } from '../primitive/live.js'
 
 // THE TYPE TRANSFORM, and nothing else. Purely declarative — no value in this module, so it cannot affect
 // runtime behaviour and a reader of the entry path never has to descend through ~200 lines of conditional

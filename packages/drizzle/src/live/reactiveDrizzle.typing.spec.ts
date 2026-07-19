@@ -5,7 +5,7 @@ import { integer as sInteger, sqliteTable, text as sText } from 'drizzle-orm/sql
 import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
 import type { MySqlAsyncSelectBuilder } from 'drizzle-orm/mysql-core/async/select'
 import { it } from 'vitest'
-import type { Live } from 'telefunc'
+import type { Live } from '../primitive/live.js'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
 
 // A COMPILE-TIME contract, checked by the package's own `tsc` (tsconfig.spec.json). It exercises the

@@ -9,6 +9,7 @@ import type { ChangeTransport } from './changeTransport.js'
 import { captureTransactions, isRawSqlOp, isWriteOp } from './writeProxy.js'
 import { wrapLiveSelect } from './readCapture.js'
 import { probeOldNewReturning } from './writeCapabilities.js'
+import { installLiveReplacer } from '../primitive/wireServer.js'
 import { dialectOf } from '../binding/database.js'
 import { assertUsage } from '../utils/assert.js'
 import type { Reactive, ReactiveDatabase } from './reactiveDrizzle.types.js'
@@ -61,6 +62,10 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
   // reactive and silently is not. The type surface rejects the same db (reactiveDrizzle.types.ts); this is
   // the half that a JavaScript caller still gets.
   dialectOf(db)
+  // Teach telefunc how to put a Live on the wire. Registered HERE rather than at import time, so importing
+  // this package registers nothing and the user never has to perform a config step: by the time any
+  // telefunction can return a Live, its db has been wrapped, so the replacer is always in place first.
+  installLiveReplacer()
   // An injected transport reaches other PROCESSES, where the connection-derived identity a local default
   // uses cannot follow. Without a stable name, two databases on one broker share a topic and apply each
   // other's row deltas — so this fails loudly rather than cross-feeding quietly.

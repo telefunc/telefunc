@@ -357,78 +357,64 @@ async function runTelefunc_({
     }
   }
 
-  // On any FAILURE of the execute→serialize pipeline — a body/shield throw BEFORE serialize, or a serialize
-  // failure — abort the response so a handle activated during a partial serialize has its channel torn down
-  // (the response never goes out). A body-throw jumps straight to runTelefunc's catch, skipping
-  // serializeTelefunctionResult entirely, so this cannot live inside it.
-  let pipelineFailed = false
-  try {
-    {
-      assert(runContext.isValidRequest)
-      const { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionTopLevelError } =
-        await executeTelefunction(runContext)
-      objectAssign(runContext, {
-        telefunctionReturn,
-        telefunctionHasErrored,
-        telefunctionAborted,
-        telefunctionTopLevelError,
-      })
-    }
-
-    // Resolve return shields into per-value bindings; serialization picks them up via the replacer context.
-    if (!runContext.telefunctionHasErrored) {
-      objectAssign(runContext, {
-        valueShields: resolveReturnShields(runContext.telefunctionReturn, runContext.telefunction),
-      })
-    }
-
-    if (runContext.telefunctionHasErrored || runContext.telefunctionAborted) {
-      runContext.requestContext.markTopLevelError()
-    }
-
-    if (runContext.telefunctionHasErrored) {
-      if (isShieldValidationError(runContext.telefunctionTopLevelError)) {
-        return createHttpResponse({ ...shieldValidationError })
-      }
-      throw runContext.telefunctionTopLevelError
-    }
-
-    {
-      objectAssign(runContext, {
-        abortSignal: runContext.requestContext.abortSignal,
-        useNodeStream: readable !== undefined,
-      })
-      const result = serializeTelefunctionResult(runContext)
-
-      if (result.type === 'streaming') {
-        const contentType =
-          result.streamTransport === STREAM_TRANSPORT.SSE_INLINE ? 'text/event-stream' : 'application/octet-stream'
-        return createHttpResponse({
-          statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
-          contentType,
-          headers: [
-            ['Cache-Control', 'no-cache, no-transform'],
-            ['X-Accel-Buffering', 'no'],
-          ],
-          body: result.body,
-        })
-      }
-
-      objectAssign(runContext, { httpResponseBody: result.body })
-    }
-
-    return createHttpResponse({
-      statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
-      contentType: 'text/plain',
-      headers: [],
-      body: runContext.httpResponseBody,
+  {
+    assert(runContext.isValidRequest)
+    const { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionTopLevelError } =
+      await executeTelefunction(runContext)
+    objectAssign(runContext, {
+      telefunctionReturn,
+      telefunctionHasErrored,
+      telefunctionAborted,
+      telefunctionTopLevelError,
     })
-  } catch (err) {
-    pipelineFailed = true
-    throw err
-  } finally {
-    // Failure only: abort activated handles' channels (idempotent; a no-op on success/abort and when
-    // nothing activated). Each abort → channel onClose → the drizzle handle's lease teardown.
-    if (pipelineFailed) runContext.requestContext.responseAbort.abort()
   }
+
+  // Resolve return shields into per-value bindings; serialization picks them up via the replacer context.
+  if (!runContext.telefunctionHasErrored) {
+    objectAssign(runContext, {
+      valueShields: resolveReturnShields(runContext.telefunctionReturn, runContext.telefunction),
+    })
+  }
+
+  if (runContext.telefunctionHasErrored || runContext.telefunctionAborted) {
+    runContext.requestContext.markTopLevelError()
+  }
+
+  if (runContext.telefunctionHasErrored) {
+    if (isShieldValidationError(runContext.telefunctionTopLevelError)) {
+      return createHttpResponse({ ...shieldValidationError })
+    }
+    throw runContext.telefunctionTopLevelError
+  }
+
+  {
+    objectAssign(runContext, {
+      abortSignal: runContext.requestContext.abortSignal,
+      useNodeStream: readable !== undefined,
+    })
+    const result = serializeTelefunctionResult(runContext)
+
+    if (result.type === 'streaming') {
+      const contentType =
+        result.streamTransport === STREAM_TRANSPORT.SSE_INLINE ? 'text/event-stream' : 'application/octet-stream'
+      return createHttpResponse({
+        statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
+        contentType,
+        headers: [
+          ['Cache-Control', 'no-cache, no-transform'],
+          ['X-Accel-Buffering', 'no'],
+        ],
+        body: result.body,
+      })
+    }
+
+    objectAssign(runContext, { httpResponseBody: result.body })
+  }
+
+  return createHttpResponse({
+    statusCode: runContext.telefunctionAborted ? STATUS_CODE_THROW_ABORT : STATUS_CODE_SUCCESS,
+    contentType: 'text/plain',
+    headers: [],
+    body: runContext.httpResponseBody,
+  })
 }
