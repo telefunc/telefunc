@@ -272,7 +272,12 @@ type UpgradeState =
   /** `PREPARE` sent, awaiting `READY`. Deliberately UNGATED (`inDrain` stays false): the old wire is
    *  still authoritative for this whole window. Gating starts one transition later, at `draining`. */
   | { tag: 'preparing'; attempt: AbortController }
-  | { tag: 'draining'; attempt: AbortController }
+  /** Barrier emitted, awaiting the verdict. ⚠️ Carries `finReceived` because the server emits FIN on
+   *  the OLD wire the moment the barrier commits, and that travels a different wire than the barrier
+   *  emission the client is still awaiting — so the FIN routinely arrives BEFORE the transport flip
+   *  enters `handoff`. Recorded here and seeded into the handoff, exactly as the probe wire's held
+   *  frames carry an early COMMITTED across the same boundary. */
+  | { tag: 'draining'; attempt: AbortController; finReceived: boolean }
   | {
       tag: 'handoff'
       from: ClientChannelTransport
@@ -412,11 +417,12 @@ class ClientConnection implements MuxConnection {
     assert(this.state.tag === 'open')
     const u = this.state.upgrade
     assert((u.tag === 'probing' || u.tag === 'preparing') && u.attempt === attempt)
-    this.state = { tag: 'open', upgrade: { tag: 'draining', attempt } }
+    this.state = { tag: 'open', upgrade: { tag: 'draining', attempt, finReceived: false } }
   }
 
   private enterUpgradeHandoff(from: ClientChannelTransport, upgradeId: string | null = null): void {
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'draining')
+    const finReceived = this.state.upgrade.finReceived
     this.state = {
       tag: 'open',
       upgrade: {
@@ -427,7 +433,7 @@ class ClientConnection implements MuxConnection {
         bufferedBytes: 0,
         bufferedFrames: 0,
         deferredOmitted: [],
-        finReceived: false,
+        finReceived,
         // Armed HERE, not on FIN arrival: the join deadline has to bound both limbs from the
         // moment two wires are live, or the missing-FIN limb has no watchdog at all.
         joinTimer: setTimeout(() => this.onHandoffJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS),
@@ -880,8 +886,22 @@ class ClientConnection implements MuxConnection {
   }
 
   private handleHandoffFin(): void {
-    if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'handoff') return
-    this.state.upgrade.finReceived = true
+    if (this.state.tag !== 'open') return
+    const u = this.state.upgrade
+    // ⚠️ The FIN can beat the flip. The server emits it on the OLD wire the instant the barrier
+    // commits, while the client is still awaiting that same barrier's emission to return — two
+    // different wires, so the ordering is a race, and in batch mode (the barrier is a standalone
+    // POST whose response the client awaits) the FIN wins routinely. Dropping it here left the join
+    // waiting for a limb that had already arrived, so EVERY such upgrade stalled until the join
+    // deadline and then took the fallback — with the whole handoff buffer released in one burst.
+    // Recorded on the attempt instead, and seeded into the handoff by `enterUpgradeHandoff`; an
+    // attempt that ends any other way discards it along with the rest of its state.
+    if (u.tag === 'draining') {
+      u.finReceived = true
+      return
+    }
+    if (u.tag !== 'handoff') return
+    u.finReceived = true
     // The remaining wait for RECONCILED is already bounded by the join deadline armed at
     // `enterUpgradeHandoff` — nothing to arm here.
     this.tryCompleteUpgradeHandoff()

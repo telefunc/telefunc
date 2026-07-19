@@ -262,6 +262,12 @@ type UpgradeHarnessOptions = {
    *  never settles, `maybeStartUpgrade` is never reached, and any "no second attempt" assertion is a
    *  gate that cannot fail. */
   autoReconcile?: boolean
+  /** Batch mode only: hold the response to the POST that CARRIES the barrier until
+   *  `releaseHungPosts()`. Freezes the client in `draining` — barrier on the wire, transport not yet
+   *  flipped — which is the only window in which a test can drive the old wire ahead of the flip.
+   *  Scoped to that one POST rather than `setBatchPostsHang`, which would also hang the ordinary
+   *  traffic that has to keep flowing to get the client there. */
+  hangBarrierPost?: boolean
 }
 
 type UpgradeHarness = {
@@ -407,7 +413,8 @@ async function createUpgradeHarness(
         // that never received it. It DOES reject once its controller is aborted, exactly as a real
         // `fetch` would — that settlement is what makes a stalled POST outlive the transport that
         // issued it, the double-teardown hazard the recovery path has to be immune to.
-        if (hangBatchPosts) {
+        const carriesBarrier = decoded.some((frame) => frame.tag === TAG.RECONCILE && frame.payload.barrier === true)
+        if (hangBatchPosts || (opts.hangBarrierPost && carriesBarrier)) {
           return await new Promise<Response>((resolve, reject) => {
             hungPostResolvers.push(resolve)
             init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {
