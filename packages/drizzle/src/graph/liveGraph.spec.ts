@@ -5,7 +5,7 @@
 // graph fires at most once per batch (G2). Deterministic — deferred/immediate promises drive the
 // seed, never timers.
 
-import { eq } from 'drizzle-orm'
+import { eq, gt } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { type SeedDescriptor, type StatefulGraph, compileQuery } from '../compile/compile.js'
@@ -505,5 +505,113 @@ describe('reseed — a write landing mid-reseed is announced, not absorbed', () 
     await settle(graph)
 
     expect(graph.invalidationSeq()).toBe(afterStart) // exactly one invalidation for an uneventful reseed
+  })
+})
+
+// ── invariants whose only enforcement was a COMMENT ──────────────────────────────────────────────
+//
+// Each case below closes a gap found by mutating the live-graph after R4's split, and each was
+// confirmed PRE-EXISTING by applying the same mutation to the pre-split tree. They are grouped here
+// because they share a shape: the code states an invariant in prose — "unsound", "breaks every
+// aggregate", "in lockstep" — and nothing enforced it, so a plausible future edit would have passed
+// the whole suite while producing silently wrong results.
+
+describe('an unresolvable key-only retraction DEMOTES, it does not merely fire', () => {
+  it('a key that carries no PK column leaves the graph coarse, not live-and-stale', async () => {
+    // `resolveOld` cannot key this retraction: the key row has no `id`, so no PK can be derived and the
+    // shadow cannot be consulted. Firing alone would leave the shadow and the engine holding a row the
+    // database has deleted — the code calls that unsound, and until now nothing checked it.
+    const graph = await seededJoin([{ id: 1, team_id: 5 }], [{ id: 5 }])
+    expect(graph.state()).toBe('live')
+
+    const outcome = graph.apply([{ table: 'users', kind: 'delete', key: { team_id: 5 } }])
+
+    expect(outcome.invalidated).toBe(true) // it fires…
+    expect(graph.state()).toBe('coarse') // …AND surrenders its precise state, which is the whole point
+  })
+})
+
+describe('a reseed builds a FRESH operator graph', () => {
+  it('instantiates again rather than re-using the graph that accumulated the previous baseline', async () => {
+    // The old operator graph holds the PREVIOUS baseline plus every delta since. Re-running it against a
+    // newly-scanned baseline double-counts every aggregate — which is why the source comment addresses a
+    // future "optimiser" directly. This pins the instantiation itself, because that is the decision: once
+    // a second graph is built, no state can survive to be double-counted.
+    let instantiations = 0
+    const build = () => qb.select().from(users).innerJoin(teams, eq(teams.id, users.teamId))
+    const graph = createLiveGraph({
+      kind: 'stateful',
+      instanceKey: 'reseed-fresh',
+      tables: ['users', 'teams'],
+      instantiate: () => {
+        instantiations++
+        return compileQuery(extractQueryShape(build(), { dialect: 'pg' })).instantiate() as StatefulGraph
+      },
+      executor: joinExecutor([{ id: 1, team_id: 5 }], [{ id: 5 }]),
+      maxStateRows: 1e9,
+    })
+    await settle(graph)
+    expect(instantiations).toBe(1)
+
+    graph.reseed()
+    await settle(graph)
+
+    expect(graph.state()).toBe('live')
+    expect(instantiations).toBe(2) // a SECOND graph, not the first one fed a second baseline
+  })
+})
+
+describe('a coarse graph fires only for the tables it WATCHES', () => {
+  it('a change on an unwatched table does not invalidate it', () => {
+    // Sound-but-noisy rather than unsound: the failure mode here is over-firing, not a wrong row. Pinned
+    // anyway, because "every write on the database invalidates every coarse graph" is a performance cliff
+    // that no test would have reported.
+    const graph = createLiveGraph({ kind: 'coarse', instanceKey: 'coarse-watch', tables: ['users'] })
+
+    expect(graph.apply([{ table: 'orders', kind: 'insert', new: { id: 1 } }]).invalidated).toBe(false)
+    expect(graph.invalidationSeq()).toBe(0)
+    // …and the positive half, so the negative above is not passing vacuously.
+    expect(graph.apply([{ table: 'users', kind: 'insert', new: { id: 1 } }]).invalidated).toBe(true)
+  })
+})
+
+describe('only a σ-MATCHING new tuple enters the shadow', () => {
+  it('a row updated OUT of the residual leaves the shadow, so it stops counting against maxStateRows', async () => {
+    // WHERE THIS IS OBSERVABLE, and where it is not. The operator graph enforces the same σ, so a ghost
+    // tuple left in the shadow is filtered out of every apply() outcome — its insert and its retraction
+    // are both no-ops, and the invalidation results are identical either way. Asserting on `invalidated`
+    // therefore CANNOT tell the two apart (measured: the mutation survives such a test), and shipping one
+    // would be verification theatre.
+    //
+    // The shadow's SIZE is the honest observable: it is what `maxStateRows` bounds, so a shadow that
+    // keeps rows the input no longer contains demotes a graph that should still be live — precision lost
+    // to bookkeeping rather than to any real growth in watched state.
+    const build = () => qb.select().from(users).innerJoin(teams, eq(teams.id, users.teamId)).where(gt(users.score, 10))
+    const graph = createLiveGraph({
+      kind: 'stateful',
+      instanceKey: 'sigma-shadow',
+      tables: ['users', 'teams'],
+      instantiate: () => compileQuery(extractQueryShape(build(), { dialect: 'pg' })).instantiate() as StatefulGraph,
+      executor: joinExecutor(
+        [
+          { id: 1, team_id: 5, score: 50 },
+          { id: 2, team_id: 5, score: 50 },
+        ],
+        [{ id: 5 }],
+      ),
+      maxStateRows: 2,
+    })
+    await settle(graph)
+    expect(graph.state()).toBe('live') // seeded at exactly the bound, which is not over it
+
+    // id=1 moves OUT of `score > 10`. It is no longer part of this input, so it must leave the shadow.
+    graph.apply([
+      { table: 'users', kind: 'update', old: { id: 1, team_id: 5, score: 50 }, new: { id: 1, team_id: 5, score: 5 } },
+    ])
+    // Room for id=3 exists ONLY if id=1 actually left. A shadow still holding it is now 3 rows over a
+    // bound of 2, and the graph demotes for state it does not really have.
+    graph.apply([{ table: 'users', kind: 'insert', new: { id: 3, team_id: 5, score: 50 } }])
+
+    expect(graph.state()).toBe('live')
   })
 })
