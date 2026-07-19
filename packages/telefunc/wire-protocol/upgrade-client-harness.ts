@@ -384,6 +384,11 @@ type UpgradeHarness = {
    *  This is what leaves `flushing` stuck true, which is the state the attempt deadline has to be
    *  able to interrupt. */
   setBatchPostsHang(hang: boolean): void
+  /** Answer every currently-hung POST with a 200 — a slow server that eventually came back, as
+   *  opposed to `dispose()` aborting it. The distinction matters: a POST that settles SUCCESSFULLY
+   *  leaves the wire perfectly usable, so an attempt aborted around that moment must NOT be treated
+   *  as wedged. */
+  releaseHungPosts(): void
   dispose(): void
 }
 
@@ -413,6 +418,7 @@ async function createUpgradeHarness(
   const prepares: PreparePayload[] = []
   const barriers: ReconcilePayload[] = []
   const batchPosts: DecodedFrame[][] = []
+  const hungPostResolvers: Array<(response: Response) => void> = []
   let hangBatchPosts = false
   let downstream: ReturnType<typeof makeSseDownstream> | null = null
   let sseTornDown = false
@@ -490,7 +496,8 @@ async function createUpgradeHarness(
         // issued it and report failure against a wire that has since been replaced — the
         // double-teardown hazard the recovery path has to be immune to.
         if (hangBatchPosts) {
-          return await new Promise<Response>((_resolve, reject) => {
+          return await new Promise<Response>((resolve, reject) => {
+            hungPostResolvers.push(resolve)
             init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {
               once: true,
             })
@@ -637,6 +644,9 @@ async function createUpgradeHarness(
     batchPosts,
     setBatchPostsHang: (hang) => {
       hangBatchPosts = hang
+    },
+    releaseHungPosts: () => {
+      for (const resolve of hungPostResolvers.splice(0)) resolve(new Response('', { status: 200 }))
     },
     sendReady: (upgradeId) => {
       const id = upgradeId ?? prepares.at(-1)?.upgradeId

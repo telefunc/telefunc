@@ -29,6 +29,14 @@ type ReconcileFrame = DecodedFrame & { tag: typeof TAG.RECONCILE }
 const reconcilesOn = (frames: readonly DecodedFrame[]): ReconcileFrame[] =>
   frames.filter((f): f is ReconcileFrame => f.tag === TAG.RECONCILE)
 
+/** Text payloads the mock server RECEIVED, in arrival order.
+ *
+ *  Deliberately `sse.upstream` and not `batchPosts`: `batchPosts` records only out-of-band POSTs
+ *  and NOT the connect POST — and the connect POST's initial batch is exactly where a frame that
+ *  jumps ahead of replay would ride. An oracle blind to it cannot see that regression at all. */
+const textsUpstream = (h: UpgradeHarness): string[] =>
+  h.sse.upstream.filter((f): f is DecodedFrame & { tag: typeof TAG.TEXT } => f.tag === TAG.TEXT).map((f) => f.text)
+
 let harness: UpgradeHarness | null = null
 afterEach(() => {
   harness?.dispose()
@@ -158,6 +166,10 @@ describe('F2 — the attempt deadline can interrupt batch-mode emission', () => 
     h.send(0, '"stuck"')
     await waitUntil(() => h.batchPosts.length > 0, 'the batch POST is in flight', 6_000)
     const postsWhileWedged = h.batchPosts.length
+    // Captured HERE, while still wedged — anything after this index went out because of the
+    // recovery. Reading it later would slice away the very replay the order assertions are about.
+    const textsWhileWedged = textsUpstream(h).length
+    expect(textsWhileWedged).toBeGreaterThan(0)
 
     h.sendReady()
     await waitUntil(() => h.upgradeTag() === 'draining', 'READY gated the wire for emission', 6_000)
@@ -181,25 +193,32 @@ describe('F2 — the attempt deadline can interrupt batch-mode emission', () => 
     // THE assertion this test exists for. Above the transport everything already looked fine before
     // the fix, so the oracle has to be a specific payload the mock server RECEIVED — not a POST
     // count, which the recovery's own reconnect POSTs would satisfy on their own.
-    const textsOnWire = () =>
-      h.batchPosts
-        .flat()
-        .filter((f): f is DecodedFrame & { tag: typeof TAG.TEXT } => f.tag === TAG.TEXT)
-        .map((f) => f.text)
+    //
+    // Read from `sse.upstream` rather than `batchPosts`: `batchPosts` records only the out-of-band
+    // POSTs and NOT the connect POST, and the connect POST is precisely where a frame that jumps
+    // the queue would ride. An oracle blind to it cannot see the regression these assertions exist
+    // to catch. `upstream` is every frame the mock server received, connect POST included.
+    //
+    // Sliced past what was already on the wire while wedged, so `"stuck"` below can only mean the
+    // REPLAYED copy. Reading the whole history is a false green: the original wedged POST already
+    // holds `"stuck"` at index 0, so `indexOf('"stuck"') < indexOf('"gated"')` holds trivially —
+    // including when the replayed copy never arrives at all.
     expect(h.batchPosts.length).toBeGreaterThan(postsWhileWedged)
     h.send(0, '"after-recovery"')
     await waitUntil(
-      () => textsOnWire().includes('"after-recovery"'),
+      () => textsUpstream(h).slice(textsWhileWedged).includes('"after-recovery"'),
       'a frame sent AFTER the deadline reached the server',
       8_000,
     )
     expect(h.channels[0]!.isClosed).toBe(false)
 
-    // Order is preserved across the recovery. `"stuck"` reappears because the wedged POST swallowed
-    // it and the certified replay path re-sent it from the server's reported `lastSeq`; `"gated"`
-    // follows it rather than jumping the queue, because gated frames are released by the
-    // post-RECONCILED drain instead of being carried in the reconnect's initial batch.
-    const texts = textsOnWire()
+    // Order across the recovery, judged only on what went out AFTER it. `"stuck"` has to appear a
+    // SECOND time — the wedged POST swallowed the first copy and the certified replay path re-sent
+    // it from the server's reported `lastSeq`. `"gated"` must follow it rather than jump ahead:
+    // gated frames are released by the post-RECONCILED drain instead of riding the reconnect's
+    // initial batch. Disabling that deferral puts `"gated"` in the connect POST, ahead of the
+    // replayed `"stuck"`, and inverts exactly these two.
+    const texts = textsUpstream(h).slice(textsWhileWedged)
     expect(texts).toContain('"stuck"')
     expect(texts.indexOf('"stuck"')).toBeLessThan(texts.indexOf('"gated"'))
     expect(texts.indexOf('"gated"')).toBeLessThan(texts.indexOf('"after-recovery"'))
@@ -208,6 +227,56 @@ describe('F2 — the attempt deadline can interrupt batch-mode emission', () => 
     // then rejects and reports failure — against a transport that is no longer `this.transport`.
     // A straggler that tore down the SUCCESSOR wire instead would show up here as a third connect.
     expect(h.sseConnects()).toBe(2)
+  }, 30_000)
+
+  test('a POST that settles OK around the abort leaves the wire usable — no recovery', async () => {
+    // The other side of the wedge, and the only branch that separates "nothing written, wire fine"
+    // from "nothing written, wire stuck". Both reach `emitBarrier`; both abort pre-barrier. What
+    // differs is whether the flush ever let go.
+    //
+    // Sequence: a POST is in flight, so emission parks in `gracefulDrain`. The attempt is aborted
+    // there — the probe wire dying does it, no clock needed — and only THEN does the POST answer
+    // 200. By the time the quiesce returns, `flushing` is false and the wire is perfectly healthy,
+    // so treating this as wedged would spend a reconnect and a full replay to fix nothing.
+    //
+    // The idle-wire control below cannot gate this: it aborts before `emitBarrier` is ever entered.
+    const h = await barrierHarness({ batchMode: true, prepare: 'withhold', barrier: 'refuse' })
+    const channel = h.channels[0]!
+
+    h.setBatchPostsHang(true)
+    h.send(0, '"in-flight"')
+    await waitUntil(() => h.batchPosts.length > 0, 'the batch POST is in flight', 6_000)
+    const postsBefore = h.batchPosts.length
+
+    h.sendReady()
+    await waitUntil(() => h.upgradeTag() === 'draining', 'emission is parked in the quiesce', 6_000)
+
+    // Abort while parked, then let the POST succeed. Closing the probe is what aborts the attempt.
+    h.setBatchPostsHang(false)
+    h.ws.socket.close()
+    h.releaseHungPosts()
+
+    await waitUntil(() => h.upgradeTag() === 'none', 'the attempt released without recovering', 6_000)
+
+    // Nothing emitted, and — the point — nothing recovered: same wire, same session.
+    expect(h.barriers).toHaveLength(0)
+    expect(h.sseConnects()).toBe(1)
+    expect(channel.isClosed).toBe(false)
+
+    // And it is genuinely still carrying traffic, in both directions, on that same connection.
+    h.send(0, '"after-abort"')
+    await waitUntil(
+      () =>
+        h.batchPosts
+          .slice(postsBefore)
+          .flat()
+          .some((f) => f.tag === TAG.TEXT && f.text === '"after-abort"'),
+      'the untouched wire carried a frame sent after the abort',
+      8_000,
+    )
+    h.sse.pushFrame(encode.text(0, '"downstream"', 1))
+    await waitUntil(() => channel.received.length === 1, 'and still delivers downstream')
+    expect(h.sseConnects()).toBe(1)
   }, 30_000)
 
   test('control: a pre-barrier abort on an IDLE wire does not force a reconnect', async () => {
