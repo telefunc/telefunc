@@ -74,6 +74,18 @@ type ProbeWire = {
   close: () => void
 }
 
+type HeldProbeFrame = { frame: DecodedFrame; byteLength: number }
+
+/** What `stageUpgrade` hands to the flip. `heldFrames` is LIVE: the probe's `onFrame` keeps
+ *  appending to it until the attempt ends, and the flip replays whatever it holds at that moment. */
+type StagedProbe = {
+  upgradeId: string
+  heartbeat: Heartbeat
+  heldFrames: HeldProbeFrame[]
+}
+
+type AttemptWatchdog = { timer: ReturnType<typeof setTimeout> | null }
+
 /** Ping-then-pong-deadline loop. Each transport owns one for its wire; the upgrade probe
  *  flow constructs a transient instance for the probed wire until the swap commits. */
 class Heartbeat {
@@ -1045,196 +1057,194 @@ class ClientConnection implements MuxConnection {
     return this.connectionOptions.transports.includes(nextTransport)
   }
 
+  /** The barrier upgrade, end to end: PREPARE stages the new wire while the old one stays fully
+   *  live, READY licenses the gate, and the barrier is the old wire's FINAL frame — it commits the
+   *  swap server-side, so the new wire never has to reconcile for itself.
+   *
+   *  Version skew degrades to "stay on SSE" in both directions, so neither gets compatibility code.
+   *  An old client against a new server sends a RECONCILE naming no stage, which the server treats
+   *  as ordinary. A new client against an old server trips that server's unknown-tag assert on the
+   *  PREPARE, killing the probe; the pre-barrier rollback leaves the live SSE wire untouched. */
   private async probeAndUpgrade(targetTransport: ChannelTransport): Promise<void> {
     // Flush pending register-reconcile inline before the upgrade so its RECONCILE
-    // doesn't fire mid-drain on the dying old wire. The freshly-registered channels
-    // either go on the old wire now (entering the upgrade drain naturally) or have
-    // their deferred releases settled before the handoff RECONCILE is built.
+    // doesn't fire mid-drain on the dying old wire.
     this.flushPendingRegisterReconcile()
-    // `sessionId` is a PREPARE field the server hard-requires. The gate on this path is a SETTLED
-    // reconciled so there always is one, but the flow must not be the thing that discovers
-    // otherwise — with no session there is nothing to stage against, so there is no attempt.
+    // `sessionId` is a PREPARE field the server hard-requires: with none there is nothing to stage
+    // against, so there is no attempt.
     const sessionId = this.sessionId
     if (sessionId === null) return
     const attempt = new AbortController()
     this.enterUpgradeProbing(attempt)
-    let attemptDeadline: ReturnType<typeof setTimeout> | null = null
+    // A holder because the watchdog is armed deep inside staging — it must start at the PREPARE,
+    // not at the probe — but is disarmed here on every path.
+    const watchdog: AttemptWatchdog = { timer: null }
     try {
       const from = this.transport
       const to = TRANSPORT_REGISTRY[targetTransport](this.telefuncUrl, this.connectionOptions, this)
-
-      const probe = await to.probe()
-      if (attempt.signal.aborted || !probe) {
-        probe?.close()
-        return
-      }
-      const probeHeartbeat = new Heartbeat(
-        this.pingIntervalMs,
-        this.pingIntervalMs * 2,
-        () => probe.ping(),
-        () => attempt.abort(),
-      )
-      probe.onPong(() => probeHeartbeat.resetPong())
-      probe.onClose(() => attempt.abort())
-      probeHeartbeat.start()
-      attempt.signal.addEventListener(
-        'abort',
-        () => {
-          probeHeartbeat.stop()
-          probe.close()
-        },
-        { once: true },
-      )
-
-      // ── Barrier flow, the only upgrade flow ── PREPARE stages the new wire while the old one
-      //    stays fully live; READY licenses the gate; the barrier is the old wire's FINAL frame and
-      //    commits the swap server-side, so the new wire never has to reconcile for itself.
-      //
-      // VERSION SKEW (streaming is beta; both directions degrade to "stay on SSE", so neither gets
-      // compatibility code):
-      //  • old client + new server — the old client runs its drain-then-RECONCILE upgrade. That
-      //    RECONCILE names no stage, so the server treats it as an ordinary reconcile and no FIN
-      //    follows. The old client's own handoff timers abort the attempt; it stays on SSE with its
-      //    session intact.
-      //  • new client + old server — the PREPARE below hits the old decoder's unknown-tag assert,
-      //    which terminates the probe wire. `probe.onClose` aborts the attempt, `readyP` resolves
-      //    null, and the pre-barrier rollback keeps the live SSE wire untouched.
-      const upgradeId = crypto.randomUUID()
-      const pendingProbeFrames: { frame: DecodedFrame; byteLength: number }[] = []
-      let heldFrames = 0
-      let heldBytes = 0
-      let heldOverflow = false
-      let onReady: ((payload: ReadyPayload) => void) | null = null
-      probe.onFrame((frame, byteLength) => {
-        if (frame.tag === TAG.READY) {
-          onReady?.(frame.payload)
-          return
-        }
-        // The COMMITTED can beat the transport flip. HELD, not dropped — replayed through the
-        // ordinary receive path right after the flip, where the handoff buffer takes it.
-        //
-        // Charged against the SAME shared budget the handoff buffer enforces, and charged HERE
-        // rather than at replay: this queue exists before any handoff state does, so without a
-        // check at hold time it is simply unbounded memory that the documented cap never sees.
-        if (heldOverflow) return
-        pendingProbeFrames.push({ frame, byteLength })
-        heldFrames += 1
-        heldBytes += byteLength
-        if (heldFrames > UPGRADE_HANDOFF_BUFFER_FRAMES || heldBytes > UPGRADE_HANDOFF_BUFFER_BYTES) {
-          // Every held frame is a NEW-wire frame, so R2's discard-the-new-buffer-WHOLE rule applies
-          // to them as a set. `heldOverflow` is what enforces that: no frame is added after it, and
-          // the abort below ends the attempt before any replay, so no prefix can survive.
-          heldOverflow = true
-          // Releases the buffered bytes NOW instead of at GC of this closure, which the probe
-          // socket keeps alive. Non-behavioural on purpose and therefore has no mutation killer —
-          // the abort already guarantees nothing here is ever replayed.
-          pendingProbeFrames.length = 0
-          // Where this LANDS is decided by where the abort is observed below — before emission it
-          // is a pre-barrier failure, after it the sticky fallback. Neither is chosen here.
-          attempt.abort()
-        }
-      })
-
-      // The ONLY watchdog over PREPARE→handoff-entry. A barrier the server finds stale is refused
-      // SILENTLY — no COMMITTED, no termination, nothing rotates — so without this a refused
-      // attempt would sit in `preparing`/`draining` for the connection's lifetime.
-      attemptDeadline = setTimeout(() => attempt.abort(), UPGRADE_ATTEMPT_TIMEOUT_MS)
-      // Armed BEFORE the PREPARE leaves. Nothing forbids a server from answering within the same
-      // turn, and a resolver installed afterwards would simply miss that READY and wedge the
-      // attempt until its deadline.
-      const readyP = new Promise<ReadyPayload | null>((resolve) => {
-        onReady = resolve
-        attempt.signal.addEventListener('abort', () => resolve(null), { once: true })
-      })
-      this.enterUpgradePreparing(attempt)
-      probe.send(this.buildPrepareFrame(upgradeId, sessionId))
-      const ready = await readyP
-      // A READY naming another attempt is worth exactly as much as none: it says nothing about
-      // whether OUR stage was installed.
-      if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
-        // Pre-barrier failure. Nothing has left that could rotate the session, so the old wire
-        // keeps it and the rule is simply "continue". Aborting is also what closes the probe.
-        attempt.abort()
-        this.rollbackToOldWire()
-        return
-      }
-
-      // Gate down. From here the old wire carries exactly one more frame, and the payload is built
-      // inside `emitBarrier` — at emission — so its cursors reflect everything delivered since.
-      this.enterUpgradeDraining(attempt)
-      const emission = await from.emitBarrier(() => this.buildReconcileFrame({ upgradeId }), attempt.signal)
-
-      if (emission === 'wedged') {
-        // Pre-barrier — nothing was written, so upgrades stay ENABLED and a later settled RECONCILED
-        // may try again — but the old wire cannot make progress: a POST that may never settle owns
-        // its flush gate, so released frames would sit in the outbox behind a guard that never
-        // opens. Lifting the connection gate alone would leave it looking healthy and mute.
-        //
-        // Recovery is the ordinary transport-loss path, which is exactly what a dead wire gets and
-        // is certified since T2: fresh SSE connect, and the frames still in `sendBuffer` released
-        // after its RECONCILED. Deliberately NOT drained into the new wire's outbox first — the
-        // reconnect's initial batch would then carry them AHEAD of the replay of frames the wedged
-        // POST swallowed, and the server would dup-drop the older ones.
-        attempt.abort()
-        this.recoverWedgedOldWire(new NetworkError('Upgrade aborted with the old wire stalled', true))
-        return
-      }
-      if (emission === 'not-emitted') {
-        // The attempt ended with not one barrier byte written and the wire still usable, so the
-        // server's session is exactly where it was: stay on it. `exitUpgradeAttempt` in the
-        // `finally` lifts the gate this branch is still under.
-        attempt.abort()
-        this.rollbackToOldWire()
-        return
-      }
-      if (attempt.signal.aborted) {
-        // The barrier MAY already have reached the server, so no wire can be trusted to still hold
-        // the session — the single rule past this point is to abandon BOTH and reconcile afresh.
-        // This must win over the reconcile deadline `buildReconcileFrame` armed a moment ago, which
-        // would take the GENERIC reconnect and leave upgrades enabled. It does win by construction
-        // — the attempt deadline was armed at PREPARE, strictly earlier, and both are 10 s — and
-        // the hanging-barrier-POST spec is what holds that ordering honest.
-        this.abortUpgradeAndReconnectSse(new NetworkError('Upgrade barrier attempt timed out', true))
-        return
-      }
-
-      probeHeartbeat.stop()
-      this.transport = to
-      this.enterUpgradeHandoff(from, upgradeId)
-      // The flip must NOT fire `sendReconcileOnOpen`. The barrier already WAS this attempt's
-      // reconcile; a second one, on a wire that is about to acquire a session, rotates that session
-      // a second time, deletes the FIN finalizer the barrier just installed, and re-opens every
-      // channel — all while still passing a happy-path test. Suppression spans only the synchronous
-      // adoption of the probed socket: a socket that instead has to CONNECT (the probe died between
-      // commit and flip) opens later, after the flag is back down, and correctly reconciles itself.
-      this.suppressReconcileOnOpen = true
-      try {
-        to.start()
-      } finally {
-        this.suppressReconcileOnOpen = false
-      }
-      // INVARIANT this replay rests on — stated because it is what makes a mid-loop cap check
-      // unnecessary rather than merely untested. The held set is already bounded by the SAME budget
-      // the handoff buffer enforces (charged in `probe.onFrame` above; over-budget aborts the
-      // attempt before any flip), the handoff buffer starts empty, and this loop is fully
-      // synchronous — no frame can interleave and no timer can fire inside it. Replaying a bounded
-      // set into an empty buffer of the same bound therefore cannot trip that bound.
-      //
-      // If this ever stops holding — a hold-time limit that diverges from the handoff cap, or an
-      // `await` introduced in here — the cap CAN trip mid-replay, and then the remaining held frames
-      // must be DISCARDED rather than dispatched: they are new-wire frames covered by the same
-      // discard-the-new-buffer-whole rule, and dispatching them would advance `trackSeq` past the
-      // frames the fallback dropped, leaving the recovery replay dup-suppressed forever.
-      for (const held of pendingProbeFrames) this._onTransportFrame(held.frame, to, held.byteLength)
+      const staged = await this.stageUpgrade(to, sessionId, attempt, watchdog)
+      if (!staged) return
+      if ((await this.commitBarrier(from, staged.upgradeId, attempt)) !== 'committed') return
+      this.flipToNewWire(from, to, staged)
     } finally {
       // Disarmed before the attempt is released, so a deadline can never fire against a committed
       // handoff — where `probe.close()` would be closing the LIVE transport's socket.
-      if (attemptDeadline) clearTimeout(attemptDeadline)
+      if (watchdog.timer) clearTimeout(watchdog.timer)
       this.exitUpgradeAttempt(attempt)
       // No-op unless the attempt aborted with a registration deferred behind it (the gate
       // blocks while a handoff is still in flight).
       this.flushPendingRegisterReconcile()
     }
+  }
+
+  /** PREPARE → READY on the probed socket, without that socket becoming the transport. Resolves
+   *  null when the attempt is over pre-barrier, having already performed whatever recovery that
+   *  ending needed — the caller only has to return. */
+  private async stageUpgrade(
+    to: ClientChannelTransport,
+    sessionId: string,
+    attempt: AbortController,
+    watchdog: AttemptWatchdog,
+  ): Promise<StagedProbe | null> {
+    const probe = await to.probe()
+    if (attempt.signal.aborted || !probe) {
+      probe?.close()
+      return null
+    }
+    const heartbeat = new Heartbeat(
+      this.pingIntervalMs,
+      this.pingIntervalMs * 2,
+      () => probe.ping(),
+      () => attempt.abort(),
+    )
+    probe.onPong(() => heartbeat.resetPong())
+    probe.onClose(() => attempt.abort())
+    heartbeat.start()
+    attempt.signal.addEventListener(
+      'abort',
+      () => {
+        heartbeat.stop()
+        probe.close()
+      },
+      { once: true },
+    )
+
+    const upgradeId = crypto.randomUUID()
+    const heldFrames: HeldProbeFrame[] = []
+    let heldCount = 0
+    let heldBytes = 0
+    let heldOverflow = false
+    let onReady: ((payload: ReadyPayload) => void) | null = null
+    probe.onFrame((frame, byteLength) => {
+      if (frame.tag === TAG.READY) {
+        onReady?.(frame.payload)
+        return
+      }
+      // The COMMITTED can beat the transport flip. HELD, not dropped — replayed through the
+      // ordinary receive path right after the flip, where the handoff buffer takes it. Charged
+      // against the SAME budget that buffer enforces, and charged HERE rather than at replay: this
+      // queue exists before any handoff state does, so a check only at replay would leave it
+      // unbounded.
+      if (heldOverflow) return
+      heldFrames.push({ frame, byteLength })
+      heldCount += 1
+      heldBytes += byteLength
+      if (heldCount > UPGRADE_HANDOFF_BUFFER_FRAMES || heldBytes > UPGRADE_HANDOFF_BUFFER_BYTES) {
+        // Held frames are NEW-wire frames, so R2's discard-the-new-buffer-WHOLE rule applies to them
+        // as a set: nothing is added after this flag, and the abort ends the attempt before any
+        // replay, so no prefix can survive.
+        heldOverflow = true
+        heldFrames.length = 0
+        attempt.abort()
+      }
+    })
+
+    // The ONLY watchdog over PREPARE→handoff-entry. A barrier the server finds stale is refused
+    // SILENTLY, so without this a refused attempt would sit in `preparing`/`draining` forever.
+    watchdog.timer = setTimeout(() => attempt.abort(), UPGRADE_ATTEMPT_TIMEOUT_MS)
+    // Armed BEFORE the PREPARE leaves: a server may answer within the same turn, and a resolver
+    // installed afterwards would miss that READY and wedge the attempt until its deadline.
+    const readyP = new Promise<ReadyPayload | null>((resolve) => {
+      onReady = resolve
+      attempt.signal.addEventListener('abort', () => resolve(null), { once: true })
+    })
+    this.enterUpgradePreparing(attempt)
+    probe.send(this.buildPrepareFrame(upgradeId, sessionId))
+    const ready = await readyP
+    // A READY naming another attempt is worth exactly as much as none: it says nothing about
+    // whether OUR stage was installed.
+    if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
+      // Pre-barrier: nothing has left that could rotate the session, so the old wire keeps it.
+      // Aborting is also what closes the probe.
+      attempt.abort()
+      this.rollbackToOldWire()
+      return null
+    }
+    return { upgradeId, heartbeat, heldFrames }
+  }
+
+  /** Emits the barrier as the old wire's final frame. Every verdict other than `committed` has
+   *  already performed its own recovery, so the caller only has to return. */
+  private async commitBarrier(
+    from: ClientChannelTransport,
+    upgradeId: string,
+    attempt: AbortController,
+  ): Promise<'committed' | 'recovered'> {
+    // Gate down. From here the old wire carries exactly one more frame, and the payload is built
+    // inside `emitBarrier` — at emission — so its cursors reflect everything delivered since.
+    this.enterUpgradeDraining(attempt)
+    const emission = await from.emitBarrier(() => this.buildReconcileFrame({ upgradeId }), attempt.signal)
+
+    if (emission === 'wedged') {
+      // Nothing was written, so upgrades stay ENABLED — but the old wire cannot make progress: a
+      // POST that may never settle owns its flush gate, so released frames would sit in the outbox
+      // behind a guard that never opens. Recovery is the ordinary transport-loss path. Deliberately
+      // NOT drained into the new wire's outbox first: the reconnect's initial batch would then carry
+      // them AHEAD of the replay of frames the wedged POST swallowed, which the server dup-drops.
+      attempt.abort()
+      this.recoverWedgedOldWire(new NetworkError('Upgrade aborted with the old wire stalled', true))
+      return 'recovered'
+    }
+    if (emission === 'not-emitted') {
+      // Not one barrier byte written and the wire still usable, so the server's session is exactly
+      // where it was: stay on it.
+      attempt.abort()
+      this.rollbackToOldWire()
+      return 'recovered'
+    }
+    if (attempt.signal.aborted) {
+      // The barrier MAY already have reached the server, so no wire can be trusted to still hold the
+      // session: abandon BOTH and reconcile afresh. This must win over the reconcile deadline
+      // `buildReconcileFrame` just armed, which would take the GENERIC reconnect and leave upgrades
+      // enabled. It wins by construction — the attempt deadline was armed at PREPARE, strictly
+      // earlier, and both are 10 s.
+      this.abortUpgradeAndReconnectSse(new NetworkError('Upgrade barrier attempt timed out', true))
+      return 'recovered'
+    }
+    return 'committed'
+  }
+
+  /** Adopts the probed socket as the transport and replays what it received before the flip. */
+  private flipToNewWire(from: ClientChannelTransport, to: ClientChannelTransport, staged: StagedProbe): void {
+    staged.heartbeat.stop()
+    this.transport = to
+    this.enterUpgradeHandoff(from, staged.upgradeId)
+    // The flip must NOT fire `sendReconcileOnOpen`: the barrier already WAS this attempt's
+    // reconcile, and a second one would rotate the session again and delete the FIN finalizer the
+    // barrier just installed. Suppression spans only the synchronous adoption of the probed socket —
+    // a socket that instead has to CONNECT opens later, after the flag is down, and correctly
+    // reconciles itself.
+    this.suppressReconcileOnOpen = true
+    try {
+      to.start()
+    } finally {
+      this.suppressReconcileOnOpen = false
+    }
+    // No mid-loop cap check is needed: the held set is bounded by the SAME budget the handoff buffer
+    // enforces, that buffer starts empty, and this loop is fully synchronous. Introducing an `await`
+    // here would break that — the remaining held frames would then have to be DISCARDED rather than
+    // dispatched, or `trackSeq` advances past frames the fallback dropped and the recovery replay
+    // stays dup-suppressed forever.
+    for (const held of staged.heldFrames) this._onTransportFrame(held.frame, to, held.byteLength)
   }
 
   /** The attempt ended pre-barrier on a wire that can no longer make progress.
