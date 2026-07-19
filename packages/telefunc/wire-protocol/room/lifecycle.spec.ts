@@ -113,9 +113,9 @@ beforeEach(() => {
 })
 afterEach(() => _resetBroadcastAdapterForTesting(previous))
 
-function authorityConfig(id: string): { status: string; gen: number } | null {
+function authorityConfig(id: string): { status: string; inc: string } | null {
   const raw = hybrid.authority.get(roomConfigKvKey(id))?.value
-  return raw ? (JSON.parse(raw) as { status: string; gen: number }) : null
+  return raw ? (JSON.parse(raw) as { status: string; inc: string }) : null
 }
 
 describe('Room lifecycle is authority-owned (regressions that fail on 00f838b)', () => {
@@ -143,16 +143,20 @@ describe('Room lifecycle is authority-owned (regressions that fail on 00f838b)',
     expect(authorityConfig('la:resurrect')?.status).toBe('closed') // still a tombstone, never re-opened
   })
 
-  it('recreation starts a new generation and carries none of the previous roster', async () => {
+  it('recreation is a fresh incarnation and carries none of the previous roster', async () => {
     const first = await Room.create('la:recreate')
     await first.join({ meta: { name: 'Alice' } })
     expect((await Room.getParticipants('la:recreate')).length).toBe(1)
-    expect(authorityConfig('la:recreate')).toMatchObject({ status: 'open', gen: 1 })
+    const firstInc = authorityConfig('la:recreate')?.inc
+    expect(firstInc).toBeTruthy() // a real incarnation id, not a counter
 
     await Room.close('la:recreate')
-    await Room.create('la:recreate') // resumes past the closed tombstone
+    await Room.create('la:recreate') // takes over the closed tombstone
 
-    expect(authorityConfig('la:recreate')?.gen).toBe(2) // new generation
+    expect(authorityConfig('la:recreate')?.status).toBe('open')
+    // A distinct incarnation id — a counter could reuse `1` after the tombstone lapsed and let a stale
+    // handle false-match; a random id never collides.
+    expect(authorityConfig('la:recreate')?.inc).not.toBe(firstInc)
     expect(await Room.getParticipants('la:recreate')).toEqual([]) // Alice did not survive the close
   })
 

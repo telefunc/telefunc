@@ -259,21 +259,24 @@ function roomIdentityRoomKvPrefix(roomId: string): string {
 
 /** A room's lifecycle at its authority. `open` admits every operation; `closing` is the atomic
  *  fence a `Room.close()` raises before it sweeps state (so an in-flight join/mutation is rejected
- *  rather than orphaned); `closed` is the tombstone left behind — the config is kept (not deleted)
- *  so a later create resumes the generation past the previous one, and it carries a TTL so it can't
- *  leak. Only `open` is a live room; `Room.get`/`Room.list` treat `closing`/`closed` as absent. */
+ *  rather than orphaned); `closed` is the tombstone left behind — the config is kept (not deleted) to
+ *  mark the id closed for the sweep window, and it carries a TTL so it can't leak. A recreation takes
+ *  it over with a fresh incarnation id (the semantic order resumes past the previous watermark via the
+ *  separate `:o` key). Only `open` is a live room; `Room.get`/`Room.list` treat `closing`/`closed` as absent. */
 type RoomStatus = 'open' | 'closing' | 'closed'
 
 /** Stored at `roomConfigKvKey`. `at`/`by` is the last-writer-wins stamp of the latest
- *  `Room.setMeta()`/`Room.setAttributes()` (see `applyRoomUpdate`). `gen` is the room's generation:
- *  it increments on every (re)create, so a member record or mutation from a previous incarnation
- *  can't attach to the current one (see `RoomMemberRecord.gen`). The authority owns this record;
- *  legality (join/mutate/close) is decided against it, never against the eventually-consistent replica. */
+ *  `Room.setMeta()`/`Room.setAttributes()` (see `applyRoomUpdate`). `inc` is the room's incarnation
+ *  id: a fresh random id on every (re)create, so a member record or mutation from a previous
+ *  incarnation can't attach to the current one (see `RoomMemberRecord.inc`). Random, not a counter, so
+ *  a recreation after the tombstone TTL lapses can't reuse a previous incarnation's id and let a stale
+ *  handle false-match. The authority owns this record; legality (join/mutate/close) is decided against
+ *  it, never against the eventually-consistent replica. */
 type RoomConfigRecord = {
   meta: RoomMeta
   at: number
   by: string
-  gen: number
+  inc: string
   status: RoomStatus
 }
 
@@ -288,10 +291,10 @@ type RoomMemberRecord = {
   meta: ParticipantMeta
   joinedAt: number
   seenAt: number
-  /** The room generation (`RoomConfigRecord.gen`) this membership belongs to. A record left behind
-   *  by a crashed node from a previous incarnation carries the old generation, so a reader binding to
-   *  the current generation ignores it — a stale member never attaches to a recreated room. */
-  gen: number
+  /** The room incarnation (`RoomConfigRecord.inc`) this membership belongs to. A record left behind
+   *  by a crashed node from a previous incarnation carries the old id, so a reader binding to the
+   *  current incarnation ignores it — a stale member never attaches to a recreated room. */
+  inc: string
   /** Monotonic meta revision, issued by the member's single owner — orders `p-meta` events. */
   metaSeq: number
   /** App identity stamped at (server-side) join — absent: none. Immutable per member. */
