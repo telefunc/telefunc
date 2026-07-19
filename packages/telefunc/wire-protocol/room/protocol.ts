@@ -619,6 +619,8 @@ function bytesToUuid(bytes: Uint8Array): string {
 const FRAME_FLAG_META = 0b0000_0001
 const FRAME_FLAG_TRACK = 0b0000_0010
 const FRAME_FLAG_RETAIN = 0b0000_0100
+/** The only bits the framer defines. Any other bit set is a malformed or forward-incompatible frame. */
+const FRAME_FLAGS_KNOWN = FRAME_FLAG_META | FRAME_FLAG_TRACK | FRAME_FLAG_RETAIN
 /** Track names stay tiny — they ride every frame. */
 const TRACK_MAX_BYTES = 64
 /** Per-frame meta stays small — it rides every frame that carries it. */
@@ -689,6 +691,7 @@ function unframeMemberId(data: Uint8Array): {
 } | null {
   if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
   const flags = data[MEMBER_ID_BYTE_LENGTH]!
+  if (flags & ~FRAME_FLAGS_KNOWN) return null // an unknown flag bit — malformed or forward-incompatible; reject it
   const retain = (flags & FRAME_FLAG_RETAIN) !== 0
   let track: string | null = null
   let meta: Record<string, unknown> | null = null
@@ -707,7 +710,9 @@ function unframeMemberId(data: Uint8Array): {
     offset += 2
     if (metaLength > META_MAX_BYTES || data.byteLength < offset + metaLength) return null
     try {
-      meta = parse(frameTextDecoder.decode(data.subarray(offset, offset + metaLength))) as Record<string, unknown>
+      const parsedMeta: unknown = parse(frameTextDecoder.decode(data.subarray(offset, offset + metaLength)))
+      if (!isObject(parsedMeta)) return null // meta must be an object — a scalar/array hand-crafted frame is rejected
+      meta = parsedMeta
     } catch {
       return null // malformed meta JSON on a hand-crafted frame — reject the whole frame, don't throw
     }
@@ -791,6 +796,13 @@ function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
 function sanitizeTrackWants(wants: unknown): TrackWants | null {
   if (!isObject(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
   if (wants.tracks.length > SUB_BINARY_TRACKS_MAX) return null
-  if (!wants.tracks.every((track) => typeof track === 'string' && track.length <= TRACK_MAX_BYTES)) return null
+  // Bound by UTF-8 bytes, the same unit the frame path uses (`frameWithMemberId`) — a `.length` char
+  // count would admit a want no real ≤64-byte track can ever match.
+  if (
+    !wants.tracks.every(
+      (track) => typeof track === 'string' && frameTextEncoder.encode(track).byteLength <= TRACK_MAX_BYTES,
+    )
+  )
+    return null
   return { all: wants.all, tracks: wants.tracks as string[] }
 }

@@ -39,6 +39,7 @@ import {
   roomIdentityMemberKvKey,
   roomIdentityKvPrefix,
   unframeMemberId,
+  sanitizeBinaryWants,
   type RoomMemberRecord,
   type RoomSnapshotMetadata,
 } from './protocol.js'
@@ -822,6 +823,32 @@ describe('selective binary delivery', () => {
     expect(out.track).toBe('screen')
     expect(out.meta).toEqual({ key: true, ts: 42 })
     expect([...out.payload]).toEqual([9])
+  })
+
+  it('rejects a hostile binary frame: unknown flag bits and non-object meta', () => {
+    const id = crypto.randomUUID()
+    // An unknown flag bit → reject the whole frame (malformed or forward-incompatible).
+    const badFlags = frameWithMemberId(id, new Uint8Array([1, 2, 3]))
+    badFlags[16] = 0x80
+    expect(unframeMemberId(badFlags)).toBeNull()
+
+    // A scalar (non-object) meta is rejected — the framer never emits one, so it can only be hand-crafted.
+    const uuidBytes = frameWithMemberId(id, new Uint8Array([9])).subarray(0, 16)
+    const scalarMeta = new TextEncoder().encode('5')
+    const hostile = new Uint8Array(16 + 1 + 2 + scalarMeta.length + 1)
+    hostile.set(uuidBytes, 0)
+    hostile[16] = 0x01 // FRAME_FLAG_META
+    hostile[18] = scalarMeta.length // 2-byte length (high byte 0)
+    hostile.set(scalarMeta, 19)
+    hostile[19 + scalarMeta.length] = 9 // payload
+    expect(unframeMemberId(hostile)).toBeNull()
+  })
+
+  it('bounds a binary want track by UTF-8 bytes, not JS chars', () => {
+    const wide = '中'.repeat(30) // 30 UTF-16 units, 90 UTF-8 bytes — passes a char count, fails the byte cap
+    expect(wide.length).toBeLessThanOrEqual(64)
+    expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: [wide] }, members: {} })).toBeNull()
+    expect(sanitizeBinaryWants({ everyMember: { all: false, tracks: ['camera'] }, members: {} })).not.toBeNull()
   })
 
   it('a member-scoped listener still brings up the room text lane', async () => {
