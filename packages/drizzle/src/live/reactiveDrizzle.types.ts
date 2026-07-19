@@ -16,22 +16,15 @@ import type {
   SelectedFields as SQLiteSelectedFields,
 } from 'drizzle-orm/sqlite-core'
 import type { SQLiteAsyncSelectBase, SQLiteAsyncSelectBuilder } from 'drizzle-orm/sqlite-core/async/select'
-import type {
-  MySqlSelectBase,
-  MySqlSelectBuilder,
-  MySqlSelectHKTBase,
-  SelectedFields as MySqlSelectedFields,
-} from 'drizzle-orm/mysql-core'
-import type { MySqlAsyncSelectBase, MySqlAsyncSelectBuilder } from 'drizzle-orm/mysql-core/async/select'
 import type { Live } from 'telefunc'
 
 // THE TYPE TRANSFORM, and nothing else. Purely declarative — no value in this module, so it cannot affect
-// runtime behaviour and a reader of the entry path never has to descend through ~250 lines of conditional
+// runtime behaviour and a reader of the entry path never has to descend through ~200 lines of conditional
 // generics to reach the proxy. `reactiveDrizzle.ts` re-exports `Reactive` as its public type.
 
 /** The driver-terminal surface an async select adds OVER the core query-builder select: the `QueryPromise`
  *  verbs (`then`/`catch`/`finally`/`execute`) plus `prepare` and each dialect's runners (SQLite
- *  `all`/`get`/`run`/`values`, MySQL `iterator`). Picked as exactly the members the async base adds and no
+ *  `all`/`get`/`run`/`values`). Picked as exactly the members the async base adds and no
  *  more (`keyof async` minus `keyof core`), so intersecting it onto the reactive chain NEVER clashes with a
  *  chain method — the reactive HKT keeps owning `from`/`where`/joins, and this only re-adds the terminals
  *  the core builder lacks. This is what makes "everything except `.live()` is the ordinary async builder"
@@ -210,77 +203,14 @@ type ReactiveSQLiteDb<TDb extends { select: (...args: any[]) => any }> = Omit<TD
   >
 }
 
-// ── MySQL ───────────────────────────────────────────────────────────────────────────────────────
-interface MySqlReactiveSelectHKT extends MySqlSelectHKTBase {
-  _type: MySqlReactiveSelect<
-    this['tableName'],
-    Assume<this['selection'], ColumnsSelection>,
-    this['selectMode'],
-    Assume<this['nullabilityMap'], Record<string, JoinNullability>>,
-    this['dynamic'],
-    this['excludedMethods'],
-    Assume<this['result'], any[]>,
-    Assume<this['selectedFields'], ColumnsSelection>
-  >
-}
-type MySqlReactiveSelect<
-  TTableName extends string | undefined,
-  TSelection extends ColumnsSelection,
-  TSelectMode extends SelectMode,
-  TNullabilityMap extends Record<string, JoinNullability>,
-  TDynamic extends boolean,
-  TExcludedMethods extends string,
-  TResult extends any[],
-  TSelectedFields extends ColumnsSelection,
-> = MySqlSelectBase<
-  MySqlReactiveSelectHKT,
-  TTableName,
-  TSelection,
-  TSelectMode,
-  TNullabilityMap,
-  TDynamic,
-  TExcludedMethods,
-  TResult,
-  TSelectedFields
-> &
-  AsyncTerminals<
-    MySqlAsyncSelectBase<
-      TTableName,
-      TSelection,
-      TSelectMode,
-      TNullabilityMap,
-      TDynamic,
-      TExcludedMethods,
-      TResult,
-      TSelectedFields
-    >,
-    MySqlSelectBase<
-      MySqlReactiveSelectHKT,
-      TTableName,
-      TSelection,
-      TSelectMode,
-      TNullabilityMap,
-      TDynamic,
-      TExcludedMethods,
-      TResult,
-      TSelectedFields
-    >
-  > & { live(): Promise<Live<TResult>> }
-type ReactiveMySqlDb<TDb> = Omit<TDb, 'select'> & {
-  select(): MySqlSelectBuilder<undefined, MySqlReactiveSelectHKT>
-  select<TSelection extends MySqlSelectedFields>(
-    fields: TSelection,
-  ): MySqlSelectBuilder<TSelection, MySqlReactiveSelectHKT>
-}
-
 /** The databases reactive queries support: a real, executable Drizzle db or transaction whose `select()`
- *  builds an ASYNC (awaitable, hydratable) query. A bare `QueryBuilder` — which type-checks a query but
- *  has no session to run it against — is deliberately excluded: a live read has nothing to hydrate from,
- *  so accepting one would type a `.live()` that could never resolve. */
+ *  builds an ASYNC (awaitable, hydratable) query on a SUPPORTED dialect. A bare `QueryBuilder` — which
+ *  type-checks a query but has no session to run it against — is deliberately excluded: a live read has
+ *  nothing to hydrate from, so accepting one would type a `.live()` that could never resolve. MySQL is
+ *  excluded for a different reason: it has no `RETURNING`, so no write on it could ever be captured row by
+ *  row, and it is rejected at construction too (see `dialectOf`) rather than merely lacking `.live()`. */
 type ReactiveDatabase = {
-  select: (
-    ...args: any[]
-  ) => PgAsyncSelectBuilder<any> | MySqlAsyncSelectBuilder<any> | SQLiteAsyncSelectBuilder<any, any, any>
+  select: (...args: any[]) => PgAsyncSelectBuilder<any> | SQLiteAsyncSelectBuilder<any, any, any>
 }
 
 /** The reactive db: exactly `TDb` (every write/query surface preserved) with `select()` re-typed to build
@@ -291,8 +221,6 @@ type ReactiveDatabase = {
  *  neither wrapped nor re-typed, so `.live()` is intentionally absent there (see the `reactiveDrizzle` doc). */
 type Reactive<TDb extends ReactiveDatabase> = ReturnType<TDb['select']> extends PgAsyncSelectBuilder<any>
   ? ReactivePgDb<TDb>
-  : ReturnType<TDb['select']> extends MySqlAsyncSelectBuilder<any>
-    ? ReactiveMySqlDb<TDb>
-    : ReturnType<TDb['select']> extends SQLiteAsyncSelectBuilder<any, any, any>
-      ? ReactiveSQLiteDb<TDb>
-      : never
+  : ReturnType<TDb['select']> extends SQLiteAsyncSelectBuilder<any, any, any>
+    ? ReactiveSQLiteDb<TDb>
+    : never

@@ -3,15 +3,14 @@ import { boolean, integer, pgTable, QueryBuilder, text } from 'drizzle-orm/pg-co
 import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { integer as sInteger, sqliteTable, text as sText } from 'drizzle-orm/sqlite-core'
 import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
-import { int as myInt, mysqlTable, varchar } from 'drizzle-orm/mysql-core'
-import { drizzle as mysqlDrizzle } from 'drizzle-orm/mysql2'
+import type { MySqlAsyncSelectBuilder } from 'drizzle-orm/mysql-core/async/select'
 import { it } from 'vitest'
 import type { Live } from 'telefunc'
 import { reactiveDrizzle } from './reactiveDrizzle.js'
 
 // A COMPILE-TIME contract, checked by the package's own `tsc` (tsconfig.spec.json). It exercises the
 // SHIPPING `reactiveDrizzle` return type — not a copy of the HKTs — against REAL Drizzle rc.4 db types,
-// on all three targeted dialects (pg + sqlite + mysql). The proof IS the typecheck: every function below
+// on both supported dialects (pg + sqlite). The proof IS the typecheck: every function below
 // either type-checks or is pinned with `@ts-expect-error`, and none is ever executed. If a pin stops erroring — someone widened a row type to `any`, or leaked
 // `.live()` onto the base db — the directive becomes unused and tsc fails here (TS2578: fail-closed).
 //
@@ -34,15 +33,9 @@ const sqliteTodos = sqliteTable('todos', {
   done: sInteger('done', { mode: 'boolean' }).notNull(),
   rank: sInteger('rank').notNull(),
 })
-const mysqlTodos = mysqlTable('todos', {
-  id: varchar('id', { length: 32 }).primaryKey(),
-  done: myInt('done').notNull(),
-  rank: myInt('rank').notNull(),
-})
 
 declare const pgBase: ReturnType<typeof pgDrizzle>
 declare const sqliteBase: ReturnType<typeof sqliteDrizzle>
-declare const mysqlBase: ReturnType<typeof mysqlDrizzle>
 
 // ── PostgreSQL: whole-row + projection resolve; `await` (no `.live()`) stays plain rows ──
 async function pgPaths() {
@@ -86,18 +79,16 @@ async function sqlitePaths() {
   void [done, rank, wrong, id]
 }
 
-// ── MySQL ──
-async function mysqlPaths() {
-  const db = reactiveDrizzle(mysqlBase)
-  const whole = await db.select().from(mysqlTodos).live()
-  const done: number = whole.data[0]!.done // mysql `int` → number
-  // @ts-expect-error teeth: `done` is number, not boolean
-  const wrong: boolean = whole.data[0]!.done
-
-  const proj = await db.select({ id: mysqlTodos.id }).from(mysqlTodos).live()
-  const id: string = proj.data[0]!.id
-
-  void [done, wrong, id]
+// ── Teeth: MySQL is REJECTED, not merely absent — the type says so and `reactiveDrizzle` throws to match ──
+// The constraint reads the db's own async select BUILDER, so the fixture is that builder's real type from
+// drizzle's driver-free `mysql-core` (the mysql2 driver is not a dependency of this package). The RUNTIME
+// half of the same contract — construction throws with a message naming the supported set — is pinned in
+// reactiveDrizzle.spec.ts against a real `MySqlDialect`; a type-only rejection would leave a JS caller with
+// a silently non-reactive db.
+declare const mysqlBase: { select: (...args: any[]) => MySqlAsyncSelectBuilder<any> }
+function mysqlRejected() {
+  // @ts-expect-error MySQL has no RETURNING, so no write on it could be captured row by row — unsupported
+  reactiveDrizzle(mysqlBase)
 }
 
 // ── Driver terminals survive: everything EXCEPT `.live()` is the ordinary async builder ──
@@ -127,12 +118,6 @@ function sqliteDriverTerminals() {
   const prepared: ReturnType<typeof base.prepare> = null as unknown as ReturnType<typeof reactive.prepare>
   void [run, all, get, values, execute, prepared]
 }
-async function mysqlDriverTerminals() {
-  const db = reactiveDrizzle(mysqlBase)
-  const q = db.select().from(mysqlTodos)
-  void [q.prepare, q.execute, q.iterator]
-}
-
 // ── Left-join nullability + `$dynamic()` survive the reactive chain to `.live()` ──
 async function joinNullabilityAndDynamic() {
   const db = reactiveDrizzle(pgBase)
@@ -190,10 +175,9 @@ async function forgettingIsVisible(): Promise<Live<(typeof pgTodos.$inferSelect)
 void [
   pgPaths,
   sqlitePaths,
-  mysqlPaths,
+  mysqlRejected,
   pgDriverTerminals,
   sqliteDriverTerminals,
-  mysqlDriverTerminals,
   joinNullabilityAndDynamic,
   transactionTyping,
   standaloneQueryBuilderRejected,
