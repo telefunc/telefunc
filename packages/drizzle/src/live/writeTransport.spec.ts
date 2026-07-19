@@ -601,3 +601,78 @@ describe('write transport — a publication belongs to the transport era of its 
     expect(b.published).toHaveLength(1) // the post-rotation one landed here
   })
 })
+
+// A rotation cuts the change stream in a way the SEQUENCE CANNOT SHOW. The receiver's deferred baseline
+// assumes a sequence below the first one it sees is either pre-admission (already in its snapshot) or still
+// owed by an at-least-once adapter. A message published on the writer's PREVIOUS transport is neither:
+// published after admission, onto a transport the receiver was never on. Nothing can ever deliver it, so a
+// precise bet there is a permanent hole rather than a brief one.
+describe('write transport — a transport rotation is an OBSERVABLE cut, not an inferred one', () => {
+  /** The Evaluator's schedule: R is admitted on B; W publishes seq 1 on A (unreachable — after R's snapshot,
+   *  and not deliverable on B); W rotates to B and publishes seq 2. */
+  async function crossEra() {
+    const $client = { connection: 'shared' }
+    const writer = { $client }
+    const receiver = { $client }
+    const transportA = createInMemoryChangeTransport()
+    const transportB = createInMemoryChangeTransport()
+
+    setChangeTransport(receiver, transportB)
+    await acquireSubscription(receiver) // R admitted on B, snapshot taken
+    registryFor(receiver).router.register(watching('users'))
+    const ingest = vi.fn()
+    engine.perDb.set(receiver, ingest)
+
+    setChangeTransport(writer, transportA, true)
+    publishBatch(writer, { changes: [change('users')] }) // seq 1 → A. R is on B: it never arrives, ever.
+    await flush()
+    expect(ingest).not.toHaveBeenCalled() // …confirmed unreachable, not merely late
+
+    return { writer, receiver, transportB, ingest }
+  }
+
+  it('the first post-rotation publication cuts: the receiver coarsens instead of betting precise', async () => {
+    const { writer, transportB, ingest } = await crossEra()
+
+    setChangeTransport(writer, transportB, true) // W rotates to B — quiescent, it has only written
+    publishBatch(writer, { changes: [change('users')] }) // seq 2 → B, carrying the cut
+    await flush()
+
+    expect(ingest).toHaveBeenCalledTimes(1)
+    const [batch] = ingest.mock.calls[0] as [{ changes: TableChange[] }]
+    // COARSE, not the precise row. Precise here would leave seq 1 missing forever with nothing able to
+    // correct it — incorrect by omission, permanently, which is the failure this marker exists to prevent.
+    expect(batch.changes.every((c) => c.kind === 'coarse')).toBe(true)
+    expect(batch.changes.map((c) => c.table)).toEqual(['users'])
+  })
+
+  it('a redelivered cut does not coarsen twice', async () => {
+    const { writer, transportB, ingest } = await crossEra()
+    setChangeTransport(writer, transportB, true)
+    const wire: string[] = []
+    await transportB.subscribe(changeTopicFor(writer), (payload) => wire.push(payload))
+    publishBatch(writer, { changes: [change('users')] })
+    await flush()
+    expect(ingest).toHaveBeenCalledTimes(1)
+
+    transportB.publish(changeTopicFor(writer), wire[0]!) // at-least-once: the same cut again
+    expect(ingest).toHaveBeenCalledTimes(1) // …already accounted for
+  })
+
+  it('NEGATIVE: with no rotation there is no cut, and the deferred baseline is unchanged', async () => {
+    // Same shape, one difference: the writer never changes transport. The first message the receiver sees is
+    // taken PRECISELY, exactly as before — so the cut above is caused by the rotation, not by the schedule.
+    const { transport, dbA, dbB } = await twoInstances()
+    registryFor(dbB).router.register(watching('users'))
+    const ingest = vi.fn()
+    engine.perDb.set(dbB, ingest)
+    void transport
+
+    publishBatch(dbA, { changes: [change('users')] })
+    publishBatch(dbA, { changes: [change('users')] })
+    await flush()
+
+    const [first] = ingest.mock.calls[0] as [{ changes: TableChange[] }]
+    expect(first.changes[0]!.kind).toBe('insert') // precise baseline, no coarsening
+  })
+})

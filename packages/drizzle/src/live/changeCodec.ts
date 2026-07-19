@@ -27,7 +27,7 @@ import type { Row, TableChange } from '../router/events.js'
 
 /** Bumped when the envelope shape changes. A receiver that does not recognise the version coarsens rather
  *  than interpreting a payload it does not understand. */
-const CHANGE_CODEC_VERSION = 2
+const CHANGE_CODEC_VERSION = 3
 
 /**
  * What one publication carries.
@@ -43,10 +43,25 @@ const CHANGE_CODEC_VERSION = 2
  *
  * `coarseAll` is the value-free form: a mutation whose touched tables are unknowable (raw SQL, batch), or a
  * precise batch that could not be encoded.
+ *
+ * `eraCut` marks the first publication after this origin CHANGED TRANSPORT. It exists because the receiver's
+ * deferred baseline (writeTransport.ts) rests on a dichotomy that a transport rotation breaks: a sequence
+ * below the first one seen was either published before the receiver was admitted (already in its snapshot)
+ * or is still owed to it by an at-least-once adapter. A message published on the PREVIOUS transport is
+ * neither — it was published after admission, and it is not deliverable on the transport the receiver is
+ * on, so no straggler can ever arrive to correct the bet. A receiver cannot infer this from `seq` alone:
+ * first-seeing an origin at seq 2 looks identical whether seq 1 went to another transport or is simply
+ * about to arrive. The publisher is the only party that knows a cut happened, so it says so.
  */
-type ChangeEnvelope =
-  | { version: number; namespace: string; origin: string; seq: number; changes: TableChange[] }
-  | { version: number; namespace: string; origin: string; seq: number; coarseAll: true }
+type ChangeEnvelopeBase = {
+  version: number
+  namespace: string
+  origin: string
+  seq: number
+  /** Present only on the first publication of a new transport era. */
+  eraCut?: true
+}
+type ChangeEnvelope = (ChangeEnvelopeBase & { changes: TableChange[] }) | (ChangeEnvelopeBase & { coarseAll: true })
 
 /**
  * The byte-array token, deliberately inside the underlying serializer's `!`-prefixed namespace.
@@ -130,6 +145,9 @@ function isEnvelope(value: unknown): value is ChangeEnvelope {
   // to prevent — and a non-integer seq would make the ordering comparisons below meaningless.
   if (typeof value.namespace !== 'string' || value.namespace === '') return false
   if (typeof value.seq !== 'number' || !Number.isInteger(value.seq) || value.seq < 1) return false
+  // Only the exact marker, never a coerced truthy value: a receiver that took a malformed `eraCut` as absent
+  // would bet precise across a cut, which is the one thing the field exists to prevent.
+  if (value.eraCut !== undefined && value.eraCut !== true) return false
   if (value.coarseAll === true) return true
   return Array.isArray(value.changes) && value.changes.every(isTableChange)
 }

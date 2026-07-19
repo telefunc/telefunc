@@ -22,6 +22,24 @@ const roundTrip = (changes: TableChange[]): TableChange[] => {
   return (decoded as { changes: TableChange[] }).changes
 }
 
+describe('change codec — the era-cut marker', () => {
+  it('survives the wire, on both envelope forms', () => {
+    const base = { version: CHANGE_CODEC_VERSION, namespace: 'ns', origin: 'a', seq: 2, eraCut: true as const }
+    expect(decodeChangePayload(encodeChangePayload({ ...base, coarseAll: true }))).toMatchObject({ eraCut: true })
+    expect(decodeChangePayload(encodeChangePayload({ ...base, changes: [] }))).toMatchObject({ eraCut: true })
+  })
+
+  it('CONTROL: an ordinary publication carries no marker at all', () => {
+    const decoded = decodeChangePayload(
+      encodeChangePayload({ version: CHANGE_CODEC_VERSION, namespace: 'ns', origin: 'a', seq: 2, changes: [] }),
+    )
+    // Absent, not `false` — the receiver branches on presence, and a decoder that invented the field would
+    // make every publication look like a cut.
+    expect(decoded).toBeDefined()
+    expect('eraCut' in (decoded as object)).toBe(false)
+  })
+})
+
 describe('change codec — SQL values survive a serializing transport', () => {
   it('carries the value domain a row is actually made of', () => {
     const row = {
@@ -103,6 +121,29 @@ describe('change codec — anything untrustworthy decodes to nothing (the caller
       coarseAll: true,
     })
     rejected(future)
+  })
+
+  it('rejects an OLDER version too — the match is exact, not a floor', () => {
+    // What makes `eraCut` safe to add by bumping the version: a receiver from before the field existed
+    // cannot decode a payload carrying it, so it coarsens instead of silently ignoring the marker and
+    // betting precise across a cut. That only holds if the version check is equality, not `>=`.
+    rejected(
+      encodeChangePayload({
+        version: CHANGE_CODEC_VERSION - 1,
+        namespace: 'ns',
+        origin: 'a',
+        seq: 1,
+        coarseAll: true,
+      }),
+    )
+  })
+
+  it('rejects a malformed eraCut marker rather than reading it as absent', () => {
+    // Coercing a truthy-but-wrong marker to "no cut" is the one misreading that costs a permanent hole.
+    const base = { version: CHANGE_CODEC_VERSION, namespace: 'ns', origin: 'a', seq: 1, coarseAll: true }
+    rejected(JSON.stringify({ ...base, eraCut: 'yes' }))
+    rejected(JSON.stringify({ ...base, eraCut: 1 }))
+    rejected(JSON.stringify({ ...base, eraCut: false }))
   })
 
   it('rejects malformed text', () => {

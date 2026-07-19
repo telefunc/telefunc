@@ -3,7 +3,7 @@ export type { SubscriptionRef }
 
 import { randomUUID } from 'node:crypto'
 import { registryFor } from './dbRuntime.js'
-import { type ChangeSubscription, namespaceFor, transportFor } from './changeTransport.js'
+import { type ChangeSubscription, type ChangeTransport, namespaceFor, transportFor } from './changeTransport.js'
 import { CHANGE_CODEC_VERSION, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
 import type { ChangeBatch } from '../router/events.js'
 
@@ -50,10 +50,19 @@ function changeTopicFor(db: object): string {
 /** The publishing identity of a db — stable for its lifetime, used to drop our own echo. Its `seq` is that
  *  identity's monotonic publication counter: the receiver's only way to tell a duplicate from a reorder from
  *  a gap without demanding both properties from every adapter. */
-const publishers = new WeakMap<object, { origin: string; seq: number; chain: Promise<void> }>()
-function publisherOf(db: object): { origin: string; seq: number; chain: Promise<void> } {
+type PublisherState = {
+  origin: string
+  seq: number
+  chain: Promise<void>
+  /** The transport the previous publication went out on, so a rotation is detectable at the next one. */
+  transport: ChangeTransport | undefined
+}
+const publishers = new WeakMap<object, PublisherState>()
+function publisherOf(db: object): PublisherState {
   let publisher = publishers.get(db)
-  if (!publisher) publishers.set(db, (publisher = { origin: randomUUID(), seq: 0, chain: Promise.resolve() }))
+  if (!publisher) {
+    publishers.set(db, (publisher = { origin: randomUUID(), seq: 0, chain: Promise.resolve(), transport: undefined }))
+  }
   return publisher
 }
 
@@ -86,15 +95,32 @@ function publishCoarseAll(db: object): void {
   publishPayload(db, encodeChangePayload({ ...nextHeader(db), coarseAll: true }))
 }
 
-/** The envelope header for the next publication, taking this db's next sequence number. */
-function nextHeader(db: object): { version: number; namespace: string; origin: string; seq: number } {
+/** The envelope header for the next publication, taking this db's next sequence number — and marking an ERA
+ *  CUT when this publication is the first to go out on a different transport than the last one did.
+ *
+ *  Only the publisher can know this. A receiver first-seeing an origin at seq 2 cannot tell whether seq 1
+ *  went to a transport it was never on or is simply about to arrive, and its deferred baseline assumes the
+ *  latter — correctly, right up until a rotation makes the earlier messages undeliverable rather than late.
+ *  The FIRST publication ever is not a cut: nothing precedes seq 1, so there is nothing a receiver could be
+ *  betting wrong about. */
+function nextHeader(db: object): {
+  version: number
+  namespace: string
+  origin: string
+  seq: number
+  eraCut?: true
+} {
   const publisher = publisherOf(db)
   publisher.seq++
+  const transport = transportFor(db)
+  const eraCut = publisher.transport !== undefined && publisher.transport !== transport
+  publisher.transport = transport
   return {
     version: CHANGE_CODEC_VERSION,
     namespace: namespaceFor(db),
     origin: publisher.origin,
     seq: publisher.seq,
+    ...(eraCut ? { eraCut: true as const } : {}),
   }
 }
 
@@ -340,7 +366,27 @@ function receive(db: object, state: SubscriptionState, payload: string): void {
   //
   // THE INVARIANT: a change is applied at most once; anything not applied precisely is over-fired; and any
   // sequence skipped by a baseline bet is either already in the snapshot or still owed to us by the adapter.
-  const tracked = state.seen.get(envelope.origin)
+  // ERA CUT — the publisher changed transport, and it is telling us so because we could not have worked it
+  // out. The deferred baseline below rests on a dichotomy that a rotation breaks: a sequence under the first
+  // one we see is either pre-admission (already in our snapshot) or still owed to us by an at-least-once
+  // adapter. Messages from the publisher's PREVIOUS era are neither — published after we were admitted, but
+  // onto a transport we were never subscribed to, so no straggler can ever arrive to correct a wrong bet and
+  // the hole would be permanent rather than brief. So we do NOT bet precise across a cut: coarsen once, and
+  // take this sequence as the watermark. Everything below it is thereby accounted for, from either era.
+  //
+  // The cost is one reseed per watched graph per rotation, and rotation only happens at a quiescent boundary
+  // — rare by construction. Coarse is recoverable; a permanently missing delta is not.
+  const trackedAtCut = state.seen.get(envelope.origin)
+  if (envelope.eraCut) {
+    // A redelivery of a cut we already acted on: at-least-once means we may see it twice, and coarsening
+    // again would buy a redundant reseed (or, mid-reseed, risk the storm guard's terminal demotion).
+    if (trackedAtCut !== undefined && envelope.seq <= trackedAtCut.last) return
+    state.seen.set(envelope.origin, { last: envelope.seq, unknownBelow: 0 })
+    coarsenWatched(db)
+    return
+  }
+
+  const tracked = trackedAtCut
   if (tracked === undefined) {
     // The bet. Everything below this sequence is unaccounted for until it either proves irrelevant (never
     // arrives, because it predates admission) or arrives as a straggler.
