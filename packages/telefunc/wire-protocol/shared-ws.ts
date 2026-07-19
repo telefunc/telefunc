@@ -134,9 +134,6 @@ function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
 
 type ReconcilePayload = {
   sessionId?: string
-  /** Set when the client is upgrading from SSE to WS and has kept SSE alive.
-   *  Server should drain the SSE send chain before replaying and attaching. */
-  upgrade?: true
   /** `initial: true` means this is the first reconcile for that channel — the server may
    *  not have created it yet (late-creation race during request body parse), so the server
    *  should wait up to `connectTtl` for it. Established channels (already reconciled at
@@ -181,11 +178,6 @@ type ReconciledPayload = {
   /** Echoed on the reconciled that COMMITS a barrier upgrade, so a delayed ordinary reconciled
    *  can never be consumed as the commit of an in-flight attempt. */
   upgradeId?: string
-  /** Capability advertisement: this server understands `PREPARE`/`READY`/barrier reconciles.
-   *  Load-bearing — an unknown tag on an older server is a decode assert, which permanently
-   *  terminates the wire, so the client must see this before sending its first `PREPARE` byte.
-   *  Absent ⇒ legacy upgrade flow. */
-  barrierUpgrade?: true
 }
 
 /** Ack result outcome on the wire — same byte value in memory and on the wire.

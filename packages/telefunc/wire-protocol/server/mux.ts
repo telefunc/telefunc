@@ -308,9 +308,6 @@ class ChannelMux {
         sseFlushThrottle: this.options.sseFlushThrottle,
         ssePostIdleFlushDelay: this.options.ssePostIdleFlushDelay,
         transports: this.options.transports,
-        // Capability advertisement. Safe to send unconditionally: neither payload is schema-
-        // validated, so an older client simply ignores the unknown field.
-        barrierUpgrade: true,
       }),
     )
     // Sends are sync; firing the upgrade finalizer here can't reorder anything on the new wire.
@@ -679,7 +676,10 @@ class ChannelMux {
     ctrl: ReconcilePayload,
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
-    const finalizeUpgrade = ctrl.upgrade && ctrl.sessionId ? this.buildUpgradeFinalizer(ctrl.sessionId) : null
+    // A barrier commits the STAGED wire, so the FIN owed to the old wire is the finalizer the old
+    // session registered on its own reconcile. Ordinary reconciles owe no FIN — nothing is being
+    // retired — which is why this reads `barrier` rather than firing on every sessioned reconcile.
+    const finalizeUpgrade = ctrl.barrier && ctrl.sessionId ? this.buildUpgradeFinalizer(ctrl.sessionId) : null
     state.reconciling = true
     this.resetPingTimer(connection)
     const send: SendFn = (frame, onCommit) => this.send(connection, frame, onCommit)
