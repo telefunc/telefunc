@@ -16,12 +16,6 @@
     "noEmit": true
   },
   "files": [
-    "node/server/extensionHost.spec.ts",
-    "node/server/live/exports.spec.ts",
-    "node/server/live/live-derived.spec.ts",
-    "node/server/live/live.spec.ts",
-    "node/server/runTelefunc/lifecycle.spec.ts",
-    "wire-protocol/live.spec.ts",
     "wire-protocol/upgrade-client-harness.ts",
     "wire-protocol/upgrade-mux-harness.ts",
     "wire-protocol/upgrade.handoff-limits.spec.ts",
