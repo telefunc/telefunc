@@ -608,29 +608,32 @@ class ChannelMux {
       stage.phase = 'committing'
       // The old wire is spent: the barrier is its final semantic frame by contract.
       entry.state.retiredByBarrier = true
-      const release = () => this.clearStage(wsConnection)
-      return this.reconcile(wsEntry, wsConnection, ctrl).then(
-        (outcome) => {
-          // Released at the session-set boundary — `reconcile` has run `setSession`/`setSessionId`,
-          // so the probe now legitimately owns a session and the pre-COMMITTED policy no longer
-          // applies to it. (The caller enqueues COMMITTED a microtask later; in that sliver the wire
-          // is an ordinary sessioned transport, on which a reconcile is legal anyway.)
-          release()
-          // The authoritative "this upgrade is done" event: the reconcile RESOLVED, so the probe
-          // wire owns the session. Recorded here rather than at the caller's COMMITTED send so a
-          // future change to how COMMITTED is delivered cannot quietly detach the e2e oracle from
-          // the commit it names.
-          recordUpgradeCommitted()
-          return { ...outcome, deliverTo: wsConnection, upgradeId: stage.upgradeId }
-        },
-        (err) => {
-          release()
-          throw err
-        },
-      )
+      return this.settleBarrierCommit(wsEntry, wsConnection, ctrl, stage.upgradeId)
     } catch (err) {
       this.clearStage(wsConnection)
       throw err
+    }
+  }
+
+  /** The awaitable half of the commit. Deliberately NOT `async` at the caller: `handleBarrier`'s
+   *  validation throws synchronously, and this is the one part that may not.
+   *
+   *  The stage is released however `reconcile` settles. On success that is the session-set boundary —
+   *  the probe now legitimately owns a session, so the pre-COMMITTED policy no longer applies to it. */
+  private async settleBarrierCommit(
+    wsEntry: ConnectionEntry,
+    wsConnection: unknown,
+    ctrl: ReconcilePayload,
+    upgradeId: string,
+  ): Promise<ReconcileOutcome> {
+    try {
+      const outcome = await this.reconcile(wsEntry, wsConnection, ctrl)
+      // Recorded on the RESOLVED reconcile rather than at the caller's COMMITTED send, so a future
+      // change to how COMMITTED is delivered cannot quietly detach the e2e oracle from the commit.
+      recordUpgradeCommitted()
+      return { ...outcome, deliverTo: wsConnection, upgradeId }
+    } finally {
+      this.clearStage(wsConnection)
     }
   }
 
