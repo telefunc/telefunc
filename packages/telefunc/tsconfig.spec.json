@@ -36,7 +36,8 @@
     "wire-protocol/upgrade.barrier-batch.spec.ts",
     "wire-protocol/upgrade.admission-caps.spec.ts",
     "wire-protocol/upgrade.client-barrier.spec.ts",
-    "wire-protocol/upgrade.client-barrier-failures.spec.ts"
+    "wire-protocol/upgrade.client-barrier-failures.spec.ts",
+    "wire-protocol/upgrade.client-barrier-emission.spec.ts"
   ],
   "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"]
 }

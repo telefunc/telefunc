@@ -289,6 +289,10 @@ type UpgradeHarnessOptions = {
   /** Which limb of the commit goes first. The real server runs the old session's finalizer inside
    *  `reconcile` and delivers the reconciled after it, so `fin-first` is the production ordering. */
   commitOrder?: 'fin-first' | 'committed-first'
+  /** Fail the streamRequest upload POST so the client falls back to outbox+batch POSTs — the real
+   *  production mode whenever duplex `fetch` is unavailable, and the one where the barrier has to
+   *  quiesce before it can be emitted. */
+  batchMode?: boolean
   /** Answer ordinary RECONCILEs arriving on the SSE downstream AFTER the first one.
    *
    *  Off by default because it changes the wire every existing spec was written against. It is what
@@ -373,6 +377,13 @@ type UpgradeHarness = {
   /** Answer the recorded `PREPARE` by hand. Pairs with `prepare: 'withhold'`, which is what holds
    *  the client in `preparing` long enough for a test to act inside the staging window. */
   sendReady(upgradeId?: string): void
+  /** Frames of each batch-mode upstream POST (the connect POST excluded), in arrival order. */
+  readonly batchPosts: DecodedFrame[][]
+  /** Make subsequent batch-mode upstream POSTs never resolve. Their frames are still recorded
+   *  first, so a hung POST is observable — a server that read the body and then stopped answering.
+   *  This is what leaves `flushing` stuck true, which is the state the attempt deadline has to be
+   *  able to interrupt. */
+  setBatchPostsHang(hang: boolean): void
   dispose(): void
 }
 
@@ -394,12 +405,15 @@ async function createUpgradeHarness(
     barrier: 'commit' as const,
     commitOrder: 'fin-first' as const,
     autoReconcile: false,
+    batchMode: false,
     ...options,
   }
   const channels = channelIds.map(createHarnessChannel)
   const upstream: DecodedFrame[] = []
   const prepares: PreparePayload[] = []
   const barriers: ReconcilePayload[] = []
+  const batchPosts: DecodedFrame[][] = []
+  let hangBatchPosts = false
   let downstream: ReturnType<typeof makeSseDownstream> | null = null
   let sseTornDown = false
   let sseConnects = 0
@@ -466,7 +480,11 @@ async function createUpgradeHarness(
       const decoded = frames.map((raw) => decode(raw as Uint8Array<ArrayBuffer>))
       for (const frame of decoded) upstream.push(frame)
       if (metadata.streamResponse !== true) {
+        batchPosts.push(decoded)
         for (const frame of decoded) onUpstreamFrame(frame)
+        // Recorded first, then hung: a server that read the body and went quiet, rather than one
+        // that never received it. `flushing` stays true for as long as this never resolves.
+        if (hangBatchPosts) return await new Promise<Response>(() => {})
         return new Response('', { status: 200 })
       }
       sseConnects += 1
@@ -474,7 +492,10 @@ async function createUpgradeHarness(
       downstream = sse
       init.signal?.addEventListener('abort', () => (sseTornDown = true), { once: true })
       sse.comment()
-      sse.pushFrame(encode.streamRequestOpenAck())
+      // Withholding the open-ack is not enough on its own — the client would wait out
+      // `STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS` first. The upload POST failing (below) is what makes
+      // the fallback immediate.
+      if (!opts.batchMode) sse.pushFrame(encode.streamRequestOpenAck())
       // Reacted to only once this POST's OWN downstream exists. A connect POST carries the
       // connection's initial RECONCILE, so answering it any earlier would push the RECONCILED onto
       // the PREVIOUS (already aborted) stream — the client would never settle, and would reconnect
@@ -489,6 +510,9 @@ async function createUpgradeHarness(
     // ReadableStream body → the long-lived streamRequest upload POST. It must resolve when the
     // client closes the body, because `forceDrain` (`connection.ts:1560-1569`) awaits exactly that.
     const stream = body as ReadableStream<Uint8Array<ArrayBuffer>>
+    // Rejecting it is what a server without duplex support effectively does. The client marks
+    // `streamRequest` failed — sticky — and lives on outbox+batch POSTs from here.
+    if (opts.batchMode) throw new Error('streamRequest upload not supported by this server')
     return await new Promise<Response>((resolve, reject) => {
       init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
       void (async () => {
@@ -598,6 +622,10 @@ async function createUpgradeHarness(
       channels.push(channel)
       registerChannel(channel)
       return channel
+    },
+    batchPosts,
+    setBatchPostsHang: (hang) => {
+      hangBatchPosts = hang
     },
     sendReady: (upgradeId) => {
       const id = upgradeId ?? prepares.at(-1)?.upgradeId
