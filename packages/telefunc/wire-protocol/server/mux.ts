@@ -469,35 +469,7 @@ class ChannelMux {
       if (frame.payload.barrier) {
         return this.handleBarrier(entry, connection, frame.payload, rawFrame.byteLength, violation)
       }
-      // A stage cannot outlive the session it commits against, so this reconcile must release any
-      // stage bound to a session it is about to consume or vacate. TWO sessions qualify, and they
-      // are NOT the same one:
-      //
-      //   · `ctrl.sessionId` — the session this reconcile CLAIMS. `reconcileSession` removes it from
-      //     the registry and deletes its FIN finalizer, and it does so no matter which connection
-      //     asked. A reconnect can name it from a wire that holds no session of its own, so keying
-      //     only off the reconciling wire misses it entirely — and the stage then survives something
-      //     that already consumed everything it depends on. The original wire still reports the old
-      //     id (nothing wrote to its transport), so its later barrier passes every equality leg while
-      //     being STRING-equal to a session that is semantically dead: it would commit a second
-      //     rotation, emit COMMITTED with no FIN available, and leave the claimant holding stale
-      //     handles whose close detaches the freshly committed probe peer.
-      //   · the reconciling wire's CURRENT session — which it is about to rotate away from. Nothing
-      //     destroys that session here, but the stage can never commit against it again (live-session
-      //     equality would refuse the barrier), and close cleanup looks up the wire's NEW id, so the
-      //     record would leak with its bytes and its timer until the TTL.
-      //
-      // A reconcile naming NO session is deliberately not covered: it destroys nothing — the
-      // previous-session block is skipped entirely, so the staged session keeps both its registry
-      // entry and its finalizer and a later commit against it is still coherent. Releasing there
-      // would abort a healthy upgrade every time an unrelated connection attached by channel id.
-      const claimedSessionId = frame.payload.sessionId
-      const vacatedSessionId = entry.transport.getSessionId(connection)
-      for (const doomed of [claimedSessionId, vacatedSessionId]) {
-        if (doomed === undefined) continue
-        const staleProbe = this.stagedByPrevSession.get(doomed)
-        if (staleProbe !== undefined) this.abandonStage(staleProbe)
-      }
+      this.releaseStagesForReconcile(frame.payload, entry, connection)
       return this.reconcile(entry, connection, frame.payload)
     }
     const sessionId = entry.transport.getSessionId(connection)
@@ -508,6 +480,29 @@ class ChannelMux {
     // server reconciled it out, but a frame was still in flight. Drop silently.
     this.sessions.get(sessionId, (frame as ChannelFrame).index)?.channel._dispatchFrame(frame as ChannelFrame)
     return null
+  }
+
+  /** A stage cannot outlive the session it commits against, so an ordinary reconcile releases any
+   *  stage bound to a session it is about to consume or vacate. TWO sessions qualify and they are
+   *  NOT the same one:
+   *
+   *   · the session the reconcile CLAIMS — `reconcileSession` destroys it whichever connection
+   *     asked, so keying only off the reconciling wire misses a reconnect that names it from
+   *     elsewhere. The original wire still reports the old id, so its later barrier would pass every
+   *     equality leg while naming a session that is already dead.
+   *   · the reconciling wire's CURRENT session, which it is about to rotate away from. The stage
+   *     could never commit against it again, and close cleanup looks up the wire's NEW id — so the
+   *     record would leak its bytes and its timer until the TTL.
+   *
+   *  A reconcile naming NO session is deliberately not covered: it destroys nothing, so a later
+   *  commit stays coherent, and releasing here would abort a healthy upgrade every time an unrelated
+   *  connection attached by channel id. */
+  private releaseStagesForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: unknown): void {
+    for (const doomed of [ctrl.sessionId, entry.transport.getSessionId(connection)]) {
+      if (doomed === undefined) continue
+      const staleProbe = this.stagedByPrevSession.get(doomed)
+      if (staleProbe !== undefined) this.abandonStage(staleProbe)
+    }
   }
 
   // ── Barrier upgrade: staging + commit ───────────────────────────────
