@@ -17,11 +17,20 @@ import type { TableChange } from '../router/events.js'
 
 // The mocked registry is PER-DB and tracks registered graphs, so watchedTables() answers truthfully — the
 // coarse-all path depends on it.
-const engine = vi.hoisted(() => ({ ingest: vi.fn(), watched: new Map<object, string[]>() }))
+const engine = vi.hoisted(() => ({
+  ingest: vi.fn(),
+  /** Per-receiver spies, so a test can attribute an ingest to the db it was routed to — the shared spy
+   *  above also carries every sibling runtime's calls, which makes it unusable for that. */
+  perDb: new Map<object, (batch: unknown) => void>(),
+  watched: new Map<object, string[]>(),
+}))
 vi.mock('./dbRuntime.js', () => ({
   registryFor: (db: object) => ({
     router: {
-      ingest: engine.ingest,
+      ingest: (batch: unknown) => {
+        engine.perDb.get(db)?.(batch)
+        engine.ingest(batch)
+      },
       register: (graph: { tables: string[] }) =>
         engine.watched.set(db, [...(engine.watched.get(db) ?? []), ...graph.tables]),
       unregister: () => engine.watched.delete(db),
@@ -307,69 +316,6 @@ describe('write transport — unrelated databases never see each other', () => {
   })
 })
 
-// ── ordering ─────────────────────────────────────────────────────────
-//
-// The adapter contract asked for at-most-once and said nothing about ORDER, which is the wrong way round: a
-// transport can obey it to the letter and still deliver update B before update A, corrupting a precise graph
-// exactly as a duplicate would. So the envelope carries origin+seq and the runtime decides: in-order applies
-// precisely, a duplicate is dropped, and a gap or reorder coarsens. The adapter now owes at-least-once only.
-describe('write transport — the runtime, not the adapter, owns duplicate and order', () => {
-  /** Replay raw payloads at a subscriber in whatever order we choose — a compliant-but-unordered adapter. */
-  async function tappedPair() {
-    const { transport, dbA, dbB } = await twoInstances()
-    const captured: string[] = []
-    await transport.subscribe(changeTopicFor(dbA), (payload) => captured.push(payload))
-    registryFor(dbB).router.register(watching('users'))
-    return { transport, dbA, dbB, captured }
-  }
-
-  it('DROPS a redelivered payload — at-most-once is no longer the adapter’s problem', async () => {
-    const { transport, dbA, dbB, captured } = await tappedPair()
-    publishBatch(dbA, { changes: [change('users')] })
-    await flush()
-    expect(engine.ingest).toHaveBeenCalledTimes(1)
-
-    transport.publish(changeTopicFor(dbB), captured[0]!) // the very same payload again
-    expect(engine.ingest).toHaveBeenCalledTimes(1) // not applied twice
-  })
-
-  it('COARSENS on a reorder instead of applying a delta out of order', async () => {
-    const { transport, dbA, dbB, captured } = await tappedPair()
-    // Two publications, captured off the wire, then replayed to B in the WRONG order.
-    publishBatch(dbA, { changes: [change('users')] })
-    publishBatch(dbA, { changes: [change('users')] })
-    await flush()
-    engine.ingest.mockClear()
-
-    const fresh = { $client: (dbB as { $client: object }).$client } // a receiver that has seen nothing yet
-    setChangeTransport(fresh, transport)
-    await acquireSubscription(fresh)
-    registryFor(fresh).router.register(watching('users'))
-
-    transport.publish(changeTopicFor(fresh), captured[1]!) // seq 2 arrives first → a gap
-    expect(engine.ingest).toHaveBeenCalledWith({ changes: [{ table: 'users', kind: 'coarse' }] })
-
-    engine.ingest.mockClear()
-    transport.publish(changeTopicFor(fresh), captured[0]!) // seq 1 straggles in, already covered
-    expect(engine.ingest).not.toHaveBeenCalled()
-  })
-
-  it('applies IN-ORDER deliveries precisely — so the coarsening above is not just blanket degradation', async () => {
-    const { transport, dbA, dbB, captured } = await tappedPair()
-    publishBatch(dbA, { changes: [change('users')] })
-    publishBatch(dbA, { changes: [change('posts')] })
-    await flush()
-    expect(engine.ingest).toHaveBeenCalledTimes(2)
-    expect(engine.ingest).toHaveBeenNthCalledWith(1, { changes: [change('users')] })
-    expect(engine.ingest).toHaveBeenNthCalledWith(2, { changes: [change('posts')] })
-    void [transport, dbB, captured]
-  })
-})
-
-// The isolation above is DEFENCE IN DEPTH: the topic separates the streams, and the envelope check catches
-// anything that reaches us anyway. That means neither guard alone is provable by the cross-apply test —
-// removing either still leaves the other, and only removing BOTH reproduces the original defect. So each
-// gets a control aimed at it specifically, or "defence in depth" would quietly mean "one untested guard".
 describe('write transport — each isolation guard, on its own', () => {
   it('TOPIC: a different database publishes on a topic this one is not subscribed to', async () => {
     const transport = createInMemoryChangeTransport()
@@ -410,73 +356,120 @@ describe('write transport — each isolation guard, on its own', () => {
   })
 })
 
-// ── admission baseline ───────────────────────────────────────────────
+// ── ordering, and the deferred baseline ──────────────────────────────
 //
-// A receiver that subscribes (or RE-subscribes) mid-stream has no watermark for a publisher that is already
-// running, and cannot tell "seq 500 is the next one for me" from "seq 500 arrived before 499". So the first
-// message from an unknown origin establishes the baseline: it is applied COARSELY and sets the watermark,
-// and everything in order after it is precise. The cost is one coarse event per origin per subscribe — and
-// that event is not free, because a graph's coarsen() is terminal: the graphs alive at that instant stay
-// coarse for the rest of their lives (a later read builds a fresh precise graph). Accepting a first message
-// precisely instead would be unsound under exactly the reordering the last case here reproduces.
-describe('write transport — the first message from an unknown publisher sets a baseline', () => {
-  /** A receiver that has never heard of the publisher, sharing its database. */
-  async function freshReceiver(transport: ChangeTransport, $client: object) {
+// The adapter contract asked for at-most-once and said nothing about ORDER, which is the wrong way round: a
+// transport can obey it to the letter and still deliver update B before update A, corrupting a precise graph
+// exactly as a duplicate would. So the envelope carries origin+seq and the RUNTIME decides. The adapter now
+// owes at-least-once only.
+//
+// The baseline is DEFERRED rather than pre-emptive. A receiver joining mid-stream cannot tell "this is
+// simply my next one" from "this overtook the one before it" — but it does not have to guess, because the
+// two cases resolve themselves: sequences published before our admission are already in our snapshot, and
+// sequences published after it are still owed to us by at-least-once, so a reorder always eventually shows
+// up as a straggler. Bet precise, and coarsen only when a straggler proves the bet wrong.
+describe('write transport — the runtime, not the adapter, owns duplicate and order', () => {
+  /** A receiver of this database that has never heard of the publisher, with its OWN ingest spy so its
+   *  behaviour is attributable — the shared `engine.ingest` also carries the sibling runtime's calls. */
+  async function isolatedReceiver(transport: ChangeTransport, $client: object) {
     const receiver = { $client }
     setChangeTransport(receiver, transport)
     await acquireSubscription(receiver)
     registryFor(receiver).router.register(watching('users'))
-    return receiver
+    const ingest = vi.fn()
+    engine.perDb.set(receiver, ingest)
+    return { receiver, ingest }
   }
 
-  it('joins MID-STREAM: the first message coarsens and sets the watermark, the next is precise', async () => {
-    const { transport, dbA, dbB } = await twoInstances()
+  /** Capture what a publisher puts on the wire, so it can be replayed in any order. */
+  async function wireOf(transport: ChangeTransport, db: object) {
     const captured: string[] = []
-    await transport.subscribe(changeTopicFor(dbA), (payload) => captured.push(payload))
-    publishBatch(dbA, { changes: [change('users')] }) // seq 1
-    publishBatch(dbA, { changes: [change('users')] }) // seq 2
-    await flush()
+    await transport.subscribe(changeTopicFor(db), (payload) => captured.push(payload))
+    return captured
+  }
 
-    const receiver = await freshReceiver(transport, (dbB as { $client: object }).$client)
-    engine.ingest.mockClear()
+  const preciseCalls = (ingest: ReturnType<typeof vi.fn>) =>
+    ingest.mock.calls.filter(([batch]) =>
+      (batch as { changes: TableChange[] }).changes.some((c) => c.kind !== 'coarse'),
+    )
+  const coarseCalls = (ingest: ReturnType<typeof vi.fn>) =>
+    ingest.mock.calls.filter(([batch]) =>
+      (batch as { changes: TableChange[] }).changes.every((c) => c.kind === 'coarse'),
+    )
 
-    transport.publish(changeTopicFor(receiver), captured[1]!) // seq 2 — first thing this receiver ever sees
-    expect(engine.ingest).toHaveBeenCalledWith({ changes: [{ table: 'users', kind: 'coarse' }] })
+  it('DROPS a redelivered payload — at-most-once is no longer the adapter’s problem', async () => {
+    const { transport, dbA, dbB } = await twoInstances()
+    const captured = await wireOf(transport, dbA)
+    const { receiver, ingest } = await isolatedReceiver(transport, (dbB as { $client: object }).$client)
 
-    engine.ingest.mockClear()
-    publishBatch(dbA, { changes: [change('users')] }) // seq 3 — in order from the new watermark
-    await flush()
-    expect(engine.ingest).toHaveBeenCalledWith({ changes: [change('users')] }) // …precise again
-  })
-
-  it('a publisher’s VERY FIRST message (seq 1) is precise — the baseline is not blanket coarsening', async () => {
-    // Nothing can precede seq 1, so there is nothing to have missed and no reordering to fear.
-    const { dbA } = await twoInstances()
     publishBatch(dbA, { changes: [change('users')] })
     await flush()
-    expect(engine.ingest).toHaveBeenCalledWith({ changes: [change('users')] })
+    expect(ingest).toHaveBeenCalledTimes(1)
+
+    transport.publish(changeTopicFor(receiver), captured[0]!) // the very same payload again
+    expect(ingest).toHaveBeenCalledTimes(1) // not applied twice
   })
 
-  it('FIRST TWO REORDERED: neither is applied precisely, so no delta lands out of order', async () => {
-    // The case that forbids "trust the first sequence you see". If seq 2 arrives before seq 1 and we took it
-    // as the baseline precisely, seq 1's delta would then be dropped as a straggler and lost outright.
+  it('ROUTINE RESUBSCRIBE against a busy peer stays PRECISE — zero coarsening', async () => {
+    // The owner's case, and the whole point of deferring: a peer is mid-stream at seq 3 when a fresh
+    // receiver joins. Nothing is coarsened; the graphs it just compiled stay precise.
     const { transport, dbA, dbB } = await twoInstances()
-    const captured: string[] = []
-    await transport.subscribe(changeTopicFor(dbA), (payload) => captured.push(payload))
-    publishBatch(dbA, { changes: [change('users')] }) // seq 1
-    publishBatch(dbA, { changes: [change('posts')] }) // seq 2
+    publishBatch(dbA, { changes: [change('users')] }) // 1
+    publishBatch(dbA, { changes: [change('users')] }) // 2
     await flush()
 
-    const receiver = await freshReceiver(transport, (dbB as { $client: object }).$client)
-    engine.ingest.mockClear()
+    const { ingest } = await isolatedReceiver(transport, (dbB as { $client: object }).$client)
+    publishBatch(dbA, { changes: [change('users')] }) // 3 — first this receiver ever sees
+    publishBatch(dbA, { changes: [change('users')] }) // 4 — in order after it
+    await flush()
 
-    transport.publish(changeTopicFor(receiver), captured[1]!) // seq 2 first
-    transport.publish(changeTopicFor(receiver), captured[0]!) // seq 1 second
+    expect(coarseCalls(ingest)).toEqual([]) // NOT ONE coarsening
+    expect(preciseCalls(ingest)).toHaveLength(2) // both applied precisely
+  })
 
-    const precise = engine.ingest.mock.calls.filter(([batch]) => {
-      const { changes } = batch as { changes: TableChange[] }
-      return changes.some((c) => c.kind !== 'coarse')
-    })
-    expect(precise).toEqual([]) // not one precise apply — everything degraded to coarse
+  it('BET WRONG: a straggler below the baseline triggers exactly one corrective coarsen', async () => {
+    // The reordered first pair. Seq 2 is taken precisely; seq 1 arriving afterwards is proof that the skipped
+    // region was post-admission after all, so it is corrected — once — rather than silently lost.
+    const { transport, dbA, dbB } = await twoInstances()
+    const captured = await wireOf(transport, dbA)
+    publishBatch(dbA, { changes: [change('users')] }) // 1
+    publishBatch(dbA, { changes: [change('posts')] }) // 2
+    await flush()
+
+    const { receiver, ingest } = await isolatedReceiver(transport, (dbB as { $client: object }).$client)
+    transport.publish(changeTopicFor(receiver), captured[1]!) // seq 2 first → the bet
+    expect(preciseCalls(ingest)).toHaveLength(1)
+    expect(coarseCalls(ingest)).toEqual([])
+
+    transport.publish(changeTopicFor(receiver), captured[0]!) // seq 1 straggles in → the bet was wrong
+    expect(coarseCalls(ingest)).toHaveLength(1)
+
+    transport.publish(changeTopicFor(receiver), captured[0]!) // and again — already covered
+    expect(coarseCalls(ingest)).toHaveLength(1) // still ONE: no double-coarsen
+  })
+
+  it('COARSENS on a real GAP, and the gap then COVERS the outstanding bet', async () => {
+    // The baseline is deliberately seq 3, not seq 1: with a baseline of 1 there is no unaccounted region
+    // below it, so the gap's "this coarsen also covers the bet" step would be unreachable and a test built
+    // on it could not disagree with an implementation that omitted the step.
+    const { transport, dbA, dbB } = await twoInstances()
+    const captured = await wireOf(transport, dbA)
+    for (let i = 0; i < 5; i++) publishBatch(dbA, { changes: [change('users')] }) // seq 1..5
+    await flush()
+
+    const { receiver, ingest } = await isolatedReceiver(transport, (dbB as { $client: object }).$client)
+    transport.publish(changeTopicFor(receiver), captured[2]!) // seq 3 → baseline; 1..2 unaccounted
+    expect(preciseCalls(ingest)).toHaveLength(1)
+
+    transport.publish(changeTopicFor(receiver), captured[4]!) // seq 5 — skips 4 → gap
+    expect(coarseCalls(ingest)).toHaveLength(1)
+
+    // That coarsen covered EVERYTHING below seq 5, including the 1..2 the bet had left open. Both a
+    // straggler from the gap and one from under the baseline are now accounted for → dropped, not
+    // coarsened again.
+    transport.publish(changeTopicFor(receiver), captured[3]!) // seq 4, from the gap
+    transport.publish(changeTopicFor(receiver), captured[0]!) // seq 1, from under the baseline
+    expect(coarseCalls(ingest)).toHaveLength(1) // still ONE
+    expect(preciseCalls(ingest)).toHaveLength(1)
   })
 })

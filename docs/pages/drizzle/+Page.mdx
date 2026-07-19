@@ -150,7 +150,11 @@ await db.execute(sql`select count(*) from audit_log`) // base db — invalidates
 
 Invalidation is best-effort pub/sub. A live read is not admitted until the transport has confirmed its subscription, so a write can't be missed in the gap between the two.
 
-Every message carries its publisher and a sequence number, so a **detectable** loss is handled rather than ignored: a repeat is dropped, and a gap or a reordering falls back to a coarse refetch of the watched tables instead of applying a delta out of order. What that cannot cover is a message with nothing after it — if the last message from a publisher is dropped, no later message exists to reveal the gap, and that query's invalidation waits for the next write touching the table. Bounded staleness, never a fabricated row.
+Every message carries its publisher and a sequence number, so a **detectable** loss is handled rather than ignored: a repeat is dropped, and a gap falls back to a coarse refetch of the watched tables instead of applying a delta out of order.
+
+When a server starts listening to a publisher that is already running, it takes the first message it sees at face value rather than assuming the worst — the messages before it are either already in the snapshot it just read, or still owed to it, in which case they arrive later and out of order. If one does arrive late, that is the proof the assumption was wrong, and it triggers one coarse refetch to correct it. In the window before that correction the query is briefly **missing one change rather than merely out of date**; the refetch resolves it. The alternative — assuming the worst on every reconnect — would permanently drop those queries to coarse, which costs far more, far more often.
+
+What none of this can cover is a message with nothing after it: if the last message from a publisher is dropped, no later message exists to reveal the gap, and that query's invalidation waits for the next write touching the table. Bounded staleness, never a fabricated row.
 
 A db subscribes while it has live queries and unsubscribes when the last one closes, so a `db` you stop using is not held open by the transport.
 

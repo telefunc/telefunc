@@ -141,9 +141,11 @@ type SubscriptionRef = { release(): void }
 type SubscriptionState = {
   refs: number
   active: ChangeSubscription | undefined
-  /** The highest sequence number seen from each publishing origin — the ordering watermark. Cleared on
-   *  detach, which both discards state that is stale and bounds what a long-lived process accumulates. */
-  seen: Map<string, number>
+  /** Per publishing origin: the highest sequence seen (`last`), and the sequence below which nothing has
+   *  been accounted for yet (`unknownBelow` — the outstanding baseline bet, 0 once a coarsen has covered
+   *  it). Cleared on detach, which both discards state that is stale and bounds what a long-lived process
+   *  accumulates. */
+  seen: Map<string, { last: number; unknownBelow: number }>
   /** A subscription we asked to detach and could not confirm. Until it is confirmed gone, subscribing again
    *  could put a second listener alongside one that never left — so this blocks every new subscribe. */
   undetached: ChangeSubscription | undefined
@@ -272,25 +274,48 @@ function receive(db: object, state: SubscriptionState, payload: string): void {
   //                       watermark up. Anything below it is then already covered.
   //   seq <=  last      → a duplicate, or a straggler the coarsen above already accounted for → DROP
   //
-  // ADMISSION BASELINE. A receiver that subscribes — or RE-subscribes, which clears the watermarks — has no
-  // position for a publisher that is already running, and cannot distinguish "this is simply my next one"
-  // from "this overtook the one before it". So the first message from an unknown origin ESTABLISHES the
-  // baseline: it coarsens and sets the watermark, and everything in order after it is precise. Only seq 1 is
-  // taken precisely, because nothing can precede a publisher's first message.
+  // DEFERRED BASELINE. A receiver that subscribes — or RE-subscribes, which clears the watermarks — has no
+  // position for a publisher already running, and cannot tell "this is simply my next one" from "this
+  // overtook the one before it". Coarsening pre-emptively for that would pay on EVERY resubscribe against a
+  // busy peer, and `graph.coarsen()` is terminal — the graphs alive at that moment would stay coarse for the
+  // rest of their lives. So instead the first message from an unknown origin is taken PRECISELY, and the
+  // sequences below it are recorded as unaccounted-for (`unknownBelow`).
   //
-  // That baseline is not free. `graph.coarsen()` is terminal, so the graphs alive at that moment stay coarse
-  // for the rest of their lives (a later read compiles a fresh precise graph). The alternative — trusting
-  // whatever sequence arrives first — is unsound: if the first two are reordered, the earlier one is then
-  // dropped as a straggler and its delta is lost outright, which is a MISS rather than an over-fire.
+  // That bet is safe because of what the two possible cases are, and there is no third:
+  //   - those sequences were published BEFORE our subscription was admitted → the readiness barrier means
+  //     our snapshot was read after admission, so they are already IN the data. Nothing to apply.
+  //   - they were published AFTER admission → the adapter owes us at-least-once, so each one MUST still be
+  //     delivered. It arrives late and below the watermark, and THAT is the signal we coarsen on.
+  // A reorder is therefore always eventually observable, so we can wait for proof instead of guessing.
   //
-  // THE INVARIANT: a change is applied at most once, and anything not applied precisely is over-fired.
-  const last = state.seen.get(envelope.origin)
-  if (last !== undefined && envelope.seq <= last) return
-  const expected = last === undefined ? 1 : last + 1
-  state.seen.set(envelope.origin, envelope.seq)
-  if (envelope.seq !== expected) {
+  // The cost of a wrong bet, stated honestly: between the precise baseline and the straggler's arrival, a
+  // precise graph is serving a result that is missing one delta — briefly INCORRECT BY OMISSION, not merely
+  // stale — and the straggler's coarsen corrects it. Same class as the documented drop-after-readiness
+  // limit, and unlike that one it closes deterministically rather than waiting for the next write.
+  //
+  // THE INVARIANT: a change is applied at most once; anything not applied precisely is over-fired; and any
+  // sequence skipped by a baseline bet is either already in the snapshot or still owed to us by the adapter.
+  const tracked = state.seen.get(envelope.origin)
+  if (tracked === undefined) {
+    // The bet. Everything below this sequence is unaccounted for until it either proves irrelevant (never
+    // arrives, because it predates admission) or arrives as a straggler.
+    state.seen.set(envelope.origin, { last: envelope.seq, unknownBelow: envelope.seq })
+  } else if (envelope.seq <= tracked.last) {
+    // At or below the watermark: either a sequence we skipped, or a redelivery of one we already handled.
+    // `unknownBelow` is what tells them apart — a duplicate is not evidence of anything and must not coarsen.
+    if (envelope.seq >= tracked.unknownBelow) return // already seen → duplicate → drop
+    tracked.unknownBelow = 0 // the bet was wrong; one coarsen covers the whole unaccounted region
     coarsenWatched(db)
     return
+  } else if (envelope.seq !== tracked.last + 1) {
+    // A real gap. Applying this before the ones it overtook would apply a delta out of order, so coarsen —
+    // which also accounts for everything below it, closing any outstanding bet.
+    tracked.last = envelope.seq
+    tracked.unknownBelow = 0
+    coarsenWatched(db)
+    return
+  } else {
+    tracked.last = envelope.seq
   }
   if ('coarseAll' in envelope) {
     // A mutation whose touched tables are unknowable happened on ANOTHER instance: coarsen every table WE
