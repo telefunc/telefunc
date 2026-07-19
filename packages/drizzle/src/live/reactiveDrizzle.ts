@@ -523,7 +523,11 @@ function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () =>
     get(target, prop, receiver) {
       if (isWriteOp(prop)) {
         const base = Reflect.get(target, prop, receiver) as (...a: unknown[]) => unknown
-        return captureMutation(prop, base.bind(target), topDb, sink) // session props from topDb; run on tx; buffer
+        // `target` is the RAW tx db, passed ONLY as an execution handle for the capture-recovery savepoint.
+        // Planning and registry keying still read `topDb` — that invariant is what keeps this apart from
+        // the separate question of which db owns session identity. Never the PROXY: `execute` on it is
+        // intercepted as raw SQL, so a SAVEPOINT through it would coarsen the whole transaction.
+        return captureMutation(prop, base.bind(target), topDb, sink, target) // plan on topDb; run on tx; buffer
       }
       if (prop === 'transaction') {
         return wrapTransaction(target, topDb, sink, sink, announce) // nested → flush into THIS tx's buffer on release

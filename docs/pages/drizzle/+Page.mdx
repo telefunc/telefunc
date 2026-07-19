@@ -147,6 +147,10 @@ ROLLBACK;
 
 If you see this in your query log, that is what it is: always rolled back, no table, no row, nothing left behind. Nothing waits on it, and a server that refuses simply keeps the older behaviour. If the role cannot create temporary tables, Telefunc reads `server_version_num` instead and verifies the capability on the first write that uses it — if that write is refused, it falls back for good, and the write itself still goes through.
 
+#### Writing to a table you cannot read
+
+To capture a write precisely, Telefunc adds a `RETURNING` clause to it. A role that may write a table but not `SELECT` from it refuses that clause, and **your write must not fail for a clause you did not ask for** — so it does not. Telefunc runs your statement exactly as you wrote it instead, and that write invalidates coarsely rather than precisely. Inside a transaction the attempt is bracketed by a savepoint, so nothing else in the transaction is disturbed. Everything still commits; you simply get more refetching on that table than a fully readable one would need.
+
 Reads have two over-fires of their own. A plain single-table `select` keeps no row state, so an update to a row it reads can invalidate it even when the visible result is unchanged — unless the write carried both images, which is what the PostgreSQL 18 row above buys; joins and aggregates track this exactly regardless. And a live query read over a **pooled** connection stays coarse: unlike a returned row, a read's meaning depends on the session it runs in, and a pool can hand the next read a connection with a different role or `search_path` than the one Telefunc inspected.
 
 #### Raw SQL

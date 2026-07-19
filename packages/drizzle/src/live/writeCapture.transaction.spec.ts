@@ -291,3 +291,121 @@ describe('write capture — raw markers are computed at COMMIT, not at statement
     })
   })
 })
+
+// The in-transaction half of "capture's substituted statement must never fail the caller's write".
+//
+// On autocommit the recovery just re-runs the caller's statement. Inside a transaction it cannot:
+// PostgreSQL aborts the WHOLE transaction on the refused statement, so the re-run would only get "current
+// transaction is aborted". A SAVEPOINT around the substituted attempt is what gives it something to rewind
+// to.
+//
+// The refusal is REAL, not simulated: a PostgreSQL role holding INSERT/UPDATE/DELETE but not SELECT is
+// refused `… RETURNING *` with 42501 while its plain write commits. That is the actual production cause,
+// so nothing here depends on a stand-in for it. (An earlier version of these cases filtered the wire with a
+// proxy instead; it silently failed to intercept inside a transaction and the tests passed while asserting
+// the wrong thing — which is why they are grounded in the database's own privileges now.)
+describe('a refused substitution inside a TRANSACTION does not cost the caller their write', () => {
+  /** A reactive db whose connection is a role that may WRITE users but not READ it. */
+  async function writeOnlyDb() {
+    const real = new PGlite()
+    await real.exec('create table users (id int primary key, name text)')
+    await real.exec('create role writer nologin')
+    await real.exec('grant usage on schema public to writer')
+    await real.exec('grant insert, update, delete on users to writer')
+    await real.exec('set role writer')
+    const asOwner = async () => {
+      await real.exec('reset role')
+      return real
+    }
+    return { real, asOwner, db: reactiveDrizzle(drizzle({ client: real })) as unknown as ReactiveDb }
+  }
+
+  it('the transaction COMMITS, both rows are there, and the batch coarsens', async () => {
+    provideTelefuncContext({})
+    const { db, asOwner } = await writeOnlyDb()
+    await db.transaction(async (tx) => {
+      await tx.insert(users).values({ id: 1, name: 'first' })
+      await tx.insert(users).values({ id: 2, name: 'second' })
+    })
+    await tick()
+
+    const owner = await asOwner()
+    expect((await owner.query('select id, name from users order by id')).rows).toEqual([
+      { id: 1, name: 'first' },
+      { id: 2, name: 'second' },
+    ])
+    // Still ONE atomic tick — coarse, for the table capture was not allowed to read.
+    expect(flushed()).toEqual([
+      {
+        changes: [
+          { table: 'users', kind: 'coarse' },
+          { table: 'users', kind: 'coarse' },
+        ],
+      },
+    ])
+    await owner.close()
+  })
+
+  it('a ROLLBACK still discards everything — the capture savepoints pin nothing', async () => {
+    provideTelefuncContext({})
+    const { db, asOwner } = await writeOnlyDb()
+    await expect(
+      db.transaction(async (tx) => {
+        await tx.insert(users).values({ id: 1, name: 'doomed' })
+        throw new Error('caller rolls back')
+      }),
+    ).rejects.toThrow('caller rolls back')
+    await tick()
+    const owner = await asOwner()
+    expect((await owner.query('select * from users')).rows).toEqual([])
+    expect(flushed()).toEqual([])
+    await owner.close()
+  })
+
+  it('CONCURRENT writes on one transaction do not destroy each other’s savepoints', async () => {
+    // `RELEASE SAVEPOINT` destroys every savepoint established after it, so save-A, save-B, release-A would
+    // leave B with nothing to rewind to; B's release then errors, and a failed statement aborts the
+    // transaction. Observed before the whole bracket was serialized: three concurrent inserts committed
+    // ZERO rows. Unique names would not have helped — it is establishment order.
+    provideTelefuncContext({})
+    const { db, asOwner } = await writeOnlyDb()
+    await db.transaction(async (tx) => {
+      await Promise.all([
+        tx.insert(users).values({ id: 1, name: 'a' }),
+        tx.insert(users).values({ id: 2, name: 'b' }),
+        tx.insert(users).values({ id: 3, name: 'c' }),
+      ])
+    })
+    await tick()
+    const owner = await asOwner()
+    expect((await owner.query('select count(*)::int c from users')).rows).toEqual([{ c: 3 }])
+    await owner.close()
+  })
+
+  it('the savepoint is NOT issued through the tx PROXY — that would coarsen the whole transaction', async () => {
+    // The sharpest trap in this machinery: the proxy intercepts `execute` as raw SQL, so a SAVEPOINT sent
+    // through it would be recorded as raw INTENT and coarsen every WATCHED table at commit rather than the
+    // one table written. The registered graph below is what makes that visible.
+    provideTelefuncContext({})
+    const { db, asOwner } = await writeOnlyDb()
+    const watcher = {
+      tables: ['users', 'posts'],
+      apply: () => ({}) as never,
+      notifyKey: () => 'w',
+      fault() {},
+      reseed() {},
+      coarsen() {},
+    }
+    registryFor(db as object).router.register(watcher)
+    await db.transaction(async (tx) => {
+      await tx.insert(users).values({ id: 1, name: 'x' })
+    })
+    await tick()
+    registryFor(db as object).router.unregister(watcher)
+
+    const tables = flushed().flatMap((batch) => batch.changes.map((change) => change.table))
+    expect(tables).toEqual(['users']) // raw-SQL intent would have dragged `posts` in too
+    const owner = await asOwner()
+    await owner.close()
+  })
+})

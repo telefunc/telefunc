@@ -70,19 +70,20 @@ function captureMutation(
   baseMethod: (...a: unknown[]) => unknown,
   db: object,
   emit?: CaptureSink,
+  tx?: object,
 ): (...a: unknown[]) => unknown {
   const sink: CaptureSink = emit ?? ((changes) => ingestWrite(db, { changes }))
   return (...args: unknown[]) => {
     const table = args[0]
     // insert/update/delete all take the target table as their first argument.
     if (!isTable(table)) return baseMethod(...args)
-    return wrapWrite(baseMethod(...args), table, op, db, sink)
+    return wrapWrite(baseMethod(...args), table, op, db, sink, tx)
   }
 }
 
 /** Wrap a mutation builder so its terminal (`await` / `.execute()`) runs the write and captures its change;
  *  chain methods (`values`/`set`/`where`/`returning`/…) re-wrap so the terminal stays captured. */
-function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: CaptureSink): unknown {
+function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: CaptureSink, tx?: object): unknown {
   return new Proxy(builder as object, {
     get(target, prop, receiver) {
       // EVERY promise terminal routes through the captured run. `.catch()`/`.finally()` used to reach the
@@ -93,18 +94,27 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
       // unfinished chain would run a write the caller never asked for, and `typeof b.then === 'function'`
       // lied about a proxy that is transparent except for `.live()`.
       const has = (name: string): boolean => typeof Reflect.get(target, name, receiver) === 'function'
+      // ONE write at a time per transaction. The serialization sits HERE, around the whole captured write,
+      // rather than around the substituted statement alone: a savepoint's `ROLLBACK TO` rewinds everything
+      // done after it, so an interleaved write's already-completed recovery statement would be undone by a
+      // neighbour rewinding. Observed — three concurrent inserts on one transaction committed one row.
+      // Outside a transaction there is nothing to serialize and writes stay fully concurrent.
+      const start = (args?: unknown[]): Promise<unknown> => {
+        const run = () => runWrite(target, table, op, db, sink, tx, args)
+        return tx ? serializePerTx(tx, run) : run()
+      }
       if (prop === 'then' && has('then')) {
         return (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>
-          runWrite(target, table, op, db, sink).then(onFulfilled, onRejected)
+          start().then(onFulfilled, onRejected)
       }
       if (prop === 'catch' && has('catch')) {
-        return (onRejected?: (e: unknown) => unknown) => runWrite(target, table, op, db, sink).catch(onRejected)
+        return (onRejected?: (e: unknown) => unknown) => start().catch(onRejected)
       }
       if (prop === 'finally' && has('finally')) {
-        return (onFinally?: () => void) => runWrite(target, table, op, db, sink).finally(onFinally)
+        return (onFinally?: () => void) => start().finally(onFinally)
       }
       if (prop === 'execute' && has('execute')) {
-        return (...args: unknown[]) => runWrite(target, table, op, db, sink, args)
+        return (...args: unknown[]) => start(args)
       }
       // Driver terminals that execute DIRECTLY (SQLite's run/all/get/values — SYNCHRONOUS on node:sqlite).
       // Gated on the underlying builder ACTUALLY having the member: PG and MySQL write builders have no
@@ -130,7 +140,7 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
       if (typeof value !== 'function') return value
       return (...args: unknown[]) => {
         const next = (value as (...a: unknown[]) => unknown).apply(target, args)
-        return isWriteBuilder(next) ? wrapWrite(next, table, op, db, sink) : next
+        return isWriteBuilder(next) ? wrapWrite(next, table, op, db, sink, tx) : next
       }
     },
   })
@@ -308,6 +318,7 @@ async function runWrite(
   op: Op,
   db: object,
   sink: CaptureSink,
+  tx: object | undefined,
   executeArgs?: unknown[],
   asWritten = false,
 ): Promise<unknown> {
@@ -342,6 +353,7 @@ async function runWrite(
     const rows = await runSubstituted(
       () => substituteOldNew(builder, table, plan.images!),
       builder,
+      tx,
       executeArgs,
       relationId,
     )
@@ -353,7 +365,7 @@ async function runWrite(
         demoteOldNewReturning(db)
         reportOldNewDemotion(relationId)
       }
-      return recoverAsWritten(builder, table, op, db, sink, executeArgs)
+      return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
     }
     if (!oldNewProvenOf(db)) markOldNewProven(db) // it worked; later writes pay nothing for the guard
     const pairs = rows.map((row) => splitImages(row, plan.images!))
@@ -365,10 +377,11 @@ async function runWrite(
   const rows = await runSubstituted(
     () => (builder as { returning: () => unknown }).returning(),
     builder,
+    tx,
     executeArgs,
     relationId,
   )
-  if (rows === SUBSTITUTION_REFUSED) return recoverAsWritten(builder, table, op, db, sink, executeArgs)
+  if (rows === SUBSTITUTION_REFUSED) return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
   emitSafely(sink, captureOrCoarse(op, relationId, rows, plan))
   return plan.reconstruct(rows)
 }
@@ -397,19 +410,45 @@ const SUBSTITUTION_REFUSED = Symbol('telefunc: capture substitution refused')
 async function runSubstituted(
   substitute: () => unknown,
   builder: unknown,
+  tx: object | undefined,
   executeArgs: unknown[] | undefined,
   relationId: string,
 ): Promise<Row[] | typeof SUBSTITUTION_REFUSED> {
   const config = writeConfigOf(builder)
   const callerReturning = config?.returning
-  try {
-    return (await runBase(substitute(), executeArgs)) as Row[]
-  } catch (error) {
+  const restore = () => {
     if (config) config.returning = callerReturning
-    if (!isSubstitutionFault(error)) throw error
-    reportSubstitutionRefused(relationId, error)
-    return SUBSTITUTION_REFUSED
   }
+  // INSIDE A TRANSACTION the recovery needs a savepoint, because PostgreSQL aborts the whole transaction on
+  // the refused statement and re-running would only get "current transaction is aborted". Without one — an
+  // unverified dialect, or a SAVEPOINT the driver would not issue — there is nothing to recover to, so the
+  // substitution is not attempted at all and the caller's statement runs as written (coarse).
+  const attempt = async (): Promise<Row[] | typeof SUBSTITUTION_REFUSED> => {
+    const savepoint = tx ? await openSavepoint(tx, relationId) : NO_SAVEPOINT_NEEDED
+    if (savepoint === SAVEPOINT_UNAVAILABLE) {
+      restore()
+      return SUBSTITUTION_REFUSED
+    }
+    try {
+      const rows = (await runBase(substitute(), executeArgs)) as Row[]
+      await savepoint.release()
+      return rows
+    } catch (error) {
+      restore()
+      if (!isSubstitutionFault(error)) {
+        // The caller's own error. Their transaction is aborted exactly as plain Drizzle would have left it,
+        // so the savepoint is abandoned rather than rolled back to — rewinding would HIDE their failure.
+        await savepoint.abandon()
+        throw error
+      }
+      await savepoint.rewind() // un-abort the transaction so the caller's statement can still run
+      reportSubstitutionRefused(relationId, error)
+      return SUBSTITUTION_REFUSED
+    }
+  }
+  // Serialization happens one level up, around the WHOLE write — see `wrapWrite`. It has to: this attempt's
+  // `ROLLBACK TO` would otherwise undo another write's already-completed recovery statement.
+  return attempt()
 }
 
 /** Re-run the caller's write EXACTLY as they wrote it, and coarsen. Single-shot by construction: this path
@@ -431,9 +470,110 @@ async function recoverAsWritten(
   op: Op,
   db: object,
   sink: CaptureSink,
+  tx: object | undefined,
   executeArgs: unknown[] | undefined,
 ): Promise<unknown> {
-  return runWrite(builder, table, op, db, sink, executeArgs, true)
+  return runWrite(builder, table, op, db, sink, tx, executeArgs, true)
+}
+
+// ── savepoints, so the in-transaction recovery has something to rewind to ──
+//
+// Established through the RAW transaction handle, never the tx proxy: the proxy treats `execute` as raw SQL
+// (`isRawSqlOp`), so a SAVEPOINT issued through it would be recorded as raw INTENT and coarsen every watched
+// graph in the transaction at commit — this recovery would then degrade every transaction it touched, which
+// is worse than the problem it solves. (Verified against drizzle 1.0.0-rc.4, which issues its own nested-tx
+// savepoints through exactly this handle.)
+
+/** The bracket around one substituted statement. `release` on success, `rewind` to undo a refusal, `abandon`
+ *  when the caller's own statement failed and their transaction should stay aborted. */
+type Savepoint = { release: () => Promise<void>; rewind: () => Promise<void>; abandon: () => Promise<void> }
+
+/** No transaction: the statement stands alone, and a failure aborts nothing to recover from. */
+const NO_SAVEPOINT_NEEDED: Savepoint = {
+  release: async () => {},
+  rewind: async () => {},
+  abandon: async () => {},
+}
+/** A savepoint could not be established, so the substitution must not be attempted. */
+const SAVEPOINT_UNAVAILABLE = Symbol('telefunc: no savepoint available')
+
+/** Serializes whole substituted ATTEMPTS per transaction — savepoint, statement and release as one unit.
+ *
+ *  `RELEASE SAVEPOINT` destroys every savepoint established after it, so two concurrent writes on one
+ *  transaction (`Promise.all` over the same tx) interleave as save-A, save-B, release-A: B's savepoint is
+ *  gone, B's release errors, and a failed statement aborts the transaction. Observed, not theorised — three
+ *  concurrent inserts committed zero rows. Unique names do not help; it is establishment ORDER, not naming.
+ *
+ *  PostgreSQL executes one statement at a time per connection anyway, so nothing real is lost by queueing. */
+const txSerial = new WeakMap<object, Promise<unknown>>()
+let savepointCount = 0
+
+function serializePerTx<T>(tx: object, attempt: () => Promise<T>): Promise<T> {
+  const previous = txSerial.get(tx) ?? Promise.resolve()
+  const next = previous.then(attempt, attempt)
+  // Kept off the chain's failure path: one attempt's rejection must not reject every later one.
+  txSerial.set(
+    tx,
+    next.then(
+      () => {},
+      () => {},
+    ),
+  )
+  return next
+}
+
+/** Open a savepoint on the executing transaction, or report that none is available.
+ *
+ *  SAVEPOINT-FIRST and fail-safe: if establishing it fails, the substituted statement is never run, so this
+ *  machinery cannot cause the very harm it exists to prevent. Scoped to PostgreSQL, the only dialect this is
+ *  driven against — SQLite has savepoints too, but its raw surface is `run` rather than `execute` and
+ *  node:sqlite is synchronous, so symmetry is assumed nowhere. */
+async function openSavepoint(tx: object, relationId: string): Promise<Savepoint | typeof SAVEPOINT_UNAVAILABLE> {
+  if (dialectOf(tx as { dialect?: unknown }) !== 'pg') return SAVEPOINT_UNAVAILABLE
+  const execute = (tx as { execute?: (query: SQL) => Promise<unknown> }).execute
+  if (typeof execute !== 'function') return SAVEPOINT_UNAVAILABLE
+  // NOT `sp<n>` — that is drizzle's own nested-transaction namespace.
+  const name = `telefunc_cap_${savepointCount++}`
+  const run = (statement: string) => execute.call(tx, sql.raw(statement)) as Promise<unknown>
+  try {
+    await run(`savepoint ${name}`)
+  } catch (error) {
+    reportSavepointUnavailable(relationId, error)
+    return SAVEPOINT_UNAVAILABLE
+  }
+  // A failed SAVEPOINT statement aborts the transaction like any other, so bookkeeping failures cannot be
+  // swallowed: doing that once turned a silently-destroyed savepoint into a transaction that committed
+  // nothing while every assertion about the writes still passed. Contained (the caller's write is already
+  // decided by this point) but never silent — and the caller still sees it, because their COMMIT will fail.
+  const bookkeeping = (statement: string) =>
+    run(statement).then(
+      () => {},
+      (error: unknown) => reportSavepointBookkeepingFailed(relationId, statement, error),
+    )
+  return {
+    release: () => bookkeeping(`release savepoint ${name}`),
+    // RELEASE after ROLLBACK TO as well: PostgreSQL keeps the savepoint alive otherwise, and a long
+    // transaction full of recovered writes would accumulate them.
+    rewind: async () => {
+      await bookkeeping(`rollback to savepoint ${name}`)
+      await bookkeeping(`release savepoint ${name}`)
+    },
+    abandon: async () => {},
+  }
+}
+
+function reportSavepointUnavailable(relationId: string, error: unknown): void {
+  console.error(
+    `[telefunc] live: could not open a savepoint to capture a write on "${describeRelationId(relationId)}" inside a transaction. The write runs exactly as you wrote it and is unaffected; live queries on this table over-invalidate.`,
+    error,
+  )
+}
+
+function reportSavepointBookkeepingFailed(relationId: string, statement: string, error: unknown): void {
+  console.error(
+    `[telefunc] live: "${statement}" failed while capturing a write on "${describeRelationId(relationId)}". The surrounding transaction is likely aborted and its COMMIT will fail — this is a bug in Telefunc's capture, please report it.`,
+    error,
+  )
 }
 
 /** Whether an error is one capture's substituted RETURNING could have caused. Reads the SQLSTATE CLASS (the
