@@ -435,9 +435,9 @@ function Room() {
           await onCreateRoom(roomId)
           const pubRoom = await onGetRoom(roomId)
           const pub = await pubRoom.join({ meta: { name: 'Pub' } })
-          const cam: number[] = []
-          pub.onDemand((track, count) => {
-            if (track === 'camera') cam.push(count)
+          const cam: boolean[] = []
+          pub.onDemand((track, wanted) => {
+            if (track === 'camera') cam.push(wanted)
           })
           // Announce the camera track so demand is attributable to (Pub, camera).
           await pub.publishBinary(new Uint8Array(8).fill(1), { track: 'camera', meta: { key: true } })
@@ -447,12 +447,12 @@ function Room() {
           const unsub = viewer.subscribeBinary(() => {}, { track: 'camera' })
           await pollUntil(() => {
             setResult(JSON.stringify({ cam }))
-            return { done: cam.includes(1) }
+            return { done: cam.includes(true) }
           })
           unsub()
           await pollUntil(() => {
             setResult(JSON.stringify({ cam }))
-            return { done: cam.includes(1) && cam[cam.length - 1] === 0 }
+            return { done: cam.includes(true) && cam[cam.length - 1] === false }
           })
         }}
       >

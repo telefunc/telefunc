@@ -227,14 +227,14 @@ function testRoom() {
     })
   })
 
-  test('room: onDemand rises when a subscriber wants a track and falls when it leaves', async () => {
+  test('room: onDemand turns on when a subscriber wants a track and off when it leaves', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-demand')
 
     await autoRetry(async () => {
-      const r = await getResult<{ cam: number[] }>('#room-result')
-      expect(r.cam).toContain(1) // a viewer arrived (pause-at-0 lifts)
-      expect(r.cam[r.cam.length - 1]).toBe(0) // ...and left again — back to zero
+      const r = await getResult<{ cam: boolean[] }>('#room-result')
+      expect(r.cam).toContain(true) // a viewer arrived (the track is wanted)
+      expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again — back to unwanted
     })
   })
 
