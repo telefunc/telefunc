@@ -8,6 +8,15 @@ import type { SQL } from 'drizzle-orm'
 // (table-level invalidation) rather than guessing. Field names verified live
 // against drizzle-orm 1.0.0-rc.4. Public entry points take `unknown` because the real
 // builder's `config`/`usedTables` are `protected` — we read them through a cast.
+//
+// VERSION RANGE. The guard makes an unrecognized shape SAFE, not correct: the feature
+// quietly stops being precise and every write invalidates at table level. That is
+// exactly the kind of degradation a peer range should catch instead of ship, so the
+// range in package.json is the set of versions there is EVIDENCE for — one, asserted
+// by a golden test — rather than an optimistic `<2`. Moving private-field reads into
+// more files would not have widened it; only a fixture run against another version
+// does. Widen it by pinning that version in devDependencies, running the suite, and
+// extending the golden — not by assuming the internals held.
 
 /** The structural surface we read off a drizzle select query builder. */
 type DrizzleSelect = {

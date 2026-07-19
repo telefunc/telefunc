@@ -29,7 +29,7 @@
     "@tanstack/db-ivm": "0.1.18"
   },
   "peerDependencies": {
-    "drizzle-orm": ">=1.0.0-rc.4 <2",
+    "drizzle-orm": "1.0.0-rc.4",
     "telefunc": ">=0.2.0"
   },
   "devDependencies": {
