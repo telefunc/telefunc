@@ -49,10 +49,11 @@ function Inner() {
 
   const fetchesOf = useFetchCounts()
   const todos = useQuery({ queryKey: TODOS_KEY, queryFn: live(onGetTodos) })
-  // The SYNCHRONOUS-closure spelling, exercised end-to-end alongside the direct form above. It reaches the
-  // telefunction inside the same per-call context window, so the query's abort signal still rides along —
-  // the two spellings are equivalent, and this lane is where that stops being a unit-test claim.
-  const notes = useQuery({ queryKey: NOTES_KEY, queryFn: live(() => onGetNotes()) })
+  // The CONTROL query. `live()` takes the telefunction and its arguments directly — the closure spelling
+  // `live(() => onGetNotes())` was dropped with the boundary move, because deciding whether a closure's
+  // returned value was the call that took the context needed attribution machinery in telefunc core.
+  // Calling the telefunction here makes that question unaskable.
+  const notes = useQuery({ queryKey: NOTES_KEY, queryFn: live(onGetNotes) })
 
   const state = {
     todosCount: Array.isArray(todos.data) ? todos.data.length : -1,
