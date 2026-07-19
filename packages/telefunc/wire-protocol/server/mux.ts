@@ -369,6 +369,16 @@ class ChannelMux {
     rawFrame: Uint8Array<ArrayBuffer>,
     violation: ViolationTarget,
   ): null | Promise<ReconcileOutcome | null> {
+    // Pre-decode admission for PREPARE. The tag is byte 0, so an oversized stage frame is refused
+    // before `decode` materializes its JSON — which is what makes this cap bound decoder ALLOCATION
+    // rather than merely bound what is retained afterwards. A barrier cannot be screened the same
+    // way: only its decoded payload distinguishes it from an ordinary, deliberately uncapped
+    // reconcile. So the division of labour is explicit — for the barrier the 256 KiB cap bounds
+    // staged/commit state only, and decode-time allocation is bounded separately by the pre-decode
+    // raw-frame ceiling (D3/T7).
+    if (rawFrame[0] === TAG.PREPARE && rawFrame.byteLength > this.upgradeLimits.maxFrameBytes) {
+      throw new ProtocolViolationError()
+    }
     const frame = decode(rawFrame)
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)

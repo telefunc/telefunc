@@ -189,6 +189,46 @@ describe('per-frame caps — mechanism', () => {
   })
 })
 
+describe('the PREPARE byte cap runs BEFORE decode', () => {
+  // ── F5 ── The cap is documented as bounding decoder allocation, and a check that runs after
+  // `decode` has already materialized the JSON does not do that: by the time it fires, the very
+  // allocation it exists to prevent has happened. PREPARE's tag is byte 0 of the frame, so the
+  // length can be rejected with no decode at all.
+  //
+  // Behaviour cannot distinguish the two orderings — both refuse the frame and terminate the probe —
+  // so the oracle is the allocation itself: whether `JSON.parse` ran. That is the property being
+  // claimed, observed directly rather than through a proxy.
+
+  test('an oversized PREPARE is refused without its payload ever being parsed', async () => {
+    const h = (harness = createMuxHarness({ maxFrameBytes: 200 }))
+    const { chA, s0 } = await connectSse(h)
+    const parse = vi.spyOn(JSON, 'parse')
+
+    try {
+      await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: openEntries(64) }))
+      expect(parse).not.toHaveBeenCalled()
+    } finally {
+      parse.mockRestore()
+    }
+    await expectRejectedProbe(h, h.ws, chA)
+  })
+
+  test('control: an admissible PREPARE IS parsed — the spy can disagree', async () => {
+    // Without this, "never parsed" would be satisfied by a spy watching the wrong function.
+    const h = (harness = createMuxHarness({ maxFrameBytes: 4_096 }))
+    const { s0 } = await connectSse(h)
+    const parse = vi.spyOn(JSON, 'parse')
+
+    try {
+      await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: openEntries(4) }))
+      expect(parse).toHaveBeenCalled()
+    } finally {
+      parse.mockRestore()
+    }
+    expect(h.ws.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(1)
+  })
+})
+
 describe('global staged budget — mechanism', () => {
   /** A second, fully independent SSE session, so a second stage is legal but for the budget. */
   async function connectSecondSse(h: ReturnType<typeof createMuxHarness>) {
