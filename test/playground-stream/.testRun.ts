@@ -11,6 +11,7 @@ import { testClose } from './pages/close/e2e-test'
 import { testChannel } from './pages/channel/e2e-test'
 import { testFunction } from './pages/function/e2e-test'
 import { testStreamToServer } from './pages/stream-to-server/e2e-test'
+import { testLiveQuery } from './pages/live-query/e2e-test'
 import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
@@ -79,6 +80,8 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   testFunction()
 
   testStreamToServer()
+
+  testLiveQuery()
 
   testRxjs()
 

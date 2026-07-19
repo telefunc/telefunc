@@ -17,6 +17,7 @@ const nav = [
   { href: '/publish', label: 'Publish' },
   { href: '/ref-identity', label: 'Ref Identity' },
   { href: '/video-chat', label: 'Video Chat' },
+  { href: '/live-query', label: 'Live Query' },
   { href: '/kitchen-sink', label: 'Kitchen Sink' },
   { href: '/tanstack-ai-chat', label: 'TanStack AI' },
   { href: '/rxjs', label: 'RxJS' },
