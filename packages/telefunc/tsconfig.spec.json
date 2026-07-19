@@ -1,0 +1,32 @@
+{
+  // Typechecks the spec files THIS PR added. `tsconfig.json` excludes `**/*.spec.ts` and vitest does not
+  // typecheck, so before this these specs could drift out of sync with the source silently — the same gap
+  // that let real errors hide in packages/drizzle's specs until its own spec config was run.
+  //
+  // `files` rather than `include`, because entries listed in `files` bypass the inherited
+  // `exclude: ["**/*.spec.ts"]` while `include` does not. That keeps the source/ambient-declaration globs
+  // exactly as the build resolves them (a narrower `include` drops `wire-protocol/uint8array.d.ts` and the
+  // vite plugin's global declarations, and unrelated source files then fail on augmentations they rely on).
+  //
+  // Scoped to this PR's specs on purpose: enabling it for every spec in the package surfaces a substantial
+  // PRE-EXISTING backlog (channel-close, connection reconnect-ordering, and the client/dist dual-identity
+  // conflict). Clearing that is real work and unrelated to this PR — widening this list is the follow-up.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "files": [
+    "node/server/extensionHost.spec.ts",
+    "node/server/live/exports.spec.ts",
+    "node/server/live/live-derived.spec.ts",
+    "node/server/live/live.spec.ts",
+    "node/server/runTelefunc/lifecycle.spec.ts",
+    "wire-protocol/live.spec.ts",
+    "wire-protocol/upgrade-client-harness.ts",
+    "wire-protocol/upgrade-mux-harness.ts",
+    "wire-protocol/upgrade.abort-swallow.spec.ts",
+    "wire-protocol/upgrade.handoff-order.spec.ts",
+    "wire-protocol/upgrade.loss.spec.ts"
+  ],
+  "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"]
+}
