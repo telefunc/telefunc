@@ -111,6 +111,23 @@ class Heartbeat {
   }
 }
 
+/** Resolve when `promise` settles OR `signal` aborts, whichever comes first.
+ *
+ *  The promise is NOT cancelled — nothing here can cancel an in-flight fetch — the caller merely
+ *  stops waiting on it. That distinction is the whole point: an emitter that cannot stop waiting
+ *  makes every deadline above it advisory, because the abort fires and nothing observes it. */
+function raceAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    const settle = (): void => {
+      signal.removeEventListener('abort', settle)
+      resolve()
+    }
+    signal.addEventListener('abort', settle, { once: true })
+    promise.then(settle, settle)
+  })
+}
+
 type OutboundFrameKind = 'reconcile' | 'control' | 'flow-control' | 'ack' | 'data' | 'heartbeat'
 
 type OutboundFrame = {
@@ -207,8 +224,17 @@ type ClientChannelTransport = {
   /** Barrier-flow replacement for `forceDrain`. Puts the barrier out as this wire's FINAL frame and
    *  returns — without waiting for any server acknowledgment, which is the round-trip the whole
    *  design exists to remove. `buildFrame` is a thunk rather than a frame so the payload's cursors
-   *  are read at the actual moment of emission, after any mode-specific quiesce. */
-  emitBarrier(buildFrame: () => OutboundFrame): Promise<void>
+   *  are read at the actual moment of emission, after any mode-specific quiesce.
+   *
+   *  Every wait inside observes `signal`, so the attempt deadline can actually end an emission that
+   *  cannot complete — in batch mode the quiesce is otherwise unbounded, and a wedged emitter gates
+   *  user sends for the connection's lifetime with nothing watching.
+   *
+   *  The return value is the recovery decision and must be EXACT. `'not-emitted'` means not one
+   *  barrier byte reached the wire, so the server's session is untouched and the caller simply
+   *  stays on it. `'emitted'` means the barrier may already have committed, so no wire can be
+   *  trusted and the caller must abandon both. Guessing either way corrupts a live session. */
+  emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<'emitted' | 'not-emitted'>
   /** Connection constructs the Heartbeat (with the funnel-bound onDead) and hands it over.
    *  Transport's frame receive path routes PONG to it directly (`heartbeat?.resetPong()`). */
   attachHeartbeat(hb: Heartbeat): void
@@ -1080,6 +1106,9 @@ class ClientConnection implements MuxConnection {
       //    server-side, so the new wire never has to reconcile for itself.
       const upgradeId = crypto.randomUUID()
       const pendingProbeFrames: { frame: DecodedFrame; byteLength: number }[] = []
+      let heldFrames = 0
+      let heldBytes = 0
+      let heldOverflow = false
       let onReady: ((payload: ReadyPayload) => void) | null = null
       probe.onFrame((frame, byteLength) => {
         if (frame.tag === TAG.READY) {
@@ -1088,7 +1117,24 @@ class ClientConnection implements MuxConnection {
         }
         // The COMMITTED can beat the transport flip. HELD, not dropped — replayed through the
         // ordinary receive path right after the flip, where the handoff buffer takes it.
+        //
+        // Charged against the SAME shared budget the handoff buffer enforces, and charged HERE
+        // rather than at replay: this queue exists before any handoff state does, so without a
+        // check at hold time it is simply unbounded memory that the documented cap never sees.
+        if (heldOverflow) return
         pendingProbeFrames.push({ frame, byteLength })
+        heldFrames += 1
+        heldBytes += byteLength
+        if (heldFrames > UPGRADE_HANDOFF_BUFFER_FRAMES || heldBytes > UPGRADE_HANDOFF_BUFFER_BYTES) {
+          // Every held frame is a NEW-wire frame, so R2's discard-the-new-buffer-WHOLE rule applies
+          // to them as a set. Keeping a prefix instead would advance `trackSeq` past frames the
+          // recovery still has to replay, turning a recoverable overflow into permanent loss.
+          heldOverflow = true
+          pendingProbeFrames.length = 0
+          // Where this LANDS is decided by where the abort is observed below — before emission it
+          // is a pre-barrier failure, after it the sticky fallback. Neither is chosen here.
+          attempt.abort()
+        }
       })
 
       // The ONLY watchdog over PREPARE→handoff-entry. A barrier the server finds stale is refused
@@ -1118,11 +1164,25 @@ class ClientConnection implements MuxConnection {
       // Gate down. From here the old wire carries exactly one more frame, and the payload is built
       // inside `emitBarrier` — at emission — so its cursors reflect everything delivered since.
       this.enterUpgradeDraining(attempt)
-      await from.emitBarrier(() => this.buildReconcileFrame({ upgradeId }))
+      const emission = await from.emitBarrier(() => this.buildReconcileFrame({ upgradeId }), attempt.signal)
 
+      if (emission === 'not-emitted') {
+        // The attempt ended — deadline, dead wire — with not one barrier byte written. In batch
+        // mode that is the common shape: emission must quiesce first, and a POST that never answers
+        // means the barrier is never even built. The server's session is therefore exactly where it
+        // was, so this is a PRE-barrier failure and the old wire simply carries on;
+        // `exitUpgradeAttempt` in the `finally` lifts the gate this branch is still under.
+        attempt.abort()
+        this.rollbackToOldWire()
+        return
+      }
       if (attempt.signal.aborted) {
         // The barrier MAY already have reached the server, so no wire can be trusted to still hold
         // the session — the single rule past this point is to abandon BOTH and reconcile afresh.
+        // This must win over the reconcile deadline `buildReconcileFrame` armed a moment ago, which
+        // would take the GENERIC reconnect and leave upgrades enabled. It does win by construction
+        // — the attempt deadline was armed at PREPARE, strictly earlier, and both are 10 s — and
+        // the hanging-barrier-POST spec is what holds that ordering honest.
         this.abortUpgradeAndReconnectSse(new NetworkError('Upgrade barrier attempt timed out', true))
         return
       }
@@ -1142,6 +1202,18 @@ class ClientConnection implements MuxConnection {
       } finally {
         this.suppressReconcileOnOpen = false
       }
+      // INVARIANT this replay rests on — stated because it is what makes a mid-loop cap check
+      // unnecessary rather than merely untested. The held set is already bounded by the SAME budget
+      // the handoff buffer enforces (charged in `probe.onFrame` above; over-budget aborts the
+      // attempt before any flip), the handoff buffer starts empty, and this loop is fully
+      // synchronous — no frame can interleave and no timer can fire inside it. Replaying a bounded
+      // set into an empty buffer of the same bound therefore cannot trip that bound.
+      //
+      // If this ever stops holding — a hold-time limit that diverges from the handoff cap, or an
+      // `await` introduced in here — the cap CAN trip mid-replay, and then the remaining held frames
+      // must be DISCARDED rather than dispatched: they are new-wire frames covered by the same
+      // discard-the-new-buffer-whole rule, and dispatching them would advance `trackSeq` past the
+      // frames the fallback dropped, leaving the recovery replay dup-suppressed forever.
       for (const held of pendingProbeFrames) this._onTransportFrame(held.frame, to, held.byteLength)
     } finally {
       // Disarmed before the attempt is released, so a deadline can never fire against a committed
@@ -1588,7 +1660,7 @@ class WsTransport implements ClientChannelTransport {
 
   /** Unreachable by construction — `UPGRADE_PATH` only ever upgrades SSE→WS, so a WS wire is never
    *  the one a barrier is emitted on. Mirrors `SseTransport.probe`'s stance on the same asymmetry. */
-  async emitBarrier(): Promise<void> {
+  async emitBarrier(): Promise<'emitted' | 'not-emitted'> {
     throw new Error('WS transport does not emit an upgrade barrier')
   }
 
@@ -1800,35 +1872,44 @@ class SseTransport implements ClientChannelTransport {
   /** The barrier is this wire's last frame. It is never concurrent with another upstream POST,
    *  never retried, and never an ordinary outbox item — all three would let it commit out of order
    *  with frames the server then drops as post-rotation stragglers. */
-  async emitBarrier(buildFrame: () => OutboundFrame): Promise<void> {
+  async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<'emitted' | 'not-emitted'> {
     if (this.streamRequest.tag === 'active') {
       assert(!this.flushing && this.outbox.length === 0)
       const frame = buildFrame()
       this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
       this.streamRequest.body.push(frame.frame)
       // Body closed, fetch NOT awaited. That await is the round-trip this design removes, and it
-      // never meant "server acknowledged" anyway — `sse.ts` void-dispatches the response.
+      // never meant "server acknowledged" anyway — `sse.ts` void-dispatches the response. Nothing
+      // here awaits, so the attempt deadline has no window to interrupt and needs none.
       this.closeStreamRequest()
-      return
+      return 'emitted'
     }
 
     // Batch mode. Two POSTs in flight at once have no defined server-side dispatch order — entry
     // into the shared recv chain is the order each body is READ — so a barrier racing an earlier
     // POST can commit ahead of its frames, which then land post-rotation and are dropped silently.
     // `gracefulDrain` is the natural quiesce; if it times out with a POST still in flight we keep
-    // waiting rather than racing it. The attempt deadline is what bounds this, never a concurrent
-    // barrier — the wrong direction to be impatient in.
+    // waiting rather than racing it, because a concurrent barrier is the wrong direction to be
+    // impatient in. What bounds the wait is the ATTEMPT SIGNAL, not a shorter timeout.
     await this.gracefulDrain(UPGRADE_DRAIN_TIMEOUT_MS)
     while (this.flushing) {
-      if (!this.hasWire()) return
-      await new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
+      // Every exit above the build below is honestly `'not-emitted'`: the barrier frame has not
+      // even been constructed, let alone written, so the old session is exactly as it was.
+      if (!this.hasWire() || signal.aborted) return 'not-emitted'
+      await raceAbort(new Promise<void>((resolve) => this.drainCallbacks.push(resolve)), signal)
     }
-    if (!this.hasWire()) return
+    if (!this.hasWire() || signal.aborted) return 'not-emitted'
     this.flushScheduler.cancel()
     // Whatever the quiesce left behind rides along in this same final POST, barrier LAST.
     const queued = this.outbox.splice(0, this.outbox.length).map((entry) => entry.frame)
     queued.push(buildFrame().frame)
-    await this.sendStandalonePost(queued)
+    // Past this line the barrier is on the wire and the server may already have read it, so no
+    // later abort can claim otherwise. The await is raced only so a hanging POST cannot outlive the
+    // attempt deadline — the verdict stays `'emitted'` either way, which is what keeps the caller
+    // on the sticky both-wires fallback instead of a generic reconnect.
+    const post = this.sendStandalonePost(queued)
+    await raceAbort(post, signal)
+    return 'emitted'
   }
 
   start(): void {
