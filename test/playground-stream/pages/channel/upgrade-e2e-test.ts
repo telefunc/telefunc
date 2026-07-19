@@ -6,10 +6,22 @@ import { navigate, getResult, getCleanupState, resetCleanupState } from '../../e
 /**
  * SSE→WS barrier-upgrade e2e.
  *
- * The claim under test is that the upgrade moves a live connection between wires without losing or
- * duplicating a single frame in either direction. So the upgrade is not performed on an idle page:
- * it fires naturally on the first settled RECONCILED while an upstream burst, 1 Hz acked ticks, two
- * independently-ticking channels and a 1 MB binary round-trip are all in flight across it.
+ * What this proves: the upgrade really completes in a real browser against a real build (dev AND
+ * preview), and a connection that has undergone one delivers exactly once in both directions —
+ * upstream burst, 1 Hz acked ticks, two independently-ticking channels, a 1 MB binary round-trip.
+ *
+ * What it does NOT prove, measured rather than assumed: that a frame in flight AT the barrier turn
+ * survives it. `maybeStartUpgrade` runs on the first settled RECONCILED, which lands during
+ * `#channel-connect` — instrumenting the commit counter at each step of this test showed
+ * `committed=1` already before `#channel-test-upstream-open` was clicked, so every click below
+ * happens on the ALREADY-upgraded wire. Nothing here is in flight across the handoff.
+ *
+ * That is not a fixable oversight, and deliberately no sleep is tuned in to chase it: a browser
+ * cannot deterministically park a frame mid-`recvChain`, so any such gate would be timing-luck and
+ * a flake generator. The happens-before edge is gated where it can be gated deterministically —
+ * `upgrade.barrier.spec.ts`'s I1 rows, which park a real frame and are mutation-verified. This file
+ * gates the things only a browser can: that the upgrade fires at all, exactly once, and leaves a
+ * healthy connection behind.
  *
  * Completion is asserted from the SERVER, via the barrier-commit counter on `/api/cleanup-state`.
  * The available client-side signal — `page.waitForEvent('websocket')` — fires on the PROBE socket
@@ -29,7 +41,7 @@ function testUpgrade(isDev: boolean) {
 
   const UPSTREAM_SENDS = 25
 
-  test(`${label}: exactly-once in both directions across a live SSE→WS handoff [${transports.join(',')}]`, async () => {
+  test(`${label}: the SSE→WS upgrade commits once and the upgraded wire delivers exactly once [${transports.join(',')}]`, async () => {
     // Zeroes the barrier counters too, so the counts below belong to THIS page load. Done before
     // navigating: the connection is created by the first channel open, which is a click away.
     await resetCleanupState()
@@ -52,9 +64,9 @@ function testUpgrade(isDev: boolean) {
       channelId = state.upstreamReconnectChannelId
     })
 
-    // Traffic in flight across the handoff. The upgrade is attempted on the first settled
-    // RECONCILED, so it lands somewhere inside this block — deliberately not pinned to a
-    // particular click, because the design's safety must not depend on arrival timing.
+    // Load on the upgraded wire. Measured: the commit has already landed by here (see the header),
+    // so this is traffic AFTER the handoff, not across it — it proves the upgraded connection is
+    // healthy and exactly-once, which is a different claim from surviving the barrier turn.
     await page.click('#channel-test-multi')
     await page.click('#channel-test-binary')
     for (let i = 0; i < UPSTREAM_SENDS; i++) {
