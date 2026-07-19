@@ -2,7 +2,7 @@ export { captureMutation, emitSafely, captureRawSql, planCapture, captureMismatc
 export type { CaptureSink }
 
 import { type Column, SQL, type Table, getTableColumns, is, isTable } from 'drizzle-orm'
-import { dialectOf, driverOf, isSingleSession } from '../binding/database.js'
+import { dialectOf, driverOf } from '../binding/database.js'
 import { primaryKeyOf, relationKeyOf } from '../extract/columns.js'
 import { describeRelationId } from '../ir/relation.js'
 import { ingestWrite, registryFor } from './dbRuntime.js'
@@ -25,7 +25,6 @@ import type { Row, TableChange } from '../router/events.js'
 // PRECISION is gated + fails closed (emit one {table, kind:'coarse'}) — safe over-fire, never a wrong row:
 //   - PG/SQLite only (MySQL has no RETURNING → precise MySQL needs a pre-write SELECT + a live MySQL test
 //     lane that does not exist in this package yet → deferred; MySQL stays sound-coarse);
-//   - single-session only (decision #6: pooled connections can't prove session authority → coarse);
 //   - a resolvable PK (single OR composite); a table with no PK → coarse (a retraction can't be keyed);
 //   - not an UPSERT / ON CONFLICT, not a raw-SQL/insert-from-select write;
 //   - not a PK-CHANGING update (SET touches the PK column → the old PK can't be recovered from RETURNING
@@ -34,6 +33,11 @@ import type { Row, TableChange } from '../router/events.js'
 //     from a hidden full RETURNING (verified: PGlite → `{rows:[],fields:[],affectedRows:N}`); other drivers
 //     + SQLite (its `lastInsertRowid` is not recoverable for update/delete) → coarse. A caller's own
 //     `.returning()` needs no reconstruction, but must cover every column to yield a full image, else coarse.
+//
+// NOT a gate: whether the connection is pooled. A `.returning()` row image is produced by the exact session
+// that executed the statement, so "which pool connection ran it" cannot make those rows less real. Session
+// authority (role / search_path / RLS) is load-bearing for READ hydration identity — which keeps its own
+// pooled gate in readCapture.ts — not for returned-row capture. See `planCapture`.
 
 type Op = 'insert' | 'update' | 'delete'
 /** Where a captured batch goes: straight to the db's graphs (autocommit) or a transaction buffer. */
@@ -332,7 +336,6 @@ type Plan =
 function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   const dialect = dialectOf(db)
   if (dialect === 'mysql') return { mode: 'coarse' } // no RETURNING; precise MySQL (pre-write SELECT) deferred
-  if (!isSingleSession(db)) return { mode: 'coarse' } // decision #6: pooled → coarse
   const pk = pkFieldsOf(table)
   if (pk.length === 0) return { mode: 'coarse' } // no resolvable PK → a retraction can't be keyed → coarse
   const config = writeConfigOf(builder)
@@ -342,9 +345,20 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   if (op === 'update' && setTouchesPk(config, pk)) return { mode: 'coarse' } // PK-changing update (fork #2)
 
   const columns = Object.keys(getTableColumns(table))
+  // The caller asked the DATABASE for the changed rows, and the database answered from the very session that
+  // executed the statement — so a POOLED connection is precise here too. This used to sit below a blanket
+  // `!isSingleSession(db) → coarse` gate, which coarsened pooled PostgreSQL writes using an argument that
+  // belongs to read hydration (a pooled read can be answered by a connection with a different role /
+  // search_path / RLS view than the one that was probed). No such probe is involved in a returned row.
+  //
+  // FULLNESS is deliberately not decided here: `.returning({id})` also sets `config.returning`, and plans
+  // precise, and is then caught AFTER execution by `captureMismatch` (missing-columns → one coarse marker).
+  // That check is what keeps a partial projection from being emitted as a full image — on any connection.
   if (config.returning !== undefined) return { mode: 'precise', callerReturning: true, pk, columns }
 
-  // no caller returning → reconstruction must be provably faithful for THIS driver
+  // No caller returning → capture must SUBSTITUTE a hidden full RETURNING and hand the caller back a
+  // reconstructed plain result, so reconstruction must be provably faithful for THIS driver. (PGlite is one
+  // in-process connection by construction, so there is no pooled variant of this branch to gate.)
   if (dialect === 'pg' && driverOf(db) === 'PgliteDatabase') {
     return {
       mode: 'precise',

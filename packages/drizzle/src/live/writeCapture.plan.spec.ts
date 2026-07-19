@@ -6,10 +6,20 @@
 //
 // ISOLATION, stated honestly (verified by mutating each guard in turn):
 //  - the no-PK, UPSERT and PK-changing cases ISOLATE their guard — removing it flips exactly that case;
-//  - the MySQL and POOLED cases are OVER-DETERMINED: those dbs also fail the "reconstruction must be provably
-//    faithful for this driver" gate, so removing the dialect or single-session guard alone does NOT flip them.
-//    They assert the OUTCOME (such a write can never plan precise) rather than one guard. That is defence in
-//    depth, not a defect — but it means they are not regression tests for those two guards specifically.
+//  - the MySQL case is OVER-DETERMINED: that db also fails the "reconstruction must be provably faithful for
+//    this driver" gate, so removing the dialect guard alone does NOT flip it. It asserts the OUTCOME (such a
+//    write can never plan precise) rather than one guard. Defence in depth, not a defect — but it is not a
+//    regression test for the dialect guard specifically.
+//  - the POOLED cases DO isolate: re-introducing a blanket `!isSingleSession(db) → coarse` gate above the
+//    returning check flips 'pooled + full .returning()' and the plan-equality case, and nothing else.
+//
+// POOLED PostgreSQL, and what this file can and cannot prove (premise audit #3 / H2):
+//   A `.returning()` row image comes from the exact session that ran the statement, so pooling cannot make
+//   those rows less real — session authority is load-bearing for READ hydration, which keeps its own pooled
+//   gate in readCapture.ts. There is no real pooled-PG lane in this package (node-postgres cannot connect to
+//   PGlite, and there is no pg-mem/socket/server dependency), so pooled writes are asserted at PLAN level.
+//   The bridge to execution is the plan-EQUALITY case below: everything after planning consumes only the
+//   Plan (`runWrite` reads `db` nowhere else), so an identical plan is an identical capture.
 
 import { PGlite } from '@electric-sql/pglite'
 import { entityKind } from 'drizzle-orm'
@@ -38,6 +48,7 @@ class Connection {
   config = {} // drizzle's mysql2 driver writes `supportBigNumbers` here
 }
 class Pool {}
+class Client {}
 
 /** These stubs implement only what the classifier reads, not the driver's full type — the cast is the
  *  point, and `assertClassifierInputs` is what keeps it honest at runtime. */
@@ -60,6 +71,14 @@ beforeAll(async () => {
   pg = pgDrizzle({ client })
 })
 afterAll(async () => await client.close())
+
+/** A node-postgres db over a POOL — re-classified on every call, so the pooled discriminators the planner
+ *  reads are re-pinned rather than trusted once. */
+function pooledPg() {
+  const pooled = pgPoolDrizzle({ client: asClient(new Pool()) })
+  assertClassifierInputs(pooled, { dialect: 'PgDialect', driver: 'NodePgDatabase', client: 'Pool' })
+  return pooled
+}
 
 /** The planner reads the BUILDER's shape; building one never executes it. */
 const insertPlan = (db: object, builder: unknown, table: Parameters<typeof planCapture>[1]) =>
@@ -86,11 +105,66 @@ describe('capture planning — fail-closed branches have executable controls', (
     expect(plan.mode).toBe('coarse')
   })
 
-  it('POOLED (non-single-session) PG → coarse (session authority is unprovable — decision #6)', () => {
-    const pooled = pgPoolDrizzle({ client: asClient(new Pool()) })
-    assertClassifierInputs(pooled, { dialect: 'PgDialect', driver: 'NodePgDatabase', client: 'Pool' })
-    const plan = insertPlan(pooled, pooled.insert(keyed).values({ id: 1, name: 'a' }), keyed)
+  it('POOLED PG with NO returning → coarse (the reconstruction is unproven for node-postgres)', () => {
+    // Still coarse — but for the honest reason. Capture would have to substitute a hidden RETURNING and
+    // rebuild node-postgres' plain `Result` from it, which is not verified for this driver. Pooling is not
+    // the reason: the same write on a single pg `Client` coarsens identically (asserted just below).
+    const plan = insertPlan(pooledPg(), pooledPg().insert(keyed).values({ id: 1, name: 'a' }), keyed)
     expect(plan.mode).toBe('coarse')
+  })
+
+  it('and a PINNED single pg Client with no returning coarsens the SAME way (pooling was never the reason)', () => {
+    const pinned = pgPoolDrizzle({ client: asClient(new Client()) })
+    assertClassifierInputs(pinned, { dialect: 'PgDialect', driver: 'NodePgDatabase', client: 'Client' })
+    expect(insertPlan(pinned, pinned.insert(keyed).values({ id: 1, name: 'a' }), keyed).mode).toBe('coarse')
+  })
+
+  it('POOLED PG with the caller’s own full .returning() → PRECISE (premise audit #3)', () => {
+    // The win. The database handed back the changed rows from the statement itself; which pool connection
+    // ran it is irrelevant to whether those rows are real. A blanket pooled gate coarsened this.
+    const pooled = pooledPg()
+    const plan = insertPlan(pooled, pooled.insert(keyed).values({ id: 1, name: 'a' }).returning(), keyed)
+    expect(plan).toEqual({ mode: 'precise', callerReturning: true, pk: ['id'], columns: ['id', 'name'] })
+  })
+
+  it('a pooled full-returning plan EQUALS the single-session one — so capture behaves identically', () => {
+    // The bridge from plan level to execution. `runWrite`'s callerReturning branch reads `db` nowhere: it
+    // runs the caller's builder and hands the rows to `captureOrCoarse(op, relationId, rows, plan)`. Equal
+    // plans therefore mean equal capture, which is why the PGlite execution cases cover the pooled path too.
+    const pooled = pooledPg()
+    expect(insertPlan(pooled, pooled.insert(keyed).values({ id: 1, name: 'a' }).returning(), keyed)).toEqual(
+      insertPlan(pg, pg.insert(keyed).values({ id: 1, name: 'a' }).returning(), keyed),
+    )
+  })
+
+  it('pooling does not unlock the OTHER gates: no-PK, upsert and PK-changing stay coarse with .returning()', () => {
+    // The reorder moved one gate; it must not have moved the rest. Each of these carries a full
+    // `.returning()`, so only its own guard can be what coarsens it.
+    const pooled = pooledPg()
+    expect(insertPlan(pooled, pooled.insert(unkeyed).values({ a: 1, b: 'x' }).returning(), unkeyed).mode).toBe('coarse')
+    expect(
+      insertPlan(pooled, pooled.insert(keyed).values({ id: 1, name: 'a' }).onConflictDoNothing().returning(), keyed)
+        .mode,
+    ).toBe('coarse')
+    expect(planCapture(pooled.update(keyed).set({ id: 2 }).returning(), keyed, 'update', pooled).mode).toBe('coarse')
+  })
+
+  it('a pooled PARTIAL .returning({id}) is NOT admitted as a full image — it fails closed after execution', () => {
+    // The trap in the reorder: `.returning({id})` also sets `config.returning`, so it plans precise on a
+    // pooled db just as it does on a pinned one. What keeps it sound is the post-execution check, asserted
+    // here at its own seam on exactly the row a partial projection produces.
+    const pooled = pooledPg()
+    const plan = insertPlan(
+      pooled,
+      pooled.insert(keyed).values({ id: 1, name: 'a' }).returning({ id: keyed.id }),
+      keyed,
+    )
+    expect(plan.mode).toBe('precise') // planning does not decide fullness…
+    expect(captureMismatch([{ id: 1 }], ['id', 'name'], ['id'], 'insert')).toEqual({
+      rowIndex: 0,
+      reason: 'missing-columns',
+      detail: 'name', // …capture does, and coarsens
+    })
   })
 
   it('UPSERT and PK-changing update plan coarse on a db that would otherwise be precise', () => {

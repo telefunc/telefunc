@@ -118,21 +118,20 @@ Live queries are **precise where that can be proven, and deliberately coarse —
 
 Coarse is also **temporary rather than permanent**. When something happens that Telefunc cannot describe row by row — a raw statement on any server, a migration, a gap detected in the change stream — the affected queries refetch and then rebuild their tracking from the database, so they go back to being precise. Under a burst of such events they stop trying and stay coarse until the next fresh read, which is the safe direction.
 
-Capturing a write precisely means recovering the rows it changed. That needs a connection whose session Telefunc can prove is its own, a usable primary key, and a way to read the changed rows back:
+Capturing a write precisely means recovering the rows it changed. That needs a usable primary key and a way to read the changed rows back — either your own `RETURNING`, or a driver whose plain result Telefunc can reproduce faithfully:
 
 The rows below are read top to bottom: a write is precise only if no coarse row also applies to it. An `UPSERT` on PGlite is coarse, not precise.
 
 | Write | Behaviour |
 | --- | --- |
 | On PGlite, for an ordinary insert/update/delete | **Precise** — the rows are captured for you |
-| On SQLite or a pinned PostgreSQL client, using a **full-row** `.returning()` | **Precise** — your own `RETURNING` supplies the rows |
-| On SQLite or a pinned PostgreSQL client, *without* `.returning()` | **Coarse** — the plain driver result can't be reproduced faithfully, so the rows aren't captured |
+| On any PostgreSQL or SQLite connection — **pooled included** — using a **full-row** `.returning()` | **Precise** — your own `RETURNING` supplies the rows, and they come from the very session that ran the statement |
+| Without `.returning()`, on any driver other than PGlite | **Coarse** — the plain driver result can't be reproduced faithfully, so the rows aren't captured |
 | A **partial** `.returning({ id })` — on any dialect | **Coarse** — a projection is not a full row image, and widening it would mean inventing the missing columns |
-| On a pooled PostgreSQL connection | **Coarse** — a pool can't prove which session ran the query |
 | On MySQL | **Coarse** — no `RETURNING` to capture rows from |
 | `UPSERT` / `ON CONFLICT`, a primary-key-changing update, or a table with no usable primary key | **Coarse** — the affected rows can't be identified unambiguously |
 
-Reads have one over-fire of their own: a plain single-table `select` keeps no row state, so an update to a row it reads can invalidate it even when the visible result is unchanged. Joins and aggregates track this exactly.
+Reads have two over-fires of their own. A plain single-table `select` keeps no row state, so an update to a row it reads can invalidate it even when the visible result is unchanged — joins and aggregates track this exactly. And a live query read over a **pooled** connection stays coarse: unlike a returned row, a read's meaning depends on the session it runs in, and a pool can hand the next read a connection with a different role or `search_path` than the one Telefunc inspected.
 
 #### Raw SQL
 
