@@ -83,69 +83,57 @@ export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
  *  phase 2 gates the producer and forces the cutover. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
-/** Deadline for the FIN(old wire) + RECONCILED(new wire) join that commits the handoff. Symmetric
- *  — it bounds whichever limb is missing — and armed when the handoff is ENTERED rather than when
- *  the first of the two arrives. Arming it on FIN leaves a MISSING FIN unbounded, which is the one
- *  case it exists to catch: with RECONCILED settled there is no `reconcileTimer` either, so nothing
- *  at all is watching and the handoff wedges for the connection's lifetime. */
+/** Deadline for the FIN(old wire) + RECONCILED(new wire) join that commits the handoff. Armed when
+ *  the handoff is ENTERED, not when the first limb arrives — arming it on FIN leaves a MISSING FIN
+ *  unbounded, which is the one case it exists to catch. */
 export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 
-/** ONE budget shared across BOTH handoff buffers (old + new). Hitting either limit trips the same
- *  fallback as a missing FIN. Frames are never evicted to stay under it: eviction would silently
- *  drop precisely the non-replayable old-wire frames the source partitioning exists to protect. */
+/** ONE budget shared across BOTH handoff buffers (old + new); either limit trips the same fallback
+ *  as a missing FIN. Frames are never evicted to stay under it — eviction would silently drop
+ *  precisely the non-replayable old-wire frames the source partitioning exists to protect. */
 export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
 export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
-/** CLIENT-side deadline for one barrier-upgrade attempt, armed when the `PREPARE` goes out and
- *  disarmed once the handoff is entered — deliberately excluding the 3 s probe, which
- *  `WS_PROBE_TIMEOUT_MS` already bounds. It is the only watchdog over that window, and it is not
- *  redundant with the server's stage TTL: a barrier the server finds STALE is refused SILENTLY (no
- *  `COMMITTED`, no termination, old session intact), so nothing on the wire would ever end such an
- *  attempt. From handoff entry onwards `UPGRADE_HANDOFF_JOIN_TIMEOUT_MS` takes over. */
+/** CLIENT-side deadline for one attempt, armed at the `PREPARE` and disarmed at handoff entry
+ *  (excluding the probe, which `WS_PROBE_TIMEOUT_MS` bounds). Not redundant with the server's stage
+ *  TTL: a barrier the server finds STALE is refused SILENTLY, so nothing on the wire would otherwise
+ *  ever end such an attempt. From handoff entry on, the join timeout takes over. */
 export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 
-/** Overall barrier-upgrade attempt deadline, from the moment the server accepts a PREPARE until
- *  the barrier commits. NON-refreshing on purpose: a client that pings but never barriers would
- *  otherwise hold its stage open forever, since PING resets only the liveness timer. On expiry the
- *  stage is dropped and the old SSE session is left completely untouched — the client falls back. */
+/** SERVER-side stage lifetime, from accepted PREPARE to commit. NON-refreshing on purpose: PING
+ *  resets only the liveness timer, so a client that pings but never barriers would otherwise hold
+ *  its stage forever. On expiry the old SSE session is left completely untouched. */
 export const UPGRADE_STAGE_TTL_MS = 10_000
 
-/** Admission caps for PREPARE and `barrier: true` RECONCILE frames ONLY. An ordinary RECONCILE
- *  keeps its existing uncapped contract; narrowing that would be a behavior change to a certified
- *  path. 256 KiB matches one text replay-lane budget; the entry/id caps bound what the JSON decoder
- *  allocated, which the byte cap alone does not (1024 ids of 256 B is a very different object graph
- *  from one 256 KiB id). */
+/** Admission caps for PREPARE and barrier RECONCILE frames ONLY — an ordinary RECONCILE keeps its
+ *  uncapped contract. The entry/id caps bound what the JSON decoder allocated, which the byte cap
+ *  alone does not: 1024 ids of 256 B is a very different object graph from one 256 KiB id. */
 export const UPGRADE_MAX_FRAME_BYTES = 256 * 1024
 export const UPGRADE_MAX_OPEN_ENTRIES = 1_024
 export const UPGRADE_MAX_ID_BYTES = 256
 
-/** Global staged-upgrade budget per server instance. Both units are necessary: thousands of empty
- *  stages still cost sockets, timers, Maps and closures, so a byte cap alone does not bound them.
- *  At capacity the server rejects the NEW probe only — every existing stage and SSE session lives. */
+/** Global staged budget per server instance. Both units are needed — thousands of empty stages still
+ *  cost sockets, timers and closures. At capacity only the NEW probe is rejected. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
 export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 
 // ===== Inbound wire resource caps =====
 //
-// These bound a MISBEHAVING client's cheapest allocations, and unlike the caps above they are not
-// upgrade-specific: they sit at the two inbound entry points every frame crosses. Nothing here
+// Not upgrade-specific: these sit at the two inbound entry points every frame crosses. Nothing here
 // bounds hostile APPLICATION memory — flow-control credit is cooperative at the sender — which is a
 // documented residual of the design, not an oversight.
 
-/** Ceiling on ONE raw wire frame, enforced before it is decoded. Two inbound paths need it, and for
- *  different reasons: SSE frames are length-prefixed, so a hostile u32 declares an allocation the
- *  server would otherwise make on request (rejected by the DECLARED length, before a body byte is
- *  pulled), while a WS binary message has already been read by the socket layer and is capped
- *  against the cost of DECODING it. 64 MiB matches the protocol's maximum adaptive byte credit, so
- *  no frame a compliant client can legitimately produce is anywhere near it. */
+/** Ceiling on ONE raw wire frame, enforced before decode. Both inbound paths need it for different
+ *  reasons: an SSE frame is rejected by its DECLARED length before a body byte is pulled, while a WS
+ *  binary message has already been read and is capped against the cost of DECODING it. 64 MiB is the
+ *  protocol's maximum adaptive byte credit, so no compliant frame comes near it. */
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
 /** Ceiling on the raw frames queued on ONE connection's recv chain — bytes AND count, because a
  *  flood of tiny frames costs closures and promise links rather than bytes. A frame parked behind an
  *  awaited turn is retained by the chain's closure until that turn completes, so without this a
- *  client that stalls the chain and keeps sending has an unbounded holding area. Charged before the
- *  frame is chained and refunded in the turn's own `finally`; overflow terminates that wire (and
- *  with it any upgrade staged on it), never any other. */
+ *  client that stalls the chain and keeps sending has an unbounded holding area. Overflow terminates
+ *  that wire and any upgrade staged on it, never any other. */
 export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
 export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
 

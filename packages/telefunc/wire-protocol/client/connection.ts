@@ -57,10 +57,8 @@ type BufferedFrame = {
 /** Probe wire returned by `WsTransport.probe`. Liveness is the consumer's responsibility
  *  until the swap commits — typically driven via a transient Heartbeat.
  *
- *  `send`/`onFrame` exist so the barrier upgrade can exchange `PREPARE`/`READY` on the probed
- *  socket WITHOUT that socket becoming the transport: nothing about the connection may move to the
- *  new wire until the server has committed the barrier, so adopting the `WsTransport` early — the
- *  obvious alternative — would put a sessionless wire in `this.transport` for a whole round-trip. */
+ *  `send`/`onFrame` exist so the upgrade can exchange `PREPARE`/`READY` WITHOUT the probed socket
+ *  becoming the transport — adopting it early puts a sessionless wire in `this.transport`. */
 type ProbeWire = {
   ping: () => void
   onPong: (cb: () => void) => void
@@ -123,11 +121,8 @@ class Heartbeat {
   }
 }
 
-/** Resolve when `promise` settles OR `signal` aborts, whichever comes first.
- *
- *  The promise is NOT cancelled — nothing here can cancel an in-flight fetch — the caller merely
- *  stops waiting on it. That distinction is the whole point: an emitter that cannot stop waiting
- *  makes every deadline above it advisory, because the abort fires and nothing observes it. */
+/** Resolve when `promise` settles OR `signal` aborts, whichever comes first. The promise is NOT
+ *  cancelled — nothing here can cancel an in-flight fetch — the caller merely stops waiting on it. */
 function raceAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve()
   return new Promise<void>((resolve) => {
@@ -140,18 +135,16 @@ function raceAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<void
   })
 }
 
-/** What `emitBarrier` did — and, when it wrote nothing, whether the wire it declined to write on
- *  can still carry traffic afterwards. The three outcomes take three different recovery paths, so
- *  collapsing any two of them silently corrupts one of the cases. */
+/** What `emitBarrier` did, and when it wrote nothing, whether that wire can still carry traffic.
+ *  Three outcomes, three different recovery paths — collapsing any two corrupts one of the cases. */
 type BarrierEmission =
-  /** The barrier bytes may already have reached the server, so no wire can be trusted to hold the
-   *  session: abandon both and reconcile afresh, upgrades sticky-disabled. */
+  /** May already have reached the server, so no wire can be trusted to hold the session: abandon
+   *  both and reconcile afresh, upgrades sticky-disabled. */
   | 'emitted'
   /** Nothing written and the wire is fine: stay on it, upgrades still enabled. */
   | 'not-emitted'
-  /** Nothing written, but a POST that may never settle owns the flush gate. Every later flush would
-   *  return at that guard, so the wire is de facto dead however healthy it looks — the connection
-   *  must recover it rather than keep pretending. Still a PRE-barrier outcome: not sticky. */
+  /** Nothing written, but a POST that may never settle owns the flush gate, so the wire is de facto
+   *  dead however healthy it looks. Still a PRE-barrier outcome: not sticky. */
   | 'wedged'
 
 type OutboundFrameKind = 'reconcile' | 'control' | 'flow-control' | 'ack' | 'data' | 'heartbeat'
@@ -240,19 +233,11 @@ type ClientChannelTransport = {
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
-  /** Puts the barrier out as this wire's FINAL frame and returns — without waiting for any server
-   *  acknowledgment, which is the round-trip the whole design exists to remove. `buildFrame` is a
-   *  thunk rather than a frame so the payload's cursors are read at the actual moment of emission,
-   *  after any mode-specific quiesce.
+  /** Puts the barrier out as this wire's FINAL frame and returns, without waiting for any server
+   *  acknowledgment. `buildFrame` is a thunk so the payload's cursors are read at the moment of
+   *  emission, after any mode-specific quiesce; every wait inside observes `signal`.
    *
-   *  Every wait inside observes `signal`, so the attempt deadline can actually end an emission that
-   *  cannot complete — in batch mode the quiesce is otherwise unbounded, and a wedged emitter gates
-   *  user sends for the connection's lifetime with nothing watching.
-   *
-   *  The return value is the recovery decision and must be EXACT. `'not-emitted'` means not one
-   *  barrier byte reached the wire, so the server's session is untouched and the caller simply
-   *  stays on it. `'emitted'` means the barrier may already have committed, so no wire can be
-   *  trusted and the caller must abandon both. Guessing either way corrupts a live session. */
+   *  ⚠️ The verdict IS the recovery decision and must be exact — see `BarrierEmission`. */
   emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission>
   /** Connection constructs the Heartbeat (with the funnel-bound onDead) and hands it over.
    *  Transport's frame receive path routes PONG to it directly (`heartbeat?.resetPong()`). */
@@ -285,8 +270,7 @@ type UpgradeState =
   | { tag: 'none' }
   | { tag: 'probing'; attempt: AbortController }
   /** `PREPARE` sent, awaiting `READY`. Deliberately UNGATED (`inDrain` stays false): the old wire is
-   *  still fully live and authoritative for this whole window, so gating here would buy nothing and
-   *  cost every user send a round-trip. Gating starts one transition later, at `draining`. */
+   *  still authoritative for this whole window. Gating starts one transition later, at `draining`. */
   | { tag: 'preparing'; attempt: AbortController }
   | { tag: 'draining'; attempt: AbortController }
   | {
@@ -299,21 +283,18 @@ type UpgradeState =
       /** ONE budget across both buffers — see `UPGRADE_HANDOFF_BUFFER_*`. */
       bufferedBytes: number
       bufferedFrames: number
-      /** Channel ixes the settling RECONCILED omitted, held back instead of released — see
-       *  `releaseDeferredOmitted`. Lives on the state rather than in `handleReconciled` because
-       *  FIN and RECONCILED can arrive in either order, so the reconcile that fills this list is
+      /** Channel ixes the settling RECONCILED omitted, held back instead of released. On the state
+       *  because FIN and RECONCILED arrive in either order, so the reconcile that fills this list is
        *  often not the call that completes the handoff. */
       deferredOmitted: number[]
       finReceived: boolean
       joinTimer: ReturnType<typeof setTimeout> | null
     }
 
-/** Frames that arrive during the handoff, kept PARTITIONED BY SOURCE WIRE rather than in one
- *  arrival-ordered list. The old wire's frames are authoritative and largely non-recoverable
- *  (terminal ctrls are seq-less and never replayed); the new wire's are all replayable. So the
- *  old buffer is drained in full before the new one — merging the two by arrival order lets a
- *  replayed new-wire frame advance `trackSeq` past an in-flight old-wire frame, which is then
- *  dropped as a `'dup'` forever. */
+/** ⚠️ Partitioned BY SOURCE WIRE, not one arrival-ordered list, and the old buffer drains FIRST.
+ *  Old-wire frames are largely non-recoverable (seq-less terminal ctrls) while new-wire frames all
+ *  replay — so merging by arrival order lets a replayed new-wire frame advance `trackSeq` past an
+ *  in-flight old-wire frame, which is then dropped as a `'dup'` forever. */
 type HandoffBuffer = { old: DecodedFrame[]; new: DecodedFrame[] }
 
 /** Per-channel lifecycle. `releasing` = unregistered before the server confirmed —
@@ -355,9 +336,8 @@ class ClientConnection implements MuxConnection {
    *  can run from both `handleReconciled` and `_onTransportOpen` — transport-open and the
    *  first RECONCILED can arrive in either order on the SSE path. */
   private serverTransports: ReconciledPayload['transports'] | null = null
-  /** Set for exactly one synchronous `_onTransportOpen`: the one the barrier commit's transport
-   *  flip triggers. See `probeAndUpgrade`'s flip block for why a second RECONCILE there is
-   *  destructive rather than merely wasteful. */
+  /** Set for exactly one synchronous `_onTransportOpen`: the one the barrier commit's flip
+   *  triggers. See `flipToNewWire` for why a second RECONCILE there is destructive. */
   private suppressReconcileOnOpen = false
   /** RECONCILE sent, awaiting RECONCILED. SSE sets it true during connecting since the
    *  initial reconcile is baked into the openStream POST body. Bounded by `reconcileTimer`:
@@ -828,9 +808,9 @@ class ClientConnection implements MuxConnection {
     upgrade.buffer[source].push(frame)
     upgrade.bufferedFrames += 1
     upgrade.bufferedBytes += byteLength
-    // Checked AFTER the push, so the frame that trips the budget is still part of the old prefix
-    // the fallback delivers. Overshooting by one frame is the cheap direction to be wrong in;
-    // dropping a non-replayable old-wire ctrl is not.
+    // ⚠️ Checked AFTER the push, so the frame that trips the budget is still in the old prefix the
+    // fallback delivers. Overshooting by one frame is the cheap direction to be wrong in; dropping a
+    // non-replayable old-wire ctrl is not.
     if (
       upgrade.bufferedFrames > UPGRADE_HANDOFF_BUFFER_FRAMES ||
       upgrade.bufferedBytes > UPGRADE_HANDOFF_BUFFER_BYTES
@@ -839,9 +819,8 @@ class ClientConnection implements MuxConnection {
     }
   }
 
-  /** The FIN+RECONCILED join did not complete in time. The two limbs get distinguishable messages
-   *  so a missing FIN can never be mistaken for a missing RECONCILED — and so neither limb can be
-   *  silently satisfied by `RECONCILE_TIMEOUT_MS` firing 8s later instead. */
+  /** The FIN+RECONCILED join did not complete in time. Distinguishable messages per limb, so neither
+   *  is mistaken for the other nor silently satisfied by `RECONCILE_TIMEOUT_MS` firing 8 s later. */
   private onHandoffJoinTimeout(): void {
     if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'handoff') return
     this.state.upgrade.joinTimer = null
@@ -924,21 +903,16 @@ class ClientConnection implements MuxConnection {
     for (const frame of buffer.new) this.dispatchFrame(frame)
     // Registrations deferred while the upgrade was in flight can go out now.
     this.flushPendingRegisterReconcile()
-    // ── Secondary cleanup that split settlement moved out from under its usual owners ──
-    // Ordinary settlement releases an omitted channel INSIDE `applyReconciled`, which puts that
-    // release ahead of both `applyReconciled`'s own `drainBufferedFrames` compaction and
-    // `handleReconciled`'s `startTtlIfIdle()`. Deferring the release moves it after both, and on
-    // the RECONCILED-before-FIN ordering neither ever runs again — so they are re-run here, once
-    // both drains have settled which channels actually survived.
+    // Deferring the omitted-channel release moved it PAST both of these, and on the
+    // RECONCILED-before-FIN ordering neither would ever run again. Re-run once the drains have
+    // settled which channels actually survived.
     this.pruneSendBufferForReleasedChannels()
     this.startTtlIfIdle()
   }
 
-  /** Drop queued sends whose channel is gone. `drainBufferedFrames` normally does this as a side
-   *  effect of its release pass — an entry belonging to neither `serverMap` nor `this.channels` is
-   *  simply not copied forward — but a channel released AFTER that pass keeps its entries, and no
-   *  later pass would collect them: channel indexes are monotonic and never reused, so the entries
-   *  can never be matched, released, or even mis-sent. They would just sit there. */
+  /** Drop queued sends whose channel is gone. `drainBufferedFrames` normally does this in its release
+   *  pass, but a channel released AFTER that pass keeps its entries and no later pass collects them —
+   *  channel indexes are monotonic and never reused, so they would sit there forever. */
   private pruneSendBufferForReleasedChannels(): void {
     const sendBuffer = this.sendBuffer
     if (sendBuffer.length === 0) return
@@ -972,20 +946,17 @@ class ClientConnection implements MuxConnection {
   }
 
   private handleReconciled(ctrl: ReconciledPayload): void {
-    // A BARRIER handoff is settled by exactly one reconciled: the COMMITTED echoing this attempt's
-    // `upgradeId`. Any other reconciled arriving in that window — above all a delayed ordinary one
-    // still in flight from the OLD wire — would otherwise be consumed as the commit and complete a
-    // handoff the server never performed, retiring a live SSE session against a WS that holds no
-    // session at all. Checked BEFORE the apply, which is itself unchanged; the legacy flow leaves
-    // `upgradeId` null and never enters this branch.
+    // ⚠️ Exactly ONE reconciled settles a barrier handoff: the COMMITTED echoing this attempt's
+    // `upgradeId`. Any other — above all a delayed ordinary one still in flight from the OLD wire —
+    // would complete a handoff the server never performed, retiring a live SSE session.
     if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff' && this.state.upgrade.upgradeId !== null) {
       if (ctrl.upgradeId !== this.state.upgrade.upgradeId) return
       // Consumed. The follow-up reconciled for any channel registered mid-attempt is ordinary.
       this.state.upgrade.upgradeId = null
     }
     this.transport.applyReconciledSettings(ctrl)
-    // Split settlement, but ONLY for the reconcile that settles a handoff. The rest of the apply —
-    // the C2S ungate, the flow-control reset, `installHeartbeat` — must NOT be deferred with it.
+    // Split settlement applies ONLY to the reconcile that settles a handoff — the C2S ungate, the
+    // flow-control reset and `installHeartbeat` must NOT be deferred with it.
     const deferredOmitted =
       this.state.tag === 'open' && this.state.upgrade.tag === 'handoff' ? this.state.upgrade.deferredOmitted : null
     const outcome = this.applyReconciled(ctrl, deferredOmitted)
@@ -1019,16 +990,10 @@ class ClientConnection implements MuxConnection {
 
   /** Tear down upgrade state, fall back to a fresh SSE, and disable upgrades for this connection.
    *
-   *  When a handoff is in flight this is also the R2 fallback, and its shape is load-bearing:
-   *  exiting the handoff state stops further arrivals from buffering, then the OLD wire's received
-   *  FIFO prefix is dispatched while channel membership is still intact — those frames include
-   *  terminal ctrls (ABORT/ERROR) that carry no seq and that no replay can reproduce. The NEW
-   *  wire's buffer is discarded WHOLE: every frame in it is replayable from the server, and
-   *  dispatching a prefix of it would advance `trackSeq` past old-wire frames that never arrived,
-   *  converting a recoverable abort into permanent loss. Nothing is ever evicted to make room.
-   *
-   *  Draining the old prefix also lifts `lastSeqByChannel`, so the fresh RECONCILE that follows
-   *  reports the HIGHER `lastSeq` and the server replays only past it — no double delivery. */
+   *  ⚠️ With a handoff in flight this is the R2 fallback and its ORDER is load-bearing: stop
+   *  buffering, then dispatch the OLD wire's FIFO prefix while channel membership is still intact
+   *  (seq-less terminal ctrls no replay can reproduce). The NEW wire's buffer is discarded WHOLE —
+   *  a prefix of it would advance `trackSeq` past old-wire frames that never arrived. */
   private abortUpgradeAndReconnectSse(err: Error): void {
     if (this.closed) return
     if (this.state.tag === 'open') {
@@ -1059,18 +1024,12 @@ class ClientConnection implements MuxConnection {
 
   /** The barrier upgrade, end to end: PREPARE stages the new wire while the old one stays fully
    *  live, READY licenses the gate, and the barrier is the old wire's FINAL frame — it commits the
-   *  swap server-side, so the new wire never has to reconcile for itself.
-   *
-   *  Version skew degrades to "stay on SSE" in both directions, so neither gets compatibility code.
-   *  An old client against a new server sends a RECONCILE naming no stage, which the server treats
-   *  as ordinary. A new client against an old server trips that server's unknown-tag assert on the
-   *  PREPARE, killing the probe; the pre-barrier rollback leaves the live SSE wire untouched. */
+   *  swap server-side, so the new wire never has to reconcile for itself. Version skew in either
+   *  direction degrades to "stay on SSE", so neither side carries compatibility code. */
   private async probeAndUpgrade(targetTransport: ChannelTransport): Promise<void> {
-    // Flush pending register-reconcile inline before the upgrade so its RECONCILE
-    // doesn't fire mid-drain on the dying old wire.
+    // Flushed inline so this RECONCILE doesn't fire mid-drain on the dying old wire.
     this.flushPendingRegisterReconcile()
-    // `sessionId` is a PREPARE field the server hard-requires: with none there is nothing to stage
-    // against, so there is no attempt.
+    // The server hard-requires `sessionId` on a PREPARE: with none there is nothing to stage against.
     const sessionId = this.sessionId
     if (sessionId === null) return
     const attempt = new AbortController()
@@ -1139,11 +1098,9 @@ class ClientConnection implements MuxConnection {
         onReady?.(frame.payload)
         return
       }
-      // The COMMITTED can beat the transport flip. HELD, not dropped — replayed through the
-      // ordinary receive path right after the flip, where the handoff buffer takes it. Charged
-      // against the SAME budget that buffer enforces, and charged HERE rather than at replay: this
-      // queue exists before any handoff state does, so a check only at replay would leave it
-      // unbounded.
+      // The COMMITTED can beat the transport flip. HELD, not dropped — replayed right after the
+      // flip, where the handoff buffer takes it. Charged against that same budget and charged HERE
+      // rather than at replay: this queue exists before any handoff state does.
       if (heldOverflow) return
       heldFrames.push({ frame, byteLength })
       heldCount += 1
@@ -1195,11 +1152,10 @@ class ClientConnection implements MuxConnection {
     const emission = await from.emitBarrier(() => this.buildReconcileFrame({ upgradeId }), attempt.signal)
 
     if (emission === 'wedged') {
-      // Nothing was written, so upgrades stay ENABLED — but the old wire cannot make progress: a
-      // POST that may never settle owns its flush gate, so released frames would sit in the outbox
-      // behind a guard that never opens. Recovery is the ordinary transport-loss path. Deliberately
-      // NOT drained into the new wire's outbox first: the reconnect's initial batch would then carry
-      // them AHEAD of the replay of frames the wedged POST swallowed, which the server dup-drops.
+      // Nothing written, so upgrades stay ENABLED — but the old wire cannot make progress and needs
+      // the ordinary transport-loss recovery. Deliberately NOT drained into the new wire's outbox
+      // first: the reconnect's initial batch would then carry those frames AHEAD of the replay of
+      // what the wedged POST swallowed, and the server dup-drops the older ones.
       attempt.abort()
       this.recoverWedgedOldWire(new NetworkError('Upgrade aborted with the old wire stalled', true))
       return 'recovered'
@@ -1212,11 +1168,10 @@ class ClientConnection implements MuxConnection {
       return 'recovered'
     }
     if (attempt.signal.aborted) {
-      // The barrier MAY already have reached the server, so no wire can be trusted to still hold the
-      // session: abandon BOTH and reconcile afresh. This must win over the reconcile deadline
-      // `buildReconcileFrame` just armed, which would take the GENERIC reconnect and leave upgrades
-      // enabled. It wins by construction — the attempt deadline was armed at PREPARE, strictly
-      // earlier, and both are 10 s.
+      // The barrier MAY already have reached the server, so no wire can be trusted to hold the
+      // session: abandon BOTH. This must win over the reconcile deadline `buildReconcileFrame` just
+      // armed (which would take the GENERIC reconnect and leave upgrades enabled) — and it does, by
+      // construction: the attempt deadline was armed at PREPARE, strictly earlier, and both are 10 s.
       this.abortUpgradeAndReconnectSse(new NetworkError('Upgrade barrier attempt timed out', true))
       return 'recovered'
     }
@@ -1228,40 +1183,29 @@ class ClientConnection implements MuxConnection {
     staged.heartbeat.stop()
     this.transport = to
     this.enterUpgradeHandoff(from, staged.upgradeId)
-    // The flip must NOT fire `sendReconcileOnOpen`: the barrier already WAS this attempt's
-    // reconcile, and a second one would rotate the session again and delete the FIN finalizer the
-    // barrier just installed. Suppression spans only the synchronous adoption of the probed socket —
-    // a socket that instead has to CONNECT opens later, after the flag is down, and correctly
-    // reconciles itself.
+    // ⚠️ The flip must NOT fire `sendReconcileOnOpen`: the barrier already WAS this attempt's
+    // reconcile, and a second one rotates the session again and deletes the FIN finalizer the
+    // barrier just installed. Suppression spans only the SYNCHRONOUS adoption of the probed socket —
+    // one that has to CONNECT opens later, after the flag is down, and reconciles itself correctly.
     this.suppressReconcileOnOpen = true
     try {
       to.start()
     } finally {
       this.suppressReconcileOnOpen = false
     }
-    // No mid-loop cap check is needed: the held set is bounded by the SAME budget the handoff buffer
-    // enforces, that buffer starts empty, and this loop is fully synchronous. Introducing an `await`
-    // here would break that — the remaining held frames would then have to be DISCARDED rather than
-    // dispatched, or `trackSeq` advances past frames the fallback dropped and the recovery replay
-    // stays dup-suppressed forever.
+    // ⚠️ No mid-loop cap check is needed only because this loop is fully synchronous and the held
+    // set is bounded by the same budget the (empty) handoff buffer enforces. Adding an `await` here
+    // breaks that, and the remaining held frames would then have to be DISCARDED rather than
+    // dispatched — otherwise `trackSeq` advances past frames the fallback dropped.
     for (const held of staged.heldFrames) this._onTransportFrame(held.frame, to, held.byteLength)
   }
 
-  /** The attempt ended pre-barrier on a wire that can no longer make progress.
+  /** The attempt ended pre-barrier on a wire that can no longer make progress. A REPLACEMENT
+   *  transport, not a reset: the stalled POST owns that instance's flush gate until it settles, and
+   *  replacing it also makes the eventual settlement harmless — `_onTransportClosed` ignores loss
+   *  reported against a transport that is no longer `this.transport`.
    *
-   *  A replacement transport rather than a reset of the wedged one: the stalled POST still owns
-   *  that instance's flush gate and will only let go if and when it settles, so the instance is
-   *  unusable for as long as it exists. Replacing it also makes the stalled POST's eventual
-   *  settlement harmless — it reports loss against a transport that is no longer
-   *  `this.transport`, which `_onTransportClosed` already ignores, so the successor wire is never
-   *  abandoned by a straggler.
-   *
-   *  Sequenced frames the wedged POST swallowed are not lost: they are still in the per-channel
-   *  replay buffers, and `applyReconciled` re-sends everything past the server's reported
-   *  `lastSeq`. Unsequenced C2S ctrl on a dying wire remains the pre-existing, documented gap.
-   *
-   *  NOT sticky: nothing was emitted, so this attempt cost the connection a reconnect, not its
-   *  ability to upgrade later. */
+   *  NOT sticky: nothing was emitted, so this cost a reconnect, not the ability to upgrade later. */
   private recoverWedgedOldWire(err: Error): void {
     const wedged = this.transport
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
@@ -1370,11 +1314,9 @@ class ClientConnection implements MuxConnection {
     for (const [ix, entry] of this.channels) {
       const isInitial = entry.state.tag !== 'open' && entry.state.initial
       // A barrier carries ESTABLISHED channels only — the server rejects `initial: true` there,
-      // because `attach` would park the commit mid-flight waiting for a channel to appear. Such a
-      // channel is left out of `reconcileIxes` as well, so the settling `applyReconciled` reads it
-      // as registered-after-the-fact and stages the ordinary follow-up RECONCILE for it. Leaving it
-      // IN `reconcileIxes` instead would classify it as server-omitted and release it — killing a
-      // channel the user just opened.
+      // since `attach` would park the commit mid-flight. ⚠️ Such a channel must also stay OUT of
+      // `reconcileIxes`, so the settling `applyReconciled` reads it as registered-after-the-fact;
+      // leaving it in would classify it as server-omitted and release a channel the user just opened.
       if (barrier && isInitial) continue
       this.reconcileIxes.add(ix)
       const payloadEntry: ReconcilePayload['open'][number] = {
@@ -1500,9 +1442,8 @@ class ClientConnection implements MuxConnection {
   }
 
   /** Second half of the split settlement. Channels the settling RECONCILED omitted were held back
-   *  until the old wire's buffer drained; any that a real ABORT/ERROR closed during that drain are
-   *  already gone from `this.channels`, and whatever is still present genuinely vanished
-   *  server-side and gets exactly today's generic release. */
+   *  until the old wire's buffer drained; any closed by a real ABORT/ERROR during that drain are
+   *  already gone, and whatever is still present genuinely vanished server-side. */
   private releaseDeferredOmitted(ixes: number[]): void {
     for (const ix of ixes) {
       const entry = this.channels.get(ix)
@@ -1889,10 +1830,9 @@ class SseTransport implements ClientChannelTransport {
     return this.emitBarrierBatch(buildFrame, signal)
   }
 
-  /** Streaming upstream: append to the open body and close it. Nothing here awaits, so the attempt
+  /** Streaming upstream: append to the open body and close it. Nothing awaits, so the attempt
    *  deadline has no window to interrupt and needs none. The fetch is deliberately NOT awaited —
-   *  that await is the round-trip this design removes, and `sse.ts` void-dispatches the response
-   *  anyway, so it never meant "server acknowledged". */
+   *  `sse.ts` void-dispatches the response, so it never meant "server acknowledged". */
   private emitBarrierStreamRequest(buildFrame: () => OutboundFrame): BarrierEmission {
     assert(this.streamRequest.tag === 'active' && !this.flushing && this.outbox.length === 0)
     const frame = buildFrame()
