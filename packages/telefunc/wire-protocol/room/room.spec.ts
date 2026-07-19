@@ -2555,6 +2555,14 @@ describe('ClientRoom', () => {
     expect(clientRoom.count).toBe(2)
   })
 
+  it('rejects a client-side identity join — identity is server-assigned, not client-settable', async () => {
+    // The shared `JoinOptions` type carries `identity`/`hidden` (the `Room` type is one vocabulary for
+    // both sides), so the client can't reject them at compile time; it enforces the server-only contract
+    // at runtime instead — the guard the negative type surface would otherwise provide.
+    const clientRoom = new ClientRoom(createFakeStub().stub, createSnapshot('client-identity'))
+    await expect(clientRoom.join({ identity: 'u1' })).rejects.toThrow('server-assigned')
+  })
+
   it('rejects a client-side hidden join; a hidden member never rides the roster to a client', async () => {
     const fake = createFakeStub()
     const clientRoom = new ClientRoom(fake.stub, createSnapshot('hidden', { count: 1 }))

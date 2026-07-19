@@ -165,6 +165,10 @@ type RoomGetOptions = {
   tail?: boolean
 }
 
+/** Options for `join()`. `identity` and `hidden` are server-only: the type carries them because the
+ *  `Room` type is shared by server and client (and a room returned from a telefunction keeps its server
+ *  type on the client), but a client-side `join()` rejects them at runtime. Set them where trust lives —
+ *  in the granting telefunction, server-side. */
 type JoinOptions<P extends ParticipantMeta = ParticipantMeta> = {
   /** Your participant metadata (e.g. name, score), visible to all observers. Default: `{}`. */
   meta?: P
