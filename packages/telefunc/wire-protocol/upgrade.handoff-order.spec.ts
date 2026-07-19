@@ -1,6 +1,7 @@
-// PC2 — POSITIVE CONTROL. Asserts the CURRENT (defective) behaviour: a server→client frame still
-// in flight on the OLD SSE wire is lost forever when a NEWER frame arrives first on the new WS
-// wire, because the upgrade handoff keeps ONE arrival-ordered buffer for both sources.
+// PC2 — POSITIVE CONTROL, now FLIPPED to assert the fix (R1). It originally asserted the defect: a
+// server→client frame still in flight on the OLD SSE wire was lost forever when a NEWER frame
+// arrived first on the new WS wire, because the upgrade handoff kept ONE arrival-ordered buffer for
+// both sources. R1 partitions that buffer by source wire and drains old-before-new.
 //
 // The barrier design does NOT fix this — the barrier is a C2S cut; this is S2C loss, reachable on
 // the current tree today. Two independent halves have to hold for it to be reachable, and both are
@@ -12,20 +13,21 @@
 //     `ReplayBuffer.getAfter` merges the two lanes INDEPENDENTLY: `if (t.frames.length === 0)
 //     return b.frames` (`:68-71`). So a gapped text lane does not hold back the binary lane, and
 //     attach (`mux.ts:335`) replays N+1 alone.
-//  2. THE CLIENT CANNOT RECOVER FROM THAT ORDER. Frames from both wires land in the single
-//     arrival-ordered `state.upgrade.buffer` (`connection.ts:691-702`). On handoff completion the
-//     buffer is drained in arrival order (`:779`), so WS-(N+1) advances `trackSeq`
-//     (`:1132-1136`) past the in-flight SSE-N, which is then dropped as `'dup'` — and the gap is
-//     baked into the next RECONCILE's reported `lastSeq` (`:1021`), so it is never replayed again.
+//  2. THE CLIENT COULD NOT RECOVER FROM THAT ORDER. Frames from both wires landed in one
+//     arrival-ordered `state.upgrade.buffer` and were drained in arrival order, so WS-(N+1)
+//     advanced `trackSeq` past the in-flight SSE-N, which was then dropped as `'dup'` — and the gap
+//     was baked into the next RECONCILE's reported `lastSeq`, so it was never replayed again.
 //
-// Fix (R1): partition the handoff buffer by source transport and drain the ENTIRE old buffer
-// before the new one. `trackSeq` / `drainBufferedFrames` / `dispatchFrame` stay untouched.
+// Fix (R1): `_onTransportFrame` now carries its source transport, the handoff buffer is
+// `{old, new}`, and completion drains the ENTIRE old buffer before the new one.
+// `trackSeq` / `drainBufferedFrames` / `dispatchFrame` are untouched.
 //
 // Oracle discipline: delivery is read at the channel's `_dispatchFrame`, which sits BELOW the
 // `trackSeq` dedup that does the dropping. Reported `lastSeq` is the same bookkeeping the drop
 // decision uses and would be circular.
 //
-// Disposition: T2 rewrites the loss assertion in place to assert delivery. Do not delete.
+// Mutation control: revert the handoff buffer to a single mixed array drained in arrival order.
+// Only the last test in this file goes red.
 
 import { afterEach, describe, expect, test } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -107,9 +109,17 @@ describe('PC2 — S2C loss across the upgrade handoff', () => {
     ])
   })
 
-  // THE POSITIVE CONTROL. Same two frames, same channel, same seqs — only the wire each arrives on
-  // differs, which is precisely what the recipe above makes reachable.
-  test('CURRENT: a new-wire frame arriving first silently loses the in-flight old-wire frame', async () => {
+  // THE POSITIVE CONTROL, FLIPPED BY R1. Same two frames, same channel, same seqs — only the wire
+  // each arrives on differs, which is precisely what the recipe above makes reachable.
+  //
+  // Before R1 (commit `fix(wire-protocol): partition the upgrade handoff buffer by source wire`)
+  // this test asserted the LOSS:
+  //
+  //     expect(h.channels[0]!.received).toEqual([{ kind: 'binary', bytes: new Uint8Array([1, 2, 3]) }])
+  //
+  // i.e. N+1 arrived and N did not — no error, no counter, nothing to alert on. Kept verbatim
+  // because it is the only artifact proving the rider was necessary.
+  test('an old-wire frame in flight survives a newer new-wire frame arriving first', async () => {
     const h = (harness = await createUpgradeHarness(['A']))
 
     // The replayed N+1 lands on the new WS wire. `socket.emit` is synchronous through
@@ -119,8 +129,12 @@ describe('PC2 — S2C loss across the upgrade handoff', () => {
     h.sse.pushFrame(frameN(1))
     await completeHandoff(h)
 
-    // ← THE DEFECT: N+1 arrived, N did not. No error, no counter, nothing to alert on.
-    expect(h.channels[0]!.received).toEqual([{ kind: 'binary', bytes: new Uint8Array([1, 2, 3]) }])
+    // Arrival order was N+1 then N; DELIVERY order is N then N+1, because the old buffer drains
+    // in full first. So `trackSeq` sees 1 before 2 and neither is dup-dropped.
+    expect(h.channels[0]!.received).toEqual([
+      { kind: 'text', value: 'old-wire-1' },
+      { kind: 'binary', bytes: new Uint8Array([1, 2, 3]) },
+    ])
     expect(h.channels[0]!.closeErrors).toEqual([])
     expect(h.channels[0]!.isClosed).toBe(false)
   })

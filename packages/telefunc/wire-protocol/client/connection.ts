@@ -215,10 +215,18 @@ type UpgradeState =
   | {
       tag: 'handoff'
       from: ClientChannelTransport
-      buffer: DecodedFrame[]
+      buffer: HandoffBuffer
       finReceived: boolean
       finTimer: ReturnType<typeof setTimeout> | null
     }
+
+/** Frames that arrive during the handoff, kept PARTITIONED BY SOURCE WIRE rather than in one
+ *  arrival-ordered list. The old wire's frames are authoritative and largely non-recoverable
+ *  (terminal ctrls are seq-less and never replayed); the new wire's are all replayable. So the
+ *  old buffer is drained in full before the new one — merging the two by arrival order lets a
+ *  replayed new-wire frame advance `trackSeq` past an in-flight old-wire frame, which is then
+ *  dropped as a `'dup'` forever. */
+type HandoffBuffer = { old: DecodedFrame[]; new: DecodedFrame[] }
 
 /** Per-channel lifecycle. `releasing` = unregistered before the server confirmed —
  *  entry stays so the upcoming RECONCILE carries the ix and buffered ABORT/CLOSE flow alongside. */
@@ -330,7 +338,7 @@ class ClientConnection implements MuxConnection {
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'draining')
     this.state = {
       tag: 'open',
-      upgrade: { tag: 'handoff', from, buffer: [], finReceived: false, finTimer: null },
+      upgrade: { tag: 'handoff', from, buffer: { old: [], new: [] }, finReceived: false, finTimer: null },
     }
   }
 
@@ -345,7 +353,7 @@ class ClientConnection implements MuxConnection {
 
   private exitUpgradeHandoff(): {
     from: ClientChannelTransport
-    buffer: DecodedFrame[]
+    buffer: HandoffBuffer
     finTimer: ReturnType<typeof setTimeout> | null
   } {
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'handoff')
@@ -649,9 +657,11 @@ class ClientConnection implements MuxConnection {
     this.maybeStartUpgrade()
   }
 
-  _onTransportFrame(frame: DecodedFrame): void {
+  /** `source` is the transport the frame came off. During the handoff two wires are live at once
+   *  and which one a frame arrived on is load-bearing, so every caller must identify itself. */
+  _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport): void {
     if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') {
-      this.bufferFrameDuringHandoff(frame)
+      this.bufferFrameDuringHandoff(frame, source === this.state.upgrade.from ? 'old' : 'new')
     } else {
       this.dispatchFrame(frame)
     }
@@ -688,7 +698,7 @@ class ClientConnection implements MuxConnection {
     this.channels.get(channelFrame.index)?.channel._dispatchFrame(channelFrame)
   }
 
-  private bufferFrameDuringHandoff(frame: DecodedFrame): void {
+  private bufferFrameDuringHandoff(frame: DecodedFrame, source: 'old' | 'new'): void {
     switch (frame.tag) {
       case TAG.FIN:
         this.handleHandoffFin()
@@ -698,7 +708,7 @@ class ClientConnection implements MuxConnection {
         return
     }
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'handoff')
-    this.state.upgrade.buffer.push(frame)
+    this.state.upgrade.buffer[source].push(frame)
   }
 
   /** Idempotent. Detaches first either way so a fresh install can never leak the prior. */
@@ -776,7 +786,9 @@ class ClientConnection implements MuxConnection {
     from.detachHeartbeat()
     from.abandonActiveTransport()
     from.dispose()
-    for (const frame of buffer) this.dispatchFrame(frame)
+    // ENTIRE old buffer first, then the new one — never interleaved by arrival order.
+    for (const frame of buffer.old) this.dispatchFrame(frame)
+    for (const frame of buffer.new) this.dispatchFrame(frame)
     // Registrations deferred while the upgrade was in flight can go out now.
     this.flushPendingRegisterReconcile()
   }
@@ -1335,7 +1347,7 @@ class WsTransport implements ClientChannelTransport {
         this.heartbeat?.resetPong()
         return
       }
-      this.owner._onTransportFrame(frame)
+      this.owner._onTransportFrame(frame, this)
     }
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
@@ -1601,7 +1613,7 @@ class SseTransport implements ClientChannelTransport {
             this.heartbeat?.resetPong()
             continue
           }
-          this.owner._onTransportFrame(frame)
+          this.owner._onTransportFrame(frame, this)
         }
       } catch {
         if (abortController.signal.aborted) return
