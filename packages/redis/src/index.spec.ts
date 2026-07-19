@@ -60,7 +60,11 @@ class FakeIoredis {
 
   defineCommand(name: string, _def: { numberOfKeys: number; lua: string }): void {
     const run =
-      name === 'tfCas' ? (args: unknown[]) => this.runCasScript(args) : (args: unknown[]) => this.runPublishScript(args)
+      name === 'tfCas'
+        ? (args: unknown[]) => this.runCasScript(args)
+        : name === 'tfCommitFrame'
+          ? (args: unknown[]) => this.runCommitFrameScript(args)
+          : (args: unknown[]) => this.runPublishScript(args)
     ;(this as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[name] = (
       ...args: unknown[]
     ): Promise<unknown> => Promise.resolve(run(args))
@@ -118,6 +122,44 @@ class FakeIoredis {
     for (const cb of this.listeners) cb(channelBytes, frame)
     // Like real PUBLISH: how many subscriber connections got it — the fake has one.
     return [seq, ts, this.subscribedChannels.has(channelKey) ? 1 : 0]
+  }
+
+  /** Emulate the commitFrame Lua: fence-check, advance the clamped clock at the order key, store the
+   *  framed retained text, then publish the frame. Returns [0] on a stale fence, else [1, seq, ts, receivers]. */
+  private runCommitFrameScript(args: unknown[]): [number] | [number, number, number, number] {
+    const [orderKey, channelKey, payload, retainKey, orderTtl] = args as [string, string, Buffer, string, string]
+    const nf = Number(args[5])
+    for (let i = 0; i < nf; i++) {
+      const cur = this.store.get(args[6 + i * 2] as string)
+      if (cur === undefined || cur !== (args[7 + i * 2] as string)) return [0]
+    }
+    const prev = this.store.get(orderKey)
+    const now = this.clockMs
+    let seq: number
+    let ts: number
+    if (prev === undefined) {
+      seq = 1
+      ts = now
+    } else {
+      const parts = prev.split(':')
+      const pseq = Number(parts[0])
+      const pts = Number(parts[1])
+      if (now > pts) {
+        seq = 1
+        ts = now
+      } else {
+        seq = pseq + 1
+        ts = pts
+      }
+    }
+    this.store.set(orderKey, `${seq}:${ts}`)
+    if (orderTtl === '') this.ttls.delete(orderKey)
+    else this.ttls.set(orderKey, Number(orderTtl))
+    if (retainKey !== '') this.store.set(retainKey, `${seq},${ts}\n${payload.toString('utf8')}`)
+    const frame = encodeFrame(seq, ts, payload)
+    const channelBytes = new TextEncoder().encode(channelKey)
+    for (const cb of this.listeners) cb(channelBytes, frame)
+    return [1, seq, ts, this.subscribedChannels.has(channelKey) ? 1 : 0]
   }
 }
 

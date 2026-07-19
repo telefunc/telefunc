@@ -401,26 +401,27 @@ function pushBoundedTail(hold: TailEntry[], entry: TailEntry): void {
   }
 }
 
-/** A participant's message. Published on the room's one text key. `fromMeta` is the sender's meta
- *  as verified by the sender's own node — never client-supplied — so any receiver can surface a
- *  correct sender even before its roster
- *  view catches up (see `RoomState.applyData`). `ord` is the room-wide order stamped by the sender's
- *  node from the room clock — the receiver reads it, never the transport's per-key seq. */
+/** A participant's message. Published on the room's one text key via `commitFrame`, which assigns the
+ *  room-wide order and rides it on the transport frame — so the order is NOT in this envelope; the
+ *  receiver reads it off the frame (`WirePublishInfo`), the single source of a message's place in the
+ *  room's semantic timeline. `fromMeta` is the sender's meta as verified by the sender's own node —
+ *  never client-supplied — so any receiver can surface a correct sender even before its roster view
+ *  catches up (see `RoomState.applyData`). */
 type RoomDataEnvelope = {
   __r: 'data'
   from: string
   fromMeta: ParticipantMeta
   fromIdentity?: string
   data: unknown
-  ord: RoomOrder
 }
 
 /** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: boolean }
 
-/** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. Carries the
- *  same room-wide `ord` as participant text, so the two share one order domain. */
-type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown; ord: RoomOrder }
+/** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. Committed on
+ *  the same room clock as participant text (`commitFrame`), so the two share one order domain; like
+ *  text, its order rides the transport frame, not this envelope. */
+type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
 

@@ -16,6 +16,7 @@ import {
 import type {
   BroadcastDeliverRequest,
   BroadcastPublishRequest,
+  RoomFrameCommit,
 } from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
@@ -159,8 +160,20 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     telefuncRoomStateSetIfAbsent(key: string, value: string, ttlMs?: number) {
       return this.authorityState.roomStateSetIfAbsent(key, value, ttlMs)
     }
-    telefuncRoomStateCompareAndSet(key: string, expected: string | null, next: string | null, ttlMs?: number) {
-      return this.authorityState.roomStateCompareAndSet(key, expected, next, ttlMs)
+    telefuncRoomStateCompareAndSet(
+      key: string,
+      expected: string | null,
+      next: string | null,
+      ttlMs?: number,
+      replicate?: boolean,
+    ) {
+      return this.authorityState.roomStateCompareAndSet(key, expected, next, ttlMs, replicate)
+    }
+
+    // Room frame commit RPC — the atomic assign-order + retain + publish behind `Room`'s timeline, run on
+    // the room's partition authority DO (see `commitFrameOnAuthority`).
+    telefuncRoomCommitFrame(input: RoomFrameCommit) {
+      return broadcast.commitFrameOnAuthority(this.authorityState, input)
     }
 
     /** Storage alarm: reclaim expired room-state entries (DO storage has no native TTL). */

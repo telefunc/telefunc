@@ -24,11 +24,11 @@ import {
   getBroadcastAdapter,
   KV_KEEP,
   type BroadcastAdapter,
-  type BroadcastPublishResult,
   type KvReadOptions,
   type KvWriteOptions,
+  type RoomFrameCommitResult,
 } from '../server/broadcast.js'
-import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
+import { decodePublishText, encodePublishBinary, encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 import {
   RoomError,
   roomFailureError,
@@ -283,24 +283,37 @@ async function registerRoomIndex(id: string): Promise<void> {
  *  advances, else the timestamp is clamped to the watermark and `seq` increments — so a repeated or
  *  backward clock never yields a duplicate or an out-of-order pair. `seq` is 1-based, per the
  *  `ChannelPublishInfo.seq` contract. Pure, so it's the whole contract. */
-function advanceRoomOrder(prev: RoomOrder | null, now: number): RoomOrder {
-  const baseTimestamp = prev?.timestamp ?? 0
-  return now > baseTimestamp ? { timestamp: now, seq: 1 } : { timestamp: baseTimestamp, seq: (prev?.seq ?? 0) + 1 }
-}
-
-/** Allocate a room's next semantic-lane order: one atomic advance of the persisted clock at
- *  `roomOrderKey`, on the room's authority (`consistent`, so concurrent publishers across nodes
- *  linearize). `publish()` text and `Room.announce()` share it, so a room's semantic messages carry
- *  one strictly-increasing, unique order. The clamp in `advanceRoomOrder` continues past whatever
- *  watermark is there — including one a previous incarnation left — so a recreation never rewinds. */
-async function allocateRoomOrder(id: string): Promise<RoomOrder> {
-  const stored = await getRoomKV(id).update(
-    roomOrderKey(id),
-    (raw) => stringify(advanceRoomOrder(raw === null ? null : (parse(raw) as RoomOrder), Date.now())),
-    { consistent: true, ttlMs: ROOM_ORDER_KV_TTL_MS },
+/** Commit a semantic frame — participant text or `Room.announce()` — to the room's timeline: one
+ *  atomic assign-order + optional retain + publish on `channelKey`, drawing the shared room clock at
+ *  `roomOrderKey`. The adapter rides the assigned order on the transport frame (the single source of a
+ *  message's place in the order — the receiver reads it there, never out of the payload) and
+ *  linearizes against the room's partition, so concurrent publishers across nodes never rewind or
+ *  overtake, and a crash can't advance the order with nothing published. `publish()` and `announce()`
+ *  share the clock, so a room's semantic messages carry one strictly-increasing, unique order that
+ *  continues past whatever watermark a previous incarnation left. The fence set is empty for now
+ *  (open-ness is still checked in memory, `_admitPublish`); the incarnation fence lands with epochs. */
+function commitRoomFrame(
+  id: string,
+  channelKey: string,
+  payload: string,
+  retainKey?: string,
+): Promise<RoomFrameCommitResult> {
+  const adapter = getBroadcastAdapter()
+  assertUsage(
+    typeof adapter.commitFrame === 'function',
+    "The installed broadcast adapter doesn't implement `commitFrame()`, the atomic assign-order + retain + publish `Room`'s timeline needs. Install an adapter (in-memory, `@telefunc/redis`, or Cloudflare) that provides it.",
   )
-  assert(stored !== null) // the mutator always writes a record, never `KV_KEEP`/delete
-  return parse(stored) as RoomOrder
+  return Promise.resolve(
+    adapter.commitFrame!({
+      partitionKey: roomCtrlKey(id),
+      fences: [],
+      orderKey: roomOrderKey(id),
+      orderTtlMs: ROOM_ORDER_KV_TTL_MS,
+      channelKey,
+      payload,
+      ...(retainKey === undefined ? {} : { retainKey }),
+    }),
+  )
 }
 
 /** Atomically create a room, returning the fresh room if this call won the create, or `null` if a
@@ -573,11 +586,12 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 
 async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
   await requireRoom(id)
-  // Draw from the room's semantic clock, the same one `publish()` uses, so an announcement is ordered
-  // relative to participant text — then ship the pair in the envelope for every receiver.
-  const ord = await allocateRoomOrder(id)
-  await getBroadcastAdapter().publish(roomCtrlKey(id), stringify({ __r: 'announce', data, ord } satisfies RoomEnvelope))
-  return ord
+  // One commit on the room's semantic clock, the same one `publish()` draws, so an announcement is
+  // ordered relative to participant text; the assigned order rides the control frame for every
+  // receiver. Announce shares the clock but keeps the control lane, so it reaches every observer.
+  const commit = await commitRoomFrame(id, roomCtrlKey(id), stringify({ __r: 'announce', data } satisfies RoomEnvelope))
+  if (!commit.ok) throw new RoomError(`Room is closed: ${id}`)
+  return { seq: commit.seq, timestamp: commit.timestamp }
 }
 
 async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
@@ -924,23 +938,25 @@ class ServerRoom implements Room {
    *  text subscriber (see `_replayRetainedText`). */
   async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
     const sender = await this._admitPublish(from, data)
-    // Stamp the room-wide order before anything ships, so the retained copy, the live frame, and the
-    // receipt all carry the one pair — text and `announce()` share this clock, so they totally order.
-    const ord = await allocateRoomOrder(this.id)
     const envelope: RoomDataEnvelope = {
       __r: 'data',
       from,
       fromMeta: sender.meta,
       ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
       data,
-      ord,
     }
-    const serialized = stringify(envelope)
-    // Store before publishing live, so a subscriber that arrives around now is never left with a
-    // gap: it either receives the live message (subscribed in time) or replays it (subscribed after
-    // the store). The reverse order could drop it in the window between publish and store.
-    if (retain) await retainedKv(this.id).set(roomRetainedTextKey(this.id), serialized)
-    return this._finishPublish(sender, data, getBroadcastAdapter().publish(roomTextKey(this.id), serialized), ord)
+    // One atomic commit assigns the room-wide order, stores the retained frame (if any), and publishes
+    // — the assigned order rides the transport frame, so the retained copy, the live frame, and the
+    // receipt all carry the one pair with no separate allocate, and no subscriber sees a gap between
+    // the store and the publish. Text and `announce()` share this clock, so they totally order.
+    const commit = await commitRoomFrame(
+      this.id,
+      roomTextKey(this.id),
+      stringify(envelope),
+      retain ? roomRetainedTextKey(this.id) : undefined,
+    )
+    if (!commit.ok) throw new RoomError(`Room is closed: ${this.id}`)
+    return this._finishPublish(sender, data, commit)
   }
 
   /** @internal — publish a member's binary frame (`[16-byte member ID][flags][…]`, validated at
@@ -956,14 +972,11 @@ class ServerRoom implements Room {
     // The guard sees exactly what a subscriber would: the payload, without the wire frame.
     const sender = await this._admitPublish(from, frame.payload)
     if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
-    const ack = await this._finishPublish(
-      sender,
-      frame.payload,
-      getBroadcastAdapter().publishBinary(
-        frame.track === null ? roomMemberDataKey(this.id, from) : roomMemberTrackKey(this.id, from, frame.track),
-        framed,
-      ),
+    const result = await getBroadcastAdapter().publishBinary(
+      frame.track === null ? roomMemberDataKey(this.id, from) : roomMemberTrackKey(this.id, from, frame.track),
+      framed,
     )
+    const ack = await this._finishPublish(sender, frame.payload, result)
     // Retained per (member, track), MQTT-style: replayed to any later subscriber of that lane (see
     // `_replayRetainedBinary`). Stored WITH the publish receipt, so a late subscriber replays it in the
     // lane's real order rather than a fresh stamp — which means storing after the publish that assigns
@@ -993,17 +1006,13 @@ class ServerRoom implements Room {
   private async _finishPublish(
     sender: Sender,
     payload: unknown,
-    publishing: BroadcastPublishResult | Promise<BroadcastPublishResult>,
-    order?: RoomOrder,
+    // Text carries the room-wide order its `commitFrame` assigned; binary keeps its own per-key
+    // transport seq, a separate order domain. `receivers`/`meta` come from the hop either way.
+    info: { seq: number; timestamp: number; receivers?: number; meta?: Record<string, unknown> },
   ): Promise<ChannelPublishAck> {
-    const result = await publishing
-    // Text carries the room-wide semantic order (`order`); binary keeps its own per-key transport seq,
-    // a separate order domain. `receivers`/`meta` always come from the transport hop.
-    const seq = order ? order.seq : result.seq
-    const timestamp = order ? order.timestamp : result.timestamp
-    const ack = Object.assign(makePublishInfo(this.id, seq, timestamp), {
-      meta: result.meta,
-      ...(result.receivers === undefined ? {} : { receivers: result.receivers }),
+    const ack = Object.assign(makePublishInfo(this.id, info.seq, info.timestamp), {
+      meta: info.meta,
+      ...(info.receivers === undefined ? {} : { receivers: info.receivers }),
     })
     const onAfterPublish = this._guards?.onAfterPublish
     if (onAfterPublish) {
@@ -1204,15 +1213,16 @@ class ServerRoom implements Room {
     const serverOnly = this._hidesFromClients(event)
 
     if (event.__r === 'announce') {
-      this._state.applyAnnounce(event.data, makePublishInfo(this.id, event.ord.seq, event.ord.timestamp))
+      this._state.applyAnnounce(event.data, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
     } else {
       this._applyCtrl(event)
     }
 
     if (this._stubs.size > 0 && !serverOnly) {
-      // An announcement carries the room's semantic order (`ord`); every other control event is
-      // presence/lifecycle, ordered only by the control lane's own transport seq.
-      const wireText = encodePublishText(serialized, event.__r === 'announce' ? event.ord : rawInfo)
+      // An announcement's `commitFrame` assigned the room's semantic order onto this control frame;
+      // every other control event is presence/lifecycle, ordered by the control lane's transport seq.
+      // Either way the order rides the frame (`rawInfo`), so the relay carries it straight through.
+      const wireText = encodePublishText(serialized, rawInfo)
       for (const stub of this._stubs) stub._relayPublishText(wireText)
     }
 
@@ -1235,7 +1245,7 @@ class ServerRoom implements Room {
   }
 
   /** The text data lane — relayed per stub, skipping the sender's own holder when it opted out. */
-  private _onTextData(serialized: string, _rawInfo: WirePublishInfo): void {
+  private _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
     let envelope: unknown
     try {
       envelope = parse(serialized)
@@ -1244,9 +1254,9 @@ class ServerRoom implements Room {
     }
     if (!hasRoomTag(envelope) || envelope.__r !== 'data') return
     const event = envelope as RoomDataEnvelope
-    // The room-wide order rides in the envelope (`ord`), never the transport's per-key seq — so a
-    // receiver on any delivery key sees the single order the sender's clock assigned.
-    const info = makePublishInfo(this.id, event.ord.seq, event.ord.timestamp)
+    // The room-wide order rides on the transport frame (`commitFrame` assigned it there), never in the
+    // payload — so a receiver on any delivery key sees the single order the sender's clock assigned.
+    const info = makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp)
     this._state.applyData(
       event.from,
       event.fromMeta,
@@ -1258,22 +1268,22 @@ class ServerRoom implements Room {
     this._healUnknownSender(event.from)
 
     if (this._stubs.size > 0) {
-      const wireText = encodePublishText(serialized, event.ord)
+      const wireText = encodePublishText(serialized, rawInfo)
       for (const stub of this._stubs) {
         // A stub still awaiting its client's first text want holds the message server-side (bounded,
         // drop-oldest) instead of relaying — flushed selectively once the want declares the selector.
         if (stub._tailPending !== null) {
-          stub._holdTail(serialized, event.ord, event.from)
+          stub._holdTail(serialized, rawInfo, event.from)
           continue
         }
         if (!stub._wantsTextFrom(event.from)) continue
         if (stub._selfSuppressed.has(event.from)) continue
-        stub._relayTextLive(wireText, event.from, event.ord)
+        stub._relayTextLive(wireText, event.from, rawInfo)
       }
     } else if (this._tail) {
       // Tail, pre-attach: no stub yet, but `Room.get({ tail })` opened ingestion — hold the message so
       // the stub inherits it on attach. Bounded by count and total size; the client dedupes any overlap.
-      pushBoundedTail(this._tailHold, { serialized, ord: event.ord, from: event.from })
+      pushBoundedTail(this._tailHold, { serialized, ord: rawInfo, from: event.from })
     }
   }
 
@@ -1609,11 +1619,13 @@ class ServerRoom implements Room {
   ): Promise<void> {
     const stored = await retainedKv(this.id).get(roomRetainedTextKey(this.id))
     if (stored === null) return
-    const envelope = parse(stored) as RoomDataEnvelope
+    // The retained slot holds the framed message (order prefix + payload); decode to recover both.
+    const { text: serialized, info } = decodePublishText(stored)
+    const envelope = parse(serialized) as RoomDataEnvelope
     if (prevWantsText || prevMemberWants.has(envelope.from) || !stub._wantsTextFrom(envelope.from)) return
-    // Replay with the message's own stored order, and let the stub drop it if a same-or-newer live
-    // frame already reached it (a publish that raced this subscribe) — exactly-once, in order.
-    stub._emitRetainedText(encodePublishText(stored, envelope.ord), envelope.from, envelope.ord)
+    // Replay the stored frame as-is (it already carries its real order), and let the stub drop it if a
+    // same-or-newer live frame already reached it (a publish that raced this subscribe) — exactly-once.
+    stub._emitRetainedText(stored, envelope.from, info)
   }
 
   /** @internal — MQTT-retained replay for the binary lanes. Called when a stub's `sub-binary` want
@@ -2195,7 +2207,7 @@ async function resolveIdentityMembers(kv: RoomKV, roomId: string, identity: stri
  *  never leaves. */
 async function dropRetainedTextOwnedBy(roomId: string, memberId: string): Promise<void> {
   await retainedKv(roomId).update(roomRetainedTextKey(roomId), (raw) =>
-    raw !== null && (parse(raw) as RoomDataEnvelope).from === memberId ? null : KV_KEEP,
+    raw !== null && (parse(decodePublishText(raw).text) as RoomDataEnvelope).from === memberId ? null : KV_KEEP,
   )
 }
 

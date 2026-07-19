@@ -15,12 +15,14 @@ export type {
   KvMutate,
   KvReadOptions,
   KvWriteOptions,
+  RoomFrameCommit,
+  RoomFrameCommitResult,
 }
 
 import { assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
-import type { WirePublishInfo } from '../shared-ws.js'
+import { encodePublishText, type WirePublishInfo } from '../shared-ws.js'
 
 /** Sentinel an `update` mutator returns to leave the key untouched (no write). Distinct from
  *  `null`, which deletes. `Symbol.for` (not `Symbol`) so every copy of this module shares one
@@ -58,6 +60,41 @@ type KvWriteOptions = { ttlMs?: number; partitionKey?: string; consistent?: bool
  *  absent when the transport can't count. */
 type BroadcastPublishResult = WirePublishInfo & { meta?: Record<string, unknown>; receivers?: number }
 
+/** One atomic room-frame commit: the fused assign-order + retain + publish that gives a room's
+ *  semantic timeline (`publish()` text and `Room.announce()`) one gap-free order, even across nodes.
+ *  The adapter compares every fence (each `key` must still equal `expected`, else the caller's
+ *  incarnation is stale), advances the clamped monotonic clock at `orderKey`, frames `payload` with
+ *  the assigned order, optionally stores that frame at `retainKey` (MQTT-style retained), and
+ *  publishes it on `channelKey` — the order rides the transport frame, so a receiver reads it there,
+ *  never out of the payload. It all linearizes against `partitionKey` (a room's keys share one home)
+ *  so no later commit overtakes. Every field is opaque to the adapter: it never parses the payload,
+ *  a config, or an identity — only compares fences, advances a clock, and moves bytes. */
+type RoomFrameCommit = {
+  partitionKey: string
+  fences: readonly { key: string; expected: string }[]
+  orderKey: string
+  orderTtlMs?: number
+  channelKey: string
+  payload: string
+  retainKey?: string
+}
+
+/** The outcome of `commitFrame`: the assigned order and live receiver count on success, or a
+ *  `stale-fence` refusal when a fence no longer holds (a closed or superseded incarnation) — on
+ *  refusal nothing was ordered, retained, or published. */
+type RoomFrameCommitResult =
+  | { ok: true; seq: number; timestamp: number; receivers?: number }
+  | { ok: false; reason: 'stale-fence' }
+
+/** Advance a room's clamped monotonic clock. `seq` resets to 1 when wall time passes the last
+ *  `timestamp`, else it clamps that timestamp and increments `seq`, so `(timestamp, seq)` is strictly
+ *  increasing whatever the node's clock skew. The shared shape every `commitFrame` realizes — this
+ *  one in-memory, the Redis Lua and the Cloudflare Durable Object each in their own runtime. */
+function advanceRoomFrameOrder(prev: WirePublishInfo | null, now: number): WirePublishInfo {
+  const base = prev?.timestamp ?? 0
+  return now > base ? { seq: 1, timestamp: now } : { seq: (prev?.seq ?? 0) + 1, timestamp: base }
+}
+
 /** Callback for delivering a broadcast message to a subscriber. */
 type BroadcastOnMessage = (serialized: string, info: WirePublishInfo) => void
 
@@ -89,6 +126,10 @@ type BroadcastAdapter = {
    *  interleaving. Returns the stored value (`null` if deleted or kept-absent). The race-free
    *  primitive behind every room-state mutation (config, member meta, tracks, heartbeat). */
   update?(key: string, mutate: KvMutate, options?: KvWriteOptions): string | null | Promise<string | null>
+  /** KV+pub/sub — required by `Room`. The fused, linearizable assign-order + retain + publish behind a
+   *  room's semantic timeline (see `RoomFrameCommit`). One authority op so a later frame can't overtake
+   *  and a crash can't leave the order advanced with nothing published. */
+  commitFrame?(input: RoomFrameCommit): RoomFrameCommitResult | Promise<RoomFrameCommitResult>
 }
 
 /**
@@ -127,6 +168,12 @@ type BroadcastTransport = {
   /** Optional KV — linearizable read-modify-write (see `BroadcastAdapter.update`). A transport that
    *  backs `Room` state across nodes must implement this so concurrent writers converge without loss. */
   update?(key: string, mutate: KvMutate, options?: KvWriteOptions): string | null | Promise<string | null>
+  /** Optional — the fused assign-order + retain + publish (see `BroadcastAdapter.commitFrame`). A
+   *  transport that backs `Room` across nodes must implement this atomically (one Lua script, one
+   *  Durable Object turn) so a room's timeline stays gap-free and ordered under concurrency; there is
+   *  no safe way to compose it from separate KV+publish calls, so `Room` requires it rather than
+   *  falling back. */
+  commitFrame?(input: RoomFrameCommit): RoomFrameCommitResult | Promise<RoomFrameCommitResult>
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +331,30 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     }
     this._writeInMemory(key, next, options)
     return next
+  }
+
+  commitFrame(input: RoomFrameCommit): RoomFrameCommitResult | Promise<RoomFrameCommitResult> {
+    if (this.transport) {
+      assertUsage(
+        typeof this.transport.commitFrame === 'function',
+        "The installed broadcast transport doesn't implement `commitFrame()`, the atomic assign-order + retain + publish `Room` needs to keep a room's timeline ordered across nodes. Implement it on the transport (one Lua script, one Durable Object turn) — there's no safe way to compose it from separate KV and publish calls.",
+      )
+      return this.transport.commitFrame!(input)
+    }
+    // In-memory: one isolate, no `await` between steps, so the whole commit is atomic and no later
+    // frame overtakes — the fence check, clock advance, retain, and publish linearize for free.
+    for (const { key, expected } of input.fences) {
+      if (this._readInMemory(key) !== expected) return { ok: false, reason: 'stale-fence' }
+    }
+    const prev = this._readInMemory(input.orderKey)
+    const ord = advanceRoomFrameOrder(prev === null ? null : (JSON.parse(prev) as WirePublishInfo), Date.now())
+    this._writeInMemory(input.orderKey, JSON.stringify(ord), { ttlMs: input.orderTtlMs })
+    // Retain the self-framed bytes (order prefix + payload), so a replay re-emits the message in its
+    // real place in the order, not a fresh stamp — the room decodes it back on the retained read.
+    if (input.retainKey !== undefined) this._writeInMemory(input.retainKey, encodePublishText(input.payload, ord))
+    const set = this.subscriptions.get(input.channelKey)
+    if (set) for (const onMessage of set) onMessage(input.payload, ord)
+    return { ok: true, seq: ord.seq, timestamp: ord.timestamp, receivers: set?.size ?? 0 }
   }
 
   /** In-memory read with lazy expiry (used when no transport is installed). */

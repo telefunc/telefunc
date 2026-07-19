@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   DEFAULT_BROADCAST_BUCKETS,
   assertLocationFallbackIsScaled,
@@ -10,6 +10,7 @@ import {
 } from './routing.js'
 import '../../../../node/server/async_hooks.js'
 import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from './broadcast.js'
+import { encodePublishText, type WirePublishInfo } from '../../../shared-ws.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting } from '../../broadcast.js'
@@ -22,14 +23,15 @@ function createCloudflareRequest({ colo, continent }: { colo?: string; continent
   return request
 }
 
-function createAuthorityState() {
-  const stored = new Map<string, number>()
+function createAuthorityState(kv?: KVNamespace) {
+  const stored = new Map<string, unknown>()
+  let alarm: number | null = null
   const state = {
     storage: {
       async get<T>(key: string) {
         return stored.get(key) as T | undefined
       },
-      async put(key: string, value: number) {
+      async put(key: string, value: unknown) {
         stored.set(key, value)
       },
       async delete(key: string) {
@@ -43,9 +45,18 @@ function createAuthorityState() {
         }
         return entries
       },
+      async getAlarm() {
+        return alarm
+      },
+      async setAlarm(time: number) {
+        alarm = time
+      },
+      async deleteAlarm() {
+        alarm = null
+      },
     },
   } as unknown as DurableObjectState
-  return new CloudflareBroadcastAuthorityState(state)
+  return new CloudflareBroadcastAuthorityState(state, kv)
 }
 
 function createMockKV(): KVNamespace {
@@ -861,5 +872,107 @@ describe('cloudflare room-state routing (hybrid tiers)', () => {
     await transport.delete('idx:a')
     expect(await transport.get('idx:a')).toBeNull()
     expect(calls).toEqual([]) // the index has no authority
+  })
+})
+
+describe('cloudflare commitFrame (atomic assign-order + retain + publish)', () => {
+  // NOTE: exercises the authority half (`commitFrameOnAuthority`) against the in-memory fake DO state +
+  // KV harness — the same fakes `roomState.spec.ts` uses. Real Durable Object certification is pending
+  // (P7); there's no live-DO Room-over-Cloudflare test yet, so this stays at the adapter level.
+  afterEach(() => vi.useRealTimers())
+
+  // A binding whose authority stub records every frame the ordered fanout forwards, so a test can read
+  // back the exact (seq,timestamp) each receiver would see.
+  function setup() {
+    const forwarded: Array<{ serialized?: string; info?: WirePublishInfo }> = []
+    const kv = createMockKV()
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    transport.attachBinding(
+      createBasicBinding({
+        onPublish(_id, request) {
+          forwarded.push({ serialized: request.serialized, info: request.info })
+          return Promise.resolve()
+        },
+      }),
+      'TelefuncDurableObject',
+    )
+    transport.attachKV(kv)
+    return { transport, authorityState: createAuthorityState(kv), kv, forwarded }
+  }
+
+  // Room keys: the partition (control lane) home, the order watermark, the text channel, the retained key.
+  const base = {
+    partitionKey: 'telefunc:room:r',
+    orderKey: 'telefunc:room:r:o',
+    channelKey: 'telefunc:room:r:t',
+    orderTtlMs: 3_600_000,
+  }
+
+  it('assigns the room order, retains the framed bytes, and fans out carrying that order', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000)
+    const { transport, authorityState, kv, forwarded } = setup()
+    await kv.put(`tfps:${encodeURIComponent(base.channelKey)}:weur:telefunc-shard-weur-0`, 'telefunc-shard-weur-0', {
+      expirationTtl: 90,
+    })
+
+    const result = await transport.commitFrameOnAuthority(authorityState, {
+      ...base,
+      fences: [],
+      payload: '{"text":"hi"}',
+      retainKey: 'telefunc:room:r:rt',
+    })
+
+    expect(result).toEqual({ ok: true, seq: 1, timestamp: 1_000, receivers: 1 })
+    // The order watermark is persisted (authority-only — never mirrored to the KV replica).
+    expect(await authorityState.roomStateGet(base.orderKey)).toBe('{"seq":1,"timestamp":1000}')
+    expect(await kv.get(`tfkv:${base.orderKey}`)).toBeNull()
+    // Retained bytes are self-framed with the committed order — byte-for-byte what the room decodes back.
+    expect(await authorityState.roomStateGet('telefunc:room:r:rt')).toBe(
+      encodePublishText('{"text":"hi"}', { seq: 1, timestamp: 1_000 }),
+    )
+    expect(await kv.get('tfkv:telefunc:room:r:rt')).toBeNull()
+    // The fanout carried the committed (seq,timestamp) — not a fresh per-key seq.
+    expect(forwarded).toEqual([{ serialized: '{"text":"hi"}', info: { seq: 1, timestamp: 1_000 } }])
+  })
+
+  it('clamps the monotonic clock across commits — increment at one instant, reset when time advances', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(5_000)
+    const { transport, authorityState } = setup()
+    const commit = () => transport.commitFrameOnAuthority(authorityState, { ...base, fences: [], payload: 'x' })
+
+    expect(await commit()).toMatchObject({ ok: true, seq: 1, timestamp: 5_000 })
+    expect(await commit()).toMatchObject({ ok: true, seq: 2, timestamp: 5_000 }) // same instant → clamp + ++seq
+    vi.setSystemTime(5_010)
+    expect(await commit()).toMatchObject({ ok: true, seq: 1, timestamp: 5_010 }) // time advanced → seq resets
+  })
+
+  it('refuses on a stale fence — nothing is ordered, retained, or published', async () => {
+    const { transport, authorityState, forwarded } = setup()
+    await authorityState.roomStateSet('telefunc:room:r:gen', 'g2')
+
+    const result = await transport.commitFrameOnAuthority(authorityState, {
+      ...base,
+      fences: [{ key: 'telefunc:room:r:gen', expected: 'g1' }], // stored is 'g2' → stale
+      payload: 'x',
+      retainKey: 'telefunc:room:r:rt',
+    })
+
+    expect(result).toEqual({ ok: false, reason: 'stale-fence' })
+    expect(await authorityState.roomStateGet(base.orderKey)).toBeNull() // clock untouched
+    expect(await authorityState.roomStateGet('telefunc:room:r:rt')).toBeNull() // nothing retained
+    expect(forwarded).toEqual([]) // nothing published
+  })
+
+  it('commits when every fence still holds', async () => {
+    const { transport, authorityState } = setup()
+    await authorityState.roomStateSet('telefunc:room:r:gen', 'g1')
+    const result = await transport.commitFrameOnAuthority(authorityState, {
+      ...base,
+      fences: [{ key: 'telefunc:room:r:gen', expected: 'g1' }],
+      payload: 'x',
+    })
+    expect(result).toMatchObject({ ok: true, seq: 1 })
   })
 })

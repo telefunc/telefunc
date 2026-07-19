@@ -2,7 +2,14 @@ export { installRedis, RedisTransport }
 export type { InstallRedisOptions, RedisBroadcastOptions }
 
 import type { Cluster, Redis } from 'ioredis'
-import { config, KV_KEEP, type BroadcastTransport, type KvMutate } from 'telefunc'
+import {
+  config,
+  KV_KEEP,
+  type BroadcastTransport,
+  type KvMutate,
+  type RoomFrameCommit,
+  type RoomFrameCommitResult,
+} from 'telefunc'
 import { assert } from './assert.js'
 import { callDefinedCommand } from './callDefinedCommand.js'
 
@@ -70,6 +77,55 @@ return 1
 const CAS_CMD = 'tfCas'
 const NIL_SENTINEL = '\0NIL'
 
+// The fused assign-order + retain + publish behind a room's semantic timeline (`Room` text and
+// `announce`). One Lua call so a room's order stays gap-free and no later frame overtakes: compare
+// every fence (a stale incarnation loses), advance the clamped clock at the order key from Redis
+// `TIME` (the one cross-instance clock), optionally store the framed retained text, then PUBLISH the
+// same wire frame `_publish` emits — the assigned order rides the header, so a subscriber reads it
+// there. KEYS[1]=order key, KEYS[2]=channel; ARGV[1]=payload, ARGV[2]=retain key ('' = none),
+// ARGV[3]=order TTL ms ('' = none), ARGV[4]=fence count, then (key, expected) pairs. Returns {0} on a
+// stale fence (nothing written or published), else {1, seq, ts, receivers}.
+//
+// NOTE (Cluster): the order/retain/fence keys are reached via ARGV, not declared in KEYS, so this is
+// correct on a single Redis but not yet Cluster-slot-safe. Bracing a room's keys onto one hash slot
+// (so the whole commit runs in one slot) is the versioned key migration tracked for the Redis
+// hardening pass — it needs a real Cluster to certify.
+const COMMIT_FRAME_LUA = `
+local nf = tonumber(ARGV[4])
+for i = 1, nf do
+  local cur = redis.call('GET', ARGV[3 + i * 2])
+  if not cur or cur ~= ARGV[4 + i * 2] then return {0} end
+end
+local prev = redis.call('GET', KEYS[1])
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local seq, ts
+if not prev then
+  seq = 1
+  ts = now
+else
+  local pseq, pts = string.match(prev, '(%d+):(%d+)')
+  pseq = tonumber(pseq)
+  pts = tonumber(pts)
+  if now > pts then seq = 1; ts = now else seq = pseq + 1; ts = pts end
+end
+if ARGV[3] == '' then
+  redis.call('SET', KEYS[1], seq .. ':' .. ts)
+else
+  redis.call('SET', KEYS[1], seq .. ':' .. ts, 'PX', tonumber(ARGV[3]))
+end
+if ARGV[2] ~= '' then
+  redis.call('SET', ARGV[2], seq .. ',' .. ts .. '\\n' .. ARGV[1])
+end
+local ts_hi = math.floor(ts / 4294967296)
+local ts_lo = ts - ts_hi * 4294967296
+local header = struct.pack('>I4I4I4', seq, ts_hi, ts_lo)
+local receivers = redis.call('PUBLISH', KEYS[2], header .. ARGV[1])
+return {1, seq, ts, receivers}
+`.trim()
+
+const COMMIT_CMD = 'tfCommitFrame'
+
 class RedisTransport implements BroadcastTransport {
   private readonly publisher: Redis | Cluster
   private readonly subscriber: Redis | Cluster
@@ -83,6 +139,7 @@ class RedisTransport implements BroadcastTransport {
     this.prefix = options.prefix ?? DEFAULT_PREFIX
     this.publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
     this.publisher.defineCommand(CAS_CMD, { numberOfKeys: 1, lua: CAS_LUA })
+    this.publisher.defineCommand(COMMIT_CMD, { numberOfKeys: 2, lua: COMMIT_FRAME_LUA })
     this.subscriber.on('messageBuffer', this._onMessage)
   }
 
@@ -152,6 +209,31 @@ class RedisTransport implements BroadcastTransport {
       'Publish script returned non-numeric seq/ts/receivers',
     )
     return { seq, timestamp, receivers }
+  }
+
+  // ── commitFrame (backs `Room`'s semantic timeline) ────────────────────
+
+  async commitFrame(input: RoomFrameCommit): Promise<RoomFrameCommitResult> {
+    // Payload bytes ride the frame (publish); the retain copy stores the same bytes framed as text.
+    const buf = Buffer.from(input.payload, 'utf8')
+    const argv: (string | Buffer)[] = [
+      this.kvKey(input.orderKey), // KEYS[1] — the room's semantic-clock watermark
+      this.channelKey(input.channelKey, 't'), // KEYS[2] — the same channel `listen` subscribes to
+      buf, // ARGV[1]
+      input.retainKey === undefined ? '' : this.kvKey(input.retainKey), // ARGV[2]
+      input.orderTtlMs === undefined ? '' : String(input.orderTtlMs), // ARGV[3]
+      String(input.fences.length), // ARGV[4]
+    ]
+    for (const fence of input.fences) argv.push(this.kvKey(fence.key), fence.expected)
+    const reply = await callDefinedCommand(this.publisher, COMMIT_CMD, argv)
+    assert(Array.isArray(reply) && reply.length >= 1, 'commitFrame script returned an unexpected shape')
+    if (reply[0] !== 1) return { ok: false, reason: 'stale-fence' }
+    const [, seq, timestamp, receivers] = reply
+    assert(
+      typeof seq === 'number' && typeof timestamp === 'number' && typeof receivers === 'number',
+      'commitFrame script returned non-numeric seq/ts/receivers',
+    )
+    return { ok: true, seq, timestamp, receivers }
   }
 
   // ── KV (backs `Room` state) ───────────────────────────────────────────

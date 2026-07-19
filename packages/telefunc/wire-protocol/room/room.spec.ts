@@ -720,7 +720,7 @@ describe('data pub/sub', () => {
     const ghost = crypto.randomUUID()
     await getBroadcastAdapter().publish(
       roomTextKey('race'),
-      stringify({ __r: 'data', from: ghost, fromMeta: { name: 'Zoe' }, data: 'first!', ord: { seq: 0, timestamp: 1 } }),
+      stringify({ __r: 'data', from: ghost, fromMeta: { name: 'Zoe' }, data: 'first!' }),
     )
 
     expect(received).toEqual([{ data: 'first!', id: ghost, meta: { name: 'Zoe' } }])
@@ -2416,7 +2416,7 @@ describe('room stub channel', () => {
   //    Replay must reconcile against the live frames a stub has been handed, so a message lands exactly
   //    once and never rewinds the stream — and carry the frame's real order, not a fresh stamp.
   const textWire = (from: string, data: unknown, ord: { seq: number; timestamp: number }) =>
-    encodePublishText(stringify({ __r: 'data', from, data, ord }), ord)
+    encodePublishText(stringify({ __r: 'data', from, data }), ord)
 
   it('replays a retained binary frame with its real publish receipt — not a fresh seq:0/timestamp stamp', async () => {
     const { serverRoom, stub, peer } = await createServedRoom('retain-binary-receipt')

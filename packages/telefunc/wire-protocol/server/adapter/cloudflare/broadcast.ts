@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
-export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncDurableObjectStub }
+export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncDurableObjectStub, RoomFrameCommit }
 
 import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
@@ -16,8 +16,10 @@ import type {
   KvMutate,
   KvReadOptions,
   KvWriteOptions,
+  RoomFrameCommit,
+  RoomFrameCommitResult,
 } from '../../broadcast.js'
-import type { WirePublishInfo } from '../../../shared-ws.js'
+import { encodePublishText, type WirePublishInfo } from '../../../shared-ws.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90
@@ -121,6 +123,7 @@ type TelefuncDurableObjectStub = DurableObjectStub & {
     ttlMs?: number,
     replicate?: boolean,
   ): Promise<boolean>
+  telefuncRoomCommitFrame(input: RoomFrameCommit): Promise<RoomFrameCommitResult>
 }
 
 type PendingBucketPublish = {
@@ -616,6 +619,22 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     }
   }
 
+  async commitFrame(input: RoomFrameCommit): Promise<RoomFrameCommitResult> {
+    // The whole commit runs in one turn on the room's partition authority DO (`commitFrameOnAuthority`);
+    // this is the client hop to it, routed by `partitionKey` like every other authority-tier op. We only
+    // materialize its lazy RPC result onto a plain object (see `unwrapRpcResult`), awaiting each field so
+    // none is dropped in transit — `ok` discriminates, so it's read first.
+    const r = (await this.roomStateStub(input.partitionKey).telefuncRoomCommitFrame(input)) as {
+      ok: boolean
+      seq?: number
+      timestamp?: number
+      receivers?: number
+    }
+    if (!(await r.ok)) return { ok: false, reason: 'stale-fence' }
+    const [seq, timestamp, receivers] = await Promise.all([r.seq, r.timestamp, r.receivers])
+    return { ok: true, seq: seq!, timestamp: timestamp!, ...(receivers === undefined ? undefined : { receivers }) }
+  }
+
   private requirePartition(options: KvReadOptions | undefined): string {
     assert(options?.partitionKey !== undefined, 'A Room authority-tier KV op must carry a partition key.')
     return options.partitionKey
@@ -759,17 +778,33 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       presenceByBucket: await this.listPresenceByBucket(key),
     }))
 
-    const timestamp = Date.now()
-    const info = { seq, timestamp }
-    const activeBuckets = Array.from(presenceByBucket.keys())
+    const info = { seq, timestamp: Date.now() }
+    // `receivers` counts subscribed DOs (presence entries) — the same want-driven zero
+    // semantics as the other transports: 0 ⟺ no subscriber anywhere.
+    const { receivers, fanoutBuckets } = await this.fanoutFrame(key, { serialized, binaryData }, info, presenceByBucket)
+    return { seq: info.seq, timestamp: info.timestamp, receivers, meta: { authorityBucket, fanoutBuckets } }
+  }
+
+  /** Forward one already-ordered frame to every populated bucket coordinator, each of which delivers it
+   *  to the subscribed DOs in its bucket. The seq/timestamp ride on `info` — the single source of a
+   *  frame's place in the order — so `publishToSubscribers` (a fresh per-key seq) and
+   *  `commitFrameOnAuthority` (the committed room order) share one ordered-outbound fanout. Returns the
+   *  live receiver count and the buckets reached. */
+  private async fanoutFrame(
+    key: string,
+    payload: { serialized?: string; binaryData?: Uint8Array },
+    info: WirePublishInfo,
+    presenceByBucket: Map<LocationBucket, string[]>,
+  ): Promise<{ receivers: number; fanoutBuckets: LocationBucket[] }> {
+    const fanoutBuckets = Array.from(presenceByBucket.keys())
     let receivers = 0
     for (const doNames of presenceByBucket.values()) receivers += doNames.length
     await Promise.all(
-      activeBuckets.map((activeBucket) =>
+      fanoutBuckets.map((activeBucket) =>
         this.getBucketCoordinatorStub(key, activeBucket).telefuncBroadcastPublish({
           key,
-          serialized,
-          binaryData,
+          serialized: payload.serialized,
+          binaryData: payload.binaryData,
           forwarded: true,
           locationBucket: activeBucket,
           doNames: presenceByBucket.get(activeBucket)!,
@@ -777,9 +812,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
         }),
       ),
     )
-    // `receivers` counts subscribed DOs (presence entries) — the same want-driven zero
-    // semantics as the other transports: 0 ⟺ no subscriber anywhere.
-    return { seq, timestamp, receivers, meta: { authorityBucket, fanoutBuckets: activeBuckets } }
+    return { receivers, fanoutBuckets }
   }
 
   /**
@@ -787,6 +820,52 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
    */
   deliverToLocal(request: BroadcastDeliverRequest): void {
     this.deliverLocal(request)
+  }
+
+  /**
+   * The authority half of `commitFrame` (see `BroadcastAdapter.commitFrame`), run via RPC on the room's
+   * partition Durable Object — the one that already sequences the room's control lane. One
+   * `runInAuthorityChain` turn does the whole atomic core: it compares every fence (each `key` must still
+   * equal `expected`, else the caller's incarnation is stale and nothing else happens), advances the
+   * clamped monotonic room clock at `orderKey`, and — authority-only (`replicate: false`), like the `:o`
+   * watermark — retains the self-framed bytes at `retainKey`. Presence is snapshotted in that same turn so
+   * no later commit slips its order in ahead of this one's fanout targets. The ordered fanout then runs
+   * outside the chain (as `publishToSubscribers` does, so a slow remote hop can't stall the next commit's
+   * ordering), carrying the committed `(seq,timestamp)` on the wire — so every local and remote receiver
+   * reads this frame's real place in the room order, never a fresh per-key seq.
+   */
+  async commitFrameOnAuthority(
+    authorityState: CloudflareBroadcastAuthorityState,
+    input: RoomFrameCommit,
+  ): Promise<RoomFrameCommitResult> {
+    const committed = await authorityState.runInAuthorityChain(async () => {
+      for (const { key, expected } of input.fences) {
+        if ((await authorityState.roomStateGet(key)) !== expected) return null
+      }
+      const prevRaw = await authorityState.roomStateGet(input.orderKey)
+      const prev = prevRaw === null ? null : (JSON.parse(prevRaw) as WirePublishInfo)
+      // The clamped advance (mirrors `advanceRoomFrameOrder`): `seq` resets to 1 when wall time passes the
+      // last timestamp, else it clamps that timestamp and increments — so `(timestamp, seq)` is strictly
+      // increasing whatever this authority's clock skew.
+      const now = Date.now()
+      const prevTs = prev?.timestamp ?? 0
+      const info: WirePublishInfo =
+        now > prevTs ? { seq: 1, timestamp: now } : { seq: (prev?.seq ?? 0) + 1, timestamp: prevTs }
+      // Order + retain are authority-only — read back through `consistent`, so a replica copy is dead
+      // weight (and a per-key write-ceiling risk on a hot room).
+      await authorityState.roomStateSet(input.orderKey, JSON.stringify(info), input.orderTtlMs, false)
+      if (input.retainKey !== undefined)
+        await authorityState.roomStateSet(input.retainKey, encodePublishText(input.payload, info), undefined, false)
+      return { info, presenceByBucket: await this.listPresenceByBucket(input.channelKey) }
+    })
+    if (committed === null) return { ok: false, reason: 'stale-fence' }
+    const { receivers } = await this.fanoutFrame(
+      input.channelKey,
+      { serialized: input.payload },
+      committed.info,
+      committed.presenceByBucket,
+    )
+    return { ok: true, seq: committed.info.seq, timestamp: committed.info.timestamp, receivers }
   }
 
   // --- Private ---
