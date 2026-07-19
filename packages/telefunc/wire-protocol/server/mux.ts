@@ -166,12 +166,20 @@ type ConnectionState = {
    *  the routing lookup below would otherwise swallow it silently (the connection still reports
    *  the rotated-away session id, so `sessions.get` misses for every ix). */
   retiredByBarrier: boolean
-  /** Raw bytes and frames currently charged to this wire's recv chain — every frame that has been
-   *  admitted but whose turn has not finished. Charged before the frame is chained and refunded in
-   *  that turn's own `finally`, so the pair is one integer op each on the dispatch path and cannot
-   *  drift: there is exactly one increment site and exactly one decrement site. */
+  /** Raw bytes and frames admitted to this wire's recv chain whose turn has not finished.
+   *  Written only by `chargeBacklog`/`refundBacklog`, so the pair cannot drift. */
   recvBacklogBytes: number
   recvBacklogFrames: number
+}
+
+function chargeBacklog(state: ConnectionState, byteLength: number): void {
+  state.recvBacklogBytes += byteLength
+  state.recvBacklogFrames++
+}
+
+function refundBacklog(state: ConnectionState, byteLength: number): void {
+  state.recvBacklogBytes -= byteLength
+  state.recvBacklogFrames--
 }
 
 type ConnectionEntry = {
@@ -363,49 +371,54 @@ class ChannelMux {
     if (!entry) return Promise.resolve(null)
     const { state } = entry
     const byteLength = rawFrame.byteLength
-    // Resource admission, ahead of everything — decode, dispatch, and the chain itself. The raw-frame
-    // ceiling bounds what `decode` below is asked to allocate; the backlog pair bounds what a client
-    // can leave QUEUED by stalling the chain and continuing to send. Both terminate only the wire
-    // that overran, so a flood costs its author its own connection and nobody else theirs.
-    //
-    // The backlog charge is deliberately two integer adds with no allocation and no async hop: it
-    // sits on the path every ordinary data frame takes, and anything heavier here would be a real
-    // throughput cost paid on normal traffic to bound abnormal traffic.
-    if (
-      byteLength > this.limits.maxRawFrameBytes ||
-      state.recvBacklogBytes + byteLength > this.limits.maxRecvBacklogBytes ||
-      state.recvBacklogFrames >= this.limits.maxRecvBacklogFrames
-    ) {
+    if (!this.admitInboundFrame(state, byteLength)) {
       this.terminateWire(entry, connection)
       return Promise.resolve(null)
     }
-    state.recvBacklogBytes += byteLength
-    state.recvBacklogFrames++
+    chargeBacklog(state, byteLength)
     const exec = async (): Promise<ReconcileOutcome | null> => {
-      const violation: ViolationTarget = { connection }
       try {
-        const pending = this.handleFrame(entry, connection, rawFrame, violation)
-        return pending ? ((await pending) ?? null) : null
-      } catch (err) {
-        // Nobody's wire to kill — see `StaleBarrierError`. Refuse and leave both wires alone.
-        if (err instanceof StaleBarrierError) return null
-        const target = violation.connection
-        // `target === connection` is every pre-existing path, and resolves to the entry captured
-        // above exactly as before. Only a barrier retargets, and then the wire may already be gone.
-        const targetEntry = target === connection ? entry : this.connectionEntries.get(target)
-        if (!targetEntry) return null
-        this.terminateWire(targetEntry, target)
-        return null
+        return await this.runInboundTurn(entry, connection, rawFrame)
       } finally {
-        // The refund rides the turn's OWN try, so it costs no extra promise link and cannot be
-        // skipped by any exit — including the violation path above, whose wire is dead but whose
-        // entry may be re-registered by a reconnect on the same object in a pooled adapter.
-        state.recvBacklogBytes -= byteLength
-        state.recvBacklogFrames--
+        refundBacklog(state, byteLength)
       }
     }
     if (rawFrame[0] === TAG.PING) return exec()
     return this.chainRecv(entry, exec)
+  }
+
+  /** Admission runs ahead of everything — decode, dispatch, and the chain itself. The raw-frame
+   *  ceiling bounds what `decode` is asked to allocate; the backlog pair bounds what a client can
+   *  leave QUEUED by stalling the chain and continuing to send. Rejection kills only the wire that
+   *  overran, so a flood costs its author its own connection and nobody else theirs. */
+  private admitInboundFrame(state: ConnectionState, byteLength: number): boolean {
+    if (byteLength > this.limits.maxRawFrameBytes) return false
+    // Bytes compare post-add and frames pre-increment, because this frame is not charged yet.
+    if (state.recvBacklogBytes + byteLength > this.limits.maxRecvBacklogBytes) return false
+    return state.recvBacklogFrames < this.limits.maxRecvBacklogFrames
+  }
+
+  /** One admitted frame's turn. Never rejects: a protocol violation kills the offending wire — which
+   *  is not always the wire the frame arrived on, see `ViolationTarget` — and resolves null. */
+  private async runInboundTurn(
+    entry: ConnectionEntry,
+    connection: unknown,
+    rawFrame: Uint8Array<ArrayBuffer>,
+  ): Promise<ReconcileOutcome | null> {
+    const violation: ViolationTarget = { connection }
+    try {
+      const pending = this.handleFrame(entry, connection, rawFrame, violation)
+      return pending ? ((await pending) ?? null) : null
+    } catch (err) {
+      // Nobody's wire to kill — see `StaleBarrierError`. Refuse and leave both wires alone.
+      if (err instanceof StaleBarrierError) return null
+      const target = violation.connection
+      // Only a barrier retargets, and then the wire may already be gone.
+      const targetEntry = target === connection ? entry : this.connectionEntries.get(target)
+      if (!targetEntry) return null
+      this.terminateWire(targetEntry, target)
+      return null
+    }
   }
 
   /** Kill one wire and abandon any upgrade staged on it: a wire being torn down can never commit. */
