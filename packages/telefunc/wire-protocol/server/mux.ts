@@ -182,6 +182,28 @@ type ConnectionEntry = {
 
 class ProtocolViolationError extends Error {}
 
+/**
+ * Which path a RECONCILE takes, decided by SHAPE rather than by truthiness. `decode` only casts the
+ * JSON it parsed, so `ReconcilePayload`'s union — both barrier legs absent, or `barrier === true`
+ * with a string `upgradeId` — is a compile-time claim about untrusted bytes and nothing more.
+ *
+ * ⚠️ Anything else is a violation, and the two ways to get one fail in OPPOSITE directions, which is
+ * why neither a `=== true` check nor a `typeof upgradeId` check alone is enough. A truthy non-`true`
+ * `barrier` (`"yes"`, `1`) reaches `handleBarrier` and can COMMIT; a present-but-falsy one
+ * (`false`, `0`), or an `upgradeId` with no `barrier` at all, falls through to the ordinary path,
+ * where `releaseStagesForReconcile` kills a healthy stage and `reconcile` rotates the session
+ * destructively. A malformed barrier-shaped frame must reach neither.
+ *
+ * Stated as the two LEGAL shapes and violating everything else, so a shape nobody anticipated is
+ * refused by default rather than by having been enumerated.
+ */
+function isBarrierReconcile(payload: ReconcilePayload): payload is ReconcilePayload & { barrier: true } {
+  const { barrier, upgradeId } = payload as { barrier?: unknown; upgradeId?: unknown }
+  if (barrier === undefined && upgradeId === undefined) return false
+  if (barrier === true && typeof upgradeId === 'string') return true
+  throw new ProtocolViolationError()
+}
+
 /** A barrier whose stage is simply GONE — expired, or its probe closed. Distinct from a violation
  *  because there is no correct wire to kill: the probe no longer exists, and killing the OLD wire
  *  would cost an established client a healthy session because a probe timed out. Both wires are left
@@ -328,9 +350,14 @@ class ChannelMux {
     this.clearStage(connection)
     const sessionId = entry.transport.getSessionId(connection)
     if (!sessionId) return // Closed before reconciling — nothing to clean up.
-    // The OLD wire died with a stage pending on it: the barrier can never arrive now.
+    // The OLD wire died with a stage pending on it: the barrier can never arrive now. ⚠️ ABANDON,
+    // not clear — the probe has to go with the record. `clearStage` alone leaves a session-less WS
+    // that PING keeps alive indefinitely, and the record it drops is also the phase marker
+    // `handleFrame` reads, so the wire would be left free to establish an ordinary WS session
+    // through a plain RECONCILE. This is the same rule every other cleanup path here follows; the
+    // `clearStage` above is the exception only because there the closing wire IS the probe.
     const stagedWs = this.stagedByPrevSession.get(sessionId)
-    if (stagedWs !== undefined) this.clearStage(stagedWs)
+    if (stagedWs !== undefined) this.abandonStage(stagedWs)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
     // permanent tears them down. The session-level finalizer is dropped on any close;
     // reconcile rebuilds it on next attach.
@@ -454,7 +481,9 @@ class ChannelMux {
       // reconcile on a staged probe wire would run the destructive rotation and step around the
       // stage entirely. A barrier-flagged copy is equally wrong here — it belongs on the OLD wire.
       if (this.stagedUpgrades.has(connection)) throw new ProtocolViolationError()
-      if (frame.payload.barrier) {
+      // ONE seam for the whole discriminant, deliberately not pushed down into `handleBarrier`: the
+      // shapes that must be refused include ones that would never reach it. See `isBarrierReconcile`.
+      if (isBarrierReconcile(frame.payload)) {
         return this.handleBarrier(entry, connection, frame.payload, rawFrame.byteLength, violation)
       }
       this.releaseStagesForReconcile(frame.payload, entry, connection)

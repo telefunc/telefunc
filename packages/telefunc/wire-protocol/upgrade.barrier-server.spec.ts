@@ -465,6 +465,97 @@ describe('refusal — two checks for two distinct defects, and neither substitut
   })
 })
 
+// `decode` only CASTS the JSON it parsed, so `ReconcilePayload`'s union — either both barrier legs
+// absent, or `barrier === true` with a string `upgradeId` — buys nothing at runtime unless the
+// dispatch seam enforces it. Truthiness-testing `barrier` left two openings, and they are opposite
+// in kind: a truthy non-`true` value COMMITS an upgrade, while a falsy-but-present one falls through
+// to the ordinary path, where `releaseStagesForReconcile` kills the stage and `reconcile` performs a
+// destructive session rotation. A malformed barrier-shaped frame must reach neither.
+//
+// Every row asserts the same three things, because a check that produced only one of them would be
+// half a fix: the sender's own wire dies, the old session is NOT rotated, and the stage survives
+// intact for the legitimate attempt still in flight.
+describe('the barrier discriminant is a shape, not a truthiness test', () => {
+  /** A RECONCILE carrying whatever the caller says. The typed helper cannot express these shapes —
+   *  which is precisely why nothing but a runtime check can stop them. */
+  const hostileReconcile = (payload: Record<string, unknown>) =>
+    reconcileFrame(payload as unknown as Parameters<typeof reconcileFrame>[0])
+
+  const open = [{ id: 'A', ix: 0, lastSeq: 1 }]
+
+  async function stagedConnection() {
+    const h = (harness = createMuxHarness())
+    const { chA, s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0, 'upg-1'))
+    expect(h.mux._getUpgradeResourceSnapshot()).toMatchObject({ records: 1 })
+    return { h, chA, s0 }
+  }
+
+  function expectRefused(h: ReturnType<typeof createMuxHarness>, s0: string) {
+    expect(h.sse.terminated()).toBe(true) // the malformed frame costs its SENDER the wire
+    expect(h.sse.sessionId()).toBe(s0) // ← no rotation: it never reached `reconcile`
+    expect(reconciledOn(h.ws)).toHaveLength(0) // ← and no commit
+    expect(finsOn(h.sse)).toHaveLength(0)
+    expect(h.mux._getUpgradeResourceSnapshot()).toMatchObject({ records: 1 }) // the stage survives
+  }
+
+  test('barrier:false with an otherwise valid upgradeId does not fall through to ordinary rotation', async () => {
+    const { h, s0 } = await stagedConnection()
+
+    await h.sse.deliver(hostileReconcile({ sessionId: s0, barrier: false, upgradeId: 'upg-1', open }))
+
+    expectRefused(h, s0)
+  })
+
+  test('barrier:"yes" with a matching upgradeId does not commit', async () => {
+    const { h, s0 } = await stagedConnection()
+
+    await h.sse.deliver(hostileReconcile({ sessionId: s0, barrier: 'yes', upgradeId: 'upg-1', open }))
+
+    expectRefused(h, s0)
+  })
+
+  test('an orphaned upgradeId with no barrier leg is not ordinary traffic', async () => {
+    const { h, s0 } = await stagedConnection()
+
+    await h.sse.deliver(hostileReconcile({ sessionId: s0, upgradeId: 'upg-1', open }))
+
+    expectRefused(h, s0)
+  })
+
+  test('barrier:true without a string upgradeId dies on the SENDER, not on the probe', async () => {
+    // The one row whose outcome MOVES rather than flips. Today it reaches `handleBarrier`, fails the
+    // id equality, and retargets the kill to the probe — the right victim for a well-formed barrier
+    // the server refuses, and the wrong one for a frame that never satisfied the wire contract at
+    // all. Screened at the seam, the sender pays and the probe is left for its own deadline.
+    const { h, s0 } = await stagedConnection()
+
+    await h.sse.deliver(hostileReconcile({ sessionId: s0, barrier: true, open }))
+
+    expectRefused(h, s0)
+    expect(h.ws.terminated()).toBe(false)
+  })
+
+  test('control: the well-formed shapes on either side of the check still take their own path', async () => {
+    // Without this the four rows above are satisfied just as well by a seam that rejects EVERY
+    // reconcile. Both legal shapes run here, in sequence, on the same connection: an ordinary
+    // reconcile rotates, and a real barrier commits.
+    const { h, s0 } = await stagedConnection()
+
+    await h.sse.deliver(reconcileFrame({ sessionId: s0, open })) // ordinary: rotates, releases the stage
+    const s1 = h.sse.sessionId()
+    expect(s1).not.toBe(s0)
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+
+    await h.ws.deliver(prepare(s1!, 'upg-2'))
+    await h.sse.deliver(barrier(s1!, 'upg-2'))
+
+    expect(reconciledOn(h.ws)).toHaveLength(1) // ← COMMITTED on the probe
+    expect(finsOn(h.sse)).toHaveLength(1)
+    expect(h.sse.terminated()).toBe(false)
+  })
+})
+
 describe('a stage never outlives what it depends on', () => {
   test('the TTL expires the stage and releases the probe, without disturbing the old session', async () => {
     // Confounder control: BOTH wires are PINGed across the window, because the mux's own ping deadline
@@ -512,6 +603,27 @@ describe('a stage never outlives what it depends on', () => {
       expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
     }
     await expectWireDelivers(h.sse, chA)
+  })
+
+  test('the OLD wire closing releases the stage AND the probe that can no longer commit', async () => {
+    // The missing sibling of the TTL / probe-close / rotation rows above, and the one cleanup path
+    // that used to clear the RECORD without letting go of the PROBE. Two things go wrong when it
+    // does. The probe is session-less, so nothing but PING keeps it alive — and PING it will,
+    // forever, waiting on a commit that can never come. Worse, the record it just lost is also the
+    // phase marker `handleFrame` reads: with it gone the `stagedUpgrades.has(connection)` guard no
+    // longer fires, so the wire is not merely alive but ELIGIBLE, free to establish itself as an
+    // ordinary WS session through a plain RECONCILE.
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+    expect(h.mux._getUpgradeResourceSnapshot()).toMatchObject({ records: 1, reverseRecords: 1 })
+
+    h.sse.close(true)
+
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+    expect(h.ws.terminated()).toBe(true)
+    // Permanent, so the probe gets no reconnect grace: there is nothing left for it to come back to.
+    expect(h.mux.consumePermanentTermination(h.ws.conn)).toBe(true)
   })
 
   test('a stage is released when its old wire rotates away from the staged session', async () => {
