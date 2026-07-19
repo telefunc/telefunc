@@ -3,24 +3,17 @@ import { TelefuncStreamBeta, PoweredByTelefuncStream } from '../../components'
 
 <TelefuncStreamBeta />
 
-Live queries for [Drizzle ORM](https://orm.drizzle.team) — write an ordinary Drizzle query, end it with `.live()`, and Telefunc keeps the result current. When a write changes rows the query cares about, the clients reading it are told to refetch. Nothing to subscribe to, no invalidation keys to maintain: the dependencies come from the SQL you already wrote.
+Live queries for [Drizzle ORM](https://orm.drizzle.team) — write an ordinary Drizzle query, end it with `.live()`, and Telefunc keeps the result current. The dependencies come from the SQL you already wrote: nothing to subscribe to, no invalidation keys to maintain.
 
 <PoweredByTelefuncStream pkg="drizzle" />
 
-## Install
+## Quickstart
 
 ```bash
 npm install @telefunc/drizzle
 ```
 
-That's it — there is nothing to register. `reactiveDrizzle()` is imported where you use it, and `Live` is part of Telefunc itself.
-
-Supported databases: **PostgreSQL** (including PGlite) and **SQLite**. MySQL is not, and `reactiveDrizzle()` says so rather than accepting it: MySQL has no `RETURNING`, so the rows a write changed can never be recovered, and every write would invalidate every live query on the table.
-
-
-## Usage
-
-Wrap your Drizzle `db` once, export it, and terminate a query with `.live()`:
+Wrap your Drizzle `db` once and export it:
 
 ```ts
 // db.ts
@@ -29,6 +22,8 @@ import { db } from './drizzle'
 
 export const rdb = reactiveDrizzle(db)
 ```
+
+End a read with `.live()`. Writes stay ordinary Drizzle:
 
 ```ts
 // Todos.telefunc.ts
@@ -47,23 +42,7 @@ export async function onAddTodo(text: string) {
 }
 ```
 
-The read returns a `Live<Todo[]>`. The write is ordinary Drizzle — but because it ran through the reactive `db`, Telefunc knows which rows changed and invalidates the live queries that read them — precisely where it can identify the rows, and deliberately coarsely where it cannot (see Precision & limits).
-
-> `reactiveDrizzle(db)` binds to nothing request-scoped — call it at module level, or inside a telefunction, before or after an `await`. There are no usage rules to remember.
-
-Everything except `.live()` is the ordinary Drizzle builder — `await` the same chain for plain rows, and `execute`/`prepare`/the dialect runners all behave as before:
-
-```ts
-const rows = await rdb.select().from(todos)          // Todo[]     — plain read
-const live = await rdb.select().from(todos).live()   // Live<Todo[]> — live read
-```
-
-> Forgetting `.live()` is a *compile* error at the boundary, not a silent bug: `Todo[]` is not a `Live<Todo[]>`.
-
-
-## Reading a live value
-
-A `Live<T>` is `{ readonly data: T }` — `.data` is the current snapshot:
+On the client you get a `Live<Todo[]>` — read `.data`. Because `onAddTodo` ran through the reactive `db`, Telefunc knows it touched rows this query reads, and tells the clients reading it to refetch:
 
 ```ts
 // Environment: client
@@ -71,11 +50,25 @@ const todos = await onGetTodos(userId)
 todos.data // Todo[]
 ```
 
-The snapshot does not mutate in place. When the server signals that it is stale, an adapter refetches and swaps in a fresh handle — see <Link href="/tanstack-query">`@telefunc/tanstack-query`</Link>, which does this for you.
+That is the whole loop. Use <Link href="/tanstack-query">`@telefunc/tanstack-query`</Link> to do the refetching for you.
 
-#### `Live.derived()`
+Works on PostgreSQL (including PGlite) and SQLite. `reactiveDrizzle()` refuses a MySQL database rather than accepting one whose writes it has no verified way to capture.
 
-Compose a live value from others. Reading a dependency's `.data` inside the callback registers it, and the derived value goes stale whenever a dependency does:
+
+## Everything else is ordinary Drizzle
+
+`await` the same chain without `.live()` for plain rows; `execute`, `prepare` and the dialect runners behave as before:
+
+```ts
+const rows = await rdb.select().from(todos)          // Todo[]       — plain read
+const live = await rdb.select().from(todos).live()   // Live<Todo[]> — live read
+```
+
+> Forgetting `.live()` is a *compile* error at the boundary, not a silent bug: `Todo[]` is not a `Live<Todo[]>`.
+
+> `reactiveDrizzle(db)` binds to nothing request-scoped — call it at module level, or inside a telefunction, before or after an `await`. There are no usage rules to remember.
+
+Compose live values with `Live.derived()`. Reading a dependency's `.data` inside the callback registers it, and the derived value goes stale whenever a dependency does:
 
 ```ts
 import { Live } from 'telefunc'
@@ -84,20 +77,51 @@ const openCount = Live.derived(() => todos.data.filter((t) => !t.done).length)
 ```
 
 
-## Multi-process deployments
+## How it works & limits
 
-The built-in default fans writes out **within one process** — enough for development and a single server. Running more than one server process requires a shared transport, or a write on one will not reach a live query on another:
+You can use Telefunc without reading this section. It is here for when you want to know why a query refetched, or are deploying more than one server.
+
+### Precision
+
+Live queries are **precise where that can be proven, and deliberately coarse — never wrong — everywhere else.** A coarse invalidation refetches more than strictly necessary; it never delivers a stale or fabricated row. Coarse is also temporary: after a raw statement, a migration, or a gap detected in the change stream, the affected queries refetch, rebuild their tracking, and go back to being precise.
+
+Capturing a write precisely means recovering the rows it changed — and, for anything that retracts a row, a usable primary key. Read the table top to bottom: a write is precise only if no coarse row below it also applies.
+
+| Your write | Behaviour |
+| --- | --- |
+| With your own `.returning()` — full, or a projection like `.returning({ id })` | **Precise** on any PostgreSQL or SQLite connection, **pooled included**: the rows come from the very session that ran the statement. For a projection Telefunc widens the `RETURNING` internally and hands you back exactly the columns you asked for |
+| On **PGlite**, with no `.returning()` | **Precise** — its plain driver result can be reproduced faithfully |
+| Anything else with no `.returning()` | **Coarse** — the plain driver result can't be reproduced faithfully, so the rows aren't captured |
+| A **prepared** write with a *partial* `.returning()`, or with none | **Coarse on every driver, PGlite included** — `prepare()` freezes the statement, so Telefunc can neither add a `RETURNING` to it nor widen a projection into one. With a *full* `.returning()` a prepared write is precise on every execution: one decision covers them all |
+| `UPSERT` / `ON CONFLICT`; an update or delete on a table with **no primary key**; a `.returning()` selecting a computed expression like ``sql`id + 1` `` | **Coarse even with `.returning()`** — a returned row doesn't say whether it was inserted or updated, a retraction has nothing to key on, and a value the database computed can't be recovered from the row. An **insert** into a key-less table is still precise: it carries its whole row and retracts nothing |
+
+On **PostgreSQL 18 or newer**, an update or delete also returns the row's old image beside the new one, so a live query can tell a change it does not care about from one that moves a row in or out of its result — and primary-key-changing updates stay precise instead of coarsening. Telefunc **probes** for this once per database rather than trusting a version number, using a transaction it always rolls back: `telefunc_old_new_probe` in your query log is that probe, and it leaves nothing behind. If the role may not create temporary tables, Telefunc reads `server_version_num` instead and confirms the capability on the first write that relies on it.
+
+Two over-fires are worth knowing about. Where you did not supply a full `RETURNING` yourself, Telefunc adds one — and a role that may write a table but not `SELECT` from it refuses that clause, so Telefunc re-runs your statement exactly as you wrote it and invalidates coarsely instead. **Your write never fails for a clause you did not ask for.** And a live *read* over a **pooled** connection stays coarse: a read's meaning depends on the session it runs in, and a pool can hand the next one a different role or `search_path`.
+
+### Raw SQL
+
+A raw statement's tables are unknowable without parsing it, so running one on the reactive db invalidates **every** table that db has a live query on — raw *reads* included:
+
+```ts
+await rdb.execute(sql`update todos set done = true`) // invalidates everything this db watches
+await db.execute(sql`select count(*) from audit_log`) // base db — invalidates nothing
+```
+
+Run raw reads on your base `db` to avoid the noise.
+
+### More than one server
+
+The built-in default fans writes out **within one process** — enough for development and a single server. More than one needs a shared transport, or a write on one server will not reach a live query on another:
 
 ```ts
 const rdb = reactiveDrizzle(db, {
   changeTransport: myRedisChangeTransport,
-  changeNamespace: 'orders-db', // which database this is
+  changeNamespace: 'orders-db', // which logical database this is
 })
 ```
 
-> This transport is dedicated to live queries and is independent of your app's `config.broadcast.transport`.
-
-`changeNamespace` is **required** with an injected transport, and names the logical database: identical on every server that talks to the same database, and different for every other database sharing the broker. Without it two databases would exchange row changes, and a `users` row from one would be applied to the other's `users` query. With the built-in default it is derived from your connection, so there is nothing to pass.
+`changeNamespace` is **required** alongside a transport: it must be identical on every server talking to the same database, and different for every other database sharing the broker. Without it two databases would exchange row changes. This transport is dedicated to live queries and independent of your app's `config.broadcast.transport`.
 
 A transport carries an opaque string — Telefunc encodes the change itself, so you never have to make `BigInt`, `Date` or byte columns survive your serializer:
 
@@ -110,83 +134,22 @@ type ChangeTransport = {
 
 Two rules make it correct:
 
-- **Resolve `subscribe()` once the subscription really exists** — after Redis acknowledges `SUBSCRIBE`, not when the command is sent. A live read waits on that promise, so resolving early re-opens the gap it closes, and rejecting fails the read rather than admitting one that could miss writes. Likewise resolve `unsubscribe()` only once the listener is detached.
+- **Resolve `subscribe()` once the subscription really exists** — after Redis acknowledges `SUBSCRIBE`, not when the command is sent. A live read waits on that promise, so resolving early re-opens the gap it closes. Likewise resolve `unsubscribe()` only once the listener is detached.
 - **Deliver each payload at least once, byte for byte.** You do not have to deduplicate or preserve order: every message carries its publisher and a sequence number, so Telefunc drops repeats itself and falls back to a coarse refetch if it sees a gap or a reordering.
 
-A db keeps the transport it first used, so a *different* one passed while live queries are running is an error rather than a silent swap — subscriptions and their readiness were established on the first one, and moving out from under them would strand a listener where nobody publishes. Once a db is **quiescent** — no live query holding a subscription, and none still detaching — there is nothing left to strand, and passing a different transport rotates it. That is what lets you replace a client, or reset between tests, without building a new db object. A db that has only ever *written* is quiescent too: one write resolving the default does not lock it there.
+A db keeps the transport it first used, so passing a *different* one while live queries are running is an error rather than a silent swap. Once the db is quiescent — no live query holding a subscription — passing a different transport rotates it, which is what lets you replace a client or reset between tests.
 
+### Delivery
 
-## Precision & limits
+Invalidation is best-effort pub/sub. A live read is not admitted until the transport confirms its subscription, so a write can't be missed in the gap between the two, and a detectable loss — a repeat, a gap, a reordering — falls back to a coarse refetch rather than applying a delta out of order.
 
-Live queries are **precise where that can be proven, and deliberately coarse — never wrong — everywhere else.** A coarse invalidation refetches more than strictly necessary; it never delivers a stale or fabricated row.
+A server that starts listening to a publisher already running takes the first message it sees at face value rather than assuming the worst. If an earlier one then arrives late, that is the proof the assumption was wrong and it triggers one corrective refetch; until then the query is briefly **missing a change rather than merely out of date**. Assuming the worst on every reconnect would instead drop those queries to coarse permanently, which costs more, far more often.
 
-Coarse is also **temporary rather than permanent**. When something happens that Telefunc cannot describe row by row — a raw statement on any server, a migration, a gap detected in the change stream — the affected queries refetch and then rebuild their tracking from the database, so they go back to being precise. Under a burst of such events they stop trying and stay coarse until the next fresh read, which is the safe direction.
+One case stays undetectable: if the *last* message from a publisher is dropped, no later message exists to reveal the gap, and that query's invalidation waits for the next write touching the table. Bounded staleness, never a fabricated row.
 
-Capturing a write precisely means recovering the rows it changed: a way to read those rows back — your own `RETURNING`, or a driver whose plain result Telefunc can reproduce faithfully — and, for anything that retracts a row, a usable primary key.
+### Abandoned live reads
 
-The rows below are read top to bottom: a write is precise only if no coarse row also applies to it. An `UPSERT` on PGlite is coarse, not precise.
-
-| Write | Behaviour |
-| --- | --- |
-| On PGlite, for an ordinary insert/update/delete | **Precise** — the rows are captured for you |
-| On any PostgreSQL or SQLite connection — **pooled included** — using `.returning()`, whether full or a **partial or renamed projection** like `.returning({ id })` | **Precise** — the rows come from the very session that ran the statement. For a projection Telefunc widens the `RETURNING` to the whole row internally and hands you back exactly the columns you asked for |
-| A `.returning()` that selects a **computed expression**, such as ``sql`id + 1` `` | **Coarse** — the database computed that value; it cannot be recovered from the row, so nothing is guessed |
-| A **prepared** write, with a full `.returning()` | **Precise** on every execution — `prepare()` freezes the statement, so one decision covers them all |
-| Without `.returning()`, on any driver other than PGlite (including any prepared write) | **Coarse** — the plain driver result can't be reproduced faithfully, so the rows aren't captured |
-| On **PostgreSQL 18 or newer**, an update or delete | **Precise, and exact** — the statement returns the row's old image alongside the new one, so a live query can tell an update it does not care about from one that moves a row in or out of its result. Older servers keep the behaviour above |
-| A **primary-key-changing update** | **Precise on PostgreSQL 18+** (the old key is in the old image); **coarse** elsewhere, where the key a retraction is addressed by is destroyed by the statement itself |
-| `UPSERT` / `ON CONFLICT` | **Coarse** — a returned row does not say whether it was inserted or updated |
-| An **update or delete** on a table with no primary key | **Coarse** — the retraction has nothing to key on. An **insert** into such a table is precise: it carries its whole row and retracts nothing |
-
-That last capability is **probed, not assumed** — a version number is a claim, and PostgreSQL-compatible engines do not all keep it. Once per database, at `reactiveDrizzle()`, Telefunc runs one short transaction and rolls it back:
-
-```sql
-BEGIN;
-CREATE TEMP TABLE telefunc_old_new_probe (x int);
-INSERT INTO telefunc_old_new_probe VALUES (1);
-UPDATE telefunc_old_new_probe SET x = 2 RETURNING old.x, new.x;
-ROLLBACK;
-```
-
-If you see this in your query log, that is what it is: always rolled back, no table, no row, nothing left behind. Nothing waits on it, and a server that refuses simply keeps the older behaviour. If the role cannot create temporary tables, Telefunc reads `server_version_num` instead and verifies the capability on the first write that uses it — if that write is refused, it falls back for good, and the write itself still goes through.
-
-#### Writing to a table you cannot read
-
-To capture a write precisely, Telefunc adds a `RETURNING` clause to it. A role that may write a table but not `SELECT` from it refuses that clause, and **your write must not fail for a clause you did not ask for** — so it does not. Telefunc runs your statement exactly as you wrote it instead, and that write invalidates coarsely rather than precisely. Inside a transaction the attempt is bracketed by a savepoint, so nothing else in the transaction is disturbed. Everything still commits; you simply get more refetching on that table than a fully readable one would need.
-
-Reads have two over-fires of their own. A plain single-table `select` keeps no row state, so an update to a row it reads can invalidate it even when the visible result is unchanged — unless the write carried both images, which is what the PostgreSQL 18 row above buys; joins and aggregates track this exactly regardless. And a live query read over a **pooled** connection stays coarse: unlike a returned row, a read's meaning depends on the session it runs in, and a pool can hand the next read a connection with a different role or `search_path` than the one Telefunc inspected.
-
-#### Raw SQL
-
-A raw statement's tables are unknowable without parsing it, so running one on the reactive db invalidates **every** table that db has a live query on:
-
-```ts
-await rdb.execute(sql`update todos set done = true`) // invalidates everything this db watches
-```
-
-That keeps raw SQL correct and usable, but noisy — and it applies to raw **reads** too. Run raw reads on your base `db` (the one you still hold) to avoid it:
-
-```ts
-await db.execute(sql`select count(*) from audit_log`) // base db — invalidates nothing
-```
-
-#### Delivery
-
-Invalidation is best-effort pub/sub. A live read is not admitted until the transport has confirmed its subscription, so a write can't be missed in the gap between the two.
-
-Every message carries its publisher and a sequence number, so a **detectable** loss is handled rather than ignored: a repeat is dropped, and a gap falls back to a coarse refetch of the watched tables instead of applying a delta out of order.
-
-When a server starts listening to a publisher that is already running, it takes the first message it sees at face value rather than assuming the worst — the messages before it are either already in the snapshot it just read, or still owed to it, in which case they arrive later and out of order. If one does arrive late, that is the proof the assumption was wrong, and it triggers one coarse refetch to correct it. In the window before that correction the query is briefly **missing one change rather than merely out of date**; the refetch resolves it. The alternative — assuming the worst on every reconnect — would permanently drop those queries to coarse, which costs far more, far more often.
-
-What none of this can cover is a message with nothing after it: if the last message from a publisher is dropped, no later message exists to reveal the gap, and that query's invalidation waits for the next write touching the table. Bounded staleness, never a fabricated row.
-
-A db subscribes while it has live queries and unsubscribes when the last one closes, so a `db` you stop using is not held open by the transport.
-
-#### Abandoned live reads
-
-A `.live()` reserves state — the graph it invalidates through, and a share of the db's subscription — and hands it to the client connection when the handle is serialized. A handle that is **never** returned to the client (your telefunction builds one and then throws, or returns something else) has nothing to hand it to, so that state is released when the handle is garbage-collected instead.
-
-That is not bounded: the JavaScript spec allows a finalizer never to run, and in practice it is the next GC. Nor is what it holds negligible. The reservation is a *reference*, but what that reference keeps alive is the whole graph for that query — including any hydrated row state, up to tens of thousands of rows for a stateful query. Another live query reading the same rows shares that graph and would keep it alive anyway; a *unique* abandoned query does not, and holds its graph alone until collection. Failure paths that never produce a handle at all — a failed compile, a failed snapshot read — release immediately and do not wait for the collector.
+A `.live()` reserves state and hands it to the client connection when the handle is serialized. A handle that is **never** returned to the client — your telefunction builds one and then throws, or returns something else — has nothing to hand it to, so that state waits for garbage collection instead, which the JavaScript spec does not bound. What it holds is not negligible: the whole graph for that query, including hydrated row state. Failure paths that never produce a handle at all release immediately.
 
 
 ## See also
