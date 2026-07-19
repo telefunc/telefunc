@@ -262,6 +262,12 @@ type UpgradeHarness = {
    *  `handleReconciled` (`:811`) which runs BEFORE the drain and even when FIN has not arrived,
    *  so waiting on it reads "done" while the buffer is still full. */
   handoffDrained(): boolean
+  /** How many SSE downstream (`streamResponse`) POSTs the client has opened. Exactly 1 through a
+   *  successful handoff — the transport flips to WS and never reconnects. A SECOND one is the
+   *  unambiguous signal that the upgrade fell back: `abortUpgradeAndReconnectSse` installs a fresh
+   *  SSE transport and reconnects. `handoffDrained()` cannot discriminate here, because the old
+   *  wire's fetch is aborted on both the success and the fallback path. */
+  sseConnects(): number
   dispose(): void
 }
 
@@ -279,6 +285,7 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
   const upstream: DecodedFrame[] = []
   let downstream: ReturnType<typeof makeSseDownstream> | null = null
   let sseTornDown = false
+  let sseConnects = 0
 
   const fetchImpl = (async (_url: string, init: RequestInit) => {
     const body = init.body as unknown
@@ -287,6 +294,7 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
       const { metadata, frames } = await parseBlobBody(body)
       for (const raw of frames) upstream.push(decode(raw as Uint8Array<ArrayBuffer>))
       if (metadata.streamResponse !== true) return new Response('', { status: 200 })
+      sseConnects += 1
       const sse = makeSseDownstream()
       downstream = sse
       init.signal?.addEventListener('abort', () => (sseTornDown = true), { once: true })
@@ -366,6 +374,7 @@ async function createUpgradeHarness(channelIds: string[] = ['A']): Promise<Upgra
     },
     inHandoff: () => socket.sent.some((f) => f.tag === TAG.RECONCILE && f.payload.upgrade === true),
     handoffDrained: () => sseTornDown,
+    sseConnects: () => sseConnects,
     dispose: () => {
       downstream?.close()
       socket.close()

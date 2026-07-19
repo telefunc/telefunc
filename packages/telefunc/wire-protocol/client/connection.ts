@@ -22,7 +22,9 @@ import {
   SSE_RECONCILE_DEADLINE_MS,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   TELEFUNC_SESSION_HEADER,
-  UPGRADE_FIN_RECONCILED_TIMEOUT_MS,
+  UPGRADE_HANDOFF_BUFFER_BYTES,
+  UPGRADE_HANDOFF_BUFFER_FRAMES,
+  UPGRADE_HANDOFF_JOIN_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
   WS_PROBE_TIMEOUT_MS,
   type ChannelTransport,
@@ -216,8 +218,11 @@ type UpgradeState =
       tag: 'handoff'
       from: ClientChannelTransport
       buffer: HandoffBuffer
+      /** ONE budget across both buffers — see `UPGRADE_HANDOFF_BUFFER_*`. */
+      bufferedBytes: number
+      bufferedFrames: number
       finReceived: boolean
-      finTimer: ReturnType<typeof setTimeout> | null
+      joinTimer: ReturnType<typeof setTimeout> | null
     }
 
 /** Frames that arrive during the handoff, kept PARTITIONED BY SOURCE WIRE rather than in one
@@ -338,7 +343,17 @@ class ClientConnection implements MuxConnection {
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'draining')
     this.state = {
       tag: 'open',
-      upgrade: { tag: 'handoff', from, buffer: { old: [], new: [] }, finReceived: false, finTimer: null },
+      upgrade: {
+        tag: 'handoff',
+        from,
+        buffer: { old: [], new: [] },
+        bufferedBytes: 0,
+        bufferedFrames: 0,
+        finReceived: false,
+        // Armed HERE, not on FIN arrival: the join deadline has to bound both limbs from the
+        // moment two wires are live, or the missing-FIN limb has no watchdog at all.
+        joinTimer: setTimeout(() => this.onHandoffJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS),
+      },
     }
   }
 
@@ -354,12 +369,12 @@ class ClientConnection implements MuxConnection {
   private exitUpgradeHandoff(): {
     from: ClientChannelTransport
     buffer: HandoffBuffer
-    finTimer: ReturnType<typeof setTimeout> | null
+    joinTimer: ReturnType<typeof setTimeout> | null
   } {
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'handoff')
-    const { from, buffer, finTimer } = this.state.upgrade
+    const { from, buffer, joinTimer } = this.state.upgrade
     this.state = { tag: 'open', upgrade: { tag: 'none' } }
-    return { from, buffer, finTimer }
+    return { from, buffer, joinTimer }
   }
 
   private canSendImmediately(): boolean {
@@ -659,9 +674,9 @@ class ClientConnection implements MuxConnection {
 
   /** `source` is the transport the frame came off. During the handoff two wires are live at once
    *  and which one a frame arrived on is load-bearing, so every caller must identify itself. */
-  _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport): void {
+  _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number): void {
     if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') {
-      this.bufferFrameDuringHandoff(frame, source === this.state.upgrade.from ? 'old' : 'new')
+      this.bufferFrameDuringHandoff(frame, source === this.state.upgrade.from ? 'old' : 'new', byteLength)
     } else {
       this.dispatchFrame(frame)
     }
@@ -698,7 +713,7 @@ class ClientConnection implements MuxConnection {
     this.channels.get(channelFrame.index)?.channel._dispatchFrame(channelFrame)
   }
 
-  private bufferFrameDuringHandoff(frame: DecodedFrame, source: 'old' | 'new'): void {
+  private bufferFrameDuringHandoff(frame: DecodedFrame, source: 'old' | 'new', byteLength: number): void {
     switch (frame.tag) {
       case TAG.FIN:
         this.handleHandoffFin()
@@ -708,7 +723,29 @@ class ClientConnection implements MuxConnection {
         return
     }
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'handoff')
-    this.state.upgrade.buffer[source].push(frame)
+    const upgrade = this.state.upgrade
+    upgrade.buffer[source].push(frame)
+    upgrade.bufferedFrames += 1
+    upgrade.bufferedBytes += byteLength
+    // Checked AFTER the push, so the frame that trips the budget is still part of the old prefix
+    // the fallback delivers. Overshooting by one frame is the cheap direction to be wrong in;
+    // dropping a non-replayable old-wire ctrl is not.
+    if (
+      upgrade.bufferedFrames > UPGRADE_HANDOFF_BUFFER_FRAMES ||
+      upgrade.bufferedBytes > UPGRADE_HANDOFF_BUFFER_BYTES
+    ) {
+      this.abortUpgradeAndReconnectSse(new NetworkError('Upgrade handoff buffer limit exceeded', true))
+    }
+  }
+
+  /** The FIN+RECONCILED join did not complete in time. The two limbs get distinguishable messages
+   *  so a missing FIN can never be mistaken for a missing RECONCILED — and so neither limb can be
+   *  silently satisfied by `RECONCILE_TIMEOUT_MS` firing 8s later instead. */
+  private onHandoffJoinTimeout(): void {
+    if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'handoff') return
+    this.state.upgrade.joinTimer = null
+    const waitingFor = this.state.upgrade.finReceived ? 'RECONCILED' : 'FIN'
+    this.abortUpgradeAndReconnectSse(new NetworkError(`Upgrade handoff timed out waiting for ${waitingFor}`, true))
   }
 
   /** Idempotent. Detaches first either way so a fresh install can never leak the prior. */
@@ -765,15 +802,8 @@ class ClientConnection implements MuxConnection {
   private handleHandoffFin(): void {
     if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'handoff') return
     this.state.upgrade.finReceived = true
-    // Bound the wait for RECONCILED — abort and reconnect if it never shows.
-    if (this.reconciling && !this.state.upgrade.finTimer) {
-      this.state.upgrade.finTimer = setTimeout(() => {
-        if (this.state.tag === 'open' && this.state.upgrade.tag === 'handoff') {
-          this.state.upgrade.finTimer = null
-        }
-        this.abortUpgradeAndReconnectSse(new NetworkError('Upgrade FIN without RECONCILED', true))
-      }, UPGRADE_FIN_RECONCILED_TIMEOUT_MS)
-    }
+    // The remaining wait for RECONCILED is already bounded by the join deadline armed at
+    // `enterUpgradeHandoff` — nothing to arm here.
     this.tryCompleteUpgradeHandoff()
   }
 
@@ -781,8 +811,8 @@ class ClientConnection implements MuxConnection {
   private tryCompleteUpgradeHandoff(): void {
     if (this.state.tag !== 'open' || this.state.upgrade.tag !== 'handoff') return
     if (!this.state.upgrade.finReceived || this.reconciling) return
-    const { from, buffer, finTimer } = this.exitUpgradeHandoff()
-    if (finTimer) clearTimeout(finTimer)
+    const { from, buffer, joinTimer } = this.exitUpgradeHandoff()
+    if (joinTimer) clearTimeout(joinTimer)
     from.detachHeartbeat()
     from.abandonActiveTransport()
     from.dispose()
@@ -845,7 +875,18 @@ class ClientConnection implements MuxConnection {
     void this.probeAndUpgrade(nextTransport)
   }
 
-  /** Tear down upgrade state, fall back to a fresh SSE, and disable upgrades for this connection. */
+  /** Tear down upgrade state, fall back to a fresh SSE, and disable upgrades for this connection.
+   *
+   *  When a handoff is in flight this is also the R2 fallback, and its shape is load-bearing:
+   *  exiting the handoff state stops further arrivals from buffering, then the OLD wire's received
+   *  FIFO prefix is dispatched while channel membership is still intact — those frames include
+   *  terminal ctrls (ABORT/ERROR) that carry no seq and that no replay can reproduce. The NEW
+   *  wire's buffer is discarded WHOLE: every frame in it is replayable from the server, and
+   *  dispatching a prefix of it would advance `trackSeq` past old-wire frames that never arrived,
+   *  converting a recoverable abort into permanent loss. Nothing is ever evicted to make room.
+   *
+   *  Draining the old prefix also lifts `lastSeqByChannel`, so the fresh RECONCILE that follows
+   *  reports the HIGHER `lastSeq` and the server replays only past it — no double delivery. */
   private abortUpgradeAndReconnectSse(err: Error): void {
     if (this.closed) return
     if (this.state.tag === 'open') {
@@ -854,11 +895,12 @@ class ClientConnection implements MuxConnection {
         u.attempt.abort()
         this.exitUpgradeAttempt(u.attempt)
       } else if (u.tag === 'handoff') {
-        const { from, finTimer } = this.exitUpgradeHandoff()
-        if (finTimer) clearTimeout(finTimer)
+        const { from, buffer, joinTimer } = this.exitUpgradeHandoff()
+        if (joinTimer) clearTimeout(joinTimer)
         from.detachHeartbeat()
         from.abandonActiveTransport()
         from.dispose()
+        for (const frame of buffer.old) this.dispatchFrame(frame)
       }
     }
     this.upgradeDisabled = true
@@ -999,7 +1041,7 @@ class ClientConnection implements MuxConnection {
       const u = this.state.upgrade
       if (u.tag === 'probing' || u.tag === 'draining') u.attempt.abort()
       if (u.tag === 'handoff') {
-        if (u.finTimer) clearTimeout(u.finTimer)
+        if (u.joinTimer) clearTimeout(u.joinTimer)
         u.from.detachHeartbeat()
         u.from.abandonActiveTransport()
         u.from.dispose()
@@ -1347,7 +1389,7 @@ class WsTransport implements ClientChannelTransport {
         this.heartbeat?.resetPong()
         return
       }
-      this.owner._onTransportFrame(frame, this)
+      this.owner._onTransportFrame(frame, this, raw.byteLength)
     }
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
@@ -1613,7 +1655,7 @@ class SseTransport implements ClientChannelTransport {
             this.heartbeat?.resetPong()
             continue
           }
-          this.owner._onTransportFrame(frame, this)
+          this.owner._onTransportFrame(frame, this, entry.frame.byteLength)
         }
       } catch {
         if (abortController.signal.aborted) return

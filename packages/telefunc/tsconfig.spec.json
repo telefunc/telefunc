@@ -24,6 +24,7 @@
     "wire-protocol/live.spec.ts",
     "wire-protocol/upgrade-client-harness.ts",
     "wire-protocol/upgrade-mux-harness.ts",
+    "wire-protocol/upgrade.handoff-limits.spec.ts",
     "wire-protocol/upgrade.abort-swallow.spec.ts",
     "wire-protocol/upgrade.handoff-order.spec.ts",
     "wire-protocol/upgrade.loss.spec.ts"

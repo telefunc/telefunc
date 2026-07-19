@@ -83,9 +83,18 @@ export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
  *  phase 2 gates the producer and forces the cutover. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
-/** How long the client waits for RECONCILED on the new wire after FIN arrives on the old
- *  wire (cross-wire reordering can deliver FIN first) before aborting the upgrade. */
-export const UPGRADE_FIN_RECONCILED_TIMEOUT_MS = 2_000
+/** Deadline for the FIN(old wire) + RECONCILED(new wire) join that commits the handoff. Symmetric
+ *  — it bounds whichever limb is missing — and armed when the handoff is ENTERED rather than when
+ *  the first of the two arrives. Arming it on FIN leaves a MISSING FIN unbounded, which is the one
+ *  case it exists to catch: with RECONCILED settled there is no `reconcileTimer` either, so nothing
+ *  at all is watching and the handoff wedges for the connection's lifetime. */
+export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
+
+/** ONE budget shared across BOTH handoff buffers (old + new). Hitting either limit trips the same
+ *  fallback as a missing FIN. Frames are never evicted to stay under it: eviction would silently
+ *  drop precisely the non-replayable old-wire frames the source partitioning exists to protect. */
+export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
+export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
 /** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
  *  wire dead and reconnecting. A downstream that stalls without erroring (bytes stop, no FIN)
