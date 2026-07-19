@@ -18,12 +18,23 @@
 // its own `ChannelMux` rather than sharing the module-global one.
 
 export { createMuxHarness, settle, textFrame, reconcileFrame, prepareFrame, pingFrame }
+export { lengthPrefixed, globalRegisterChannel, disposeGlobalChannels, openSseDownstream, openGlobalProbeWire }
 export type { MuxHarness, HarnessWire, HarnessChannel }
 
+import { expect } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
-import { ChannelMux, type BacklogSnapshot, type MuxResourceLimits, type ServerTransport } from './server/mux.js'
+import {
+  ChannelMux,
+  getChannelMux,
+  type BacklogSnapshot,
+  type MuxResourceLimits,
+  type ServerTransport,
+} from './server/mux.js'
 import { ServerChannel } from './server/channel.js'
+import { handleSseChannelRequest } from './server/sse.js'
+import { encodeSseRequestMetadata } from './sse-request.js'
+import { encodeU32 } from './frame.js'
 import { decode, encode, type DecodedFrame, type PreparePayload, type ReconcilePayload } from './shared-ws.js'
 
 /** Let every already-scheduled microtask AND macrotask turn run. `setTimeout(0)` rather than
@@ -163,4 +174,83 @@ function prepareFrame(payload: PreparePayload): Uint8Array<ArrayBuffer> {
 
 function pingFrame(): Uint8Array<ArrayBuffer> {
   return encode.ping()
+}
+
+// ── The REAL `sse.ts` seam ───────────────────────────────────────────────────────────────────
+//
+// Some guards live in `handleBatchPost` / `runStreamResponse`, ABOVE the mux — the harness above
+// delivers straight to `onConnectionRawMessage` and never reaches them. These drive
+// `handleSseChannelRequest` with hand-built Requests against the MODULE-GLOBAL mux that `sse.ts`
+// resolves, which is also what makes them exercise the shipped default limits.
+
+function lengthPrefixed(bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(4 + bytes.length) as Uint8Array<ArrayBuffer>
+  out.set(encodeU32(bytes.length), 0)
+  out.set(bytes, 4)
+  return out
+}
+
+const globalChannels: ServerChannel<number, never>[] = []
+
+function globalRegisterChannel(id: string): ServerChannel<number, never> {
+  const channel = new ServerChannel<number, never>({ id })
+  getChannelMux().registerChannel(channel)
+  globalChannels.push(channel)
+  return channel
+}
+
+/** `afterEach` teardown for `globalRegisterChannel` — releases connect-TTL / reconnect timers. */
+function disposeGlobalChannels(): void {
+  for (const channel of globalChannels) channel._onPeerClose()
+  globalChannels.length = 0
+}
+
+/** Open the SSE downstream so the connection exists and its `ready` gate is resolved. The
+ *  stream-response POST carries the first reconcile, which registers `channelId` at ix 0.
+ *  Returns the session it minted. */
+async function openSseDownstream(connId: string, channelId: string): Promise<string> {
+  const reconcile = encode.reconcile({ open: [{ id: channelId, ix: 0, lastSeq: 0, initial: true }] })
+  const body = new Blob([encodeSseRequestMetadata({ connId, streamResponse: true }), lengthPrefixed(reconcile)])
+  const response = await handleSseChannelRequest(new Request('http://test.local/_telefunc', { method: 'POST', body }))
+  expect(response?.statusCode).toBe(200)
+  // `runStreamResponse` consumes the body asynchronously; the session appearing IS its completion.
+  // Polled rather than settled: real `ReadableStream` wakeups are not timer-driven and take an
+  // unbounded number of turns under load — a single `settle()` here was measured to pass alone and
+  // fail intermittently across a full suite run.
+  const live = () => getChannelMux().getConnectionByConnId(connId) as { sessionId: string | null } | undefined
+  for (let i = 0; i < 1_000; i++) {
+    if (typeof live()?.sessionId === 'string') return live()!.sessionId as string
+    await settle()
+  }
+  throw new Error(`Timed out waiting for downstream ${connId} to reconcile`)
+}
+
+/** A probe (WebSocket-shaped) connection on the same global mux `sse.ts` uses. `getConnId: null` is
+ *  already the SSE-vs-WS discriminator the mux keys on, so no new production seam is needed. */
+function openGlobalProbeWire() {
+  const conn = {}
+  const sent: DecodedFrame[] = []
+  let sessionId: string | undefined
+  let terminated = false
+  const transport: ServerTransport<object> = {
+    getSessionId: () => sessionId,
+    setSessionId: (_c, id) => {
+      sessionId = id
+    },
+    getConnId: () => null,
+    sendNow: (_c, frame) => {
+      sent.push(decode(frame))
+    },
+    terminateConnection: () => {
+      terminated = true
+    },
+  }
+  getChannelMux().onConnectionOpen(conn, transport)
+  return {
+    conn,
+    sent,
+    sessionId: () => sessionId,
+    terminated: () => terminated,
+    deliver: (frame: Uint8Array<ArrayBuffer>) => getChannelMux().onConnectionRawMessage(conn, frame),
+  }
 }
