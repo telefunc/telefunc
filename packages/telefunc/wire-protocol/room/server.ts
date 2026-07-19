@@ -56,6 +56,7 @@ import {
   roomIdentityKvPrefix,
   roomIdentityRoomKvPrefix,
   roomOrderKey,
+  roomOpenFenceKey,
   roomRetainedTextKey,
   roomRetainedBinaryKey,
   roomRetainedBinaryPrefix,
@@ -290,10 +291,12 @@ async function registerRoomIndex(id: string): Promise<void> {
  *  linearizes against the room's partition, so concurrent publishers across nodes never rewind or
  *  overtake, and a crash can't advance the order with nothing published. `publish()` and `announce()`
  *  share the clock, so a room's semantic messages carry one strictly-increasing, unique order that
- *  continues past whatever watermark a previous incarnation left. The fence set is empty for now
- *  (open-ness is still checked in memory, `_admitPublish`); the incarnation fence lands with epochs. */
+ *  continues past whatever watermark a previous incarnation left. Fenced on the incarnation (`inc`):
+ *  the commit orders/retains/publishes only while the open-fence still holds this handle's id, so a
+ *  publish from a closed or superseded incarnation fails before any effect (the caller throws). */
 function commitRoomFrame(
   id: string,
+  inc: string,
   channelKey: string,
   payload: string,
   retainKey?: string,
@@ -306,7 +309,7 @@ function commitRoomFrame(
   return Promise.resolve(
     adapter.commitFrame!({
       partitionKey: roomCtrlKey(id),
-      fences: [],
+      fences: [{ key: roomOpenFenceKey(id), expected: inc }],
       orderKey: roomOrderKey(id),
       orderTtlMs: ROOM_ORDER_KV_TTL_MS,
       channelKey,
@@ -337,7 +340,12 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined, kv: R
   })
   if (created === null) return null
   await registerRoomIndex(id)
-  return new ServerRoom(id, created, { members: [] }) // fresh room — the roster is known: empty
+  const room = new ServerRoom(id, created, { members: [] }) // fresh room — the roster is known: empty
+  // Raise the open-fence — this incarnation's id, on the authority — so a `commitFrame` publish is
+  // admitted only while the room is live at this incarnation (see `commitRoomFrame`). After the config
+  // write: a crash in between leaves the room publish-closed (fail-closed), never silently unfenced.
+  await getRoomKV(id, { consistent: true }).set(roomOpenFenceKey(id), room._inc)
+  return room
 }
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
@@ -504,6 +512,9 @@ async function closeRoom(id: string): Promise<void> {
     return stringify({ ...current, status: 'closing' })
   })
   if (!fenced) return
+  // Drop the open-fence first, so a publish still in flight at this incarnation fails at its
+  // `commitFrame` before the sweep runs — a stale incarnation already fails, its id no longer matching.
+  await getRoomKV(id, { consistent: true }).delete(roomOpenFenceKey(id))
   // Event so observers disconnect promptly; then sweep. The member scan reads the authority so it
   // sees every record committed before the fence — nothing joined after it can slip past.
   await publishCtrl(id, { __r: 'closed' })
@@ -587,11 +598,16 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 }
 
 async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
-  await requireRoom(id)
+  const { config } = await requireRoom(id)
   // One commit on the room's semantic clock, the same one `publish()` draws, so an announcement is
   // ordered relative to participant text; the assigned order rides the control frame for every
   // receiver. Announce shares the clock but keeps the control lane, so it reaches every observer.
-  const commit = await commitRoomFrame(id, roomCtrlKey(id), stringify({ __r: 'announce', data } satisfies RoomEnvelope))
+  const commit = await commitRoomFrame(
+    id,
+    config.inc,
+    roomCtrlKey(id),
+    stringify({ __r: 'announce', data } satisfies RoomEnvelope),
+  )
   if (!commit.ok) throw new RoomError(`Room is closed: ${id}`)
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
@@ -953,6 +969,7 @@ class ServerRoom implements Room {
     // the store and the publish. Text and `announce()` share this clock, so they totally order.
     const commit = await commitRoomFrame(
       this.id,
+      this._inc,
       roomTextKey(this.id),
       stringify(envelope),
       retain ? roomRetainedTextKey(this.id) : undefined,

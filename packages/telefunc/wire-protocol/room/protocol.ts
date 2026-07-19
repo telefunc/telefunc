@@ -10,6 +10,7 @@ export {
   roomMemberTrackKey,
   roomDmKey,
   roomOrderKey,
+  roomOpenFenceKey,
   roomOrderBefore,
   roomRetainedTextKey,
   roomRetainedBinaryKey,
@@ -154,6 +155,12 @@ function roomRetainedTextKey(roomId: string): string {
  *  every semantic message carries one room-wide order. */
 function roomOrderKey(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:o`
+}
+/** KV key holding the open room's incarnation id (`RoomConfigRecord.inc`) — the fence a `commitFrame`
+ *  compares before it orders/retains/publishes. Set on create, deleted first on close, so a publish
+ *  from a closed or superseded incarnation fails before any effect (the value differs, or is gone). */
+function roomOpenFenceKey(roomId: string): string {
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:f`
 }
 /** KV key holding the last `publishBinary(data, { retain: true })` on one (member, track) — replayed
  *  (base64-encoded, since KV values are strings) to a new subscriber before live frames. Track is

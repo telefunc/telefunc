@@ -40,6 +40,7 @@ import {
   roomTextKey,
   roomConfigKvKey,
   roomRetainedBinaryPrefix,
+  roomOpenFenceKey,
   roomRetainedTextKey,
   roomMemberDataKey,
   roomMemberTrackKey,
@@ -2330,6 +2331,19 @@ describe('room stub channel', () => {
     await Room.removeParticipant('retain-text-kick', { id: cam.id })
 
     expect(await adapter.get!(roomRetainedTextKey('retain-text-kick'))).toBeNull() // swept on kick
+  })
+
+  it('rejects a publish whose incarnation fence no longer holds — stale before any effect', async () => {
+    const room = (await Room.create('fence-stale')) as ServerRoom
+    const me = await room.join({ meta: { name: 'me' } })
+    await me.publish('live') // admitted while the open-fence holds this incarnation
+
+    // The room was closed (or recreated) on another node: the open-fence is gone, but this handle's
+    // in-memory view never saw the close event and still thinks the room is open. commitFrame's fence
+    // check is the authority-level guard that catches it — the publish fails before it orders/publishes.
+    await getBroadcastAdapter().delete!(roomOpenFenceKey('fence-stale'))
+
+    await expect(me.publish('stale')).rejects.toThrow(/closed/i)
   })
 
   it('replays the last retained frame of every (member, track) a client starts watching', async () => {
