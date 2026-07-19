@@ -162,7 +162,11 @@ describe('write capture — RAW SQL fails closed over the db’s watched tables'
   })
 })
 
-describe('write capture — SQLite (node-sqlite)', () => {
+// Named for the MECHANISM rather than the dialect, because two of these five cases run on PG. The subject is
+// the terminal surface itself, which is not the same on every driver: node-sqlite write builders carry
+// `run`/`all`/`get`/`values`, PG builders carry none of them, and capture's proxy has to be transparent about
+// that in BOTH directions — intercept every verb the builder really has, and invent none that it does not.
+describe('write capture — driver-level terminals: node-sqlite has verbs PG does not', () => {
   /** A drizzle db over a fresh in-memory node:sqlite. Only reached when the lane probe succeeded. */
   async function sqliteDb() {
     const { drizzle } = await import('drizzle-orm/node-sqlite')
