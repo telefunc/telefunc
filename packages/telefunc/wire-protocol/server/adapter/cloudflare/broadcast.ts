@@ -853,6 +853,13 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
    * outside the chain (as `publishToSubscribers` does, so a slow remote hop can't stall the next commit's
    * ordering), carrying the committed `(seq,timestamp)` on the wire — so every local and remote receiver
    * reads this frame's real place in the room order, never a fresh per-key seq.
+   *
+   * NOTE (certification): the atomic authority turn and the presence-registration readiness
+   * (`MemberBucketState.ready`) run only on real Durable Objects, which need a workerd runtime, not the
+   * in-memory fakes the unit suite uses. Certify them in the `test/@cloudflare_vite-plugin` playground
+   * (the same real-DO harness the "Cloudflare" CI job runs): drive a `Room` across two isolates and
+   * assert a committed frame reaches a subscriber that joined mid-commit in order, and that a stale-fence
+   * commit is rejected. That harness needs the workerd dev server, so it is certified there, not here.
    */
   async commitFrameOnAuthority(
     authorityState: CloudflareBroadcastAuthorityState,
