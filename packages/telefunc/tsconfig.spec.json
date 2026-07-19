@@ -34,7 +34,9 @@
     "wire-protocol/upgrade.staging.spec.ts",
     "wire-protocol/upgrade.barrier.spec.ts",
     "wire-protocol/upgrade.barrier-batch.spec.ts",
-    "wire-protocol/upgrade.admission-caps.spec.ts"
+    "wire-protocol/upgrade.admission-caps.spec.ts",
+    "wire-protocol/upgrade.client-barrier.spec.ts",
+    "wire-protocol/upgrade.client-barrier-failures.spec.ts"
   ],
   "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"]
 }
