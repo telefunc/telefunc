@@ -110,11 +110,19 @@ function wrapWrite(
       // Outside a transaction there is nothing to serialize and writes stay fully concurrent.
       const start = (args?: unknown[]): Promise<unknown> => {
         const run = () => runWrite(target, table, op, db, sink, tx, args)
-        // Keyed by the ROOT of the physical transaction, not by this scope's own handle: a nested
-        // transaction is a SAVEPOINT on the same connection, so keying per handle gave parent and child
-        // separate queues, let their savepoints interleave, and turned a transaction plain Drizzle commits
-        // into "savepoint does not exist" → 25P02.
-        return tx ? serializePerTx(txRoot ?? tx, run) : run()
+        // INSIDE A TRANSACTION, keyed by the ROOT of the physical transaction rather than by this scope's own
+        // handle: a nested transaction is a SAVEPOINT on the same connection, so keying per handle gave
+        // parent and child separate queues, let their savepoints interleave, and turned a transaction plain
+        // Drizzle commits into "savepoint does not exist" → 25P02. That queue already covers everything on
+        // the connection, this builder included.
+        //
+        // OUTSIDE one, keyed by the BUILDER. Substitution rewrites the builder's RETURNING in place and puts
+        // it back when the statement finishes, so two executions of the SAME builder overlapping in time see
+        // each other's half-applied state: `Promise.all([b, b])` had the second execution plan against
+        // CAPTURE's full RETURNING and hand that caller capture's rows where plain Drizzle returns the plain
+        // count-shape twice — and their two taps shadowed and restored one `_prepare` out of order. Different
+        // builders keep different queues, so unrelated autocommit writes stay fully concurrent.
+        return serializeOn(tx ? (txRoot ?? tx) : target, run)
       }
       if (prop === 'then' && has('then')) {
         return (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>
@@ -362,6 +370,12 @@ async function runWrite(
   // reproducible from their own projection). The rows are expected to be full, but that is still VERIFIED
   // rather than trusted: this path once built changes unchecked, so a driver returning a narrowed row would
   // have emitted a partial image as precise.
+  // Where the caller's own result carries VALUES, capture decodes it first and separately — see the tap. An
+  // unresolvable position means capture's layout cannot answer their projection, so the substitution is
+  // refused rather than approximated.
+  const callerPositions = callerPositionsOf(plan, op)
+  if (callerPositions === UNMAPPABLE) return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
+
   if (plan.images) {
     const outcome = await runSubstituted(
       () => substituteOldNew(builder, table, plan.images!),
@@ -369,6 +383,7 @@ async function runWrite(
       tx,
       executeArgs,
       relationId,
+      callerPositions,
     )
     if (outcome === SUBSTITUTION_REFUSED) {
       // An UNPROVEN capability came from the server's version number rather than from a statement that ran
@@ -381,20 +396,62 @@ async function runWrite(
       return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
     }
     if (!oldNewProvenOf(db)) markOldNewProven(db) // it worked; later writes pay nothing for the guard
-    // The statement RAN and its rows never survived drizzle's mapping. Capture has no image, but the write
-    // happened — so it coarsens and the caller is answered from what the tap observed.
-    if (isCommittedUnmapped(outcome)) return answerFromRawRows(outcome, builder, plan, op, relationId, sink)
-    const pairs = outcome.map((row) => splitImages(row, plan.images!))
-    emitSafely(sink, captureBothOrCoarse(op, relationId, pairs, plan))
     // PostgreSQL's plain RETURNING on a DELETE is the row that was deleted — the OLD image. On an UPDATE it
-    // is the NEW one. The caller's result is rebuilt from whichever they would have been given.
-    return plan.reconstruct(pairs.map((pair) => (op === 'delete' ? pair.old : pair.new)))
+    // is the NEW one. Both are already accounted for in the positions the caller's decoding read.
+    const pairs = outcome.rows?.map((row) => splitImages(row, plan.images!))
+    emitCaptured(sink, relationId, outcome, pairs ? captureBothOrCoarse(op, relationId, pairs, plan) : undefined)
+    if (outcome.caller) return deliverCaller(outcome.caller)
+    return deliverCount(
+      outcome,
+      plan,
+      pairs?.map((pair) => (op === 'delete' ? pair.old : pair.new)),
+    )
   }
-  const outcome = await runSubstituted(() => substituteFullRow(builder, table), builder, tx, executeArgs, relationId)
+
+  const outcome = await runSubstituted(
+    () => substituteFullRow(builder, table),
+    builder,
+    tx,
+    executeArgs,
+    relationId,
+    callerPositions,
+  )
   if (outcome === SUBSTITUTION_REFUSED) return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
-  if (isCommittedUnmapped(outcome)) return answerFromRawRows(outcome, builder, plan, op, relationId, sink)
-  emitSafely(sink, captureOrCoarse(op, relationId, outcome, plan))
-  return plan.reconstruct(outcome)
+  emitCaptured(sink, relationId, outcome, outcome.rows && captureOrCoarse(op, relationId, outcome.rows, plan))
+  if (outcome.caller) return deliverCaller(outcome.caller)
+  return deliverCount(outcome, plan, outcome.rows)
+}
+
+/** Emit what capture managed to see. Where its own mapping of the rows failed there is no image to emit, but
+ *  the write HAPPENED — so the table coarsens rather than going unmentioned.
+ *
+ *  Emission follows the DATABASE, not the caller's outcome: this runs before the caller is answered and
+ *  regardless of whether they are about to receive a result or an error, because a live query never told
+ *  about an applied write is silently stale. (A write that never ran — a constraint violation, a refused
+ *  statement — still emits nothing, because nothing changed.) */
+function emitCaptured(
+  sink: CaptureSink,
+  relationId: string,
+  outcome: Substituted,
+  changes: TableChange[] | undefined,
+): void {
+  if (changes) return emitSafely(sink, changes)
+  emitSafely(sink, [coarse(relationId)])
+  reportPostCommitDecodeFault(relationId, outcome.captureError)
+}
+
+/** Capture's layout cannot produce one of the caller's own columns. */
+const UNMAPPABLE = Symbol('telefunc: the caller projection has no position in capture’s layout')
+
+/** Where each of the caller's ordered columns sits in the raw rows capture's statement returns — or
+ *  `undefined` when their result carries no values and nothing is decoded on their behalf. */
+function callerPositionsOf(
+  plan: Extract<Plan, { callerReturning: false }>,
+  op: Op,
+): number[] | undefined | typeof UNMAPPABLE {
+  if (plan.callerOrder.length === 0) return undefined
+  const positions = plan.callerOrder.map((field) => rawPositionOf(field, plan, op))
+  return positions.some((position) => position < 0) ? UNMAPPABLE : positions
 }
 
 // ── capture's own statement must never fail the caller's write ──────
@@ -402,16 +459,24 @@ async function runWrite(
 /** The substituted statement was refused for a reason the SUBSTITUTION introduced. */
 const SUBSTITUTION_REFUSED = Symbol('telefunc: capture substitution refused')
 
-/** The substituted statement RAN — the driver handed back rows — and then drizzle's mapping of those rows
- *  threw. The write has happened and cannot be taken back; what is lost is capture's view of it. Carries the
- *  RAW driver rows the tap observed, which is what the caller's own result is rebuilt from. */
-type CommittedUnmapped = { readonly committedUnmapped: true; readonly raw: readonly unknown[]; readonly error: unknown }
-
-type SubstitutionOutcome = Row[] | typeof SUBSTITUTION_REFUSED | CommittedUnmapped
-
-function isCommittedUnmapped(outcome: SubstitutionOutcome): outcome is CommittedUnmapped {
-  return typeof outcome === 'object' && outcome !== null && 'committedUnmapped' in outcome
+/** What ONE substituted execution produced — capture's view and the caller's, kept apart on purpose. */
+type Substituted = {
+  /** Capture's own view: the mapped rows, absent when drizzle's mapping of them threw. */
+  readonly rows?: Row[]
+  /** Why capture's mapping failed — present exactly when `rows` is absent. */
+  readonly captureError?: unknown
+  /** The RAW driver rows the tap observed. Only ever set when they arrived as an ARRAY, so a length taken
+   *  from it is a length that was measured — see `tapRawRows`. */
+  readonly raw?: readonly unknown[]
+  /** The caller's own result, decoded FIRST and by their own mapper. Absent when their result carries no
+   *  values at all, which is the case where nothing is decoded on their behalf. */
+  readonly caller?: CallerResult
 }
+
+/** The caller's result, or the error their own statement would have raised producing it. */
+type CallerResult = { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly error: unknown }
+
+type SubstitutionOutcome = Substituted | typeof SUBSTITUTION_REFUSED
 
 // ── the count-observation tap ───────────────────────────────────────
 //
@@ -431,118 +496,142 @@ function isCommittedUnmapped(outcome: SubstitutionOutcome): outcome is Committed
 // passes it through untouched. When the mapper then throws, the tap is holding the truth about the statement:
 // how many rows it changed, and their raw values.
 //
-// From that the caller's own result is rebuilt WITHOUT capture decoding anything:
-//   - they asked for no rows → their result is count-shaped, and the count is `raw.length` (REAL, observed);
-//   - they asked for a projection → drizzle's OWN mapper for THEIR selection is applied to the raw values at
-//     their columns' positions. Capture's added columns are never decoded, so a decoder capture introduced
-//     cannot reach them; a decoder on a column they selected themselves throws exactly as it would have.
-// Capture's own image is gone either way, so the write coarsens.
+// From that the caller's own result is produced WITHOUT capture's decoding being involved at all:
+//   - they asked for no rows → their result is count-shaped, and the count is the observed row count. Nothing
+//     is decoded on their behalf, so there is no decoding for capture to disturb;
+//   - they asked for a projection → drizzle's OWN mapper for THEIR selection runs over the raw values at
+//     their columns' positions, and runs FIRST — before capture's mapper decodes anything.
+//
+// CALLER-FIRST is the part that is easy to get subtly wrong, and was. It is not enough to reuse drizzle's
+// mapper; capture must not change how many times, in what order, or over which values the CALLER's decoders
+// run. Capture's own selections do both of those things: a BOTH-IMAGES statement decodes every column TWICE
+// (old and new), and a widened full-row statement decodes in TABLE order rather than the caller's. A
+// stateful `customType.fromDriver` — a perfectly valid decoder — therefore handed the caller the value from
+// its SECOND invocation where plain Drizzle gives the first. Decoding the caller's projection before capture
+// touches anything makes their invocation sequence identical to plain Drizzle's, whatever capture does after.
+//
+// HONEST RESIDUAL, and the reason this is a bound rather than a proof: `fromDriver` is a MAPPING contract,
+// and capture assumes it is pure with respect to caller-visible behaviour. An impure decoder can still
+// OBSERVE capture's additional invocations (it just cannot colour the caller's result with them). That is
+// inherent to capturing by RETURNING — the rows exist, so something must decode them. The alternative is to
+// coarsen every table carrying a custom type, which would trade real precision on ordinary schemas for the
+// protection of a pathological decoder class. Rejected deliberately.
 //
 // Scoped per execution, never a global client wrap: the tap shadows `_prepare` on THIS builder for the
 // duration of THIS statement and restores it afterwards, and every `_prepare()` call mints a fresh prepared
-// query, so the wrapped mapper belongs to one execution and nothing else.
+// query, so the wrapped mapper belongs to one execution and nothing else. Concurrent executions of one
+// builder cannot overlap here — `serializeOn` keys a queue on the builder precisely so two taps can never
+// shadow one `_prepare` at once.
 //
 // Verified placed on PGlite, node-postgres (they share `pg-core/async`'s `PgAsyncPreparedQuery`) and
 // node-sqlite (`SQLiteAsyncPreparedQuery`, whose executor shape differs but whose `mapper` does not — which
 // is why the tap sits on the mapper rather than the executor).
 
-/** What the tap saw. `observed()` is `undefined` until the mapper is actually handed rows — so it answers
- *  "did this statement reach the mapper", which is the only thing that licenses rebuilding a caller result. */
-type Tap = { observed: () => readonly unknown[] | undefined; release: () => void }
+/** What the tap saw. Both are `undefined` until the mapper is actually handed rows, so they answer "did this
+ *  statement reach the mapper" — the only thing that licenses answering the caller from an observation. */
+type Tap = {
+  /** Whether the mapper was reached AT ALL — which proves the driver returned and the statement APPLIED,
+   *  even where what it returned is a shape capture can make no use of. Emission keys off this; answering the
+   *  caller keys off `observed`. The two are deliberately not the same question. */
+  reached: () => boolean
+  observed: () => readonly unknown[] | undefined
+  callerResult: () => CallerResult | undefined
+  release: () => void
+}
 
-/** A builder whose prepared query capture cannot reach (version drift, or a driver that prepares
- *  differently). Observes nothing, so a post-commit mapping failure is RETHROWN rather than answered from a
- *  number nobody measured — a wrong count is corruption, a loud error is honest.
+/** The tap could not be placed, so this execution must not be substituted at all.
  *
- *  UNREACHABLE on every driver this package drives, and not claimed as covered: `_prepare` is the seam the
- *  statement EXECUTES through (drizzle's own `execute` is `this._prepare().execute()`), so a builder capture
- *  cannot observe is a builder that cannot run — there is no applied write left to misreport. Kept as a
- *  cheap guard for a future driver that executes some other way. */
-const UNPLACEABLE_TAP: Tap = { observed: () => undefined, release: () => {} }
+ *  FAILS CLOSED, and that is the whole point of it being a value rather than an exception: the builder is put
+ *  back and the caller's own statement runs as they wrote it (coarse). Installing the shadow used to happen
+ *  outside the recovery's `try`, so a builder that could not be shadowed — `Object.preventExtensions()` on a
+ *  finished builder is enough — rejected the caller's perfectly valid write before it ever reached the
+ *  database, and left capture's RETURNING on the builder. That is a worse failure than the one this file
+ *  exists to fix, produced by the machinery meant to fix it. */
+const TAP_UNPLACEABLE = Symbol('telefunc: capture could not observe this statement')
 
-function tapRawRows(builder: unknown): Tap {
+/** Decode the CALLER's own projection out of the raw driver rows — drizzle's mapper for their selection, over
+ *  the values at the positions capture's layout put them. */
+type CallerDecode = (raw: readonly unknown[]) => unknown
+
+function tapRawRows(builder: unknown, callerDecode: CallerDecode | undefined): Tap | typeof TAP_UNPLACEABLE {
   const target = builder as { _prepare?: unknown }
   const prepare = target._prepare
-  if (typeof prepare !== 'function') return UNPLACEABLE_TAP
+  if (typeof prepare !== 'function') return TAP_UNPLACEABLE
   const own = Object.getOwnPropertyDescriptor(target, '_prepare')
+  let reached = false
   let seen: readonly unknown[] | undefined
+  let caller: CallerResult | undefined
   const shadow = function (this: unknown, ...args: unknown[]): unknown {
     const prepared = (prepare as (...a: unknown[]) => unknown).apply(this, args) as { mapper?: unknown }
     const mapper = prepared?.mapper
     // No mapper means no mapping step to fail — the driver result IS the answer. Nothing to observe.
     if (typeof mapper !== 'function') return prepared
     prepared.mapper = (rows: readonly unknown[]) => {
-      seen = rows // record BEFORE mapping, so a mapper that throws still leaves the observation behind
+      // Reaching the mapper at all is what proves the STATEMENT APPLIED — the driver answered. That is true
+      // whatever shape the answer has, so it is recorded first and separately.
+      reached = true
+      // The rows themselves are recorded ONLY when they arrived as an array. Everything downstream reads a
+      // LENGTH off this, and a length taken from a container of some other shape would be a number nobody
+      // measured. A future mapper argument that is not an array therefore leaves the observation empty: the
+      // table still coarsens, because the write happened, and the caller gets the error rather than a count.
+      if (Array.isArray(rows)) {
+        seen = rows // recorded BEFORE mapping, so a mapper that throws still leaves the observation behind
+        // CALLER-FIRST: their decoders run here, over their columns, in their order, before capture's mapper
+        // has decoded anything at all.
+        if (callerDecode) {
+          try {
+            caller = { ok: true, value: callerDecode(rows) }
+          } catch (error) {
+            // A decoder on a column the CALLER selected themselves, failing exactly where their own statement
+            // would have failed. Theirs to receive.
+            caller = { ok: false, error }
+          }
+        }
+      }
       return (mapper as (r: readonly unknown[]) => unknown)(rows)
     }
     return prepared
   }
-  Object.defineProperty(target, '_prepare', { value: shadow, configurable: true, writable: true, enumerable: false })
+  try {
+    Object.defineProperty(target, '_prepare', {
+      value: shadow,
+      configurable: true,
+      writable: true,
+      enumerable: false,
+    })
+  } catch {
+    return TAP_UNPLACEABLE // a frozen / non-extensible builder: refuse the substitution, never the write
+  }
   return {
+    reached: () => reached,
     observed: () => seen,
+    callerResult: () => caller,
     release: () => {
-      if (own) Object.defineProperty(target, '_prepare', own)
-      else delete (target as Record<string, unknown>)._prepare
+      try {
+        if (own) Object.defineProperty(target, '_prepare', own)
+        else delete (target as Record<string, unknown>)._prepare
+      } catch {
+        // Placement succeeded, so this cannot normally fail. If it somehow does, the statement is already
+        // decided and a restore fault must not become the caller's error.
+      }
     },
   }
 }
 
-/** Answer the caller for a write that HAPPENED but whose rows capture could not map: coarsen (capture has no
- *  image), and rebuild their own result from the raw rows the tap observed. If it cannot be rebuilt
- *  faithfully, the original error is rethrown rather than answered with a guess.
- *
- *  The coarse marker goes out FIRST, and on BOTH exits. Whether the caller is handed a result or an error is
- *  a question about them; the rows changed either way, and a live query that is not told about a write that
- *  happened is silently stale. (This is the same rule as everywhere else in this file, applied to the one
- *  case where the write succeeds and the caller still sees a failure: emission follows the DATABASE, not the
- *  caller's outcome. A write that never ran — a constraint violation, a refused statement — still emits
- *  nothing, because nothing changed.) */
-function answerFromRawRows(
-  outcome: CommittedUnmapped,
-  builder: unknown,
-  plan: Extract<Plan, { callerReturning: false }>,
-  op: Op,
-  relationId: string,
-  sink: CaptureSink,
-): unknown {
-  emitSafely(sink, [coarse(relationId)])
-  reportPostCommitDecodeFault(relationId, outcome.error)
-  const result = rebuildCallerResult(outcome.raw, builder, plan, op)
-  if (result === UNRECOVERABLE) throw outcome.error
-  return result
+/** The caller's result as the tap produced it: theirs to receive, or theirs to be thrown. */
+function deliverCaller(caller: CallerResult): unknown {
+  if (caller.ok) return caller.value
+  throw caller.error
 }
 
-const UNRECOVERABLE = Symbol('telefunc: the caller result cannot be rebuilt from the observed rows')
-
-function rebuildCallerResult(
-  raw: readonly unknown[],
-  builder: unknown,
-  plan: Extract<Plan, { callerReturning: false }>,
-  op: Op,
-): unknown {
-  // The caller asked for NO rows: their result carries a row COUNT and no values at all, and the count is
-  // exactly the number of rows the statement returned — which the tap measured.
-  if (plan.callerOrder.length === 0) return plan.reconstructCount?.(raw.length) ?? UNRECOVERABLE
-
-  // They asked for a projection. Take their values out of the raw rows at the positions capture's own
-  // selection put them, and let DRIZZLE decode them through the caller's own selection — the same mapper
-  // their unsubstituted statement would have used, so the result is theirs down to the type of every value.
-  const positions = plan.callerOrder.map((field) => rawPositionOf(field, plan, op))
-  if (positions.some((position) => position < 0)) return UNRECOVERABLE
-  const mapper = callerMapperOf(builder)
-  if (!mapper) return UNRECOVERABLE
-  const projected: unknown[][] = []
-  for (const row of raw) {
-    if (!Array.isArray(row)) return UNRECOVERABLE // a driver whose raw rows are not positional
-    projected.push(positions.map((position) => row[position]))
-  }
-  try {
-    return mapper(projected)
-  } catch {
-    // A decoder on a column the CALLER selected themselves. Their own statement would have thrown too, so
-    // the original error is the faithful answer.
-    return UNRECOVERABLE
-  }
+/** The caller's COUNT-shaped result — the case where nothing is decoded on their behalf.
+ *
+ *  Taken from capture's mapped rows when capture mapped them, and otherwise from the rows the tap observed.
+ *  Where neither exists there is no measured number, so the failure is rethrown rather than answered. */
+function deliverCount(outcome: Substituted, plan: Extract<Plan, { callerReturning: false }>, mapped?: Row[]): unknown {
+  if (mapped) return plan.reconstruct(mapped)
+  if (outcome.raw && plan.reconstructCount) return plan.reconstructCount(outcome.raw.length)
+  throw outcome.captureError
 }
 
 /** Where in the substituted statement's raw row the given table field's value sits.
@@ -558,21 +647,44 @@ function rawPositionOf(field: string, plan: PrecisePlan & { images?: string[] },
   return op === 'delete' ? index * 2 : index * 2 + 1
 }
 
-/** Drizzle's own mapper for the CALLER's selection, asked for the same way drizzle asks for it.
+/** The caller's own decoding, as a function of the raw driver rows: their values at the positions capture's
+ *  layout put them, mapped by DRIZZLE'S OWN mapper for their selection.
  *
- *  Reached by preparing the builder once more — by this point `runSubstituted` has already put the caller's
- *  own RETURNING back, so what comes out is the mapper their statement would have carried. Preparing builds
- *  SQL and touches no connection, and this only ever runs on the fault path. */
-function callerMapperOf(builder: unknown): ((rows: unknown[][]) => Row[]) | undefined {
+ *  The mapper is obtained by preparing the builder while it still carries THEIR returning — which is what
+ *  makes it the mapper their unsubstituted statement would have used, rather than a re-implementation of one.
+ *  Preparing builds SQL and touches no connection. It is done once per substituted write that projects
+ *  values, which is a second SQL build on that path; the alternative is reaching past `_prepare` into
+ *  `dialect.mapperGenerators`, and one internal seam is enough. */
+function callerDecoderFor(builder: unknown, positions: number[]): CallerDecode | undefined {
   const prepare = (builder as { _prepare?: unknown })._prepare
   if (typeof prepare !== 'function') return undefined
+  let mapper: ((rows: unknown[][]) => Row[]) | undefined
   try {
     const prepared = (prepare as (...a: unknown[]) => unknown).call(builder) as { mapper?: unknown }
-    const mapper = prepared?.mapper
-    return typeof mapper === 'function' ? (mapper as (rows: unknown[][]) => Row[]) : undefined
+    if (typeof prepared?.mapper === 'function') mapper = prepared.mapper as (rows: unknown[][]) => Row[]
   } catch {
-    return undefined // version drift in `_prepare`'s signature: fall back to rethrowing, never to a guess
+    return undefined // version drift in `_prepare`: refuse the substitution, never guess at their result
   }
+  if (!mapper) return undefined
+  const decode = mapper
+  return (raw) => {
+    const projected: unknown[][] = []
+    for (const row of raw) {
+      // A driver whose raw rows are not positional. Throwing here reaches the caller as their own error
+      // rather than as a wrong value, and the same statement's capture side will have failed too.
+      if (!Array.isArray(row)) throw new TypeError('[telefunc] live: capture observed a non-positional row')
+      projected.push(positions.map((position) => row[position]))
+    }
+    return decode(projected)
+  }
+}
+
+/** The tap could not be placed, so this write runs exactly as the caller wrote it and capture coarsens. Rare
+ *  enough to be worth saying out loud: it means the builder shape drifted from the one capture is pinned to. */
+function reportTapUnplaceable(relationId: string): void {
+  report(
+    `[telefunc] live: Telefunc could not observe the statement it uses to capture a write on "${describeRelationId(relationId)}", so it did not substitute one. The write runs exactly as you wrote it and is unaffected; live queries on this table over-invalidate.`,
+  )
 }
 
 function reportPostCommitDecodeFault(relationId: string, error: unknown): void {
@@ -604,6 +716,7 @@ async function runSubstituted(
   tx: object | undefined,
   executeArgs: unknown[] | undefined,
   relationId: string,
+  callerPositions: number[] | undefined,
 ): Promise<SubstitutionOutcome> {
   const config = writeConfigOf(builder)
   const callerReturning = config?.returning
@@ -624,27 +737,47 @@ async function runSubstituted(
   // the refused statement and re-running would only get "current transaction is aborted". Without one — an
   // unverified dialect, or a SAVEPOINT the driver would not issue — there is nothing to recover to, so the
   // substitution is not attempted at all and the caller's statement runs as written (coarse).
+  // Taken from the PRISTINE builder, before the substitution rewrites its RETURNING — this has to be the
+  // mapper the caller's OWN statement would have carried, and after `substitute()` the builder no longer
+  // describes their statement. Where their projection needs values and no such mapper can be had, the
+  // substitution is refused rather than attempted: without it there is no way to keep their decoding first,
+  // and a substitution that cannot guarantee that is one this file should not be making.
+  const callerDecode = callerPositions ? callerDecoderFor(builder, callerPositions) : undefined
+  if (callerPositions && !callerDecode) return SUBSTITUTION_REFUSED
+
   const attempt = async (): Promise<SubstitutionOutcome> => {
     const savepoint = tx ? await openSavepoint(tx, relationId) : NO_SAVEPOINT_NEEDED
     if (savepoint === SAVEPOINT_UNAVAILABLE) {
       restore()
       return SUBSTITUTION_REFUSED
     }
-    const substituted = substitute()
-    const tap = tapRawRows(substituted)
+    // Everything that can touch the builder now sits INSIDE the try, so every exit runs `restore()`. The tap
+    // is placed after the substitution but before the statement, and a builder that cannot be shadowed
+    // refuses the substitution instead of failing a write the database would have accepted.
+    let tap: Tap | undefined
     try {
+      const substituted = substitute()
+      const placed = tapRawRows(substituted, callerDecode)
+      if (placed === TAP_UNPLACEABLE) {
+        await savepoint.release() // nothing ran, so there is nothing to rewind
+        reportTapUnplaceable(relationId)
+        return SUBSTITUTION_REFUSED
+      }
+      tap = placed
       const rows = (await runBase(substituted, executeArgs)) as Row[]
       await savepoint.release()
-      return rows
+      return { rows, raw: tap.observed(), caller: tap.callerResult() }
     } catch (error) {
-      // THE STATEMENT RAN. The tap was handed rows, so the database applied the write and the failure came
-      // afterwards, inside drizzle's mapping of a RETURNING capture chose. Re-running would write twice and
-      // rewinding would undo a write the caller asked for, so the savepoint is RELEASED exactly as on
-      // success and the caller is answered from the observed rows.
-      const raw = tap.observed()
-      if (raw !== undefined) {
+      // THE STATEMENT RAN. The mapper was reached, so the driver answered and the database applied the write;
+      // the failure came afterwards, inside drizzle's mapping of a RETURNING capture chose. Re-running would
+      // write twice and rewinding would undo a write the caller asked for, so the savepoint is RELEASED
+      // exactly as on success and the caller is answered from what the tap already decoded for them.
+      //
+      // Keyed on REACHED rather than on the rows: a driver that answered with a shape capture cannot read
+      // still applied the write, and the table must coarsen for it even though no count can be given.
+      if (tap?.reached()) {
         await savepoint.release()
-        return { committedUnmapped: true, raw, error }
+        return { captureError: error, raw: tap.observed(), caller: tap.callerResult() }
       }
       if (!isSubstitutionFault(error)) {
         // The caller's own error. Their transaction is aborted exactly as plain Drizzle would have left it,
@@ -656,7 +789,7 @@ async function runSubstituted(
       reportSubstitutionRefused(relationId, error)
       return SUBSTITUTION_REFUSED
     } finally {
-      tap.release()
+      tap?.release()
       restore()
     }
   }
@@ -711,23 +844,32 @@ const NO_SAVEPOINT_NEEDED: Savepoint = {
 /** A savepoint could not be established, so the substitution must not be attempted. */
 const SAVEPOINT_UNAVAILABLE = Symbol('telefunc: no savepoint available')
 
-/** Serializes whole substituted ATTEMPTS per transaction — savepoint, statement and release as one unit.
+/** Serializes whole captured WRITES on one key — savepoint, statement, mapping and restore as one unit.
  *
- *  `RELEASE SAVEPOINT` destroys every savepoint established after it, so two concurrent writes on one
- *  transaction (`Promise.all` over the same tx) interleave as save-A, save-B, release-A: B's savepoint is
- *  gone, B's release errors, and a failed statement aborts the transaction. Observed, not theorised — three
- *  concurrent inserts committed zero rows. Unique names do not help; it is establishment ORDER, not naming.
+ *  Keyed by a TRANSACTION, this is about savepoints: `RELEASE SAVEPOINT` destroys every savepoint
+ *  established after it, so two concurrent writes on one transaction (`Promise.all` over the same tx)
+ *  interleave as save-A, save-B, release-A: B's savepoint is gone, B's release errors, and a failed statement
+ *  aborts the transaction. Observed, not theorised — three concurrent inserts committed zero rows. Unique
+ *  names do not help; it is establishment ORDER, not naming. PostgreSQL executes one statement at a time per
+ *  connection anyway, so nothing real is lost by queueing.
  *
- *  PostgreSQL executes one statement at a time per connection anyway, so nothing real is lost by queueing. */
-const txSerial = new WeakMap<object, Promise<unknown>>()
+ *  Keyed by a BUILDER, it is about the builder's own mutable state: capture's RETURNING lives on the shared
+ *  builder across an await, so overlapping executions of one builder read each other's temporary shape.
+ *
+ *  SERIALIZED rather than executed against a per-execution CLONE, which was the alternative: drizzle's write
+ *  builders carry `execute` as an own ARROW property bound to the instance it was constructed on, so a clone
+ *  would build its own SQL and then execute the ORIGINAL builder — the copy would silently not be the thing
+ *  that runs. Serialization changes only the timing of concurrent reuse, which is exactly the state that was
+ *  wrong, and leaves every result identical to plain Drizzle's. */
+const serialQueues = new WeakMap<object, Promise<unknown>>()
 let savepointCount = 0
 
-function serializePerTx<T>(tx: object, attempt: () => Promise<T>): Promise<T> {
-  const previous = txSerial.get(tx) ?? Promise.resolve()
+function serializeOn<T>(key: object, attempt: () => Promise<T>): Promise<T> {
+  const previous = serialQueues.get(key) ?? Promise.resolve()
   const next = previous.then(attempt, attempt)
   // Kept off the chain's failure path: one attempt's rejection must not reject every later one.
-  txSerial.set(
-    tx,
+  serialQueues.set(
+    key,
     next.then(
       () => {},
       () => {},
