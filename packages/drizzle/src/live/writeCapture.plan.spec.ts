@@ -5,7 +5,8 @@
 // count/shape mismatch an observation seam.
 //
 // ISOLATION, stated honestly (verified by mutating each guard in turn):
-//  - the no-PK, UPSERT and PK-changing cases ISOLATE their guard — removing it flips exactly that case;
+//  - the no-PK, UPSERT and PK-changing cases ISOLATE their guard — removing it flips exactly that case (the
+//    no-PK guard now applies to UPDATE/DELETE only, since an insert retracts nothing);
 //  - the MySQL case is OVER-DETERMINED: that db also fails the "reconstruction must be provably faithful for
 //    this driver" gate, so removing the dialect guard alone does NOT flip it. It asserts the OUTCOME (such a
 //    write can never plan precise) rather than one guard. Defence in depth, not a defect — but it is not a
@@ -22,7 +23,7 @@
 //   Plan (`runWrite` reads `db` nowhere else), so an identical plan is an identical capture.
 
 import { PGlite } from '@electric-sql/pglite'
-import { entityKind } from 'drizzle-orm'
+import { entityKind, sql } from 'drizzle-orm'
 import { mysqlTable, int as myInt, varchar } from 'drizzle-orm/mysql-core'
 import { drizzle as mysqlDrizzle } from 'drizzle-orm/mysql2'
 import { drizzle as pgPoolDrizzle } from 'drizzle-orm/node-postgres'
@@ -90,9 +91,15 @@ describe('capture planning — fail-closed branches have executable controls', (
     expect(plan.mode).toBe('precise')
   })
 
-  it('NO primary key → coarse (a retraction could never be keyed)', () => {
-    const plan = insertPlan(pg, pg.insert(unkeyed).values({ a: 1, b: 'x' }), unkeyed)
-    expect(plan.mode).toBe('coarse')
+  it('NO primary key: UPDATE and DELETE stay coarse — their retraction could never be keyed', () => {
+    expect(planCapture(pg.update(unkeyed).set({ b: 'y' }), unkeyed, 'update', pg).mode).toBe('coarse')
+    expect(planCapture(pg.delete(unkeyed), unkeyed, 'delete', pg).mode).toBe('coarse')
+  })
+
+  it('NO primary key: an INSERT is still PRECISE — it carries its whole row and retracts nothing', () => {
+    // premise audit #4/H4. The old rule coarsened by table, not by operation, and an insert never needs the
+    // key the rule was protecting. See the liveGraph case for where the win actually lands (stateless).
+    expect(insertPlan(pg, pg.insert(unkeyed).values({ a: 1, b: 'x' }), unkeyed).mode).toBe('precise')
   })
 
   it('MySQL → coarse (no RETURNING; precise MySQL is deferred pending a live lane)', () => {
@@ -124,7 +131,13 @@ describe('capture planning — fail-closed branches have executable controls', (
     // ran it is irrelevant to whether those rows are real. A blanket pooled gate coarsened this.
     const pooled = pooledPg()
     const plan = insertPlan(pooled, pooled.insert(keyed).values({ id: 1, name: 'a' }).returning(), keyed)
-    expect(plan).toEqual({ mode: 'precise', callerReturning: true, pk: ['id'], columns: ['id', 'name'] })
+    expect(plan).toEqual({
+      mode: 'precise',
+      callerReturning: true,
+      pk: ['id'],
+      columns: ['id', 'name'],
+      positional: ['id', 'name'],
+    })
   })
 
   it('a pooled full-returning plan EQUALS the single-session one — so capture behaves identically', () => {
@@ -137,11 +150,10 @@ describe('capture planning — fail-closed branches have executable controls', (
     )
   })
 
-  it('pooling does not unlock the OTHER gates: no-PK, upsert and PK-changing stay coarse with .returning()', () => {
-    // The reorder moved one gate; it must not have moved the rest. Each of these carries a full
+  it('pooling does not unlock the OTHER gates: upsert and PK-changing stay coarse with .returning()', () => {
+    // The reorder moved one gate; it must not have moved the rest. Both of these carry a full
     // `.returning()`, so only its own guard can be what coarsens it.
     const pooled = pooledPg()
-    expect(insertPlan(pooled, pooled.insert(unkeyed).values({ a: 1, b: 'x' }).returning(), unkeyed).mode).toBe('coarse')
     expect(
       insertPlan(pooled, pooled.insert(keyed).values({ id: 1, name: 'a' }).onConflictDoNothing().returning(), keyed)
         .mode,
@@ -149,21 +161,22 @@ describe('capture planning — fail-closed branches have executable controls', (
     expect(planCapture(pooled.update(keyed).set({ id: 2 }).returning(), keyed, 'update', pooled).mode).toBe('coarse')
   })
 
-  it('a pooled PARTIAL .returning({id}) is NOT admitted as a full image — it fails closed after execution', () => {
-    // The trap in the reorder: `.returning({id})` also sets `config.returning`, so it plans precise on a
-    // pooled db just as it does on a pinned one. What keeps it sound is the post-execution check, asserted
-    // here at its own seam on exactly the row a partial projection produces.
+  it('a pooled PARTIAL .returning({id}) is not read AS a full image — it is widened and projected back', () => {
+    // The trap in the reorder: `.returning({id})` also sets `config.returning`. It is never treated as the
+    // full image — before rank 4 it planned `callerReturning` and was failed closed after execution by the
+    // check asserted here; now it plans the WIDEN path instead, which reaches the same soundness by
+    // capturing the whole row. Either way, what is emitted is never a projection dressed up as a row.
     const pooled = pooledPg()
     const plan = insertPlan(
       pooled,
       pooled.insert(keyed).values({ id: 1, name: 'a' }).returning({ id: keyed.id }),
       keyed,
     )
-    expect(plan.mode).toBe('precise') // planning does not decide fullness…
+    expect(plan).toMatchObject({ mode: 'precise', callerReturning: false }) // widened, not trusted as-is
     expect(captureMismatch([{ id: 1 }], ['id', 'name'], ['id'], 'insert')).toEqual({
       rowIndex: 0,
       reason: 'missing-columns',
-      detail: 'name', // …capture does, and coarsens
+      detail: 'name', // and were a driver ever to narrow the widened row, this still coarsens
     })
   })
 
@@ -172,6 +185,50 @@ describe('capture planning — fail-closed branches have executable controls', (
       'coarse',
     )
     expect(planCapture(pg.update(keyed).set({ id: 2 }), keyed, 'update', pg).mode).toBe('coarse')
+  })
+})
+
+// Which PATH a RETURNING selection takes. Three outcomes, and the difference between them is exactly what
+// the selection can be rebuilt from — asserted here because the choice is invisible in the emitted rows.
+describe('capture planning — the caller’s RETURNING selection decides the path', () => {
+  const pathOf = (builder: unknown) => {
+    const plan = insertPlan(pg, builder, keyed)
+    if (plan.mode === 'coarse') return 'coarse'
+    return plan.callerReturning ? 'as-written' : 'widen+project'
+  }
+  const insert = () => pg.insert(keyed).values({ id: 1, name: 'a' })
+
+  it('a full .returning() runs AS WRITTEN — there is nothing to widen', () => {
+    expect(pathOf(insert().returning())).toBe('as-written')
+    expect(pathOf(insert().returning({ id: keyed.id, name: keyed.name }))).toBe('as-written')
+  })
+
+  it('a partial or RENAMED projection is WIDENED and projected back', () => {
+    expect(pathOf(insert().returning({ id: keyed.id }))).toBe('widen+project')
+    expect(pathOf(insert().returning({ theId: keyed.id, theName: keyed.name }))).toBe('widen+project')
+    // Covers every column but carries an extra member: widening makes the captured image the TABLE's row
+    // rather than the caller's bag of aliases, which is what the graph must be fed.
+    expect(pathOf(insert().returning({ id: keyed.id, name: keyed.name, alsoId: keyed.id }))).toBe('widen+project')
+  })
+
+  it('a projected raw SQL EXPRESSION is a stated NON-WIN — it runs as written and fails closed', () => {
+    // The database computed `id + 1`; no full row image can produce it back, and re-deriving it would mean
+    // re-implementing SQL. So this keeps the old behaviour rather than inventing one: plan as-written, then
+    // coarsen at capture because the rows lack the table's columns.
+    expect(pathOf(insert().returning({ id: keyed.id, next: sql`id + 1` }))).toBe('as-written')
+  })
+
+  it('a column of ANOTHER table cannot masquerade as one of ours (matched by object identity)', () => {
+    // `unkeyed.a` is not a column of `keyed`, and a name-based match would be the kind of guess this file
+    // exists to prevent. Unrecognised selection → as-written → fails closed downstream.
+    expect(pathOf(insert().returning({ a: unkeyed.a }))).toBe('as-written')
+  })
+
+  it('an insert-from-SELECT plans precise — where the rows came FROM says nothing about the rows put IN', () => {
+    // premise audit #4. Both capture paths handle it: with the caller's own RETURNING, and (on PGlite) via
+    // the hidden one, whose plain result shape is identical to an ordinary insert's.
+    const fromSelect = pg.insert(keyed).select(pg.select({ id: keyed.id, name: keyed.name }).from(keyed))
+    expect(insertPlan(pg, fromSelect, keyed).mode).toBe('precise')
   })
 })
 

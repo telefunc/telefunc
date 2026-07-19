@@ -25,14 +25,20 @@ import type { Row, TableChange } from '../router/events.js'
 // PRECISION is gated + fails closed (emit one {table, kind:'coarse'}) — safe over-fire, never a wrong row:
 //   - PG/SQLite only (MySQL has no RETURNING → precise MySQL needs a pre-write SELECT + a live MySQL test
 //     lane that does not exist in this package yet → deferred; MySQL stays sound-coarse);
-//   - a resolvable PK (single OR composite); a table with no PK → coarse (a retraction can't be keyed);
-//   - not an UPSERT / ON CONFLICT, not a raw-SQL/insert-from-select write;
+//   - a resolvable PK (single OR composite) for UPDATE/DELETE, whose retraction is keyed by it; an INSERT
+//     carries its whole row and retracts nothing, so a PK-less table is still exact for it;
+//   - not an UPSERT / ON CONFLICT (a returned row does not say whether it was inserted or updated), and not
+//     a raw-SQL values clause;
 //   - not a PK-CHANGING update (SET touches the PK column → the old PK can't be recovered from RETURNING
 //     without a pre-write SELECT, which decision #3 forbids on PG/SQLite → coarse);
-//   - for a write with NO caller `.returning()`, the plain driver result must be FAITHFULLY reconstructible
+//   - the caller's result must be REBUILDABLE from the full row image the capture actually runs. A full
+//     `.returning()` is its own answer. A PARTIAL or aliased `.returning({ id })` is widened internally to
+//     the whole row and the caller's own columns are projected back out of it — nothing is invented, every
+//     value returned is a real column of the row the database changed. Where the projection selects a raw
+//     `SQL` expression the database computed (`sql`id + 1``), it cannot be recomputed from the row → coarse.
+//     For a write with NO `.returning()` at all, the plain driver result must be faithfully reproducible
 //     from a hidden full RETURNING (verified: PGlite → `{rows:[],fields:[],affectedRows:N}`); other drivers
-//     + SQLite (its `lastInsertRowid` is not recoverable for update/delete) → coarse. A caller's own
-//     `.returning()` needs no reconstruction, but must cover every column to yield a full image, else coarse.
+//     + SQLite (its `lastInsertRowid` is not recoverable for update/delete) → coarse.
 //
 // NOT a gate: whether the connection is pooled. A `.returning()` row image is produced by the exact session
 // that executed the statement, so "which pool connection ran it" cannot make those rows less real. Session
@@ -97,8 +103,11 @@ function wrapWrite(builder: unknown, table: Table, op: Op, db: object, sink: Cap
       if (prop === 'prepare') {
         const prepare = Reflect.get(target, prop, receiver)
         if (typeof prepare === 'function') {
+          // Planned HERE, from the builder as it stands at `prepare()` — after that the shape is frozen, so
+          // one plan covers every execution of the prepared statement.
+          const plan = planCapture(target, table, op, db)
           return (...args: unknown[]) =>
-            wrapPrepared((prepare as (...a: unknown[]) => unknown).apply(target, args), table, sink)
+            wrapPrepared((prepare as (...a: unknown[]) => unknown).apply(target, args), table, op, sink, plan)
         }
       }
       const value = Reflect.get(target, prop, receiver)
@@ -168,17 +177,43 @@ function runDirectTerminal(
 
 function directChanges(result: unknown, builder: object, table: Table, op: Op, db: object): TableChange[] {
   const relationId = relationKeyOf(table)
-  const plan = planCapture(builder, table, op, db)
-  if (plan.mode === 'precise' && plan.callerReturning && Array.isArray(result)) {
-    return captureOrCoarse(op, relationId, result as Row[], plan)
-  }
-  return [coarse(relationId)]
+  return changesFromRows(result, planCapture(builder, table, op, db), relationId, op)
 }
 
-/** A PREPARED write: the statement executes later (possibly many times), and its per-execution row images
- *  are not re-planned here — so every execution fails closed to COARSE for the target table rather than
- *  running uncaptured. Result shape and sync/async-ness are preserved. */
-function wrapPrepared(prepared: unknown, table: Table, sink: CaptureSink): unknown {
+/** Capture from rows a terminal returned DIRECTLY, without capture having chosen the statement's RETURNING.
+ *  Only a caller's own full `.returning()` qualifies: widening is not available here, because the caller's
+ *  result must come back with its exact shape and sync/async-ness and the statement runs as they wrote it. */
+function changesFromRows(result: unknown, plan: Plan, relationId: string, op: Op): TableChange[] {
+  if (plan.mode !== 'precise' || !plan.callerReturning || !Array.isArray(result)) return [coarse(relationId)]
+  return captureOrCoarse(op, relationId, namedRows(result, plan), plan)
+}
+
+/** Driver rows as NAMED rows. `.all()`/`.get()`/`await` already yield objects; SQLite's `.values()` terminal
+ *  yields POSITIONAL arrays. Naming those is not the forbidden guess it looks like: the statement's RETURNING
+ *  list was BUILT from the builder's own ordered selection, so position i is that selection's i-th column by
+ *  construction (verified against node:sqlite — a `.returning({ n: name, i: id })` comes back `["z", 9]`).
+ *  A positional row of a length the selection does not explain is left alone and fails closed downstream. */
+function namedRows(rows: unknown[], plan: PrecisePlan): Row[] {
+  const { positional } = plan
+  return rows.map((row) => {
+    if (!Array.isArray(row) || positional === undefined || row.length !== positional.length) return row as Row
+    const named: Row = {}
+    positional.forEach((field, index) => {
+      named[field] = row[index]
+    })
+    return named
+  })
+}
+
+/** A PREPARED write: the statement executes later, possibly many times, but it is FROZEN at `prepare()` —
+ *  the builder it came from can no longer change shape, so the plan made for that builder describes every
+ *  execution. Each one is captured under it: a caller's own full `.returning()` yields real rows per
+ *  execution, and anything else fails closed to COARSE for the target table rather than running uncaptured.
+ *
+ *  Only the caller's own returning qualifies, for the same reason as a direct terminal: capture never chose
+ *  this statement's RETURNING and cannot widen it after the fact. Result shape and sync/async-ness are
+ *  preserved either way. */
+function wrapPrepared(prepared: unknown, table: Table, op: Op, sink: CaptureSink, plan: Plan): unknown {
   const relationId = relationKeyOf(table)
   return new Proxy(prepared as object, {
     get(target, prop, receiver) {
@@ -198,11 +233,11 @@ function wrapPrepared(prepared: unknown, table: Table, sink: CaptureSink): unkno
         const result = (value as (...a: unknown[]) => unknown).apply(target, args)
         if (isThenable(result)) {
           return Promise.resolve(result).then((rows) => {
-            emitSafely(sink, [coarse(relationId)])
+            emitSafely(sink, changesFromRows(rows, plan, relationId, op))
             return rows
           })
         }
-        emitSafely(sink, [coarse(relationId)])
+        emitSafely(sink, changesFromRows(result, plan, relationId, op))
         return result
       }
     },
@@ -319,9 +354,10 @@ function reportCaptureFault(error: unknown, relationId: string): void {
 
 // ── capture planning ────────────────────────────────────────────────
 
-/** What a precise plan carries into capture: the PK fields a retraction is keyed by, and the columns a
- *  full image must contain. */
-type PrecisePlan = { pk: string[]; columns: string[] }
+/** What a precise plan carries into capture: the PK fields a retraction is keyed by, the columns a full
+ *  image must contain, and — only when the RETURNING selection already IS the full image — the table field
+ *  each returned POSITION carries, which is what lets SQLite's positional `.values()` rows be named. */
+type PrecisePlan = { pk: string[]; columns: string[]; positional?: string[] }
 
 type Plan =
   | { mode: 'coarse' }
@@ -337,11 +373,15 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   const dialect = dialectOf(db)
   if (dialect === 'mysql') return { mode: 'coarse' } // no RETURNING; precise MySQL (pre-write SELECT) deferred
   const pk = pkFieldsOf(table)
-  if (pk.length === 0) return { mode: 'coarse' } // no resolvable PK → a retraction can't be keyed → coarse
+  // A retraction is keyed by the PK, so UPDATE and DELETE need one. An INSERT retracts nothing — it carries
+  // its whole new row — so a table with no primary key is still captured exactly for it. (A STATEFUL graph
+  // over a PK-less input is born coarse in liveGraph and ignores the precision either way; a STATELESS one
+  // evaluates the new row against its predicate, which is where this win lands.)
+  if (pk.length === 0 && op !== 'insert') return { mode: 'coarse' }
   const config = writeConfigOf(builder)
   if (!config) return { mode: 'coarse' } // unrecognized builder shape (version drift) → coarse
   if (hasOnConflict(config, dialect)) return { mode: 'coarse' } // UPSERT / ON CONFLICT
-  if (op === 'insert' && isRawInsert(config)) return { mode: 'coarse' } // raw-SQL values / insert-from-select
+  if (op === 'insert' && hasRawValues(config)) return { mode: 'coarse' } // raw-SQL values clause
   if (op === 'update' && setTouchesPk(config, pk)) return { mode: 'coarse' } // PK-changing update (fork #2)
 
   const columns = Object.keys(getTableColumns(table))
@@ -351,10 +391,25 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   // belongs to read hydration (a pooled read can be answered by a connection with a different role /
   // search_path / RLS view than the one that was probed). No such probe is involved in a returned row.
   //
-  // FULLNESS is deliberately not decided here: `.returning({id})` also sets `config.returning`, and plans
-  // precise, and is then caught AFTER execution by `captureMismatch` (missing-columns → one coarse marker).
-  // That check is what keeps a partial projection from being emitted as a full image — on any connection.
-  if (config.returning !== undefined) return { mode: 'precise', callerReturning: true, pk, columns }
+  if (config.returning !== undefined) {
+    const selection = callerSelection(config.returning, table)
+    // Not reproducible from a row image — a nested alias path, or a raw `SQL` expression the DATABASE
+    // computed. Run exactly what the caller wrote and let `captureMismatch` fail it closed, as before.
+    if (!selection) return { mode: 'precise', callerReturning: true, pk, columns }
+    // Already the full image: nothing to widen, and the returned order is what names SQLite's positional rows.
+    if (isFullImage(selection, columns))
+      return { mode: 'precise', callerReturning: true, pk, columns, positional: selection.map((s) => s.field) }
+    // A PARTIAL or aliased projection is not a reason to give up. Widen the executed RETURNING to the whole
+    // row, capture THAT, and project the caller's own columns back out of it. The caller sees exactly the
+    // result they asked for; capture sees a real full row. No column is invented — this is the same row.
+    return {
+      mode: 'precise',
+      callerReturning: false,
+      pk,
+      columns,
+      reconstruct: (rows) => rows.map((row) => projectRow(row, selection)),
+    }
+  }
 
   // No caller returning → capture must SUBSTITUTE a hidden full RETURNING and hand the caller back a
   // reconstructed plain result, so reconstruction must be provably faithful for THIS driver. (PGlite is one
@@ -475,10 +530,64 @@ function hasOnConflict(config: WriteConfig, dialect: 'pg' | 'sqlite'): boolean {
   return config.onConflict !== undefined
 }
 
-/** A fully-raw values clause (`insert(t).values(sql\`…\`)`) or an insert-from-SELECT — capture can't map it
- *  to per-row images, so coarsen. Per-column raw values are fine (the RETURNING row is still the real row). */
-function isRawInsert(config: WriteConfig): boolean {
-  return is(config.values, SQL) || config.select === true
+/** A fully-raw values clause (`insert(t).values(sql\`…\`)`): the rows going IN are opaque, and no shape for
+ *  the caller's result is pinned for it, so coarsen. Per-column raw values are fine (the RETURNING row is
+ *  still the real row).
+ *
+ *  An insert-from-SELECT (`config.select === true`) used to coarsen here too, on the same "raw" reflex. It
+ *  does not belong: where the rows CAME from says nothing about the rows that went IN. `RETURNING` on an
+ *  insert-from-select yields the real inserted rows (verified on PGlite), and its plain no-returning result
+ *  is byte-identical in shape to an ordinary insert's — so both capture paths already handle it. */
+function hasRawValues(config: WriteConfig): boolean {
+  return is(config.values, SQL)
+}
+
+// ── the caller's RETURNING selection ────────────────────────────────
+
+/** One entry of drizzle's ordered RETURNING selection: the alias path the returned row is keyed by, and
+ *  what was selected there. `.returning()` with no argument builds the identity selection over every column.
+ *  (Pinned against drizzle 1.0.0-rc.4, like the rest of this file's builder introspection.) */
+type ReturningEntry = { path: string[]; field: unknown }
+
+/** The caller's RETURNING selection as alias → table FIELD pairs, in the order the statement returns them,
+ *  or `null` when their result could not be rebuilt from a full row image:
+ *
+ *   - a nested alias path (`.returning({ a: { b: col } })`) — the result shape is not a flat row;
+ *   - anything that is not a plain column of THIS table, above all a raw `SQL` expression
+ *     (`.returning({ n: sql\`id + 1\` })`): the DATABASE computed that value, and re-deriving it from the
+ *     row would mean re-implementing SQL. That case keeps its old behaviour — run as written, fail closed.
+ *
+ *  Columns are matched by OBJECT IDENTITY against the table's own column map, so a same-named column of a
+ *  different table cannot masquerade as one of ours. */
+function callerSelection(returning: unknown, table: Table): { alias: string; field: string }[] | null {
+  if (!Array.isArray(returning) || returning.length === 0) return null
+  const fieldByColumn = new Map<unknown, string>()
+  for (const [field, column] of Object.entries(getTableColumns(table))) fieldByColumn.set(column, field)
+  const selection: { alias: string; field: string }[] = []
+  for (const entry of returning as ReturningEntry[]) {
+    if (!Array.isArray(entry?.path) || entry.path.length !== 1) return null
+    const field = fieldByColumn.get(entry.field)
+    if (field === undefined) return null
+    selection.push({ alias: entry.path[0]!, field })
+  }
+  return selection
+}
+
+/** Whether a selection already yields exactly the image capture needs: every column, keyed by its own field
+ *  name, and NOTHING else. An extra or renamed member (`.returning({ mine: users.id, … })`) is not a defect
+ *  — it just means the row is widened and projected instead, so the emitted image is the table's row rather
+ *  than the caller's bag of aliases. */
+function isFullImage(selection: { alias: string; field: string }[], columns: string[]): boolean {
+  if (selection.length !== columns.length) return false
+  const identity = new Set(selection.filter((entry) => entry.alias === entry.field).map((entry) => entry.field))
+  return columns.every((column) => identity.has(column))
+}
+
+/** The caller's requested result, taken out of a full row image. */
+function projectRow(row: Row, selection: { alias: string; field: string }[]): Row {
+  const projected: Row = {}
+  for (const { alias, field } of selection) projected[alias] = row[field]
+  return projected
 }
 
 /** Whether an UPDATE's SET assigns any PK column — a PK-changing update, whose old PK a RETURNING (new)

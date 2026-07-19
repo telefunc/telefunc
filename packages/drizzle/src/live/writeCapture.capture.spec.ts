@@ -1,8 +1,9 @@
 // Write-capture CORRECTNESS per dialect (real drivers). Drives captureMutation directly with a custom sink,
 // so it asserts BOTH the change(s) emitted AND the caller-visible result (which must equal plain drizzle's).
-// Precise via hidden RETURNING (new + old-PK), single OR composite PK (slice 5 lifted composite from coarse);
-// fail-closed COARSE for everything outside the contract (PK-changing update, UPSERT, no PK, partial-returning,
-// MySQL, unverified driver / sqlite-no-returning).
+// Precise via hidden RETURNING (new + old-PK), single OR composite PK (slice 5 lifted composite from coarse),
+// and via the caller's own RETURNING — full, or a projection widened internally and projected back (rank 4).
+// Fail-closed COARSE for everything outside the contract (PK-changing update, UPSERT, no-PK update/delete, a
+// projected SQL expression, MySQL, unverified driver / sqlite-no-returning).
 
 import { PGlite } from '@electric-sql/pglite'
 import { integer, pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
@@ -18,6 +19,7 @@ const users = pgTable('users', { id: integer('id').primaryKey(), name: text('nam
 const composite = pgTable('composite', { a: integer('a'), b: integer('b'), v: text('v') }, (t) => [
   primaryKey({ columns: [t.a, t.b] }),
 ])
+const nokey = pgTable('nokey', { a: integer('a'), b: text('b') }) // NO primary key
 const sqUsers = sqliteTable('users', { id: sInt('id').primaryKey(), name: sText('name') })
 
 // The SQLite lane runs only where it CAN run, and says out loud when it cannot.
@@ -120,10 +122,12 @@ describe('write capture — PG (PGlite) precise via hidden RETURNING', () => {
 })
 
 describe('write capture — fail-closed COARSE (safe over-fire, never a wrong row)', () => {
-  it("caller's PARTIAL .returning({id}) → coarse (no full image), but their rows come back exactly", async () => {
+  it('a projected raw SQL expression → coarse; the caller still gets their computed value', async () => {
+    // The stated NON-WIN of the widen path: the database computed `id + 1`, and no full row image can
+    // produce it back. So the write runs exactly as the caller wrote it and capture fails closed.
     const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
-    const rows = await wrapped(users).values({ id: 10, name: 'p' }).returning({ id: users.id })
-    expect(rows).toEqual([{ id: 10 }]) // exactly their projection
+    const rows = await wrapped(users).values({ id: 11, name: 'e' }).returning({ id: users.id, next: sql`id + 1` })
+    expect(rows).toEqual([{ id: 11, next: 12 }]) // their projection, computed value and all
     expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
   })
 
@@ -148,11 +152,94 @@ describe('write capture — fail-closed COARSE (safe over-fire, never a wrong ro
       .where(and(eq(composite.a, 7), eq(composite.b, 8)))
     expect(batches).toEqual([[{ table: 'composite', kind: 'coarse' }]]) // old composite key unrecoverable → coarse
   })
+})
 
-  it('raw insert-from-SELECT → coarse', async () => {
+// premise audit #4 / H4: a cluster of writes that were coarsened by a rule broader than its own reason.
+// Each is taken on its own evidence, and every one of them is asserted against the REAL driver.
+describe('write capture — precision the old gates were hiding', () => {
+  it('a PARTIAL .returning({id}) is WIDENED: precise capture, and the caller still gets only {id}', async () => {
     const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
-    await wrapped(users).select(pg.select({ id: users.id, name: users.name }).from(users).where(eq(users.id, 99)))
-    expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+    const rows = await wrapped(users).values({ id: 10, name: 'p' }).returning({ id: users.id })
+    expect(rows).toEqual([{ id: 10 }]) // EXACTLY their projection — the widening is invisible to them
+    expect(batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 10, name: 'p' } }]])
+    // and their projection is not a fabrication: it is the same row the database really wrote
+    expect(await pg.select().from(users).where(eq(users.id, 10))).toEqual([{ id: 10, name: 'p' }])
+  })
+
+  it('a RENAMED projection comes back under the caller’s own aliases, in their own order', async () => {
+    const { wrapped, batches } = capturing(pg, 'update', pg.update.bind(pg))
+    const rows = await wrapped(users)
+      .set({ name: 'renamed' })
+      .where(eq(users.id, 10))
+      .returning({ nm: users.name, ident: users.id })
+    expect(rows).toEqual([{ nm: 'renamed', ident: 10 }])
+    expect(batches).toEqual([[{ table: 'users', kind: 'update', new: { id: 10, name: 'renamed' }, key: { id: 10 } }]])
+  })
+
+  it('a widened DELETE keys its retraction from the full row, not from the caller’s projection', async () => {
+    await pg.insert(users).values({ id: 12, name: 'gone' })
+    const { wrapped, batches } = capturing(pg, 'delete', pg.delete.bind(pg))
+    const rows = await wrapped(users).where(eq(users.id, 12)).returning({ nm: users.name })
+    expect(rows).toEqual([{ nm: 'gone' }]) // the caller never asked for the PK…
+    expect(batches).toEqual([[{ table: 'users', kind: 'delete', key: { id: 12 } }]]) // …but the retraction has it
+  })
+
+  it('an insert-from-SELECT is precise — with the caller’s RETURNING and without it', async () => {
+    await pg.insert(users).values({ id: 99, name: 'src' })
+    const withReturning = capturing(pg, 'insert', pg.insert.bind(pg))
+    const rows = await withReturning
+      .wrapped(users)
+      .select(
+        pg
+          .select({ id: sql<number>`${users.id} + 100`, name: users.name })
+          .from(users)
+          .where(eq(users.id, 99)),
+      )
+      .returning()
+    expect(rows).toEqual([{ id: 199, name: 'src' }]) // the rows that really went in
+    expect(withReturning.batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 199, name: 'src' } }]])
+
+    // and via the HIDDEN returning: the plain insert-from-select result shape is an ordinary insert's
+    const hidden = capturing(pg, 'insert', pg.insert.bind(pg))
+    const plain = await hidden.wrapped(users).select(
+      pg
+        .select({ id: sql<number>`${users.id} + 200`, name: users.name })
+        .from(users)
+        .where(eq(users.id, 99)),
+    )
+    expect(plain).toEqual({ rows: [], fields: [], affectedRows: 1 })
+    expect(hidden.batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 299, name: 'src' } }]])
+  })
+
+  it('an insert into a table with NO primary key is precise; its update and delete stay coarse', async () => {
+    await pgClient.exec('create table nokey (a int, b text)')
+    const inserted = capturing(pg, 'insert', pg.insert.bind(pg))
+    await inserted.wrapped(nokey).values({ a: 1, b: 'x' })
+    expect(inserted.batches).toEqual([[{ table: 'nokey', kind: 'insert', new: { a: 1, b: 'x' } }]])
+
+    const updated = capturing(pg, 'update', pg.update.bind(pg))
+    await updated.wrapped(nokey).set({ b: 'y' })
+    expect(updated.batches).toEqual([[{ table: 'nokey', kind: 'coarse' }]]) // no key to retract the old row by
+
+    const deleted = capturing(pg, 'delete', pg.delete.bind(pg))
+    await deleted.wrapped(nokey).where(eq(nokey.a, 1))
+    expect(deleted.batches).toEqual([[{ table: 'nokey', kind: 'coarse' }]])
+  })
+
+  it('a PREPARED write with a full .returning() captures EVERY execution precisely', async () => {
+    // `prepare()` freezes the builder, so the plan made for it describes every execution. The old code
+    // discarded that plan and coarsened unconditionally.
+    const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
+    const prepared = wrapped(users)
+      .values({ id: sql.placeholder('id'), name: sql.placeholder('name') })
+      .returning()
+      .prepare('cap_precise_prepared')
+    expect(await prepared.execute({ id: 70, name: 'p1' })).toEqual([{ id: 70, name: 'p1' }])
+    expect(await prepared.execute({ id: 71, name: 'p2' })).toEqual([{ id: 71, name: 'p2' }])
+    expect(batches).toEqual([
+      [{ table: 'users', kind: 'insert', new: { id: 70, name: 'p1' } }],
+      [{ table: 'users', kind: 'insert', new: { id: 71, name: 'p2' } }],
+    ])
   })
 })
 
@@ -210,7 +297,10 @@ describe('write capture — EVERY execution terminal captures (no silent bypass)
     expect(batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 41, name: 'finally' } }]])
   })
 
-  it('a PREPARED write invalidates on every execution (fails closed to coarse, never uncaptured)', async () => {
+  it('a PREPARED write with NO returning still fails closed to coarse — never uncaptured', async () => {
+    // Capture cannot substitute a hidden RETURNING into a statement the caller already prepared, so this
+    // half of the prepared surface stays coarse. (With the caller's own `.returning()` it is precise — see
+    // "precision the old gates were hiding".)
     const { wrapped, batches } = capturing(pg, 'insert', pg.insert.bind(pg))
     const prepared = wrapped(users).values({ id: 42, name: 'prepared' }).prepare('cap_prepared')
     await prepared.execute()
@@ -329,11 +419,28 @@ describe('write capture — SQLite (node-sqlite)', () => {
 
     expect(rowCount()).toBe(1) // it really did execute
     expect(out).toEqual([[1, 'a']]) // caller's result is the driver's own positional rows, unchanged
-    // Captured — COARSE, because positional rows carry no column names and mapping them back would mean
-    // assuming projection order. Over-invalidating is the contract; guessing is not. The point of the
-    // assertion is that SOMETHING was emitted: before this, the write published nothing at all.
-    expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+    // Captured PRECISELY. Naming those positions is not the guess it once looked like: the RETURNING list
+    // was BUILT from the builder's own ordered selection, so position i is that selection's i-th column by
+    // construction. The next case pins that order against a projection that is deliberately not the table's.
+    expect(batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 1, name: 'a' } }]])
   })
+
+  it.skipIf(!sqliteLane.ok)(
+    `positional rows are named from the builder's own ORDER, not the table's${laneNote}`,
+    async () => {
+      // The control for the order claim. `{ name, id }` reverses the table's column order, so a mapping that
+      // assumed table order would emit `{ id: 'a', name: 1 }` — values swapped, and silently precise.
+      const db = await sqliteDb()
+      await db.run(sql`create table users (id integer primary key, name text)`)
+      const { wrapped, batches } = capturing(db, 'insert', db.insert.bind(db))
+      const out = wrapped(sqUsers)
+        .values({ id: 5, name: 'e' })
+        .returning({ name: sqUsers.name, id: sqUsers.id })
+        .values()
+      expect(out).toEqual([['e', 5]]) // the driver really does return them in the SELECTION's order
+      expect(batches).toEqual([[{ table: 'users', kind: 'insert', new: { id: 5, name: 'e' } }]])
+    },
+  )
 
   it('the proxy does not SYNTHESIZE driver terminals the builder lacks', async () => {
     // The capture proxy must be transparent except for `.live()`. PG write builders have no

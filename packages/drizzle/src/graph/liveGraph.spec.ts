@@ -166,6 +166,55 @@ describe('coarsen() intentionally demotes a graph to coarse', () => {
   })
 })
 
+// ── where the no-PK INSERT win actually lands (premise audit #4/H4) ──
+//
+// Write capture now emits a precise `insert` for a table with no primary key: an insert carries its whole
+// row and retracts nothing, so no key is needed to describe it. This is the consumer side of that claim,
+// and it is deliberately split, because the win is real for one graph kind and hollow for the other.
+
+describe('a PK-less table: a precise INSERT is classified, not blanket-fired', () => {
+  const events = pg.pgTable('events', { level: pg.text('level'), msg: pg.text('msg') }) // NO primary key
+  const statelessOverEvents = (): LiveGraph =>
+    createLiveGraph({
+      kind: 'stateless',
+      instanceKey: 'nokey',
+      tables: ['events'],
+      instantiate: () =>
+        compileQuery(
+          extractQueryShape(qb.select().from(events).where(eq(events.level, 'error')), { dialect: 'pg' }),
+        ).instantiate() as never,
+    })
+
+  it('STATELESS: a non-matching insert does NOT invalidate — this is the win', async () => {
+    const graph = statelessOverEvents()
+    await settle(graph)
+    // Before capture could describe this row, the same write arrived as `kind:'coarse'` and fired every
+    // time. The control for that is the second assertion: coarse still fires, so the first one is not
+    // passing because the graph is inert.
+    expect(graph.apply([{ table: 'events', kind: 'insert', new: { level: 'info', msg: 'noise' } }]).invalidated).toBe(
+      false,
+    )
+    expect(graph.apply([{ table: 'events', kind: 'insert', new: { level: 'error', msg: 'boom' } }]).invalidated).toBe(
+      true,
+    )
+  })
+
+  it('STATEFUL: no win — a PK-less input is still born coarse, and ignores the precision', async () => {
+    // Stated rather than glossed: `startSeeding` refuses a PK-less input because a key-only retraction
+    // could never shadow-resolve, so a stateful consumer coarsens independently of what capture emits.
+    const graph = createLiveGraph({
+      kind: 'stateful',
+      instanceKey: 'nokey-stateful',
+      tables: ['events'],
+      instantiate: () => statefulFake([fakeSeed('events', 'events', [])]),
+      executor: neverExecutor(),
+      maxStateRows: 1e9,
+    })
+    await settle(graph)
+    expect(graph.state()).toBe('coarse')
+  })
+})
+
 // ── E1 — RLS-gated stateful born coarse ─────────────────────────────
 
 describe('RLS-gated stateful graphs are born coarse', () => {
