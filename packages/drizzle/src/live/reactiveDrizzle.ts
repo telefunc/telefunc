@@ -7,7 +7,7 @@ import { configureChangeRuntime } from './changeRuntime.js'
 import type { ChangeTransport } from './changeTransport.js'
 import { captureTransactions, isRawSqlOp, isWriteOp } from './writeProxy.js'
 import { wrapLiveSelect } from './readCapture.js'
-import { probeOldNewReturning } from '../binding/database.js'
+import { probeOldNewReturning } from './writeCapabilities.js'
 import { assertUsage } from '../utils/assert.js'
 import type { Reactive, ReactiveDatabase } from './reactiveDrizzle.types.js'
 

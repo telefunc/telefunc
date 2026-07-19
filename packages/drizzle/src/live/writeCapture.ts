@@ -4,7 +4,7 @@ export { planCapture } from './writePlan.js'
 export type { CaptureSink } from './writeChanges.js'
 
 import { type Table, isTable } from 'drizzle-orm'
-import { demoteOldNewReturning, markOldNewProven, oldNewProvenOf } from '../binding/database.js'
+import { demoteOldNewReturning, markOldNewProven, oldNewProvenOf } from './writeCapabilities.js'
 import { relationKeyOf } from '../extract/columns.js'
 import { describeRelationId } from '../ir/relation.js'
 import { report } from './captureReport.js'

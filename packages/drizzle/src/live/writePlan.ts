@@ -2,7 +2,8 @@ export { planCapture, callerPositionsOf, writeConfigOf, UNMAPPABLE }
 export type { Op, Plan, PrecisePlan, WriteConfig }
 
 import { type Column, SQL, type Table, getTableColumns, is } from 'drizzle-orm'
-import { dialectOf, driverOf, oldNewReturningOf } from '../binding/database.js'
+import { dialectOf, driverOf } from '../binding/database.js'
+import { oldNewReturningOf } from './writeCapabilities.js'
 import { primaryKeyOf } from '../extract/columns.js'
 import type { Row } from '../router/events.js'
 

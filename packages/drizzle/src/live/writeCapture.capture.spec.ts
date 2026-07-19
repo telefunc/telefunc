@@ -12,7 +12,7 @@ import { integer as sInt, sqliteTable, text as sText } from 'drizzle-orm/sqlite-
 import { and, eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { captureMutation, captureRawSql } from './writeCapture.js'
-import { oldNewProvenOf, oldNewReturningOf, probeOldNewReturning } from '../binding/database.js'
+import { oldNewProvenOf, oldNewReturningOf, probeOldNewReturning } from './writeCapabilities.js'
 import { registryFor } from './dbRuntime.js'
 import { compileQuery } from '../compile/compile.js'
 import { extractQueryShape } from '../extract/queryShape.js'

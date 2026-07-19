@@ -20,7 +20,7 @@ import { customType as sqliteCustomType, integer as sInt, sqliteTable, text as s
 import { eq, sql } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { captureMutation } from './writeCapture.js'
-import { probeOldNewReturning } from '../binding/database.js'
+import { probeOldNewReturning } from './writeCapabilities.js'
 import type { TableChange } from '../router/events.js'
 
 /** A column whose decoder throws on EVERY value. The stored data is ordinary text — nothing about the write

@@ -17,7 +17,7 @@ import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { captureMutation } from './writeCapture.js'
-import { probeOldNewReturning } from '../binding/database.js'
+import { probeOldNewReturning } from './writeCapabilities.js'
 import type { TableChange } from '../router/events.js'
 
 // A VALID decoder that is not pure: it appends its own invocation number. Nothing here is pathological —
