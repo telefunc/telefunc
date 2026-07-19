@@ -309,10 +309,13 @@ async function runWrite(
   db: object,
   sink: CaptureSink,
   executeArgs?: unknown[],
-  allowImages = true,
+  asWritten = false,
 ): Promise<unknown> {
   const relationId = relationKeyOf(table)
-  const plan = planCapture(builder, table, op, db, allowImages)
+  // `asWritten` is the recovery from a refused substitution: run the caller's statement and nothing else.
+  // Expressed as a coarse plan rather than a flag threaded through planning, so the recovery provably
+  // cannot substitute again — that is what makes it single-shot by construction rather than by discipline.
+  const plan: Plan = asWritten ? { mode: 'coarse' } : planCapture(builder, table, op, db)
 
   if (plan.mode === 'coarse') {
     const result = await runBase(builder, executeArgs) // run the caller's write untouched
@@ -327,51 +330,127 @@ async function runWrite(
     return rows
   }
 
-  // Capture CHOOSES this statement's RETURNING: a full row image, or — where the connection can produce it
-  // — both images of the row. The caller's own result is then rebuilt from what came back (verified faithful
-  // for this driver / reproducible from their projection). The returned rows are expected to be full, but
-  // that is still VERIFIED rather than trusted: this path once built changes unchecked, so a driver
-  // returning a narrowed row would have emitted a partial image as precise.
+  // From here capture CHOOSES the statement — a full row image, or both images of the row where the
+  // connection can produce them. THE CALLER DID NOT ASK FOR THIS, so it must never be what fails their
+  // write: `runSubstituted` puts their own statement back and runs that instead if it does.
+  //
+  // The caller's result is then rebuilt from what came back (verified faithful for this driver, or
+  // reproducible from their own projection). The rows are expected to be full, but that is still VERIFIED
+  // rather than trusted: this path once built changes unchecked, so a driver returning a narrowed row would
+  // have emitted a partial image as precise.
   if (plan.images) {
-    // An UNPROVEN capability was derived from the server's version number rather than from a statement that
-    // ran (the temp-table probe was refused for lack of privilege). A fork can report version 18 and still
-    // reject `RETURNING old.*, new.*`, so the first write that actually depends on it is guarded: believe
-    // the statement over the version, demote permanently, and run the caller's write as they wrote it.
-    //
-    // The retry is safe because a statement that ERRORED had no effect — PostgreSQL applies a statement
-    // wholly or not at all, so this is the caller's write happening for the first time, not a second time.
-    // HONEST LIMIT: inside an already-open transaction the failed statement aborts that transaction, so the
-    // retry cannot rescue it — that write fails, and every later one is correct. The window is one write on
-    // a database whose version number lied.
-    const proven = oldNewProvenOf(db)
-    const config = writeConfigOf(builder)
-    const callerReturning = config?.returning
-    let rows: Row[]
-    try {
-      rows = (await runBase(substituteOldNew(builder, table, plan.images), executeArgs)) as Row[]
-    } catch (error) {
-      if (proven) throw error // this connection has DONE this — the failure is the caller's, untouched
-      demoteOldNewReturning(db)
-      reportOldNewDemotion(relationId, error)
-      // `substituteOldNew` overwrote the builder's RETURNING in place, so the caller's own statement has to
-      // be put back before re-planning — otherwise the retry would replay the very statement that failed.
-      if (config) config.returning = callerReturning
-      // `allowImages: false` — the retry cannot substitute again, so this is one fallback and not a loop,
-      // by construction rather than by trusting the demotion above to have taken effect.
-      return runWrite(builder, table, op, db, sink, executeArgs, false)
+    const rows = await runSubstituted(
+      () => substituteOldNew(builder, table, plan.images!),
+      builder,
+      executeArgs,
+      relationId,
+    )
+    if (rows === SUBSTITUTION_REFUSED) {
+      // An UNPROVEN capability came from the server's version number rather than from a statement that ran
+      // (the temp-table probe was refused for lack of privilege). A fork can report 18 and still reject
+      // `RETURNING old.*, new.*` — so believe the statement over the version, permanently.
+      if (!oldNewProvenOf(db)) {
+        demoteOldNewReturning(db)
+        reportOldNewDemotion(relationId)
+      }
+      return recoverAsWritten(builder, table, op, db, sink, executeArgs)
     }
-    if (!proven) markOldNewProven(db) // it worked; later writes pay nothing for the guard
+    if (!oldNewProvenOf(db)) markOldNewProven(db) // it worked; later writes pay nothing for the guard
     const pairs = rows.map((row) => splitImages(row, plan.images!))
     emitSafely(sink, captureBothOrCoarse(op, relationId, pairs, plan))
     // PostgreSQL's plain RETURNING on a DELETE is the row that was deleted — the OLD image. On an UPDATE it
     // is the NEW one. The caller's result is rebuilt from whichever they would have been given.
     return plan.reconstruct(pairs.map((pair) => (op === 'delete' ? pair.old : pair.new)))
   }
-  const full = (builder as { returning: () => unknown }).returning()
-  const rows = (await runBase(full, executeArgs)) as Row[]
+  const rows = await runSubstituted(
+    () => (builder as { returning: () => unknown }).returning(),
+    builder,
+    executeArgs,
+    relationId,
+  )
+  if (rows === SUBSTITUTION_REFUSED) return recoverAsWritten(builder, table, op, db, sink, executeArgs)
   emitSafely(sink, captureOrCoarse(op, relationId, rows, plan))
   return plan.reconstruct(rows)
 }
+
+// ── capture's own statement must never fail the caller's write ──────
+
+/** The substituted statement was refused for a reason the SUBSTITUTION introduced. */
+const SUBSTITUTION_REFUSED = Symbol('telefunc: capture substitution refused')
+
+/** Run a statement CAPTURE chose in place of the caller's, and tell a refusal of the substitution apart from
+ *  a refusal of the write.
+ *
+ *  The caller never asked for a `RETURNING` clause, so it must never be the reason their write fails — and
+ *  it genuinely can be: a role with INSERT but not SELECT on the table commits a plain insert and is
+ *  refused `INSERT … RETURNING *` with 42501. That is capture breaking a write that was fine.
+ *
+ *  Refusals are told apart by SQLSTATE CLASS, not by guessing. A substituted RETURNING can only ever produce
+ *  an access, syntax or unsupported-feature error; it cannot make a row violate a constraint, deadlock, or
+ *  fail a trigger. So classes 42 (syntax/access), 0A (feature not supported) and 28/22 are treated as
+ *  capture's fault and recovered from, while a class-23 integrity violation is the CALLER'S error and is
+ *  re-thrown untouched — retrying that would only mean two failed statements in their log, and inside a
+ *  transaction it would replace their real error with "current transaction is aborted".
+ *
+ *  Also restores the caller's own RETURNING before returning the refusal: the substitution overwrote it IN
+ *  PLACE, so without this the recovery would replay the very statement that just failed. */
+async function runSubstituted(
+  substitute: () => unknown,
+  builder: unknown,
+  executeArgs: unknown[] | undefined,
+  relationId: string,
+): Promise<Row[] | typeof SUBSTITUTION_REFUSED> {
+  const config = writeConfigOf(builder)
+  const callerReturning = config?.returning
+  try {
+    return (await runBase(substitute(), executeArgs)) as Row[]
+  } catch (error) {
+    if (config) config.returning = callerReturning
+    if (!isSubstitutionFault(error)) throw error
+    reportSubstitutionRefused(relationId, error)
+    return SUBSTITUTION_REFUSED
+  }
+}
+
+/** Re-run the caller's write EXACTLY as they wrote it, and coarsen. Single-shot by construction: this path
+ *  plans with substitution forbidden, so it cannot land back here.
+ *
+ *  Safe to re-run because the refused statement had no effect — PostgreSQL applies a statement wholly or not
+ *  at all, so this is the caller's write happening for the first time, not a second time.
+ *
+ *  HONEST LIMIT, in-transaction only: inside an already-open transaction the refused statement aborts the
+ *  whole transaction, so this re-run cannot rescue it and the caller's write is lost with a "current
+ *  transaction is aborted" error. Closing that needs a SAVEPOINT around the substituted attempt, which needs
+ *  the executing transaction handle — and capture is deliberately handed the TOP db (`txProxy` passes
+ *  `topDb` so registry keying stays with the db that owns the graphs), so no such handle reaches here.
+ *  Autocommit writes — the overwhelming majority, and every write on a db with no transaction open — are
+ *  fully covered. */
+async function recoverAsWritten(
+  builder: unknown,
+  table: Table,
+  op: Op,
+  db: object,
+  sink: CaptureSink,
+  executeArgs: unknown[] | undefined,
+): Promise<unknown> {
+  return runWrite(builder, table, op, db, sink, executeArgs, true)
+}
+
+/** Whether an error is one capture's substituted RETURNING could have caused. Reads the SQLSTATE CLASS (the
+ *  first two characters), walking the cause chain because drizzle re-throws driver errors wrapped. */
+function isSubstitutionFault(error: unknown): boolean {
+  for (let current = error, depth = 0; current != null && depth < 5; depth++) {
+    const code = (current as { code?: unknown }).code
+    if (typeof code === 'string' && SUBSTITUTION_FAULT_CLASSES.has(code.slice(0, 2))) return true
+    current = (current as { cause?: unknown }).cause
+  }
+  return false
+}
+
+/** `42` insufficient privilege / syntax error / undefined column, `0A` feature not supported, `28` invalid
+ *  authorization. Deliberately NOT `23` (integrity constraint): no RETURNING clause can cause one, so such
+ *  an error belongs to the caller's write and must reach them unchanged. */
+const SUBSTITUTION_FAULT_CLASSES = new Set(['42', '0A', '28'])
 
 // ── both images (`RETURNING old.*, new.*`) ──────────────────────────
 
@@ -429,12 +508,20 @@ function emitSafely(sink: CaptureSink, changes: TableChange[]): void {
   }
 }
 
-/** The server rejected a statement that its own version number said it would accept. Reported once per db,
- *  because it changes how every later write on it is captured. */
-function reportOldNewDemotion(relationId: string, error: unknown): void {
+/** The server refused the RETURNING clause CAPTURE added — most often a role that may write the table but
+ *  not read it. The caller's write is re-run as they wrote it, so the only cost is a coarse invalidation. */
+function reportSubstitutionRefused(relationId: string, error: unknown): void {
   console.error(
-    `[telefunc] live: this PostgreSQL server reports version 18 or newer but rejected "RETURNING old.*, new.*" (first seen writing "${describeRelationId(relationId)}"). Falling back to new-image capture for this database; the write itself is unaffected. Live queries stay correct, with more coarse invalidation than a genuine PostgreSQL 18 would need.`,
+    `[telefunc] live: the database refused the RETURNING clause Telefunc added to a write on "${describeRelationId(relationId)}" (a role that can write a table but not SELECT from it does this). The write is being re-run exactly as you wrote it and is unaffected; live queries on this table over-invalidate rather than lose the write.`,
     error,
+  )
+}
+
+/** The server rejected a statement its own version number said it would accept. Reported once per db,
+ *  because it changes how every later write on it is captured. */
+function reportOldNewDemotion(relationId: string): void {
+  console.error(
+    `[telefunc] live: this PostgreSQL server reports version 18 or newer but refused "RETURNING old.*, new.*" (first seen writing "${describeRelationId(relationId)}"). Falling back to new-image capture for this database. Live queries stay correct, with more coarse invalidation than a genuine PostgreSQL 18 would need.`,
   )
 }
 
@@ -467,11 +554,8 @@ type Plan =
       images?: string[]
     } & PrecisePlan)
 
-/** Decide precise vs coarse for one write — every ambiguity fails closed to coarse.
- *
- *  `allowImages` is how the OLD/NEW retry path forbids a second substitution. It makes that retry
- *  STRUCTURALLY single-shot instead of relying on the demotion side-effect to break the recursion. */
-function planCapture(builder: unknown, table: Table, op: Op, db: object, allowImages = true): Plan {
+/** Decide precise vs coarse for one write — every ambiguity fails closed to coarse. */
+function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   const dialect = dialectOf(db)
   if (dialect === 'mysql') return { mode: 'coarse' } // no RETURNING; precise MySQL (pre-write SELECT) deferred
   const pk = pkFieldsOf(table)
@@ -491,9 +575,7 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object, allowIm
   // when a real statement proved it — so this branch adds precision where it exists and changes nothing
   // anywhere else.
   const images =
-    allowImages && op !== 'insert' && dialect === 'pg' && oldNewReturningOf(db)
-      ? Object.keys(getTableColumns(table))
-      : undefined
+    op !== 'insert' && dialect === 'pg' && oldNewReturningOf(db) ? Object.keys(getTableColumns(table)) : undefined
   // A PK-CHANGING update moves the very key a retraction is addressed by. Without the old image that key is
   // gone the moment the statement runs, and no RETURNING of the NEW row can recover it → coarse. WITH the
   // old image it is simply there, so the case stops being special (fork #2 closed on this lane).

@@ -637,12 +637,13 @@ describe('write capture — a version number is believed only until a statement 
     const { wrapped, batches } = capturing(db, 'update', db.update.bind(db))
     const result = await wrapped(users).set({ name: 'after' }).where(eq(users.id, 1))
 
-    // 1. THE WRITE WAS SAVED. The OLD/NEW statement was rejected, but the caller neither saw an error nor
+    // 1. THE WRITE WAS SAVED. The OLD/NEW statement was refused, but the caller neither saw an error nor
     //    lost their write: they got plain drizzle's result, and the row really changed on disk.
     expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 })
     expect(await db.select().from(users).where(eq(users.id, 1))).toEqual([{ id: 1, name: 'after' }])
-    // 2. …and it was captured, under the FALLBACK contract: new image only, no `old`.
-    expect(batches).toEqual([[{ table: 'users', kind: 'update', new: { id: 1, name: 'after' }, key: { id: 1 } }]])
+    // 2. THIS write is coarse. The recovery re-runs the caller's statement exactly as written, which carries
+    //    no RETURNING at all — so there are no rows to capture, and coarse is the honest answer.
+    expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
     // 3. THE CLAIM IS RETIRED for this db, so no later write pays for it again.
     expect(oldNewReturningOf(db)).toBe(false)
 
@@ -670,6 +671,128 @@ describe('write capture — a version number is believed only until a statement 
     // Moving id 2 onto id 1 violates the primary key: a real caller error, on the OLD/NEW path.
     await expect(wrapped(users).set({ id: 1 }).where(eq(users.id, 2))).rejects.toThrow()
     expect(oldNewReturningOf(db)).toBe(true) // …and the capability is untouched
+    await real.close()
+  })
+})
+
+// ONE PRINCIPLE, applying to every statement capture substitutes for the caller's: it must never be what
+// fails their write. The OLD/NEW substitution is only the newest one — the HIDDEN full RETURNING has been
+// injected into no-returning writes since the original capture engine, and had the same defect.
+//
+// The realistic cause is not exotic: a role with INSERT/UPDATE but not SELECT on a table commits a plain
+// write and is refused `… RETURNING *` with 42501. The caller never asked for RETURNING.
+describe('write capture — a statement CAPTURE substituted never fails the caller’s write', () => {
+  const REFUSED = () => Object.assign(new Error('permission denied for table users'), { code: '42501' })
+
+  /** A real PGlite that refuses any statement carrying a RETURNING clause — a role that may write the
+   *  table but not read it. Everything else is the real database. */
+  function writeOnly(real: PGlite): PGlite {
+    return new Proxy(real, {
+      get(object, prop, receiver) {
+        const value = Reflect.get(object, prop, receiver)
+        if (typeof value !== 'function') return value
+        if (prop !== 'query' && prop !== 'exec') return (value as (...a: unknown[]) => unknown).bind(object)
+        return (...args: unknown[]) => {
+          if (/\breturning\b/i.test(String(args[0]))) throw REFUSED()
+          return (value as (...a: unknown[]) => unknown).apply(object, args)
+        }
+      },
+    })
+  }
+
+  it('the injected RETURNING is refused → the write COMMITS, and capture degrades to coarse', async () => {
+    const real = new PGlite()
+    await real.exec('create table users (id int primary key, name text)')
+    const db = pgDrizzle({ client: writeOnly(real) })
+
+    const { wrapped, batches } = capturing(db, 'insert', db.insert.bind(db))
+    const result = await wrapped(users).values({ id: 1, name: 'committed' })
+
+    // The caller asked for a plain insert and got one: no error, plain drizzle's result, row on disk.
+    expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 })
+    expect((await real.query('select * from users where id = 1')).rows).toEqual([{ id: 1, name: 'committed' }])
+    // Capture could not see the row, so it says so rather than staying silent.
+    expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+    await real.close()
+  })
+
+  it('every op recovers the same way — update and delete too', async () => {
+    const real = new PGlite()
+    await real.exec('create table users (id int primary key, name text)')
+    await real.exec("insert into users values (1, 'a'), (2, 'b')")
+    const db = pgDrizzle({ client: writeOnly(real) })
+
+    const updated = capturing(db, 'update', db.update.bind(db))
+    await updated.wrapped(users).set({ name: 'a2' }).where(eq(users.id, 1))
+    expect(updated.batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+    expect((await real.query('select name from users where id = 1')).rows).toEqual([{ name: 'a2' }])
+
+    const deleted = capturing(db, 'delete', db.delete.bind(db))
+    await deleted.wrapped(users).where(eq(users.id, 2))
+    expect(deleted.batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+    expect((await real.query('select count(*)::int c from users')).rows).toEqual([{ c: 1 }])
+    await real.close()
+  })
+
+  it('a WIDENED partial returning recovers too — and the caller still gets their own projection', async () => {
+    // Here the caller DID ask for rows, just not these ones: capture widened `.returning({id})` to the whole
+    // row. When that is refused, their own statement has to come back — projection and all.
+    const real = new PGlite()
+    await real.exec('create table users (id int primary key, name text)')
+    let widened = 0
+    const db = pgDrizzle({
+      client: new Proxy(real, {
+        get(object, prop, receiver) {
+          const value = Reflect.get(object, prop, receiver)
+          if (typeof value !== 'function') return value
+          if (prop !== 'query' && prop !== 'exec') return (value as (...a: unknown[]) => unknown).bind(object)
+          return (...args: unknown[]) => {
+            // Refuse only the WIDENED statement (it returns "name", which the caller did not ask for).
+            if (/returning[^;]*"name"/i.test(String(args[0]))) {
+              widened++
+              throw REFUSED()
+            }
+            return (value as (...a: unknown[]) => unknown).apply(object, args)
+          }
+        },
+      }),
+    })
+
+    const { wrapped, batches } = capturing(db, 'insert', db.insert.bind(db))
+    const rows = await wrapped(users).values({ id: 7, name: 'projected' }).returning({ id: users.id })
+    expect(widened).toBe(1) // the widening really was attempted and really was refused
+    expect(rows).toEqual([{ id: 7 }]) // …and the caller got EXACTLY the projection they wrote
+    expect(batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+    expect((await real.query('select * from users where id = 7')).rows).toEqual([{ id: 7, name: 'projected' }])
+    await real.close()
+  })
+
+  it('an INTEGRITY violation is the caller’s error and is NOT recovered from', async () => {
+    // The line the recovery must not cross. A constraint violation cannot be caused by a RETURNING clause,
+    // so it belongs to the caller: re-running it would only put a second failed statement in their log, and
+    // inside a transaction would replace their real error with "current transaction is aborted".
+    const real = new PGlite()
+    await real.exec('create table users (id int primary key, name text)')
+    await real.exec("insert into users values (1, 'taken')")
+    let attempts = 0
+    const db = pgDrizzle({
+      client: new Proxy(real, {
+        get(object, prop, receiver) {
+          const value = Reflect.get(object, prop, receiver)
+          if (typeof value !== 'function') return value
+          if (prop !== 'query' && prop !== 'exec') return (value as (...a: unknown[]) => unknown).bind(object)
+          return (...args: unknown[]) => {
+            if (/insert into "users"/i.test(String(args[0]))) attempts++
+            return (value as (...a: unknown[]) => unknown).apply(object, args)
+          }
+        },
+      }),
+    })
+
+    const { wrapped, batches } = capturing(db, 'insert', db.insert.bind(db))
+    await expect(wrapped(users).values({ id: 1, name: 'duplicate' })).rejects.toThrow()
+    expect(attempts).toBe(1) // ONE attempt — the caller's error was not retried
+    expect(batches).toEqual([]) // a write that did not happen invalidates nothing
     await real.close()
   })
 })
