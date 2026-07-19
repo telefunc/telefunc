@@ -12,7 +12,7 @@ import { integer as sInt, sqliteTable, text as sText } from 'drizzle-orm/sqlite-
 import { and, eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { captureMutation, captureRawSql } from './writeCapture.js'
-import { probeOldNewReturning } from '../binding/database.js'
+import { oldNewProvenOf, oldNewReturningOf, probeOldNewReturning } from '../binding/database.js'
 import { registryFor } from './dbRuntime.js'
 import type { TableChange } from '../router/events.js'
 
@@ -581,5 +581,95 @@ describe('write capture — both images (RETURNING old.*, new.*)', () => {
     const moved = capturing(pg, 'update', pg.update.bind(pg))
     await moved.wrapped(users).set({ id: 81 }).where(eq(users.id, 80))
     expect(moved.batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
+  })
+})
+
+// The composite path's teeth. Where a least-privilege role blocks the temp-table probe, the capability is
+// taken from `server_version_num` instead — and that is a CLAIM, not a statement that ran. A
+// PostgreSQL-compatible fork can report 18 and still reject `RETURNING old.*, new.*`, so the first write
+// that depends on the claim has to be the thing that tests it.
+//
+// Driven against a REAL PGlite behind a client that reproduces exactly that database: it denies CREATE TEMP
+// TABLE the way a revoked TEMP privilege does, answers 18 for its version, and rejects OLD/NEW. Everything
+// else — the write, the retry, the row that ends up on disk — is the real database.
+describe('write capture — a version number is believed only until a statement disagrees', () => {
+  const DENIED = () => Object.assign(new Error('permission denied to create temporary tables'), { code: '42501' })
+  const REJECTED = () => Object.assign(new Error('syntax error at or near "old"'), { code: '42601' })
+
+  /** Filters the wire by statement text, passing everything else through to the real database. Both the
+   *  connection AND the transaction object are wrapped: drizzle's `db.transaction()` calls
+   *  `client.transaction(fn)`, so the probe's statements never touch `client.query` (verified). */
+  function forkish(real: PGlite): PGlite {
+    const screen = (text: unknown) => {
+      const sql = String(text)
+      if (/create temp table/i.test(sql)) throw DENIED()
+      if (/\bold\."/i.test(sql)) throw REJECTED()
+    }
+    const wrap = <T extends object>(target: T): T =>
+      new Proxy(target, {
+        get(object, prop, receiver) {
+          const value = Reflect.get(object, prop, receiver)
+          if (typeof value !== 'function') return value
+          if (prop === 'transaction') {
+            return (run: (tx: object) => unknown) =>
+              (value as (r: (tx: object) => unknown) => unknown).call(object, (tx) => run(wrap(tx)))
+          }
+          if (prop !== 'query' && prop !== 'exec') return (value as (...a: unknown[]) => unknown).bind(object)
+          return (...args: unknown[]) => {
+            screen(args[0])
+            return (value as (...a: unknown[]) => unknown).apply(object, args)
+          }
+        },
+      })
+    return wrap(real)
+  }
+
+  it('probes to SUPPORTED but UNPROVEN, then the first OLD/NEW write demotes it and still lands', async () => {
+    const real = new PGlite()
+    await real.exec('create table users (id int primary key, name text)')
+    const db = pgDrizzle({ client: forkish(real) })
+
+    // The temp-table probe is refused for privilege, so the version answers instead — supported, unproven.
+    await expect(probeOldNewReturning(db)).resolves.toBe(true)
+    expect(oldNewProvenOf(db)).toBe(false)
+
+    await db.insert(users).values({ id: 1, name: 'before' })
+    const { wrapped, batches } = capturing(db, 'update', db.update.bind(db))
+    const result = await wrapped(users).set({ name: 'after' }).where(eq(users.id, 1))
+
+    // 1. THE WRITE WAS SAVED. The OLD/NEW statement was rejected, but the caller neither saw an error nor
+    //    lost their write: they got plain drizzle's result, and the row really changed on disk.
+    expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 })
+    expect(await db.select().from(users).where(eq(users.id, 1))).toEqual([{ id: 1, name: 'after' }])
+    // 2. …and it was captured, under the FALLBACK contract: new image only, no `old`.
+    expect(batches).toEqual([[{ table: 'users', kind: 'update', new: { id: 1, name: 'after' }, key: { id: 1 } }]])
+    // 3. THE CLAIM IS RETIRED for this db, so no later write pays for it again.
+    expect(oldNewReturningOf(db)).toBe(false)
+
+    const next = capturing(db, 'update', db.update.bind(db))
+    await next.wrapped(users).set({ name: 'later' }).where(eq(users.id, 1))
+    expect(next.batches).toEqual([[{ table: 'users', kind: 'update', new: { id: 1, name: 'later' }, key: { id: 1 } }]])
+    await real.close()
+  })
+
+  it('a PROVEN capability does not swallow the caller’s own errors', async () => {
+    // The other side of the guard. On a connection that has genuinely DONE an OLD/NEW statement, a failing
+    // write is the CALLER's failure — a constraint violation, say — and must propagate untouched rather
+    // than be retried and quietly demote the database.
+    const real = new PGlite()
+    const db = pgDrizzle({ client: real })
+    await real.exec('create table users (id int primary key, name text)')
+    await expect(probeOldNewReturning(db)).resolves.toBe(true)
+    expect(oldNewProvenOf(db)).toBe(true)
+
+    await db.insert(users).values([
+      { id: 1, name: 'a' },
+      { id: 2, name: 'b' },
+    ])
+    const { wrapped } = capturing(db, 'update', db.update.bind(db))
+    // Moving id 2 onto id 1 violates the primary key: a real caller error, on the OLD/NEW path.
+    await expect(wrapped(users).set({ id: 1 }).where(eq(users.id, 2))).rejects.toThrow()
+    expect(oldNewReturningOf(db)).toBe(true) // …and the capability is untouched
+    await real.close()
   })
 })

@@ -2,7 +2,14 @@ export { captureMutation, emitSafely, captureRawSql, planCapture, captureMismatc
 export type { CaptureSink }
 
 import { type Column, SQL, type Table, getTableColumns, is, isTable, sql } from 'drizzle-orm'
-import { dialectOf, driverOf, oldNewReturningOf } from '../binding/database.js'
+import {
+  demoteOldNewReturning,
+  dialectOf,
+  driverOf,
+  markOldNewProven,
+  oldNewProvenOf,
+  oldNewReturningOf,
+} from '../binding/database.js'
 import { primaryKeyOf, relationKeyOf } from '../extract/columns.js'
 import { describeRelationId } from '../ir/relation.js'
 import { ingestWrite, registryFor } from './dbRuntime.js'
@@ -302,9 +309,10 @@ async function runWrite(
   db: object,
   sink: CaptureSink,
   executeArgs?: unknown[],
+  allowImages = true,
 ): Promise<unknown> {
   const relationId = relationKeyOf(table)
-  const plan = planCapture(builder, table, op, db)
+  const plan = planCapture(builder, table, op, db, allowImages)
 
   if (plan.mode === 'coarse') {
     const result = await runBase(builder, executeArgs) // run the caller's write untouched
@@ -325,7 +333,34 @@ async function runWrite(
   // that is still VERIFIED rather than trusted: this path once built changes unchecked, so a driver
   // returning a narrowed row would have emitted a partial image as precise.
   if (plan.images) {
-    const rows = (await runBase(substituteOldNew(builder, table, plan.images), executeArgs)) as Row[]
+    // An UNPROVEN capability was derived from the server's version number rather than from a statement that
+    // ran (the temp-table probe was refused for lack of privilege). A fork can report version 18 and still
+    // reject `RETURNING old.*, new.*`, so the first write that actually depends on it is guarded: believe
+    // the statement over the version, demote permanently, and run the caller's write as they wrote it.
+    //
+    // The retry is safe because a statement that ERRORED had no effect — PostgreSQL applies a statement
+    // wholly or not at all, so this is the caller's write happening for the first time, not a second time.
+    // HONEST LIMIT: inside an already-open transaction the failed statement aborts that transaction, so the
+    // retry cannot rescue it — that write fails, and every later one is correct. The window is one write on
+    // a database whose version number lied.
+    const proven = oldNewProvenOf(db)
+    const config = writeConfigOf(builder)
+    const callerReturning = config?.returning
+    let rows: Row[]
+    try {
+      rows = (await runBase(substituteOldNew(builder, table, plan.images), executeArgs)) as Row[]
+    } catch (error) {
+      if (proven) throw error // this connection has DONE this — the failure is the caller's, untouched
+      demoteOldNewReturning(db)
+      reportOldNewDemotion(relationId, error)
+      // `substituteOldNew` overwrote the builder's RETURNING in place, so the caller's own statement has to
+      // be put back before re-planning — otherwise the retry would replay the very statement that failed.
+      if (config) config.returning = callerReturning
+      // `allowImages: false` — the retry cannot substitute again, so this is one fallback and not a loop,
+      // by construction rather than by trusting the demotion above to have taken effect.
+      return runWrite(builder, table, op, db, sink, executeArgs, false)
+    }
+    if (!proven) markOldNewProven(db) // it worked; later writes pay nothing for the guard
     const pairs = rows.map((row) => splitImages(row, plan.images!))
     emitSafely(sink, captureBothOrCoarse(op, relationId, pairs, plan))
     // PostgreSQL's plain RETURNING on a DELETE is the row that was deleted — the OLD image. On an UPDATE it
@@ -394,6 +429,15 @@ function emitSafely(sink: CaptureSink, changes: TableChange[]): void {
   }
 }
 
+/** The server rejected a statement that its own version number said it would accept. Reported once per db,
+ *  because it changes how every later write on it is captured. */
+function reportOldNewDemotion(relationId: string, error: unknown): void {
+  console.error(
+    `[telefunc] live: this PostgreSQL server reports version 18 or newer but rejected "RETURNING old.*, new.*" (first seen writing "${describeRelationId(relationId)}"). Falling back to new-image capture for this database; the write itself is unaffected. Live queries stay correct, with more coarse invalidation than a genuine PostgreSQL 18 would need.`,
+    error,
+  )
+}
+
 /** The diagnostics seam for a contained capture fault. Takes a relation IDENTITY and renders it the way a
  *  human wrote it (`a.users`), since this reaches an operator's logs. */
 function reportCaptureFault(error: unknown, relationId: string): void {
@@ -423,8 +467,11 @@ type Plan =
       images?: string[]
     } & PrecisePlan)
 
-/** Decide precise vs coarse for one write — every ambiguity fails closed to coarse. */
-function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
+/** Decide precise vs coarse for one write — every ambiguity fails closed to coarse.
+ *
+ *  `allowImages` is how the OLD/NEW retry path forbids a second substitution. It makes that retry
+ *  STRUCTURALLY single-shot instead of relying on the demotion side-effect to break the recursion. */
+function planCapture(builder: unknown, table: Table, op: Op, db: object, allowImages = true): Plan {
   const dialect = dialectOf(db)
   if (dialect === 'mysql') return { mode: 'coarse' } // no RETURNING; precise MySQL (pre-write SELECT) deferred
   const pk = pkFieldsOf(table)
@@ -444,7 +491,9 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   // when a real statement proved it — so this branch adds precision where it exists and changes nothing
   // anywhere else.
   const images =
-    op !== 'insert' && dialect === 'pg' && oldNewReturningOf(db) ? Object.keys(getTableColumns(table)) : undefined
+    allowImages && op !== 'insert' && dialect === 'pg' && oldNewReturningOf(db)
+      ? Object.keys(getTableColumns(table))
+      : undefined
   // A PK-CHANGING update moves the very key a retraction is addressed by. Without the old image that key is
   // gone the moment the statement runs, and no RETURNING of the NEW row can recover it → coarse. WITH the
   // old image it is simply there, so the case stops being special (fork #2 closed on this lane).

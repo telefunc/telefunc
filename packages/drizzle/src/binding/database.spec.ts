@@ -13,6 +13,7 @@ import {
   type RowRunner,
   dialectOf,
   driverOf,
+  oldNewProvenOf,
   oldNewReturningOf,
   probeOldNewReturning,
   rlsEnabledOf,
@@ -207,6 +208,76 @@ describe('oldNewReturningOf — probed against the real connection, never assume
     const first = probeOldNewReturning(db)
     expect(probeOldNewReturning(db)).toBe(first) // the same promise, not a second probe
     await first
+    await client.close()
+  })
+})
+
+describe('oldNewReturningOf — a role without TEMP privilege falls back to the version, unproven', () => {
+  /** A PostgreSQL connection whose statements are answered by `respond`. Real dialect, fake wire. */
+  const fakePg = (respond: (text: string) => unknown) => ({
+    dialect: (pgPoolDb as unknown as { dialect: unknown }).dialect,
+    execute: async (query: { queryChunks?: { value?: unknown }[] }) =>
+      respond((query.queryChunks ?? []).flatMap((chunk) => chunk.value ?? []).join('')),
+    transaction: async (run: (tx: unknown) => Promise<unknown>) =>
+      run({
+        execute: async (query: { queryChunks?: { value?: unknown }[] }) =>
+          respond((query.queryChunks ?? []).flatMap((chunk) => chunk.value ?? []).join('')),
+      }),
+  })
+
+  /** What PostgreSQL raises for `CREATE TEMP TABLE` without the TEMP privilege. */
+  const denied = () => Object.assign(new Error('permission denied to create temporary tables'), { code: '42501' })
+
+  it('permission-denied on the temp table + version 18 → supported, but NOT proven', async () => {
+    const seen: string[] = []
+    const db = fakePg((text) => {
+      seen.push(text)
+      if (text.startsWith('create temp table')) throw denied()
+      if (text.includes('server_version_num')) return { rows: [{ server_version_num: '180003' }] }
+      return { rows: [] }
+    })
+    await expect(probeOldNewReturning(db)).resolves.toBe(true)
+    expect(oldNewReturningOf(db)).toBe(true)
+    expect(oldNewProvenOf(db)).toBe(false) // a version is weaker evidence than a statement
+    expect(seen.some((text) => text.includes('server_version_num'))).toBe(true) // it really did fall back
+  })
+
+  it('permission-denied + version 17 → unsupported', async () => {
+    const db = fakePg((text) => {
+      if (text.startsWith('create temp table')) throw denied()
+      if (text.includes('server_version_num')) return { rows: [{ server_version_num: '170004' }] }
+      return { rows: [] }
+    })
+    await expect(probeOldNewReturning(db)).resolves.toBe(false)
+  })
+
+  it('a SYNTAX refusal does NOT fall back to the version — the server already answered', async () => {
+    // The distinction the fallback turns on. A server that ran the DDL and then rejected `old.x` has told
+    // us the real answer; asking its version afterwards could only overrule a fact with a claim.
+    const seen: string[] = []
+    const db = fakePg((text) => {
+      seen.push(text)
+      if (text.includes('old.x')) throw Object.assign(new Error('syntax error at or near "old"'), { code: '42601' })
+      return { rows: [] }
+    })
+    await expect(probeOldNewReturning(db)).resolves.toBe(false)
+    expect(seen.some((text) => text.includes('old.x'))).toBe(true) // it got as far as the real question…
+    expect(seen.some((text) => text.includes('server_version_num'))).toBe(false) // …and did not second-guess it
+  })
+
+  it('permission-denied and the version cannot be read either → unsupported', async () => {
+    const db = fakePg((text) => {
+      if (text.startsWith('create temp table')) throw denied()
+      throw new Error('permission denied')
+    })
+    await expect(probeOldNewReturning(db)).resolves.toBe(false)
+  })
+
+  it('a REAL probe stays proven — the fallback path is not reached when the statement ran', async () => {
+    const client = new PGlite()
+    const db = pgliteDrizzle({ client })
+    await probeOldNewReturning(db)
+    expect(oldNewProvenOf(db)).toBe(true)
     await client.close()
   })
 })
