@@ -203,6 +203,11 @@ describe('F2 — the attempt deadline can interrupt batch-mode emission', () => 
     expect(texts).toContain('"stuck"')
     expect(texts.indexOf('"stuck"')).toBeLessThan(texts.indexOf('"gated"'))
     expect(texts.indexOf('"gated"')).toBeLessThan(texts.indexOf('"after-recovery"'))
+
+    // EXACTLY one recovery reconnect. Disposing the wedged transport aborts the stalled POST, which
+    // then rejects and reports failure — against a transport that is no longer `this.transport`.
+    // A straggler that tore down the SUCCESSOR wire instead would show up here as a third connect.
+    expect(h.sseConnects()).toBe(2)
   }, 30_000)
 
   test('control: a pre-barrier abort on an IDLE wire does not force a reconnect', async () => {

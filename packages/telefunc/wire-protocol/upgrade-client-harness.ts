@@ -484,7 +484,18 @@ async function createUpgradeHarness(
         for (const frame of decoded) onUpstreamFrame(frame)
         // Recorded first, then hung: a server that read the body and went quiet, rather than one
         // that never received it. `flushing` stays true for as long as this never resolves.
-        if (hangBatchPosts) return await new Promise<Response>(() => {})
+        //
+        // It DOES reject once its controller is aborted, exactly as a real `fetch` would. That
+        // settlement is load-bearing: it is what makes a stalled POST outlive the transport that
+        // issued it and report failure against a wire that has since been replaced — the
+        // double-teardown hazard the recovery path has to be immune to.
+        if (hangBatchPosts) {
+          return await new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {
+              once: true,
+            })
+          })
+        }
         return new Response('', { status: 200 })
       }
       sseConnects += 1
