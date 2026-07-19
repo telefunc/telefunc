@@ -322,7 +322,7 @@ importers:
         specifier: ^8.0.16
         version: 8.0.16(@types/node@24.0.10)(esbuild@0.27.3)(jiti@2.7.0)
 
-  packages/drizzle:
+  packages/drizzle-experimental:
     dependencies:
       '@brillout/json-serializer':
         specifier: ^0.5.25
@@ -569,7 +569,7 @@ importers:
         version: 5.101.0(react@19.2.4)
       '@telefunc/drizzle-experimental':
         specifier: workspace:*
-        version: link:../../packages/drizzle
+        version: link:../../packages/drizzle-experimental
       '@telefunc/redis':
         specifier: workspace:*
         version: link:../../packages/redis

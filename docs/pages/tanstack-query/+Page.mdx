@@ -3,7 +3,7 @@ import { TelefuncStreamBeta, PoweredByTelefuncStream } from '../../components'
 
 <TelefuncStreamBeta />
 
-Live queries for [TanStack Query](https://tanstack.com/query) — when a telefunction returns a <Link href="/drizzle">`Live`</Link> value, wrap it with `live()` and the query stays current on its own: the server signals that the result is stale, and the query refetches.
+Live queries for [TanStack Query](https://tanstack.com/query) — invalidate a query key on the server, and every connected client with a matching query refetches automatically.
 
 <PoweredByTelefuncStream pkg="tanstack-query" />
 
@@ -13,68 +13,167 @@ Live queries for [TanStack Query](https://tanstack.com/query) — when a telefun
 npm install @telefunc/tanstack-query
 ```
 
-That's it — there is nothing to register. `live()` is imported where you use it.
-
-
-## Usage
-
-Pass the telefunction — and its arguments — to `live()`, and use it as an ordinary `queryFn`:
+Wrap your `QueryClient` with `withTelefunc()`:
 
 ```tsx
-import { useQuery } from '@tanstack/react-query'
-import { live } from '@telefunc/tanstack-query'
-import { onGetTodos } from './Todos.telefunc'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { withTelefunc } from '@telefunc/tanstack-query'
 
-function Todos({ userId }) {
-  const { data: todos } = useQuery({
-    queryKey: ['todos', userId],
-    queryFn: live(onGetTodos, userId), // onGetTodos(userId) returns a Live<Todo[]>
-  })
-  // ...
+const queryClient = withTelefunc(new QueryClient())
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <MyApp />
+    </QueryClientProvider>
+  )
 }
 ```
 
-`data` is the value itself (`Todo[]`), not the live handle — the wrapper unwraps it.
+> `withTelefunc()` returns the same `new QueryClient()` instance:
+> - All options and APIs continue to work as before
+> - Any TanStack Query adapter works: React, Vue, Svelte, Solid
 
-> This wraps the `queryFn`, not the hook, so it works unchanged with the React, Vue, Solid and Svelte adapters.
+> There isn't any other setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them.
 
-The server side is <Link href="/drizzle">`@telefunc/drizzle`</Link>: `onGetTodos` ends its query with `.live()`, and a write through the same reactive db invalidates the queries that read the changed rows (precisely where the rows can be identified, coarsely where they cannot).
 
-#### Call the telefunction synchronously
+## Local vs global keys
+
+After installing `@telefunc/tanstack-query`, keys prefixed with `global:` become special: they invalidate globally — *every* connected client with a matching query refetches.
+
+> All other keys remain normal (invalidate locally, i.e. current tab only).
+
+> **How does it work?** Under the hood, the `global:` key is sent to the server and then <Link href="/channel#broadcast">broadcast</Link> to every client using a query key that matches. Learn more at <Link href="#how-it-works" />.
 
 ```js
-// ✅ Pass the telefunction and its arguments
-queryFn: live(onGetTodos, userId)
+queryKey: ['todos']                          // local — current tab only
+queryKey: ['global:todos', `user:${userId}`] // global — all clients with a matching query refetch
+queryKey: ['global:documents', docId]        // global
+```
 
-// ✅ Or call it inside a synchronous closure
-queryFn: live(() => onGetTodos(userId))
+> A key is global when its *first* element is a string starting with `global:`, for example:
+> - ``['global:todos', `user:${userId}`]{:js}`` is global
+> - `['todos', 'global:x']{:js}` is local
 
-// ❌ Broken: the telefunction is reached after an await, so the abort signal never reaches the request
-queryFn: live(async () => {
-  await somethingElse()
-  return onGetTodos(userId)
+
+## Mutations
+
+#### `meta.invalidates`
+
+Use `meta.invalidates` on mutations to invalidate matching queries after the mutation succeeds.
+
+```tsx
+const { data: todos } = useQuery({
+  queryKey: ['todos'],
+  queryFn: () => getTodos(),
+})
+
+const add = useMutation({
+  mutationFn: (text: string) => addTodo(text),
+  meta: { invalidates: [['todos']] },
 })
 ```
 
-> TanStack Query cancels an in-flight fetch by aborting a signal, and `live()` attaches that signal to the call it issues — for the synchronous window in which your function runs. A telefunction reached only *after* an `await` runs outside that window, so cancellation would silently do nothing. `live()` detects that the call never picked the signal up and throws, rather than leaving it to fail quietly.
+> `meta.invalidates` is a `@telefunc/tanstack-query` convention: TanStack Query itself attaches no behavior to `meta`.
+
+#### Global keys
+
+When using <Link href="#local-vs-global-keys">a global key</Link>, every connected client refetches.
+
+> Local and global keys can be mixed in a single mutation:
+>
+> ```js
+> meta: {
+>   invalidates: [
+>     ['my-drafts'],        // local — this client only
+>     ['global:documents'], // global — every connected client
+>   ],
+> }
+> ```
+
+#### Example:
+
+Consider a collaborative document editor: when one user edits a document, every other user viewing it refetches:
+
+```tsx
+const { data: doc } = useQuery({
+  queryKey: ['global:documents', docId],
+  queryFn: () => getDocument(docId),
+})
+
+const edit = useMutation({
+  mutationFn: (content: string) => updateDocument(docId, content),
+  meta: { invalidates: [['global:documents', docId]] },
+})
+```
 
 
-## Cleanup
+## Two rules
 
-Each live query owns a subscription for as long as its entry is in the query cache. When the entry is removed — `removeQueries()`, or TanStack Query's own garbage collection — the subscription is closed. A refetch replaces the handle and closes the previous one. Nothing to unsubscribe by hand.
+Make sure that:
+
+1. **`queryFn` and `mutationFn` must call a telefunction.**
+1. **Return the telefunction call directly.** Transform the result with `select` instead of inside `queryFn`:
+   ```js
+   // ❌ Broken: queryFn doesn't directly return getTodos()
+   queryFn: async () => (await getTodos()).items
+
+   // ✅ Return the call directly, transform with select
+   queryFn: () => getTodos(),
+   select: (todos) => todos.items,
+   ```
+   > The `@telefunc/tanstack-query` integration must access the return value of the telefunction call.
+
+
+## Server-side invalidation
+
+For changes not triggered by a client mutation (e.g. background jobs, webhooks), you can use `invalidate()`:
+
+```ts
+// Environment: server
+
+import { invalidate } from '@telefunc/tanstack-query/server'
+
+// e.g. a CMS publishes new content
+invalidate(['global:articles'])
+
+// a specific document was updated
+invalidate(['global:documents', docId])
+```
+
+> `invalidate()` is for global keys only. (Local keys have no cross-client subscribers, so they wouldn't reach any client.)
+
+> Invalidation is prefix-based: invalidating `['global:documents']` matches `['global:documents', docId]` too. This is the same behavior as TanStack Query's [`invalidateQueries()`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
 
 
 ## How it works
 
-1. The `queryFn` calls the telefunction, which returns a `Live<T>` handle.
-2. The wrapper unwraps `.data` for the cache and subscribes to the handle's stale signal.
-3. On a write, the server invalidates the affected live queries; each connected client holding one receives the signal.
-4. The wrapper calls [`invalidateQueries()`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys) for that key, TanStack Query refetches, and a fresh handle replaces the old one.
+### Local keys
 
-> Staleness drives a **refetch** — rows are not pushed into the cache. The client re-reads through the telefunction, so <Link href="/permissions">authorization</Link> applies to every refetch exactly as it did to the first read.
+Query: normal (`@telefunc/tanstack-query` has no effect).
+
+Mutation:
+
+1. The mutation succeeds.
+2. <Link href="#install">`withTelefunc()`</Link> calls [`invalidateQueries()`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys) on the current client for the matching local keys.
+
+### Global keys
+
+> Global keys are powered by <Link href="/stream">Telefunc Stream</Link> under the hood (in particular <Link href="/channel">channels</Link> and <Link href="/channel#broadcast">broadcasts</Link>).
+
+Query:
+
+1. If it's <Link href="#local-vs-global-keys">a global key</Link>, then <Link href="#install">`withTelefunc()`</Link> sends `queryKey` alongside the query telefunction call.
+1. The query telefunction executes, and the client subscribes to invalidation events for that key.
+   > It subscribes only if the telefunction call succeeds (i.e. it doesn't throw an error), therefore <Link href="/permissions">authorization</Link> is respected.
+
+Mutation:
+1. <Link href="#install">`withTelefunc()`</Link> sends all the global keys from <Link href="#mutations">`meta.invalidates`</Link> alongside the telefunction mutation call.
+1. The server <Link href="/channel#broadcast">broadcasts</Link> an invalidation event to the clients subscribed to a query key that matches a global key.
+1. Every connected client (with a subscription that matches a global key) calls [`invalidateQueries()`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
 
 
 ## See also
 
-- <Link href="/drizzle" /> — the server side: `.live()` on a Drizzle query
 - <Link href="/stream" />
+- <Link href="/channel" />

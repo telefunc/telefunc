@@ -159,7 +159,7 @@ function coarse(tables: string[], reason: string): CoarseShape {
   // untrackable (a typed rejection) and warn, so downstream rejects it rather than
   // silently treating it as an unscoped/global subscription.
   if (unique.length === 0) {
-    console.warn(`[@telefunc/drizzle] untrackable read, no relations recovered: ${reason}`)
+    console.warn(`[@telefunc/drizzle-experimental] untrackable read, no relations recovered: ${reason}`)
     return { kind: 'coarse', tables: [], reason, untrackable: true }
   }
   return { kind: 'coarse', tables: unique, reason }

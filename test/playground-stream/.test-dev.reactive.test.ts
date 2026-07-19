@@ -1,4 +1,4 @@
-// T5 — cross-instance live-query invalidation (@telefunc/drizzle). Its own runner entry rather than a case
+// T5 — cross-instance live-query invalidation (@telefunc/drizzle-experimental). Its own runner entry rather than a case
 // in `.testRun.ts`: the reactive path is independent of the stream transport, so folding it into the shared
 // suite would run it once per transport permutation for no added coverage.
 

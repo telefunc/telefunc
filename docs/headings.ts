@@ -156,7 +156,7 @@ const headings = [
   },
   {
     level: 2,
-    title: '`@telefunc/drizzle`',
+    title: '`@telefunc/drizzle-experimental`',
     url: '/drizzle',
   },
   {

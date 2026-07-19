@@ -10,14 +10,14 @@ Live queries for [Drizzle ORM](https://orm.drizzle.team) — write an ordinary D
 ## Quickstart
 
 ```bash
-npm install @telefunc/drizzle
+npm install @telefunc/drizzle-experimental
 ```
 
 Wrap your Drizzle `db` once and export it:
 
 ```ts
 // db.ts
-import { reactiveDrizzle } from '@telefunc/drizzle'
+import { reactiveDrizzle } from '@telefunc/drizzle-experimental'
 import { db } from './drizzle'
 
 export const rdb = reactiveDrizzle(db)
@@ -42,12 +42,12 @@ export async function onAddTodo(text: string) {
 }
 ```
 
-On the client, wrap the call with <Link href="/tanstack-query">`@telefunc/tanstack-query`</Link>'s `live()` and the query keeps itself current — when `onAddTodo` changes a row this query reads, the server signals it and the query refetches:
+On the client, wrap the call with the package's own `live()` adapter and the query keeps itself current — when `onAddTodo` changes a row this query reads, the server signals it and the query refetches:
 
 ```tsx
 // Environment: client
 import { useQuery } from '@tanstack/react-query'
-import { live } from '@telefunc/tanstack-query'
+import { live } from '@telefunc/drizzle-experimental/tanstack-query'
 import { onGetTodos } from './Todos.telefunc'
 
 function Todos({ userId }) {
@@ -77,12 +77,12 @@ const live = await rdb.select().from(todos).live()   // Live<Todo[]> — live re
 
 > `reactiveDrizzle(db)` binds to nothing request-scoped: wrap at module level and use the result anywhere, inside a telefunction or not, before or after an `await`. There is no placement rule to remember — the behavioural rules that do exist are below.
 
-Compose live values on the **server** with `Live.derived()`. Reading a dependency's `.data` inside the callback registers it, and an invalidation of any dependency invalidates the derived value too:
+Compose live values on the **server** with `derived()`. Reading a dependency's `.data` inside the callback registers it, and an invalidation of any dependency invalidates the derived value too:
 
 ```ts
-import { Live } from 'telefunc'
+import { derived } from '@telefunc/drizzle-experimental'
 
-const openCount = Live.derived(() => todos.data.filter((t) => !t.done).length)
+const openCount = derived(() => todos.data.filter((t) => !t.done).length)
 ```
 
 The callback runs **once**, when you call it. It is not re-run on the server when a dependency changes — invalidation is forwarded to the client, and re-derivation is your refetch running the telefunction again.

@@ -87,7 +87,7 @@ function createRouter(config: { notify: (identityKey: string) => void }): Router
             // this graph to coarse (fault) so no LATER batch can miss over corrupt precise state,
             // coarse-notify its identity so it re-reads, and SURFACE the error (structured log) —
             // never swallow, or the degrade would be operator-invisible.
-            console.error('[@telefunc/drizzle] a routed graph apply threw; faulting it to coarse:', error)
+            console.error('[@telefunc/drizzle-experimental] a routed graph apply threw; faulting it to coarse:', error)
             graph.fault()
             invalidated = true
           }
@@ -133,7 +133,7 @@ function splitDeclarationWatch(): (relationId: string) => void {
     if (warned.has(relation.name) || !qualified.has(relation.name) || !unqualified.has(relation.name)) return
     warned.add(relation.name)
     console.warn(
-      `[@telefunc/drizzle] the relation "${relation.name}" is declared both with and without a schema (${describeRelationId(relationId)} and its counterpart). ` +
+      `[@telefunc/drizzle-experimental] the relation "${relation.name}" is declared both with and without a schema (${describeRelationId(relationId)} and its counterpart). ` +
         'If those are the SAME physical table, a write through one declaration will not invalidate a live query that read through the other — the invalidation is lost, not delayed. ' +
         'Declare the relation once. If they are genuinely different tables in different schemas, this is expected and can be ignored.',
     )
