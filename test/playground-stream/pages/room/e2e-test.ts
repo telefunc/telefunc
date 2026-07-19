@@ -90,6 +90,18 @@ function testRoom() {
     })
   })
 
+  test('room: a retained message reaches a subscriber that joins after it was published', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-retain')
+
+    await autoRetry(async () => {
+      const r = await getResult<{ received: string[] }>('#room-result')
+      // The late subscriber gets the pinned message via the retained slot — read only after its
+      // subscription is live, so an async transport (the docker run uses real Redis) can't drop it.
+      expect(r.received).deep.equal(['pinned'])
+    })
+  })
+
   test('room: server-joined participant publishes, updates metadata, receives a DM', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-participant')

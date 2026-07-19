@@ -1,20 +1,23 @@
 // Real-Redis certification harness for the `commitFrame` + subscribe-readiness realizations.
 //
-// The unit spec (`index.spec.ts`) proves the Lua and the wire codec against a fake ioredis. This proves
+// The unit spec (`index.spec.ts`) proves the Lua and the wire codec against a fake ioredis; this proves
 // the same contract against a live Redis, where the parts a fake can't model are the real ones: the
 // commit runs as one atomic EVAL inside Redis (fences + clock from `TIME` + retain + `PUBLISH`), and
 // `SUBSCRIBE` has a genuine ack the readiness handoff waits on before a publish can reach a connection.
 //
-// Gated on `TELEFUNC_TEST_REAL_REDIS` so it stays out of the default suite (CI has no Redis service).
-// Certify against a throwaway server — the harness FLUSHES the database between tests:
+// A fast, deterministic companion to the `test/playground-stream` `.test-docker` jobs, which run the
+// whole Room path across real (DragonflyDB) instances in CI: this one pins the transport's low-level
+// contract — stale-fence result, framed retain, cross-connection order — that the e2e doesn't assert.
+//
+// Gated on `TELEFUNC_TEST_REAL_REDIS` so it skips in the default `test:units` job (no Redis there). Run
+// it against a throwaway server — it FLUSHES the database between tests:
 //
 //   docker run --rm -p 6379:6379 redis
 //   TELEFUNC_TEST_REAL_REDIS=redis://localhost:6379 \
 //     pnpm --filter @telefunc/redis exec vitest run src/index.integration.spec.ts
 //
-// Authored against the live contract; treat the first green run as the certification pass. The
-// Cluster hash-slot co-location noted in `COMMIT_FRAME_LUA` needs a real Cluster and is certified
-// separately.
+// Certified green against redis:7-alpine. The Cluster hash-slot co-location noted in `COMMIT_FRAME_LUA`
+// still needs a real Cluster and is certified separately.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { Redis } from 'ioredis'
 import { DefaultBroadcastAdapter, type BroadcastAdapter, type RoomFrameCommit } from 'telefunc'

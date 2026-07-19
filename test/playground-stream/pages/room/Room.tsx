@@ -95,6 +95,37 @@ function Room() {
         Join, publish, setMeta, leave
       </button>
 
+      <h2>Retained Replay</h2>
+
+      <button
+        id="test-room-retain"
+        onClick={async () => {
+          setResult('')
+          const roomId = `e2e-retain:${crypto.randomUUID()}`
+          await onCreateRoom(roomId)
+
+          // A publisher pins a retained message; a subscriber that arrives *after* the publish must
+          // still receive it (MQTT-style). The retained slot is read only once the subscription is
+          // live at the backend — the readiness handoff — so an async transport (Redis) can't drop
+          // it in the gap between subscribing and the read. Keep the publisher's view referenced so
+          // its membership (and thus the owned retained slot) survives until the late subscriber reads.
+          const pubView = await onGetRoom(roomId)
+          const author = await pubView.join({ meta: { name: 'Author' } })
+          await author.publish({ text: 'pinned' }, { retain: true })
+
+          const late = await onGetRoom(roomId)
+          const received: string[] = []
+          late.subscribe((data) => received.push((data as { text: string }).text))
+
+          await pollUntil(() => {
+            setResult(JSON.stringify({ received }))
+            return { done: received.length >= 1 }
+          })
+        }}
+      >
+        Retained replay to a late subscriber
+      </button>
+
       <h2>Server-Joined Participant</h2>
 
       <button
