@@ -331,6 +331,37 @@ describe('staged-state cleanup — all six paths', () => {
     expect(h.mux._getUpgradeResourceSnapshot()).toEqual(empty)
   })
 
+  // ── F3 ── The reverse index is keyed by the session the stage was opened against. Once an
+  // ordinary reconcile rotates the old wire S0 → S1, that key no longer matches anything the wire
+  // reports, so old-wire-close cleanup (which looks up S1) walks straight past the record — and the
+  // stage survives, with its bytes and its timer, until the 10 s TTL. The stage is already dead at
+  // that point: live-session equality would refuse its barrier. So it is released the moment the
+  // rotation that kills it is dispatched, rather than left for the TTL to reap.
+  test('path 4b — a stage is released when its old wire rotates away from the staged session', async () => {
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+
+    await h.sse.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
+
+    expect(h.sse.sessionId()).not.toBe(s0) // the rotation really happened
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(empty)
+    expect(h.ws.terminated()).toBe(true) // the attempt can never commit, so the probe is released too
+  })
+
+  test('path 4b — and the record does not survive a rotate-then-close either', async () => {
+    // The leak as the reviewer described it: close cleanup looks up the CURRENT session, so without
+    // the eager release above nothing on the close path can find a record still keyed by the old one.
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+    await h.sse.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
+
+    h.sse.close()
+
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(empty)
+  })
+
   test('path 6 — dispose() clears staged state', async () => {
     const h = (harness = createMuxHarness())
     const { s0 } = await connectSse(h)

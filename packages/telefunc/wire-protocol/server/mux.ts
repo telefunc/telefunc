@@ -392,6 +392,16 @@ class ChannelMux {
       if (frame.payload.barrier) {
         return this.handleBarrier(entry, connection, frame.payload, rawFrame.byteLength, violation)
       }
+      // This reconcile is about to rotate THIS wire's session away, which kills any stage keyed to
+      // it — live-session equality would refuse that stage's barrier from here on. Release it now
+      // rather than leave a dead record for the TTL to reap: the wire may well close first, and
+      // close cleanup looks up the wire's CURRENT session, so it would walk straight past a record
+      // still keyed by the old one and leak the record, its bytes and its timer.
+      const currentSessionId = entry.transport.getSessionId(connection)
+      if (currentSessionId !== undefined) {
+        const staleProbe = this.stagedByPrevSession.get(currentSessionId)
+        if (staleProbe !== undefined) this.abandonStage(staleProbe)
+      }
       return this.reconcile(entry, connection, frame.payload)
     }
     const sessionId = entry.transport.getSessionId(connection)
