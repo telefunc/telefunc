@@ -110,20 +110,29 @@ import type {
 /** Reserved pub/sub + KV namespace for rooms. Don't use it for `BroadcastChannel` keys. */
 const ROOM_KEY_NAMESPACE = 'telefunc:room:'
 
+/** Encode a room ID before interpolating it into a key. Room IDs are app-supplied and may contain the
+ *  key delimiter `:` (e.g. the docs' `team:red`), so a raw ID could alias one room's keys/lanes onto
+ *  another's (`roomCtrlKey('a:t') === roomTextKey('a')`) or nest under another's prefix sweep (`:rb:`,
+ *  `:hidden:`, `:m:`) and get wiped by its close. Encoding makes every ID a single opaque, delimiter-free
+ *  segment. Member IDs are delimiter-free UUIDs and need none; identities are already encoded (below). */
+function roomKeyId(roomId: string): string {
+  return encodeURIComponent(roomId)
+}
+
 /** Pub/sub key carrying a room's control lane: presence & lifecycle events plus room-authored
  *  announcements. Low-rate, subscribed by every observer — never carries participant data. */
 function roomCtrlKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}`
 }
 /** Pub/sub key carrying the room's text data in shared mode — its own lane, so holders that
  *  only observe presence never receive it. */
 function roomTextKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:t`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:t`
 }
 /** Pub/sub key carrying one member's default-track binary — per-publisher keys make delivery
  *  member-selective at the source (a holder subscribes only the members it wants). */
 function roomMemberDataKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:m:${memberId}`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:m:${memberId}`
 }
 /** Pub/sub key carrying one member's named binary track. Per-(member, track) keys make delivery
  *  track-selective at the source: a holder that stops watching a track drops this subscription,
@@ -134,17 +143,17 @@ function roomMemberTrackKey(roomId: string, memberId: string, track: string): st
 }
 /** Pub/sub key carrying one member's private inbox — only the member's owning node subscribes. */
 function roomDmKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:dm:${memberId}`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:dm:${memberId}`
 }
 /** KV key holding the room's last `publish(data, { retain: true })` — replayed to new text subscribers. */
 function roomRetainedTextKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:rt`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:rt`
 }
 /** KV key holding the room's semantic-lane order watermark (a `RoomOrder`): the persisted, clamped
  *  `(timestamp, seq)` logical clock that `publish()` text and `Room.announce()` both draw from, so
  *  every semantic message carries one room-wide order. */
 function roomOrderKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:o`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:o`
 }
 /** KV key holding the last `publishBinary(data, { retain: true })` on one (member, track) — replayed
  *  (base64-encoded, since KV values are strings) to a new subscriber before live frames. Track is
@@ -154,7 +163,7 @@ function roomRetainedBinaryKey(roomId: string, memberId: string, track: string):
 }
 /** KV prefix under which all of a room's retained binary frames live (`keys()` enumerates them). */
 function roomRetainedBinaryPrefix(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:rb:`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:rb:`
 }
 /** KV prefix under which one member's retained binary frames live — every track they retained. The
  *  member ID is a delimiter-free UUID, so the trailing `:` makes it an unambiguous per-member scan
@@ -178,21 +187,21 @@ function base64ToBytes(b64: string): Uint8Array {
 }
 /** KV key of the room's config record. */
 function roomConfigKvKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:config`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:config`
 }
 /** Inverse of `roomConfigKvKey` — `null` for keys that aren't room config records. */
 function roomIdFromConfigKey(key: string): string | null {
   if (!key.startsWith(ROOM_KEY_NAMESPACE) || !key.endsWith(':config')) return null
-  return key.slice(ROOM_KEY_NAMESPACE.length, -':config'.length)
+  return decodeURIComponent(key.slice(ROOM_KEY_NAMESPACE.length, -':config'.length))
 }
 /** KV key of one member record. */
 function roomMemberKvKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:m:${memberId}`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:m:${memberId}`
 }
 /** KV prefix under which all of a room's member records live. Member IDs are UUIDs, which is
  *  how member records are told apart from keys of other rooms whose ID shares the prefix. */
 function roomMemberKvPrefix(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:m:`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:m:`
 }
 
 /** Reserved KV namespace for the room-existence index — a flat set of room IDs (`Room.list()`). A
@@ -219,11 +228,11 @@ function roomIdFromIndexKey(key: string): string | null {
  *  to the member record, off the `:m:` member-record prefix so a member scan never sweeps it — that
  *  lets the lazy count (`Room.get`/`Room.list`) exclude hidden members without reading any record. */
 function roomHiddenMemberKvKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:hidden:${memberId}`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:hidden:${memberId}`
 }
 /** KV prefix enumerating a room's off-presence markers. */
 function roomHiddenMemberKvPrefix(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:hidden:`
+  return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:hidden:`
 }
 
 /** Reserved KV namespace for the identity→membership index — kept separate from

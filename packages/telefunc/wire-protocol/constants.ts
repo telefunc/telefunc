@@ -258,6 +258,10 @@ export const ROOM_TAIL_HOLD_MAX = 256
  *  Measured as serialized-string length — a tight proxy for encoded/heap bytes. A single entry larger
  *  than the whole budget is dropped, never held; the tail is best-effort. */
 export const ROOM_TAIL_HOLD_BYTES_MAX = 1024 * 1024
+/** Max room-ID length in UTF-8 bytes. Room IDs are app-supplied and interpolated (URL-encoded) into
+ *  KV and pub/sub keys, so this keeps the worst-case encoded key within backend key limits (Workers KV
+ *  caps keys at 512 bytes) and bounds an otherwise-unbounded-ID resource vector. */
+export const ROOM_ID_MAX_BYTES = 128
 /** How long a `Room.get({ tail })` hold lingers without progress before it's dropped and its text
  *  ingestion released: pre-attach, waiting to be serialized into a response; post-attach, waiting for
  *  the client's first subscribe. Generous — the contract is a prompt subscribe, this only bounds misuse. */

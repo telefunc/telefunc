@@ -15,6 +15,7 @@ import {
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_MEMBER_KV_TTL_MS,
   ROOM_MEMBER_TTL_MS,
+  ROOM_ID_MAX_BYTES,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_BYTES_MAX,
   ROOM_TRACKS_PER_MEMBER_MAX,
@@ -33,6 +34,8 @@ import {
   frameWithMemberId,
   roomCtrlKey,
   roomTextKey,
+  roomConfigKvKey,
+  roomRetainedBinaryPrefix,
   roomRetainedTextKey,
   roomMemberDataKey,
   roomMemberTrackKey,
@@ -868,6 +871,20 @@ describe('selective binary delivery', () => {
     })
     expect(hold.some((e) => e.serialized[0] === 'y')).toBe(false) // a single over-budget entry is never held
     expect(hold.length).toBeLessThanOrEqual(len)
+  })
+
+  it('encodes room IDs so a delimiter in one ID cannot collide with or sweep another room', () => {
+    // Raw interpolation aliased roomCtrlKey('a:t') onto roomTextKey('a'), and let a `:rb:` close-sweep for
+    // room 'A' reach a room named 'A:rb:X'. IDs may legitimately contain ':' (the docs' 'team:red'), so
+    // encoding makes every ID one opaque, delimiter-free segment.
+    expect(roomCtrlKey('alpha:t')).not.toBe(roomTextKey('alpha'))
+    expect(roomConfigKvKey('A:rb:X').startsWith(roomRetainedBinaryPrefix('A'))).toBe(false)
+    expect(roomCtrlKey('team:red')).not.toBe(roomCtrlKey('team')) // the documented nested ID stays distinct
+  })
+
+  it('bounds the room ID length', async () => {
+    await expect(Room.create('x'.repeat(ROOM_ID_MAX_BYTES + 1))).rejects.toThrow(/at most/)
+    await expect(Room.create('x'.repeat(ROOM_ID_MAX_BYTES))).resolves.toBeDefined() // the cap itself is allowed
   })
 
   it('a member-scoped listener still brings up the room text lane', async () => {
