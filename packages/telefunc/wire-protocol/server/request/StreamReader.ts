@@ -1,4 +1,4 @@
-export { StreamReader }
+export { StreamReader, OversizeFrameError }
 
 import type { Readable } from 'node:stream'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
@@ -7,6 +7,12 @@ import { decodeU32 } from '../../frame.js'
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
 const DISCONNECT_MSG = 'Client disconnected during file upload'
+
+/** A frame whose DECLARED length is over the caller's ceiling. Distinct from the disconnect error
+ *  because the two deserve opposite responses: a truncated body is an ordinary client death, while
+ *  this is a wire that must be terminated. Nothing after it can be trusted to be frame-aligned
+ *  anyway — the reader never consumed the body it announced. */
+class OversizeFrameError extends Error {}
 
 /**
  * Pull-based byte-counting stream reader for the binary frame protocol.
@@ -49,11 +55,19 @@ class StreamReader {
     return new TextDecoder().decode(await this.readExact(length))
   }
 
-  /** Read one length-prefixed chunk, or null if the stream is cleanly exhausted. */
-  async readLengthPrefixedBytesOrNull() {
+  /**
+   * Read one length-prefixed chunk, or null if the stream is cleanly exhausted.
+   *
+   * `maxBytes` is checked against the DECLARED length, so an oversize frame is refused before a
+   * single body byte is pulled — that is what makes the cap free to enforce. Checking after the
+   * read would bound what is RETAINED while still letting a hostile u32 drive the allocation.
+   */
+  async readLengthPrefixedBytesOrNull(maxBytes: number) {
     const lengthBytes = await this.readExactOrNull(4)
     if (!lengthBytes) return null
-    return this.readExact(decodeU32(lengthBytes))
+    const length = decodeU32(lengthBytes)
+    if (length > maxBytes) throw new OversizeFrameError()
+    return this.readExact(length)
   }
 
   /** Ensure no trailing bytes remain. */

@@ -37,7 +37,8 @@
     "wire-protocol/upgrade.admission-caps.spec.ts",
     "wire-protocol/upgrade.client-barrier.spec.ts",
     "wire-protocol/upgrade.client-barrier-failures.spec.ts",
-    "wire-protocol/upgrade.client-barrier-emission.spec.ts"
+    "wire-protocol/upgrade.client-barrier-emission.spec.ts",
+    "wire-protocol/wire-resource-caps.spec.ts"
   ],
   "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"]
 }

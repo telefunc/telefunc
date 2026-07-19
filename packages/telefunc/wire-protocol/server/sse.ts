@@ -5,13 +5,13 @@ import type { Readable } from 'node:stream'
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
-import { CHANNEL_TRANSPORT } from '../constants.js'
+import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { createPushReadable, type PushReadable } from '../push-readable.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 import { textEncoder } from '../frame.js'
 import { parseSseRequestMetadata } from '../sse-request.js'
-import { StreamReader } from './request/StreamReader.js'
+import { OversizeFrameError, StreamReader } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
 import { encode } from '../shared-ws.js'
@@ -151,7 +151,7 @@ class SseConnectionTransport {
     // accumulate one retained promise per frame for the connection's lifetime.
     const inFlight = new Set<Promise<unknown>>()
     while (true) {
-      const raw = await reader.readLengthPrefixedBytesOrNull()
+      const raw = await this.readFrameOrNull(connection, reader)
       if (!raw || connection.closed) break
       const dispatch = this.mux.onConnectionRawMessage(connection, raw)
       inFlight.add(dispatch)
@@ -216,12 +216,27 @@ class SseConnectionTransport {
   private async drainDeferred(connection: SseConnection, reader: StreamReader): Promise<ReconcileOutcome | null> {
     let outcome: ReconcileOutcome | null = null
     while (true) {
-      const raw = await reader.readLengthPrefixedBytesOrNull()
+      const raw = await this.readFrameOrNull(connection, reader)
       if (!raw || connection.closed) break
       const next = await this.mux.onConnectionRawMessageDeferredReconciled(connection, raw)
       if (next !== null) outcome = next
     }
     return outcome
+  }
+
+  /** The single read site for every C2S body, so the raw-frame ceiling has exactly one enforcement
+   *  point and exactly one termination point across all three POST shapes. Only an OVERSIZE frame
+   *  kills the wire: a truncated body is an ordinary client death, and the existing per-caller
+   *  handling of that stays exactly as it was. Permanent, because the declared length is a
+   *  protocol-level lie rather than a transient fault — a reconnect grace would just invite the
+   *  next one. */
+  private async readFrameOrNull(connection: SseConnection, reader: StreamReader) {
+    try {
+      return await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
+    } catch (err) {
+      if (err instanceof OversizeFrameError) this.closeConnection(connection, true)
+      throw err
+    }
   }
 
   private async resolveConnection(connId: string): Promise<SseConnection | null> {

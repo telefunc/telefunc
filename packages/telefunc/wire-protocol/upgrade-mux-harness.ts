@@ -22,7 +22,7 @@ export type { MuxHarness, HarnessWire, HarnessChannel }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 
-import { ChannelMux, type ServerTransport, type UpgradeResourceLimits } from './server/mux.js'
+import { ChannelMux, type BacklogSnapshot, type MuxResourceLimits, type ServerTransport } from './server/mux.js'
 import { ServerChannel } from './server/channel.js'
 import { decode, encode, type DecodedFrame, type PreparePayload, type ReconcilePayload } from './shared-ws.js'
 
@@ -40,6 +40,9 @@ type HarnessWire = {
   sessionId(): string | undefined
   /** Whether the mux asked the transport to kill this wire. */
   terminated(): boolean
+  /** This wire's recv-chain backlog, read straight off the fields the overflow check compares.
+   *  Null once the connection entry is gone. */
+  backlog(): BacklogSnapshot | null
   /** Hand a frame to the mux exactly as `ws.ts:33` / `sse.ts:145` do. The returned promise
    *  settles when this frame's recv-chain turn completes — `await` it for ordinary frames,
    *  keep it un-awaited to model a frame parked behind an earlier turn. */
@@ -74,10 +77,10 @@ type MuxHarness = {
   dispose(): void
 }
 
-/** `upgradeLimits` are injected into the REAL `ChannelMux`, so a mechanism test at a small limit
+/** `limits` are injected into the REAL `ChannelMux`, so a mechanism test at a small limit
  *  drives the same enforcement path production runs — not a pure accountant standing beside it. */
-function createMuxHarness(upgradeLimits: Partial<UpgradeResourceLimits> = {}): MuxHarness {
-  const mux = new ChannelMux(upgradeLimits)
+function createMuxHarness(limits: Partial<MuxResourceLimits> = {}): MuxHarness {
+  const mux = new ChannelMux(limits)
   const channels: HarnessChannel[] = []
 
   const makeWire = (connId: string | null): HarnessWire => {
@@ -107,6 +110,7 @@ function createMuxHarness(upgradeLimits: Partial<UpgradeResourceLimits> = {}): M
       sent,
       sessionId: () => sessionId,
       terminated: () => terminated,
+      backlog: () => mux._getBacklogSnapshot(conn),
       deliver: (frame) => mux.onConnectionRawMessage(conn, frame),
       close: (isPermanent = false) => mux.onConnectionClosed(conn, isPermanent),
     }

@@ -1,5 +1,5 @@
 export { ChannelMux, getChannelMux }
-export type { ReconcileOutcome, ServerTransport, UpgradeResourceLimits, UpgradeResourceSnapshot }
+export type { ReconcileOutcome, ServerTransport, MuxResourceLimits, UpgradeResourceSnapshot, BacklogSnapshot }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -13,6 +13,9 @@ import {
   UPGRADE_MAX_STAGED_BYTES,
   UPGRADE_MAX_STAGED_RECORDS,
   UPGRADE_STAGE_TTL_MS,
+  WIRE_MAX_RAW_FRAME_BYTES,
+  WIRE_MAX_RECV_BACKLOG_BYTES,
+  WIRE_MAX_RECV_BACKLOG_FRAMES,
   type ChannelTransports,
 } from '../constants.js'
 import { TAG, decode, encode, isConnCtrlTag } from '../shared-ws.js'
@@ -53,25 +56,32 @@ type ReconcileOutcome = {
   upgradeId?: string
 }
 
-/** Admission limits for the barrier upgrade. Named immutable defaults in production; tests
- *  construct a `ChannelMux` with small values so the mechanism runs through the REAL enforcement
- *  path rather than a parallel accountant. */
-type UpgradeResourceLimits = {
+/** Resource limits the mux enforces. The `maxFrameBytes`…`stageTtlMs` group admits the barrier
+ *  upgrade; the `maxRaw…`/`maxRecv…` group is not upgrade-specific and bounds inbound raw frames on
+ *  EVERY wire. Named immutable defaults in production; tests construct a `ChannelMux` with small
+ *  values so the mechanism runs through the REAL enforcement path rather than a parallel accountant. */
+type MuxResourceLimits = {
   maxFrameBytes: number
   maxOpenEntries: number
   maxIdBytes: number
   maxStagedRecords: number
   maxStagedBytes: number
   stageTtlMs: number
+  maxRawFrameBytes: number
+  maxRecvBacklogBytes: number
+  maxRecvBacklogFrames: number
 }
 
-const DEFAULT_UPGRADE_LIMITS: UpgradeResourceLimits = Object.freeze({
+const DEFAULT_MUX_LIMITS: MuxResourceLimits = Object.freeze({
   maxFrameBytes: UPGRADE_MAX_FRAME_BYTES,
   maxOpenEntries: UPGRADE_MAX_OPEN_ENTRIES,
   maxIdBytes: UPGRADE_MAX_ID_BYTES,
   maxStagedRecords: UPGRADE_MAX_STAGED_RECORDS,
   maxStagedBytes: UPGRADE_MAX_STAGED_BYTES,
   stageTtlMs: UPGRADE_STAGE_TTL_MS,
+  maxRawFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
+  maxRecvBacklogBytes: WIRE_MAX_RECV_BACKLOG_BYTES,
+  maxRecvBacklogFrames: WIRE_MAX_RECV_BACKLOG_FRAMES,
 })
 
 /** A PREPARE the server accepted, awaiting its barrier on the OLD wire. Metadata only — no
@@ -102,6 +112,14 @@ type UpgradeResourceSnapshot = {
   reverseRecords: number
   /** The running charge admission compares against `maxStagedBytes`. */
   bytes: number
+}
+
+/** Read-only view of ONE connection's recv-chain backlog, for tests. Same discipline as
+ *  `UpgradeResourceSnapshot`: these are the very fields the overflow check compares, not a tally
+ *  kept beside them — a mirrored counter would stay right while enforcement went wrong. */
+type BacklogSnapshot = {
+  bytes: number
+  frames: number
 }
 
 /** Which wire dies if this turn throws. Defaults to the wire the frame arrived on; the barrier
@@ -148,6 +166,12 @@ type ConnectionState = {
    *  the routing lookup below would otherwise swallow it silently (the connection still reports
    *  the rotated-away session id, so `sessions.get` misses for every ix). */
   retiredByBarrier: boolean
+  /** Raw bytes and frames currently charged to this wire's recv chain — every frame that has been
+   *  admitted but whose turn has not finished. Charged before the frame is chained and refunded in
+   *  that turn's own `finally`, so the pair is one integer op each on the dispatch path and cannot
+   *  drift: there is exactly one increment site and exactly one decrement site. */
+  recvBacklogBytes: number
+  recvBacklogFrames: number
 }
 
 type ConnectionEntry = {
@@ -188,14 +212,14 @@ class ChannelMux {
    *  only a session id, and the server has no other way back to the staged probe wire. */
   private readonly stagedByPrevSession = new Map<string, unknown>()
   private stagedBytes = 0
-  private readonly upgradeLimits: UpgradeResourceLimits
+  private readonly limits: MuxResourceLimits
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
   private resolvedOptions: MuxServerOptions | null = null
 
-  constructor(upgradeLimits: Partial<UpgradeResourceLimits> = {}) {
-    this.upgradeLimits = { ...DEFAULT_UPGRADE_LIMITS, ...upgradeLimits }
+  constructor(limits: Partial<MuxResourceLimits> = {}) {
+    this.limits = { ...DEFAULT_MUX_LIMITS, ...limits }
   }
 
   private get options(): MuxServerOptions {
@@ -244,6 +268,8 @@ class ChannelMux {
         recvChain: null,
         closed: null,
         retiredByBarrier: false,
+        recvBacklogBytes: 0,
+        recvBacklogFrames: 0,
       },
       transport: transport as ServerTransport<unknown>,
     })
@@ -338,6 +364,26 @@ class ChannelMux {
   private dispatchInbound(connection: unknown, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
+    const { state } = entry
+    const byteLength = rawFrame.byteLength
+    // Resource admission, ahead of everything — decode, dispatch, and the chain itself. The raw-frame
+    // ceiling bounds what `decode` below is asked to allocate; the backlog pair bounds what a client
+    // can leave QUEUED by stalling the chain and continuing to send. Both terminate only the wire
+    // that overran, so a flood costs its author its own connection and nobody else theirs.
+    //
+    // The backlog charge is deliberately two integer adds with no allocation and no async hop: it
+    // sits on the path every ordinary data frame takes, and anything heavier here would be a real
+    // throughput cost paid on normal traffic to bound abnormal traffic.
+    if (
+      byteLength > this.limits.maxRawFrameBytes ||
+      state.recvBacklogBytes + byteLength > this.limits.maxRecvBacklogBytes ||
+      state.recvBacklogFrames >= this.limits.maxRecvBacklogFrames
+    ) {
+      this.terminateWire(entry, connection)
+      return Promise.resolve(null)
+    }
+    state.recvBacklogBytes += byteLength
+    state.recvBacklogFrames++
     const exec = async (): Promise<ReconcileOutcome | null> => {
       const violation: ViolationTarget = { connection }
       try {
@@ -351,15 +397,25 @@ class ChannelMux {
         // above exactly as before. Only a barrier retargets, and then the wire may already be gone.
         const targetEntry = target === connection ? entry : this.connectionEntries.get(target)
         if (!targetEntry) return null
-        // A wire being torn down can never commit its stage.
-        this.clearStage(target)
-        targetEntry.state.terminatePermanently = true
-        targetEntry.transport.terminateConnection(target)
+        this.terminateWire(targetEntry, target)
         return null
+      } finally {
+        // The refund rides the turn's OWN try, so it costs no extra promise link and cannot be
+        // skipped by any exit — including the violation path above, whose wire is dead but whose
+        // entry may be re-registered by a reconnect on the same object in a pooled adapter.
+        state.recvBacklogBytes -= byteLength
+        state.recvBacklogFrames--
       }
     }
     if (rawFrame[0] === TAG.PING) return exec()
     return this.chainRecv(entry, exec)
+  }
+
+  /** Kill one wire and abandon any upgrade staged on it: a wire being torn down can never commit. */
+  private terminateWire(entry: ConnectionEntry, connection: unknown): void {
+    this.clearStage(connection)
+    entry.state.terminatePermanently = true
+    entry.transport.terminateConnection(connection)
   }
 
   /** Returns a `ReconcileOutcome` only on reconcile (so the caller decides when to send
@@ -377,7 +433,7 @@ class ChannelMux {
     // reconcile. So the division of labour is explicit — for the barrier the 256 KiB cap bounds
     // staged/commit state only, and decode-time allocation is bounded separately by the pre-decode
     // raw-frame ceiling (D3/T7).
-    if (rawFrame[0] === TAG.PREPARE && rawFrame.byteLength > this.upgradeLimits.maxFrameBytes) {
+    if (rawFrame[0] === TAG.PREPARE && rawFrame.byteLength > this.limits.maxFrameBytes) {
       throw new ProtocolViolationError()
     }
     const frame = decode(rawFrame)
@@ -456,7 +512,7 @@ class ChannelMux {
     payload: PreparePayload,
     rawByteLength: number,
   ): null {
-    const limits = this.upgradeLimits
+    const limits = this.limits
     // Charged before anything is installed, so a rejected PREPARE leaves no trace to clean up.
     this.validateUpgradeFrame(payload.open, rawByteLength)
     if (!payload.upgradeId || typeof payload.upgradeId !== 'string') throw new ProtocolViolationError()
@@ -604,7 +660,7 @@ class ChannelMux {
   /** Applies to PREPARE and `barrier: true` RECONCILE only — an ordinary reconcile keeps its
    *  existing uncapped contract. */
   private validateUpgradeFrame(open: ReconcilePayload['open'] | PreparePayload['open'], rawByteLength: number): void {
-    const limits = this.upgradeLimits
+    const limits = this.limits
     if (rawByteLength > limits.maxFrameBytes) throw new ProtocolViolationError()
     if (!Array.isArray(open)) throw new ProtocolViolationError()
     if (open.length > limits.maxOpenEntries) throw new ProtocolViolationError()
@@ -814,6 +870,15 @@ class ChannelMux {
       reverseRecords: this.stagedByPrevSession.size,
       bytes: this.stagedBytes,
     }
+  }
+
+  /** @internal @test-only Beside `_getUpgradeResourceSnapshot` rather than folded into it: that one
+   *  is server-global, this one is per-connection, and merging them would force a shape where one
+   *  half is meaningless. Reads the enforcement fields themselves. Null once the wire is gone. */
+  _getBacklogSnapshot(connection: unknown): BacklogSnapshot | null {
+    const entry = this.connectionEntries.get(connection)
+    if (!entry) return null
+    return { bytes: entry.state.recvBacklogBytes, frames: entry.state.recvBacklogFrames }
   }
 }
 

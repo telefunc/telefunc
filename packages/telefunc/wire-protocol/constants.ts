@@ -125,6 +125,30 @@ export const UPGRADE_MAX_ID_BYTES = 256
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
 export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 
+// ===== Inbound wire resource caps =====
+//
+// These bound a MISBEHAVING client's cheapest allocations, and unlike the caps above they are not
+// upgrade-specific: they sit at the two inbound entry points every frame crosses. Nothing here
+// bounds hostile APPLICATION memory — flow-control credit is cooperative at the sender — which is a
+// documented residual of the design, not an oversight.
+
+/** Ceiling on ONE raw wire frame, enforced before it is decoded. Two inbound paths need it, and for
+ *  different reasons: SSE frames are length-prefixed, so a hostile u32 declares an allocation the
+ *  server would otherwise make on request (rejected by the DECLARED length, before a body byte is
+ *  pulled), while a WS binary message has already been read by the socket layer and is capped
+ *  against the cost of DECODING it. 64 MiB matches the protocol's maximum adaptive byte credit, so
+ *  no frame a compliant client can legitimately produce is anywhere near it. */
+export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
+
+/** Ceiling on the raw frames queued on ONE connection's recv chain — bytes AND count, because a
+ *  flood of tiny frames costs closures and promise links rather than bytes. A frame parked behind an
+ *  awaited turn is retained by the chain's closure until that turn completes, so without this a
+ *  client that stalls the chain and keeps sending has an unbounded holding area. Charged before the
+ *  frame is chained and refunded in the turn's own `finally`; overflow terminates that wire (and
+ *  with it any upgrade staged on it), never any other. */
+export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
+export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
+
 /** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
  *  wire dead and reconnecting. A downstream that stalls without erroring (bytes stop, no FIN)
  *  otherwise wedges the connection: the upstream keeps sending pings but `handlePongTimeout`
