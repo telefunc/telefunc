@@ -1,4 +1,5 @@
 export { dialectOf, driverOf, semanticEnvironmentKeyOf, rlsEnabledOf, executeSql, entityKindOf, isSingleSession }
+export { oldNewReturningOf, probeOldNewReturning }
 export type { RlsStatus, RowRunner }
 
 import { type SQL, entityKind, sql } from 'drizzle-orm'
@@ -109,6 +110,75 @@ let failCounter = 0
  *  not dedupe under an unproven assumption. */
 function failClosedKey(dialect: Dialect, driver: string): string {
   return `env-failclosed|${dialect}|${driver}|#${failCounter++}`
+}
+
+// ── Returned-image capability ───────────────────────────────────────
+
+// Whether this connection can return BOTH images of a changed row in the write statement itself
+// (`RETURNING old.*, new.*`, PostgreSQL 18 and up). With it, an update that moves a primary key, and an
+// update a stateless live query has to decide membership for, are exact with no extra round trip.
+//
+// This is a CAPABILITY probe, not a version check — a version number is a claim about a server, and the
+// question here is what THIS connection accepts. So the statement is actually run: against a temp table,
+// inside a transaction that is ALWAYS rolled back, which is what makes it safe to run against a live
+// database. It leaves nothing behind (verified: no `pg_class` row survives), and a server that rejects the
+// syntax aborts only the probe's own transaction.
+//
+// The answer is cached per db object and read SYNCHRONOUSLY by write planning. Until the probe lands the
+// answer is unknown, and unknown reads as NOT supported — so capture only ever gains precision from this,
+// and never waits on it or assumes it.
+
+const oldNewSupport = new WeakMap<object, boolean>()
+const probeInFlight = new WeakMap<object, Promise<boolean>>()
+const PROBE_TABLE = 'telefunc_old_new_probe'
+/** Thrown to roll the probe back. A sentinel, so a genuine failure is never mistaken for the rollback. */
+const PROBE_ROLLBACK = Symbol('telefunc: capability probe rollback')
+
+/** Whether `RETURNING old.*, new.*` is known to work on this db. Never `true` before the probe resolves. */
+function oldNewReturningOf(db: AnyDb): boolean {
+  return oldNewSupport.get(db as object) === true
+}
+
+/** Start the capability probe for this db, at most once, and return what it settles on. Production calls
+ *  this and does NOT await it: nothing waits on the probe, so a slow or failing one costs a write nothing
+ *  but the extra precision it would have unlocked. The promise is returned so a caller that genuinely needs
+ *  the settled answer (a test asserting the capability) can have it without a test-only seam. */
+function probeOldNewReturning(db: AnyDb): Promise<boolean> {
+  const key = db as object
+  const started = probeInFlight.get(key)
+  if (started) return started
+  const probe = runOldNewProbe(db).then(
+    (supported) => {
+      oldNewSupport.set(key, supported)
+      return supported
+    },
+    () => {
+      oldNewSupport.set(key, false)
+      return false
+    },
+  )
+  probeInFlight.set(key, probe)
+  return probe
+}
+
+async function runOldNewProbe(db: AnyDb): Promise<boolean> {
+  if (dialectOf(db) !== 'pg') return false
+  const host = db as { transaction?: (cb: (tx: unknown) => Promise<unknown>) => Promise<unknown> }
+  if (typeof host.transaction !== 'function') return false
+  let supported = false
+  try {
+    await host.transaction(async (tx) => {
+      const run = (text: string) => (tx as { execute: (query: SQL) => Promise<unknown> }).execute(sql.raw(text))
+      await run(`create temp table ${PROBE_TABLE} (x int)`)
+      await run(`insert into ${PROBE_TABLE} values (1)`)
+      await run(`update ${PROBE_TABLE} set x = 2 returning old.x, new.x`)
+      supported = true
+      throw PROBE_ROLLBACK // never commit — the probe must leave the database exactly as it found it
+    })
+  } catch (error) {
+    if (error !== PROBE_ROLLBACK) return false
+  }
+  return supported
 }
 
 // ── Row-level security ──────────────────────────────────────────────

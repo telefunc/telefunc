@@ -30,6 +30,7 @@ import { ingestLocal, ingestWrite, registryFor } from './dbRuntime.js'
 import { publishCoarseAll } from './writeTransport.js'
 import { type ChangeTransport, configureChanges } from './changeTransport.js'
 import { wrapLiveSelect } from './readCapture.js'
+import { probeOldNewReturning } from '../binding/database.js'
 import type { TableChange } from '../router/events.js'
 import { assertUsage } from '../utils/assert.js'
 
@@ -352,6 +353,9 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
   // the in-process bus). Installed ATOMICALLY — a db must never end up with one and not the other. Reads
   // subscribe over it and writes publish over it — never the user's app Broadcast.
   configureChanges(db, { transport: options?.changeTransport, namespace: options?.changeNamespace })
+  // Ask this connection ONCE, here at setup, whether it can return both images of a changed row. Nothing
+  // waits on the answer; it lands long before any request and simply lets later writes be more precise.
+  probeOldNewReturning(db)
   // Autocommit writes ingest into THIS db's graphs immediately; a transaction buffers and flushes here once.
   const ingest: CaptureSink = (changes) => ingestWrite(db, { changes })
   // Raw SQL's coarse markers stay local — the coarse-all announcement is what reaches other instances.

@@ -1,8 +1,8 @@
 export { captureMutation, emitSafely, captureRawSql, planCapture, captureMismatch }
 export type { CaptureSink }
 
-import { type Column, SQL, type Table, getTableColumns, is, isTable } from 'drizzle-orm'
-import { dialectOf, driverOf } from '../binding/database.js'
+import { type Column, SQL, type Table, getTableColumns, is, isTable, sql } from 'drizzle-orm'
+import { dialectOf, driverOf, oldNewReturningOf } from '../binding/database.js'
 import { primaryKeyOf, relationKeyOf } from '../extract/columns.js'
 import { describeRelationId } from '../ir/relation.js'
 import { ingestWrite, registryFor } from './dbRuntime.js'
@@ -17,10 +17,18 @@ import type { Row, TableChange } from '../router/events.js'
 // ir/relation.ts) — NOT the bare table name. The read side registers its graphs under the same identity, so
 // a write to `a.users` reaches live queries on `a.users` and not the different physical table `b.users`.
 //
-// Under decision #3's "new + old-PK only" contract:
+// What a captured change carries:
 //   INSERT  → { kind:'insert', new: full row }
 //   DELETE  → { kind:'delete', key: PK }        (retraction by old PK)
 //   UPDATE  → { kind:'update', new: full row, key: PK }   (key = old PK = new PK; non-PK-changing only)
+//
+// …and, where the connection can return BOTH images of a changed row in the write statement itself
+// (`RETURNING old.*, new.*`, PostgreSQL 18+, capability-probed once per db — see `oldNewReturningOf`):
+//   DELETE  → { kind:'delete', old: full row, key: PK }
+//   UPDATE  → { kind:'update', old: full row, new: full row, key: OLD PK }
+// which costs no extra round trip and makes two previously-coarse classes exact: an update that MOVES the
+// primary key (the old key is right there), and any update a STATELESS live query must decide membership
+// for (it can compare the two images instead of assuming the row may have entered or left).
 //
 // PRECISION is gated + fails closed (emit one {table, kind:'coarse'}) — safe over-fire, never a wrong row:
 //   - PG/SQLite only (MySQL has no RETURNING → precise MySQL needs a pre-write SELECT + a live MySQL test
@@ -29,8 +37,9 @@ import type { Row, TableChange } from '../router/events.js'
 //     carries its whole row and retracts nothing, so a PK-less table is still exact for it;
 //   - not an UPSERT / ON CONFLICT (a returned row does not say whether it was inserted or updated), and not
 //     a raw-SQL values clause;
-//   - not a PK-CHANGING update (SET touches the PK column → the old PK can't be recovered from RETURNING
-//     without a pre-write SELECT, which decision #3 forbids on PG/SQLite → coarse);
+//   - not a PK-CHANGING update, UNLESS both images are available: without the old image, the key a
+//     retraction is addressed by is gone the moment the statement runs, and no RETURNING of the new row can
+//     recover it → coarse;
 //   - the caller's result must be REBUILDABLE from the full row image the capture actually runs. A full
 //     `.returning()` is its own answer. A PARTIAL or aliased `.returning({ id })` is widened internally to
 //     the whole row and the caller's own columns are projected back out of it — nothing is invented, every
@@ -310,14 +319,56 @@ async function runWrite(
     return rows
   }
 
-  // No caller `.returning()`: run a HIDDEN full-row returning to capture, and hand the caller back the plain
-  // driver result reconstructed from it (verified faithful for this driver). The hidden RETURNING is
-  // expected to yield full rows, but that is still VERIFIED rather than trusted — this path used to build
-  // changes unchecked, so a driver returning a narrowed row would have emitted a partial image as precise.
+  // Capture CHOOSES this statement's RETURNING: a full row image, or — where the connection can produce it
+  // — both images of the row. The caller's own result is then rebuilt from what came back (verified faithful
+  // for this driver / reproducible from their projection). The returned rows are expected to be full, but
+  // that is still VERIFIED rather than trusted: this path once built changes unchecked, so a driver
+  // returning a narrowed row would have emitted a partial image as precise.
+  if (plan.images) {
+    const rows = (await runBase(substituteOldNew(builder, table, plan.images), executeArgs)) as Row[]
+    const pairs = rows.map((row) => splitImages(row, plan.images!))
+    emitSafely(sink, captureBothOrCoarse(op, relationId, pairs, plan))
+    // PostgreSQL's plain RETURNING on a DELETE is the row that was deleted — the OLD image. On an UPDATE it
+    // is the NEW one. The caller's result is rebuilt from whichever they would have been given.
+    return plan.reconstruct(pairs.map((pair) => (op === 'delete' ? pair.old : pair.new)))
+  }
   const full = (builder as { returning: () => unknown }).returning()
   const rows = (await runBase(full, executeArgs)) as Row[]
   emitSafely(sink, captureOrCoarse(op, relationId, rows, plan))
   return plan.reconstruct(rows)
+}
+
+// ── both images (`RETURNING old.*, new.*`) ──────────────────────────
+
+/** A row's two images, as the write statement returned them. */
+type Images = { old: Row; new: Row }
+
+/** Replace the statement's RETURNING with one that asks for BOTH images of every column.
+ *
+ *  Aliases are POSITIONAL (`o0`/`n0`, …) rather than name-derived: capture owns every alias in this list, so
+ *  positional ones are injective by construction, while any name-based scheme (`old_id`) could be made to
+ *  collide by a table that has a column of that name. Each expression is mapped through its own column, so
+ *  values arrive decoded exactly as drizzle would decode them anywhere else (a `timestamp` comes back a
+ *  `Date`, not a string). */
+function substituteOldNew(builder: unknown, table: Table, fields: string[]): unknown {
+  const columns = getTableColumns(table)
+  const selection: Record<string, SQL.Aliased | SQL> = {}
+  fields.forEach((field, index) => {
+    const column = columns[field] as Column
+    const name = sql.identifier(column.name)
+    selection[`o${index}`] = sql`old.${name}`.mapWith(column)
+    selection[`n${index}`] = sql`new.${name}`.mapWith(column)
+  })
+  return (builder as { returning: (selection: unknown) => unknown }).returning(selection)
+}
+
+function splitImages(row: Row, fields: string[]): Images {
+  const images: Images = { old: {}, new: {} }
+  fields.forEach((field, index) => {
+    images.old[field] = row[`o${index}`]
+    images.new[field] = row[`n${index}`]
+  })
+  return images
 }
 
 // ── capture-fault isolation ─────────────────────────────────────────
@@ -365,7 +416,11 @@ type Plan =
   | ({
       mode: 'precise'
       callerReturning: false
+      /** The caller's own result, rebuilt from the rows capture chose to fetch. */
       reconstruct: (rows: Row[]) => unknown
+      /** Present when the statement asks for BOTH images: the table fields, in the order the positional
+       *  `o<i>`/`n<i>` aliases carry them. */
+      images?: string[]
     } & PrecisePlan)
 
 /** Decide precise vs coarse for one write — every ambiguity fails closed to coarse. */
@@ -382,9 +437,18 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   if (!config) return { mode: 'coarse' } // unrecognized builder shape (version drift) → coarse
   if (hasOnConflict(config, dialect)) return { mode: 'coarse' } // UPSERT / ON CONFLICT
   if (op === 'insert' && hasRawValues(config)) return { mode: 'coarse' } // raw-SQL values clause
-  if (op === 'update' && setTouchesPk(config, pk)) return { mode: 'coarse' } // PK-changing update (fork #2)
 
   const columns = Object.keys(getTableColumns(table))
+  // BOTH images, where the connection is known to produce them (`RETURNING old.*, new.*`, PostgreSQL 18+).
+  // An INSERT has no old image and needs none. The capability is probed once per db and is only ever `true`
+  // when a real statement proved it — so this branch adds precision where it exists and changes nothing
+  // anywhere else.
+  const images =
+    op !== 'insert' && dialect === 'pg' && oldNewReturningOf(db) ? Object.keys(getTableColumns(table)) : undefined
+  // A PK-CHANGING update moves the very key a retraction is addressed by. Without the old image that key is
+  // gone the moment the statement runs, and no RETURNING of the NEW row can recover it → coarse. WITH the
+  // old image it is simply there, so the case stops being special (fork #2 closed on this lane).
+  if (op === 'update' && !images && setTouchesPk(config, pk)) return { mode: 'coarse' }
   // The caller asked the DATABASE for the changed rows, and the database answered from the very session that
   // executed the statement — so a POOLED connection is precise here too. This used to sit below a blanket
   // `!isSingleSession(db) → coarse` gate, which coarsened pooled PostgreSQL writes using an argument that
@@ -396,19 +460,18 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
     // Not reproducible from a row image — a nested alias path, or a raw `SQL` expression the DATABASE
     // computed. Run exactly what the caller wrote and let `captureMismatch` fail it closed, as before.
     if (!selection) return { mode: 'precise', callerReturning: true, pk, columns }
+    const project = (rows: Row[]) => rows.map((row) => projectRow(row, selection))
+    // Both images are worth SUBSTITUTING for even when the caller's own RETURNING would have sufficed:
+    // their result is reproducible from the image they would have been handed, and the old row is what
+    // makes a stateless update exact and a key change describable.
+    if (images) return { mode: 'precise', callerReturning: false, pk, columns, reconstruct: project, images }
     // Already the full image: nothing to widen, and the returned order is what names SQLite's positional rows.
     if (isFullImage(selection, columns))
       return { mode: 'precise', callerReturning: true, pk, columns, positional: selection.map((s) => s.field) }
     // A PARTIAL or aliased projection is not a reason to give up. Widen the executed RETURNING to the whole
     // row, capture THAT, and project the caller's own columns back out of it. The caller sees exactly the
     // result they asked for; capture sees a real full row. No column is invented — this is the same row.
-    return {
-      mode: 'precise',
-      callerReturning: false,
-      pk,
-      columns,
-      reconstruct: (rows) => rows.map((row) => projectRow(row, selection)),
-    }
+    return { mode: 'precise', callerReturning: false, pk, columns, reconstruct: project }
   }
 
   // No caller returning → capture must SUBSTITUTE a hidden full RETURNING and hand the caller back a
@@ -423,6 +486,7 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
       // PGlite's plain no-returning result is `{ rows: [], fields: [], affectedRows: N }`; affectedRows =
       // the RETURNING row count. Verified empirically against PGlite 18.3.
       reconstruct: (rows) => ({ rows: [], fields: [], affectedRows: rows.length }),
+      images,
     }
   }
   // SQLite's `lastInsertRowid` is not recoverable for update/delete, and other drivers are unverified → coarse.
@@ -472,6 +536,31 @@ function captureOrCoarse(op: Op, relationId: string, rows: Row[], plan: PreciseP
 function reportCaptureMismatch(relationId: string, mismatch: NonNullable<CaptureMismatch>): void {
   console.error(
     `[telefunc] live write-capture fell back to COARSE for table "${describeRelationId(relationId)}": captured row ${mismatch.rowIndex} has ${mismatch.reason} (${mismatch.detail}). The write is unaffected; live queries on this table over-invalidate rather than receive a partial row.`,
+  )
+}
+
+/** Precise changes from BOTH images, else one coarse marker. The image that has to be trustworthy is the
+ *  one the change is built from: an UPDATE is decided by both, a DELETE only by the row that was removed
+ *  (PostgreSQL returns NEW as all-NULL for a delete, which is not a row and is never treated as one). */
+function captureBothOrCoarse(op: Op, relationId: string, pairs: Images[], plan: PrecisePlan): TableChange[] {
+  const decisive = op === 'delete' ? [] : pairs.map((pair) => pair.new)
+  const mismatch =
+    captureMismatch(
+      pairs.map((pair) => pair.old),
+      plan.columns,
+      plan.pk,
+      op,
+    ) ?? captureMismatch(decisive, plan.columns, plan.pk, 'insert')
+  if (mismatch) {
+    reportCaptureMismatch(relationId, mismatch)
+    return [coarse(relationId)]
+  }
+  return pairs.map(({ old, new: fresh }) =>
+    op === 'delete'
+      ? { table: relationId, kind: 'delete', old, key: keyOf(old, plan.pk) }
+      : // The key is taken from the OLD image on purpose: it addresses the row as the graph knows it, which
+        // is what makes an update that MOVES the key describable rather than coarse.
+        { table: relationId, kind: 'update', old, new: fresh, key: keyOf(old, plan.pk) },
   )
 }
 

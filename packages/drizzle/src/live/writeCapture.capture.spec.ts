@@ -6,12 +6,13 @@
 // projected SQL expression, MySQL, unverified driver / sqlite-no-returning).
 
 import { PGlite } from '@electric-sql/pglite'
-import { integer, pgTable, primaryKey, text } from 'drizzle-orm/pg-core'
+import { integer, pgTable, primaryKey, text, timestamp } from 'drizzle-orm/pg-core'
 import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { integer as sInt, sqliteTable, text as sText } from 'drizzle-orm/sqlite-core'
 import { and, eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { captureMutation, captureRawSql } from './writeCapture.js'
+import { probeOldNewReturning } from '../binding/database.js'
 import { registryFor } from './dbRuntime.js'
 import type { TableChange } from '../router/events.js'
 
@@ -472,5 +473,113 @@ describe('write capture — SQLite (node-sqlite)', () => {
     const found = await pgClient.query('select * from users where id = 900')
     expect(found.rows).toEqual([]) // and nothing was written
     void builder
+  })
+})
+
+// premise audit #5 / H5. Where the connection can hand back BOTH images of a changed row in the write
+// statement itself, two classes stop being coarse at no extra round trip. Driven against the REAL PGlite
+// (PostgreSQL 18.3) with the capability actually probed — not stubbed — so these cases are asserting the
+// database's behaviour, not a fixture's.
+describe('write capture — both images (RETURNING old.*, new.*)', () => {
+  let bothClient: PGlite
+  let both: ReturnType<typeof pgDrizzle>
+
+  beforeAll(async () => {
+    bothClient = new PGlite()
+    both = pgDrizzle({ client: bothClient })
+    await bothClient.exec('create table users (id int primary key, name text, at timestamptz)')
+    const supported = await probeOldNewReturning(both)
+    expect(supported).toBe(true) // the lane exists — everything below would be vacuous otherwise
+  })
+  afterAll(async () => await bothClient.close())
+
+  const imaged = pgTable('users', {
+    id: integer('id').primaryKey(),
+    name: text('name'),
+    at: timestamp('at', { withTimezone: true }),
+  })
+
+  it('an UPDATE carries the OLD row alongside the new one', async () => {
+    await both.insert(imaged).values({ id: 1, name: 'before' })
+    const { wrapped, batches } = capturing(both, 'update', both.update.bind(both))
+    const result = await wrapped(imaged).set({ name: 'after' }).where(eq(imaged.id, 1))
+    expect(batches).toEqual([
+      [
+        {
+          table: 'users',
+          kind: 'update',
+          old: { id: 1, name: 'before', at: null },
+          new: { id: 1, name: 'after', at: null },
+          key: { id: 1 },
+        },
+      ],
+    ])
+    expect(result).toEqual({ rows: [], fields: [], affectedRows: 1 }) // the caller's result is untouched
+  })
+
+  it('a PK-CHANGING update is PRECISE — the old key is right there, keyed from the OLD image', async () => {
+    // The case fork #2 gave up on: the key a retraction is addressed by is the one the statement destroys.
+    await both.insert(imaged).values({ id: 2, name: 'moving' })
+    const { wrapped, batches } = capturing(both, 'update', both.update.bind(both))
+    await wrapped(imaged).set({ id: 20 }).where(eq(imaged.id, 2))
+    expect(batches).toEqual([
+      [
+        {
+          table: 'users',
+          kind: 'update',
+          old: { id: 2, name: 'moving', at: null },
+          new: { id: 20, name: 'moving', at: null },
+          key: { id: 2 }, // the OLD key — retracting by the NEW one would retract a row nobody has
+        },
+      ],
+    ])
+  })
+
+  it('a DELETE carries the row that was removed, not just its key', async () => {
+    await both.insert(imaged).values({ id: 3, name: 'doomed' })
+    const { wrapped, batches } = capturing(both, 'delete', both.delete.bind(both))
+    await wrapped(imaged).where(eq(imaged.id, 3))
+    expect(batches).toEqual([
+      [{ table: 'users', kind: 'delete', old: { id: 3, name: 'doomed', at: null }, key: { id: 3 } }],
+    ])
+  })
+
+  it("the caller's own .returning() still comes back exactly — and a DELETE's is the OLD row", async () => {
+    await both.insert(imaged).values({ id: 4, name: 'kept' })
+    const updated = capturing(both, 'update', both.update.bind(both))
+    expect(await updated.wrapped(imaged).set({ name: 'now' }).where(eq(imaged.id, 4)).returning()).toEqual([
+      { id: 4, name: 'now', at: null }, // an UPDATE's plain RETURNING is the NEW row
+    ])
+
+    const deleted = capturing(both, 'delete', both.delete.bind(both))
+    expect(await deleted.wrapped(imaged).where(eq(imaged.id, 4)).returning({ nm: imaged.name })).toEqual([
+      { nm: 'now' }, // a DELETE's is the row that was deleted — the OLD one — projected as they asked
+    ])
+  })
+
+  it('both images are DECODED by their own columns — a timestamp is a Date, not a string', async () => {
+    // The substituted RETURNING is raw SQL (`old."at"`), which drizzle would hand back undecoded unless each
+    // expression is mapped through its column. A string here would put a wrong-typed value in the row image.
+    const when = new Date('2020-01-02T03:04:05.000Z')
+    await both.insert(imaged).values({ id: 5, name: 'timed', at: when })
+    const { wrapped, batches } = capturing(both, 'update', both.update.bind(both))
+    await wrapped(imaged).set({ name: 'retimed' }).where(eq(imaged.id, 5))
+    const change = batches[0]![0]!
+    expect(change.old?.at).toBeInstanceOf(Date)
+    expect(change.old?.at).toEqual(when)
+    expect(change.new?.at).toEqual(when)
+  })
+
+  it('a db WITHOUT the capability keeps the old contract — new image only, PK change coarse', async () => {
+    // The control that keeps every case above honest: the same writes on a connection whose capability was
+    // never probed carry no old image at all, and the PK-changing update is coarse again.
+    const { wrapped, batches } = capturing(pg, 'update', pg.update.bind(pg))
+    await pg.insert(users).values({ id: 80, name: 'plain' })
+    await wrapped(users).set({ name: 'plain2' }).where(eq(users.id, 80))
+    expect(batches).toEqual([[{ table: 'users', kind: 'update', new: { id: 80, name: 'plain2' }, key: { id: 80 } }]])
+
+    const moved = capturing(pg, 'update', pg.update.bind(pg))
+    await moved.wrapped(users).set({ id: 81 }).where(eq(users.id, 80))
+    expect(moved.batches).toEqual([[{ table: 'users', kind: 'coarse' }]])
   })
 })

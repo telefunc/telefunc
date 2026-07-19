@@ -130,10 +130,12 @@ The rows below are read top to bottom: a write is precise only if no coarse row 
 | A **prepared** write, with a full `.returning()` | **Precise** on every execution — `prepare()` freezes the statement, so one decision covers them all |
 | Without `.returning()`, on any driver other than PGlite (including any prepared write) | **Coarse** — the plain driver result can't be reproduced faithfully, so the rows aren't captured |
 | On MySQL | **Coarse** — no `RETURNING` to capture rows from |
-| `UPSERT` / `ON CONFLICT`, or a primary-key-changing update | **Coarse** — a returned row does not say whether it was inserted or updated, and a changed key leaves the old one unrecoverable |
+| On **PostgreSQL 18 or newer**, an update or delete | **Precise, and exact** — the statement returns the row's old image alongside the new one, so a live query can tell an update it does not care about from one that moves a row in or out of its result. Telefunc probes for this once per database; older servers keep the behaviour above |
+| A **primary-key-changing update** | **Precise on PostgreSQL 18+** (the old key is in the old image); **coarse** elsewhere, where the key a retraction is addressed by is destroyed by the statement itself |
+| `UPSERT` / `ON CONFLICT` | **Coarse** — a returned row does not say whether it was inserted or updated |
 | An **update or delete** on a table with no primary key | **Coarse** — the retraction has nothing to key on. An **insert** into such a table is precise: it carries its whole row and retracts nothing |
 
-Reads have two over-fires of their own. A plain single-table `select` keeps no row state, so an update to a row it reads can invalidate it even when the visible result is unchanged — joins and aggregates track this exactly. And a live query read over a **pooled** connection stays coarse: unlike a returned row, a read's meaning depends on the session it runs in, and a pool can hand the next read a connection with a different role or `search_path` than the one Telefunc inspected.
+Reads have two over-fires of their own. A plain single-table `select` keeps no row state, so an update to a row it reads can invalidate it even when the visible result is unchanged — unless the write carried both images, which is what the PostgreSQL 18 row above buys; joins and aggregates track this exactly regardless. And a live query read over a **pooled** connection stays coarse: unlike a returned row, a read's meaning depends on the session it runs in, and a pool can hand the next read a connection with a different role or `search_path` than the one Telefunc inspected.
 
 #### Raw SQL
 

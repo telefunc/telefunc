@@ -215,6 +215,64 @@ describe('a PK-less table: a precise INSERT is classified, not blanket-fired', (
   })
 })
 
+// ── what the OLD image buys a stateless graph (premise audit #5/H5) ──
+
+describe('a STATELESS graph with both images decides membership instead of assuming it', () => {
+  // The rows below use PHYSICAL column names (`team_id`), not drizzle's property names (`teamId`). A change
+  // row keyed by property name is silently INERT here: nothing matches the predicate, every case reports
+  // "not invalidated", and the win appears to hold for a reason that has nothing to do with the old image.
+  // Written the wrong way first, and it took the in→out case — which MUST fire — to expose it.
+  const projected = (): LiveGraph =>
+    createLiveGraph({
+      kind: 'stateless',
+      instanceKey: 'both-images',
+      tables: ['users'],
+      instantiate: () =>
+        compileQuery(
+          extractQueryShape(qb.select({ id: users.id, teamId: users.teamId }).from(users).where(eq(users.teamId, 10)), {
+            dialect: 'pg',
+          }),
+        ).instantiate() as never,
+    })
+  const outside = { id: 1, team_id: 99, score: 1 }
+  const inside = { id: 2, team_id: 10, score: 1 }
+
+  it('THE WIN: an update between two rows it does not want fires nothing once the old image is there', async () => {
+    const graph = projected()
+    await settle(graph)
+    // Both images: the graph sees a row that was outside the predicate and stayed outside.
+    expect(
+      graph.apply([{ table: 'users', kind: 'update', old: outside, new: { ...outside, score: 2 } }]).invalidated,
+    ).toBe(false)
+    // The control — the SAME update with only the new image fires. `statelessApply` coarsens an image-less
+    // change before the evaluator ever sees it: without the old row this could equally have been a row
+    // LEAVING the set, and a stateless graph has no state to ask. That is the over-fire the new+old-PK
+    // envelope was stuck with, and it is what the old image buys off.
+    expect(graph.apply([{ table: 'users', kind: 'update', new: { ...outside, score: 3 } }]).invalidated).toBe(true)
+  })
+
+  it('an update that MOVES a row out of the set still fires — exact is not the same as quiet', async () => {
+    const graph = projected()
+    await settle(graph)
+    expect(
+      graph.apply([{ table: 'users', kind: 'update', old: inside, new: { ...inside, team_id: 99 } }]).invalidated,
+    ).toBe(true)
+    // …and an update WITHIN the set that changes nothing it selects does not.
+    expect(
+      graph.apply([{ table: 'users', kind: 'update', old: inside, new: { ...inside, score: 5 } }]).invalidated,
+    ).toBe(false)
+  })
+
+  it('a DELETE carrying the removed row is decided too; a key-only one can only coarsen', async () => {
+    const graph = projected()
+    await settle(graph)
+    expect(graph.apply([{ table: 'users', kind: 'delete', old: outside, key: { id: 1 } }]).invalidated).toBe(false)
+    expect(graph.apply([{ table: 'users', kind: 'delete', old: inside, key: { id: 2 } }]).invalidated).toBe(true)
+    // The control: the same retraction with only a key is image-less, so it coarsens.
+    expect(graph.apply([{ table: 'users', kind: 'delete', key: { id: 1 } }]).invalidated).toBe(true)
+  })
+})
+
 // ── E1 — RLS-gated stateful born coarse ─────────────────────────────
 
 describe('RLS-gated stateful graphs are born coarse', () => {
