@@ -107,11 +107,11 @@ type Tap = {
 /** The tap could not be placed, so this execution must not be substituted at all.
  *
  *  FAILS CLOSED, and that is the whole point of it being a value rather than an exception: the builder is put
- *  back and the caller's own statement runs as they wrote it (coarse). Installing the shadow used to happen
- *  outside the recovery's `try`, so a builder that could not be shadowed — `Object.preventExtensions()` on a
- *  finished builder is enough — rejected the caller's perfectly valid write before it ever reached the
- *  database, and left capture's RETURNING on the builder. That is a worse failure than the one this path
- *  exists to fix, produced by the machinery meant to fix it. */
+ *  back and the caller's own statement runs as they wrote it (coarse). Installing the shadow must therefore
+ *  happen INSIDE the recovery's `try` — a builder that cannot be shadowed (`Object.preventExtensions()` on a
+ *  finished builder is enough) would otherwise reject the caller's perfectly valid write before it ever
+ *  reached the database, and leave capture's RETURNING on the builder. That is a worse failure than the one
+ *  this path exists to fix, produced by the machinery meant to fix it. */
 const TAP_UNPLACEABLE = Symbol('telefunc: capture could not observe this statement')
 
 /** Decode the CALLER's own projection out of the raw driver rows — drizzle's mapper for their selection, over

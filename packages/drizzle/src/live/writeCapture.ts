@@ -77,8 +77,9 @@ function wrapWrite(
 ): unknown {
   return new Proxy(builder as object, {
     get(target, prop, receiver) {
-      // EVERY promise terminal routes through the captured run. `.catch()`/`.finally()` used to reach the
-      // raw QueryPromise and execute the write uncaptured — a systematic missed invalidation.
+      // EVERY promise terminal routes through the captured run — `.catch()`/`.finally()` included. A
+      // terminal left out reaches the raw QueryPromise and executes the write uncaptured, which is a
+      // systematic missed invalidation rather than a one-off.
       //
       // Each is gated on the underlying builder ACTUALLY having it. An insert builder before `.values()`
       // has none of them, so synthesizing them made `db.insert(t)` spuriously thenable: `await` on an

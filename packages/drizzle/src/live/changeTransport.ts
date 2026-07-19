@@ -45,10 +45,10 @@ export { defaultChangeTransport, createInMemoryChangeTransport }
  *    success.)
  *  - **Deliver each published payload to each subscriber AT LEAST ONCE, and deliver it verbatim.** Neither
  *    de-duplication nor FIFO ordering is asked of you: the envelope carries the publisher's identity and a
- *    monotonic sequence, and the runtime drops duplicates and coarsens on a detected gap or reorder. This
- *    contract used to demand at-most-once and say nothing about order — which was the wrong way round, since
- *    an adapter obeying it to the letter could still deliver update B before update A and corrupt a precise
- *    graph exactly as a duplicate would.
+ *    monotonic sequence, and the runtime drops duplicates and coarsens on a detected gap or reorder.
+ *    Demanding at-most-once and saying nothing about order would be the wrong way round: an adapter obeying
+ *    THAT to the letter could still deliver update B before update A and corrupt a precise graph exactly as
+ *    a duplicate would.
  *  - **NO BACKLOG: a subscription receives only what was published AFTER its `subscribe()` resolved.**
  *    Store-and-forward and replay-from-offset transports are unsupported. This is ordinary pub/sub semantics
  *    — in-process and Redis both behave this way — and the runtime depends on it: a live read's snapshot is

@@ -14,13 +14,14 @@ import type { ChangeBatch } from '../router/events.js'
 // bus, in one place: which transport and namespace it resolved, what it has published, who is subscribed on
 // its behalf, whether it is quiescent, and what to do with each delivery.
 //
-// These were split across a "transport config" file and a "write transport" file, divided by implementation
-// history rather than by responsibility. The split LEAKED: the caller had to read quiescence out of one and
-// hand it to the other so a rotation could be admitted, which made a private state machine's internals part
-// of the calling convention — and let two entry points carry contradictory contracts (a direct
-// `setChangeTransport` froze unconditionally, while the configured path honoured quiescence). One rule now,
-// read from this module's own state. The deletion test settles the merge: remove this abstraction and its
-// state and reconciliation logic reappear across configuration, publish and subscription callers alike.
+// ONE quiescence rule, read from this module's own state, because every entry point that can rotate a
+// transport has to agree about when that is admissible. Splitting the transport config from the runtime puts
+// the two on opposite sides of a boundary: the caller then has to read quiescence out of one and hand it to
+// the other, which makes a private state machine's internals part of the calling convention and lets the two
+// entry points drift into contradictory contracts.
+//
+// The deletion test settles the merge: remove this abstraction and its state and reconciliation logic
+// reappear across configuration, publish and subscription callers alike.
 //
 // A committed batch is published ONCE, to ONE topic per logical database, over the db's DEDICATED
 // changeTransport (never the user's app Broadcast — see changeTransport.ts). A receiver feeds the whole
@@ -254,9 +255,9 @@ function publishBatch(db: object, batch: ChangeBatch): void {
 }
 
 /** Announce a mutation whose touched tables are UNKNOWABLE (raw SQL, batch) to every OTHER instance: each
- *  coarsens its own watched tables, since the publisher cannot know them. Rides the SAME topic — the
- *  separate wildcard channel it used to need was an artefact of per-table fan-out. The publisher's own
- *  graphs are fed directly, and the `origin` check makes its own subscription drop this. */
+ *  coarsens its own watched tables, since the publisher cannot know them. Rides the SAME topic — a separate
+ *  wildcard channel is only needed where publication fans out per table. The publisher's own graphs are fed
+ *  directly, and the `origin` check makes its own subscription drop this. */
 function publishCoarseAll(db: object): void {
   const transport = transportFor(db)
   publishPayload(db, encodeChangePayload({ ...nextHeader(db, transport), coarseAll: true }), transport)

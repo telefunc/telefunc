@@ -1,8 +1,8 @@
 export { observeEnvelopeSequence, withBaselineBetClosed }
 export type { OriginSequence, SequenceHeader, SequenceDecision, SequenceTransition }
 
-// THE PER-ORIGIN ORDERING AUTOMATON — a pure transition, deliberately separated from the I/O callback that
-// used to contain it. Given what we have seen from one publisher and the header of one arriving envelope, it
+// THE PER-ORIGIN ORDERING AUTOMATON — a pure transition, deliberately kept out of the I/O callback that
+// delivers envelopes. Given what we have seen from one publisher and the header of one arriving envelope, it
 // decides whether that envelope is applied precisely, dropped, or coarsened over. It reads and writes no
 // state of its own: the caller holds the map and stores what this returns, which is what makes every rule
 // below assertable as a table of inputs rather than only through a delivered payload.

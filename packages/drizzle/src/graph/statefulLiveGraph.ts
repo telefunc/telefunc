@@ -16,13 +16,15 @@ import type { ApplyOutcome, GraphCore, GraphVariant } from './liveGraph.js'
 // escalation ladder — inline old > shadow resolve > provably-irrelevant drop — and fires AT MOST ONCE per
 // batch.
 //
-// RESEED — `seeding` is reachable AFTER `live`, and coarse is no longer a one-way door. An image-less
-// event (raw SQL anywhere, a detected transport gap) used to demote a graph permanently: `coarsen()`
-// aborts the seed, drops the operator graph and sets `coarse` with no path back, so ONE raw statement
-// on any instance cost every watching graph its precision for the rest of its life. Reseeding instead
-// invalidates and then rebuilds the baseline from the database, keeping this graph's identity, its
-// router registration and its subscribers while replacing its internals. Readiness is re-armed per
-// cycle so an acquire arriving mid-reseed still blocks until precision is back.
+// RESEED — `seeding` is reachable AFTER `live`, so coarse is not a one-way door. An image-less event
+// (raw SQL anywhere, a detected transport gap) invalidates and then rebuilds the baseline from the
+// database, keeping this graph's identity, its router registration and its subscribers while replacing
+// its internals. Readiness is re-armed per cycle so an acquire arriving mid-reseed still blocks until
+// precision is back.
+//
+// Reseeding rather than `coarsen()`, which aborts the seed, drops the operator graph and sets `coarse`
+// with no path back: that makes ONE raw statement on any instance cost every watching graph its
+// precision for the rest of its life.
 //
 // Two things bound it HERE (the third — that a stateless graph never reseeds — lives with that variant).
 // A coarse event arriving while a seed is IN FLIGHT degrades to a plain demote, which makes the mechanism

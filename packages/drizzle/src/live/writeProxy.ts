@@ -26,9 +26,10 @@ function isRawSqlOp(prop: string | symbol): boolean {
     prop === 'get' ||
     prop === 'values' ||
     // Not SQL execution, but a MUTATION with the same problem: it changes what a live query on the view
-    // reads, and its effect is unknowable without resolving the view's definition. It used to fall through
-    // to plain Drizzle and commit with nothing captured and nothing published — the same silent bypass
-    // `tx.execute` had. Coarsening it is sound and it is a rare, deliberate operation.
+    // reads, and its effect is unknowable without resolving the view's definition. Left off this list it
+    // falls through to plain Drizzle and commits with nothing captured and nothing published — the silent
+    // bypass this whole predicate exists to close. Coarsening it is sound and it is a rare, deliberate
+    // operation.
     prop === 'refreshMaterializedView' ||
     // `db.batch([...])` runs a list of statements that may include writes (libSQL, D1, Neon-HTTP,
     // sqlite-proxy). Reconstructing which rows each item touched would mean re-planning every statement in
@@ -41,10 +42,10 @@ function isRawSqlOp(prop: string | symbol): boolean {
 
 /** Everything ONE transaction scope needs to know about the world enclosing it.
  *
- *  This used to be seven positional parameters on `wrapTransaction`, which is what a concern sitting too
- *  high looks like: the entry had to build the announcement closure and the commit-marker closure itself,
- *  so a caller that only wanted "capture transactions on this db" had to know how a savepoint differs from
- *  a top-level commit. The scope is owned here, and the two shapes it can take are named below. */
+ *  Passing these to `wrapTransaction` positionally instead would put the concern one level too high: the
+ *  entry would have to build the announcement closure and the commit-marker closure itself, so a caller that
+ *  only wants "capture transactions on this db" would have to know how a savepoint differs from a top-level
+ *  commit. The scope is owned here, and the two shapes it can take are named below. */
 type TransactionScope = {
   /** The session capture PLANS against and keys the registry to — always the top db, never a tx handle.
    *  A tx db is not recognized as its own driver, and the graphs live on the db the reads acquired from. */
@@ -116,9 +117,8 @@ function wrapTransaction(txHost: object, scope: TransactionScope) {
       //
       // A transaction that ran raw SQL flushes LOCAL-ONLY: its remote announcement is the single coarse-all
       // below, and publishing the batch as well would deliver two messages — and two refetches — for one
-      // commit. This used to be defended as the price of atomicity ("splitting the raw markers out would
-      // make two local ticks"), which was a false dichotomy: the whole buffer still lands in ONE local tick
-      // here; only the redundant remote copy is dropped.
+      // commit. That second message is not the price of atomicity: the whole buffer still lands in ONE local
+      // tick here, so dropping the redundant remote copy costs nothing.
       //
       // The raw statement's coarse markers are computed HERE, at commit, not when the statement ran. The
       // buffer only ever carried INTENT for raw SQL, because statement-time markers snapshot the watch-set
@@ -184,8 +184,8 @@ function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () =>
         return wrapTransaction(target, savepointScope(topDb, sink, announce, root))
       }
       if (isRawSqlOp(prop)) {
-        // `tx.execute(sql`…`)` used to pass straight through, so a raw write committed with NOTHING
-        // published — the same silent bypass the top-level db already fixed.
+        // `tx.execute(sql`…`)` has to be intercepted here as well as at the top level: passing it straight
+        // through commits a raw write with NOTHING published.
         //
         // Inside a transaction, raw SQL records INTENT ONLY (`announce`); its coarse markers are NOT
         // materialized here. Markers name the tables being watched, and the watch-set at statement time is

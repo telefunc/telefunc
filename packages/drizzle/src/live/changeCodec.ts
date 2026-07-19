@@ -66,11 +66,11 @@ type ChangeEnvelope = (ChangeEnvelopeBase & { changes: TableChange[] }) | (Chang
 /**
  * The byte-array token, deliberately inside the underlying serializer's `!`-prefixed namespace.
  *
- * An earlier version tagged bytes with an OBJECT shape (`{ __telefunc_live_bytes__: [...] }`) and hunted for
- * it on the way back. That ALIASES USER DATA: a JSON/JSONB column holding an object with that key decoded
- * into a `Uint8Array`, and whatever sibling fields it had were dropped — silent corruption of exactly the
- * row this codec exists to carry faithfully. No object shape can be safe here, because any shape the decoder
- * recognises is one a JSON column can contain.
+ * NO OBJECT SHAPE CAN BE SAFE HERE, because any shape the decoder recognises is one a JSON column can
+ * contain. Tagging bytes as `{ __telefunc_live_bytes__: [...] }` and hunting for that on the way back
+ * ALIASES USER DATA: a JSON/JSONB column holding an object with that key decodes into a `Uint8Array` and
+ * whatever sibling fields it had are dropped — silent corruption of exactly the row this codec exists to
+ * carry faithfully.
  *
  * A string token can be safe, because the serializer already solves this for its own types: its last rule
  * escapes ANY ordinary string starting with `!` by prefixing another one. So a user string `'!Bytes:1,2'`

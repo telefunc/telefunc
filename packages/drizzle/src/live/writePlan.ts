@@ -103,10 +103,11 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   // old image it is simply there, so the case stops being special (fork #2 closed on this lane).
   if (op === 'update' && !images && setTouchesPk(config, pk)) return { mode: 'coarse' }
   // The caller asked the DATABASE for the changed rows, and the database answered from the very session that
-  // executed the statement — so a POOLED connection is precise here too. This used to sit below a blanket
-  // `!isSingleSession(db) → coarse` gate, which coarsened pooled PostgreSQL writes using an argument that
-  // belongs to read hydration (a pooled read can be answered by a connection with a different role /
-  // search_path / RLS view than the one that was probed). No such probe is involved in a returned row.
+  // executed the statement — so a POOLED connection is precise here too, and this check sits ABOVE any
+  // single-session gate deliberately. Session authority is a READ-HYDRATION argument: a pooled read can be
+  // answered by a connection with a different role / search_path / RLS view than the one that was probed,
+  // which is why `readCapture.ts` keeps its own pooled gate. No such probe is involved in a returned row, so
+  // borrowing that gate here coarsens pooled PostgreSQL writes for a reason that does not apply to them.
   //
   if (config.returning !== undefined) {
     const selection = callerSelection(config.returning, table)
@@ -250,10 +251,10 @@ function hasOnConflict(config: WriteConfig, dialect: 'pg' | 'sqlite'): boolean {
  *  the caller's result is pinned for it, so coarsen. Per-column raw values are fine (the RETURNING row is
  *  still the real row).
  *
- *  An insert-from-SELECT (`config.select === true`) used to coarsen here too, on the same "raw" reflex. It
- *  does not belong: where the rows CAME from says nothing about the rows that went IN. `RETURNING` on an
- *  insert-from-select yields the real inserted rows (verified on PGlite), and its plain no-returning result
- *  is byte-identical in shape to an ordinary insert's — so both capture paths already handle it. */
+ *  An insert-from-SELECT (`config.select === true`) is deliberately NOT caught by this: where the rows CAME
+ *  from says nothing about the rows that went IN. `RETURNING` on an insert-from-select yields the real
+ *  inserted rows (verified on PGlite), and its plain no-returning result is byte-identical in shape to an
+ *  ordinary insert's — so both capture paths already handle it. */
 function hasRawValues(config: WriteConfig): boolean {
   return is(config.values, SQL)
 }
