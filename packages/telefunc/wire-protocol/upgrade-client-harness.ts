@@ -129,7 +129,7 @@ async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 3_
 type ReceivedPayload = { kind: 'text'; value: unknown } | { kind: 'binary'; bytes: Uint8Array }
 
 /** The shape `handoffBuffered()` reads out of the connection's private upgrade state. */
-type UpgradeStateShape = { tag: string; bufferedFrames: number; bufferedBytes: number }
+type UpgradeStateShape = { tag: string; bufferedFrames: number; bufferedBytes: number; finReceived: boolean }
 
 type HarnessClientChannel = {
   readonly id: string
@@ -361,6 +361,12 @@ type UpgradeHarness = {
   /** The connection's live upgrade tag — `'none' | 'probing' | 'preparing' | 'draining' |
    *  'handoff'` — read straight off the state machine, never mirrored. */
   upgradeTag(): string
+  /** Whether the handoff has taken its FIN yet, read off the same field the join reads.
+   *
+   *  The point is to have something a test can WAIT for. Pushing a frame onto the SSE downstream
+   *  only queues it; a test that asserts immediately afterwards is asserting against a client that
+   *  has not seen it, which passes no matter what the client would have done. */
+  handoffFinReceived(): boolean
   /** Register another channel on the SAME connection, exactly as a `ClientChannel` constructor
    *  does. Used to open one mid-attempt, when registrations are deferred. */
   register(id: string): HarnessClientChannel
@@ -582,6 +588,11 @@ async function createUpgradeHarness(
     prepares,
     barriers,
     upgradeTag,
+    handoffFinReceived: () => {
+      const state = (connection as unknown as { state: { tag: string; upgrade?: UpgradeStateShape } }).state
+      const upgrade = state.tag === 'open' ? state.upgrade : undefined
+      return upgrade?.tag === 'handoff' && upgrade.finReceived
+    },
     register: (id) => {
       const channel = createHarnessChannel(id)
       channels.push(channel)

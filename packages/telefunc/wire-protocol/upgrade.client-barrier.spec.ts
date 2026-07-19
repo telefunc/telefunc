@@ -139,9 +139,12 @@ describe('I4 — settlement happens on COMMITTED, and exactly once', () => {
     h.send(0, '"queued"')
     expect(h.bufferedSendCount()).toBe(1)
 
-    // FIN alone must not settle anything — the join needs both limbs.
+    // FIN alone must not settle anything — the join needs both limbs. Waiting for the client to
+    // have CONSUMED the FIN is what makes this assertion able to fail: pushing a frame onto the SSE
+    // downstream only queues it, so asserting straight afterwards would be asserting against a
+    // client that has not seen it yet, and would pass whatever the client did with it.
     commit(h, { committed: false })
-    await waitUntil(() => true, 'fin delivered')
+    await waitUntil(() => h.handoffFinReceived(), 'the client consumed the FIN')
     expect(h.bufferedSendCount()).toBe(1)
     expect(channel.opens.length).toBe(opensBefore)
 
@@ -167,7 +170,9 @@ describe('I4 — settlement happens on COMMITTED, and exactly once', () => {
     h.ws.pushFrame(
       encode.reconciled({ ...reconciledPayload([{ ix: 0, lastSeq: 0 }], undefined, true), upgradeId: 'someone-else' }),
     )
-    await waitUntil(() => true, 'imposters delivered')
+    // The WS imposters are delivered synchronously by the stub; the FIN is not, so this is what
+    // proves the client has processed everything pushed above before the assertions run.
+    await waitUntil(() => h.handoffFinReceived(), 'the client consumed the FIN and both imposters')
 
     expect(h.inHandoff()).toBe(true)
     expect(h.handoffDrained()).toBe(false)
@@ -209,7 +214,11 @@ describe('I11 — registrations stay deferred across staging', () => {
     // Deferred, not sent: `flushPendingRegisterReconcile` keeps the obligation while an upgrade is
     // in flight. Relaxing that is what the rotation race made unsafe — a register-reconcile landing
     // mid-stage rotates the session out from under the barrier.
-    await waitUntil(() => true, 'a turn for a register-reconcile to have fired')
+    //
+    // `scheduleRegisterReconcile` arms a 0 ms timer, so a real interval has to elapse before "no
+    // RECONCILE was sent" means anything at all. The post-commit follow-up asserted at the end of
+    // this test is the control: the same registration DOES reach the wire once the upgrade is over.
+    await new Promise((resolve) => setTimeout(resolve, 50))
     expect(reconcilesOn(h.sse.upstream.slice(upstreamBefore))).toHaveLength(0)
     expect(late.opens).toHaveLength(0)
 
