@@ -281,8 +281,9 @@ type UpgradeState =
   | {
       tag: 'handoff'
       from: ClientChannelTransport
-      /** The barrier attempt this handoff is waiting to have COMMITTED, or `null` on the legacy
-       *  flow. Non-null means exactly one RECONCILED can settle it — the one echoing this id. */
+      /** The attempt this handoff is waiting to have COMMITTED. Exactly one RECONCILED can settle
+       *  it — the one echoing this id — and `handleReconciled` nulls it the moment that arrives, so
+       *  `null` reads as "the matching COMMITTED has been consumed" and nothing else. */
       upgradeId: string | null
       buffer: HandoffBuffer
       /** ONE budget across both buffers — see `UPGRADE_HANDOFF_BUFFER_*`. */
@@ -411,16 +412,16 @@ class ClientConnection implements MuxConnection {
     this.state = { tag: 'open', upgrade: { tag: 'preparing', attempt } }
   }
 
-  /** Reached from `probing` on the legacy flow and from `preparing` on the barrier flow — the two
-   *  differ in what proves the new wire is usable, not in what gating means once it is. */
+  /** Only ever reached from `preparing`: `commitBarrier` is the single caller, and it runs only once
+   *  `stageUpgrade` has returned a READY-confirmed stage. */
   private enterUpgradeDraining(attempt: AbortController): void {
     assert(this.state.tag === 'open')
     const u = this.state.upgrade
-    assert((u.tag === 'probing' || u.tag === 'preparing') && u.attempt === attempt)
+    assert(u.tag === 'preparing' && u.attempt === attempt)
     this.state = { tag: 'open', upgrade: { tag: 'draining', attempt, finReceived: false } }
   }
 
-  private enterUpgradeHandoff(from: ClientChannelTransport, upgradeId: string | null = null): void {
+  private enterUpgradeHandoff(from: ClientChannelTransport, upgradeId: string): void {
     assert(this.state.tag === 'open' && this.state.upgrade.tag === 'draining')
     const finReceived = this.state.upgrade.finReceived
     this.state = {
@@ -1819,7 +1820,6 @@ class SseTransport implements ClientChannelTransport {
     | {
         tag: 'active'
         body: PushReadableStream<Uint8Array<ArrayBuffer>>
-        fetch: Promise<unknown>
       }
     | { tag: 'failed' } = { tag: 'idle' }
 
@@ -1957,8 +1957,10 @@ class SseTransport implements ClientChannelTransport {
       // Metadata header first — the server classifies the POST by it; `streamRequest: true`
       // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
       body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
+      // Held by the `fetchEndedP` closure alone, deliberately: nothing reads it off the record, so
+      // retaining it there would only invite a second owner for a promise with one consumer.
       const fetch = this.openStreamRequest(body, abortController.signal)
-      this.streamRequest = { tag: 'active', body, fetch }
+      this.streamRequest = { tag: 'active', body }
       fetchEndedP = (async (): Promise<'fetch-ended'> => {
         try {
           await fetch
