@@ -1127,9 +1127,12 @@ class ClientConnection implements MuxConnection {
         heldBytes += byteLength
         if (heldFrames > UPGRADE_HANDOFF_BUFFER_FRAMES || heldBytes > UPGRADE_HANDOFF_BUFFER_BYTES) {
           // Every held frame is a NEW-wire frame, so R2's discard-the-new-buffer-WHOLE rule applies
-          // to them as a set. Keeping a prefix instead would advance `trackSeq` past frames the
-          // recovery still has to replay, turning a recoverable overflow into permanent loss.
+          // to them as a set. `heldOverflow` is what enforces that: no frame is added after it, and
+          // the abort below ends the attempt before any replay, so no prefix can survive.
           heldOverflow = true
+          // Releases the buffered bytes NOW instead of at GC of this closure, which the probe
+          // socket keeps alive. Non-behavioural on purpose and therefore has no mutation killer —
+          // the abort already guarantees nothing here is ever replayed.
           pendingProbeFrames.length = 0
           // Where this LANDS is decided by where the abort is observed below — before emission it
           // is a pre-barrier failure, after it the sticky fallback. Neither is chosen here.
