@@ -1,8 +1,6 @@
-import { PGlite } from '@electric-sql/pglite'
 import { MySqlDialect } from 'drizzle-orm/mysql-core'
 import { drizzle as pgDrizzle } from 'drizzle-orm/node-postgres'
 import { drizzle as sqliteDrizzle } from 'drizzle-orm/node-sqlite'
-import { drizzle as pgliteDrizzle } from 'drizzle-orm/pglite'
 import { drizzle as pjDrizzle } from 'drizzle-orm/postgres-js'
 import { Client, Pool } from 'pg'
 import postgres from 'postgres'
