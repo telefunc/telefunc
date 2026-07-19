@@ -2,6 +2,7 @@ export { RoomStubChannel, bindParticipantStubChannel }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { ROOM_TAIL_ATTACH_TIMEOUT_MS } from '../constants.js'
 import type { ChannelPublishAck } from '../channel.js'
@@ -298,6 +299,14 @@ function bindParticipantStubChannel(
   participant: ServerLocalParticipant,
   publishShield?: ShieldValidator,
 ): void {
+  // A LocalParticipant is a single member's live seat: it forwards its inbox to exactly one holder
+  // (`_setForwarder`) and its holder's close ends the membership (`onClose → leave`). Binding a second
+  // client would silently overwrite the first's forwarder and let either close drop the shared seat.
+  // A member belongs to one holder: return a fresh `join()` per client, or a read-only view.
+  assertUsage(
+    !participant._isBound,
+    'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
+  )
   // A throwing request maps onto the channel's native ack status (see `roomAckError`) — identical to
   // the shared room stub. Every request here is ack-bearing, so a throw rejects the client's request.
   channel.setAckErrorEncoder((err) => roomAckError(err, reportRoomError))

@@ -22,7 +22,7 @@ import {
 } from '../constants.js'
 import { ACK_STATUS, TAG, decode, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import { Room, ServerRoom, type ServerLocalParticipant } from './server.js'
-import { RoomStubChannel } from './stubs.js'
+import { RoomStubChannel, bindParticipantStubChannel } from './stubs.js'
 import { ClientRoom } from './client.js'
 import { ServerChannel } from '../server/channel.js'
 import { createStreamingReplacer } from '../server/response/registry.js'
@@ -1816,6 +1816,16 @@ describe('room stub channel', () => {
     expect(ackFor(2)!.status).toBe(ACK_STATUS.OK) // the valid payload publishes
   })
 
+  it('refuses to bind one LocalParticipant to a second client', async () => {
+    const serverRoom = (await Room.create('bind-once')) as ServerRoom
+    const me = await serverRoom.join({ meta: { name: 'A' } })
+    // A participant is a single member's seat: its inbox forwards to one holder and that holder's
+    // close ends the membership. A second bind would silently overwrite the first's forwarder and let
+    // either close drop the shared seat — so it's rejected instead.
+    bindParticipantStubChannel(new ServerChannel(), me)
+    expect(() => bindParticipantStubChannel(new ServerChannel(), me)).toThrow(/already bound to a client/)
+  })
+
   it("the room replacer installs the room's auto-generated data shield onto the stub", async () => {
     const serverRoom = (await Room.create('shield-wiring')) as ServerRoom
     // The one wiring line under test: `roomReplacer` must lift `context.validators`' `data` verifier — the
@@ -2135,14 +2145,13 @@ describe('room stub channel', () => {
 
   it('a co-returned selfDelivery=false participant is bound onto its room stub at the source, in either serialization order', async () => {
     const serverRoom = (await Room.create('self-src-order')) as ServerRoom
-    const me = await serverRoom.join({ meta: { name: 'me' }, selfDelivery: false })
 
     // Whether the app returns { room, me } or { me, room }, the serializer converges on one drop-set:
     // the room's stub adopts the pass's set, the participant adds its id — order-independent by identity.
-    for (const value of [
-      { room: serverRoom, me },
-      { me, room: serverRoom },
-    ]) {
+    // A fresh member per pass: each response serializes its own seat (a participant binds to one client).
+    for (const order of ['room-first', 'me-first'] as const) {
+      const me = await serverRoom.join({ meta: { name: 'me' }, selfDelivery: false })
+      const value = order === 'room-first' ? { room: serverRoom, me } : { me, room: serverRoom }
       const registered: unknown[] = []
       const context = {
         createChannel: () => new ServerChannel(),

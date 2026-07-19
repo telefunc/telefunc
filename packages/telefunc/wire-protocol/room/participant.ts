@@ -64,6 +64,11 @@ abstract class ParticipantBase implements LocalParticipant {
     this._forwarder = forwarder
   }
 
+  /** @internal — already bound to a client holder (serialized once, via `bindParticipantStubChannel`)? */
+  get _isBound(): boolean {
+    return this._forwarder !== null
+  }
+
   constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
     this.id = id
     this._meta = meta
