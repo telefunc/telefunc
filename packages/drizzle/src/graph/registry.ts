@@ -72,11 +72,13 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
       if (current.size === 0) sinks.delete(key)
     }
   }
-  const router = createRouter({
-    notify: (key) => {
-      for (const notify of sinks.get(key) ?? []) notify()
-    },
-  })
+  /** Notify every subscriber of one identity. The router's per-batch pass and a graph's asynchronous
+   *  reseed cut both land here, so a cut reaches subscribers by the same route an ordinary invalidation
+   *  does rather than by advancing a counter nobody watches. */
+  const notifyIdentity = (key: string): void => {
+    for (const notify of sinks.get(key) ?? []) notify()
+  }
+  const router = createRouter({ notify: notifyIdentity })
   const instances = new Map<string, Entry>()
   const inflight = new Map<string, Promise<Entry>>()
 
@@ -149,7 +151,9 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
     // Register inputs with the router BEFORE the graph's seed reads (activate-before-read):
     // no event window can slip between the read and registration.
     router.register(routable)
-    graph = createLiveGraph(specOf(plan, request, config.maxStateRowsPerInput))
+    graph = createLiveGraph(
+      specOf(plan, request, config.maxStateRowsPerInput, () => notifyIdentity(request.instanceKey)),
+    )
     entry = {
       graph,
       routable,
@@ -172,11 +176,26 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
     async acquire(request) {
       const existing = instances.get(request.instanceKey)
       if (existing) {
-        // Blocks until the CURRENT seed cycle lands. That is the initial seed for a graph still warming,
-        // and a RESEED for one rebuilding its baseline after an image-less event — `ready()` is re-armed
-        // per cycle, so this cannot return early on a promise the previous cycle resolved.
-        await existing.graph.ready()
-        return attach(existing, request)
+        // A PROVISIONAL ref, taken BEFORE any await. Without it this waiter owns nothing: if the last
+        // channel lease closes while we are waiting, the sweep disposes the entry — destroying the graph
+        // and unregistering it from the router — and we would then mint a token on a removed graph and
+        // hand back a Live that can never be invalidated again. Same no-transient-zero rule as the
+        // token→lease redeem: the real token is minted before this is dropped.
+        existing.tokens++
+        try {
+          // Wait for the CURRENT cycle, then LOOK AGAIN. Reading `ready()` once is not enough: if the
+          // graph was live when we started, that promise is already resolved, and a coarse event can
+          // re-arm readiness for a reseed before our continuation runs — leaving us attached to a graph
+          // that is mid-rebuild while believing it precise. Re-checking after every await is what makes
+          // this generation-aware without a generation counter.
+          while (existing.graph.state() === 'seeding') await existing.graph.ready()
+          return attach(existing, request)
+        } finally {
+          existing.tokens-- // release the provisional; `attach` already took the real ref above
+          // Deliberately no sweep here. On the success path `attach` holds a token, so the count cannot
+          // be zero; on the throw path the entry is either still held by someone else or was already
+          // disposed by the release that raced us.
+        }
       }
 
       const pending = inflight.get(request.instanceKey)
@@ -204,7 +223,12 @@ function createRegistry(config: { maxStateRowsPerInput: number }): Registry {
 
 /** The live-graph spec for a compiled plan: coarse plans and RLS-gated stateful plans are
  *  born coarse; stateless plans are born live; other stateful plans seed. */
-function specOf(plan: GraphPlan, request: AcquireRequest, maxStateRows: number): Parameters<typeof createLiveGraph>[0] {
+function specOf(
+  plan: GraphPlan,
+  request: AcquireRequest,
+  maxStateRows: number,
+  notifyIdentity: () => void,
+): Parameters<typeof createLiveGraph>[0] {
   const base = { instanceKey: request.instanceKey, tables: request.tables }
   if (plan.coarse) return { kind: 'coarse', ...base }
   if (plan.stateless) return { kind: 'stateless', ...base, instantiate: () => plan.instantiate() }
@@ -215,5 +239,6 @@ function specOf(plan: GraphPlan, request: AcquireRequest, maxStateRows: number):
     executor: request.executor,
     maxStateRows,
     bornCoarse: request.rlsEnabled, // rls / 'unknown' → born coarse (never hydrates row state)
+    notifyIdentity, // the async reseed cut reaches subscribers through the same sinks the router uses
   }
 }

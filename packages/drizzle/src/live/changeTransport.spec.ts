@@ -122,3 +122,24 @@ describe('changeTransport — database identity, derived and frozen', () => {
     expect(transportFor(db)).toBe(defaultChangeTransport) // NOT the half-installed `chosen`
   })
 })
+
+// ── the no-backlog clause ────────────────────────────────────────────
+
+describe('changeTransport — the default delivers nothing published before a subscription existed', () => {
+  it('a payload published BEFORE subscribe never reaches that subscriber', async () => {
+    // The runtime depends on this: a live read's snapshot is taken after its subscription is admitted, so
+    // anything published earlier is already in the data it read. Replaying such a payload afterwards would
+    // apply it a SECOND time, and the first message from a publisher is indistinguishable from a legitimate
+    // one — there is no cheap detection, so the obligation is contractual. This pins that the transport we
+    // actually ship honours it; a store-and-forward adapter that does not is out of contract.
+    const transport = createInMemoryChangeTransport()
+    transport.publish('t', 'published-before-anyone-listened')
+
+    const heard: string[] = []
+    await transport.subscribe('t', (payload) => heard.push(payload))
+    expect(heard).toEqual([]) // no backlog
+
+    transport.publish('t', 'after')
+    expect(heard).toEqual(['after']) // …and it is genuinely delivering, so the emptiness above means something
+  })
+})

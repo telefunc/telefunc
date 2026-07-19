@@ -50,6 +50,14 @@ type LiveGraphSpec =
       maxStateRows: number
       /** rls (true / 'unknown') → born coarse (never hydrates row state). */
       bornCoarse?: boolean
+      /** Notify this identity's subscribers from OUTSIDE a routed batch.
+       *
+       *  Every other invalidation reaches subscribers because the router notifies each affected identity
+       *  after a synchronous `apply()`/`reseed()` reports it. A reseed's cut is asynchronous and belongs to
+       *  no batch, so nothing would carry it: `fire()` alone advances the sequence, which the read fence
+       *  reads but a subscriber never sees. The registry supplies this so the cut can reach the same sinks
+       *  the router does. */
+      notifyIdentity?: () => void
     }
 
 type LiveGraph = {
@@ -156,8 +164,21 @@ function createLiveGraph(spec: LiveGraphSpec): LiveGraph {
           // does not fire. During an INITIAL seed that is right: nobody is subscribed yet, and the reader is
           // covered by the redeem fence. During a RESEED it is not: subscribers exist, and a write that
           // committed after their refetch would be absorbed into the new baseline and never announced.
-          if (raced) fire()
+          //
+          // `fire()` alone is NOT enough here, and that distinction cost a review round: it advances the
+          // sequence the read fence consults, but subscribers are reached by the ROUTER's notify pass, and
+          // this cut runs asynchronously outside any routed batch. A test asserting the sequence therefore
+          // passes while no client is ever told. Hence the explicit identity notification.
+          // Resolve THIS cycle before notifying anyone. `notifyIdentity` runs subscriber callbacks, and a
+          // subscriber is free to cause another coarse event synchronously — which starts a new cycle and
+          // REBINDS `resolveSeed` to it. Notifying first would then resolve the new cycle's promise instead
+          // of this one: waiters on the finished cycle hang, and waiters on the running one are released
+          // early against a graph that is seeding again.
           resolveSeed()
+          if (raced) {
+            fire()
+            stateful.notifyIdentity?.()
+          }
         },
         onDemote() {
           demote()

@@ -281,12 +281,22 @@ function receive(db: object, state: SubscriptionState, payload: string): void {
   // rest of their lives. So instead the first message from an unknown origin is taken PRECISELY, and the
   // sequences below it are recorded as unaccounted-for (`unknownBelow`).
   //
-  // That bet is safe because of what the two possible cases are, and there is no third:
-  //   - those sequences were published BEFORE our subscription was admitted → the readiness barrier means
-  //     our snapshot was read after admission, so they are already IN the data. Nothing to apply.
-  //   - they were published AFTER admission → the adapter owes us at-least-once, so each one MUST still be
-  //     delivered. It arrives late and below the watermark, and THAT is the signal we coarsen on.
+  // That bet rests on the adapter contract's NO-BACKLOG clause (changeTransport.ts): a subscription only
+  // receives what was published after it was admitted. Given that, the sequences below the first one we see
+  // fall into exactly two cases:
+  //   - published BEFORE our admission → the readiness barrier means our snapshot was read after admission,
+  //     so they are already IN the data, and they will never be delivered to us. Nothing to apply.
+  //   - published AFTER admission → the adapter owes us at-least-once, so each one MUST still be delivered.
+  //     It arrives late and below the watermark, and THAT is the signal we coarsen on.
   // A reorder is therefore always eventually observable, so we can wait for proof instead of guessing.
+  //
+  // A REPLAY/BACKLOG transport breaks this, which is why the clause is written down rather than assumed: a
+  // pre-admission payload delivered after admission is already in the snapshot, and taking it as the
+  // baseline would apply it a second time. It is indistinguishable from a legitimate first message — an
+  // unknown origin's opening sequence looks the same either way — so there is no cheap runtime detection to
+  // fall back on, and the obligation is carried by the contract and pinned against the shipped default
+  // transport instead. (Once an origin HAS a watermark, a late pre-admission payload is a straggler and
+  // coarsens like any other; only the very first message from an origin is exposed.)
   //
   // The cost of a wrong bet, stated honestly: between the precise baseline and the straggler's arrival, a
   // precise graph is serving a result that is missing one delta — briefly INCORRECT BY OMISSION, not merely
@@ -320,6 +330,12 @@ function receive(db: object, state: SubscriptionState, payload: string): void {
   if ('coarseAll' in envelope) {
     // A mutation whose touched tables are unknowable happened on ANOTHER instance: coarsen every table WE
     // watch. Sound over-fire; never a fabricated row.
+    //
+    // This also CLOSES any outstanding baseline bet. Coarsening rebuilds every watched graph from the
+    // database, which accounts for every lower sequence as surely as a gap does — so a later straggler must
+    // not trigger a second one. Leaving the bet open would buy a redundant reseed at best, and at worst a
+    // terminal demotion, if that straggler landed while this reseed was still in flight.
+    state.seen.get(envelope.origin)!.unknownBelow = 0
     coarsenWatched(db)
     return
   }

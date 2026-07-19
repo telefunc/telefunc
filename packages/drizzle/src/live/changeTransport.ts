@@ -54,6 +54,13 @@ import { randomUUID } from 'node:crypto'
  *    contract used to demand at-most-once and say nothing about order — which was the wrong way round, since
  *    an adapter obeying it to the letter could still deliver update B before update A and corrupt a precise
  *    graph exactly as a duplicate would.
+ *  - **NO BACKLOG: a subscription receives only what was published AFTER its `subscribe()` resolved.**
+ *    Store-and-forward and replay-from-offset transports are unsupported. This is ordinary pub/sub semantics
+ *    — in-process and Redis both behave this way — and the runtime depends on it: a live read's snapshot is
+ *    taken after admission, so anything published before that is ALREADY in the data it read. Replaying such
+ *    a payload afterwards would apply it a second time, and the first message from a publisher is
+ *    indistinguishable from a legitimate one, so the runtime cannot detect it and fail closed. (An earlier
+ *    version of this contract relied on the same property without writing it down.)
  *
  * `publish()` may return a promise (real clients publish asynchronously). It is NOT awaited by the write
  * that produced it — the database has already committed by then — but a rejection is reported rather than

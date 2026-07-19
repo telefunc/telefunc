@@ -473,3 +473,31 @@ describe('write transport — the runtime, not the adapter, owns duplicate and o
     expect(preciseCalls(ingest)).toHaveLength(1)
   })
 })
+
+// A first-unknown envelope that is COARSE-ALL closes the baseline bet as surely as a gap does: coarsening
+// rebuilds every watched graph from the database, so every lower sequence is accounted for. Leaving the bet
+// open buys a redundant second reseed — or, if the straggler lands while the first is still running, the
+// storm guard turns a recoverable event into a terminal demotion.
+describe('write transport — a first-unknown coarse-all closes the bet', () => {
+  it('a later straggler does NOT trigger a second coarsening', async () => {
+    const { transport, dbA, dbB } = await twoInstances()
+    const captured: string[] = []
+    await transport.subscribe(changeTopicFor(dbA), (payload) => captured.push(payload))
+    publishBatch(dbA, { changes: [change('users')] }) // seq 1
+    publishCoarseAll(dbA) // seq 2
+    await flush()
+
+    const receiver = { $client: (dbB as { $client: object }).$client }
+    setChangeTransport(receiver, transport)
+    await acquireSubscription(receiver)
+    registryFor(receiver).router.register(watching('users'))
+    const ingest = vi.fn()
+    engine.perDb.set(receiver, ingest)
+
+    transport.publish(changeTopicFor(receiver), captured[1]!) // seq 2, coarse-all, first thing seen
+    expect(ingest).toHaveBeenCalledTimes(1) // the coarse-all itself
+
+    transport.publish(changeTopicFor(receiver), captured[0]!) // seq 1 straggles in — already covered
+    expect(ingest).toHaveBeenCalledTimes(1) // …no redundant second coarsening
+  })
+})
