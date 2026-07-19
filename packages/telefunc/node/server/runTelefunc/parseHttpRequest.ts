@@ -178,8 +178,12 @@ async function readBody(
       consumeFile: (i, s) => reader.consumeFile(i, s),
     }
   }
+  // Text request: no files, one JSON envelope. Read it size-capped (like the binary metadata) rather than
+  // an unbounded `request.text()` — the message limit is documented to cover telefunction envelopes too.
+  const source = readable ?? request.body
+  assert(source)
   return {
-    text: await request.text(),
+    text: await new StreamReader(source, messageLimit).readAllText(),
     registerFile: () => {},
     consumeFile: () =>
       new ReadableStream<Uint8Array<ArrayBuffer>>({

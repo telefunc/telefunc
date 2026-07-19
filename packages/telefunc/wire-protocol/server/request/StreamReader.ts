@@ -52,6 +52,35 @@ class StreamReader {
     return new TextDecoder().decode(await this.readExact(length))
   }
 
+  /** Read the whole body as UTF-8 text, rejecting once more than `maxFrameBytes` have arrived. For an
+   *  un-framed body (a plain text RPC envelope, which carries no length prefix) the bound is enforced as
+   *  bytes accumulate — the text twin of `assertDeclaredLength`, so a text request is capped like a binary one. */
+  async readAllText(): Promise<string> {
+    const chunks: Uint8Array<ArrayBuffer>[] = []
+    let total = 0
+    if (this.buffer.length > 0) {
+      chunks.push(this.buffer)
+      total = this.buffer.length
+      this.buffer = EMPTY
+    }
+    for (;;) {
+      const chunk = await this.pullChunk()
+      if (chunk === null) break
+      total += chunk.length
+      if (total > this.maxFrameBytes)
+        throw new Error(`Request body exceeds the per-message limit of ${this.maxFrameBytes} bytes`)
+      chunks.push(chunk)
+    }
+    if (chunks.length === 1) return new TextDecoder().decode(chunks[0])
+    const all = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      all.set(chunk, offset)
+      offset += chunk.length
+    }
+    return new TextDecoder().decode(all)
+  }
+
   /** Read one length-prefixed chunk, or null if the stream is cleanly exhausted. */
   async readLengthPrefixedBytesOrNull() {
     const lengthBytes = await this.readExactOrNull(4)
