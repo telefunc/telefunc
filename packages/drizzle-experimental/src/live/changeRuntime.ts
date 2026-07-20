@@ -309,21 +309,38 @@ function isThenable(value: void | Promise<void>): value is Promise<void> {
  *  was minted for, or the channel lease that token redeemed into. */
 type SubscriptionRef = { release(): void }
 
-/** What the runtime knows about a db's presence on the change topic: how many owners want it, the live
- *  handle if there is one, the chain that serializes every transition between those two facts — and any
- *  handle whose detachment FAILED, whose listener is therefore of unknown status. */
+/** WHAT THIS DB'S LISTENER IS. Three states, each carrying exactly the handle that state needs — so the
+ *  combination that means nothing (a subscription we intend to keep AND one whose detachment we could not
+ *  confirm, at the same time) cannot be written down at all.
+ *
+ *  It says what IS, not what is happening. Subscribing and detaching are the interior of a single `step`
+ *  call, and `settling` already answers "is a transition in flight" — for any number of them at once. */
+type ListenerState =
+  /** Nothing attached, nothing owed. */
+  | { phase: 'idle' }
+  /** Attached, and we intend to keep it — the handle we will detach when the last ref goes. */
+  | { phase: 'live'; subscription: ChangeSubscription }
+  /** A subscription we asked to detach and could not confirm, so its listener's status is UNKNOWN. Until it
+   *  is confirmed gone, subscribing again could put a second listener alongside one that never left — so
+   *  this state blocks every new subscribe. */
+  | { phase: 'detach-failed'; undetached: ChangeSubscription }
+
+/** What the runtime knows about a db's presence on the change topic: how many owners want it, what its
+ *  listener currently is, and the chain that serializes every transition between those two facts. */
 type SubscriptionState = {
   refs: number
-  active: ChangeSubscription | undefined
+  listener: ListenerState
   /** Per publishing origin, the ordering position this db has reached — see changeSequence.ts. Cleared on
    *  detach, which both discards state that is stale and bounds what a long-lived process accumulates. */
   seen: Map<string, OriginSequence>
-  /** A subscription we asked to detach and could not confirm. Until it is confirmed gone, subscribing again
-   *  could put a second listener alongside one that never left — so this blocks every new subscribe. */
-  undetached: ChangeSubscription | undefined
   transition: Promise<void>
-  /** Transitions started and not yet settled. `active` is cleared BEFORE its detach is awaited, so without
-   *  this a db mid-detach would look identical to one that had finished detaching. */
+  /** Transitions started and not yet settled. NOT a phase: `reconcile` increments it synchronously before
+   *  chaining, so two concurrent live reads reach 2 before either has yielded, and a single phase value
+   *  cannot say "two transitions queued". Nor could one be assigned at that point — `step` branches on the
+   *  refcount AS IT STANDS WHEN IT RUNS, so a transition queued while refs > 0 can still end up detaching.
+   *
+   *  It is also what makes mid-detach legible: the listener goes `idle` BEFORE its detach is awaited, so
+   *  without this a db mid-detach would look identical to one that had finished detaching. */
   settling: number
 }
 
@@ -336,9 +353,8 @@ function stateFor(db: object): SubscriptionState {
       db,
       (state = {
         refs: 0,
-        active: undefined,
+        listener: { phase: 'idle' },
         seen: new Map(),
-        undetached: undefined,
         transition: Promise.resolve(),
         settling: 0,
       }),
@@ -400,12 +416,17 @@ function reconcile(db: object, state: SubscriptionState): Promise<void> {
  *  could not confirm, and no transition is still in flight. That is the only boundary at which the db's
  *  change transport can be swapped without stranding a listener or a readiness proof — see
  *  `configureChangeRuntime`. It is also the point at which `seen` is provably empty (a confirmed detach
- *  clears it, and a failed one leaves `undetached` set), so a rotated-in transport cannot inherit a stale
- *  sequence baseline and drop a live message as a duplicate. */
+ *  clears it, and a failed one leaves the listener in `detach-failed`), so a rotated-in transport cannot
+ *  inherit a stale sequence baseline and drop a live message as a duplicate.
+ *
+ *  Three conjuncts, deliberately: `refs` is what is WANTED, the listener phase is what IS, and `settling` is
+ *  whether the two are still being reconciled. They agree in every state a caller can reach — a db with refs
+ *  outstanding is either already `live` or still settling — so the refcount alone never decides an answer.
+ *  It is stated anyway because the predicate's job is that all three hold, not that the reachable ones do. */
 function isQuiescent(db: object): boolean {
   const state = subscriptions.get(db)
   if (!state) return true // never had a live read at all
-  return state.refs === 0 && !state.active && !state.undetached && state.settling === 0
+  return state.refs === 0 && state.listener.phase === 'idle' && state.settling === 0
 }
 
 /** One transition toward the desired state. Anything that changed the refcount during an await has already
@@ -415,19 +436,22 @@ async function step(db: object, state: SubscriptionState): Promise<void> {
   // attached; subscribing now would leave two listeners on one topic and apply the next precise batch TWICE.
   // Retry the detach first (the contract requires unsubscribe to be idempotent) and let a still-failing one
   // throw — which rejects the live read waiting on it, rather than admitting one onto a doubled listener.
-  if (state.undetached) {
-    await state.undetached.unsubscribe()
-    state.undetached = undefined
+  if (state.listener.phase === 'detach-failed') {
+    await state.listener.undetached.unsubscribe()
+    state.listener = { phase: 'idle' }
   }
-  if (state.refs > 0 && !state.active) {
-    state.active = await transportFor(db).subscribe(changeTopicFor(db), (payload) => receive(db, state, payload))
+  if (state.refs > 0 && state.listener.phase === 'idle') {
+    const subscription = await transportFor(db).subscribe(changeTopicFor(db), (payload) => receive(db, state, payload))
+    state.listener = { phase: 'live', subscription }
     return
   }
-  if (state.refs === 0 && state.active) {
-    const active = state.active
-    state.active = undefined // `active` means a subscription we intend to keep; from here we are letting go of it
+  if (state.refs === 0 && state.listener.phase === 'live') {
+    const { subscription } = state.listener
+    // `live` is a subscription we intend to KEEP, and from here we are letting go of it. Cleared BEFORE the
+    // detach is awaited, which is why `settling` and not the phase is what says "mid-transition".
+    state.listener = { phase: 'idle' }
     try {
-      await active.unsubscribe()
+      await subscription.unsubscribe()
       // Detached: we are no longer following anyone's stream, so the per-origin sequence state is stale.
       // Dropping it also bounds it — a long-lived process does not accumulate an entry per peer that ever
       // restarted. Re-subscribing then sees every origin as FIRST-SEEN, which the automaton takes precisely
@@ -436,7 +460,8 @@ async function step(db: object, state: SubscriptionState): Promise<void> {
       // is dropped as a duplicate: a silent missed invalidation rather than an over-fire.
       state.seen.clear()
     } catch (error) {
-      state.undetached = active // its listener's status is now UNKNOWN — block subscribing until it is not
+      // Its listener's status is now UNKNOWN — this phase blocks subscribing until it is not.
+      state.listener = { phase: 'detach-failed', undetached: subscription }
       throw error
     }
   }
