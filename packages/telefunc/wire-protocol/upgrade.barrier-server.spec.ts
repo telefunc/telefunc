@@ -622,11 +622,18 @@ describe('a malformed reconcile dies end-to-end, and takes only its sender with 
 describe('only the commit continuation may release a committing stage', () => {
   const ordinaryClaim = (sessionId: string) => reconcileFrame({ sessionId, open: [{ id: 'A', ix: 0, lastSeq: 1 }] })
 
-  test('a concurrent claim on the old session lands mid-commit and does not strand it', async () => {
+  test('a concurrent claim on the old session lands mid-commit and loses to the barrier', async () => {
     // SOL's reproduced merge blocker. The claim is delivered on a THIRD wire while the barrier's
     // continuation is suspended, so `releaseStagesForReconcile` reaches a `committing` stage.
+    //
+    // K1 stopped the claim from RELEASING that stage. It did not stop the claim from proceeding into
+    // `reconcile` and rotating the very session the barrier is committing: two rotations of one
+    // session, and `attachChannel` overwrites the channel's single outbound peer. Both sides then
+    // report success while the channel's two directions live on DIFFERENT wires — C2S over the
+    // committed probe via its own session map, S2C over whichever claimant attached last. Asserting
+    // only that each side got its reconciled is exactly what let that pass.
     const h = (harness = createMuxHarness())
-    const { s0 } = await connectSse(h)
+    const { chA, s0 } = await connectSse(h)
     await h.ws.deliver(prepare(s0))
 
     const commit = h.sse.deliver(barrier(s0)) // deliberately un-awaited: the continuation is in flight
@@ -635,13 +642,26 @@ describe('only the commit continuation may release a committing stage', () => {
     await Promise.all([commit, claim])
 
     expect(h.ws.terminated()).toBe(false) // ← the probe survives the claim
-    const committed = reconciledOn(h.ws)
-    expect(committed).toHaveLength(1) // ← COMMITTED reached a LIVE probe
+    expect(reconciledOn(h.ws)).toHaveLength(1) // ← COMMITTED reached a LIVE probe
     expect(h.ws.sessionId()).toBeTypeOf('string')
     // The continuation is the sole releaser, and it did release: no stage leaks past the commit.
     expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
-    // The claim is not collateral either — it is ordinary traffic and must complete on its own wire.
-    expect(reconciledOn(sse2)).toHaveLength(1)
+
+    // ONE WINNER. A committing barrier owns that session until it settles, so the late claim is
+    // refused and costs its author its own wire — one extra reconnect, against a channel whose two
+    // directions would otherwise be permanently split.
+    expect(sse2.terminated()).toBe(true)
+    expect(reconciledOn(sse2)).toHaveLength(0)
+
+    // BOTH DIRECTIONS, over the SAME wire. This is the assertion the old row lacked, and the only
+    // one that can see a split: a reconciled count per wire is satisfied by either outcome.
+    await h.ws.deliver(textFrame(0, 9, 4_242)) // C2S: the probe's session routes to the real listener
+    expect(chA.received.at(-1)).toBe(4_242)
+    const wsSentBefore = h.ws.sent.length
+    const sse2SentBefore = sse2.sent.length
+    void chA.channel.send(1_313 as never) // S2C: the channel's outbound peer must be that same probe
+    expect(h.ws.sent.length).toBe(wsSentBefore + 1)
+    expect(sse2.sent.length).toBe(sse2SentBefore)
   })
 
   test('the stage TTL handler refuses a committing stage', async () => {

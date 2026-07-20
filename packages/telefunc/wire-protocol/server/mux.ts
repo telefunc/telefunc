@@ -489,12 +489,28 @@ class ChannelMux {
    *  leak until the TTL, since close cleanup looks up the wire's NEW id.
    *
    *  A reconcile naming NO session is deliberately not covered: it destroys nothing, and releasing
-   *  there would abort a healthy upgrade whenever an unrelated connection attached by channel id. */
+   *  there would abort a healthy upgrade whenever an unrelated connection attached by channel id.
+   *
+   *  ⚠️ A `committing` stage is not released here but REFUSES the reconcile outright, and that is a
+   *  precondition on the turn rather than a cleanup: a barrier that has passed its linearization
+   *  point OWNS the session it is committing until it settles. `abandonStage` already declines to
+   *  release such a stage — but declining to release it is not the same as declining to ROTATE it,
+   *  and rotation was what did the damage. Two reconciles against one session both succeed, and
+   *  `attachChannel` overwrites the channel's single outbound peer: C2S then routes over the
+   *  committed probe via its own session map while S2C answers on the claimant's wire. Nothing
+   *  reports an error and the channel is half-dead until it is closed.
+   *
+   *  Refusing costs the late claimant its wire and one reconnect, by which time the commit has
+   *  settled — the window is a bounded microtask chain, since a barrier refuses `initial: true` and
+   *  so the commit can never park. Symmetric to the staged-probe guard in `handleFrame`: both say a
+   *  wire involved in an upgrade may not be spoken to as though it were not. */
   private releaseStagesForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: unknown): void {
     for (const doomed of [ctrl.sessionId, entry.transport.getSessionId(connection)]) {
       if (doomed === undefined) continue
       const staleProbe = this.stagedByPrevSession.get(doomed)
-      if (staleProbe !== undefined) this.abandonStage(staleProbe)
+      if (staleProbe === undefined) continue
+      if (this.stagedUpgrades.get(staleProbe)?.phase === 'committing') throw new ProtocolViolationError()
+      this.abandonStage(staleProbe)
     }
   }
 
