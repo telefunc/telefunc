@@ -13,6 +13,7 @@ import { ReplayBuffer } from './replay-buffer.js'
 import { CHANNEL_SERVER_REPLAY_BUFFER_BYTES } from './constants.js'
 import { TAG, decode, encode } from './shared-ws.js'
 import { createMuxHarness, prepareFrame, reconcileFrame, settle, textFrame } from './upgrade-mux-harness.js'
+import { connectSse } from './upgrade-spec-helpers.js'
 import { createUpgradeHarness, waitUntil, type UpgradeHarness } from './upgrade-client-harness.js'
 
 // PC1 — a C2S frame in flight on the old wire, lost once the upgrade rotated the session:
@@ -27,18 +28,6 @@ afterEach(() => {
   muxHarness?.dispose()
   muxHarness = null
 })
-
-async function connectSse(h: ReturnType<typeof createMuxHarness>) {
-  const chA = h.registerChannel('A')
-  await h.sse.deliver(reconcileFrame({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
-  const s0 = h.sse.sessionId()
-  expect(s0).toBeTypeOf('string')
-  // Sentinel: this wire delivers. Without it every "not received" assertion below would pass just as
-  // happily against a listener that was never wired up.
-  await h.sse.deliver(textFrame(0, 1, 111))
-  expect(chA.received).toEqual([111])
-  return { chA, s0: s0! }
-}
 
 describe('PC1 — an old-wire C2S frame in flight at commit time', () => {
   // The instrument that can disagree, at the exact assertion site the flip below uses. Same wire,

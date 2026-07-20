@@ -41,6 +41,7 @@ import {
   textFrame,
 } from './upgrade-mux-harness.js'
 import { createUpgradeHarness, waitUntil, type UpgradeHarness } from './upgrade-client-harness.js'
+import { EMPTY_STAGE, connectSecondSse, connectSse, makeSentinel, type Harness } from './upgrade-spec-helpers.js'
 import { getChannelMux } from './server/mux.js'
 import { OversizeFrameError, StreamReader } from './server/request/StreamReader.js'
 import { handleSseChannelRequest } from './server/sse.js'
@@ -62,43 +63,22 @@ import {
   WIRE_MAX_RECV_BACKLOG_FRAMES,
 } from './constants.js'
 
-type Harness = ReturnType<typeof createMuxHarness>
-
 let harness: Harness | null = null
 let clientHarness: UpgradeHarness | null = null
+const sentinel = makeSentinel(6_000, 7_000)
 afterEach(() => {
   harness?.dispose()
   harness = null
   clientHarness?.dispose()
   clientHarness = null
   disposeGlobalChannels()
-})
-
-const EMPTY_STAGE = { records: 0, reverseRecords: 0, bytes: 0 }
-
-async function connectSse(h: Harness) {
-  const chA = h.registerChannel('A')
-  await h.sse.deliver(reconcileFrame({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
-  const s0 = h.sse.sessionId()
-  expect(s0).toBeTypeOf('string')
-  await h.sse.deliver(textFrame(0, 1, 111))
-  expect(chA.received).toEqual([111])
-  return { chA, s0: s0! }
-}
-
-let sentinelSeq = 6_000
-let sentinelValue = 7_000
-afterEach(() => {
-  sentinelSeq = 6_000
-  sentinelValue = 7_000
+  sentinel.reset()
 })
 
 /** The independent oracle: the OTHER connection is untouched and still delivering. */
 async function expectSentinelAlive(h: Harness, chA: { received: number[] }) {
   expect(h.sse.terminated()).toBe(false)
-  const value = ++sentinelValue
-  await h.sse.deliver(textFrame(0, ++sentinelSeq, value))
-  expect(chA.received.at(-1)).toBe(value)
+  await sentinel.expectDelivers(h.sse, chA)
 }
 
 /** The full over-limit oracle for an admission row. */

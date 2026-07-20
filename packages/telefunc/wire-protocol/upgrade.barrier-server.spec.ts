@@ -33,67 +33,35 @@ import {
   settle,
   textFrame,
 } from './upgrade-mux-harness.js'
+import {
+  EMPTY_STAGE,
+  barrier,
+  connectSecondSse,
+  connectSse,
+  finsOn,
+  makeSentinel,
+  prepare,
+  readysOn,
+  reconciledOn,
+  type Harness,
+  type HarnessWire,
+} from './upgrade-spec-helpers.js'
 import { handleSseChannelRequest } from './server/sse.js'
 import { encodeSseRequestMetadata } from './sse-request.js'
 import { UPGRADE_STAGE_TTL_MS } from './constants.js'
 import { TAG, encode, type DecodedFrame } from './shared-ws.js'
 
-type Harness = ReturnType<typeof createMuxHarness>
-type HarnessWire = Harness['sse']
-
 let harness: Harness | null = null
-let sentinelSeq = 5_000
-let sentinelValue = 9_000
+const sentinel = makeSentinel(5_000, 9_000)
 afterEach(() => {
   harness?.dispose()
   harness = null
   disposeGlobalChannels()
   vi.useRealTimers()
-  sentinelSeq = 5_000
-  sentinelValue = 9_000
+  sentinel.reset()
 })
 
-const EMPTY_STAGE = { records: 0, reverseRecords: 0, bytes: 0 }
-
-async function connectSse(h: ReturnType<typeof createMuxHarness>) {
-  const chA = h.registerChannel('A')
-  await h.sse.deliver(reconcileFrame({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
-  const s0 = h.sse.sessionId()
-  expect(s0).toBeTypeOf('string')
-  await h.sse.deliver(textFrame(0, 1, 111))
-  expect(chA.received).toEqual([111]) // sentinel: this wire delivers
-  return { chA, s0: s0! }
-}
-
-/** A second, fully independent SSE connection with its own session. */
-async function connectSecondSse(h: ReturnType<typeof createMuxHarness>) {
-  const sse2 = h.makeWire('sse-conn-2')
-  h.registerChannel('B')
-  await sse2.deliver(reconcileFrame({ open: [{ id: 'B', ix: 0, lastSeq: 0, initial: true }] }))
-  expect(sse2.sessionId()).toBeTypeOf('string')
-  return sse2
-}
-
-const prepare = (sessionId: string, upgradeId = 'upg-1') => prepareFrame({ upgradeId, sessionId })
-
-/** The old wire's FINAL frame: authoritative membership plus barrier-fresh cursors. */
-const barrier = (sessionId: string, upgradeId = 'upg-1', lastSeq = 1) =>
-  reconcileFrame({ sessionId, barrier: true, upgradeId, open: [{ id: 'A', ix: 0, lastSeq }] })
-
-const reconciledOn = (wire: { sent: readonly DecodedFrame[] }) => wire.sent.filter((f) => f.tag === TAG.RECONCILED)
-const finsOn = (wire: { sent: readonly DecodedFrame[] }) => wire.sent.filter((f) => f.tag === TAG.FIN)
-const readysOn = (wire: { sent: readonly DecodedFrame[] }) => wire.sent.filter((f) => f.tag === TAG.READY)
-
-/** Seqs well clear of every in-test frame, so a sentinel can never be dropped as a duplicate by the
- *  channel's `_lastClientSeq` dedup and misread as a routing failure. */
-async function expectWireDelivers(
-  wire: { deliver: (f: Uint8Array<ArrayBuffer>) => Promise<void> },
-  chA: { received: number[] },
-) {
-  const value = ++sentinelValue
-  await wire.deliver(textFrame(0, ++sentinelSeq, value))
-  expect(chA.received.at(-1)).toBe(value)
-}
+const expectWireDelivers = sentinel.expectDelivers
 
 describe('PREPARE stages, and staging alone is inert', () => {
   test('a valid PREPARE answers READY echoing the upgradeId, with no side effect on the old session', async () => {
