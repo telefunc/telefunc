@@ -130,6 +130,22 @@ describe('PREPARE stages, and staging alone is inert', () => {
     await expectWireDelivers(h.sse, chA)
   })
 
+  test('a PREPARE naming a session the server does not hold is refused [B4]', async () => {
+    // Staging is otherwise willing to pin memory and a socket against any string a client invents:
+    // the session id is only ever compared for EQUALITY, at barrier time, so a junk one produces a
+    // record that can never commit and is reaped only by its TTL. Refusing at admission costs the
+    // legitimate client nothing — it names a session the server just minted for it.
+    const h = (harness = createMuxHarness())
+    const { chA } = await connectSse(h)
+
+    await h.ws.deliver(prepare('no-such-session'))
+
+    expect(readysOn(h.ws)).toHaveLength(0)
+    expect(h.ws.terminated()).toBe(true)
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+    await expectWireDelivers(h.sse, chA)
+  })
+
   test('a second PREPARE on the same probe wire is a violation — never a re-stage', async () => {
     // Without the guard the stage is silently re-installed (leaking the first timer) and a SECOND
     // READY goes out, so the client could act on an attempt the server re-keyed underneath it.
@@ -465,84 +481,47 @@ describe('refusal — two checks for two distinct defects, and neither substitut
   })
 })
 
-// `decode` only CASTS the JSON it parsed, so `ReconcilePayload`'s union — either both barrier legs
-// absent, or `barrier === true` with a string `upgradeId` — buys nothing at runtime unless the
-// dispatch seam enforces it. Truthiness-testing `barrier` left two openings, and they are opposite
-// in kind: a truthy non-`true` value COMMITS an upgrade, while a falsy-but-present one falls through
-// to the ordinary path, where `releaseStagesForReconcile` kills the stage and `reconcile` performs a
-// destructive session rotation. A malformed barrier-shaped frame must reach neither.
-//
-// Every row asserts the same three things, because a check that produced only one of them would be
-// half a fix: the sender's own wire dies, the old session is NOT rotated, and the stage survives
-// intact for the legitimate attempt still in flight.
-describe('the barrier discriminant is a shape, not a truthiness test', () => {
-  /** A RECONCILE carrying whatever the caller says. The typed helper cannot express these shapes —
-   *  which is precisely why nothing but a runtime check can stop them. */
-  const hostileReconcile = (payload: Record<string, unknown>) =>
-    reconcileFrame(payload as unknown as Parameters<typeof reconcileFrame>[0])
-
-  const open = [{ id: 'A', ix: 0, lastSeq: 1 }]
-
-  async function stagedConnection() {
+// The hostile-SHAPE table lives at the decode seam (`upgrade.wire-codec.spec.ts`), where the refusal
+// now happens. What has to be gated HERE is the end-to-end consequence the shape table cannot see:
+// that a refused frame really kills a wire, that it kills the RIGHT one, and that nothing it touched
+// on the way is left rotated or released.
+describe('a malformed reconcile dies end-to-end, and takes only its sender with it', () => {
+  test('a barrier-shaped frame that fails the seam costs its sender the wire and nothing else', async () => {
     const h = (harness = createMuxHarness())
     const { chA, s0 } = await connectSse(h)
     await h.ws.deliver(prepare(s0, 'upg-1'))
     expect(h.mux._getUpgradeResourceSnapshot()).toMatchObject({ records: 1 })
-    return { h, chA, s0 }
-  }
 
-  function expectRefused(h: ReturnType<typeof createMuxHarness>, s0: string) {
+    // `barrier: false` with a valid upgradeId: the shape that used to fall through to the ordinary
+    // path and rotate the session destructively. One representative is enough — the seam refuses the
+    // whole family identically, and the codec table is what enumerates it.
+    await h.sse.deliver(
+      reconcileFrame({
+        sessionId: s0,
+        barrier: false,
+        upgradeId: 'upg-1',
+        open: [{ id: 'A', ix: 0, lastSeq: 1 }],
+      } as unknown as Parameters<typeof reconcileFrame>[0]),
+    )
+
     expect(h.sse.terminated()).toBe(true) // the malformed frame costs its SENDER the wire
     expect(h.sse.sessionId()).toBe(s0) // ← no rotation: it never reached `reconcile`
     expect(reconciledOn(h.ws)).toHaveLength(0) // ← and no commit
     expect(finsOn(h.sse)).toHaveLength(0)
+    expect(h.ws.terminated()).toBe(false) // ← the staged probe is not collateral
     expect(h.mux._getUpgradeResourceSnapshot()).toMatchObject({ records: 1 }) // the stage survives
-  }
-
-  test('barrier:false with an otherwise valid upgradeId does not fall through to ordinary rotation', async () => {
-    const { h, s0 } = await stagedConnection()
-
-    await h.sse.deliver(hostileReconcile({ sessionId: s0, barrier: false, upgradeId: 'upg-1', open }))
-
-    expectRefused(h, s0)
-  })
-
-  test('barrier:"yes" with a matching upgradeId does not commit', async () => {
-    const { h, s0 } = await stagedConnection()
-
-    await h.sse.deliver(hostileReconcile({ sessionId: s0, barrier: 'yes', upgradeId: 'upg-1', open }))
-
-    expectRefused(h, s0)
-  })
-
-  test('an orphaned upgradeId with no barrier leg is not ordinary traffic', async () => {
-    const { h, s0 } = await stagedConnection()
-
-    await h.sse.deliver(hostileReconcile({ sessionId: s0, upgradeId: 'upg-1', open }))
-
-    expectRefused(h, s0)
-  })
-
-  test('barrier:true without a string upgradeId dies on the SENDER, not on the probe', async () => {
-    // The one row whose outcome MOVES rather than flips. Today it reaches `handleBarrier`, fails the
-    // id equality, and retargets the kill to the probe — the right victim for a well-formed barrier
-    // the server refuses, and the wrong one for a frame that never satisfied the wire contract at
-    // all. Screened at the seam, the sender pays and the probe is left for its own deadline.
-    const { h, s0 } = await stagedConnection()
-
-    await h.sse.deliver(hostileReconcile({ sessionId: s0, barrier: true, open }))
-
-    expectRefused(h, s0)
-    expect(h.ws.terminated()).toBe(false)
+    void chA
   })
 
   test('control: the well-formed shapes on either side of the check still take their own path', async () => {
-    // Without this the four rows above are satisfied just as well by a seam that rejects EVERY
-    // reconcile. Both legal shapes run here, in sequence, on the same connection: an ordinary
-    // reconcile rotates, and a real barrier commits.
-    const { h, s0 } = await stagedConnection()
+    // Without this the row above is satisfied just as well by a seam that rejects EVERY reconcile.
+    // Both legal shapes run here, in sequence, on the same connection: an ordinary reconcile
+    // rotates, and a real barrier commits.
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0, 'upg-1'))
 
-    await h.sse.deliver(reconcileFrame({ sessionId: s0, open })) // ordinary: rotates, releases the stage
+    await h.sse.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
     const s1 = h.sse.sessionId()
     expect(s1).not.toBe(s0)
     expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)

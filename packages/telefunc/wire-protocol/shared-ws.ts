@@ -3,6 +3,8 @@ export {
   ACK_STATUS,
   encode,
   decode,
+  decodeClientFrame,
+  ProtocolViolationError,
   isChannelCtrlTag,
   isChannelDataFrame,
   isConnCtrlTag,
@@ -485,6 +487,84 @@ function decode(frame: Uint8Array): DecodedFrame {
     default:
       assert(false, `Unknown wire frame tag ${tag}`)
   }
+}
+
+// ===== The client→server decode seam =====
+
+/** A client frame that violated the wire contract. `target` names the wire to terminate when it is
+ *  not the one the frame arrived on — a barrier is the one case: the staged probe is at fault, and
+ *  the old wire whose chain merely hosted the turn must not pay for it. */
+class ProtocolViolationError extends Error {
+  constructor(readonly target?: unknown) {
+    super()
+  }
+}
+
+/** Tags only a server may send. A client sending one is talking a protocol we do not speak. */
+const SERVER_ONLY_TAGS: ReadonlySet<number> = new Set([
+  TAG.PONG,
+  TAG.FIN,
+  TAG.RECONCILED,
+  TAG.READY,
+  TAG.STREAM_REQUEST_OPEN_ACK,
+])
+
+/**
+ * The single gate every inbound client frame crosses. Shape lives here, policy lives in the mux.
+ *
+ * `decode` casts JSON payloads without inspecting them, so past this point the mux's certified code
+ * would otherwise be reading untrusted objects — which is what makes the caller's narrowed catch
+ * sound: with shape guaranteed here, a `TypeError` downstream is a telefunc bug rather than a
+ * client's malformed frame, and the two deserve opposite responses.
+ */
+function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxPrepareBytes: number): DecodedFrame {
+  // Pre-parse, so this bounds what the decoder is asked to allocate rather than what survives it.
+  if (raw[0] === TAG.PREPARE && raw.byteLength > maxPrepareBytes) throw new ProtocolViolationError()
+  let frame: DecodedFrame
+  try {
+    frame = decode(raw)
+  } catch {
+    throw new ProtocolViolationError()
+  }
+  if (SERVER_ONLY_TAGS.has(frame.tag)) throw new ProtocolViolationError()
+  if (frame.tag === TAG.PREPARE) validatePrepare(frame.payload)
+  if (frame.tag === TAG.RECONCILE) validateReconcile(frame.payload)
+  return frame
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+function validatePrepare(payload: PreparePayload): void {
+  const p = payload as { upgradeId?: unknown; sessionId?: unknown; open?: unknown }
+  if (!isNonEmptyString(p.upgradeId)) throw new ProtocolViolationError()
+  if (!isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
+  if (!Array.isArray(p.open)) throw new ProtocolViolationError()
+}
+
+/**
+ * The barrier legs are a flat union — both absent, or `barrier === true` with string `upgradeId` and
+ * `sessionId` — and nothing but this check enforces it at runtime. The two malformed shapes fail in
+ * opposite directions, which is why one truthiness test cannot stand for both: a truthy non-`true`
+ * `barrier` would COMMIT an upgrade, while a present-but-falsy one falls through to the ordinary
+ * path and rotates the session destructively. Stated as the legal shapes so an unanticipated one is
+ * refused by default.
+ */
+function validateReconcile(payload: ReconcilePayload): void {
+  const p = payload as { open?: unknown; sessionId?: unknown; barrier?: unknown; upgradeId?: unknown }
+  if (!Array.isArray(p.open)) throw new ProtocolViolationError()
+  for (const entry of p.open) {
+    if (typeof entry?.id !== 'string') throw new ProtocolViolationError()
+    if (!Number.isInteger(entry.ix) || entry.ix < 0) throw new ProtocolViolationError()
+    if (!Number.isInteger(entry.lastSeq) || entry.lastSeq < 0) throw new ProtocolViolationError()
+    if (entry.initial !== undefined && entry.initial !== true) throw new ProtocolViolationError()
+  }
+  if (p.sessionId !== undefined && !isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
+  if (p.barrier === undefined && p.upgradeId === undefined) return
+  if (p.barrier !== true) throw new ProtocolViolationError()
+  if (!isNonEmptyString(p.upgradeId)) throw new ProtocolViolationError()
+  if (!isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
 }
 
 // ===== Publish info helpers =====
