@@ -8,7 +8,7 @@ import { report } from './captureReport.js'
 import { registryFor } from './dbRuntime.js'
 import { CHANGE_CODEC_VERSION, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
 import { type ChangeSubscription, type ChangeTransport, defaultChangeTransport } from './changeTransport.js'
-import { type OriginSequence, observeEnvelopeSequence, withBaselineBetClosed } from './changeSequence.js'
+import { type OriginSequence, coarsenClosingBet, observeEnvelopeSequence } from './changeSequence.js'
 import type { ChangeBatch } from '../router/events.js'
 
 // THE CHANGE RUNTIME for one logical database — everything that is true of a db's presence on the change
@@ -502,10 +502,9 @@ function receive(db: object, state: SubscriptionState, payload: string): void {
 
   if ('coarseAll' in envelope) {
     // A mutation whose touched tables are unknowable happened on ANOTHER instance: coarsen every table WE
-    // watch. Sound over-fire; never a fabricated row. It also CLOSES any outstanding baseline bet, since
-    // coarsening accounts for every lower sequence as surely as a gap does — so a later straggler must not
-    // trigger a second one.
-    state.seen.set(envelope.origin, withBaselineBetClosed(state.seen.get(envelope.origin)!))
+    // watch. Sound over-fire; never a fabricated row. This envelope was ADMITTED in order, so the watermark
+    // stays exactly where the transition just put it — but coarsening also closes any outstanding bet.
+    state.seen.set(envelope.origin, coarsenClosingBet(state.seen.get(envelope.origin)!.last))
     coarsenWatched(db)
     return
   }

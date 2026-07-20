@@ -1,4 +1,4 @@
-export { observeEnvelopeSequence, withBaselineBetClosed }
+export { observeEnvelopeSequence, openBet, advance, coarsenClosingBet }
 export type { OriginSequence, SequenceHeader, SequenceDecision, SequenceTransition }
 
 // THE PER-ORIGIN ORDERING AUTOMATON — a pure transition, deliberately kept out of the I/O callback that
@@ -44,6 +44,15 @@ export type { OriginSequence, SequenceHeader, SequenceDecision, SequenceTransiti
 // stale — and the straggler's coarsen corrects it. Same class as the documented drop-after-readiness
 // limit, and unlike that one it closes deterministically rather than waiting for the next write.
 //
+// ERA CUT. A rotation to a different transport breaks the dichotomy the bet rests on. Messages from the
+// publisher's PREVIOUS era are neither pre-admission (already in our snapshot) nor still owed to us: they
+// were published after we were admitted, but onto a transport we were never subscribed to, so no straggler
+// can ever arrive to correct a wrong bet and the hole would be permanent rather than brief. The publisher
+// therefore MARKS the first envelope of a new era, and a marked envelope is never applied precisely — it is
+// treated exactly as a gap is, for exactly the same reason. The cost is one reseed per watched graph per
+// rotation, and rotation only happens at a quiescent boundary, so it is rare by construction. Coarse is
+// recoverable; a permanently missing delta is not.
+//
 // THE INVARIANT: a change is applied at most once; anything not applied precisely is over-fired; and any
 // sequence skipped by a baseline bet is either already in the snapshot or still owed to us by the adapter.
 
@@ -51,6 +60,38 @@ export type { OriginSequence, SequenceHeader, SequenceDecision, SequenceTransiti
  *  which nothing has been accounted for yet (`unknownBelow` — the outstanding baseline bet, 0 once a
  *  coarsen has covered it). */
 type OriginSequence = { last: number; unknownBelow: number }
+
+// The three ways an origin's position can move, named — because the two fields are only meaningful as a
+// pair, and every rule below is one of these three sentences rather than an arrangement of numbers.
+
+/** First contact: apply this one precisely, and record everything under it as unaccounted for. */
+function openBet(seq: number): OriginSequence {
+  return { last: seq, unknownBelow: seq }
+}
+
+/** The next contiguous sequence: the watermark moves, and an outstanding bet stays outstanding. */
+function advance(tracked: OriginSequence, seq: number): OriginSequence {
+  return { last: seq, unknownBelow: tracked.unknownBelow }
+}
+
+/** A coarsen rebuilds every watched graph from the database, which accounts for every lower sequence as
+ *  surely as an in-order delivery does — so it CLOSES any outstanding bet, and a later straggler must not
+ *  trigger a second one (a redundant reseed at best; at worst, if it lands mid-reseed, the storm guard's
+ *  terminal demotion).
+ *
+ *  The watermark is passed rather than derived because the two callers differ on it: a coarsen triggered by
+ *  something ABOVE what we have seen moves it up to that sequence, while one triggered by a straggler must
+ *  leave it exactly where it is — moving it down would re-apply everything in between. */
+function coarsenClosingBet(watermark: number): OriginSequence {
+  return { last: watermark, unknownBelow: 0 }
+}
+
+/** Whether a sequence at or below the watermark lies in the region an open bet never accounted for. This is
+ *  what tells a straggler that DISPROVES the bet from a plain at-least-once redelivery, which is evidence of
+ *  nothing and must not coarsen. */
+function belowOpenBet(tracked: OriginSequence, seq: number): boolean {
+  return seq < tracked.unknownBelow
+}
 
 /** The ordering-relevant part of an arriving envelope. */
 type SequenceHeader = { seq: number; eraCut?: true }
@@ -67,68 +108,30 @@ type SequenceTransition = { decision: SequenceDecision; next?: OriginSequence }
  *  or `undefined` if we have never heard from it (a fresh subscription, or one that re-subscribed and
  *  cleared its watermarks). */
 function observeEnvelopeSequence(tracked: OriginSequence | undefined, header: SequenceHeader): SequenceTransition {
-  // ERA CUT — the publisher changed transport, and it is telling us so because we could not have worked it
-  // out. The deferred baseline rests on a dichotomy that a rotation breaks: a sequence under the first one we
-  // see is either pre-admission (already in our snapshot) or still owed to us by an at-least-once adapter.
-  // Messages from the publisher's PREVIOUS era are neither — published after we were admitted, but onto a
-  // transport we were never subscribed to, so no straggler can ever arrive to correct a wrong bet and the
-  // hole would be permanent rather than brief. So we do NOT bet precise across a cut: coarsen once, and take
-  // this sequence as the watermark. Everything below it is thereby accounted for, from either era.
-  //
-  // The cost is one reseed per watched graph per rotation, and rotation only happens at a quiescent boundary
-  // — rare by construction. Coarse is recoverable; a permanently missing delta is not.
-  if (header.eraCut) {
-    if (tracked !== undefined && header.seq <= tracked.last) {
-      // BELOW AN OPEN BET, a cut is not a redelivery — it is the proof the bet was wrong, and the one
-      // straggler that can never be corrected by a later one. No FIFO is owed, so the publisher's
-      // post-rotation seq n+1 can overtake the cut at seq n: we first-see n+1, bet precise on everything
-      // under it, and the cut then arrives below the watermark. Reading that as a duplicate leaves the bet
-      // open forever — nothing below it is deliverable, because it belongs to a transport era we were never
-      // subscribed to. That is the permanent hole `eraCut` exists to close, reopened by the drop.
-      //
-      // So coarsen, which accounts for the whole unaccounted region, and CLOSE the bet. The watermark does
-      // NOT move down to this cut: we have already seen higher sequences and must not re-apply them.
-      if (header.seq < tracked.unknownBelow)
-        return { decision: 'coarsen', next: { last: tracked.last, unknownBelow: 0 } }
-      // A cut covered by a CLOSED bet is a genuine redelivery: at-least-once means we may see it twice, and
-      // coarsening again would buy a redundant reseed (or, mid-reseed, risk the storm guard's terminal
-      // demotion).
-      return { decision: 'drop' }
-    }
-    return { decision: 'coarsen', next: { last: header.seq, unknownBelow: 0 } }
-  }
+  const { seq, eraCut } = header
 
+  // FIRST CONTACT. An era cut is not a baseline we may bet on — nothing below it is deliverable to us at
+  // all — so it coarsens instead, taking this sequence as the watermark and accounting for both eras below.
   if (tracked === undefined) {
-    // The bet. Everything below this sequence is unaccounted for until it either proves irrelevant (never
-    // arrives, because it predates admission) or arrives as a straggler.
-    return { decision: 'apply', next: { last: header.seq, unknownBelow: header.seq } }
+    if (eraCut) return { decision: 'coarsen', next: coarsenClosingBet(seq) }
+    return { decision: 'apply', next: openBet(seq) }
   }
 
-  if (header.seq <= tracked.last) {
-    // At or below the watermark: either a sequence we skipped, or a redelivery of one we already handled.
-    // `unknownBelow` is what tells them apart — a duplicate is not evidence of anything and must not coarsen.
-    if (header.seq >= tracked.unknownBelow) return { decision: 'drop' } // already seen → duplicate → drop
-    // The bet was wrong; one coarsen covers the whole unaccounted region. The watermark does NOT move: this
-    // envelope is older than what we have already seen.
-    return { decision: 'coarsen', next: { last: tracked.last, unknownBelow: 0 } }
+  // AT OR BELOW THE WATERMARK — a straggler, or a redelivery of something already handled. The open bet is
+  // what tells them apart, and a cut is no different here: it is simply the one straggler that could never
+  // have been corrected by a later one. (No FIFO is owed, so a post-rotation seq n+1 can overtake the cut at
+  // seq n — we first-see n+1, bet on everything under it, and the cut arrives below the watermark. Reading
+  // that as a duplicate would leave the bet open forever, which is the permanent hole eraCut exists to
+  // close.) The watermark does NOT move: this envelope is older than what we have already seen.
+  if (seq <= tracked.last) {
+    if (!belowOpenBet(tracked, seq)) return { decision: 'drop' }
+    return { decision: 'coarsen', next: coarsenClosingBet(tracked.last) }
   }
 
-  if (header.seq !== tracked.last + 1) {
-    // A real gap. Applying this before the ones it overtook would apply a delta out of order, so coarsen —
-    // which also accounts for everything below it, closing any outstanding bet.
-    return { decision: 'coarsen', next: { last: header.seq, unknownBelow: 0 } }
-  }
+  // ABOVE THE WATERMARK. A gap means something was lost or is late and applying this first would apply a
+  // delta out of order; a cut means the ordering evidence itself does not carry across the rotation. Neither
+  // can be applied precisely, and one coarsen accounts for everything below either way.
+  if (eraCut || seq !== tracked.last + 1) return { decision: 'coarsen', next: coarsenClosingBet(seq) }
 
-  return { decision: 'apply', next: { last: header.seq, unknownBelow: tracked.unknownBelow } }
-}
-
-/** Close an outstanding baseline bet without moving the watermark.
- *
- *  Used when an APPLIED envelope turns out to coarsen everything anyway (a `coarseAll` announcement):
- *  coarsening rebuilds every watched graph from the database, which accounts for every lower sequence as
- *  surely as a gap does — so a later straggler must not trigger a second one. Leaving the bet open would buy
- *  a redundant reseed at best, and at worst a terminal demotion, if that straggler landed while this reseed
- *  was still in flight. */
-function withBaselineBetClosed(entry: OriginSequence): OriginSequence {
-  return { last: entry.last, unknownBelow: 0 }
+  return { decision: 'apply', next: advance(tracked, seq) }
 }

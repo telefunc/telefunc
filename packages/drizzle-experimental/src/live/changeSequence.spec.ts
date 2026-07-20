@@ -14,7 +14,7 @@
 // predates admission and is already in the snapshot) or turns up late as a straggler and coarsens.
 
 import { describe, expect, it } from 'vitest'
-import { observeEnvelopeSequence, withBaselineBetClosed } from './changeSequence.js'
+import { advance, coarsenClosingBet, observeEnvelopeSequence, openBet } from './changeSequence.js'
 
 describe('changeSequence — an origin we have never heard from', () => {
   it('bets PRECISE and records what it bet on', () => {
@@ -108,6 +108,16 @@ describe('changeSequence — era cut', () => {
     })
   })
 
+  it('coarsens for a CONTIGUOUS cut too — a rotation is never applied precisely', () => {
+    // The one cut the gap rule does not catch for free: seq is exactly the next one, so nothing LOOKS
+    // missing and only the marker says the rotation happened. Found by mutation — deleting `eraCut` from the
+    // above-watermark branch survived every other case in this file, in this shape and in the one before it.
+    expect(observeEnvelopeSequence({ last: 5, unknownBelow: 0 }, { seq: 6, eraCut: true })).toEqual({
+      decision: 'coarsen',
+      next: { last: 6, unknownBelow: 0 },
+    })
+  })
+
   it('still coarsens for a cut ABOVE the watermark — a second, genuine rotation', () => {
     // The redelivery guard must key on the sequence, not on "we have seen a cut before", or a db that
     // rotates twice would bet precise across the second one.
@@ -144,7 +154,15 @@ describe('changeSequence — era cut', () => {
 })
 
 describe('changeSequence — closing a bet without moving', () => {
-  it('withBaselineBetClosed keeps the watermark and clears only the bet', () => {
-    expect(withBaselineBetClosed({ last: 8, unknownBelow: 3 })).toEqual({ last: 8, unknownBelow: 0 })
+  it('coarsenClosingBet keeps the watermark it is given and clears only the bet', () => {
+    expect(coarsenClosingBet(8)).toEqual({ last: 8, unknownBelow: 0 })
+  })
+
+  it('openBet and advance are the other two moves — the bet opens once and survives an in-order delivery', () => {
+    // The three constructors are the whole state space: nothing else may write `unknownBelow`, which is what
+    // makes "close the bet" one operation rather than the five spellings it used to be.
+    expect(openBet(4)).toEqual({ last: 4, unknownBelow: 4 })
+    expect(advance({ last: 4, unknownBelow: 4 }, 5)).toEqual({ last: 5, unknownBelow: 4 })
+    expect(advance({ last: 9, unknownBelow: 0 }, 10)).toEqual({ last: 10, unknownBelow: 0 })
   })
 })
