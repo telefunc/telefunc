@@ -4,6 +4,7 @@ export { publishBatch, publishCoarseAll, acquireSubscription, isQuiescent }
 export type { SubscriptionRef }
 
 import { randomUUID } from 'node:crypto'
+import { report } from './captureReport.js'
 import { registryFor } from './dbRuntime.js'
 import { CHANGE_CODEC_VERSION, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
 import { type ChangeSubscription, type ChangeTransport, defaultChangeTransport } from './changeTransport.js'
@@ -242,13 +243,9 @@ function publishBatch(db: object, batch: ChangeBatch): void {
   try {
     payload = encodeChangePayload({ ...header, changes: batch.changes })
   } catch (error) {
-    // A value the codec cannot carry must not cost the invalidation itself: fall back to the value-free
-    // coarse-all envelope, so remote graphs refetch instead of never hearing about the write. It keeps the
-    // seq it already took — the stream must stay contiguous or every receiver reads a gap.
-    console.error(
-      '[telefunc] live: a change batch could not be encoded for the transport, so a COARSE invalidation was published instead. Remote live queries over-fetch rather than miss the write.',
-      error,
-    )
+    // Fall back to the value-free coarse-all envelope, keeping the seq it already took — the stream must
+    // stay contiguous or every receiver reads a gap.
+    report('encode-failed', { cause: error })
     payload = encodeChangePayload({ ...header, coarseAll: true })
   }
   publishPayload(db, payload, transport)
@@ -328,9 +325,10 @@ function publishPayload(db: object, payload: string, transport: ChangeTransport)
   publisher.chain = publisher.chain.then(() => {
     try {
       const published = transport.publish(topic, payload)
-      if (isThenable(published)) return published.then(undefined, reportPublishFailure)
+      if (isThenable(published))
+        return published.then(undefined, (error: unknown) => report('publish-failed', { cause: error }))
     } catch (error) {
-      reportPublishFailure(error)
+      report('publish-failed', { cause: error })
     }
     return undefined
   })
@@ -338,13 +336,6 @@ function publishPayload(db: object, payload: string, transport: ChangeTransport)
 
 function isThenable(value: void | Promise<void>): value is Promise<void> {
   return typeof (value as Promise<void> | undefined)?.then === 'function'
-}
-
-function reportPublishFailure(error: unknown): void {
-  console.error(
-    '[telefunc] live: publishing a change batch to the changeTransport failed. The write COMMITTED and its result is unaffected; live queries on other instances may be stale until the next write touching those tables.',
-    error,
-  )
 }
 
 // ── subscription lifetime ───────────────────────────────────────────
@@ -410,7 +401,7 @@ async function acquireSubscription(db: object): Promise<SubscriptionRef> {
       state.refs--
       // Teardown is nobody's read to fail: a transport that cannot detach is reported, not thrown at a
       // caller who has already finished with its live query.
-      reconcile(db, state).catch(reportUnsubscribeFailure)
+      reconcile(db, state).catch((error: unknown) => report('detach-failed', { cause: error }))
     },
   }
   try {
@@ -486,13 +477,6 @@ async function step(db: object, state: SubscriptionState): Promise<void> {
   }
 }
 
-function reportUnsubscribeFailure(error: unknown): void {
-  console.error(
-    '[telefunc] live: detaching the change subscription failed, so its listener may still be attached. Live reads on this db FAIL CLOSED until the transport confirms detachment (each one retries it); admitting them would risk applying a change twice.',
-    error,
-  )
-}
-
 // ── one delivered payload ───────────────────────────────────────────
 
 /** DECODE → ADMIT SCOPE → CLASSIFY ORDERING → ROUTE. Each step answers one question, and the ordering rules
@@ -500,12 +484,8 @@ function reportUnsubscribeFailure(error: unknown): void {
 function receive(db: object, state: SubscriptionState, payload: string): void {
   const envelope = decodeChangePayload(payload)
   if (!envelope) {
-    // Unreadable — an unknown codec version, or a payload the transport mangled. `origin` is unreadable
-    // too, so this may even be our own echo: coarsening costs a redundant refetch, while applying a guessed
-    // row would be wrong at any price.
-    console.error(
-      `[telefunc] live: an undecodable payload arrived on "${changeTopicFor(db)}" (unknown codec version, or a transport that does not deliver the exact string it was given). Coarsening every watched table rather than interpreting it.`,
-    )
+    // Coarsening costs a redundant refetch, while applying a guessed row would be wrong at any price.
+    report('undecodable-payload', { topic: changeTopicFor(db) })
     coarsenWatched(db)
     return
   }

@@ -4,7 +4,6 @@ export type { Substituted, SubstitutionOutcome }
 
 import { type Column, SQL, type Table, getTableColumns, sql } from 'drizzle-orm'
 import { dialectOf } from '../binding/database.js'
-import { describeRelationId } from '../ir/relation.js'
 import { report } from './captureReport.js'
 import type { Images } from './writeChanges.js'
 import { type Plan, writeConfigOf } from './writePlan.js'
@@ -253,42 +252,15 @@ function buildSubstitution(
   try {
     substituted = substitute()
   } catch (error) {
-    reportSubstitutionUnbuildable(relationId, error)
+    report('substitution-unbuildable', { relation: relationId, cause: error })
     return SUBSTITUTION_REFUSED
   }
   const tap = tapRawRows(substituted, callerDecode)
   if (tap === TAP_UNPLACEABLE) {
-    reportTapUnplaceable(relationId)
+    report('tap-unplaceable', { relation: relationId })
     return SUBSTITUTION_REFUSED
   }
   return { substituted, tap }
-}
-
-/** Capture could not even WRITE its RETURNING onto the builder — a frozen or read-only drizzle `config`, or
- *  a builder shape that has drifted from the pinned one. No statement ran. */
-function reportSubstitutionUnbuildable(relationId: string, error: unknown): void {
-  report(
-    `[telefunc] live: Telefunc could not build the statement it uses to capture a write on "${describeRelationId(relationId)}" (its RETURNING clause could not be applied to the query builder). The write runs exactly as you wrote it and is unaffected; live queries on this table over-invalidate.`,
-    error,
-  )
-}
-
-/** The builder could not be put back the way the caller left it. Contained — the statement is already decided
- *  — but it means a LATER execution of this same builder would run capture's selection, so it is never
- *  silent. */
-function reportRestoreFailed(relationId: string, error: unknown): void {
-  report(
-    `[telefunc] live: Telefunc could not restore the query builder it borrowed to capture a write on "${describeRelationId(relationId)}". This write is unaffected, but re-executing that same builder may return Telefunc's columns instead of yours — this is a bug in Telefunc's capture, please report it.`,
-    error,
-  )
-}
-
-/** The tap could not be placed, so this write runs exactly as the caller wrote it and capture coarsens. Rare
- *  enough to be worth saying out loud: it means the builder shape drifted from the one capture is pinned to. */
-function reportTapUnplaceable(relationId: string): void {
-  report(
-    `[telefunc] live: Telefunc could not observe the statement it uses to capture a write on "${describeRelationId(relationId)}", so it did not substitute one. The write runs exactly as you wrote it and is unaffected; live queries on this table over-invalidate.`,
-  )
 }
 
 /** Run a statement CAPTURE chose in place of the caller's, and tell a refusal of the substitution apart from
@@ -339,7 +311,7 @@ async function runSubstituted(
     } catch (error) {
       // Contained, never silent: the builder is left describing capture's selection, so a later execution of
       // this same builder would run capture's statement. Reported rather than raised — see `report`.
-      reportRestoreFailed(relationId, error)
+      report('restore-failed', { relation: relationId, cause: error })
     }
   }
   // INSIDE A TRANSACTION the recovery needs a savepoint, because PostgreSQL aborts the whole transaction on
@@ -398,7 +370,7 @@ async function runSubstituted(
         throw error
       }
       await savepoint.rewind() // un-abort the transaction so the caller's statement can still run
-      reportSubstitutionRefused(relationId, error)
+      report('substitution-refused', { relation: relationId, cause: error })
       return SUBSTITUTION_REFUSED
     } finally {
       tap.release()
@@ -408,15 +380,6 @@ async function runSubstituted(
   // Serialization happens one level up, around the WHOLE write — see `wrapWrite`. It has to: this attempt's
   // `ROLLBACK TO` would otherwise undo another write's already-completed recovery statement.
   return attempt()
-}
-
-/** The server refused the RETURNING clause CAPTURE added — most often a role that may write the table but
- *  not read it. The caller's write is re-run as they wrote it, so the only cost is a coarse invalidation. */
-function reportSubstitutionRefused(relationId: string, error: unknown): void {
-  report(
-    `[telefunc] live: the database refused the RETURNING clause Telefunc added to a write on "${describeRelationId(relationId)}" (a role that can write a table but not SELECT from it does this). The write is being re-run exactly as you wrote it and is unaffected; live queries on this table over-invalidate rather than lose the write.`,
-    error,
-  )
 }
 
 // ── savepoints, so the in-transaction recovery has something to rewind to ──
@@ -490,7 +453,7 @@ async function openSavepoint(tx: object, relationId: string): Promise<Savepoint 
   try {
     await run(`savepoint ${name}`)
   } catch (error) {
-    reportSavepointUnavailable(relationId, error)
+    report('savepoint-unavailable', { relation: relationId, cause: error })
     return SAVEPOINT_UNAVAILABLE
   }
   // A failed SAVEPOINT statement aborts the transaction like any other, so bookkeeping failures cannot be
@@ -500,7 +463,7 @@ async function openSavepoint(tx: object, relationId: string): Promise<Savepoint 
   const bookkeeping = (statement: string) =>
     run(statement).then(
       () => {},
-      (error: unknown) => reportSavepointBookkeepingFailed(relationId, statement, error),
+      (error: unknown) => report('savepoint-bookkeeping-failed', { relation: relationId, statement, cause: error }),
     )
   return {
     release: () => bookkeeping(`release savepoint ${name}`),
@@ -512,20 +475,6 @@ async function openSavepoint(tx: object, relationId: string): Promise<Savepoint 
     },
     abandon: async () => {},
   }
-}
-
-function reportSavepointUnavailable(relationId: string, error: unknown): void {
-  report(
-    `[telefunc] live: could not open a savepoint to capture a write on "${describeRelationId(relationId)}" inside a transaction. The write runs exactly as you wrote it and is unaffected; live queries on this table over-invalidate.`,
-    error,
-  )
-}
-
-function reportSavepointBookkeepingFailed(relationId: string, statement: string, error: unknown): void {
-  report(
-    `[telefunc] live: "${statement}" failed while capturing a write on "${describeRelationId(relationId)}". The surrounding transaction is likely aborted and its COMMIT will fail — this is a bug in Telefunc's capture, please report it.`,
-    error,
-  )
 }
 
 /** Whether an error is one capture's substituted RETURNING could have caused.

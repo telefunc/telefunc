@@ -1,5 +1,6 @@
 export { isWriteOp, isRawSqlOp, captureTransactions }
 
+import { report } from './captureReport.js'
 import { registryFor } from './dbRuntime.js'
 import { publishCoarseAll } from './changeRuntime.js'
 import { captureMutation, captureRawSql } from './writeCapture.js'
@@ -137,10 +138,7 @@ function wrapTransaction(txHost: object, scope: TransactionScope) {
         try {
           scope.announce()
         } catch (error) {
-          console.error(
-            '[telefunc] live: announcing a committed raw-SQL transaction failed; other instances may hold stale live queries until the next write.',
-            error,
-          )
+          report('announce-failed', { cause: error })
         }
       }
       return result

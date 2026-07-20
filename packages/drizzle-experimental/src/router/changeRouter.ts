@@ -11,6 +11,7 @@
 export { type RoutableGraph, type Router, createRouter }
 
 import type { ApplyOutcome } from '../graph/liveGraph.js'
+import { report } from '../live/captureReport.js'
 import { describeRelationId, parseRelationId } from '../ir/relation.js'
 import type { ChangeBatch, TableChange } from './events.js'
 
@@ -84,10 +85,9 @@ function createRouter(config: { notify: (identityKey: string) => void }): Router
             invalidated = graph.apply(slice).invalidated
           } catch (error) {
             // A routed apply threw (a latent bug leaving state possibly corrupt): PERMANENTLY demote
-            // this graph to coarse (fault) so no LATER batch can miss over corrupt precise state,
-            // coarse-notify its identity so it re-reads, and SURFACE the error (structured log) —
-            // never swallow, or the degrade would be operator-invisible.
-            console.error('[@telefunc/drizzle-experimental] a routed graph apply threw; faulting it to coarse:', error)
+            // this graph to coarse (fault) so no LATER batch can miss over corrupt precise state, and
+            // coarse-notify its identity so it re-reads.
+            report('apply-threw', { cause: error })
             graph.fault()
             invalidated = true
           }

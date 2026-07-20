@@ -1,8 +1,6 @@
 export { captureMismatch, captureOrCoarse, captureBothOrCoarse, changesFromRows, emitSafely, coarse }
-export { reportCaptureFault }
 export type { CaptureSink, CaptureMismatch, Images }
 
-import { describeRelationId } from '../ir/relation.js'
 import { report } from './captureReport.js'
 import type { Op, Plan, PrecisePlan } from './writePlan.js'
 import type { Row, TableChange } from '../router/events.js'
@@ -63,14 +61,8 @@ function captureMismatch(rows: Row[], columns: string[], pk: string[], op: Op): 
 function captureOrCoarse(op: Op, relationId: string, rows: Row[], plan: PrecisePlan): TableChange[] {
   const mismatch = captureMismatch(rows, plan.columns, plan.pk, op)
   if (!mismatch) return changesOf(op, relationId, rows, plan)
-  reportCaptureMismatch(relationId, mismatch)
+  report('capture-mismatch', { relation: relationId, mismatch })
   return [coarse(relationId)]
-}
-
-function reportCaptureMismatch(relationId: string, mismatch: NonNullable<CaptureMismatch>): void {
-  report(
-    `[telefunc] live write-capture fell back to COARSE for table "${describeRelationId(relationId)}": captured row ${mismatch.rowIndex} has ${mismatch.reason} (${mismatch.detail}). The write is unaffected; live queries on this table over-invalidate rather than receive a partial row.`,
-  )
 }
 
 /** Precise changes from BOTH images, else one coarse marker. The image that has to be trustworthy is the
@@ -87,7 +79,7 @@ function captureBothOrCoarse(op: Op, relationId: string, pairs: Images[], plan: 
       op,
     ) ?? captureMismatch(decisive, plan.columns, plan.pk, 'insert')
   if (mismatch) {
-    reportCaptureMismatch(relationId, mismatch)
+    report('capture-mismatch', { relation: relationId, mismatch })
     return [coarse(relationId)]
   }
   return pairs.map(({ old, new: fresh }) =>
@@ -179,21 +171,12 @@ function emitSafely(sink: CaptureSink, changes: TableChange[]): void {
     sink(changes)
   } catch (error) {
     const tables = [...new Set(changes.map((change) => change.table))]
-    reportCaptureFault(error, tables.join(', '))
+    report('capture-failed', { relation: tables.join(', '), cause: error })
     if (changes.every((change) => change.kind === 'coarse')) return // the coarse fallback itself failed
     try {
       sink(tables.map(coarse)) // degrade: coarsen EVERY touched table rather than leave a feed half-applied
     } catch (fallbackError) {
-      reportCaptureFault(fallbackError, tables.join(', '))
+      report('capture-failed', { relation: tables.join(', '), cause: fallbackError })
     }
   }
-}
-
-/** The diagnostics seam for a contained capture fault. Takes a relation IDENTITY and renders it the way a
- *  human wrote it (`a.users`), since this reaches an operator's logs. */
-function reportCaptureFault(error: unknown, relationId: string): void {
-  report(
-    `[telefunc] live write-capture failed for table "${describeRelationId(relationId)}". The write COMMITTED and its result is unaffected; live queries on this table may be stale until the next write.`,
-    error,
-  )
 }

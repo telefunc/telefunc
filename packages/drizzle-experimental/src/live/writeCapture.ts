@@ -3,7 +3,6 @@ export { captureMutation, captureRawSql }
 import { type Table, isTable } from 'drizzle-orm'
 import { demoteOldNewReturning, markOldNewProven, oldNewProvenOf } from './writeCapabilities.js'
 import { relationKeyOf } from '../extract/columns.js'
-import { describeRelationId } from '../ir/relation.js'
 import { report } from './captureReport.js'
 import { ingestWrite, registryFor } from './dbRuntime.js'
 import {
@@ -13,7 +12,6 @@ import {
   changesFromRows,
   coarse,
   emitSafely,
-  reportCaptureFault,
 } from './writeChanges.js'
 import { UNMAPPABLE, type Op, type Plan, callerPositionsOf, planCapture } from './writePlan.js'
 import {
@@ -274,7 +272,7 @@ function captureRawSql(
       try {
         announce()
       } catch (error) {
-        reportCaptureFault(error, '*')
+        report('capture-failed', { relation: '*', cause: error })
       }
     }
     if (isThenable(result)) {
@@ -348,7 +346,7 @@ async function runWrite(
       // `RETURNING old.*, new.*` — so believe the statement over the version, permanently.
       if (!oldNewProvenOf(db)) {
         demoteOldNewReturning(db)
-        reportOldNewDemotion(relationId)
+        report('old-new-demoted', { relation: relationId })
       }
       return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
     }
@@ -394,7 +392,7 @@ function emitCaptured(
 ): void {
   if (changes) return emitSafely(sink, changes)
   emitSafely(sink, [coarse(relationId)])
-  reportPostCommitDecodeFault(relationId, outcome.captureError)
+  report('post-commit-decode-failed', { relation: relationId, cause: outcome.captureError })
 }
 
 /** Re-run the caller's write EXACTLY as they wrote it, and coarsen. Single-shot by construction: this path
@@ -423,21 +421,6 @@ async function recoverAsWritten(
   executeArgs: unknown[] | undefined,
 ): Promise<unknown> {
   return runWrite(builder, table, op, db, sink, tx, executeArgs, true)
-}
-
-function reportPostCommitDecodeFault(relationId: string, error: unknown): void {
-  report(
-    `[telefunc] live: decoding the rows Telefunc added to a write on "${describeRelationId(relationId)}" failed AFTER the database applied it (a column decoder threw). The write HAPPENED and your result is unaffected; live queries on this table over-invalidate rather than receive a row capture could not read.`,
-    error,
-  )
-}
-
-/** The server rejected a statement its own version number said it would accept. Reported once per db,
- *  because it changes how every later write on it is captured. */
-function reportOldNewDemotion(relationId: string): void {
-  report(
-    `[telefunc] live: this PostgreSQL server reports version 18 or newer but refused "RETURNING old.*, new.*" (first seen writing "${describeRelationId(relationId)}"). Falling back to new-image capture for this database. Live queries stay correct, with more coarse invalidation than a genuine PostgreSQL 18 would need.`,
-  )
 }
 
 /** A drizzle write query builder, distinguished from a plain method return (a `toSQL()` object, a Promise). */
