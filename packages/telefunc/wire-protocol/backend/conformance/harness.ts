@@ -33,14 +33,14 @@ export type BackendHarness = {
   create(): Promise<BackendFixture>
 }
 
-// A fixed epoch, deliberately unrelated to Date.now: it keeps authority time distinguishable from the
-// caller clock, which is what makes the skewed-caller mint scenario meaningful.
-const AUTHORITY_EPOCH = 1_700_000_000_000
-
 export const memoryHarness: BackendHarness = {
   name: 'memory',
   async create(): Promise<BackendFixture> {
-    let clock = AUTHORITY_EPOCH
+    // Authority time STARTS aligned with the caller clock and diverges only through advanceAuthority.
+    // That alignment is load-bearing for the I13 killers: an epoch offset by years would make a backend
+    // that wrongly consults the caller clock fail the wrong scenario (a takeover would look permanently
+    // expired), which would certify the mutation gate against the wrong invariant.
+    let clock = Date.now()
     const backend = new MemoryRoomBackend({ authorityNow: () => clock })
     return {
       backend,
