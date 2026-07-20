@@ -24,7 +24,6 @@ export type {
   ReconciledPayload,
   PreparePayload,
   ReadyPayload,
-  ServerCtrlTag,
   WirePublishInfo,
 }
 
@@ -49,7 +48,7 @@ import type { ChannelTransports } from './constants.js'
 // Sequence numbers are sender-assigned for replayable data frames in both directions.
 // Each side tracks the highest seq received and replays after reconnect via reconcile.
 
-export const HEADER = 7
+const HEADER = 7
 const payloadBytes = (frame: Uint8Array): number => frame.byteLength - HEADER
 const DATA_TAG_MIN = 0x10
 
@@ -235,20 +234,6 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
   | { tag: typeof TAG.READY; payload: ReadyPayload }
-
-/** Ctrl frame tags the client receives from the server. */
-type ServerCtrlTag =
-  | typeof TAG.CLOSE
-  | typeof TAG.CLOSE_ACK
-  | typeof TAG.ABORT
-  | typeof TAG.ERROR
-  | typeof TAG.WINDOW
-  | typeof TAG.MSG_WINDOW
-  | typeof TAG.BDP_PING
-  | typeof TAG.BDP_PING_ACK
-  | typeof TAG.FIN
-  | typeof TAG.RECONCILED
-  | typeof TAG.READY
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 

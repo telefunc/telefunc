@@ -1,5 +1,4 @@
-export { recordUpgradePrepared, recordUpgradeCommitted, getUpgradeObservations, resetUpgradeObservations }
-export type { UpgradeObservations }
+export { recordUpgradePrepared, recordUpgradeCommitted }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 
@@ -23,8 +22,9 @@ type UpgradeObservations = {
   committed: number
 }
 
-/** The slot's key. Exported so the one consumer that reads it across a package boundary (the
- *  e2e playground's `/api/cleanup-state`) names it rather than spelling it out again. */
+/** ⚠️ This literal is duplicated in `test/playground-stream/upgrade-observations.ts`, which reads the
+ *  slot off `globalThis` rather than importing it — adding a package export for a test-only surface
+ *  is not worth it. Rename the two together. */
 const UPGRADE_OBSERVER_KEY = 'wire-protocol/server/upgrade-observer.ts'
 
 function getGlobals(): UpgradeObservations {
@@ -41,15 +41,4 @@ function recordUpgradePrepared(): void {
 
 function recordUpgradeCommitted(): void {
   getGlobals().committed++
-}
-
-function getUpgradeObservations(): UpgradeObservations {
-  return { ...getGlobals() }
-}
-
-/** Test-suite hygiene: lets an e2e establish a zero baseline per page load. */
-function resetUpgradeObservations(): void {
-  const g = getGlobals()
-  g.prepared = 0
-  g.committed = 0
 }

@@ -4,6 +4,7 @@ export type { SseChannelHttpResponse }
 import type { Readable } from 'node:stream'
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
@@ -267,7 +268,7 @@ class SseConnectionTransport {
     })
   }
 
-  private resolvePendingConnections(connId: string, connection: SseConnection | null): void {
+  private resolvePendingConnections(connId: string, connection: SseConnection): void {
     const pending = this.pendingConnections.get(connId)
     if (!pending) return
     this.pendingConnections.delete(connId)
@@ -282,7 +283,7 @@ class SseConnectionTransport {
   /** Resolves false on timeout — caller drops the POST. */
   private waitReady(connection: SseConnection): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(false), this.mux.connectTtl)
+      const timer = unrefTimer(setTimeout(() => resolve(false), this.mux.connectTtl))
       connection.ready.then(() => {
         clearTimeout(timer)
         resolve(true)
@@ -300,7 +301,7 @@ class SseConnectionTransport {
   }
 
   private terminateConnection(connection: SseConnection): void {
-    const terminatePermanently = this.mux.consumePermanentTermination(connection)
+    const terminatePermanently = this.mux.readPermanentTermination(connection)
     this.closeConnection(connection, terminatePermanently === true)
   }
 }

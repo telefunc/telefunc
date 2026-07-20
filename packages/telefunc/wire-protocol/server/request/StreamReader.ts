@@ -78,12 +78,6 @@ class StreamReader {
     return this.readExact(length)
   }
 
-  /** Ensure no trailing bytes remain. */
-  async assertDone() {
-    const chunk = await this.pullChunk()
-    assert(chunk === null && this.buffer.length === 0, 'Malformed request body')
-  }
-
   /** Register a file's size (called during deserialization). */
   registerFile(index: number, size: number) {
     this.fileSizes.set(index, size)

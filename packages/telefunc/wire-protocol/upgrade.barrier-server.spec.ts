@@ -715,7 +715,7 @@ describe('a stage never outlives what it depends on', () => {
     expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
     expect(h.ws.terminated()).toBe(true)
     // Permanent, so the probe gets no reconnect grace: there is nothing left for it to come back to.
-    expect(h.mux.consumePermanentTermination(h.ws.conn)).toBe(true)
+    expect(h.mux.readPermanentTermination(h.ws.conn)).toBe(true)
   })
 
   test('a stage is released when its old wire rotates away from the staged session', async () => {

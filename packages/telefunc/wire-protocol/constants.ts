@@ -125,10 +125,12 @@ export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 // bounds hostile APPLICATION memory — flow-control credit is cooperative at the sender — which is a
 // documented residual of the design, not an oversight.
 
-/** Ceiling on ONE raw wire frame, enforced before decode. Both inbound paths need it for different
- *  reasons: an SSE frame is rejected by its DECLARED length before a body byte is pulled, while a WS
- *  binary message has already been read and is capped against the cost of DECODING it. 64 MiB is the
- *  protocol's maximum adaptive byte credit, so no compliant frame comes near it. */
+/** Ceiling on ONE raw wire frame, enforced before decode. Both SERVER-inbound paths need it for
+ *  different reasons: an SSE frame is rejected by its DECLARED length before a body byte is pulled,
+ *  while a WS binary message has already been read and is capped against the cost of DECODING it.
+ *  The CLIENT enforces no inbound ceiling — a hostile server is outside the threat model, since it
+ *  already controls every byte the client would act on. 64 MiB is the protocol's maximum adaptive
+ *  byte credit, so no compliant frame comes near it. */
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
 /** Ceiling on the raw frames queued on ONE connection's recv chain — bytes AND count, because a

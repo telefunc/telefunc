@@ -137,8 +137,6 @@ type MuxServerOptions = {
   clientReplayBuffer: number
   clientReplayBufferBinary: number
   connectTtl: number
-  bufferLimit: number
-  bufferLimitBinary: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
@@ -353,7 +351,7 @@ class ChannelMux {
     this.sessionFinalizers.delete(sessionId)
   }
 
-  consumePermanentTermination(connection: unknown): boolean | null {
+  readPermanentTermination(connection: unknown): boolean | null {
     return this.connectionEntries.get(connection)?.state.terminatePermanently ?? null
   }
 
@@ -964,8 +962,6 @@ function resolveMuxServerOptions(): MuxServerOptions {
     clientReplayBuffer: c.clientReplayBuffer,
     clientReplayBufferBinary: c.clientReplayBufferBinary,
     connectTtl: c.connectTtl,
-    bufferLimit: c.bufferLimit,
-    bufferLimitBinary: c.bufferLimitBinary,
     sseFlushThrottle: c.sseFlushThrottle,
     ssePostIdleFlushDelay: c.ssePostIdleFlushDelay,
     transports: c.transports,

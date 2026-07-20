@@ -20,6 +20,7 @@ export { readUpgradeObservations, resetUpgradeObservations }
  * land on an instance other than the one that ran the upgrade.
  */
 const TELEFUNC_GLOBALS_KEY = '_telefunc'
+/** ⚠️ Duplicated from `packages/telefunc/wire-protocol/server/upgrade-observer.ts` — rename together. */
 const UPGRADE_OBSERVER_KEY = 'wire-protocol/server/upgrade-observer.ts'
 
 type UpgradeObservations = { prepared: number; committed: number }
