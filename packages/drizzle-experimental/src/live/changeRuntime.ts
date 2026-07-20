@@ -4,6 +4,7 @@ export { publishBatch, publishCoarseAll, acquireSubscription, isQuiescent }
 export type { SubscriptionRef }
 
 import { randomUUID } from 'node:crypto'
+import { createResolvable } from './changeResolution.js'
 import { report } from './captureReport.js'
 import { registryFor } from './dbRuntime.js'
 import { CHANGE_CODEC_VERSION, decodeChangePayload, encodeChangePayload } from './changeCodec.js'
@@ -73,34 +74,19 @@ import type { ChangeBatch } from '../router/events.js'
 // live read anywhere — is quiescent by that definition too, and is NOT frozen to the default forever on the
 // strength of one write. Rotation there lets a client be replaced, or a test reset, without minting a new db
 // object. Mid-subscription swaps stay forbidden, which is the case the freeze was written for.
-const configured = new WeakMap<object, ChangeTransport>() // explicit override, registered before first use
-const resolved = new WeakMap<object, ChangeTransport>() // frozen at first use (an override OR the default)
+const transportSlot = createResolvable<ChangeTransport>({
+  // Quiescence IS the whole rule, and it is read HERE rather than asserted by a caller.
+  rotatableWhile: isQuiescent,
+  conflictMessage:
+    'telefunc live: the change transport for this db is in use and cannot be replaced. `changeTransport` can only be swapped while the db is quiescent — no live query holding a subscription, and none still detaching (the default counts as a resolution). Pass the same transport instance on every reactiveDrizzle(db, …) call for this db, close its live queries before rotating, or use a distinct db instance.',
+})
 
-const SWAP_MESSAGE =
-  'telefunc live: the change transport for this db is in use and cannot be replaced. `changeTransport` can only be swapped while the db is quiescent — no live query holding a subscription, and none still detaching (the default counts as a resolution). Pass the same transport instance on every reactiveDrizzle(db, …) call for this db, close its live queries before rotating, or use a distinct db instance.'
-
-/** Reject a transport that conflicts with this db's existing one, WITHOUT recording anything. */
-function checkChangeTransport(db: object, transport: ChangeTransport | undefined): void {
-  if (!transport) return
-  if (isQuiescent(db)) return // nothing subscribed, nothing detaching — no listener or readiness proof to strand
-  const frozen = resolved.get(db)
-  if (frozen !== undefined && frozen !== transport) throw new Error(SWAP_MESSAGE) // resolved (incl. default)
-  // NOT redundant with the check above. A subscription makes the db non-quiescent SYNCHRONOUSLY (`refs++`,
-  // `settling++`) while the `transportFor` that resolves it runs a microtask later — so there is a real
-  // window in which a db is in use and has an override registered but no resolution yet. A rotation admitted
-  // in that window would be resolved by the very subscription now being established. Pinned by test.
-  const existing = configured.get(db)
-  if (existing !== undefined && existing !== transport) throw new Error(SWAP_MESSAGE)
-}
-
+/** A TEST SEAM: no production path reaches it — `reactiveDrizzle` configures everything through
+ *  `configureChangeRuntime`. It stays exported because the specs drive one slot at a time, and `commit`
+ *  validates for exactly that reason. Production therefore validates twice (once in the atomicity pre-pass,
+ *  once here), which is the price of this entry point being safe on its own. */
 function setChangeTransport(db: object, transport: ChangeTransport | undefined): void {
-  if (!transport) return
-  checkChangeTransport(db, transport)
-  if (resolved.get(db) === transport) return // already resolved to this same transport — nothing to record
-  // A quiescent rotation to a DIFFERENT transport: unfreeze, so the next `transportFor` re-resolves to the
-  // new one instead of handing back the old resolution.
-  resolved.delete(db)
-  configured.set(db, transport)
+  transportSlot.commit(db, transport)
 }
 
 /** Install a db's whole change configuration ATOMICALLY: validate every part first, then commit. Setting
@@ -112,21 +98,16 @@ function setChangeTransport(db: object, transport: ChangeTransport | undefined):
  *  logical database itself, and changing it moves future publications to a topic that remote listeners are
  *  not on. */
 function configureChangeRuntime(db: object, options: { transport?: ChangeTransport; namespace?: string } = {}): void {
-  checkChangeTransport(db, options.transport)
-  checkChangeNamespace(db, options.namespace)
-  setChangeTransport(db, options.transport)
-  setChangeNamespace(db, options.namespace)
+  transportSlot.check(db, options.transport)
+  namespaceSlot.check(db, options.namespace)
+  transportSlot.commit(db, options.transport)
+  namespaceSlot.commit(db, options.namespace)
 }
 
 /** The transport for a db — its registered override, else the shared in-process default — FROZEN on first
  *  call so every later subscription, publish and readiness proof refers to the same transport identity. */
 function transportFor(db: object): ChangeTransport {
-  let transport = resolved.get(db)
-  if (!transport) {
-    transport = configured.get(db) ?? defaultChangeTransport
-    resolved.set(db, transport)
-  }
-  return transport
+  return transportSlot.resolve(db, () => defaultChangeTransport)
 }
 
 // ── logical-database identity ─────────────────────────────────────
@@ -150,41 +131,25 @@ function transportFor(db: object): ChangeTransport {
 // that, because the identity is what REMOTE instances agree on, and their subscriptions are not observable
 // from here.
 
-const configuredNamespaces = new WeakMap<object, string>() // explicit, registered before first use
-const resolvedNamespaces = new WeakMap<object, string>() // frozen at first use (explicit OR derived)
+const namespaceSlot = createResolvable<string>({
+  // No `rotatableWhile`: NEVER. Quiescence cannot rescue an identity change, because the identity is what
+  // REMOTE instances agree on and their subscriptions are not observable from here.
+  conflictMessage:
+    'telefunc live: the change namespace for this db is already in use and cannot be replaced. `changeNamespace` identifies the logical database on a shared transport (a derived one counts as a resolution) — pass the same value on every reactiveDrizzle(db, …) call for this db, or use a distinct db instance.',
+})
+
 const derivedNamespaces = new WeakMap<object, string>() // per identity owner, shared by sibling dbs
 
-const NAMESPACE_SWAP_MESSAGE =
-  'telefunc live: the change namespace for this db is already in use and cannot be replaced. `changeNamespace` identifies the logical database on a shared transport (a derived one counts as a resolution) — pass the same value on every reactiveDrizzle(db, …) call for this db, or use a distinct db instance.'
-
-/** Reject a namespace that conflicts with this db's existing one, WITHOUT recording anything. Splitting
- *  the check from the commit is what lets the whole configuration be validated before any of it is
- *  installed — otherwise a transport could be installed and then a namespace throw, leaving the db
- *  half-configured. */
-function checkChangeNamespace(db: object, namespace: string | undefined): void {
-  if (namespace === undefined) return
-  const frozen = resolvedNamespaces.get(db)
-  if (frozen !== undefined && frozen !== namespace) throw new Error(NAMESPACE_SWAP_MESSAGE)
-  const existing = configuredNamespaces.get(db)
-  if (existing !== undefined && existing !== namespace) throw new Error(NAMESPACE_SWAP_MESSAGE)
-}
-
+/** A TEST SEAM, like `setChangeTransport` — see the note there. */
 function setChangeNamespace(db: object, namespace: string | undefined): void {
-  if (namespace === undefined) return
-  checkChangeNamespace(db, namespace)
-  configuredNamespaces.set(db, namespace)
+  namespaceSlot.commit(db, namespace)
 }
 
 /** The logical-database identity for a db: the caller's `changeNamespace` if there is one, else an identity
  *  derived from the connection this db runs on — FROZEN on first call, so every later topic, envelope and
  *  admitted subscription refers to the same database. */
 function namespaceFor(db: object): string {
-  let namespace = resolvedNamespaces.get(db)
-  if (namespace === undefined) {
-    namespace = configuredNamespaces.get(db) ?? derivedNamespaceFor(db)
-    resolvedNamespaces.set(db, namespace)
-  }
-  return namespace
+  return namespaceSlot.resolve(db, derivedNamespaceFor)
 }
 
 /** An identity shared by every db over the same connection. Drizzle clients are not all plain objects —

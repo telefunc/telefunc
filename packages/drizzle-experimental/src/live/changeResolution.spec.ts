@@ -192,6 +192,17 @@ describe('changeTransport — database identity, derived and frozen', () => {
     expect(namespaceFor(db)).toBe('orders')
   })
 
+  it('treats an EMPTY namespace as a configured value, not as an absent one', () => {
+    // The two slots guarded absence differently before they shared a machine — the transport on falsiness,
+    // the namespace on `undefined` alone — and that difference is load-bearing here: `''` reaches
+    // `configureChangeRuntime` (the entry only requires a namespace alongside an injected transport), and
+    // reading it as absent would silently resolve to the DERIVED identity instead, putting this db on a
+    // different topic from the one its operator named.
+    const db = { $client: {} }
+    setChangeNamespace(db, '')
+    expect(namespaceFor(db)).toBe('')
+  })
+
   it('is STABLE across calls even when $client is a fresh getter each time', () => {
     // A db whose `$client` is a getter returning a new object would otherwise derive a new identity on every
     // call. The per-db resolution cache is what makes the topic stable regardless.
