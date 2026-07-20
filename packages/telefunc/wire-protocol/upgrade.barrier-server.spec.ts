@@ -46,10 +46,13 @@ import {
   type Harness,
   type HarnessWire,
 } from './upgrade-spec-helpers.js'
+import { waitUntil } from './upgrade-client-harness.js'
 import { handleSseChannelRequest } from './server/sse.js'
+import { getChannelMux } from './server/mux.js'
 import { encodeSseRequestMetadata } from './sse-request.js'
+import { base64urlToUint8Array } from './base64url.js'
 import { UPGRADE_STAGE_TTL_MS } from './constants.js'
-import { TAG, encode, type DecodedFrame } from './shared-ws.js'
+import { TAG, decode, encode, type DecodedFrame } from './shared-ws.js'
 
 let harness: Harness | null = null
 const sentinel = makeSentinel(5_000, 9_000)
@@ -62,6 +65,29 @@ afterEach(() => {
 })
 
 const expectWireDelivers = sentinel.expectDelivers
+
+/** Decode the REAL SSE downstream the server hands back. Frame ORDER on this stream is the oracle
+ *  for anything the server must emit in a fixed sequence, and it is the same bytes a browser sees —
+ *  the per-wire `sent[]` logs cannot show it, because they belong to the in-memory harness. */
+function readDownstream(stream: ReadableStream<Uint8Array<ArrayBuffer>>) {
+  const seen: DecodedFrame[] = []
+  void (async () => {
+    const decoder = new TextDecoder()
+    let buffered = ''
+    try {
+      for await (const chunk of stream as unknown as AsyncIterable<Uint8Array<ArrayBuffer>>) {
+        buffered += decoder.decode(chunk, { stream: true })
+        const events = buffered.split('\n\n')
+        buffered = events.pop() ?? ''
+        for (const event of events) {
+          if (!event.startsWith('data: ')) continue // the `: open` comment
+          seen.push(decode(base64urlToUint8Array(event.slice(6)) as Uint8Array<ArrayBuffer>))
+        }
+      }
+    } catch {} // the stream is closed by teardown; a read racing that close is not a failure
+  })()
+  return { frames: seen, tags: () => seen.map((f) => f.tag) }
+}
 
 describe('PREPARE stages, and staging alone is inert', () => {
   test('a valid PREPARE answers READY echoing the upgradeId, with no side effect on the old session', async () => {
@@ -1005,6 +1031,59 @@ describe('through the real sse.ts', () => {
 
     expect((await response)?.statusCode).toBe(200)
   })
+
+  // The open-ACK is the client's signal that this wire will carry its uploads, and it raced the
+  // readiness boundary: sent the instant a connection object existed, while `runStreamResponse` was
+  // still consuming the initial reconcile. A client that acted on it uploaded into the window before
+  // `ready` released — and `runStreamResponse` snapshots `pendingDispatches` SYNCHRONOUSLY one line
+  // after `resolveReady()`, so a POST still parked before registration is not in that set and its
+  // dispatch is not covered by the drain. RECONCILED then went out with a stale `lastSeq`, which is
+  // exactly the replay ordering the drain registry exists to prevent.
+  //
+  // Made unreachable rather than merely narrowed: the ACK cannot be OBSERVED before RECONCILED, so
+  // there is no window in which a compliant client can upload early.
+  test('the streamRequest open-ACK is not sent until the initial reconcile has settled', async () => {
+    const connId = crypto.randomUUID()
+    const chA = globalRegisterChannel(`A-${connId}`)
+
+    // A stream-response POST whose body stays OPEN: `drainDeferred` consumes the initial reconcile
+    // and then blocks awaiting more body, so `ready` is genuinely unresolved for the whole window.
+    // `openSseDownstream`'s Blob body ends immediately and could not hold this state open.
+    let downCtrl!: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>>
+    const downBody = new ReadableStream<Uint8Array<ArrayBuffer>>({ start: (c) => (downCtrl = c) })
+    downCtrl.enqueue(encodeSseRequestMetadata({ connId, streamResponse: true }))
+    downCtrl.enqueue(lengthPrefixed(encode.reconcile({ open: [{ id: chA.id, ix: 0, lastSeq: 0, initial: true }] })))
+    const downstream = await handleSseChannelRequest(
+      new Request('http://test.local/_telefunc', { method: 'POST', body: downBody, duplex: 'half' } as RequestInit),
+    )
+    expect(downstream?.statusCode).toBe(200)
+    const frames = readDownstream(downstream!.body as ReadableStream<Uint8Array<ArrayBuffer>>)
+
+    // The upload wire opens while the initial reconcile is still in flight — the real ordering
+    // whenever a client opens both POSTs at once, which is what it does.
+    let upCtrl!: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>>
+    const upBody = new ReadableStream<Uint8Array<ArrayBuffer>>({ start: (c) => (upCtrl = c) })
+    upCtrl.enqueue(encodeSseRequestMetadata({ connId, streamRequest: true }))
+    void handleSseChannelRequest(
+      new Request('http://test.local/_telefunc', { method: 'POST', body: upBody, duplex: 'half' } as RequestInit),
+    )
+
+    // INSTRUMENT CHECK: the event loop has turned and the connection is live and registered — the
+    // upload POST has reached the ACK site and can only be held by the readiness gate. Without this
+    // the assertion below is satisfied by a POST that never got that far.
+    await settle()
+    await settle()
+    expect(getChannelMux().getConnectionByConnId(connId)).toBeDefined()
+    expect(frames.tags()).not.toContain(TAG.STREAM_REQUEST_OPEN_ACK)
+
+    downCtrl.close() // the initial reconcile settles; RECONCILED goes out, and only then the ACK
+    await waitUntil(() => frames.tags().includes(TAG.STREAM_REQUEST_OPEN_ACK), 'the open-ACK was sent')
+
+    const tags = frames.tags()
+    expect(tags.indexOf(TAG.RECONCILED)).toBeGreaterThanOrEqual(0)
+    expect(tags.indexOf(TAG.RECONCILED)).toBeLessThan(tags.indexOf(TAG.STREAM_REQUEST_OPEN_ACK))
+    upCtrl.close()
+  }, 10_000)
 
   test('a TRUNCATED streamRequest body drains its parked frames before the POST resolves', async () => {
     // The exit that matters most: a client whose upload body dies mid-frame is the one about to

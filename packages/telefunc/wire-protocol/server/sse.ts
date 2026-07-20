@@ -146,10 +146,13 @@ class SseConnectionTransport {
   private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
-    // Send the open-ack as soon as we have a connection — the client races this ack against
-    // its handshake timeout to commit to using this wire as its upload channel.
-    this.sendNow(connection, encode.streamRequestOpenAck())
     if (!(await this.waitReady(connection))) return badRequest()
+    // ⚠️ AFTER the readiness gate, never on connection resolution. The client treats this ack as
+    // "this wire will carry my uploads" and may enqueue immediately, so sending it while the initial
+    // reconcile was still in flight opened a window whose frames raced RECONCILED. `ready` now
+    // releases only once RECONCILED has been sent, which is what makes the early upload unreachable
+    // rather than merely unlikely.
+    this.sendNow(connection, encode.streamRequestOpenAck())
     try {
       while (true) {
         const raw = await this.readFrameOrNull(connection, reader)
@@ -188,9 +191,19 @@ class SseConnectionTransport {
     return okResponse()
   }
 
-  /** Stream-response POST lifecycle: consume the initial reconcile batch, release the
-   *  `ready` gate, drain in-flight batch POSTs (so their `_lastClientSeq` mutations land
-   *  first), then emit `reconciled`. */
+  /** Stream-response POST lifecycle: consume the initial reconcile batch, drain any dispatch already
+   *  in flight (so its `_lastClientSeq` mutation lands first), emit `reconciled` — and only THEN
+   *  release the `ready` gate.
+   *
+   *  ⚠️ The gate is released LAST, and that ordering is the whole point. Released before
+   *  `sendReconciled`, it let every POST parked in `waitReady` resume and register a dispatch — but
+   *  the drain below snapshots `pendingDispatches` SYNCHRONOUSLY, one turn before any of them can
+   *  resume, so their work was never in the set it awaits. RECONCILED then reported a `lastSeq`
+   *  taken before frames that were already being applied. Draining a set that work cannot yet have
+   *  entered is not a barrier; making the gate the last thing that opens is.
+   *
+   *  The drain is still needed: `closeConnection` resolves `ready` early on a mid-drain failure, and
+   *  a batch POST released that way registers unconditionally. */
   private async runStreamResponse(connection: SseConnection, reader: StreamReader): Promise<void> {
     let outcome: ReconcileOutcome | null = null
     try {
@@ -199,14 +212,16 @@ class SseConnectionTransport {
       // Body truncated mid-frame (`StreamReader` throws). The caller fire-and-forgets this
       // promise, so a rethrow would be an unhandled rejection. Transient close: the channels
       // keep their reconnect grace and the client's retry can re-attach them.
-      this.closeConnection(connection, false)
+      this.closeConnection(connection, false) // resolves `ready` — the parked POSTs see it closed
       return
+    }
+    try {
+      if (!shouldSendReconciled(outcome, connection)) return
+      await Promise.allSettled(connection.pendingDispatches)
+      this.mux.sendReconciled(connection, outcome)
     } finally {
       connection.resolveReady()
     }
-    if (!shouldSendReconciled(outcome, connection)) return
-    await Promise.allSettled(connection.pendingDispatches)
-    this.mux.sendReconciled(connection, outcome)
   }
 
   /** Read length-prefixed frames from `reader`, dispatch each through the deferred-reconcile

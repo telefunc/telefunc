@@ -37,6 +37,12 @@ type ServerTransport<TConnection> = {
   /** Stable per-connection id, or `null` for transports that don't multiplex client→server
    *  traffic across requests (WebSocket: every frame already lands on the same socket). */
   getConnId(connection: TConnection): string | null
+  /** ⚠️ SYNCHRONOUS and ORDER-PRESERVING: the frame must be committed to this connection's outbound
+   *  sequence before this returns, and frames must leave in call order. Both shipped transports
+   *  satisfy it (WS `socket.send`, SSE `stream.push`), and the barrier upgrade DEPENDS on it —
+   *  replay → COMMITTED → FIN is emitted as consecutive calls with nothing awaited between them, so
+   *  an adapter that deferred or reordered would land the FIN ahead of the frames it terminates.
+   *  Stated here because it is a requirement on every future adapter, not an observation about two. */
   sendNow(connection: TConnection, frame: Uint8Array<ArrayBuffer>): void
   terminateConnection(connection: TConnection): void
 }
