@@ -120,7 +120,15 @@ async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 3_
 
 type ReceivedPayload = { kind: 'text'; value: unknown } | { kind: 'binary'; bytes: Uint8Array }
 
-type UpgradeStateShape = { tag: string; bufferedFrames: number; bufferedBytes: number; finReceived: boolean }
+type UpgradeStateShape = {
+  tag: string
+  bufferedFrames: number
+  bufferedBytes: number
+  finReceived: boolean
+  to: unknown
+}
+
+type ConnectionShape = { state: { tag: string; upgrade?: UpgradeStateShape }; transport: unknown }
 
 type HarnessClientChannel = {
   readonly id: string
@@ -263,7 +271,7 @@ type UpgradeHarnessOptions = {
    *  gate that cannot fail. */
   autoReconcile?: boolean
   /** Batch mode only: hold the response to the POST that CARRIES the barrier until
-   *  `releaseHungPosts()`. Freezes the client in `draining` — barrier on the wire, transport not yet
+   *  `releaseHungPosts()`. Freezes the client in `committing` — barrier on the wire, transport not yet
    *  flipped — which is the only window in which a test can drive the old wire ahead of the flip.
    *  Scoped to that one POST rather than `setBatchPostsHang`, which would also hang the ordinary
    *  traffic that has to keep flowing to get the client there. */
@@ -288,8 +296,11 @@ type UpgradeHarness = {
    *  only thing discriminating the commit from a stale ordinary reconciled. Pairs with
    *  `barrier: 'refuse'`, where the test drives both limbs of the join by hand. */
   committedFrame(open?: ReconciledPayload['open'], overrides?: Partial<ReconciledPayload>): Uint8Array
-  inHandoff(): boolean
-  /** Handoff COMMITTED and buffer drained. `tryCompleteUpgradeHandoff` disposes the old transport
+  /** The probe has been adopted as the transport. The flip is an EVENT inside `committing`, not a
+   *  state of its own, so the only honest reading is transport identity — the same comparison the
+   *  connection's own routing makes. */
+  flipped(): boolean
+  /** Handoff COMMITTED and buffer drained. `tryCompleteUpgrade` disposes the old transport
    *  then drains, in one synchronous block, and disposing aborts the SSE fetch — so an async observer
    *  sees the abort strictly after the drain. The obvious alternative, a second `_onTransportOpen`,
    *  fires BEFORE the drain and even when FIN has not arrived. */
@@ -309,7 +320,7 @@ type UpgradeHarness = {
   readonly sockets: StubWebSocket[]
   readonly prepares: PreparePayload[]
   readonly barriers: ReconcilePayload[]
-  /** `'none' | 'probing' | 'preparing' | 'draining' | 'handoff'`, off the state machine, never mirrored. */
+  /** `'none' | 'staging' | 'committing'`, off the state machine, never mirrored. */
   upgradeTag(): string
   /** FIN consumed, read off the field the join reads. The point is to have something a test can WAIT
    *  for: pushing onto the SSE downstream only queues it, so asserting immediately afterwards passes
@@ -479,10 +490,18 @@ async function createUpgradeHarness(
   let connection!: ClientConnection
   for (const channel of channels) connection = registerChannel(channel)
 
+  const readConnection = (): ConnectionShape => connection as unknown as ConnectionShape
+
   const upgradeTag = (): string => {
-    const state = (connection as unknown as { state: { tag: string; upgrade?: { tag: string } } }).state
+    const { state } = readConnection()
     if (state.tag !== 'open') return state.tag
     return state.upgrade?.tag ?? 'none'
+  }
+
+  const committingUpgrade = (): UpgradeStateShape | null => {
+    const { state } = readConnection()
+    const upgrade = state.tag === 'open' ? state.upgrade : undefined
+    return upgrade?.tag === 'committing' ? upgrade : null
   }
 
   const firstReconcile = (): (DecodedFrame & { tag: typeof TAG.RECONCILE }) | undefined =>
@@ -503,7 +522,7 @@ async function createUpgradeHarness(
   const socket = stub.sockets[0]!
 
   // 3) Drive to the point both wires are observable. With no READY coming the attempt cannot get
-  //    past `preparing`, so stop at the PREPARE; otherwise the barrier is the old wire's final frame
+  //    past `staging`, so stop at the PREPARE; otherwise the barrier is the old wire's final frame
   //    and the transport flip follows it synchronously.
   if (opts.prepare !== 'ready') {
     await waitUntil(() => prepares.length > 0, 'client sent its PREPARE')
@@ -530,16 +549,15 @@ async function createUpgradeHarness(
     },
     // Read off the live state machine rather than inferred from the wire: on the barrier flow the
     // new wire never sends a RECONCILE at all, so any wire-derived signal would read false forever.
-    inHandoff: () => upgradeTag() === 'handoff',
+    flipped: () => {
+      const upgrade = committingUpgrade()
+      return upgrade !== null && readConnection().transport === upgrade.to
+    },
     sockets: stub.sockets,
     prepares,
     barriers,
     upgradeTag,
-    handoffFinReceived: () => {
-      const state = (connection as unknown as { state: { tag: string; upgrade?: UpgradeStateShape } }).state
-      const upgrade = state.tag === 'open' ? state.upgrade : undefined
-      return upgrade?.tag === 'handoff' && upgrade.finReceived
-    },
+    handoffFinReceived: () => committingUpgrade()?.finReceived === true,
     register: (id) => {
       const channel = createHarnessChannel(id)
       channels.push(channel)
@@ -566,9 +584,8 @@ async function createUpgradeHarness(
     },
     bufferedSendCount: () => (connection as unknown as { sendBuffer: unknown[] }).sendBuffer.length,
     handoffBuffered: () => {
-      const state = (connection as unknown as { state: { tag: string; upgrade?: UpgradeStateShape } }).state
-      const upgrade = state.tag === 'open' ? state.upgrade : undefined
-      if (upgrade?.tag !== 'handoff') return null
+      const upgrade = committingUpgrade()
+      if (upgrade === null) return null
       return { frames: upgrade.bufferedFrames, bytes: upgrade.bufferedBytes }
     },
     dispose: () => {

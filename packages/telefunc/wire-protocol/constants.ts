@@ -1,3 +1,5 @@
+import { assert } from '../utils/assert.js'
+
 export const SERIALIZER_PREFIX_FILE = '!TelefuncFile:'
 export const SERIALIZER_PREFIX_BLOB = '!TelefuncBlob:'
 export const SERIALIZER_PREFIX_FILE_DOWNLOAD = '!TelefuncFileDownload:'
@@ -94,10 +96,10 @@ export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
 export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
-/** CLIENT-side deadline for one attempt, armed at the `PREPARE` and disarmed at handoff entry
- *  (excluding the probe, which `WS_PROBE_TIMEOUT_MS` bounds). Not redundant with the server's stage
- *  TTL: a barrier the server finds STALE is refused SILENTLY, so nothing on the wire would otherwise
- *  ever end such an attempt. From handoff entry on, the join timeout takes over. */
+/** CLIENT-side deadline for one attempt, armed at the `PREPARE` and disarmed at the flip (excluding
+ *  the probe, which `WS_PROBE_TIMEOUT_MS` bounds). Not redundant with the server's stage TTL: a
+ *  barrier the server finds STALE is refused SILENTLY, so nothing on the wire would otherwise ever
+ *  end such an attempt. From the flip on, the join timeout takes over. */
 export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 
 /** SERVER-side stage lifetime, from accepted PREPARE to commit. NON-refreshing on purpose: PING
@@ -149,6 +151,11 @@ export const SSE_METADATA_MAX_BYTES = 64 * 1024
  *  is suppressed while reconciling, so nothing notices the dead wire and every call buffered
  *  behind the un-acked RECONCILE hangs. */
 export const RECONCILE_TIMEOUT_MS = 10_000
+
+/** An aborted attempt must reach its sticky upgrade fallback BEFORE the reconcile timer takes the
+ *  generic reconnect and leaves upgrades enabled. The attempt deadline is armed strictly earlier, so
+ *  it wins as long as it is not the longer of the two — enforced here rather than argued in prose. */
+assert(UPGRADE_ATTEMPT_TIMEOUT_MS <= RECONCILE_TIMEOUT_MS)
 
 // ===== Multiplexed SSE transport =====
 

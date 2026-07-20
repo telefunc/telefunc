@@ -46,7 +46,7 @@ const WS_CLOSED = 3
 
 /** The join deadline is 2 s and the next-slowest bound that could produce the same fallback is
  *  `RECONCILE_TIMEOUT_MS` at 10 s, so a budget in between is what separates them. Falling back
- *  inside it is the ONLY observable the two limbs have: `abortUpgradeAndReconnectSse` reconnects
+ *  inside it is the ONLY observable the two limbs have: `fallbackToSse` reconnects
  *  rather than closing channels, so a limb-naming error never reaches any test surface. */
 const JOIN_BUDGET_MS = UPGRADE_HANDOFF_JOIN_TIMEOUT_MS + 3_000
 
@@ -106,7 +106,7 @@ describe('the PREPARE/barrier exchange', () => {
     const channel = h.channels[0]!
 
     // Staged, awaiting READY — and deliberately UNGATED, so the old wire keeps flowing.
-    expect(h.upgradeTag()).toBe('preparing')
+    expect(h.upgradeTag()).toBe('staging')
     h.sse.pushFrame(encode.text(0, '"one"', 1))
     h.sse.pushFrame(encode.text(0, '"two"', 2))
     await waitUntil(() => channel.received.length === 2, 'both frames delivered during staging')
@@ -121,7 +121,7 @@ describe('the PREPARE/barrier exchange', () => {
 
   test('a channel opened mid-staging is not in the barrier and lands on the follow-up reconcile', async () => {
     const h = await upgradeHarness({ prepare: 'withhold', barrier: 'refuse' })
-    expect(h.upgradeTag()).toBe('preparing')
+    expect(h.upgradeTag()).toBe('staging')
     const upstreamBefore = h.sse.upstream.length
 
     const late = h.register('B')
@@ -193,7 +193,7 @@ describe('a server frame the client cannot parse', () => {
     // The probe's handler is a second, independent decode site: it runs before any transport exists,
     // so its recovery is the attempt abort, not a reconnect.
     const h = await upgradeHarness({ prepare: 'withhold' })
-    expect(h.upgradeTag()).toBe('preparing')
+    expect(h.upgradeTag()).toBe('staging')
 
     h.ws.pushFrame(unparseable())
 
@@ -244,7 +244,7 @@ describe('settlement happens on COMMITTED, and exactly once', () => {
     // proves the client processed everything pushed above before the assertions run.
     await waitUntil(() => h.handoffFinReceived(), 'the client consumed the FIN and both imposters')
 
-    expect(h.inHandoff()).toBe(true)
+    expect(h.flipped()).toBe(true)
     expect(h.handoffDrained()).toBe(false)
 
     // The real one still settles it — so the guard rejects imposters rather than everything.
@@ -258,7 +258,7 @@ describe('settlement happens on COMMITTED, and exactly once', () => {
     // one arrival-ordered buffer, or drained the new wire first, loses it.
     const h = await upgradeHarness({ barrier: 'refuse' })
     const channel = h.channels[0]!
-    expect(h.inHandoff()).toBe(true)
+    expect(h.flipped()).toBe(true)
 
     h.sse.pushFrame(encode.text(0, '"in-flight"', 1))
     // Buffered rather than dispatched — the handoff is still open, which is what makes the ordering
@@ -279,7 +279,7 @@ describe('settlement must not skip the secondary cleanup it moved past', () => {
   // Before the split, a channel the settling RECONCILED omitted was released INSIDE
   // `applyReconciled` — ahead of two things that depend on it: `handleReconciled`'s
   // `startTtlIfIdle()`, and `applyReconciled`'s own `drainBufferedFrames` compaction. Deferring the
-  // release to `tryCompleteUpgradeHandoff` moved it AFTER both, and nothing downstream re-runs
+  // release to `tryCompleteUpgrade` moved it AFTER both, and nothing downstream re-runs
   // either step. FIN-first is the ordering that still works (the handoff completes from inside
   // `handleReconciled`), so each finding is paired with the ordering twin that proves it is about
   // the ORDERING and not about the harness, the idle timeout or the send path.
@@ -351,8 +351,8 @@ describe('the attempt deadline is the only abort path when the server says nothi
     vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval'] })
     const h = await upgradeHarness({ prepare: 'withhold' })
 
-    expect(h.upgradeTag()).toBe('preparing')
-    // Ungated by design: `preparing` is not `draining`, so the old wire keeps carrying user sends for
+    expect(h.upgradeTag()).toBe('staging')
+    // Ungated by design: `staging` is not `committing`, so the old wire keeps carrying user sends for
     // the whole staging window.
     h.sse.pushFrame(encode.text(0, '"during-staging"', 1))
     await waitUntil(() => h.channels[0]!.received.length === 1, 'the old wire still delivers while staged')
@@ -377,10 +377,10 @@ describe('the attempt deadline is the only abort path when the server says nothi
     // An impostor proves nothing about whether OUR stage was installed, so emitting the old wire's
     // final frame on its word would be a barrier against a stage that may not exist.
     const h = await upgradeHarness({ prepare: 'withhold' })
-    expect(h.upgradeTag()).toBe('preparing')
+    expect(h.upgradeTag()).toBe('staging')
 
     h.sendReady('not-our-attempt')
-    await waitUntil(() => h.upgradeTag() !== 'preparing', 'the impostor READY ended the attempt')
+    await waitUntil(() => h.upgradeTag() !== 'staging', 'the impostor READY ended the attempt')
 
     expect(h.barriers).toHaveLength(0)
     expect(h.upgradeTag()).toBe('none')
@@ -446,7 +446,7 @@ describe('once the barrier may have left, both wires are abandoned', () => {
 
   test('the SSE dies after the barrier: one fresh reconcile, and the in-flight frame survives', async () => {
     const h = await upgradeHarness({ barrier: 'refuse' })
-    expect(h.inHandoff()).toBe(true)
+    expect(h.flipped()).toBe(true)
 
     // Received on the old wire but not yet dispatched — terminal old-wire frames carry no seq and no
     // replay can reproduce them, so the fallback must drain what it already has.
@@ -497,7 +497,7 @@ describe('batch-mode emission: the deadline must be able to interrupt a quiesce'
     // the transport — a POST body the mock server actually received.
     vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval'] })
     const h = await upgradeHarness({ batchMode: true, prepare: 'withhold', barrier: 'refuse', autoReconcile: true })
-    expect(h.upgradeTag()).toBe('preparing')
+    expect(h.upgradeTag()).toBe('staging')
 
     // A batch POST the server reads and then never answers. `flushing` stays true, so the barrier can
     // never be emitted: sending it alongside would put two POSTs on the wire with no defined
@@ -514,7 +514,7 @@ describe('batch-mode emission: the deadline must be able to interrupt a quiesce'
     expect(textsWhileWedged).toBeGreaterThan(0)
 
     h.sendReady()
-    await waitUntil(() => h.upgradeTag() === 'draining', 'READY gated the wire for emission', 6_000)
+    await waitUntil(() => h.upgradeTag() === 'committing', 'READY gated the wire for emission', 6_000)
     h.send(0, '"gated"')
     expect(h.bufferedSendCount()).toBeGreaterThan(0)
 
@@ -578,7 +578,7 @@ describe('batch-mode emission: the deadline must be able to interrupt a quiesce'
     const postsBefore = h.batchPosts.length
 
     h.sendReady()
-    await waitUntil(() => h.upgradeTag() === 'draining', 'emission is parked in the quiesce', 6_000)
+    await waitUntil(() => h.upgradeTag() === 'committing', 'emission is parked in the quiesce', 6_000)
 
     h.setBatchPostsHang(false)
     h.ws.socket.close() // closing the probe is what aborts the attempt
@@ -612,7 +612,7 @@ describe('batch-mode emission: the deadline must be able to interrupt a quiesce'
     // needless reconnect and replay.
     vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval'] })
     const h = await upgradeHarness({ batchMode: true, prepare: 'withhold', barrier: 'refuse' })
-    expect(h.upgradeTag()).toBe('preparing')
+    expect(h.upgradeTag()).toBe('staging')
 
     await vi.advanceTimersByTimeAsync(UPGRADE_ATTEMPT_TIMEOUT_MS + 500)
     await waitUntil(() => h.upgradeTag() === 'none', 'the attempt deadline released the attempt', 6_000)
@@ -669,7 +669,7 @@ describe('batch-mode emission: the deadline must be able to interrupt a quiesce'
 // The FIN is emitted on the OLD wire the instant the barrier commits, while the client is still
 // awaiting that same barrier's emission to return. Two wires, so which lands first is a race — and
 // in batch mode, where the emission awaits a POST round-trip, the FIN wins it routinely. The probe
-// wire's early COMMITTED already had a carrier across this boundary (`heldFrames`); the old wire's
+// wire's early COMMITTED already had a carrier across this boundary (a probe-side hold queue); the old wire's
 // early FIN did not, and was dropped for arriving one turn early. The join then waited on a limb
 // already in, so every such upgrade could only end at the join deadline — releasing the whole
 // handoff buffer in one burst. Caught by the rxjs `close()` e2e, whose 5 buffered ticks then arrived
@@ -677,22 +677,22 @@ describe('batch-mode emission: the deadline must be able to interrupt a quiesce'
 // the rest.
 describe('a join limb that arrives before the handoff exists', () => {
   test('a FIN that arrives BEFORE the transport flip still settles the join', async () => {
-    // `hangBarrierPost` freezes the client in `draining` — barrier on the wire, transport not yet
+    // `hangBarrierPost` freezes the client in `committing` — barrier on the wire, transport not yet
     // flipped — which is the pre-flip window, held open rather than raced for.
     const h = await upgradeHarness({ batchMode: true, barrier: 'refuse', hangBarrierPost: true })
-    expect(h.upgradeTag()).toBe('draining')
+    expect(h.upgradeTag()).toBe('committing')
 
     h.sse.pushFrame(encode.fin())
     // Ordering barrier, not decoration: the SSE downstream is a real stream, so the FIN is only
     // QUEUED by `pushFrame`. This frame rides behind it on the same stream, and pre-flip it still
     // dispatches straight to the channel — so observing it proves the FIN was consumed while the
-    // client was `draining`. Without it the test would pass on a client that read the FIN after
+    // client was pre-flip. Without it the test would pass on a client that read the FIN after
     // the flip, i.e. exactly the case it is meant to exclude.
     h.sse.pushFrame(encode.text(0, '"pre-flip"', 1))
     await waitUntil(() => h.channels[0]!.received.length === 1, 'the frame behind the FIN arrived pre-flip')
 
     h.releaseHungPosts()
-    await waitUntil(() => h.inHandoff(), 'the flip entered the handoff')
+    await waitUntil(() => h.flipped(), 'the flip entered the handoff')
     h.ws.pushFrame(h.committedFrame([{ ix: 0, lastSeq: 1 }]))
 
     // Under the join deadline, so a handoff that only ends by TIMING OUT cannot satisfy this. The
@@ -707,15 +707,38 @@ describe('a join limb that arrives before the handoff exists', () => {
     expect(h.channels[0]!.isClosed).toBe(false)
   }, 20_000)
 
+  test('BOTH limbs before the flip settle the join from INSIDE the flip', async () => {
+    // The ordering case the single-limb rows cannot reach. With both limbs already in when the flip
+    // runs, nothing arrives afterwards to re-drive the completion check — so the flip itself has to
+    // leave the connection joined. That pins the ORDER of the flip's own two halves: the adoption
+    // must precede the re-ingest, because the completion check reads transport identity to decide
+    // whether the flip has happened. Re-ingest first and the COMMITTED is consumed while the check
+    // still reads "not flipped"; the join then has no second chance and can only end at its deadline.
+    const h = await upgradeHarness({ batchMode: true, barrier: 'refuse', hangBarrierPost: true })
+    expect(h.upgradeTag()).toBe('committing')
+    expect(h.flipped()).toBe(false)
+
+    h.sse.pushFrame(encode.fin())
+    h.ws.pushFrame(h.committedFrame([{ ix: 0, lastSeq: 0 }]))
+    await waitUntil(() => h.handoffFinReceived(), 'the FIN was recorded pre-flip')
+
+    h.releaseHungPosts()
+    // Under the join deadline: an upgrade that only ends by TIMING OUT cannot satisfy this, and
+    // `sseConnects()` is what tells the two apart — both paths abort the SSE fetch, only one reconnects.
+    await waitUntil(() => h.handoffDrained(), 'the join settled inside the flip', UPGRADE_HANDOFF_JOIN_TIMEOUT_MS - 500)
+    expect(h.sseConnects()).toBe(1)
+    expect(h.channels[0]!.isClosed).toBe(false)
+  }, 20_000)
+
   test('control: the same handoff with the FIN AFTER the flip settles the same way', async () => {
     // The instrument that can disagree. Identical harness, identical frames, one variable moved:
     // WHEN the FIN is pushed. It passes on the unfixed client too — which is what makes the row
     // above a statement about the early FIN rather than about batch-mode handoffs in general.
     const h = await upgradeHarness({ batchMode: true, barrier: 'refuse', hangBarrierPost: true })
-    expect(h.upgradeTag()).toBe('draining')
+    expect(h.upgradeTag()).toBe('committing')
 
     h.releaseHungPosts()
-    await waitUntil(() => h.inHandoff(), 'the flip entered the handoff')
+    await waitUntil(() => h.flipped(), 'the flip entered the handoff')
     h.sse.pushFrame(encode.fin())
     h.ws.pushFrame(h.committedFrame([{ ix: 0, lastSeq: 0 }]))
 

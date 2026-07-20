@@ -598,62 +598,144 @@ describe('the handoff buffer budget is ONE budget shared across both wires', () 
     expect(h.channels[0]!.received).toHaveLength(OLD_FRAMES)
   })
 
-  test('frames HELD before the transport flip are charged against that same budget', async () => {
-    // `prepare: 'withhold'` holds the client in `preparing`, the window in which `probe.onFrame` is
-    // live but the transport has not flipped — so everything pushed on the WS is HELD. That queue
-    // exists before any handoff state does, so without a check at HOLD time it is unbounded memory
-    // the documented cap never sees.
+  test('a probe that is not yet committing DROPS what it receives instead of buffering it', async () => {
+    // `prepare: 'withhold'` holds the client in `staging`. The probe socket is live but it is nobody's
+    // wire and carries no session, so no compliant server can address a frame to it: between PREPARE
+    // and the commit the mux answers a staged probe with nothing but READY. Anything arriving here is
+    // hostile or buggy, and the bounded answer is to DROP it — buffering would pin memory against an
+    // unauthenticated socket the attempt may never adopt.
     //
-    // The loss is not "a frame was buffered wrongly", it is `trackSeq` advancing past frames that
-    // were dropped: once it has, the client reports the HIGHER cursor and the server's replay of the
-    // dropped prefix is dup-suppressed forever. So the oracle is whether a frame at the ORIGINAL seq
-    // is still deliverable afterwards — not the buffer state, and not a frame count.
+    // Dropping is only safe because it is SILENT: the loss that matters is not "a frame went
+    // missing", it is `trackSeq` advancing past a frame that was never dispatched. Once it has, the
+    // client reports the HIGHER cursor and the server's replay is dup-suppressed forever. So the
+    // oracle is whether a frame at the ORIGINAL seq is still deliverable — not a buffer count.
     const h = (clientHarness = await createUpgradeHarness(['A'], { prepare: 'withhold', barrier: 'refuse' }))
     const channel = h.channels[0]!
-    expect(h.upgradeTag()).toBe('preparing')
+    expect(h.upgradeTag()).toBe('staging')
 
     for (let seq = 1; seq <= UPGRADE_HANDOFF_BUFFER_FRAMES + 2; seq++) {
-      h.ws.pushFrame(encode.text(0, `"new-${seq}"`, seq))
+      h.ws.pushFrame(encode.text(0, `"dropped-${seq}"`, seq))
     }
+    // Nothing dispatched and nothing accounted: there is no record to charge them against yet.
     expect(channel.received).toHaveLength(0)
+    expect(h.handoffBuffered()).toBeNull()
 
-    await waitUntil(() => h.upgradeTag() === 'none', 'the over-budget attempt released itself', 6_000)
+    // The attempt is untouched by the flood — it commits exactly as it would have without it.
+    h.sendReady()
+    await waitUntil(() => h.flipped(), 'the attempt committed and flipped')
+    h.ws.pushFrame(h.committedFrame())
+    h.sse.pushFrame(encode.fin())
+    await waitUntil(() => h.handoffDrained(), 'the join settled', 6_000)
 
-    // Discarded as a SET — keeping any suffix would be keeping exactly the frames whose seq is
-    // highest, which is what poisons the cursor.
     expect(channel.received).toHaveLength(0)
     expect(channel.isClosed).toBe(false)
-    // Nothing was emitted, so the old wire keeps its session: a pre-barrier failure.
-    expect(h.barriers).toHaveLength(0)
     expect(h.sseConnects()).toBe(1)
 
-    // THE oracle, and it needs no reconnect: `trackSeq` must not have moved, so a frame at seq 1 is
-    // still deliverable. Had any held frame escaped, the cursor would sit past 4096 and the server's
-    // replay of the whole discarded prefix would be dup-suppressed forever.
-    h.sse.pushFrame(encode.text(0, '"replayed-1"', 1))
-    await waitUntil(() => channel.received.length === 1, 'the discarded prefix is still replayable', 6_000)
+    // THE oracle: `trackSeq` must not have moved, so a frame at seq 1 is still deliverable. Had any
+    // dropped frame been dispatched, the cursor would sit past 4096 and this would be a silent dup.
+    h.ws.pushFrame(encode.text(0, '"replayed-1"', 1))
+    await waitUntil(() => channel.received.length === 1, 'the dropped prefix is still replayable', 6_000)
     expect(channel.received).toEqual([{ kind: 'text', value: 'replayed-1' }])
   }, 20_000)
 
-  test('control: a held burst UNDER the cap is delivered in full, in order', async () => {
+  test('frames held between the barrier and the flip are charged against that same budget', async () => {
+    // The real pre-flip hold window, and the only one there is: from the barrier's emission the
+    // commit record exists, the COMMITTED may legitimately arrive on the probe, and it must WAIT for
+    // the flip. `hangBarrierPost` holds the client exactly there. Uncharged, this window is unbounded
+    // memory the documented cap never sees — the flood arrives while the emission's own await is
+    // still parked.
+    const h = (clientHarness = await createUpgradeHarness(['A'], {
+      batchMode: true,
+      barrier: 'refuse',
+      hangBarrierPost: true,
+    }))
+    const channel = h.channels[0]!
+    expect(h.upgradeTag()).toBe('committing')
+    expect(h.flipped()).toBe(false)
+
+    for (let seq = 1; seq <= UPGRADE_HANDOFF_BUFFER_FRAMES + 1; seq++) {
+      if (h.handoffBuffered() === null) break // stop at the trip
+      h.ws.pushFrame(encode.text(0, `"new-${seq}"`, seq))
+    }
+
+    // Pre-flip a budget trip only ABORTS the attempt — `commitBarrier`'s verdict routing owns the one
+    // recovery, and it takes the sticky both-wires fallback because the barrier may already be read.
+    await waitForFallback(h, OVERFLOW_BUDGET_MS)
+
+    // Discarded as a SET — keeping the prefix that fit would keep exactly the frames whose seq is
+    // highest, which is what poisons the cursor.
+    expect(channel.received).toEqual([])
+    expect(channel.isClosed).toBe(false)
+  }, 20_000)
+
+  test('a held frame is charged ONCE — the flip refunds before it re-ingests', async () => {
+    // The measured scar this design dissolves: the pre-flip queue and the post-flip buffer used to be
+    // two accumulators that never saw each other's totals, so a frame was charged at capture AND
+    // again at replay. True peak was 2× the documented budget, with different overflow policies at
+    // each half. One record with one budget makes charge-once the only expressible shape, and this
+    // row is what pins it: a held set just over HALF the budget completes normally, and would trip a
+    // client that charged it twice. Nothing else discriminates — every other budget row floods far
+    // enough past the cap that doubling changes nothing.
+    const HELD = Math.ceil(UPGRADE_HANDOFF_BUFFER_FRAMES / 2) + 1
+    const h = (clientHarness = await createUpgradeHarness(['A'], {
+      batchMode: true,
+      barrier: 'refuse',
+      hangBarrierPost: true,
+    }))
+    const channel = h.channels[0]!
+
+    for (let seq = 1; seq <= HELD; seq++) h.ws.pushFrame(encode.text(0, `"held-${seq}"`, seq))
+    expect(h.handoffBuffered()?.frames).toBe(HELD)
+    expect(HELD * 2).toBeGreaterThan(UPGRADE_HANDOFF_BUFFER_FRAMES)
+
+    h.releaseHungPosts()
+    await waitUntil(() => h.flipped(), 'the emission settled and the flip ran')
+    // Charged once, so the flip leaves the accounting exactly where it found it.
+    expect(h.handoffBuffered()?.frames).toBe(HELD)
+
+    h.ws.pushFrame(h.committedFrame([{ ix: 0, lastSeq: 0 }]))
+    h.sse.pushFrame(encode.fin())
+    await waitUntil(() => h.handoffDrained(), 'the join settled', 6_000)
+
+    // No fallback: the budget was never exceeded, so every held frame is delivered.
+    expect(h.sseConnects()).toBe(1)
+    expect(channel.received).toHaveLength(HELD)
+  }, 20_000)
+
+  test('control: a held burst UNDER the cap is delivered in full, in order, on the NEW wire', async () => {
     // Without this, "zero delivered" above is satisfied just as well by a client that drops every
     // held frame — a different bug with the same assertion.
-    const h = (clientHarness = await createUpgradeHarness(['A'], { prepare: 'withhold', barrier: 'refuse' }))
+    //
+    // It also gates the flip's ORDERING, which nothing else does: the adoption must happen BEFORE the
+    // held frames are re-ingested. Re-ingesting first routes the COMMITTED among them through a
+    // connection whose transport is still the OLD wire, so the frames its settlement releases go out
+    // on the wire the barrier just retired — hence the assertion on which wire carried them.
+    const h = (clientHarness = await createUpgradeHarness(['A'], {
+      batchMode: true,
+      barrier: 'refuse',
+      hangBarrierPost: true,
+    }))
     const channel = h.channels[0]!
 
     for (let seq = 1; seq <= 3; seq++) h.ws.pushFrame(encode.text(0, `"new-${seq}"`, seq))
+    // The COMMITTED rides in the SAME held set, behind the data — the ordinary ordering whenever the
+    // server commits before the client's emission await has resumed.
+    h.ws.pushFrame(h.committedFrame([{ ix: 0, lastSeq: 0 }]))
+    expect(h.handoffBuffered()?.frames).toBe(4)
+    const upstreamBeforeFlip = h.sse.upstream.length
 
-    h.sendReady()
-    await waitUntil(() => h.barriers.length > 0, 'barrier emitted')
-    h.ws.pushFrame(h.committedFrame())
+    h.releaseHungPosts()
+    await waitUntil(() => h.flipped(), 'the emission settled and the flip ran')
     h.sse.pushFrame(encode.fin())
-    await waitUntil(() => h.handoffDrained(), 'handoff settled', 6_000)
+    await waitUntil(() => h.handoffDrained(), 'the join settled', 6_000)
 
     expect(channel.received).toEqual([
       { kind: 'text', value: 'new-1' },
       { kind: 'text', value: 'new-2' },
       { kind: 'text', value: 'new-3' },
     ])
+    // The retired wire carried nothing after the barrier.
+    expect(h.sse.upstream).toHaveLength(upstreamBeforeFlip)
     expect(h.sseConnects()).toBe(1)
   }, 20_000)
 })
