@@ -243,10 +243,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._openCallbacks.push(callback)
   }
 
-  /** @internal — fires each time the transport re-opens for an already-open channel (a reconnect
-   *  reconciled this channel back), never on the first open. A consumer whose server-side state can
-   *  be rebuilt on a fresh connection (e.g. `Room` re-declaring its wants) re-establishes it here:
-   *  the client survives a blip but the server it reconnects to may not remember what it declared. */
+  /** @internal — fires each time the transport re-opens for an already-open channel, after reconnect
+   *  has reconciled that existing channel and released its bounded sequenced replay, never on first
+   *  open. Consumers use it as the final keyed-declaration layer for state emitted but no longer
+   *  replayable; it does not repair separate unsequenced control loss such as room-wide `BROADCAST_SUB`. */
   _onReconnect(callback: () => void): void {
     this._reconnectCallbacks.push(callback)
   }

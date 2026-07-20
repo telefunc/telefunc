@@ -94,10 +94,10 @@ class ClientRoom implements Room {
     // Wire death — the network gave up or the stub was GC'd. (A server `Room.close()` arrives
     // as the `closed` ctrl event before the stub shuts down, so it takes the 'closed' path.)
     stub.onClose(() => this._applyClosed('disconnected'))
-    // A reconnect may reconcile onto a server stub that no longer holds our declared wants (the
-    // grace lapsed, or a different node took the connection). The holder survives the blip, so
-    // nothing else would re-declare — forget what we assume the server knows and re-sync, so a
-    // lane we still want is relayed again instead of going silently dark.
+    // Reconnect first reconciles the existing holder and releases bounded sequenced replay. This is
+    // the final keyed-declaration layer: if a declaration was emitted but no longer replayable before the
+    // holder applied it, forget what we assumed it knew and re-sync the current full wants. It does
+    // not repair separate unsequenced room-wide `BROADCAST_SUB` loss.
     stub._onReconnect(() => {
       this._declaredWants.clear()
       this._syncWants()

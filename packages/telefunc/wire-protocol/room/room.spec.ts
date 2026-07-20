@@ -2760,8 +2760,8 @@ describe('ClientRoom', () => {
     fake.reconnect() // same blip the binary lane above survives
     await settle()
 
-    // The reconnect re-sync clears `_declaredWants` for every lane, not just binary: a server stub
-    // that forgot the want must be told again, or Alice's text is relayed to nobody.
+    // The reconnect re-sync is the post-replay final declaration for every keyed lane, not just
+    // binary: a member-text want that was emitted but no longer replayable must be sent again.
     expect(subTextMsgs().length).toBe(before + 1)
     expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice] })
   })
