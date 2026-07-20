@@ -163,13 +163,14 @@ function assertTransitionAllowed(
   cx: HeadCx,
   next: Extract<HeadNext, { head: unknown }>,
   current: StoredHead | null,
+  generations: ReadonlyMap<string, Generation> | undefined,
 ): void {
   const from = current === null ? 'absent' : current.state
   const transition = `${from} + ${headCxForm(cx)} -> ${next.head.state}`
   switch (transition) {
     case 'absent + absent -> open':
-      return
     case 'closed + generic -> open':
+      assertFreshIncarnation(next.head.currentInc, generations)
       return
     case 'open + generic -> open':
     case 'open + generic -> closing':
@@ -186,6 +187,19 @@ function assertTransitionAllowed(
       return
     default:
       throw new Error(`head CX: '${transition}' is not a legal head transition`)
+  }
+}
+
+// FRESH-INC on create/recreate: the incarnation a room is (re)created on must have NO surviving
+// generation state, checked against the very storage listGenerations reads. Room core mints fresh uuids
+// anyway; this makes stale-generation resurrection — an old inc's cells silently becoming the "new"
+// room's state — unrepresentable even under caller error. A fully-dropped id is harmless by
+// construction, because no state survives to expose.
+function assertFreshIncarnation(inc: string | null, generations: ReadonlyMap<string, Generation> | undefined): void {
+  if (inc !== null && generations?.has(inc) === true) {
+    throw new Error(
+      `head CX: incarnation '${inc}' still has surviving generation state — creating a room on it would resurrect it`,
+    )
   }
 }
 
@@ -307,7 +321,8 @@ export class MemoryRoomBackend implements RoomBackendSpi {
   > {
     this.#assertLive()
     assertHeadNextWellFormed(next)
-    const current = this.#liveHead(this.#rooms.get(roomId))
+    const existing = this.#rooms.get(roomId)
+    const current = this.#liveHead(existing)
     // Operation legality precedes the compare for the delete path only; every other transition is
     // validated against the head the compare actually matched, so a genuine race still conflicts.
     assertDeleteLegal(next, current)
@@ -320,7 +335,7 @@ export class MemoryRoomBackend implements RoomBackendSpi {
       room.head = null
       return { ok: true, deleted: true }
     }
-    assertTransitionAllowed(cx, next, current)
+    assertTransitionAllowed(cx, next, current, existing?.gens)
     return { ok: true, head: publicHead(this.#storeHead(room, next)) }
   }
 

@@ -16,6 +16,12 @@ export type BackendTraces = {
   // Is a failing target visible on that frame's `delivery` promise? Same clause: per-backend visibility,
   // never a false common guarantee (Redis exposes only the PUBLISH reply).
   perTargetFailure: boolean
+  // Does a head CX apply atomically-synchronously — compare and store both complete before the returned
+  // promise exists? On such a backend no two CXs can ever be in flight at once, so the two serial
+  // linearizations of I13(c) exhaust its schedule space and asserting both IS the race. A backend with
+  // genuinely ASYNCHRONOUS CX application must set this false, supply `concurrentHeadCxBarrier`, and run
+  // the barrier-forced variant (spi.md I13 race-realization note, ratified 2026-07-20).
+  cxAppliesSynchronously: boolean
 }
 
 export type BackendFixture = {
@@ -25,6 +31,11 @@ export type BackendFixture = {
   // and TTLs are all resolved against this, so the scenarios drive it explicitly instead of waiting.
   authorityNow(): number
   advanceAuthority(ms: number): void
+  // REQUIRED iff traces.cxAppliesSynchronously is false. Queues both head-CX requests before either
+  // reaches the backend, asserts both are pending, then releases them in the given order — the only way
+  // to realize I13(c)'s race on a backend whose CX application is genuinely asynchronous. W2b/W2c carry
+  // this obligation; the conformance suite fails loudly if an async backend registers without it.
+  concurrentHeadCxBarrier?: <T>(first: () => Promise<T>, second: () => Promise<T>) => Promise<[T, T]>
   dispose(): Promise<void>
 }
 
@@ -44,7 +55,7 @@ export const memoryHarness: BackendHarness = {
     const backend = new MemoryRoomBackend({ authorityNow: () => clock })
     return {
       backend,
-      traces: { handoffAwaitsReceiver: true, perTargetFailure: true },
+      traces: { handoffAwaitsReceiver: true, perTargetFailure: true, cxAppliesSynchronously: true },
       authorityNow: () => clock,
       advanceAuthority: (ms) => {
         clock += ms

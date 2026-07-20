@@ -431,10 +431,13 @@ for (const harness of installedBackends) {
     })
 
     describe('I13 (c) — finalization race', () => {
-      // The race runs from ONE paused head: the original closer's closed event has been accepted and it
-      // is about to run its terminal head CX when the lease expires and a recovery actor takes over.
-      // Both CXs are issued from that same head before either settles — the issue order is what selects
-      // the linearization, so both legal outcomes are exercised rather than one hand-picked ordering.
+      // Both CXs are ISSUED from ONE paused head in a single synchronous turn with no intervening await,
+      // then both are awaited. On a backend whose CX applies atomically-synchronously the first call has
+      // already stored before the second is issued — the two are never simultaneously in flight, and no
+      // test can make them be. That is not a weakness of the test: such a backend admits exactly two
+      // schedules, so asserting BOTH serial linearizations exhausts the schedule space and IS the race
+      // (spi.md I13 race-realization note). A backend with genuinely asynchronous CX application must
+      // additionally run the barrier-forced variant below.
       const pauseBetweenEventAndFinalization = async () => {
         const roomId = nextId('room')
         const { inc, head } = await openRoom(fx.backend, roomId)
@@ -454,6 +457,7 @@ for (const harness of installedBackends) {
       it('linearization (a): the original finalizes first and the takeover conflicts', async () => {
         const { roomId, paused, originalLease, control } = await pauseBetweenEventAndFinalization()
 
+        // issued together, awaited together — no await separates the two calls
         const finalization = finalizeClose(fx.backend, roomId, paused, originalLease)
         const takeover = takeoverClose(fx.backend, roomId, paused)
         const [finalized, taken] = await Promise.all([finalization, takeover])
@@ -470,6 +474,7 @@ for (const harness of installedBackends) {
       it('linearization (b): the takeover wins, the original aborts, and only the winner clears the head', async () => {
         const { roomId, inc, paused, originalLease, control } = await pauseBetweenEventAndFinalization()
 
+        // same pair, opposite issue order — the other of the two schedules
         const takeover = takeoverClose(fx.backend, roomId, paused)
         const finalization = finalizeClose(fx.backend, roomId, paused, originalLease)
         const [taken, finalized] = await Promise.all([takeover, finalization])
@@ -500,6 +505,18 @@ for (const harness of installedBackends) {
         const tombstone = okHead(await finalizeClose(fx.backend, roomId, still, taken.leaseId))
         expect(tombstone.state).toBe('closed')
         expect(tombstone.currentInc).toBeNull()
+      })
+
+      it('carries the barrier-forced concurrent obligation to backends whose CX is not synchronous', () => {
+        if (fx.traces.cxAppliesSynchronously) return // the two linearizations above already exhaust it
+        if (fx.concurrentHeadCxBarrier === undefined) {
+          throw new Error(
+            'this backend applies head CXs asynchronously, so the two serial linearizations do NOT ' +
+              'exhaust I13(c). It must supply BackendFixture.concurrentHeadCxBarrier and run the ' +
+              'barrier-forced variant — queue both CXs, assert both pending, release in each order ' +
+              '(spi.md I13 race-realization note).',
+          )
+        }
       })
 
       it('lets an UNREPLACED closer finalize after its deadline passes (id equality, never expiry)', async () => {
@@ -680,6 +697,98 @@ for (const harness of installedBackends) {
             ),
           ).state,
         ).toBe('open')
+      })
+
+      // FRESH-INC: create/recreate must refuse an incarnation that still has surviving generation state,
+      // otherwise an old generation's cells silently become the "new" room's state.
+      describe('stale-generation resurrection', () => {
+        // Close a room WITHOUT dropping its generation, leaving an orphan whose id a caller might reuse.
+        const orphanGeneration = async () => {
+          const roomId = nextId('room')
+          const { inc, head } = await openRoom(fx.backend, roomId)
+          const seeded = cellsOf(await fx.backend.readCells(roomId, inc, { prefix: '' }))
+          expect(
+            await fx.backend.compareExchangeCells(roomId, inc, seeded.revision, [
+              { key: 'member/old', set: { bytes: bytes('ghost') } },
+            ]),
+          ).toBe('committed')
+          accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('ghost-retained'), { retain: true }))
+
+          const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+          accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+          const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
+          expect(await fx.backend.listGenerations(roomId)).toContain(inc) // the orphan survives
+          return { roomId, orphanInc: inc, tombstone }
+        }
+
+        it('refuses recreating a tombstoned room on an incarnation that still has state', async () => {
+          // KILLER: admitting a reused inc turns this red — the probe that found it seeded member/old,
+          // finalized without dropping, recreated on the old id, and read the ghost back as new state.
+          const { roomId, orphanInc, tombstone } = await orphanGeneration()
+
+          await expect(
+            fx.backend.compareExchangeHead(
+              roomId,
+              { expect: { rev: tombstone.rev } },
+              { head: { currentInc: orphanInc, state: 'open', config: tombstone.config } },
+            ),
+          ).rejects.toThrow(/surviving generation state/)
+
+          // the ghost never became current: the room is still a tombstone
+          const stillTombstone = await readHeadOrThrow(fx.backend, roomId)
+          expect(stillTombstone.state).toBe('closed')
+          expect(stillTombstone.currentInc).toBeNull()
+        })
+
+        it('refuses creating on a surviving incarnation after the tombstone lapses to absent', async () => {
+          const { roomId, orphanInc } = await orphanGeneration()
+          fx.advanceAuthority(TOMBSTONE_TTL_MS + 1)
+          expect(await fx.backend.readHead(roomId)).toBeNull() // reads as absent…
+
+          await expect(
+            fx.backend.compareExchangeHead(
+              roomId,
+              { expect: 'absent' },
+              { head: { currentInc: orphanInc, state: 'open', config: bytes('cfg') } },
+            ),
+          ).rejects.toThrow(/surviving generation state/)
+          expect(await fx.backend.listGenerations(roomId)).toContain(orphanInc) // …but the orphan is real
+        })
+
+        it('admits a fresh incarnation, whose generation starts empty', async () => {
+          const { roomId, orphanInc, tombstone } = await orphanGeneration()
+          const fresh = okHead(
+            await fx.backend.compareExchangeHead(
+              roomId,
+              { expect: { rev: tombstone.rev } },
+              { head: { currentInc: 'genuinely-fresh', state: 'open', config: tombstone.config } },
+            ),
+          )
+          expect(fresh.currentInc).toBe('genuinely-fresh')
+          expect(cellsOf(await fx.backend.readCells(roomId, 'genuinely-fresh', { prefix: '' })).cells.size).toBe(0)
+          expect(await fx.backend.readRetained(roomId, 'genuinely-fresh', SEMANTIC)).toBeNull()
+          expect(await fx.backend.listGenerations(roomId)).toContain(orphanInc) // the orphan is untouched
+        })
+
+        it('the positive twin: a FULLY DROPPED id is reusable and inert', async () => {
+          // A dropped generation exposes nothing, so its id is harmless by construction.
+          const { roomId, orphanInc, tombstone } = await orphanGeneration()
+          await fx.backend.dropGeneration(roomId, orphanInc)
+          expect(await fx.backend.listGenerations(roomId)).not.toContain(orphanInc)
+
+          const reborn = okHead(
+            await fx.backend.compareExchangeHead(
+              roomId,
+              { expect: { rev: tombstone.rev } },
+              { head: { currentInc: orphanInc, state: 'open', config: tombstone.config } },
+            ),
+          )
+          expect(reborn.currentInc).toBe(orphanInc)
+          // nothing of the old generation surfaces under the reused id
+          expect(cellsOf(await fx.backend.readCells(roomId, orphanInc, { prefix: '' })).cells.size).toBe(0)
+          expect(await fx.backend.readRetained(roomId, orphanInc, SEMANTIC)).toBeNull()
+          expect(accepted(await fx.backend.commitLane(roomId, orphanInc, SEMANTIC, bytes('new'))).seq).toBe(1)
+        })
       })
 
       it('CONFLICTS (never throws) when a guarded form is used on a head that is not closing', async () => {
