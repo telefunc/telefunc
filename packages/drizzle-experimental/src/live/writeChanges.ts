@@ -106,21 +106,22 @@ function changesOf(op: Op, table: string, rows: Row[], plan: PrecisePlan): Table
  *  Only a caller's own full `.returning()` qualifies: widening is not available here, because the caller's
  *  result must come back with its exact shape and sync/async-ness and the statement runs as they wrote it. */
 function changesFromRows(result: unknown, plan: Plan, relationId: string, op: Op): TableChange[] {
-  if (plan.mode !== 'precise' || !plan.callerReturning || !Array.isArray(result)) return [coarse(relationId)]
+  if (plan.strategy !== 'callerReturning' || !Array.isArray(result)) return [coarse(relationId)]
   return captureOrCoarse(op, relationId, namedRows(result, plan), plan)
 }
 
 /** Driver rows as NAMED rows. `.all()`/`.get()`/`await` already yield objects; SQLite's `.values()` terminal
- *  yields POSITIONAL arrays. Naming those is not the forbidden guess it looks like: the statement's RETURNING
- *  list was BUILT from the builder's own ordered selection, so position i is that selection's i-th column by
- *  construction (verified against node:sqlite — a `.returning({ n: name, i: id })` comes back `["z", 9]`).
- *  A positional row of a length the selection does not explain is left alone and fails closed downstream. */
+ *  yields POSITIONAL arrays. Naming those is not the forbidden guess it looks like: on a `callerReturning`
+ *  plan a non-empty `callerOrder` means the selection IS the full image, and the statement's RETURNING list
+ *  was BUILT from that ordered selection — so position i is its i-th column by construction (verified
+ *  against node:sqlite — a `.returning({ n: name, i: id })` comes back `["z", 9]`). A positional row of a
+ *  length the selection does not explain is left alone and fails closed downstream. */
 function namedRows(rows: unknown[], plan: PrecisePlan): Row[] {
-  const { positional } = plan
+  const { callerOrder } = plan
   return rows.map((row) => {
-    if (!Array.isArray(row) || positional === undefined || row.length !== positional.length) return row as Row
+    if (!Array.isArray(row) || callerOrder.length === 0 || row.length !== callerOrder.length) return row as Row
     const named: Row = {}
-    positional.forEach((field, index) => {
+    callerOrder.forEach((field, index) => {
       named[field] = row[index]
     })
     return named

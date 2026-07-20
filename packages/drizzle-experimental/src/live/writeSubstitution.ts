@@ -1,12 +1,12 @@
 export { runSubstituted, substituteOldNew, substituteFullRow, splitImages }
-export { deliverCaller, deliverCount, serializeOn, runBase, SUBSTITUTION_REFUSED }
+export { serializeOn, runBase, SUBSTITUTION_REFUSED }
 export type { Substituted, SubstitutionOutcome }
 
 import { type Column, SQL, type Table, getTableColumns, sql } from 'drizzle-orm'
 import { dialectOf } from '../binding/database.js'
 import { report } from './captureReport.js'
 import type { Images } from './writeChanges.js'
-import { type Plan, writeConfigOf } from './writePlan.js'
+import { writeConfigOf } from './writePlan.js'
 import type { Row } from '../router/events.js'
 import { causeChain } from '../utils/causeChain.js'
 
@@ -181,22 +181,6 @@ function tapRawRows(builder: unknown, callerDecode: CallerDecode | undefined): T
       }
     },
   }
-}
-
-/** The caller's result as the tap produced it: theirs to receive, or theirs to be thrown. */
-function deliverCaller(caller: CallerResult): unknown {
-  if (caller.ok) return caller.value
-  throw caller.error
-}
-
-/** The caller's COUNT-shaped result — the case where nothing is decoded on their behalf.
- *
- *  Taken from capture's mapped rows when capture mapped them, and otherwise from the rows the tap observed.
- *  Where neither exists there is no measured number, so the failure is rethrown rather than answered. */
-function deliverCount(outcome: Substituted, plan: Extract<Plan, { callerReturning: false }>, mapped?: Row[]): unknown {
-  if (mapped) return plan.reconstruct(mapped)
-  if (outcome.raw && plan.reconstructCount) return plan.reconstructCount(outcome.raw.length)
-  throw outcome.captureError
 }
 
 /** The caller's own decoding, as a function of the raw driver rows: their values at the positions capture's

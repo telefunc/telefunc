@@ -1,5 +1,5 @@
-export { planCapture, callerPositionsOf, writeConfigOf, UNMAPPABLE }
-export type { Op, Plan, PrecisePlan, WriteConfig }
+export { planCapture, callerPositionsOf, writeConfigOf, AS_WRITTEN, UNMAPPABLE }
+export type { Op, Plan, PrecisePlan, SubstitutionPlan, WriteConfig }
 
 import { type Column, SQL, type Table, getTableColumns, is } from 'drizzle-orm'
 import { dialectOf, driverOf } from '../binding/database.js'
@@ -7,10 +7,12 @@ import { oldNewReturningOf } from './writeCapabilities.js'
 import { primaryKeyOf } from '../extract/columns.js'
 import type { Dialect } from '../ir/types.js'
 import type { Row } from '../router/events.js'
+import type { Substituted } from './writeSubstitution.js'
 
-// How ONE write is classified before anything runs: precise (capture can name the changed rows) or coarse
-// (it cannot, so the table over-invalidates). Everything here is a decision made from the BUILDER's shape —
-// no statement has executed yet, and nothing in this module touches a connection.
+// How ONE write is classified before anything runs — into exactly ONE of five strategies (see `Plan`):
+// capture can name the changed rows (from the caller's own full image, or by substituting a fuller
+// RETURNING), or it cannot and the table over-invalidates (`asWritten`). Everything here is a decision made
+// from the BUILDER's shape — no statement has executed yet, and nothing in this module touches a connection.
 //
 // PRECISION is gated + fails closed (emit one {table, kind:'coarse'}) — safe over-fire, never a wrong row:
 //   - a resolvable PK (single OR composite) for UPDATE/DELETE, whose retraction is keyed by it; an INSERT
@@ -36,37 +38,60 @@ import type { Row } from '../router/events.js'
 
 type Op = 'insert' | 'update' | 'delete'
 
-/** What a precise plan carries into capture: the PK fields a retraction is keyed by, the columns a full
- *  image must contain, and — only when the RETURNING selection already IS the full image — the table field
- *  each returned POSITION carries, which is what lets SQLite's positional `.values()` rows be named. */
+/** What every capturing plan carries: the PK fields a retraction is keyed by, the columns a full image
+ *  must contain, and the field→physical translation an emitted change needs. */
 type PrecisePlan = {
   pk: string[]
   columns: string[]
-  positional?: string[]
   /** field name → PHYSICAL column name, for translating an emitted change into the graph's row space. */
   physical: Record<string, string>
   /** The table fields the CALLER's own RETURNING asked for, IN THE ORDER their selection lists them — which
-   *  is the order their own mapper reads positions in, and so is what lets their result be rebuilt from raw
-   *  rows when capture's mapping of the same statement fails (see the count-observation tap). Empty when
-   *  they asked for no rows at all, and when their projection is not rebuildable from a row image. */
+   *  is the order their own mapper reads positions in. Empty when they asked for no rows at all, and when
+   *  their projection is not rebuildable from a row image. On a `callerReturning` plan a NON-EMPTY order
+   *  means the selection is exactly the full image, which is what licenses naming SQLite's positional
+   *  `.values()` rows by it (see `namedRows`); on a substitution plan it is what lets their result be
+   *  rebuilt from raw rows when capture's mapping of the same statement fails (see the count-observation
+   *  tap). */
   callerOrder: readonly string[]
 }
 
-type Plan =
-  | { mode: 'coarse' }
-  | ({ mode: 'precise'; callerReturning: true } & PrecisePlan)
-  | ({
-      mode: 'precise'
-      callerReturning: false
-      /** The caller's own result, rebuilt from the rows capture chose to fetch. */
-      reconstruct: (rows: Row[]) => unknown
-      /** The caller's own result from a row COUNT alone — present exactly when their result carries no
-       *  values, which is the case capture's tap can answer without decoding anything. */
-      reconstructCount?: (count: number) => unknown
-      /** Present when the statement asks for BOTH images: the table fields, in the order the positional
-       *  `o<i>`/`n<i>` aliases carry them. */
-      images?: string[]
-    } & PrecisePlan)
+/** ONE strategy per write, decided before anything runs. The tag names both the statement that executes and
+ *  how the caller is answered:
+ *
+ *    `asWritten`       the caller's statement untouched + ONE coarse marker. Every ambiguity lands here —
+ *                      and so does the single-shot recovery from a refused substitution (see `AS_WRITTEN`).
+ *    `callerReturning` the caller's statement untouched; their own returned rows are the captured image
+ *                      (precise only when they carry the FULL image — verified after the fact, never trusted).
+ *    `fullRow`         substitute capture's full-row RETURNING; the caller's own columns are projected back
+ *                      out of the full image.
+ *    `bothImages`      substitute the OLD/NEW both-images RETURNING (PostgreSQL 18+); the caller gets their
+ *                      projection — or their plain count-shaped result where they asked for no rows.
+ *    `countOnly`       substitute capture's full-row RETURNING; the caller's plain no-returning result is
+ *                      reconstructed from the row count alone (driver-verified shape). */
+type Plan = { strategy: 'asWritten' } | ({ strategy: 'callerReturning' } & PrecisePlan) | SubstitutionPlan
+
+/** A plan whose statement capture REWRITES (`writeSubstitution.ts`), carrying its own reconstruction:
+ *  `deliver` answers the caller from what the substituted execution produced. Reconstruction is CO-LOCATED
+ *  with the branch that chose the strategy, so what a strategy substitutes and how it answers the caller
+ *  are one decision — not one module's definition driven from another. */
+type SubstitutionPlan = ({ strategy: 'fullRow' | 'countOnly'; images?: undefined } | BothImagesPlan) &
+  PrecisePlan & {
+    /** The caller's result — their tapped value/error where their result carries values, else rebuilt from
+     *  capture's mapped rows, else from the tap's observed row count. Built by `delivery`. */
+    deliver: (outcome: Substituted, mapped: Row[] | undefined) => unknown
+  }
+
+type BothImagesPlan = {
+  strategy: 'bothImages'
+  /** The table fields, in the order the positional `o<i>`/`n<i>` aliases carry them. */
+  images: string[]
+}
+
+/** Run the caller's statement exactly as written and coarsen — the fail-closed floor every ambiguity drops
+ *  to, and the WHOLE of the recovery from a refused substitution: a plan that cannot substitute is what
+ *  makes that recovery single-shot BY CONSTRUCTION rather than by discipline. One fact, one representation
+ *  — the recovery is this value, not a flag threaded beside a plan that contradicts it. */
+const AS_WRITTEN: Plan = { strategy: 'asWritten' }
 
 // ── the table's field↔column relationship, built once per plan ──────
 
@@ -111,14 +136,13 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   // its whole new row — so a table with no primary key is still captured exactly for it. (A STATEFUL graph
   // over a PK-less input is born coarse in liveGraph and ignores the precision either way; a STATELESS one
   // evaluates the new row against its predicate, which is where this win lands.)
-  if (pk.length === 0 && op !== 'insert') return { mode: 'coarse' }
+  if (pk.length === 0 && op !== 'insert') return AS_WRITTEN
   const config = writeConfigOf(builder)
-  if (!config) return { mode: 'coarse' } // unrecognized builder shape (version drift) → coarse
-  if (hasOnConflict(config, dialect)) return { mode: 'coarse' } // UPSERT / ON CONFLICT
-  if (op === 'insert' && hasRawValues(config)) return { mode: 'coarse' } // raw-SQL values clause
+  if (!config) return AS_WRITTEN // unrecognized builder shape (version drift) → coarse
+  if (hasOnConflict(config, dialect)) return AS_WRITTEN // UPSERT / ON CONFLICT
+  if (op === 'insert' && hasRawValues(config)) return AS_WRITTEN // raw-SQL values clause
 
   const { columns, physical } = shape
-  const noCallerOrder: readonly string[] = EMPTY_FIELDS
   // BOTH images, where the connection is known to produce them (`RETURNING old.*, new.*`, PostgreSQL 18+).
   // An INSERT has no old image and needs none. The capability is probed once per db and is only ever `true`
   // when a real statement proved it — so this branch adds precision where it exists and changes nothing
@@ -127,7 +151,7 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   // A PK-CHANGING update moves the very key a retraction is addressed by. Without the old image that key is
   // gone the moment the statement runs, and no RETURNING of the NEW row can recover it → coarse. WITH the
   // old image it is simply there, so the case stops being special (fork #2 closed on this lane).
-  if (op === 'update' && !images && setTouchesPk(config, pk)) return { mode: 'coarse' }
+  if (op === 'update' && !images && setTouchesPk(config, pk)) return AS_WRITTEN
   // The caller asked the DATABASE for the changed rows, and the database answered from the very session that
   // executed the statement — so a POOLED connection is precise here too, and this check sits ABOVE any
   // single-session gate deliberately. Session authority is a READ-HYDRATION argument: a pooled read can be
@@ -139,64 +163,62 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
     const selection = callerSelection(config.returning, shape)
     // Not reproducible from a row image — a nested alias path, or a raw `SQL` expression the DATABASE
     // computed. Run exactly what the caller wrote and let `captureMismatch` fail it closed, as before.
-    if (!selection) return { mode: 'precise', callerReturning: true, pk, columns, physical, callerOrder: noCallerOrder }
+    if (!selection) return { strategy: 'callerReturning', pk, columns, physical, callerOrder: [] }
     const project = (rows: Row[]) => rows.map((row) => projectRow(row, selection))
     const callerOrder = selection.map((entry) => entry.field)
     // Both images are worth SUBSTITUTING for even when the caller's own RETURNING would have sufficed:
     // their result is reproducible from the image they would have been handed, and the old row is what
     // makes a stateless update exact and a key change describable.
     if (images)
-      return {
-        mode: 'precise',
-        callerReturning: false,
-        pk,
-        columns,
-        physical,
-        callerOrder,
-        reconstruct: project,
-        images,
-      }
+      return { strategy: 'bothImages', pk, columns, physical, callerOrder, images, deliver: delivery(project) }
     // Already the full image: nothing to widen, and the returned order is what names SQLite's positional rows.
-    if (isFullImage(selection, columns))
-      return {
-        mode: 'precise',
-        callerReturning: true,
-        pk,
-        columns,
-        physical,
-        callerOrder,
-        positional: selection.map((entry) => entry.field),
-      }
+    if (isFullImage(selection, columns)) return { strategy: 'callerReturning', pk, columns, physical, callerOrder }
     // A PARTIAL or aliased projection is not a reason to give up. Widen the executed RETURNING to the whole
     // row, capture THAT, and project the caller's own columns back out of it. The caller sees exactly the
     // result they asked for; capture sees a real full row. No column is invented — this is the same row.
-    return { mode: 'precise', callerReturning: false, pk, columns, physical, callerOrder, reconstruct: project }
+    return { strategy: 'fullRow', pk, columns, physical, callerOrder, deliver: delivery(project) }
   }
 
   // No caller returning → capture must SUBSTITUTE a hidden full RETURNING and hand the caller back a
   // reconstructed plain result, so reconstruction must be provably faithful for THIS driver. (PGlite is one
   // in-process connection by construction, so there is no pooled variant of this branch to gate.)
   if (dialect === 'pg' && driverOf(db) === 'PgliteDatabase') {
-    return {
-      mode: 'precise',
-      callerReturning: false,
-      pk,
-      columns,
-      physical,
-      callerOrder: noCallerOrder,
-      // PGlite's plain no-returning result is `{ rows: [], fields: [], affectedRows: N }`; affectedRows =
-      // the RETURNING row count. Verified empirically against PGlite 18.3.
-      reconstruct: (rows) => ({ rows: [], fields: [], affectedRows: rows.length }),
-      // The same result from the count ALONE. It is a separate function rather than `reconstruct` over N
-      // placeholder rows because the two are asked different questions: `reconstruct` is handed rows that
-      // were decoded, this one is handed a number that was OBSERVED and no rows at all. Faking rows to reach
-      // the first would be inventing the very values this path exists to avoid inventing.
-      reconstructCount: (count) => ({ rows: [], fields: [], affectedRows: count }),
-      images,
-    }
+    // PGlite's plain no-returning result is `{ rows: [], fields: [], affectedRows: N }`; affectedRows =
+    // the RETURNING row count. Verified empirically against PGlite 18.3. Two closures rather than one over
+    // N placeholder rows, because they are asked different questions: `reconstruct` is handed rows that
+    // were decoded; `reconstructCount` a number that was OBSERVED and no rows at all. Faking rows to reach
+    // the first would be inventing the very values this path exists to avoid inventing.
+    const reconstruct = (rows: Row[]) => ({ rows: [], fields: [], affectedRows: rows.length })
+    const deliver = delivery(reconstruct, (count) => ({ rows: [], fields: [], affectedRows: count }))
+    return images
+      ? { strategy: 'bothImages', pk, columns, physical, callerOrder: [], images, deliver }
+      : { strategy: 'countOnly', pk, columns, physical, callerOrder: [], deliver }
   }
   // SQLite's `lastInsertRowid` is not recoverable for update/delete, and other drivers are unverified → coarse.
-  return { mode: 'coarse' }
+  return AS_WRITTEN
+}
+
+// ── how a substituted execution answers the caller ──────────────────
+
+/** The caller's result out of ONE substituted execution — reconstruction CO-LOCATED with the plan branch
+ *  that decides it, driven through `SubstitutionPlan.deliver`.
+ *
+ *  Their own tapped result wins wherever their result carries values: theirs to receive, or theirs to be
+ *  thrown (a decoder on a column THEY selected, failing exactly where their own statement would have).
+ *  A caller who asked for no rows gets the count-shaped result — from capture's mapped rows when capture
+ *  mapped them, and otherwise from the rows the tap OBSERVED. Where neither exists there is no measured
+ *  number, so the failure is rethrown rather than answered. */
+function delivery(reconstruct: (rows: Row[]) => unknown, reconstructCount?: (count: number) => unknown) {
+  return (outcome: Substituted, mapped: Row[] | undefined): unknown => {
+    const caller = outcome.caller
+    if (caller) {
+      if (caller.ok) return caller.value
+      throw caller.error
+    }
+    if (mapped) return reconstruct(mapped)
+    if (outcome.raw && reconstructCount) return reconstructCount(outcome.raw.length)
+    throw outcome.captureError
+  }
 }
 
 // ── where the caller's own columns sit in capture's layout ──────────
@@ -206,10 +228,7 @@ const UNMAPPABLE = Symbol('telefunc: the caller projection has no position in ca
 
 /** Where each of the caller's ordered columns sits in the raw rows capture's statement returns — or
  *  `undefined` when their result carries no values and nothing is decoded on their behalf. */
-function callerPositionsOf(
-  plan: Extract<Plan, { callerReturning: false }>,
-  op: Op,
-): number[] | undefined | typeof UNMAPPABLE {
+function callerPositionsOf(plan: SubstitutionPlan, op: Op): number[] | undefined | typeof UNMAPPABLE {
   if (plan.callerOrder.length === 0) return undefined
   const positions = plan.callerOrder.map((field) => rawPositionOf(field, plan, op))
   return positions.some((position) => position < 0) ? UNMAPPABLE : positions
@@ -220,16 +239,13 @@ function callerPositionsOf(
  *  Both layouts are capture's own, so both are known exactly: a full-row RETURNING selects the table's
  *  columns in order, and a BOTH-IMAGES RETURNING interleaves them as `o0, n0, o1, n1, …` (see
  *  `substituteOldNew`) — of which the caller would have been handed the OLD image for a delete and the NEW
- *  one otherwise, exactly as `reconstruct` picks them. */
-function rawPositionOf(field: string, plan: PrecisePlan & { images?: string[] }, op: Op): number {
+ *  one otherwise, exactly as `runWrite` picks the delivered image. */
+function rawPositionOf(field: string, plan: SubstitutionPlan, op: Op): number {
   const index = (plan.images ?? plan.columns).indexOf(field)
   if (index < 0) return -1
   if (!plan.images) return index
   return op === 'delete' ? index * 2 : index * 2 + 1
 }
-
-/** Shared empty list — a write with no caller RETURNING has no fields the caller owns. */
-const EMPTY_FIELDS: readonly string[] = []
 
 // ── builder introspection (version-brittle, guarded — mirrors drizzleShape.ts) ───────────────────────
 

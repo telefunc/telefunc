@@ -78,18 +78,18 @@ const insertPlan = (db: object, builder: unknown, table: Parameters<typeof planC
 describe('capture planning — fail-closed branches have executable controls', () => {
   it('a single-session PGlite write over a keyed table plans PRECISE (the positive control)', () => {
     const plan = insertPlan(pg, pg.insert(keyed).values({ id: 1, name: 'a' }), keyed)
-    expect(plan.mode).toBe('precise')
+    expect(plan.strategy).toBe('countOnly') // capturing, and the caller's plain result comes from the count
   })
 
   it('NO primary key: UPDATE and DELETE stay coarse — their retraction could never be keyed', () => {
-    expect(planCapture(pg.update(unkeyed).set({ b: 'y' }), unkeyed, 'update', pg).mode).toBe('coarse')
-    expect(planCapture(pg.delete(unkeyed), unkeyed, 'delete', pg).mode).toBe('coarse')
+    expect(planCapture(pg.update(unkeyed).set({ b: 'y' }), unkeyed, 'update', pg).strategy).toBe('asWritten')
+    expect(planCapture(pg.delete(unkeyed), unkeyed, 'delete', pg).strategy).toBe('asWritten')
   })
 
   it('NO primary key: an INSERT is still PRECISE — it carries its whole row and retracts nothing', () => {
     // premise audit #4/H4. The old rule coarsened by table, not by operation, and an insert never needs the
     // key the rule was protecting. See the liveGraph case for where the win actually lands (stateless).
-    expect(insertPlan(pg, pg.insert(unkeyed).values({ a: 1, b: 'x' }), unkeyed).mode).toBe('precise')
+    expect(insertPlan(pg, pg.insert(unkeyed).values({ a: 1, b: 'x' }), unkeyed).strategy).toBe('countOnly')
   })
 
   it('POOLED PG with NO returning → coarse (the reconstruction is unproven for node-postgres)', () => {
@@ -97,13 +97,13 @@ describe('capture planning — fail-closed branches have executable controls', (
     // rebuild node-postgres' plain `Result` from it, which is not verified for this driver. Pooling is not
     // the reason: the same write on a single pg `Client` coarsens identically (asserted just below).
     const plan = insertPlan(pooledPg(), pooledPg().insert(keyed).values({ id: 1, name: 'a' }), keyed)
-    expect(plan.mode).toBe('coarse')
+    expect(plan.strategy).toBe('asWritten')
   })
 
   it('and a PINNED single pg Client with no returning coarsens the SAME way (pooling was never the reason)', () => {
     const pinned = pgPoolDrizzle({ client: asClient(new Client()) })
     assertClassifierInputs(pinned, { dialect: 'PgDialect', driver: 'NodePgDatabase', client: 'Client' })
-    expect(insertPlan(pinned, pinned.insert(keyed).values({ id: 1, name: 'a' }), keyed).mode).toBe('coarse')
+    expect(insertPlan(pinned, pinned.insert(keyed).values({ id: 1, name: 'a' }), keyed).strategy).toBe('asWritten')
   })
 
   it('POOLED PG with the caller’s own full .returning() → PRECISE (premise audit #3)', () => {
@@ -112,13 +112,11 @@ describe('capture planning — fail-closed branches have executable controls', (
     const pooled = pooledPg()
     const plan = insertPlan(pooled, pooled.insert(keyed).values({ id: 1, name: 'a' }).returning(), keyed)
     expect(plan).toEqual({
-      mode: 'precise',
-      callerReturning: true,
+      strategy: 'callerReturning',
       pk: ['id'],
       columns: ['id', 'name'],
       physical: { id: 'id', name: 'name' },
       callerOrder: ['id', 'name'],
-      positional: ['id', 'name'],
     })
   })
 
@@ -138,9 +136,11 @@ describe('capture planning — fail-closed branches have executable controls', (
     const pooled = pooledPg()
     expect(
       insertPlan(pooled, pooled.insert(keyed).values({ id: 1, name: 'a' }).onConflictDoNothing().returning(), keyed)
-        .mode,
-    ).toBe('coarse')
-    expect(planCapture(pooled.update(keyed).set({ id: 2 }).returning(), keyed, 'update', pooled).mode).toBe('coarse')
+        .strategy,
+    ).toBe('asWritten')
+    expect(planCapture(pooled.update(keyed).set({ id: 2 }).returning(), keyed, 'update', pooled).strategy).toBe(
+      'asWritten',
+    )
   })
 
   it('a pooled PARTIAL .returning({id}) is not read AS a full image — it is widened and projected back', () => {
@@ -154,7 +154,7 @@ describe('capture planning — fail-closed branches have executable controls', (
       pooled.insert(keyed).values({ id: 1, name: 'a' }).returning({ id: keyed.id }),
       keyed,
     )
-    expect(plan).toMatchObject({ mode: 'precise', callerReturning: false }) // widened, not trusted as-is
+    expect(plan).toMatchObject({ strategy: 'fullRow' }) // widened and projected back, not trusted as-is
     expect(captureMismatch([{ id: 1 }], ['id', 'name'], ['id'], 'insert')).toEqual({
       rowIndex: 0,
       reason: 'missing-columns',
@@ -163,10 +163,10 @@ describe('capture planning — fail-closed branches have executable controls', (
   })
 
   it('UPSERT and PK-changing update plan coarse on a db that would otherwise be precise', () => {
-    expect(insertPlan(pg, pg.insert(keyed).values({ id: 1, name: 'a' }).onConflictDoNothing(), keyed).mode).toBe(
-      'coarse',
+    expect(insertPlan(pg, pg.insert(keyed).values({ id: 1, name: 'a' }).onConflictDoNothing(), keyed).strategy).toBe(
+      'asWritten',
     )
-    expect(planCapture(pg.update(keyed).set({ id: 2 }), keyed, 'update', pg).mode).toBe('coarse')
+    expect(planCapture(pg.update(keyed).set({ id: 2 }), keyed, 'update', pg).strategy).toBe('asWritten')
   })
 })
 
@@ -175,8 +175,8 @@ describe('capture planning — fail-closed branches have executable controls', (
 describe('capture planning — the caller’s RETURNING selection decides the path', () => {
   const pathOf = (builder: unknown) => {
     const plan = insertPlan(pg, builder, keyed)
-    if (plan.mode === 'coarse') return 'coarse'
-    return plan.callerReturning ? 'as-written' : 'widen+project'
+    if (plan.strategy === 'asWritten') return 'coarse'
+    return plan.strategy === 'callerReturning' ? 'as-written' : 'widen+project'
   }
   const insert = () => pg.insert(keyed).values({ id: 1, name: 'a' })
 
@@ -210,7 +210,7 @@ describe('capture planning — the caller’s RETURNING selection decides the pa
     // premise audit #4. Both capture paths handle it: with the caller's own RETURNING, and (on PGlite) via
     // the hidden one, whose plain result shape is identical to an ordinary insert's.
     const fromSelect = pg.insert(keyed).select(pg.select({ id: keyed.id, name: keyed.name }).from(keyed))
-    expect(insertPlan(pg, fromSelect, keyed).mode).toBe('precise')
+    expect(insertPlan(pg, fromSelect, keyed).strategy).toBe('countOnly')
   })
 })
 

@@ -14,12 +14,10 @@ import {
   emitSafely,
 } from './writeChanges.js'
 import { isBuilderTerminal, isDriverTerminal, isPreparedTerminal } from './writeTerminals.js'
-import { UNMAPPABLE, type Op, type Plan, callerPositionsOf, planCapture } from './writePlan.js'
+import { AS_WRITTEN, UNMAPPABLE, type Op, type Plan, callerPositionsOf, planCapture } from './writePlan.js'
 import {
   SUBSTITUTION_REFUSED,
   type Substituted,
-  deliverCaller,
-  deliverCount,
   runBase,
   runSubstituted,
   serializeOn,
@@ -253,21 +251,21 @@ async function runWrite(
   sink: CaptureSink,
   tx: object | undefined,
   executeArgs?: unknown[],
-  asWritten = false,
+  // The strategy this write runs under — freshly classified by default. The recovery from a refused
+  // substitution passes `AS_WRITTEN` instead: the one plan that provably cannot substitute, which is what
+  // makes that recovery single-shot by construction. The plan value IS the recovery state — one fact, one
+  // representation, never a flag beside a plan that contradicts it.
+  plan: Plan = planCapture(builder, table, op, db),
 ): Promise<unknown> {
   const relationId = relationKeyOf(table)
-  // `asWritten` is the recovery from a refused substitution: run the caller's statement and nothing else.
-  // Expressed as a coarse plan rather than a flag threaded through planning, so the recovery provably
-  // cannot substitute again — that is what makes it single-shot by construction rather than by discipline.
-  const plan: Plan = asWritten ? { mode: 'coarse' } : planCapture(builder, table, op, db)
 
-  if (plan.mode === 'coarse') {
+  if (plan.strategy === 'asWritten') {
     const result = await runBase(builder, executeArgs) // run the caller's write untouched
     emitSafely(sink, [{ table: relationId, kind: 'coarse' }]) // fail-closed: over-invalidate, never guess
     return result
   }
 
-  if (plan.callerReturning) {
+  if (plan.strategy === 'callerReturning') {
     // The caller asked for rows — run their write, and capture only if the rows carry the FULL image.
     const rows = (await runBase(builder, executeArgs)) as Row[]
     emitSafely(sink, captureOrCoarse(op, relationId, rows, plan))
@@ -278,19 +276,20 @@ async function runWrite(
   // connection can produce them. THE CALLER DID NOT ASK FOR THIS, so it must never be what fails their
   // write: `runSubstituted` puts their own statement back and runs that instead if it does.
   //
-  // The caller's result is then rebuilt from what came back (verified faithful for this driver, or
-  // reproducible from their own projection). The rows are expected to be full, but that is still VERIFIED
-  // rather than trusted: this path once built changes unchecked, so a driver returning a narrowed row would
-  // have emitted a partial image as precise.
+  // The caller's result is then rebuilt from what came back (`plan.deliver` — verified faithful for this
+  // driver, or reproducible from their own projection). The rows are expected to be full, but that is still
+  // VERIFIED rather than trusted: this path once built changes unchecked, so a driver returning a narrowed
+  // row would have emitted a partial image as precise.
   // Where the caller's own result carries VALUES, capture decodes it first and separately — see the tap. An
   // unresolvable position means capture's layout cannot answer their projection, so the substitution is
   // refused rather than approximated.
   const callerPositions = callerPositionsOf(plan, op)
   if (callerPositions === UNMAPPABLE) return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
 
-  if (plan.images) {
+  if (plan.strategy === 'bothImages') {
+    const { images } = plan
     const outcome = await runSubstituted(
-      () => substituteOldNew(builder, table, plan.images!),
+      () => substituteOldNew(builder, table, images),
       builder,
       tx,
       executeArgs,
@@ -310,12 +309,10 @@ async function runWrite(
     if (!oldNewProvenOf(db)) markOldNewProven(db) // it worked; later writes pay nothing for the guard
     // PostgreSQL's plain RETURNING on a DELETE is the row that was deleted — the OLD image. On an UPDATE it
     // is the NEW one. Both are already accounted for in the positions the caller's decoding read.
-    const pairs = outcome.rows?.map((row) => splitImages(row, plan.images!))
+    const pairs = outcome.rows?.map((row) => splitImages(row, images))
     emitCaptured(sink, relationId, outcome, pairs ? captureBothOrCoarse(op, relationId, pairs, plan) : undefined)
-    if (outcome.caller) return deliverCaller(outcome.caller)
-    return deliverCount(
+    return plan.deliver(
       outcome,
-      plan,
       pairs?.map((pair) => (op === 'delete' ? pair.old : pair.new)),
     )
   }
@@ -330,8 +327,7 @@ async function runWrite(
   )
   if (outcome === SUBSTITUTION_REFUSED) return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
   emitCaptured(sink, relationId, outcome, outcome.rows && captureOrCoarse(op, relationId, outcome.rows, plan))
-  if (outcome.caller) return deliverCaller(outcome.caller)
-  return deliverCount(outcome, plan, outcome.rows)
+  return plan.deliver(outcome, outcome.rows)
 }
 
 /** Emit what capture managed to see. Where its own mapping of the rows failed there is no image to emit, but
@@ -353,7 +349,7 @@ function emitCaptured(
 }
 
 /** Re-run the caller's write EXACTLY as they wrote it, and coarsen. Single-shot by construction: this path
- *  plans with substitution forbidden, so it cannot land back here.
+ *  re-enters `runWrite` under the `AS_WRITTEN` plan, which cannot substitute, so it cannot land back here.
  *
  *  Safe to re-run because the refused statement left nothing behind, and that holds in both worlds:
  *
@@ -377,7 +373,7 @@ async function recoverAsWritten(
   tx: object | undefined,
   executeArgs: unknown[] | undefined,
 ): Promise<unknown> {
-  return runWrite(builder, table, op, db, sink, tx, executeArgs, true)
+  return runWrite(builder, table, op, db, sink, tx, executeArgs, AS_WRITTEN)
 }
 
 /** A drizzle write query builder, distinguished from a plain method return (a `toSQL()` object, a Promise). */
