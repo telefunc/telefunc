@@ -7,6 +7,7 @@ import { oldNewReturningOf } from './writeCapabilities.js'
 import { primaryKeyOf } from '../extract/columns.js'
 import type { Dialect } from '../ir/types.js'
 import type { Row } from '../router/events.js'
+import { type ImageLayout, imageLayoutOf } from './imageLayout.js'
 import type { Substituted } from './writeSubstitution.js'
 
 // How ONE write is classified before anything runs — into exactly ONE of five strategies (see `Plan`):
@@ -83,8 +84,9 @@ type SubstitutionPlan = ({ strategy: 'fullRow' | 'countOnly'; images?: undefined
 
 type BothImagesPlan = {
   strategy: 'bothImages'
-  /** The table fields, in the order the positional `o<i>`/`n<i>` aliases carry them. */
-  images: string[]
+  /** The OLD/NEW both-images convention, owned whole — alias emission, position math, split, and the
+   *  delete/update asymmetry (see imageLayout.ts). */
+  images: ImageLayout
 }
 
 /** Run the caller's statement exactly as written and coarsen — the fail-closed floor every ambiguity drops
@@ -147,7 +149,7 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   // An INSERT has no old image and needs none. The capability is probed once per db and is only ever `true`
   // when a real statement proved it — so this branch adds precision where it exists and changes nothing
   // anywhere else.
-  const images = op !== 'insert' && dialect === 'pg' && oldNewReturningOf(db) ? shape.columns : undefined
+  const images = op !== 'insert' && dialect === 'pg' && oldNewReturningOf(db) ? imageLayoutOf(shape.columns) : undefined
   // A PK-CHANGING update moves the very key a retraction is addressed by. Without the old image that key is
   // gone the moment the statement runs, and no RETURNING of the NEW row can recover it → coarse. WITH the
   // old image it is simply there, so the case stops being special (fork #2 closed on this lane).
@@ -237,14 +239,10 @@ function callerPositionsOf(plan: SubstitutionPlan, op: Op): number[] | undefined
 /** Where in the substituted statement's raw row the given table field's value sits.
  *
  *  Both layouts are capture's own, so both are known exactly: a full-row RETURNING selects the table's
- *  columns in order, and a BOTH-IMAGES RETURNING interleaves them as `o0, n0, o1, n1, …` (see
- *  `substituteOldNew`) — of which the caller would have been handed the OLD image for a delete and the NEW
- *  one otherwise, exactly as `runWrite` picks the delivered image. */
+ *  columns in order, and the both-images interleaving is the `ImageLayout`'s to answer. */
 function rawPositionOf(field: string, plan: SubstitutionPlan, op: Op): number {
-  const index = (plan.images ?? plan.columns).indexOf(field)
-  if (index < 0) return -1
-  if (!plan.images) return index
-  return op === 'delete' ? index * 2 : index * 2 + 1
+  if (plan.images) return plan.images.rawPositionOf(field, op)
+  return plan.columns.indexOf(field)
 }
 
 // ── builder introspection (version-brittle, guarded — mirrors drizzleShape.ts) ───────────────────────

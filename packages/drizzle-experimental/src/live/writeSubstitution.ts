@@ -1,11 +1,11 @@
-export { runSubstituted, substituteOldNew, substituteFullRow, splitImages }
+export { runSubstituted, substituteOldNew, substituteFullRow }
 export { serializeOn, runBase, SUBSTITUTION_REFUSED }
 export type { Substituted, SubstitutionOutcome }
 
 import { type Column, SQL, type Table, getTableColumns, sql } from 'drizzle-orm'
+import type { ImageLayout } from './imageLayout.js'
 import { dialectOf } from '../binding/database.js'
 import { report } from './captureReport.js'
-import type { Images } from './writeChanges.js'
 import { writeConfigOf } from './writePlan.js'
 import type { Row } from '../router/events.js'
 import { causeChain } from '../utils/causeChain.js'
@@ -509,43 +509,11 @@ const SUBSTITUTION_FAULT_CLASSES = new Set(['42', '0A', '28'])
 // any of capture's own code sees a row, so it cannot be caught by being careful here. That is what the
 // count-observation tap above is for.
 
-/** Replace the statement's RETURNING with one that asks for BOTH images of every column.
- *
- *  The two images are bound to CORRELATION NAMES via `RETURNING WITH (OLD AS …, NEW AS …)` rather than
- *  written as bare `old.col` / `new.col`. Bare names are resolved against the query's own scope first, so
- *  on a table literally named `old` they silently select that TABLE's post-update row: an update to
- *  `old` returned {old: 11, new: 11} where the truth was {old: 10, new: 11} — a wrong row image reported
- *  as precise. Verified on PGlite. One form, applied unconditionally: a rule that only engages for names
- *  that look dangerous is a rule that is never exercised until it matters.
- *
- *  `WITH (…)` must sit immediately after RETURNING, which drizzle's builder has no clause for — so it
- *  rides the FIRST selected expression, where it lands in exactly that position. The emitted SQL is
- *  `returning with (old as "tf_old__", new as "tf_new__") "tf_old__"."id", …`.
- *
- *  Aliases are POSITIONAL (`o0`/`n0`, …): capture owns every alias here, so positional ones are injective
- *  by construction where a name-derived scheme could be made to collide by a column of that name.
- *
- *  Each expression is decoded through its own column, so values arrive exactly as drizzle would decode them
- *  anywhere else. A decoder that throws is handled by OBSERVING the statement rather than by decoding
- *  differently — see the count-observation tap. */
-const OLD_IMAGE = 'tf_old__'
-const NEW_IMAGE = 'tf_new__'
-
-function substituteOldNew(builder: unknown, table: Table, fields: string[]): unknown {
-  const columns = getTableColumns(table)
-  const selection: Record<string, SQL.Aliased | SQL> = {}
-  fields.forEach((field, index) => {
-    const column = columns[field] as Column
-    const name = sql.identifier(column.name)
-    const oldRef = sql`${sql.identifier(OLD_IMAGE)}.${name}`
-    selection[`o${index}`] = (
-      index === 0
-        ? sql`with (old as ${sql.identifier(OLD_IMAGE)}, new as ${sql.identifier(NEW_IMAGE)}) ${oldRef}`
-        : oldRef
-    ).mapWith(column)
-    selection[`n${index}`] = sql`${sql.identifier(NEW_IMAGE)}.${name}`.mapWith(column)
-  })
-  return (builder as { returning: (selection: unknown) => unknown }).returning(selection)
+/** Replace the statement's RETURNING with one that asks for BOTH images of every column — the selection
+ *  itself (aliases, correlation names, the WITH-clause placement) is the `ImageLayout`'s to build; this is
+ *  the substitution ACT, rewriting the builder in place like `substituteFullRow` below. */
+function substituteOldNew(builder: unknown, table: Table, layout: ImageLayout): unknown {
+  return (builder as { returning: (selection: unknown) => unknown }).returning(layout.selection(getTableColumns(table)))
 }
 
 /** Replace the RETURNING with capture's own full-row selection.
@@ -560,15 +528,6 @@ function substituteFullRow(builder: unknown, table: Table): unknown {
     selection[field] = sql`${sql.identifier((column as Column).name)}`.mapWith(column as Column)
   }
   return (builder as { returning: (selection: unknown) => unknown }).returning(selection)
-}
-
-function splitImages(row: Row, fields: string[]): Images {
-  const images: Images = { old: {}, new: {} }
-  fields.forEach((field, index) => {
-    images.old[field] = row[`o${index}`]
-    images.new[field] = row[`n${index}`]
-  })
-  return images
 }
 
 // ── terminal execution ──────────────────────────────────────────────

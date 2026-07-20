@@ -21,7 +21,6 @@ import {
   runBase,
   runSubstituted,
   serializeOn,
-  splitImages,
   substituteFullRow,
   substituteOldNew,
 } from './writeSubstitution.js'
@@ -307,13 +306,12 @@ async function runWrite(
       return recoverAsWritten(builder, table, op, db, sink, tx, executeArgs)
     }
     if (!oldNewProvenOf(db)) markOldNewProven(db) // it worked; later writes pay nothing for the guard
-    // PostgreSQL's plain RETURNING on a DELETE is the row that was deleted — the OLD image. On an UPDATE it
-    // is the NEW one. Both are already accounted for in the positions the caller's decoding read.
-    const pairs = outcome.rows?.map((row) => splitImages(row, images))
+    // Which image is which answer (delete→old, update→new) is the layout's to say — see imageLayout.ts.
+    const pairs = outcome.rows?.map((row) => images.split(row))
     emitCaptured(sink, relationId, outcome, pairs ? captureBothOrCoarse(op, relationId, pairs, plan) : undefined)
     return plan.deliver(
       outcome,
-      pairs?.map((pair) => (op === 'delete' ? pair.old : pair.new)),
+      pairs?.map((pair) => images.delivered(pair, op)),
     )
   }
 

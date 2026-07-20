@@ -2,7 +2,7 @@ export { captureMismatch, captureOrCoarse, captureBothOrCoarse, changesFromRows,
 export type { CaptureSink, CaptureMismatch, Images }
 
 import { report } from './captureReport.js'
-import type { Op, Plan, PrecisePlan } from './writePlan.js'
+import type { Op, Plan, PrecisePlan, SubstitutionPlan } from './writePlan.js'
 import type { Row, TableChange } from '../router/events.js'
 
 // Turning what a write statement returned into the `TableChange`s the graphs read. Everything here runs
@@ -39,18 +39,21 @@ type CaptureMismatch = { rowIndex: number; reason: 'missing-columns' | 'missing-
  *  Checks EVERY row, not just the first: a partial projection or a driver quirk can widen the first row and
  *  narrow a later one, and `changesOf` would then emit a change whose `new` silently lacks columns.
  *
+ *  `requireKey` is whether a retraction will be keyed off these rows: an absent or NULL key value would key
+ *  it to nothing. Callers whose rows carry the whole fact and retract nothing pass `false` — an insert
+ *  (`captureOrCoarse` derives it from the op), and a both-images NEW image, whose retraction key is the OLD
+ *  image's to provide.
+ *
  *  What is deliberately NOT claimed here: a row-COUNT cross-check. On both RETURNING paths the only
  *  affected-row count available (`reconstruct`'s `affectedRows`) is DERIVED from these same rows, so there
  *  is no independent oracle to disagree with — a "count check" against it could never fail. Where an
  *  independent count does exist (a SQLite direct terminal's `changes`) the write already fails closed to
  *  coarse for other reasons. Asserting a check that cannot fail would be verification theatre. */
-function captureMismatch(rows: Row[], columns: string[], pk: string[], op: Op): CaptureMismatch {
+function captureMismatch(rows: Row[], columns: string[], pk: string[], requireKey: boolean): CaptureMismatch {
   for (const [rowIndex, row] of rows.entries()) {
     const missing = columns.filter((column) => !(column in row))
     if (missing.length > 0) return { rowIndex, reason: 'missing-columns', detail: missing.join(', ') }
-    // A retraction is keyed by PK, so an absent or NULL key value would key it to nothing. Inserts carry the
-    // whole row and need no key.
-    if (op === 'insert') continue
+    if (!requireKey) continue
     const unkeyed = pk.filter((field) => row[field] === undefined || row[field] === null)
     if (unkeyed.length > 0) return { rowIndex, reason: 'missing-key', detail: unkeyed.join(', ') }
   }
@@ -59,25 +62,30 @@ function captureMismatch(rows: Row[], columns: string[], pk: string[], op: Op): 
 
 /** Precise changes when the captured rows are a trustworthy full image, else ONE coarse marker. */
 function captureOrCoarse(op: Op, relationId: string, rows: Row[], plan: PrecisePlan): TableChange[] {
-  const mismatch = captureMismatch(rows, plan.columns, plan.pk, op)
+  const mismatch = captureMismatch(rows, plan.columns, plan.pk, op !== 'insert')
   if (!mismatch) return changesOf(op, relationId, rows, plan)
   report('capture-mismatch', { relation: relationId, mismatch })
   return [coarse(relationId)]
 }
 
 /** Precise changes from BOTH images, else one coarse marker. The image that has to be trustworthy is the
- *  one the change is built from: an UPDATE is decided by both, a DELETE only by the row that was removed
- *  (PostgreSQL returns NEW as all-NULL for a delete, which is not a row and is never treated as one). */
-function captureBothOrCoarse(op: Op, relationId: string, pairs: Images[], plan: PrecisePlan): TableChange[] {
+ *  one the change is built from — the OLD image always (it carries the retraction key), plus whatever the
+ *  layout says is decisive for this op (`ImageLayout.decisive`: an update's NEW images; nothing for a
+ *  delete, whose NEW is the all-NULL non-row). */
+function captureBothOrCoarse(
+  op: Op,
+  relationId: string,
+  pairs: Images[],
+  plan: Extract<SubstitutionPlan, { strategy: 'bothImages' }>,
+): TableChange[] {
   const emitted = (row: Row) => physicalRow(row, plan.physical)
-  const decisive = op === 'delete' ? [] : pairs.map((pair) => pair.new)
   const mismatch =
     captureMismatch(
       pairs.map((pair) => pair.old),
       plan.columns,
       plan.pk,
-      op,
-    ) ?? captureMismatch(decisive, plan.columns, plan.pk, 'insert')
+      true, // the retraction key is the OLD image's to provide — op is never 'insert' on this path
+    ) ?? captureMismatch(plan.images.decisive(pairs, op), plan.columns, plan.pk, /* requireKey */ false)
   if (mismatch) {
     report('capture-mismatch', { relation: relationId, mismatch })
     return [coarse(relationId)]

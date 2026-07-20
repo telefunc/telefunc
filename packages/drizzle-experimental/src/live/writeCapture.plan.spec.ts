@@ -155,7 +155,7 @@ describe('capture planning — fail-closed branches have executable controls', (
       keyed,
     )
     expect(plan).toMatchObject({ strategy: 'fullRow' }) // widened and projected back, not trusted as-is
-    expect(captureMismatch([{ id: 1 }], ['id', 'name'], ['id'], 'insert')).toEqual({
+    expect(captureMismatch([{ id: 1 }], ['id', 'name'], ['id'], /* requireKey */ false)).toEqual({
       rowIndex: 0,
       reason: 'missing-columns',
       detail: 'name', // and were a driver ever to narrow the widened row, this still coarsens
@@ -227,18 +227,17 @@ describe('capture mismatch — captured rows are verified, not trusted', () => {
   ]
 
   it('a full, keyed image reports NO mismatch (the positive control)', () => {
-    expect(captureMismatch(full, columns, pk, 'insert')).toBeUndefined()
-    expect(captureMismatch(full, columns, pk, 'update')).toBeUndefined()
-    expect(captureMismatch(full, columns, pk, 'delete')).toBeUndefined()
+    expect(captureMismatch(full, columns, pk, false)).toBeUndefined()
+    expect(captureMismatch(full, columns, pk, true)).toBeUndefined()
   })
 
   it('an empty row set is not a mismatch — a write affecting no rows captures nothing', () => {
-    expect(captureMismatch([], columns, pk, 'update')).toBeUndefined()
+    expect(captureMismatch([], columns, pk, true)).toBeUndefined()
   })
 
   it('a row missing a demanded column is caught, and the ROW INDEX is reported', () => {
     const narrowed = [{ id: 1, name: 'a' }, { id: 2 }] // second row lacks `name`
-    expect(captureMismatch(narrowed, columns, pk, 'insert')).toEqual({
+    expect(captureMismatch(narrowed, columns, pk, false)).toEqual({
       rowIndex: 1,
       reason: 'missing-columns',
       detail: 'name',
@@ -250,27 +249,27 @@ describe('capture mismatch — captured rows are verified, not trusted', () => {
     // `rows[0]`-only check passes while row 1 is a partial image.
     const narrowed = [{ id: 1, name: 'a' }, { id: 2 }]
     expect(columns.every((c) => c in narrowed[0]!)).toBe(true) // what the old check asked
-    expect(captureMismatch(narrowed, columns, pk, 'insert')).toBeDefined() // what is now asked
+    expect(captureMismatch(narrowed, columns, pk, false)).toBeDefined() // what is now asked
   })
 
   it('a retraction whose PK value is absent or NULL is caught — a key of undefined keys nothing', () => {
     const noKey = [{ id: undefined, name: 'a' }]
-    expect(captureMismatch(noKey, columns, pk, 'delete')).toEqual({
+    expect(captureMismatch(noKey, columns, pk, true)).toEqual({
       rowIndex: 0,
       reason: 'missing-key',
       detail: 'id',
     })
-    expect(captureMismatch([{ id: null, name: 'a' }], columns, pk, 'update')).toMatchObject({
+    expect(captureMismatch([{ id: null, name: 'a' }], columns, pk, true)).toMatchObject({
       reason: 'missing-key',
     })
-    // An INSERT carries the whole row and is not keyed, so the same rows are fine there.
-    expect(captureMismatch(noKey, columns, pk, 'insert')).toBeUndefined()
+    // A caller that retracts nothing (an insert; a both-images NEW image) asks for no key — same rows, fine.
+    expect(captureMismatch(noKey, columns, pk, false)).toBeUndefined()
   })
 
   it('a composite key is only satisfied when EVERY key field is present', () => {
     const composite = ['a', 'b']
-    expect(captureMismatch([{ a: 1, b: 2 }], composite, composite, 'delete')).toBeUndefined()
-    expect(captureMismatch([{ a: 1, b: null }], composite, composite, 'delete')).toMatchObject({
+    expect(captureMismatch([{ a: 1, b: 2 }], composite, composite, true)).toBeUndefined()
+    expect(captureMismatch([{ a: 1, b: null }], composite, composite, true)).toMatchObject({
       reason: 'missing-key',
       detail: 'b',
     })
