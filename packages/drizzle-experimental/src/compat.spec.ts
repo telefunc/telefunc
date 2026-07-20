@@ -119,7 +119,7 @@ describe('telefunc compatibility — the declared peer floor', () => {
     expect(() => minimumOf('>=0.2.23 || <0.2.23')).toThrow(/Cannot determine a version floor/)
   })
 
-  it('CONTROL: other unparseable forms fail closed rather than guessing', () => {
+  it('CONTROL: other unparsable forms fail closed rather than guessing', () => {
     for (const unsupported of ['*', 'x', '~0.2.23', '0.2.x', '>=0.2.23 <0.3.0', '0.2.0 - 0.2.30', 'latest', '']) {
       expect(() => minimumOf(unsupported), `expected ${JSON.stringify(unsupported)} to be rejected`).toThrow()
     }
