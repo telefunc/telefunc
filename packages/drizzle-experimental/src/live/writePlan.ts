@@ -68,10 +68,45 @@ type Plan =
       images?: string[]
     } & PrecisePlan)
 
+// ── the table's field↔column relationship, built once per plan ──────
+
+/** Everything planning needs to know about how the table's FIELDS relate to its physical COLUMNS. This
+ *  relationship used to be constructed four times in this module — `planCapture`'s `physical` map,
+ *  `pkFieldsOf`'s name→field map, `callerSelection`'s identity→field map, and a second `getTableColumns`
+ *  for the images list. One relationship, one build, shared by every consumer of one plan. */
+type TableShape = {
+  /** Field names, in the table's declared column order — what a full image must contain. */
+  columns: string[]
+  /** field name → PHYSICAL column name, for translating an emitted change into the graph's row space. */
+  physical: Record<string, string>
+  /** PHYSICAL column name → field name — how a PK, resolved in DB-column space, translates back to the
+   *  field keys a `.returning()` row uses. */
+  fieldOfColumnName: Map<string, string>
+  /** Column OBJECT IDENTITY → field name — how a caller's RETURNING selection is matched. Identity, so a
+   *  same-named column of a different table cannot masquerade as one of ours. */
+  fieldOfColumn: Map<unknown, string>
+}
+
+function tableShapeOf(table: Table): TableShape {
+  const columns: string[] = []
+  const physical: Record<string, string> = {}
+  const fieldOfColumnName = new Map<string, string>()
+  const fieldOfColumn = new Map<unknown, string>()
+  for (const [field, column] of Object.entries(getTableColumns(table))) {
+    const columnName = (column as Column).name
+    columns.push(field)
+    physical[field] = columnName
+    fieldOfColumnName.set(columnName, field)
+    fieldOfColumn.set(column, field)
+  }
+  return { columns, physical, fieldOfColumnName, fieldOfColumn }
+}
+
 /** Decide precise vs coarse for one write — every ambiguity fails closed to coarse. */
 function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   const dialect = dialectOf(db)
-  const pk = pkFieldsOf(table)
+  const shape = tableShapeOf(table)
+  const pk = pkFieldsOf(table, shape)
   // A retraction is keyed by the PK, so UPDATE and DELETE need one. An INSERT retracts nothing — it carries
   // its whole new row — so a table with no primary key is still captured exactly for it. (A STATEFUL graph
   // over a PK-less input is born coarse in liveGraph and ignores the precision either way; a STATELESS one
@@ -82,20 +117,13 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   if (hasOnConflict(config, dialect)) return { mode: 'coarse' } // UPSERT / ON CONFLICT
   if (op === 'insert' && hasRawValues(config)) return { mode: 'coarse' } // raw-SQL values clause
 
-  const tableColumns = getTableColumns(table)
-  const columns = Object.keys(tableColumns)
-  // field name → physical column name. Built here so every precise plan carries it and no emission path can
-  // forget to translate (see `physicalRow`).
-  const physical = Object.fromEntries(
-    Object.entries(tableColumns).map(([field, column]) => [field, (column as Column).name]),
-  )
+  const { columns, physical } = shape
   const noCallerOrder: readonly string[] = EMPTY_FIELDS
   // BOTH images, where the connection is known to produce them (`RETURNING old.*, new.*`, PostgreSQL 18+).
   // An INSERT has no old image and needs none. The capability is probed once per db and is only ever `true`
   // when a real statement proved it — so this branch adds precision where it exists and changes nothing
   // anywhere else.
-  const images =
-    op !== 'insert' && dialect === 'pg' && oldNewReturningOf(db) ? Object.keys(getTableColumns(table)) : undefined
+  const images = op !== 'insert' && dialect === 'pg' && oldNewReturningOf(db) ? shape.columns : undefined
   // A PK-CHANGING update moves the very key a retraction is addressed by. Without the old image that key is
   // gone the moment the statement runs, and no RETURNING of the NEW row can recover it → coarse. WITH the
   // old image it is simply there, so the case stops being special (fork #2 closed on this lane).
@@ -108,7 +136,7 @@ function planCapture(builder: unknown, table: Table, op: Op, db: object): Plan {
   // borrowing that gate here coarsens pooled PostgreSQL writes for a reason that does not apply to them.
   //
   if (config.returning !== undefined) {
-    const selection = callerSelection(config.returning, table)
+    const selection = callerSelection(config.returning, shape)
     // Not reproducible from a row image — a nested alias path, or a raw `SQL` expression the DATABASE
     // computed. Run exactly what the caller wrote and let `captureMismatch` fail it closed, as before.
     if (!selection) return { mode: 'precise', callerReturning: true, pk, columns, physical, callerOrder: noCallerOrder }
@@ -207,17 +235,13 @@ const EMPTY_FIELDS: readonly string[] = []
 
 /** The PK columns' FIELD names (the keys `.returning()` rows use) — single OR composite. `primaryKeyOf`
  *  resolves the PK's DATABASE column names (composite keys live in the table's extra-config builder); those
- *  are translated back to field names via the table's column map, since a `.returning()` row is keyed by
- *  field, not db column. A PK column that doesn't resolve to a field (or no PK at all) yields `[]` → the
+ *  are translated back to field names via the shape's column-name map, since a `.returning()` row is keyed
+ *  by field, not db column. A PK column that doesn't resolve to a field (or no PK at all) yields `[]` → the
  *  caller coarsens (fail-closed). */
-function pkFieldsOf(table: Table): string[] {
+function pkFieldsOf(table: Table, shape: TableShape): string[] {
   const columnNames = primaryKeyOf(table)
   if (columnNames.length === 0) return []
-  const fieldByColumnName = new Map<string, string>()
-  for (const [field, column] of Object.entries(getTableColumns(table))) {
-    fieldByColumnName.set((column as Column).name, field)
-  }
-  const fields = columnNames.map((name) => fieldByColumnName.get(name))
+  const fields = columnNames.map((name) => shape.fieldOfColumnName.get(name))
   return fields.every((field): field is string => field !== undefined) ? (fields as string[]) : []
 }
 
@@ -272,16 +296,14 @@ type ReturningEntry = { path: string[]; field: unknown }
  *     (`.returning({ n: sql\`id + 1\` })`): the DATABASE computed that value, and re-deriving it from the
  *     row would mean re-implementing SQL. That case keeps its old behaviour — run as written, fail closed.
  *
- *  Columns are matched by OBJECT IDENTITY against the table's own column map, so a same-named column of a
+ *  Columns are matched by OBJECT IDENTITY (the shape's identity map), so a same-named column of a
  *  different table cannot masquerade as one of ours. */
-function callerSelection(returning: unknown, table: Table): { alias: string; field: string }[] | null {
+function callerSelection(returning: unknown, shape: TableShape): { alias: string; field: string }[] | null {
   if (!Array.isArray(returning) || returning.length === 0) return null
-  const fieldByColumn = new Map<unknown, string>()
-  for (const [field, column] of Object.entries(getTableColumns(table))) fieldByColumn.set(column, field)
   const selection: { alias: string; field: string }[] = []
   for (const entry of returning as ReturningEntry[]) {
     if (!Array.isArray(entry?.path) || entry.path.length !== 1) return null
-    const field = fieldByColumn.get(entry.field)
+    const field = shape.fieldOfColumn.get(entry.field)
     if (field === undefined) return null
     selection.push({ alias: entry.path[0]!, field })
   }
