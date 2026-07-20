@@ -71,8 +71,7 @@ async function connectSecondSse(h: ReturnType<typeof createMuxHarness>) {
   return sse2
 }
 
-const prepare = (sessionId: string, upgradeId = 'upg-1') =>
-  prepareFrame({ upgradeId, sessionId, open: [{ id: 'A', ix: 0 }] })
+const prepare = (sessionId: string, upgradeId = 'upg-1') => prepareFrame({ upgradeId, sessionId })
 
 /** The old wire's FINAL frame: authoritative membership plus barrier-fresh cursors. */
 const barrier = (sessionId: string, upgradeId = 'upg-1', lastSeq = 1) =>
@@ -798,7 +797,7 @@ describe('through the real sse.ts', () => {
     const s0 = await openSseDownstream(connId, channelId)
 
     const probe = openGlobalProbeWire()
-    await probe.deliver(encode.prepare({ upgradeId: 'upg-1', sessionId: s0, open: [{ id: channelId, ix: 0 }] }))
+    await probe.deliver(encode.prepare({ upgradeId: 'upg-1', sessionId: s0 }))
     expect(probe.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(1)
 
     // A batch POST whose body is held open, so the close below lands mid-drain.
@@ -849,7 +848,7 @@ describe('through the real sse.ts', () => {
     globalRegisterChannel(channelId)
     const s0 = await openSseDownstream(connId, channelId)
     const probe = openGlobalProbeWire()
-    await probe.deliver(encode.prepare({ upgradeId: 'upg-2', sessionId: s0, open: [{ id: channelId, ix: 0 }] }))
+    await probe.deliver(encode.prepare({ upgradeId: 'upg-2', sessionId: s0 }))
 
     const body = new Blob([
       encodeSseRequestMetadata({ connId }),

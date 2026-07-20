@@ -76,8 +76,7 @@ const TAG = {
    *  confirms the half-duplex streaming wire round-trips end-to-end. */
   STREAM_REQUEST_OPEN_ACK: 0x06 as const,
   /** Client → server on the probe wire: stage a barrier-commit upgrade. JSON payload
-   *  (`PreparePayload`). Membership identity only — cursors are deliberately absent, they
-   *  would be stale by the time the barrier commits. */
+   *  (`PreparePayload`) — identity only; the barrier carries membership. */
   PREPARE: 0x07 as const,
   /** Server → client once the upgrade is staged. JSON payload (`ReadyPayload`). On receipt the
    *  client gates new sends and emits the barrier `RECONCILE` as the old transport's last frame. */
@@ -150,13 +149,11 @@ type ReconcilePayload = {
   open: { id: string; ix: number; lastSeq: number; initial?: true }[]
 } & ({ barrier?: undefined; upgradeId?: undefined } | { barrier: true; upgradeId: string })
 
-/** Stages a barrier-commit upgrade on the probe wire, before that wire is the transport.
- *  Identity only: `lastSeq` is intentionally absent, because cursors captured here are stale
- *  by commit time and replaying from them would burst past the peer's flow-control credit. */
+/** Stages a barrier-commit upgrade on the probe wire, before that wire is the transport. Identity
+ *  only: membership belongs to the barrier, which carries it authoritatively at commit time. */
 type PreparePayload = {
   upgradeId: string
   sessionId: string
-  open: { id: string; ix: number }[]
 }
 
 /** The server's acknowledgment that the upgrade is staged. Echoes `upgradeId` so a client can
@@ -537,10 +534,9 @@ function isNonEmptyString(value: unknown): value is string {
 }
 
 function validatePrepare(payload: PreparePayload): void {
-  const p = payload as { upgradeId?: unknown; sessionId?: unknown; open?: unknown }
+  const p = payload as { upgradeId?: unknown; sessionId?: unknown }
   if (!isNonEmptyString(p.upgradeId)) throw new ProtocolViolationError()
   if (!isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
-  if (!Array.isArray(p.open)) throw new ProtocolViolationError()
 }
 
 /**

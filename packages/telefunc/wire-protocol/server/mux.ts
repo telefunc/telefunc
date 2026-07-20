@@ -508,9 +508,8 @@ class ChannelMux {
     rawByteLength: number,
   ): null {
     const limits = this.limits
-    // Caps only; the shape was settled at decode. Charged before anything is installed, so a
-    // rejected PREPARE leaves no trace to clean up.
-    this.validateUpgradeFrame(payload.open, rawByteLength)
+    // No cap check here: PREPARE carries no membership, so its only bound is the frame-byte one the
+    // decode seam already applied pre-parse.
     // A PREPARE belongs on a probe wire that is not yet anyone's transport.
     if (entry.transport.getSessionId(connection)) throw new ProtocolViolationError()
     // The named session must exist. It is only ever compared for equality, at barrier time, so
@@ -654,9 +653,9 @@ class ChannelMux {
     this.stagedBytes -= stage.bytes
   }
 
-  /** Applies to PREPARE and `barrier: true` RECONCILE only — an ordinary reconcile keeps its
-   *  existing uncapped contract. */
-  private validateUpgradeFrame(open: ReconcilePayload['open'] | PreparePayload['open'], rawByteLength: number): void {
+  /** Applies to the `barrier: true` RECONCILE only — an ordinary reconcile keeps its existing
+   *  uncapped contract. */
+  private validateUpgradeFrame(open: ReconcilePayload['open'], rawByteLength: number): void {
     const limits = this.limits
     if (rawByteLength > limits.maxFrameBytes) throw new ProtocolViolationError()
     if (!Array.isArray(open)) throw new ProtocolViolationError()

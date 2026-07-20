@@ -57,7 +57,7 @@ describe('PC1 — an old-wire C2S frame in flight at commit time', () => {
     const { chA, s0 } = await connectSse(h)
 
     // Stage on the probe wire. Deliberately inert: no rotation, no attach, nothing on the old wire.
-    await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: [{ id: 'A', ix: 0 }] }))
+    await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0 }))
     expect(h.sse.sessionId()).toBe(s0)
     expect(h.ws.sessionId()).toBeUndefined()
 

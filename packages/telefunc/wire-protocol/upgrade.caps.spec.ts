@@ -114,7 +114,35 @@ async function expectRejectedProbe(
 }
 
 const openEntries = (count: number, idLength = 1) =>
-  Array.from({ length: count }, (_, ix) => ({ id: 'c'.repeat(idLength) + ix, ix }))
+  Array.from({ length: count }, (_, ix) => ({ id: 'c'.repeat(idLength) + ix, ix, lastSeq: 0 }))
+
+type Probe = { sent: { tag: number }[]; terminated: () => boolean; sessionId: () => string | undefined }
+
+/** Stage a probe, then hand the old wire the barrier under test. Every cap that bounds the decoded
+ *  object graph is exercised on THIS route: PREPARE carries identity only, so the barrier is the one
+ *  upgrade frame with membership to bound — and it was always the larger of the two. */
+async function stageThenBarrier(
+  h: Harness,
+  probe: Probe & { deliver: (f: Uint8Array<ArrayBuffer>) => Promise<void> },
+  s0: string,
+  upgradeId: string,
+  open: { id: string; ix: number; lastSeq: number }[],
+) {
+  await probe.deliver(prepareFrame({ upgradeId, sessionId: s0 }))
+  expect(probe.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(1)
+  await h.sse.deliver(reconcileFrame({ sessionId: s0, barrier: true, upgradeId, open }))
+}
+
+/** A refused barrier kills the PROBE, not the wire that merely carried the oversized frame — a
+ *  pre-commit rejection must leave the old session usable. */
+async function expectRefusedBarrier(h: Harness, probe: Probe, chA: { received: number[] }, s0: string) {
+  expect(probe.terminated()).toBe(true)
+  expect(probe.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(0) // nothing committed
+  expect(probe.sessionId()).toBeUndefined()
+  expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+  expect(h.sse.sessionId()).toBe(s0)
+  await expectSentinelAlive(h, chA)
+}
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // Server admission caps — PREPARE and barrier only
@@ -126,13 +154,13 @@ describe('per-frame admission caps', () => {
     // would refuse every upgrade forever and still look like working enforcement.
     const tight = (harness = createMuxHarness({ maxFrameBytes: 64 }))
     const { chA, s0 } = await connectSse(tight)
-    await tight.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: openEntries(8) }))
+    await tight.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0 }))
     await expectRejectedProbe(tight, tight.ws, chA)
     tight.dispose()
 
     const roomy = (harness = createMuxHarness({ maxFrameBytes: 4_096 }))
     const { s0: s1 } = await connectSse(roomy)
-    await roomy.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s1, open: openEntries(8) }))
+    await roomy.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s1 }))
     expect(roomy.ws.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(1)
     expect(roomy.mux._getUpgradeResourceSnapshot().records).toBe(1)
   })
@@ -142,14 +170,17 @@ describe('per-frame admission caps', () => {
     // Pinning from both directions is what stops a cap that merely moved from looking correct.
     const over = (harness = createMuxHarness({ maxOpenEntries: 2 }))
     const { chA, s0 } = await connectSse(over)
-    await over.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: openEntries(3) }))
-    await expectRejectedProbe(over, over.ws, chA)
+    await stageThenBarrier(over, over.ws, s0, 'upg-1', openEntries(3))
+    await expectRefusedBarrier(over, over.ws, chA, s0)
     over.dispose()
 
     const at = (harness = createMuxHarness({ maxOpenEntries: 2 }))
     const { s0: s1 } = await connectSse(at)
-    await at.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s1, open: openEntries(2) }))
-    expect(at.ws.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(1)
+    await stageThenBarrier(at, at.ws, s1, 'upg-1', [
+      { id: 'A', ix: 0, lastSeq: 0 },
+      { id: 'B', ix: 1, lastSeq: 0 },
+    ])
+    expect(at.ws.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(1)
   })
 
   test('the id cap counts UTF-8 BYTES, not UTF-16 code units', async () => {
@@ -160,37 +191,9 @@ describe('per-frame admission caps', () => {
     const h = (harness = createMuxHarness({ maxIdBytes: 4 }))
     const { chA, s0 } = await connectSse(h)
 
-    await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: [{ id: '一二三', ix: 0 }] }))
+    await stageThenBarrier(h, h.ws, s0, 'upg-1', [{ id: '一二三', ix: 0, lastSeq: 0 }])
 
-    await expectRejectedProbe(h, h.ws, chA)
-  })
-
-  test('a BARRIER is capped on the same terms as a PREPARE', async () => {
-    // The caps apply to `barrier: true` reconciles too — the barrier carries the authoritative
-    // membership, so it is the LARGER of the two frames and the one worth bounding. It also reaches
-    // `validateUpgradeFrame` by a different route (`handleBarrier`, not `handlePrepare`).
-    const h = (harness = createMuxHarness({ maxOpenEntries: 2 }))
-    const { chA, s0 } = await connectSse(h)
-    await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: [{ id: 'A', ix: 0 }] }))
-
-    await h.sse.deliver(
-      reconcileFrame({
-        sessionId: s0,
-        barrier: true,
-        upgradeId: 'upg-1',
-        open: openEntries(3).map(({ id, ix }) => ({ id, ix, lastSeq: 0 })),
-      }),
-    )
-
-    // The probe dies, not the wire that carried the oversized frame — a pre-commit rejection must
-    // leave the old session usable. (The shared oracle does not fit: this probe legitimately received
-    // its READY before the barrier arrived, so "no READY" would be the wrong assertion.)
-    expect(h.ws.terminated()).toBe(true)
-    expect(h.ws.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(0) // nothing committed
-    expect(h.ws.sessionId()).toBeUndefined()
-    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
-    expect(h.sse.sessionId()).toBe(s0)
-    await expectSentinelAlive(h, chA)
+    await expectRefusedBarrier(h, h.ws, chA, s0)
   })
 
   test('an ORDINARY reconcile is NOT capped — its contract is unchanged', async () => {
@@ -223,13 +226,13 @@ describe('per-frame admission caps', () => {
     const parse = vi.spyOn(JSON, 'parse')
 
     try {
-      await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: openEntries(64) }))
+      await h.ws.deliver(prepareFrame({ upgradeId: 'u'.repeat(400), sessionId: s0 }))
       expect(parse).not.toHaveBeenCalled()
       // The spy CAN disagree: an admissible PREPARE on the same path is parsed. Without this, "never
       // parsed" would be satisfied by a spy watching the wrong function.
       const roomy = createMuxHarness({ maxFrameBytes: 4_096 })
       const { s0: s1 } = await connectSse(roomy)
-      await roomy.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s1, open: openEntries(4) }))
+      await roomy.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s1 }))
       expect(parse).toHaveBeenCalled()
       expect(roomy.ws.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(1)
       roomy.dispose()
@@ -255,10 +258,10 @@ describe('global staged budget', () => {
     const h = (harness = createMuxHarness({ maxStagedRecords: 1 }))
     const { chA, s0 } = await connectSse(h)
     const { s: s2 } = await connectSecondSse(h)
-    await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: [{ id: 'A', ix: 0 }] }))
+    await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0 }))
 
     const probe2 = h.makeWire(null)
-    await probe2.deliver(prepareFrame({ upgradeId: 'upg-2', sessionId: s2, open: [{ id: 'B', ix: 0 }] }))
+    await probe2.deliver(prepareFrame({ upgradeId: 'upg-2', sessionId: s2 }))
 
     expect(probe2.terminated()).toBe(true)
     expect(probe2.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(0)
@@ -270,22 +273,18 @@ describe('global staged budget', () => {
 
   test('the byte cap rejects the probe that would exceed it', async () => {
     const sizer = createMuxHarness()
-    const oneFrameBytes = prepareFrame({
-      upgradeId: 'upg-1',
-      sessionId: 'x'.repeat(36),
-      open: [{ id: 'A', ix: 0 }],
-    }).byteLength
+    const oneFrameBytes = prepareFrame({ upgradeId: 'upg-1', sessionId: 'x'.repeat(36) }).byteLength
     sizer.dispose()
 
     // Room for exactly one stage of that size, not two.
     const h = (harness = createMuxHarness({ maxStagedBytes: oneFrameBytes + 4 }))
     const { chA, s0 } = await connectSse(h)
     const { s: s2 } = await connectSecondSse(h)
-    await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: [{ id: 'A', ix: 0 }] }))
+    await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0 }))
     expect(h.mux._getUpgradeResourceSnapshot().records).toBe(1)
 
     const probe2 = h.makeWire(null)
-    await probe2.deliver(prepareFrame({ upgradeId: 'upg-2', sessionId: s2, open: [{ id: 'B', ix: 0 }] }))
+    await probe2.deliver(prepareFrame({ upgradeId: 'upg-2', sessionId: s2 }))
 
     expect(probe2.terminated()).toBe(true)
     expect(h.mux._getUpgradeResourceSnapshot().records).toBe(1)
@@ -696,24 +695,22 @@ describe('a default-constructed mux reads the shipped constants', () => {
 
     // One past the entry cap, with short ids so the BYTE cap is nowhere near — refused for its entry
     // count or not at all.
-    const frame = prepareFrame({ upgradeId: 'upg-1', sessionId: s0, open: openEntries(UPGRADE_MAX_OPEN_ENTRIES + 1) })
-    expect(frame.byteLength).toBeLessThan(UPGRADE_MAX_FRAME_BYTES)
-    await h.ws.deliver(frame)
-    await expectRejectedProbe(h, h.ws, chA)
+    const over = openEntries(UPGRADE_MAX_OPEN_ENTRIES + 1)
+    expect(reconcileFrame({ sessionId: s0, barrier: true, upgradeId: 'upg-1', open: over }).byteLength).toBeLessThan(
+      UPGRADE_MAX_FRAME_BYTES,
+    )
+    await stageThenBarrier(h, h.ws, s0, 'upg-1', over)
+    await expectRefusedBarrier(h, h.ws, chA, s0)
 
     const probe2 = h.makeWire(null)
-    await probe2.deliver(
-      prepareFrame({ upgradeId: 'upg-2', sessionId: s0, open: [{ id: 'x'.repeat(UPGRADE_MAX_ID_BYTES + 1), ix: 0 }] }),
-    )
+    await stageThenBarrier(h, probe2, s0, 'upg-2', [{ id: 'x'.repeat(UPGRADE_MAX_ID_BYTES + 1), ix: 0, lastSeq: 0 }])
     expect(probe2.terminated()).toBe(true)
-    expect(probe2.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(0)
+    expect(probe2.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(0)
 
     // ...and one AT the entry cap is accepted, so the default is pinned from both sides.
     const probe3 = h.makeWire(null)
-    await probe3.deliver(
-      prepareFrame({ upgradeId: 'upg-3', sessionId: s0, open: openEntries(UPGRADE_MAX_OPEN_ENTRIES) }),
-    )
-    expect(probe3.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(1)
+    await stageThenBarrier(h, probe3, s0, 'upg-3', openEntries(UPGRADE_MAX_OPEN_ENTRIES))
+    expect(probe3.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(1)
   })
 
   test('the DEFAULT mux charges the backlog fields it enforces on', async () => {

@@ -61,17 +61,17 @@ const upgradeHarness = async (options: Record<string, unknown> = {}, channelIds 
   (harness = await createUpgradeHarness(channelIds, options))
 
 describe('the PREPARE/barrier exchange', () => {
-  test('the PREPARE carries identity only — no cursors', async () => {
+  test('the PREPARE carries identity only — two fields, no membership', async () => {
     const h = await upgradeHarness()
 
     expect(h.prepares).toHaveLength(1)
     const prepare = h.prepares[0]!
     expect(prepare.upgradeId).toBeTypeOf('string')
     expect(prepare.sessionId).toBeTypeOf('string')
-    expect(prepare.open).toEqual([{ id: 'A', ix: 0 }])
-    // A watermark captured at staging time is stale by the time the barrier commits, and replaying
-    // from it would burst past the peer's flow-control credit.
-    for (const entry of prepare.open) expect(entry).not.toHaveProperty('lastSeq')
+    // Structural, over the decoded wire object: an excess-property type error would not catch a
+    // field that actually arrived. Membership is the BARRIER's to carry — anything sent here is
+    // stale by commit time, and the server never stored it.
+    expect(Object.keys(prepare).sort()).toEqual(['sessionId', 'upgradeId'])
   })
 
   test('the barrier is the old wire, the new wire never reconciles, and one socket does it all', async () => {

@@ -25,48 +25,20 @@ import {
 import { CHANNEL_TRANSPORT, UPGRADE_MAX_ID_BYTES, UPGRADE_MAX_OPEN_ENTRIES } from './constants.js'
 
 /** The admission caps the server enforces, imported rather than restated: the "max shape"
- *  round-trips must be sized to the largest payload the protocol will ever LEGALLY carry, and a
+ *  round-trip must be sized to the largest payload the protocol will ever LEGALLY carry, and a
  *  local copy would let the codec's idea of "maximum" drift silently away from the server's. */
-const maxOpenList = (): PreparePayload['open'] =>
+const maxOpenList = (): ReconcilePayload['open'] =>
   Array.from({ length: UPGRADE_MAX_OPEN_ENTRIES }, (_, ix) => ({
     id: String(ix).padStart(UPGRADE_MAX_ID_BYTES, 'x'),
     ix,
+    lastSeq: ix,
   }))
 
 describe('PREPARE / READY codec', () => {
   // ── NAMED MUTATION TARGET ── corrupting the JSON payload offset in `encodeJsonFrame` reddens this.
-  test('round-trips a full PREPARE payload', () => {
-    const payload: PreparePayload = {
-      upgradeId: 'upg-1',
-      sessionId: 'sess-0',
-      open: [
-        { id: 'A', ix: 0 },
-        { id: 'B', ix: 7 },
-      ],
-    }
+  test('round-trips a PREPARE payload', () => {
+    const payload: PreparePayload = { upgradeId: 'upg-1', sessionId: 'sess-0' }
     expect(decode(encode.prepare(payload))).toEqual({ tag: TAG.PREPARE, payload })
-  })
-
-  test('round-trips a PREPARE at the maximum admissible shape, and with an empty open list', () => {
-    const max: PreparePayload = { upgradeId: 'upg-1', sessionId: 'sess-0', open: maxOpenList() }
-    const encoded = encode.prepare(max)
-    // Well past a single TCP segment — the point is that framing is length-driven, not delimited.
-    expect(encoded.byteLength).toBeGreaterThan(UPGRADE_MAX_OPEN_ENTRIES * UPGRADE_MAX_ID_BYTES)
-    expect(decode(encoded)).toEqual({ tag: TAG.PREPARE, payload: max })
-
-    const empty: PreparePayload = { upgradeId: 'upg-1', sessionId: 'sess-0', open: [] }
-    const frame = decode(encode.prepare(empty))
-    expect(frame).toEqual({ tag: TAG.PREPARE, payload: empty })
-    // An empty array must survive as an array, not collapse to undefined via JSON.
-    expect(frame.tag === TAG.PREPARE && Array.isArray(frame.payload.open)).toBe(true)
-  })
-
-  test('a PREPARE open entry carries NO cursors — exactly id and ix', () => {
-    // The absence of `lastSeq` is a load-bearing design decision (PREPARE-time cursors are stale by
-    // commit and would produce a credit-bypassing replay burst), so it gets a STRUCTURAL check: an
-    // excess-property type error would not catch a value that arrived over the wire.
-    const frame = decode(encode.prepare({ upgradeId: 'u', sessionId: 's', open: [{ id: 'A', ix: 0 }] }))
-    expect(frame.tag === TAG.PREPARE && Object.keys(frame.payload.open[0]!).sort()).toEqual(['id', 'ix'])
   })
 
   test('READY round-trips and carries upgradeId rather than being a bare frame', () => {
@@ -103,13 +75,11 @@ describe('barrier fields on the reconcile payloads', () => {
     }
     expect(decode(encode.reconcile(one))).toEqual({ tag: TAG.RECONCILE, payload: one })
 
-    const max: ReconcilePayload = {
-      sessionId: 'sess-0',
-      barrier: true,
-      upgradeId: 'upg-1',
-      open: maxOpenList().map(({ id, ix }) => ({ id, ix, lastSeq: ix })),
-    }
-    expect(decode(encode.reconcile(max))).toEqual({ tag: TAG.RECONCILE, payload: max })
+    const max: ReconcilePayload = { sessionId: 'sess-0', barrier: true, upgradeId: 'upg-1', open: maxOpenList() }
+    const encoded = encode.reconcile(max)
+    // Well past a single TCP segment — the point is that framing is length-driven, not delimited.
+    expect(encoded.byteLength).toBeGreaterThan(UPGRADE_MAX_OPEN_ENTRIES * UPGRADE_MAX_ID_BYTES)
+    expect(decode(encoded)).toEqual({ tag: TAG.RECONCILE, payload: max })
   })
 
   test('an ordinary RECONCILE decodes with the barrier fields ABSENT, not undefined', () => {
@@ -215,13 +185,12 @@ describe('decodeClientFrame — the hostile-schema table', () => {
 
   describe('PREPARE identity fields', () => {
     const rows: [name: string, payload: Record<string, unknown>][] = [
-      ['no upgradeId', { sessionId: 's', open: [] }],
-      ['an empty upgradeId', { upgradeId: '', sessionId: 's', open: [] }],
-      ['a non-string upgradeId', { upgradeId: 7, sessionId: 's', open: [] }],
-      ['no sessionId', { upgradeId: 'u', open: [] }],
-      ['an empty sessionId', { upgradeId: 'u', sessionId: '', open: [] }],
-      ['a non-string sessionId', { upgradeId: 'u', sessionId: 7, open: [] }],
-      ['a non-array open', { upgradeId: 'u', sessionId: 's', open: 3 }],
+      ['no upgradeId', { sessionId: 's' }],
+      ['an empty upgradeId', { upgradeId: '', sessionId: 's' }],
+      ['a non-string upgradeId', { upgradeId: 7, sessionId: 's' }],
+      ['no sessionId', { upgradeId: 'u' }],
+      ['an empty sessionId', { upgradeId: 'u', sessionId: '' }],
+      ['a non-string sessionId', { upgradeId: 'u', sessionId: 7 }],
     ]
     test.each(rows)('%s is refused', (_name, payload) => {
       expect(() => clientFrame(hostile(encode.prepare, payload))).toThrow(ProtocolViolationError)
@@ -231,7 +200,7 @@ describe('decodeClientFrame — the hostile-schema table', () => {
       // Pre-parse, so the cap bounds what the decoder is asked to allocate rather than what survives
       // it. Driven at a cap far below the payload so the refusal cannot be confused with a shape one:
       // this payload is perfectly well-formed.
-      const frame = encode.prepare({ upgradeId: 'u', sessionId: 's', open: maxOpenList() })
+      const frame = encode.prepare({ upgradeId: 'u'.repeat(4_096), sessionId: 's' })
       expect(() => decodeClientFrame(frame, 32)).toThrow(ProtocolViolationError)
       expect(decodeClientFrame(frame, frame.byteLength).tag).toBe(TAG.PREPARE)
     })

@@ -40,7 +40,6 @@ import type {
   AckResultStatus,
   ChannelFrame,
   DecodedFrame,
-  PreparePayload,
   ReadyPayload,
   ReconcilePayload,
   ReconciledPayload,
@@ -1355,17 +1354,10 @@ class ClientConnection implements MuxConnection {
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
-  /** Identity only — no cursors. Anything captured here is stale by the time the barrier commits,
-   *  and replaying from a stale watermark would burst past the peer's flow-control credit. Must NOT
-   *  go through `buildReconcileFrame`: `enterReconciling` would gate every user send for the whole
-   *  `PREPARE`→`READY` window, which is precisely what leaving `preparing` ungated buys back. */
+  /** Must NOT go through `buildReconcileFrame`: `enterReconciling` would gate every user send for the
+   *  whole `PREPARE`→`READY` window, which is precisely what leaving `preparing` ungated buys back. */
   private buildPrepareFrame(upgradeId: string, sessionId: string): Uint8Array<ArrayBuffer> {
-    const open: PreparePayload['open'] = []
-    for (const [ix, entry] of this.channels) {
-      if (entry.state.tag !== 'open' && entry.state.initial) continue
-      open.push({ id: entry.channel.id, ix })
-    }
-    return encode.prepare({ upgradeId, sessionId, open })
+    return encode.prepare({ upgradeId, sessionId })
   }
 
   drainBufferedFramesForReconcile(isInitialBatch: boolean): OutboundFrame[] {
