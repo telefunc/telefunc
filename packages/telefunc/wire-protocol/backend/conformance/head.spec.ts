@@ -16,6 +16,7 @@ import {
   bytes,
   CLOSE_LEASE_MS,
   cellsOf,
+  collector,
   conflicted,
   CONTROL,
   enterClosing,
@@ -430,40 +431,73 @@ for (const harness of installedBackends) {
     })
 
     describe('I13 (c) — finalization race', () => {
-      it('never clears the head without the current lease holder’s closed event', async () => {
+      // The race runs from ONE paused head: the original closer's closed event has been accepted and it
+      // is about to run its terminal head CX when the lease expires and a recovery actor takes over.
+      // Both CXs are issued from that same head before either settles — the issue order is what selects
+      // the linearization, so both legal outcomes are exercised rather than one hand-picked ordering.
+      const pauseBetweenEventAndFinalization = async () => {
         const roomId = nextId('room')
         const { inc, head } = await openRoom(fx.backend, roomId)
-        const { head: closing, leaseId: original } = await enterClosing(fx.backend, roomId, head)
+        const control = collector()
+        const sub = fx.backend.subscribeLane(roomId, inc, CONTROL, control.receiver)
+        await sub.ready
 
-        // the original closer's closed event is ACCEPTED, and it is paused before its terminal head CX
+        const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
         const event = accepted(
-          await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed-by-original'), { closingLease: original }),
+          await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed-by-original'), { closingLease: leaseId }),
         )
         await event.delivery
-
         fx.advanceAuthority(CLOSE_LEASE_MS + 1)
-        const takeover = await takeoverClose(fx.backend, roomId, closing)
-        const taken = okHead(takeover.result)
+        return { roomId, inc, paused: closing, originalLease: leaseId, control }
+      }
 
-        // the superseded closer resumes against the CURRENT rev, so this is the lease guard failing —
-        // not a rev conflict
-        conflicted(await finalizeClose(fx.backend, roomId, taken, original))
-        // KILLER: accepting finalization through the generic {rev} CX turns this red — that is exactly
-        // the escape hatch that would clear the head under the winner without the winner's event.
-        await expect(finalizeUnguarded(fx.backend, roomId, taken)).rejects.toThrow(/lease-guarded/)
+      it('linearization (a): the original finalizes first and the takeover conflicts', async () => {
+        const { roomId, paused, originalLease, control } = await pauseBetweenEventAndFinalization()
 
-        const stillClosing = await readHeadOrThrow(fx.backend, roomId)
-        expect(stillClosing.state).toBe('closing')
-        expect(stillClosing.currentInc).toBe(inc)
-        expect(stillClosing.closeLease?.id).toBe(takeover.leaseId)
+        const finalization = finalizeClose(fx.backend, roomId, paused, originalLease)
+        const takeover = takeoverClose(fx.backend, roomId, paused)
+        const [finalized, taken] = await Promise.all([finalization, takeover])
 
-        // only the winner's own event plus its guarded finalization clears the head
-        accepted(
+        // the original's lease is EXPIRED, yet finalization is id-equality only — so it wins
+        const tombstone = okHead(finalized)
+        expect(tombstone.state).toBe('closed')
+        expect(tombstone.currentInc).toBeNull()
+        conflicted(taken.result)
+        // and the head went null only after the finalizing closer's own accepted event
+        expect(control.payloads()).toEqual(['closed-by-original'])
+      })
+
+      it('linearization (b): the takeover wins, the original aborts, and only the winner clears the head', async () => {
+        const { roomId, inc, paused, originalLease, control } = await pauseBetweenEventAndFinalization()
+
+        const takeover = takeoverClose(fx.backend, roomId, paused)
+        const finalization = finalizeClose(fx.backend, roomId, paused, originalLease)
+        const [taken, finalized] = await Promise.all([takeover, finalization])
+
+        const fresh = okHead(taken.result)
+        expect(fresh.state).toBe('closing')
+        expect(fresh.closeLease?.id).toBe(taken.leaseId)
+        conflicted(finalized) // the superseded closer aborts its tail
+
+        // no other head-null path exists for the superseded closer: not a re-read with its old lease…
+        const still = await readHeadOrThrow(fx.backend, roomId)
+        expect(still.state).toBe('closing')
+        expect(still.currentInc).toBe(inc)
+        conflicted(await finalizeClose(fx.backend, roomId, still, originalLease))
+        // …and not the generic {rev} form, which is off the normative transition table entirely.
+        // KILLER: admitting generic finalization, or dropping the lease-id compare, turns this red.
+        await expect(finalizeUnguarded(fx.backend, roomId, still)).rejects.toThrow()
+        expect(control.payloads()).toEqual(['closed-by-original'])
+
+        // only the winner's OWN event, then its guarded finalization, clears the head
+        const winnerEvent = accepted(
           await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed-by-winner'), {
-            closingLease: takeover.leaseId,
+            closingLease: taken.leaseId,
           }),
         )
-        const tombstone = okHead(await finalizeClose(fx.backend, roomId, taken, takeover.leaseId))
+        await winnerEvent.delivery
+        expect(control.payloads()).toEqual(['closed-by-original', 'closed-by-winner'])
+        const tombstone = okHead(await finalizeClose(fx.backend, roomId, still, taken.leaseId))
         expect(tombstone.state).toBe('closed')
         expect(tombstone.currentInc).toBeNull()
       })
@@ -481,6 +515,235 @@ for (const harness of installedBackends) {
         ).toBe(true)
         const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
         expect(tombstone.currentInc).toBeNull()
+      })
+    })
+
+    // ── the normative transition table ──
+
+    describe('the normative head-transition table (spi.md §2)', () => {
+      // Validation is by the triple (current state, HeadCx form, next); everything off the table throws.
+      // These are the negative cases: each proves a guarded transition cannot be reached through some
+      // OTHER compare form. Every backend must reject the same set.
+      const closingHead = (inc: string | null, config: Uint8Array, leaseId: string) => ({
+        head: {
+          currentInc: inc,
+          state: 'closing' as const,
+          config,
+          closeLease: { id: leaseId, durationMs: CLOSE_LEASE_MS },
+        },
+      })
+      const openHead = (inc: string | null, config: Uint8Array) => ({
+        head: { currentInc: inc, state: 'open' as const, config },
+      })
+      const closedHead = (config: Uint8Array) => ({
+        head: { currentInc: null, state: 'closed' as const, config },
+        ttlMs: TOMBSTONE_TTL_MS,
+      })
+
+      it('refuses a generic {rev} that re-leases a LIVE closing head, leaving the closer able to finish', async () => {
+        // KILLER: admitting `closing + generic -> closing` turns this red — it is the live-closer steal
+        // that I13 forbids, reached through an untested compare form rather than through takeover.
+        const roomId = nextId('room')
+        const { inc, head } = await openRoom(fx.backend, roomId)
+        const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+
+        await expect(
+          fx.backend.compareExchangeHead(
+            roomId,
+            { expect: { rev: closing.rev } },
+            closingHead(inc, closing.config, 'stolen-lease'),
+          ),
+        ).rejects.toThrow(/not a legal head transition/)
+
+        // the live closer is untouched and still completes its tail
+        const after = await readHeadOrThrow(fx.backend, roomId)
+        expect(after.rev).toBe(closing.rev)
+        expect(after.closeLease?.id).toBe(leaseId)
+        accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+        expect(okHead(await finalizeClose(fx.backend, roomId, after, leaseId)).currentInc).toBeNull()
+      })
+
+      it('refuses a generic {rev} re-lease even AFTER expiry — only the takeover form may re-lease', async () => {
+        const roomId = nextId('room')
+        const { inc, head } = await openRoom(fx.backend, roomId)
+        const { head: closing } = await enterClosing(fx.backend, roomId, head)
+        fx.advanceAuthority(CLOSE_LEASE_MS + 1)
+
+        await expect(
+          fx.backend.compareExchangeHead(
+            roomId,
+            { expect: { rev: closing.rev } },
+            closingHead(inc, closing.config, 'late-steal'),
+          ),
+        ).rejects.toThrow(/not a legal head transition/)
+      })
+
+      it('refuses a generic {rev} finalization from open and from closing', async () => {
+        const roomId = nextId('room')
+        const { head } = await openRoom(fx.backend, roomId)
+        await expect(
+          fx.backend.compareExchangeHead(roomId, { expect: { rev: head.rev } }, closedHead(head.config)),
+        ).rejects.toThrow(/not a legal head transition/)
+
+        const { head: closing } = await enterClosing(fx.backend, roomId, head)
+        await expect(
+          fx.backend.compareExchangeHead(roomId, { expect: { rev: closing.rev } }, closedHead(closing.config)),
+        ).rejects.toThrow(/not a legal head transition/)
+      })
+
+      it('refuses a generic {rev} that swaps the incarnation on open→open or open→closing', async () => {
+        const roomId = nextId('room')
+        const { head } = await openRoom(fx.backend, roomId)
+        await expect(
+          fx.backend.compareExchangeHead(roomId, { expect: { rev: head.rev } }, openHead('smuggled-inc', head.config)),
+        ).rejects.toThrow(/same incarnation/)
+        await expect(
+          fx.backend.compareExchangeHead(
+            roomId,
+            { expect: { rev: head.rev } },
+            closingHead('smuggled-inc', head.config, 'lease'),
+          ),
+        ).rejects.toThrow(/same incarnation/)
+      })
+
+      it('refuses a takeover that changes anything but the lease', async () => {
+        const roomId = nextId('room')
+        const { inc, head } = await openRoom(fx.backend, roomId)
+        const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+        fx.advanceAuthority(CLOSE_LEASE_MS + 1)
+        const takeoverCx = { expect: { rev: closing.rev, closingLeaseExpired: true as const } }
+
+        // KILLER: dropping the config compare turns the config case red.
+        await expect(
+          fx.backend.compareExchangeHead(roomId, takeoverCx, closingHead(inc, bytes('rewritten'), 'fresh')),
+        ).rejects.toThrow(/must not change the config/)
+        await expect(
+          fx.backend.compareExchangeHead(roomId, takeoverCx, closingHead('other-inc', closing.config, 'fresh')),
+        ).rejects.toThrow(/same incarnation/)
+        await expect(
+          fx.backend.compareExchangeHead(roomId, takeoverCx, closingHead(inc, closing.config, leaseId)),
+        ).rejects.toThrow(/different lease id/)
+        // and a takeover may not leave 'closing' at all
+        await expect(fx.backend.compareExchangeHead(roomId, takeoverCx, closedHead(closing.config))).rejects.toThrow(
+          /not a legal head transition/,
+        )
+      })
+
+      it('refuses a finalization form that writes anything but a closed tombstone', async () => {
+        const roomId = nextId('room')
+        const { inc, head } = await openRoom(fx.backend, roomId)
+        const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+        const finalizeCx = { expect: { rev: closing.rev, closingLease: leaseId } }
+
+        await expect(
+          fx.backend.compareExchangeHead(roomId, finalizeCx, closingHead(inc, closing.config, 'another-lease')),
+        ).rejects.toThrow(/not a legal head transition/)
+        await expect(fx.backend.compareExchangeHead(roomId, finalizeCx, openHead(inc, closing.config))).rejects.toThrow(
+          /not a legal head transition/,
+        )
+      })
+
+      it('refuses creating a room directly into closing or closed', async () => {
+        const roomId = nextId('room')
+        await expect(
+          fx.backend.compareExchangeHead(roomId, { expect: 'absent' }, closingHead('inc', bytes('cfg'), 'lease')),
+        ).rejects.toThrow(/not a legal head transition/)
+        await expect(
+          fx.backend.compareExchangeHead(roomId, { expect: 'absent' }, closedHead(bytes('cfg'))),
+        ).rejects.toThrow(/not a legal head transition/)
+      })
+
+      it('refuses a tombstone transition into anything but open', async () => {
+        const roomId = nextId('room')
+        const { inc, head } = await openRoom(fx.backend, roomId)
+        const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+        accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+        const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
+
+        await expect(
+          fx.backend.compareExchangeHead(
+            roomId,
+            { expect: { rev: tombstone.rev } },
+            closingHead('inc-new', tombstone.config, 'lease'),
+          ),
+        ).rejects.toThrow(/not a legal head transition/)
+        await expect(
+          fx.backend.compareExchangeHead(roomId, { expect: { rev: tombstone.rev } }, closedHead(tombstone.config)),
+        ).rejects.toThrow(/not a legal head transition/)
+        // recreation into open is the one legal move
+        expect(
+          okHead(
+            await fx.backend.compareExchangeHead(
+              roomId,
+              { expect: { rev: tombstone.rev } },
+              openHead('inc-new', tombstone.config),
+            ),
+          ).state,
+        ).toBe('open')
+      })
+
+      it('CONFLICTS (never throws) when a guarded form is used on a head that is not closing', async () => {
+        // A genuine race must stay a conflict: only the compare can fail here, so the caller re-reads.
+        const roomId = nextId('room')
+        const { inc, head } = await openRoom(fx.backend, roomId)
+        conflicted(
+          await fx.backend.compareExchangeHead(
+            roomId,
+            { expect: { rev: head.rev, closingLeaseExpired: true } },
+            closingHead(inc, head.config, 'fresh'),
+          ),
+        )
+        conflicted(
+          await fx.backend.compareExchangeHead(
+            roomId,
+            { expect: { rev: head.rev, closingLease: 'whatever' } },
+            closedHead(head.config),
+          ),
+        )
+      })
+    })
+
+    describe('{delete:true} is legal only against a closed tombstone', () => {
+      const enterClosingRoom = async () => {
+        const roomId = nextId('room')
+        const { inc, head } = await openRoom(fx.backend, roomId)
+        const entered = await enterClosing(fx.backend, roomId, head)
+        return { roomId, inc, ...entered }
+      }
+
+      it('throws against an ABSENT head, even though the compare would succeed', async () => {
+        // KILLER: treating an absent head as deletable turns this red. Operation legality is decided
+        // before the compare, so a delete can never become a second route to head-null.
+        await expect(
+          fx.backend.compareExchangeHead(nextId('room'), { expect: 'absent' }, { delete: true }),
+        ).rejects.toThrow(/only against a 'closed' tombstone/)
+      })
+
+      it('throws against an open head', async () => {
+        const roomId = nextId('room')
+        const { head } = await openRoom(fx.backend, roomId)
+        await expect(
+          fx.backend.compareExchangeHead(roomId, { expect: { rev: head.rev } }, { delete: true }),
+        ).rejects.toThrow(/only against a 'closed' tombstone/)
+        expect((await readHeadOrThrow(fx.backend, roomId)).state).toBe('open')
+      })
+
+      it('throws against a closing head', async () => {
+        const { roomId, head: closing } = await enterClosingRoom()
+        await expect(
+          fx.backend.compareExchangeHead(roomId, { expect: { rev: closing.rev } }, { delete: true }),
+        ).rejects.toThrow(/only against a 'closed' tombstone/)
+        expect((await readHeadOrThrow(fx.backend, roomId)).state).toBe('closing')
+      })
+
+      it('succeeds against a closed tombstone and conflicts on a stale rev', async () => {
+        const { roomId, inc, head: closing, leaseId } = await enterClosingRoom()
+        accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+        const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
+
+        conflicted(await fx.backend.compareExchangeHead(roomId, { expect: { rev: 'stale' } }, { delete: true }))
+        okDeleted(await fx.backend.compareExchangeHead(roomId, { expect: { rev: tombstone.rev } }, { delete: true }))
+        expect(await fx.backend.readHead(roomId)).toBeNull()
       })
     })
   })

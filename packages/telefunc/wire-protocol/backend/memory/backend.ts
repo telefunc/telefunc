@@ -89,6 +89,10 @@ function isExpired(entry: Expiring, now: number): boolean {
   return entry.expiresAt !== null && entry.expiresAt <= now
 }
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  return a.byteLength === b.byteLength && a.every((byte, index) => byte === b[index])
+}
+
 function newGeneration(): Generation {
   return { revision: 0, cells: new Map(), order: new Map(), retained: new Map(), subs: new Map(), chains: new Map() }
 }
@@ -132,29 +136,68 @@ function assertHeadNextWellFormed(next: HeadNext): void {
   }
 }
 
-// Rules that need the stored head. Two of them are the I13 guards that make an abandoned close
-// recoverable but never stealable, and one keeps the tombstone-expiry delete off a live close.
-function assertTransitionAllowed(cx: HeadCx, next: HeadNext, current: StoredHead | null): void {
-  if ('delete' in next) {
-    if (current !== null && current.state !== 'closed') {
-      throw new Error(`head CX: {delete} is the tombstone-expiry path; refusing to delete a '${current.state}' head`)
-    }
-    return
+type HeadCxForm = 'absent' | 'generic' | 'takeover' | 'finalize'
+
+function headCxForm(cx: HeadCx): HeadCxForm {
+  if (cx.expect === 'absent') return 'absent'
+  if ('closingLeaseExpired' in cx.expect) return 'takeover'
+  if ('closingLease' in cx.expect) return 'finalize'
+  return 'generic'
+}
+
+// The tombstone-expiry delete is the one operation whose legality is decided BEFORE any compare, so
+// misuse throws even where the compare would have conflicted (spi.md §2 transition table).
+function assertDeleteLegal(next: HeadNext, current: StoredHead | null): void {
+  if (!('delete' in next)) return
+  if (current?.state !== 'closed') {
+    throw new Error(`head CX: {delete} is legal only against a 'closed' tombstone, not '${current?.state ?? 'absent'}'`)
   }
-  const expect = cx.expect
-  if (expect !== 'absent' && 'closingLeaseExpired' in expect) {
-    // Takeover replaces the lease and nothing else.
-    if (next.head.state !== 'closing' || next.head.currentInc !== current?.currentInc) {
-      throw new Error('head CX: an expired-close takeover must install closing on the same incarnation')
-    }
-    if (next.head.closeLease?.id === current.closeLease?.id) {
-      throw new Error('head CX: an expired-close takeover must mint a different lease id')
-    }
-    return
+}
+
+// The NORMATIVE head-transition table of spi.md §2, exhaustive by the triple (current state, HeadCx
+// form, next state). Anything off the table is a programming error and THROWS — it is never encoded as
+// a conflict. This is what makes the I13 guards unreachable through any other compare form: a generic
+// {rev} can never install or replace a close lease, never re-lease a 'closing' head pre-expiry, and
+// never reach 'closed'.
+function assertTransitionAllowed(
+  cx: HeadCx,
+  next: Extract<HeadNext, { head: unknown }>,
+  current: StoredHead | null,
+): void {
+  const from = current === null ? 'absent' : current.state
+  const transition = `${from} + ${headCxForm(cx)} -> ${next.head.state}`
+  switch (transition) {
+    case 'absent + absent -> open':
+      return
+    case 'closed + generic -> open':
+      return
+    case 'open + generic -> open':
+    case 'open + generic -> closing':
+      // A generic CX can never swap the incarnation — on a config/LWW edit or on the close that fences
+      // this very generation.
+      if (next.head.currentInc !== current?.currentInc) {
+        throw new Error(`head CX: ${transition} must keep the same incarnation`)
+      }
+      return
+    case 'closing + takeover -> closing':
+      assertReplacesOnlyTheLease(next.head, current as StoredHead)
+      return
+    case 'closing + finalize -> closed':
+      return
+    default:
+      throw new Error(`head CX: '${transition}' is not a legal head transition`)
   }
-  const leaseGuarded = expect !== 'absent' && 'closingLease' in expect
-  if (current?.state === 'closing' && next.head.state !== 'closing' && !leaseGuarded) {
-    throw new Error('head CX: leaving closing requires the lease-guarded {rev, closingLease} form')
+}
+
+function assertReplacesOnlyTheLease(next: Extract<HeadNext, { head: unknown }>['head'], current: StoredHead): void {
+  if (next.currentInc !== current.currentInc) {
+    throw new Error('head CX: an expired-close takeover must keep the same incarnation')
+  }
+  if (!bytesEqual(next.config, current.config)) {
+    throw new Error('head CX: an expired-close takeover must not change the config — it replaces only the lease')
+  }
+  if (next.closeLease?.id === current.closeLease?.id) {
+    throw new Error('head CX: an expired-close takeover must mint a different lease id')
   }
 }
 
@@ -265,16 +308,19 @@ export class MemoryRoomBackend implements RoomBackendSpi {
     this.#assertLive()
     assertHeadNextWellFormed(next)
     const current = this.#liveHead(this.#rooms.get(roomId))
+    // Operation legality precedes the compare for the delete path only; every other transition is
+    // validated against the head the compare actually matched, so a genuine race still conflicts.
+    assertDeleteLegal(next, current)
     if (!this.#headCxMatches(cx, current)) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
     }
-    assertTransitionAllowed(cx, next, current)
     // Only a CX that actually applies materializes a room record.
     const room = this.#roomFor(roomId)
     if ('delete' in next) {
       room.head = null
       return { ok: true, deleted: true }
     }
+    assertTransitionAllowed(cx, next, current)
     return { ok: true, head: publicHead(this.#storeHead(room, next)) }
   }
 
