@@ -38,7 +38,10 @@ import { encodeSseRequestMetadata } from './sse-request.js'
 import { UPGRADE_STAGE_TTL_MS } from './constants.js'
 import { TAG, encode, type DecodedFrame } from './shared-ws.js'
 
-let harness: ReturnType<typeof createMuxHarness> | null = null
+type Harness = ReturnType<typeof createMuxHarness>
+type HarnessWire = Harness['sse']
+
+let harness: Harness | null = null
 let sentinelSeq = 5_000
 let sentinelValue = 9_000
 afterEach(() => {
@@ -113,157 +116,172 @@ describe('PREPARE stages, and staging alone is inert', () => {
     await expectWireDelivers(h.sse, chA)
   })
 
-  test('a plain RECONCILE on a staged probe wire is a violation — it never rotates', async () => {
-    // THE DISPATCH HOLE: RECONCILE is handled ABOVE the session-less guard, so without the explicit
-    // staged-wire check this runs the destructive rotation and steps around the stage entirely —
-    // `ws.sessionId()` becomes a fresh id, S0 leaves the registry, the sentinel is silently dropped.
-    const h = (harness = createMuxHarness())
-    const { chA, s0 } = await connectSse(h)
-    await h.ws.deliver(prepare(s0))
+  // ── Staging admission: one rule per case, one oracle for all of them ──────────────────────────
+  //
+  // Every case ends the same way — the SENDER loses its wire, no READY was issued to it, the stage
+  // accounting is what the case says it is, and a bystander connection still routes to its real
+  // listener. That last part is the independent one: without it "the probe was terminated" is
+  // satisfied by an implementation that tore down both wires, which is exactly what a pre-barrier
+  // refusal must never do.
+  type StagingCase = {
+    name: string
+    /** Delivers the offending frame; returns the wire that sent it. */
+    offend: (h: Harness, s0: string) => Promise<HarnessWire>
+    /** Stage accounting AFTER the refusal. */
+    snapshot: typeof EMPTY_STAGE | { records: number; reverseRecords: number; bytes: unknown }
+    /** READYs on the offending wire. Zero unless an EARLIER, accepted PREPARE legitimately earned
+     *  one — the invariant is that the REFUSED frame produced none, not that the wire never got any. */
+    readys?: number
+    /** Anything true of this case alone. */
+    extra?: (h: Harness, s0: string) => Promise<void>
+  }
 
-    await h.ws.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
+  const STAGING_CASES: StagingCase[] = [
+    {
+      // THE DISPATCH HOLE: RECONCILE is handled ABOVE the session-less guard, so without the explicit
+      // staged-wire check this runs the destructive rotation and steps around the stage entirely.
+      name: 'a plain RECONCILE on a staged probe wire — it never rotates',
+      offend: async (h, s0) => {
+        await h.ws.deliver(prepare(s0))
+        await h.ws.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
+        return h.ws
+      },
+      snapshot: EMPTY_STAGE,
+      readys: 1, // from the accepted PREPARE that staged it
+      extra: async (h) => {
+        expect(h.ws.sessionId()).toBeUndefined() // ← the rotation the guard exists to prevent
+        expect(reconciledOn(h.ws)).toHaveLength(0)
+      },
+    },
+    {
+      // Staging is otherwise willing to pin memory and a socket against any string a client invents:
+      // the session id is only ever compared for EQUALITY, at barrier time, so a junk one produces a
+      // record that can never commit and is reaped only by its TTL.
+      name: 'a PREPARE naming a session the server does not hold [B4]',
+      offend: async (h) => {
+        await h.ws.deliver(prepare('no-such-session'))
+        return h.ws
+      },
+      snapshot: EMPTY_STAGE,
+    },
+    {
+      // A stage pairs a SESSIONLESS probe with the old session it may commit against. On a wire that
+      // already owns a session the record would name that wire as both sides, and the commit would
+      // rotate a session onto the wire it was rotating away from.
+      name: 'a PREPARE on a wire that already holds a session [T4-M13]',
+      offend: async (h, s0) => {
+        await h.sse.deliver(prepare(s0)) // ← the OLD wire, which holds s0
+        return h.sse
+      },
+      snapshot: EMPTY_STAGE,
+    },
+    {
+      // One stage per old session, enforced separately from one-stage-per-probe-wire: this arrives on
+      // a DIFFERENT, perfectly valid probe. Without it two probes race to commit the same session and
+      // the loser's stage survives to its TTL holding a socket the client has forgotten.
+      name: 'a second stage for the SAME old session [T4-M18]',
+      offend: async (h, s0) => {
+        await h.ws.deliver(prepare(s0))
+        expect(readysOn(h.ws)).toHaveLength(1)
+        const ws2 = h.makeWire('ws-probe-2')
+        await ws2.deliver(prepare(s0, 'upg-2'))
+        return ws2
+      },
+      snapshot: { records: 1, reverseRecords: 1, bytes: expect.any(Number) },
+      extra: async (h, s0) => {
+        // The INCUMBENT is untouched — refusing the newcomer must never evict the stage in progress —
+        // and it can still commit, which is the property an eviction bug would have destroyed.
+        expect(h.ws.terminated()).toBe(false)
+        await h.sse.deliver(barrier(s0))
+        expect(reconciledOn(h.ws)).toHaveLength(1)
+      },
+    },
+    {
+      // Without the guard the stage is silently re-installed (leaking the first timer) and a SECOND
+      // READY goes out, so the client could act on an attempt the server re-keyed underneath it.
+      name: 'a second PREPARE on the same probe wire — never a re-stage',
+      offend: async (h, s0) => {
+        await h.ws.deliver(prepare(s0, 'upg-1'))
+        await h.ws.deliver(prepare(s0, 'upg-2'))
+        return h.ws
+      },
+      snapshot: EMPTY_STAGE,
+      readys: 1, // exactly one: the SECOND PREPARE must not have produced its own
+      extra: async (h) => {
+        // The FIRST attempt's READY stands; the refusal did not re-key it.
+        expect(readysOn(h.ws)[0]?.tag === TAG.READY && readysOn(h.ws)[0]!.payload.upgradeId).toBe('upg-1')
+      },
+    },
+  ]
 
-    expect(h.ws.terminated()).toBe(true)
-    expect(h.ws.sessionId()).toBeUndefined() // ← the rotation the guard exists to prevent
-    expect(reconciledOn(h.ws)).toHaveLength(0)
-    await expectWireDelivers(h.sse, chA)
-  })
+  for (const stagingCase of STAGING_CASES) {
+    test(`refused at admission: ${stagingCase.name}`, async () => {
+      const h = (harness = createMuxHarness())
+      const { chA, s0 } = await connectSse(h)
+      // A bystander opened BEFORE the violation, so it is a witness rather than a retry.
+      const sse2 = h.makeWire('sse-conn-2')
+      const chB = h.registerChannel('B')
+      await sse2.deliver(reconcileFrame({ open: [{ id: 'B', ix: 0, lastSeq: 0, initial: true }] }))
 
-  test('a PREPARE naming a session the server does not hold is refused [B4]', async () => {
-    // Staging is otherwise willing to pin memory and a socket against any string a client invents:
-    // the session id is only ever compared for EQUALITY, at barrier time, so a junk one produces a
-    // record that can never commit and is reaped only by its TTL. Refusing at admission costs the
-    // legitimate client nothing — it names a session the server just minted for it.
-    const h = (harness = createMuxHarness())
-    const { chA } = await connectSse(h)
+      const offender = await stagingCase.offend(h, s0)
 
-    await h.ws.deliver(prepare('no-such-session'))
-
-    expect(readysOn(h.ws)).toHaveLength(0)
-    expect(h.ws.terminated()).toBe(true)
-    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
-    await expectWireDelivers(h.sse, chA)
-  })
-
-  test('a PREPARE on a wire that already holds a session is a violation [T4-M13]', async () => {
-    // A stage pairs a SESSIONLESS probe with the old session it may commit against. Delivered on a
-    // wire that already owns a session, the record would name that wire as both the old side and the
-    // new one, and the commit would rotate a session onto the wire it was rotating away from.
-    //
-    // Restored: no spec reached this guard — every one of the suite's PREPARE deliveries targets a
-    // session-less probe, so the check was load-bearing and untested at once.
-    const h = (harness = createMuxHarness())
-    const { s0 } = await connectSse(h)
-    // Independent connection, opened BEFORE the violation so it is a bystander rather than a retry.
-    const sse2 = h.makeWire('sse-conn-2')
-    const chB = h.registerChannel('B')
-    await sse2.deliver(reconcileFrame({ open: [{ id: 'B', ix: 0, lastSeq: 0, initial: true }] }))
-
-    await h.sse.deliver(prepare(s0)) // ← the OLD wire, which holds s0
-
-    expect(h.sse.terminated()).toBe(true)
-    expect(readysOn(h.sse)).toHaveLength(0)
-    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
-    // Live sentinel: the refusal is scoped to its sender and costs the bystander nothing.
-    expect(sse2.terminated()).toBe(false)
-    await sse2.deliver(textFrame(0, 1, 4_242))
-    expect(chB.received).toContain(4_242)
-  })
-
-  test('a second stage for the SAME old session is a violation [T4-M18]', async () => {
-    // One stage per old session, enforced separately from one-stage-per-probe-wire: this arrives on a
-    // DIFFERENT, perfectly valid probe. Without it two probes race to commit the same session and the
-    // loser's stage survives to its TTL holding a socket the client has forgotten.
-    //
-    // Restored: the suite's staging rows close each probe before opening the next, so no row ever
-    // held two live probes against one session.
-    const h = (harness = createMuxHarness())
-    const { s0 } = await connectSse(h)
-    await h.ws.deliver(prepare(s0))
-    expect(readysOn(h.ws)).toHaveLength(1)
-
-    const ws2 = h.makeWire('ws-probe-2')
-    await ws2.deliver(prepare(s0, 'upg-2')) // ← a fresh probe, the same old session
-
-    expect(ws2.terminated()).toBe(true)
-    expect(readysOn(ws2)).toHaveLength(0)
-    // The INCUMBENT is untouched — refusing the newcomer must never evict the stage in progress.
-    expect(h.ws.terminated()).toBe(false)
-    expect(h.mux._getUpgradeResourceSnapshot()).toEqual({ records: 1, reverseRecords: 1, bytes: expect.any(Number) })
-    // And it can still commit, which is the property the eviction bug would have destroyed.
-    await h.sse.deliver(barrier(s0))
-    expect(reconciledOn(h.ws)).toHaveLength(1)
-  })
-
-  test('a second PREPARE on the same probe wire is a violation — never a re-stage', async () => {
-    // Without the guard the stage is silently re-installed (leaking the first timer) and a SECOND
-    // READY goes out, so the client could act on an attempt the server re-keyed underneath it.
-    const h = (harness = createMuxHarness())
-    const { chA, s0 } = await connectSse(h)
-    await h.ws.deliver(prepare(s0, 'upg-1'))
-
-    await h.ws.deliver(prepare(s0, 'upg-2'))
-
-    expect(readysOn(h.ws)).toHaveLength(1)
-    expect(readysOn(h.ws)[0]?.tag === TAG.READY && readysOn(h.ws)[0]!.payload.upgradeId).toBe('upg-1')
-    expect(h.ws.terminated()).toBe(true)
-    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
-    await expectWireDelivers(h.sse, chA)
-  })
+      expect(offender.terminated()).toBe(true)
+      expect(readysOn(offender)).toHaveLength(stagingCase.readys ?? 0)
+      expect(h.mux._getUpgradeResourceSnapshot()).toEqual(stagingCase.snapshot)
+      await stagingCase.extra?.(h, s0)
+      // The live sentinel, on a connection that was never party to any of this.
+      expect(sse2.terminated()).toBe(false)
+      await sse2.deliver(textFrame(0, 1, 4_242))
+      expect(chB.received).toContain(4_242)
+      void chA
+    })
+  }
 })
 
 describe('the barrier commits the staged wire, exactly once', () => {
-  test('COMMITTED lands on the probe wire with the upgradeId, and the channel routes there', async () => {
+  test('one integrated commit: COMMITTED to the probe, ONE new session, FIN on the old wire only', async () => {
+    // The happy path in one place, because its four claims are four readings of a SINGLE commit and
+    // splitting them let each one be true of a different run.
+    //
+    //   1. routing   — `deliverTo`: the turn ran on the SSE chain, the answer went to the WS.
+    //   2. identity  — COMMITTED *is* a RECONCILED (reusing the payload keeps the client's settlement
+    //                  path unforked), discriminated ONLY by the echoed upgradeId.
+    //   3. rotation  — exactly ONE new session, counted across BOTH wires so a second rotation
+    //                  anywhere shows up as a third minted id.
+    //   4. FIN       — count 1 on the old wire, 0 on the new. The count is the sharp edge: firing the
+    //                  finalizer early shows up as a SECOND FIN, and a client joining FIN with
+    //                  COMMITTED then settles against the wrong one.
     const h = (harness = createMuxHarness())
     const { chA, s0 } = await connectSse(h)
     await h.ws.deliver(prepare(s0, 'upg-7'))
 
     await h.sse.deliver(barrier(s0, 'upg-7'))
+    await settle()
 
-    // COMMITTED *is* a RECONCILED — reusing the payload keeps the client's settlement path unforked —
-    // discriminated from an ordinary one solely by the echoed upgradeId.
+    // 1 + 2
     const committed = reconciledOn(h.ws)
     expect(committed).toHaveLength(1)
     expect(committed[0]?.tag === TAG.RECONCILED && committed[0].payload.upgradeId).toBe('upg-7')
-    // `deliverTo` in action: the turn ran on the SSE chain, its answer went to the WS.
     expect(reconciledOn(h.sse)).toHaveLength(1)
     expect(reconciledOn(h.sse)[0]?.tag === TAG.RECONCILED && reconciledOn(h.sse)[0]!.payload.upgradeId).toBeUndefined()
-    expect(h.ws.sessionId()).toBeTypeOf('string')
-    expect(h.ws.sessionId()).not.toBe(s0)
-    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
-    await expectWireDelivers(h.ws, chA)
-  })
 
-  test('a commit mints exactly ONE new session', async () => {
-    const h = (harness = createMuxHarness())
-    const { s0 } = await connectSse(h)
-    await h.ws.deliver(prepare(s0))
-
-    await h.sse.deliver(barrier(s0))
-    await settle()
-
+    // 3
     const minted = [...h.sse.sent, ...h.ws.sent]
       .filter((f) => f.tag === TAG.RECONCILED)
       .map((f) => (f.tag === TAG.RECONCILED ? f.payload.sessionId : ''))
-    // S0 from the initial connect, S1 from the commit. A second rotation shows up as a third.
-    expect(minted).toHaveLength(2)
+    expect(minted).toHaveLength(2) // S0 from the connect, S1 from the commit
     expect(new Set(minted).size).toBe(2)
     expect(minted[0]).toBe(s0)
     expect(minted[1]).toBe(h.ws.sessionId())
-  })
+    expect(h.ws.sessionId()).not.toBe(s0)
 
-  test('FIN is delivered on the old wire and never on the new one', async () => {
-    // The FIN is the old wire's completeness proof, not cleanup decoration: it is what tells the
-    // client its old FIFO is fully drained. The COUNT is the sharp edge — firing the finalizer early
-    // shows up as a SECOND FIN, and a client joining FIN with COMMITTED settles against the wrong one.
-    const h = (harness = createMuxHarness())
-    const { s0 } = await connectSse(h)
-    await h.ws.deliver(prepare(s0))
-
-    await h.sse.deliver(barrier(s0))
-
+    // 4
     expect(finsOn(h.sse)).toHaveLength(1)
     expect(finsOn(h.ws)).toHaveLength(0)
+
+    // The stage is spent, and the channel now really routes to the wire that won it.
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+    await expectWireDelivers(h.ws, chA)
   })
 
   test('a barrier carrying an initial:true entry is refused rather than parking the commit', async () => {
@@ -461,56 +479,69 @@ describe('the retired old wire rejects post-barrier frames loudly', () => {
 })
 
 describe('refusal — two checks for two distinct defects, and neither substitutes', () => {
-  test('a barrier whose upgradeId does not match the stage is refused', async () => {
-    // upgradeId closes STALE SETTLEMENT: a delayed ordinary reconciled consumed as this commit.
-    const h = (harness = createMuxHarness())
-    const { s0 } = await connectSse(h)
-    await h.ws.deliver(prepare(s0, 'upg-1'))
+  // Two checks, two distinct defects, and a third case pinning WHICH WIRE dies. Every case refuses
+  // before any rotation, so the shared oracle is: no COMMITTED, the probe never gained a session, the
+  // old wire kept s0, and the old wire still delivers.
+  const REFUSAL_CASES: {
+    name: string
+    /** Delivers the poison barrier. */
+    poison: (h: Harness, s0: string) => Promise<void>
+    extra?: (h: Harness) => void
+  }[] = [
+    {
+      // upgradeId closes STALE SETTLEMENT: a delayed ordinary reconciled consumed as this commit.
+      name: 'an upgradeId that does not match the stage',
+      poison: async (h, s0) => {
+        await h.sse.deliver(barrier(s0, 'upg-OTHER'))
+      },
+    },
+    {
+      // Live-session equality closes CONCURRENT ROTATION: here the upgradeId matches perfectly and
+      // the frame is still poison. Committing a copy landing elsewhere would rotate a session the
+      // naming wire does not hold — no FIN sent, and the real old session left holding handles to
+      // channels re-attached to the probe.
+      name: 'a correct upgradeId arriving on a wire that does not own the staged session',
+      poison: async (h, s0) => {
+        const sse2 = await connectSecondSse(h)
+        await sse2.deliver(barrier(s0, 'upg-1'))
+      },
+      extra: (h) => {
+        expect(finsOn(h.sse)).toHaveLength(0)
+      },
+    },
+    {
+      // WHICH WIRE DIES is a distinct invariant, and this barrier fails BOTH checks at once
+      // deliberately: that makes it insensitive to either check individually and sensitive ONLY to
+      // the choice of victim. With the retarget removed the failure kills the connection whose chain
+      // merely HOSTED the turn, and a bystander loses its session to a probe's misbehaviour.
+      name: 'a barrier failing BOTH checks kills the PROBE, never the wire that hosted the turn',
+      poison: async (h, s0) => {
+        const sse2 = await connectSecondSse(h)
+        await sse2.deliver(barrier(s0, 'upg-WRONG'))
+        expect(sse2.terminated()).toBe(false) // ← the victim choice, asserted where the wire is in scope
+      },
+      extra: (h) => {
+        expect(h.ws.terminated()).toBe(true)
+        expect(h.sse.terminated()).toBe(false)
+      },
+    },
+  ]
 
-    await h.sse.deliver(barrier(s0, 'upg-OTHER'))
+  for (const refusal of REFUSAL_CASES) {
+    test(`refused before any rotation: ${refusal.name}`, async () => {
+      const h = (harness = createMuxHarness())
+      const { chA, s0 } = await connectSse(h)
+      await h.ws.deliver(prepare(s0, 'upg-1'))
 
-    expect(reconciledOn(h.ws)).toHaveLength(0)
-    expect(h.ws.sessionId()).toBeUndefined()
-    expect(h.sse.sessionId()).toBe(s0) // refused before any rotation
-  })
+      await refusal.poison(h, s0)
 
-  test('a barrier is refused when it arrives on a wire that does not own the staged session', async () => {
-    // Live-session equality closes CONCURRENT ROTATION: here the upgradeId matches perfectly and the
-    // frame is still poison. Committing a copy landing elsewhere would rotate a session the naming
-    // wire does not hold — no FIN sent, and the real old session left holding handles to channels
-    // re-attached to the probe.
-    const h = (harness = createMuxHarness())
-    const { chA, s0 } = await connectSse(h)
-    await h.ws.deliver(prepare(s0, 'upg-1'))
-    const sse2 = await connectSecondSse(h)
-
-    await sse2.deliver(barrier(s0, 'upg-1')) // correct id, correct session named — wrong wire
-
-    expect(reconciledOn(h.ws)).toHaveLength(0)
-    expect(h.ws.sessionId()).toBeUndefined()
-    expect(finsOn(h.sse)).toHaveLength(0)
-    expect(h.sse.sessionId()).toBe(s0)
-    expect(sse2.sessionId()).toBeTypeOf('string')
-    await expectWireDelivers(h.sse, chA)
-  })
-
-  test('a rejected commit terminates the probe wire, never the wire that hosted the turn', async () => {
-    // WHICH WIRE DIES is a distinct invariant, and this barrier fails BOTH checks at once
-    // deliberately: that makes it insensitive to either check individually and sensitive ONLY to the
-    // choice of victim. With the retarget removed the failure kills the connection whose chain merely
-    // HOSTED the turn, and a bystander loses its session to a probe's misbehaviour.
-    const h = (harness = createMuxHarness())
-    const { chA, s0 } = await connectSse(h)
-    await h.ws.deliver(prepare(s0, 'upg-1'))
-    const sse2 = await connectSecondSse(h)
-
-    await sse2.deliver(barrier(s0, 'upg-WRONG')) // wrong id AND the wrong wire
-
-    expect(h.ws.terminated()).toBe(true)
-    expect(sse2.terminated()).toBe(false)
-    expect(h.sse.terminated()).toBe(false)
-    await expectWireDelivers(h.sse, chA)
-  })
+      expect(reconciledOn(h.ws)).toHaveLength(0)
+      expect(h.ws.sessionId()).toBeUndefined()
+      expect(h.sse.sessionId()).toBe(s0)
+      refusal.extra?.(h)
+      await expectWireDelivers(h.sse, chA)
+    })
+  }
 
   test('a barrier naming no staged upgrade is refused, and terminates neither wire', async () => {
     // A barrier whose stage is GONE is refused without terminating anything. Both alternatives were
