@@ -13,6 +13,7 @@ import {
   coarse,
   emitSafely,
 } from './writeChanges.js'
+import { isBuilderTerminal, isDriverTerminal, isPreparedTerminal } from './writeTerminals.js'
 import { UNMAPPABLE, type Op, type Plan, callerPositionsOf, planCapture } from './writePlan.js'
 import {
   SUBSTITUTION_REFUSED,
@@ -101,27 +102,24 @@ function wrapWrite(
         // builders keep different queues, so unrelated autocommit writes stay fully concurrent.
         return serializeOn(tx ? (txRoot ?? tx) : target, run)
       }
-      if (prop === 'then' && has('then')) {
-        return (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>
-          start().then(onFulfilled, onRejected)
+      // WHETHER this member executes is `writeTerminals`' question; the branches below only differ on the
+      // signature each verb takes. Every one is gated on the underlying builder ACTUALLY having it: PG write
+      // builders have no `run`/`all`/`get`, and synthesizing one made `typeof builder.get === 'function'`
+      // report true on a proxy that is supposed to be transparent except for `.live()` — then died inside the
+      // interceptor ("Cannot read properties of undefined") instead of with the driver's own error. Mirrors
+      // the `prepare` guard below and the coarse-all guard in reactiveDrizzle.
+      if (isBuilderTerminal(prop) && has(prop as string)) {
+        if (prop === 'then') {
+          return (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>
+            start().then(onFulfilled, onRejected)
+        }
+        if (prop === 'catch') return (onRejected?: (e: unknown) => unknown) => start().catch(onRejected)
+        if (prop === 'finally') return (onFinally?: () => void) => start().finally(onFinally)
+        return (...args: unknown[]) => start(args) // execute
       }
-      if (prop === 'catch' && has('catch')) {
-        return (onRejected?: (e: unknown) => unknown) => start().catch(onRejected)
-      }
-      if (prop === 'finally' && has('finally')) {
-        return (onFinally?: () => void) => start().finally(onFinally)
-      }
-      if (prop === 'execute' && has('execute')) {
-        return (...args: unknown[]) => start(args)
-      }
-      // Driver terminals that execute DIRECTLY (SQLite's run/all/get/values — SYNCHRONOUS on node:sqlite).
-      // Gated on the underlying builder ACTUALLY having the member: PG write builders have no
-      // `run`/`all`/`get`, and synthesizing one made `typeof builder.get === 'function'` report true on a
-      // proxy that is supposed to be transparent except for `.live()` — then died inside the interceptor
-      // ("Cannot read properties of undefined") instead of with the driver's own error. Mirrors the
-      // `prepare` guard below and the raw-SQL guard in reactiveDrizzle.
-      if (typeof prop === 'string' && (DIRECT_TERMINALS.has(prop) || isTerminalValues(prop, target)) && has(prop)) {
-        return (...args: unknown[]) => runDirectTerminal(target, prop, args, table, op, db, sink)
+      // Driver terminals execute DIRECTLY rather than through the QueryPromise — SYNCHRONOUS on node:sqlite.
+      if (isDriverTerminal(prop, target) && has(prop as string)) {
+        return (...args: unknown[]) => runDirectTerminal(target, prop as string, args, table, op, db, sink)
       }
       // A prepared write executes LATER; hand back a wrapped prepared query so each execution invalidates.
       if (prop === 'prepare') {
@@ -142,32 +140,6 @@ function wrapWrite(
       }
     },
   })
-}
-
-/** Driver terminals that run the statement immediately rather than through the QueryPromise (SQLite).
- *  `values` is NOT here because the name is overloaded — see `isTerminalValues`. (At the DB level
- *  `db.values(sql`…`)` IS a raw execution surface — see `isRawSqlOp` in reactiveDrizzle.) */
-const DIRECT_TERMINALS = new Set(['run', 'all', 'get'])
-
-/** `values` names TWO different things on a write chain, and only one of them executes:
- *
- *    db.insert(t).values(rows)              — the insert BUILDER's own method: supplies the rows, no SQL runs
- *    db.insert(t).values(rows).returning()
- *                             .values()     — a SQLite driver TERMINAL: runs the statement, returns rows
- *
- *  Discriminated by the RECEIVING OBJECT's surface, not by the argument shape: the chain builder
- *  (`SQLiteInsertBuilder`) exposes `values` and nothing else, while an executable statement also exposes the
- *  execution surface (`execute`/`then`). Argument shape alone is not enough — `.values()` with no arguments
- *  is exactly what the terminal looks like, and a caller could equally pass an empty row list.
- *
- *  Verified against node:sqlite: the chain form inserts nothing until a terminal runs, while the terminal
- *  form executes and returns positional row arrays. Those positional rows are why this path stays COARSE —
- *  mapping `[2, 'b']` back to named columns would mean assuming projection order, which is the kind of guess
- *  the capture contract forbids. `captureMismatch` catches it and fails closed. */
-function isTerminalValues(prop: string, target: object): boolean {
-  if (prop !== 'values') return false
-  const candidate = target as { execute?: unknown; then?: unknown }
-  return typeof candidate.execute === 'function' || typeof candidate.then === 'function'
 }
 
 const isThenable = (value: unknown): value is PromiseLike<unknown> =>
@@ -218,16 +190,9 @@ function wrapPrepared(prepared: unknown, table: Table, op: Op, sink: CaptureSink
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver)
       if (typeof value !== 'function') return value
-      // A prepared statement IS the executable surface, so `values` here is unambiguously the driver
-      // terminal — there is no chain builder left to confuse it with.
-      const isTerminal =
-        prop === 'then' ||
-        prop === 'catch' ||
-        prop === 'finally' ||
-        prop === 'execute' ||
-        prop === 'values' ||
-        (typeof prop === 'string' && DIRECT_TERMINALS.has(prop))
-      if (!isTerminal) return (...args: unknown[]) => (value as (...a: unknown[]) => unknown).apply(target, args)
+      if (!isPreparedTerminal(prop)) {
+        return (...args: unknown[]) => (value as (...a: unknown[]) => unknown).apply(target, args)
+      }
       return (...args: unknown[]) => {
         const result = (value as (...a: unknown[]) => unknown).apply(target, args)
         if (isThenable(result)) {

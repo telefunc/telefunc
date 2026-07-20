@@ -6,7 +6,8 @@ import type { CaptureSink } from './writeChanges.js'
 import { ingestLocal, ingestWrite } from './dbRuntime.js'
 import { configureChangeRuntime } from './changeRuntime.js'
 import type { ChangeTransport } from './changeTransport.js'
-import { captureTransactions, isRawSqlOp, isWriteOp } from './writeProxy.js'
+import { captureTransactions, isWriteOp } from './writeProxy.js'
+import { isCoarseAllSurface } from './writeTerminals.js'
 import { wrapLiveSelect } from './readCapture.js'
 import { probeOldNewReturning } from './writeCapabilities.js'
 import { installLiveReplacer } from '../primitive/wireServer.js'
@@ -111,7 +112,7 @@ function reactiveDrizzle<TDb extends ReactiveDatabase>(baseDb: TDb, options?: Re
         // buffer until the commit boundary, so one committed transaction is one atomic graph tick.
         return captureTransactions(target, db, ingest, localIngest)
       }
-      if (isRawSqlOp(prop)) {
+      if (isCoarseAllSurface(prop)) {
         // Raw SQL (`db.run(sql`…`)`, `db.execute(sql`…`)`, …) can mutate anything, and its touched tables are
         // unknowable without parsing — so it fails closed by ANNOUNCING itself once it completes
         // (`announceCoarse`, which owns both halves of that) rather than executing silently uncaptured.

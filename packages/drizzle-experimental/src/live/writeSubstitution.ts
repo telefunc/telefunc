@@ -385,7 +385,7 @@ async function runSubstituted(
 // ── savepoints, so the in-transaction recovery has something to rewind to ──
 //
 // Established through the RAW transaction handle, never the tx proxy: the proxy treats `execute` as raw SQL
-// (`isRawSqlOp`), so a SAVEPOINT issued through it would be recorded as raw INTENT and coarsen every watched
+// (`isCoarseAllSurface`), so a SAVEPOINT issued through it would be recorded as raw INTENT and coarsen every watched
 // graph in the transaction at commit — this recovery would then degrade every transaction it touched, which
 // is worse than the problem it solves. (Verified against drizzle 1.0.0-rc.4, which issues its own nested-tx
 // savepoints through exactly this handle.)

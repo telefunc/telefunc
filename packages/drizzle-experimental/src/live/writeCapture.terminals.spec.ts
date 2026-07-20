@@ -15,6 +15,7 @@ import { integer as sInt, sqliteTable, text as sText } from 'drizzle-orm/sqlite-
 import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { captureMutation, captureRawSql } from './writeCapture.js'
+import { isBuilderTerminal, isCoarseAllSurface, isDriverTerminal, isPreparedTerminal } from './writeTerminals.js'
 import { registryFor } from './dbRuntime.js'
 import type { TableChange } from '../router/events.js'
 
@@ -256,5 +257,60 @@ describe('write capture — driver-level terminals: node-sqlite has verbs PG doe
     const found = await pgClient.query('select * from users where id = 900')
     expect(found.rows).toEqual([]) // and nothing was written
     void builder
+  })
+})
+
+// The classification itself, as a unit. Everything above proves it against real drivers; this pins the
+// three classes and their one genuine overlap, so a member cannot be reclassified silently.
+describe('write terminals — one classification, three questions', () => {
+  const BUILDER = ['then', 'catch', 'finally', 'execute']
+  const DRIVER = ['run', 'all', 'get']
+  const COARSE_ALL = ['run', 'execute', 'all', 'get', 'values', 'refreshMaterializedView', 'batch']
+  /** A receiver that can run what it holds; the chain builder below cannot. */
+  const executable = { execute: () => {}, then: () => {} }
+  const building = { values: () => {} }
+
+  it('classifies every member of each class, and nothing else', () => {
+    for (const prop of BUILDER) expect(isBuilderTerminal(prop)).toBe(true)
+    for (const prop of DRIVER) expect(isDriverTerminal(prop, building)).toBe(true)
+    for (const prop of COARSE_ALL) expect(isCoarseAllSurface(prop)).toBe(true)
+    for (const prop of ['where', 'set', 'returning', 'from', 'prepare', 'toSQL']) {
+      expect(isBuilderTerminal(prop)).toBe(false)
+      expect(isDriverTerminal(prop, executable)).toBe(false)
+      expect(isCoarseAllSurface(prop)).toBe(false)
+    }
+  })
+
+  it('reads `values` by its RECEIVER — the same word, two meanings', () => {
+    expect(isDriverTerminal('values', executable)).toBe(true) // an executable statement: runs it
+    expect(isDriverTerminal('values', building)).toBe(false) // a chain builder: supplies rows
+    // …and on a PREPARED statement it is unconditional, there being no chain builder left to confuse it with.
+    expect(isPreparedTerminal('values')).toBe(true)
+  })
+
+  it('a prepared statement executes on every terminal of both other classes', () => {
+    for (const prop of [...BUILDER, ...DRIVER]) expect(isPreparedTerminal(prop)).toBe(true)
+    for (const prop of ['where', 'toSQL']) expect(isPreparedTerminal(prop)).toBe(false)
+  })
+
+  it('every driver terminal is ALSO a coarse-all surface — the overlap that must not drift', () => {
+    // The systematic-miss guard. `run`/`all`/`get`/`values` name a driver terminal on a write BUILDER and a
+    // raw execution surface on the DB, so a member added to one set and forgotten in the other lets
+    // `db.<verb>(sql`...`)` commit with nothing announced. Bounded: this cannot see a name absent from the
+    // alphabet below, so a genuinely new verb still needs a line here.
+    const alphabet = [...DRIVER, 'values', 'iterate', 'stream', 'exec', 'query']
+    for (const prop of alphabet) {
+      if (isDriverTerminal(prop, executable)) expect(isCoarseAllSurface(prop)).toBe(true)
+    }
+  })
+
+  it('a symbol is never a terminal of any class', () => {
+    // The proxies dispatch on `string | symbol`, and drizzle's builders carry symbol-keyed internals.
+    for (const probe of [Symbol.iterator, Symbol.toStringTag, Symbol('run')]) {
+      expect(isBuilderTerminal(probe)).toBe(false)
+      expect(isDriverTerminal(probe, executable)).toBe(false)
+      expect(isPreparedTerminal(probe)).toBe(false)
+      expect(isCoarseAllSurface(probe)).toBe(false)
+    }
   })
 })

@@ -1,9 +1,10 @@
-export { isWriteOp, isRawSqlOp, captureTransactions }
+export { isWriteOp, captureTransactions }
 
 import { report } from './captureReport.js'
 import { registryFor } from './dbRuntime.js'
 import { publishCoarseAll } from './changeRuntime.js'
 import { captureMutation, captureRawSql } from './writeCapture.js'
+import { isCoarseAllSurface } from './writeTerminals.js'
 import { type CaptureSink, emitSafely } from './writeChanges.js'
 import type { TableChange } from '../router/events.js'
 
@@ -16,30 +17,6 @@ import type { TableChange } from '../router/events.js'
 
 function isWriteOp(prop: string | symbol): prop is 'insert' | 'update' | 'delete' {
   return prop === 'insert' || prop === 'update' || prop === 'delete'
-}
-
-/** The db-level RAW SQL execution surfaces — they bypass the builder entirely, so they need their own
- *  fail-closed capture (coarsen this db's watched tables). */
-function isRawSqlOp(prop: string | symbol): boolean {
-  return (
-    prop === 'run' ||
-    prop === 'execute' ||
-    prop === 'all' ||
-    prop === 'get' ||
-    prop === 'values' ||
-    // Not SQL execution, but a MUTATION with the same problem: it changes what a live query on the view
-    // reads, and its effect is unknowable without resolving the view's definition. Left off this list it
-    // falls through to plain Drizzle and commits with nothing captured and nothing published — the silent
-    // bypass this whole predicate exists to close. Coarsening it is sound and it is a rare, deliberate
-    // operation.
-    prop === 'refreshMaterializedView' ||
-    // `db.batch([...])` runs a list of statements that may include writes (libSQL, D1, Neon-HTTP,
-    // sqlite-proxy). Reconstructing which rows each item touched would mean re-planning every statement in
-    // the list, so it takes the same coarse-all path — AFTER the batch completes, with the caller's result
-    // handed back untouched. Rejecting it before execution was the alternative and is worse: batch is a
-    // legitimate API, and coarse-all is sound.
-    prop === 'batch'
-  )
 }
 
 /** Everything ONE transaction scope needs to know about the world enclosing it.
@@ -182,7 +159,7 @@ function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () =>
       if (prop === 'transaction') {
         return wrapTransaction(target, savepointScope(topDb, sink, announce, root))
       }
-      if (isRawSqlOp(prop)) {
+      if (isCoarseAllSurface(prop)) {
         // `tx.execute(sql`…`)` has to be intercepted here as well as at the top level: passing it straight
         // through commits a raw write with NOTHING published.
         //
