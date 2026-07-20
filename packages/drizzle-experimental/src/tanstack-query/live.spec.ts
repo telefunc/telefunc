@@ -227,3 +227,39 @@ describe('live() — cancelling a query cancels the telefunction request', () =>
     unsubscribe()
   })
 })
+
+// The adapter binds to taps a Live only carries once it has crossed the wire. A locally-constructed Live
+// has none, and the seam that used to be an unchecked cast now says so — pinned here because every other
+// case in this file feeds a well-formed handle, so nothing exercised the refusal (found by mutation:
+// weakening the guard to accept anything survived the whole suite).
+describe('live() — a Live that never crossed the wire is refused, by name', () => {
+  /** Publicly a `Live<T>`, with no subscription behind it — what `Live.of(...)` in user code produces. */
+  const bareLive = <T>(data: T) => ({ data }) as unknown as Live<T>
+
+  it('refuses a Live with no subscription at all, naming what is wrong', async () => {
+    const client = new QueryClient()
+    const telefunction = stub(async () => bareLive([{ id: 1 }]))
+    await expect(live(telefunction)(queryFnContext(client, new AbortController().signal))).rejects.toThrow(
+      /did not come from a telefunction/,
+    )
+  })
+
+  it('refuses a HALF-formed handle — an invalidation tap with no close would leak its channel', async () => {
+    // The asymmetric case: binding this one would work until teardown, then leak silently. Both members
+    // are required, so the guard has to check both.
+    const client = new QueryClient()
+    const halfFormed = { data: [{ id: 1 }], onInvalidate: () => () => {} } as unknown as Live<{ id: number }[]>
+    const telefunction = stub(async () => halfFormed)
+    await expect(live(telefunction)(queryFnContext(client, new AbortController().signal))).rejects.toThrow(
+      /did not come from a telefunction/,
+    )
+  })
+
+  it('CONTROL: the same path accepts a well-formed handle', async () => {
+    // Without this, "refuses X" and "chokes on everything" would be indistinguishable.
+    const client = new QueryClient()
+    const { handle } = makeFakeLive([{ id: 7 }])
+    const telefunction = stub(async () => handle)
+    await expect(live(telefunction)(queryFnContext(client, new AbortController().signal))).resolves.toEqual([{ id: 7 }])
+  })
+})

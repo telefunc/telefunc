@@ -1,5 +1,5 @@
 export { derived, LiveCell }
-export type { Live, LiveEvent, LiveSubscription }
+export type { Live, LiveSubscription }
 
 // THE LIVE PRIMITIVE, owned by this package rather than by telefunc core.
 //
@@ -49,13 +49,6 @@ type Live<T> = {
 function derived<R>(compute: () => R): Live<R> {
   return LiveCell.derived(compute)
 }
-
-/** What travels once a Live crosses the wire: a stale signal telling the client to refetch. The SIGNAL
- *  is the whole message — its arrival is the event, so it carries no payload. (It used to carry a
- *  `{ kind: 'invalidate' }` tag; nothing ever branched on it, in any version — the client listener has
- *  always discarded the argument.) The channel/wire layer lives in its own module — this one is the
- *  in-memory cell. */
-type LiveEvent = undefined
 
 /** @internal The consumer-side subscription behind a `Live<T>` — the seam the query adapter binds to
  *  (invalidate → refetch). Deliberately NOT on the public `Live<T>`: a user reads `.data`, and only an

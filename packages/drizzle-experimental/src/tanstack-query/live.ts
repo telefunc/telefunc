@@ -96,10 +96,27 @@ function describe(value: unknown): string {
   return value === null ? 'null' : `a ${typeof value}`
 }
 
-/** The consumer seam: a re-type, not a conversion. The revived handle carries the invalidation tap; the
- *  public `Live<T>` deliberately does not advertise it. */
+/** Whether a Live carries the consumer seam. A Live REVIVED from the wire has the invalidation tap and the
+ *  channel lifecycle; the public `Live<T>` deliberately does not advertise them, so this is where the
+ *  adapter's assumption about what it was handed becomes checkable rather than asserted.
+ *
+ *  A predicate rather than a cast, and it lives HERE rather than beside `LiveSubscription`: that type is
+ *  imported type-only on purpose — this adapter ships to the browser, and a VALUE import from a server
+ *  module would drag the server graph into a client bundle. A guard defined locally erases that risk. */
+function carriesSubscription<T>(handle: Live<T>): handle is Live<T> & LiveSubscription {
+  const candidate = handle as Partial<LiveSubscription>
+  return typeof candidate.onInvalidate === 'function' && typeof candidate.close === 'function'
+}
+
+/** The consumer seam. Narrowed, not cast: a Live that did not come from a telefunction has no tap to bind,
+ *  and saying so here names the mistake instead of failing later inside TanStack with a missing method. */
 function subscriptionOf<T>(handle: Live<T>): LiveSubscription {
-  return handle as unknown as LiveSubscription
+  if (!carriesSubscription(handle)) {
+    throw new Error(
+      'live() received a Live that did not come from a telefunction. Only a Live returned across the wire carries the invalidation subscription this adapter binds to.',
+    )
+  }
+  return handle
 }
 
 /** The rejection TanStack expects from a cancelled fetch. */

@@ -2,7 +2,7 @@ export { installLiveReviver, liveReviver }
 
 import { config } from 'telefunc/client'
 import type { ClientReviverContext, ReviverType, TypeContract } from 'telefunc/client'
-import type { Live, LiveEvent, LiveSubscription } from './live.js'
+import type { Live, LiveSubscription } from './live.js'
 import { SERIALIZER_PREFIX_LIVE } from './wireConstants.js'
 
 // THE CLIENT HALF OF THE WIRE, registered through telefunc's PUBLIC client extension seam
@@ -28,7 +28,8 @@ type RevivedChannel = ReturnType<ClientReviverContext['createChannel']>
 const liveReviver: ReviverType<LiveWireContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_LIVE,
   revive(metadata, context) {
-    const channel = context.createChannel<never, LiveEvent>({ channelId: metadata.channelId })
+    // No payload — see wireServer: the arrival is the signal.
+    const channel = context.createChannel<never, undefined>({ channelId: metadata.channelId })
     return {
       value: createClientLive(metadata.data, channel),
       async close() {

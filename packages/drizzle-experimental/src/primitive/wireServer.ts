@@ -2,7 +2,7 @@ export { installLiveReplacer, liveReplacer }
 
 import { config } from 'telefunc'
 import type { ReplacerType, ServerReplacerContext, TypeContract } from 'telefunc'
-import type { Live, LiveCell, LiveEvent } from './live.js'
+import type { Live, LiveCell } from './live.js'
 import { SERIALIZER_PREFIX_LIVE } from './wireConstants.js'
 
 // THE SERVER HALF OF THE WIRE, registered from this package through telefunc's PUBLIC extension seam
@@ -29,7 +29,8 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     // channel and no source subscription are ever created for it. That bounds what THIS layer holds; a
     // producer whose attached source reserved resources BEFORE serializing (as the read-capture engine's
     // does, to register its graph before the snapshot read) still has to reclaim those itself.
-    const channel = context.createChannel<never, LiveEvent>()
+    // No payload: the ARRIVAL of a message is the whole signal, so the channel carries `undefined`.
+    const channel = context.createChannel<never, undefined>()
     // The producer's coalesced invalidation rides the channel; the channel owns its teardown.
     //
     // The tap is installed BEFORE `activate()` so that subscription ordering can never matter. Inherited
