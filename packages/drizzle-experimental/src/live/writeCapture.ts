@@ -4,7 +4,7 @@ import { type Table, isTable } from 'drizzle-orm'
 import { demoteOldNewReturning, markOldNewProven, oldNewProvenOf } from './writeCapabilities.js'
 import { relationKeyOf } from '../extract/columns.js'
 import { report } from './captureReport.js'
-import { ingestWrite, registryFor } from './dbRuntime.js'
+import { announceCoarse, ingestWrite } from './dbRuntime.js'
 import {
   type CaptureSink,
   captureBothOrCoarse,
@@ -26,7 +26,6 @@ import {
   substituteFullRow,
   substituteOldNew,
 } from './writeSubstitution.js'
-import { publishCoarseAll } from './changeRuntime.js'
 import type { Row, TableChange } from '../router/events.js'
 
 // The write-capture INTERCEPTION facade. `reactiveDrizzle`'s proxy routes insert/update/delete here. The
@@ -245,30 +244,23 @@ function wrapPrepared(prepared: unknown, table: Table, op: Op, sink: CaptureSink
 }
 
 /** Wrap a RAW-SQL execution surface on the reactive db (`db.run(sql\`…\`)`, `db.execute(sql\`…\`)`, …). The
- *  touched tables are unknowable without parsing SQL, so — per the owner disposition — this coarsens EVERY
- *  table that currently has a registered graph on this db (safe over-fire, keeps raw SQL usable) as ONE batch
- *  at completion. One honest bound: a raw READ also over-fires (sound, just noisy).
+ *  touched tables are unknowable without parsing SQL, so — per the owner disposition — the statement is
+ *  ANNOUNCED once it completes rather than captured (safe over-fire, keeps raw SQL usable). One honest
+ *  bound: a raw READ also over-fires (sound, just noisy).
  *
- *  `announce` is how OTHER instances hear about it — they may watch tables this db does not, which a batch
- *  of THIS db's tables could never reach. It defaults to publishing a coarse-all announcement immediately,
- *  which is right for an autocommit statement. INSIDE A TRANSACTION the caller passes an announce that only
- *  records the intent, so nothing is published until the outer COMMIT and a rollback announces nothing —
- *  publishing mid-transaction would tell other instances to refetch state that may never exist. */
+ *  What that announcement IS belongs to `announceCoarse` (dbRuntime), which owns both of its halves — this
+ *  only decides WHEN. INSIDE A TRANSACTION the caller passes an announce that records the intent instead, so
+ *  nothing is announced until the outer COMMIT and a rollback announces nothing: announcing mid-transaction
+ *  would tell every other instance to refetch state that may never exist. */
 function captureRawSql(
   base: (...a: unknown[]) => unknown,
   db: object,
-  sink: CaptureSink,
-  announce: () => void = () => publishCoarseAll(db),
+  announce: () => void = () => announceCoarse(db),
 ) {
   return (...args: unknown[]) => {
     const result = base(...args)
-    const emit = () => {
-      const tables = registryFor(db).router.watchedTables()
-      if (tables.length > 0)
-        emitSafely(
-          sink,
-          tables.map((table) => ({ table, kind: 'coarse' as const })),
-        )
+    // The statement has already run, so its announcement is never allowed to fail the caller for it.
+    const announceSafely = () => {
       try {
         announce()
       } catch (error) {
@@ -277,11 +269,11 @@ function captureRawSql(
     }
     if (isThenable(result)) {
       return Promise.resolve(result).then((rows) => {
-        emit()
+        announceSafely()
         return rows
       })
     }
-    emit()
+    announceSafely()
     return result
   }
 }

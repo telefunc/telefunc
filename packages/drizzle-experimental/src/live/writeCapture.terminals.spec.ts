@@ -13,7 +13,7 @@ import { integer, pgTable, text } from 'drizzle-orm/pg-core'
 import { drizzle as pgDrizzle } from 'drizzle-orm/pglite'
 import { integer as sInt, sqliteTable, text as sText } from 'drizzle-orm/sqlite-core'
 import { sql } from 'drizzle-orm'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { captureMutation, captureRawSql } from './writeCapture.js'
 import { registryFor } from './dbRuntime.js'
 import type { TableChange } from '../router/events.js'
@@ -122,9 +122,10 @@ describe('write capture — EVERY execution terminal captures (no silent bypass)
 describe('write capture — RAW SQL fails closed over the db’s watched tables', () => {
   // Review blocker: raw DB SQL was not intercepted at all — `reactive.run(sql`insert …`)` persisted a row and
   // published NOTHING. Owner disposition: coarsen every table with a registered graph on this db.
+  // Observed on the db's OWN router rather than through an injected sink: what the announcement does is
+  // `announceCoarse`'s (dbRuntime, spec'd there), and this asks only that a raw statement triggers it.
   it('coarsens exactly the tables that currently have registered graphs', () => {
     const db = {}
-    const emitted: TableChange[][] = []
     const graph = {
       tables: ['users', 'notes'],
       apply: () => ({}) as never,
@@ -134,31 +135,26 @@ describe('write capture — RAW SQL fails closed over the db’s watched tables'
       coarsen() {},
     }
     registryFor(db).router.register(graph)
-    const run = captureRawSql(
-      () => 'driver-result',
-      db,
-      (changes) => emitted.push(changes),
-    )
+    const ingested = vi.spyOn(registryFor(db).router, 'ingest')
+    const run = captureRawSql(() => 'driver-result', db)
     expect(run()).toBe('driver-result') // the caller's raw result is untouched
-    expect(emitted).toEqual([
+    expect(ingested.mock.calls.map(([batch]) => batch.changes)).toEqual([
       [
         { table: 'users', kind: 'coarse' },
         { table: 'notes', kind: 'coarse' },
       ],
     ])
+    ingested.mockRestore()
     registryFor(db).router.unregister(graph)
   })
 
   it('emits nothing when the db has no registered graphs (nothing to invalidate)', () => {
     const db = {}
-    const emitted: TableChange[][] = []
-    const run = captureRawSql(
-      () => 'ok',
-      db,
-      (changes) => emitted.push(changes),
-    )
+    const ingested = vi.spyOn(registryFor(db).router, 'ingest')
+    const run = captureRawSql(() => 'ok', db)
     expect(run()).toBe('ok')
-    expect(emitted).toEqual([])
+    expect(ingested).not.toHaveBeenCalled()
+    ingested.mockRestore()
   })
 })
 

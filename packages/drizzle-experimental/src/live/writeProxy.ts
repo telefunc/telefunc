@@ -61,7 +61,11 @@ type TransactionScope = {
    *  the parent's buffer, and the top level makes the choice once. */
   localSink: CaptureSink
   /** How a committed raw statement reaches other instances. At the top level it publishes; a savepoint
-   *  promotes the intent into its parent instead. */
+   *  promotes the intent into its parent instead.
+   *
+   *  The REMOTE half only, unlike `announceCoarse` (dbRuntime) which owns both: a transaction's local
+   *  coarsening cannot be its own tick, because it has to land atomically beside the captured rows this
+   *  commit is flushing — so `commitCoarseMarkers` + `localSink` carry it, and this carries the rest. */
   announce: () => void
   /** The coarse markers a committed raw statement owes THIS db's own graphs, computed AT COMMIT — the top
    *  level supplies the real thing; a savepoint supplies nothing and promotes intent, so the markers are
@@ -146,10 +150,6 @@ function wrapTransaction(txHost: object, scope: TransactionScope) {
   }
 }
 
-/** A raw statement inside a transaction contributes NO markers at statement time — see the raw branch in
- *  txProxy. Named so the call site says what is happening rather than passing an anonymous no-op. */
-const DROP_MARKERS: CaptureSink = () => {}
-
 /** A SAVEPOINT's scope: it flushes into the PARENT's buffer (both sinks are that one buffer), promotes its
  *  raw-SQL intent rather than publishing, owes no markers of its own — the top level computes those once —
  *  and stays on the ROOT's write queue, because a savepoint shares one physical connection with its parent
@@ -195,7 +195,7 @@ function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () =>
         // ORM buffer in one atomic local tick; the single coarse-all carries the remote side.
         const base = Reflect.get(target, prop, receiver)
         if (typeof base === 'function') {
-          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), topDb, DROP_MARKERS, announce)
+          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), topDb, announce)
         }
       }
       return Reflect.get(target, prop, receiver)
