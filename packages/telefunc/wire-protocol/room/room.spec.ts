@@ -2746,6 +2746,26 @@ describe('ClientRoom', () => {
     expect(fake.sent.filter((m) => m.__r === 'sub-binary').length).toBe(before + 1)
   })
 
+  it('re-declares its member-scoped text want after a reconnect — the text lane must not go dark either', async () => {
+    const alice = crypto.randomUUID()
+    const fake = createFakeStub()
+    const clientRoom = new ClientRoom(fake.stub, createSnapshot('reconnect-text-wants', { count: 1 }))
+    fake.emit({ __r: 'roster', members: [{ id: alice, meta: {}, joinedAt: 1 }] })
+    const subTextMsgs = () => fake.sent.filter((m) => m.__r === 'sub-text')
+    ;(await clientRoom.getParticipant(alice))!.subscribe(() => {}) // declares a sub-text want
+    await settle()
+    const before = subTextMsgs().length
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice] })
+
+    fake.reconnect() // same blip the binary lane above survives
+    await settle()
+
+    // The reconnect re-sync clears `_declaredWants` for every lane, not just binary: a server stub
+    // that forgot the want must be told again, or Alice's text is relayed to nobody.
+    expect(subTextMsgs().length).toBe(before + 1)
+    expect(subTextMsgs().at(-1)).toEqual({ __r: 'sub-text', members: [alice] })
+  })
+
   it('rejects a client-side identity join — identity is server-assigned, not client-settable', async () => {
     // The shared `JoinOptions` type carries `identity`/`hidden` (the `Room` type is one vocabulary for
     // both sides), so the client can't reject them at compile time; it enforces the server-only contract
