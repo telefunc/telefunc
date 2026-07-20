@@ -12,6 +12,7 @@ import {
   UPGRADE_MAX_OPEN_ENTRIES,
   UPGRADE_MAX_STAGED_BYTES,
   UPGRADE_MAX_STAGED_RECORDS,
+  SSE_METADATA_MAX_BYTES,
   UPGRADE_STAGE_TTL_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_MAX_RECV_BACKLOG_BYTES,
@@ -68,6 +69,7 @@ type MuxResourceLimits = {
   maxRawFrameBytes: number
   maxRecvBacklogBytes: number
   maxRecvBacklogFrames: number
+  maxMetadataBytes: number
 }
 
 const DEFAULT_MUX_LIMITS: MuxResourceLimits = Object.freeze({
@@ -80,6 +82,7 @@ const DEFAULT_MUX_LIMITS: MuxResourceLimits = Object.freeze({
   maxRawFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
   maxRecvBacklogBytes: WIRE_MAX_RECV_BACKLOG_BYTES,
   maxRecvBacklogFrames: WIRE_MAX_RECV_BACKLOG_FRAMES,
+  maxMetadataBytes: SSE_METADATA_MAX_BYTES,
 })
 
 /** A PREPARE the server accepted, awaiting its barrier on the OLD wire. Metadata only — no
@@ -222,6 +225,17 @@ class ChannelMux {
   /** Exposed for transport-level race timers (SSE's `waitForConnection`). */
   get connectTtl(): number {
     return this.options.connectTtl
+  }
+
+  /** The mux is the single authority for inbound ceilings, so a test-constructed limit governs SSE
+   *  ingress too. Reading the module constants directly at the transport left a mux built with small
+   *  limits still facing a 64 MiB ingress, and the two could drift apart silently. */
+  get maxRawFrameBytes(): number {
+    return this.limits.maxRawFrameBytes
+  }
+
+  get maxMetadataBytes(): number {
+    return this.limits.maxMetadataBytes
   }
 
   // ── ServerChannel registry ──────────────────────────────────────────

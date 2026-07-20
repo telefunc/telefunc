@@ -49,9 +49,17 @@ class StreamReader {
     this.source = (source as AsyncIterable<Uint8Array<ArrayBuffer>>)[Symbol.asyncIterator]()
   }
 
-  /** Read the metadata: [u32 big-endian length][UTF-8 bytes]. */
-  async readMetadata() {
+  /**
+   * Read the metadata: [u32 big-endian length][UTF-8 bytes].
+   *
+   * ⚠️ `maxBytes` is checked against the DECLARED length, so an oversize header is refused before a
+   * single body byte is pulled. This is the FIRST read on every POST shape and it runs ahead of all
+   * validation, so without the ceiling a hostile u32 drives unbounded accumulation through
+   * `readExact`'s repeated `concat` — quadratic, on a request nothing has authenticated yet.
+   */
+  async readMetadata(maxBytes: number) {
     const length = await this.readU32()
+    if (length > maxBytes) throw new OversizeFrameError()
     return new TextDecoder().decode(await this.readExact(length))
   }
 

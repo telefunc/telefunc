@@ -56,6 +56,7 @@ import {
   UPGRADE_MAX_STAGED_BYTES,
   UPGRADE_MAX_STAGED_RECORDS,
   UPGRADE_STAGE_TTL_MS,
+  SSE_METADATA_MAX_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_MAX_RECV_BACKLOG_BYTES,
   WIRE_MAX_RECV_BACKLOG_FRAMES,
@@ -434,6 +435,38 @@ describe('SSE framing — the DECLARED length, before the body is pulled', () =>
     return { source, pulls: () => pulls }
   }
 
+  test('the metadata header is capped by its DECLARED length too [B8]', async () => {
+    // The metadata read is the FIRST read on every POST shape and runs ahead of every validation —
+    // the earliest allocation an unauthenticated request can drive, through `readExact`'s repeated
+    // `concat`. The pull counter is what separates a real pre-read refusal from one that bounds only
+    // what is retained; without the cap the reader keeps asking for the announced bytes.
+    const over = countingSource([encodeU32(SSE_METADATA_MAX_BYTES + 1) as Uint8Array<ArrayBuffer>])
+    await expect(new StreamReader(over.source).readMetadata(SSE_METADATA_MAX_BYTES)).rejects.toBeInstanceOf(
+      OversizeFrameError,
+    )
+    expect(over.pulls()).toBe(1) // reading the declared body would need a second
+
+    // AT the boundary it is read normally, so the refusal is the length check and not a reader that
+    // simply fails on this shape.
+    const json = new TextEncoder().encode('{"connId":"x"}') as Uint8Array<ArrayBuffer>
+    const at = countingSource([encodeU32(json.byteLength) as Uint8Array<ArrayBuffer>, json])
+    expect(await new StreamReader(at.source).readMetadata(json.byteLength)).toBe('{"connId":"x"}')
+    expect(at.pulls()).toBe(2)
+  })
+
+  test('at the shipped default, a hostile metadata length is a 400 through the real entry point [B8]', async () => {
+    // THE BRIDGE, and honestly scoped: it gates the WIRING — that `handleRequest` reaches
+    // `readMetadata` with a ceiling and that an `OversizeFrameError` lands in the 400 sink rather
+    // than the internal-error log. It does NOT discriminate the cap's value: a body truncated after
+    // the prefix produces the same 400 by a different route. The row above is what gates the cap
+    // itself, by counting pulls.
+    const four = encodeU32(SSE_METADATA_MAX_BYTES + 1) as Uint8Array<ArrayBuffer>
+    const response = await handleSseChannelRequest(
+      new Request('http://test.local/_telefunc', { method: 'POST', body: new Blob([four]) }),
+    )
+    expect(response?.statusCode).toBe(400)
+  })
+
   test('a declared length over the cap is refused without pulling one body byte', async () => {
     // The prefix alone is delivered. No body follows it, and none is asked for.
     const over = countingSource([encodeU32(64) as Uint8Array<ArrayBuffer>])
@@ -632,7 +665,7 @@ describe('a default-constructed mux reads the shipped constants', () => {
     // the resolved limits object ITSELF (the reference every comparison dereferences), so this
     // compares the values enforcement compares rather than a restatement of them.
     //
-    // All NINE fields, not just the wire trio: the defect is a property of the object literal and the
+    // All TEN fields, not just the wire trio: the defect is a property of the object literal and the
     // six upgrade fields are exposed to it identically.
     //
     // Known and accepted limit: three fields legitimately hold 64 MiB (`maxStagedBytes`,
@@ -651,6 +684,7 @@ describe('a default-constructed mux reads the shipped constants', () => {
       maxRawFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
       maxRecvBacklogBytes: WIRE_MAX_RECV_BACKLOG_BYTES,
       maxRecvBacklogFrames: WIRE_MAX_RECV_BACKLOG_FRAMES,
+      maxMetadataBytes: SSE_METADATA_MAX_BYTES,
     })
   })
 

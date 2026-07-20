@@ -137,6 +137,12 @@ export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
 export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
 
+/** Ceiling on an SSE POST's metadata header — a tiny JSON object (`connId` plus two booleans), so
+ *  the cap is generous by three orders of magnitude and no compliant request approaches it. It gets
+ *  its own, much smaller ceiling than a frame because it is read FIRST, on every POST shape, ahead
+ *  of every validation: it is the earliest allocation an unauthenticated request can drive. */
+export const SSE_METADATA_MAX_BYTES = 64 * 1024
+
 /** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
  *  wire dead and reconnecting. A downstream that stalls without erroring (bytes stop, no FIN)
  *  otherwise wedges the connection: the upstream keeps sending pings but `handlePongTimeout`

@@ -5,7 +5,7 @@ import type { Readable } from 'node:stream'
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
-import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
+import { CHANNEL_TRANSPORT } from '../constants.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { createPushReadable, type PushReadable } from '../push-readable.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
@@ -73,11 +73,15 @@ class SseConnectionTransport {
     const useNodeStream = readable !== undefined
     try {
       const reader = new StreamReader(source)
-      const metadata = parseSseRequestMetadata(await reader.readMetadata())
+      const metadata = parseSseRequestMetadata(await reader.readMetadata(this.mux.maxMetadataBytes))
       if (metadata.streamResponse) return await this.handleStreamResponsePost(metadata.connId, reader, useNodeStream)
       if (metadata.streamRequest) return await this.handleStreamRequestPost(metadata.connId, reader)
       return await this.handleBatchPost(metadata.connId, reader)
-    } catch {
+    } catch (err) {
+      // A 400 is the right answer to a malformed or truncated request, and those are the errors this
+      // sink is FOR. Anything else reaching it is ours, and answering 400 would file our bug under
+      // the client's mistakes — so it is logged rather than silently converted.
+      if (!isExpectedRequestError(err)) console.error('[telefunc][channel] internal error handling an SSE POST', err)
       return badRequest()
     }
   }
@@ -225,7 +229,7 @@ class SseConnectionTransport {
    *  next one. */
   private async readFrameOrNull(connection: SseConnection, reader: StreamReader) {
     try {
-      return await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
+      return await reader.readLengthPrefixedBytesOrNull(this.mux.maxRawFrameBytes)
     } catch (err) {
       if (err instanceof OversizeFrameError) this.closeConnection(connection, true)
       throw err
@@ -310,6 +314,16 @@ function shouldSendReconciled(
 ): outcome is ReconcileOutcome {
   if (outcome === null) return false
   return outcome.deliverTo !== undefined || !connection.closed
+}
+
+/** The two error classes a malformed or dying REQUEST legitimately produces: a body that stopped
+ *  mid-frame, and a declared length over a ceiling. Everything else is ours. `parseSseRequestMetadata`
+ *  and `JSON.parse` throw plain errors on junk, so the disconnect message is matched by text — the
+ *  same shape `StreamReader` already uses to signal it. */
+function isExpectedRequestError(err: unknown): boolean {
+  if (err instanceof OversizeFrameError) return true
+  if (!(err instanceof Error)) return true
+  return err.message.includes('disconnected') || err.message.includes('JSON') || err.name === 'SyntaxError'
 }
 
 function badRequest(): SseChannelHttpResponse {
