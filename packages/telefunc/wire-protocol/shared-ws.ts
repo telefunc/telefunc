@@ -74,11 +74,7 @@ const TAG = {
    *  within `STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS` before declaring the transport open —
    *  confirms the half-duplex streaming wire round-trips end-to-end. */
   STREAM_REQUEST_OPEN_ACK: 0x06 as const,
-  /** Client → server on the probe wire: stage a barrier-commit upgrade. JSON payload
-   *  (`PreparePayload`) — identity only; the barrier carries membership. */
   PREPARE: 0x07 as const,
-  /** Server → client once the upgrade is staged. JSON payload (`ReadyPayload`). On receipt the
-   *  client gates new sends and emits the barrier `RECONCILE` as the old transport's last frame. */
   READY: 0x08 as const,
 
   // ─── Data plane ───
@@ -132,12 +128,6 @@ function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
 
 // ===== Reconcile payloads (JSON-encoded after the header) =====
 
-/** The barrier reconcile is the old transport's FINAL frame, carrying authoritative membership and
- *  barrier-fresh cursors; its `upgradeId` is what pairs the frame with its staged record. The two
- *  legs are co-required, so they live in a union rather than as two independent optionals — a
- *  barrier without an id cannot be constructed. The wire form stays FLAT: this is a type-level
- *  distinction, not an encoding change. Decoding still casts untrusted JSON, so the SERVER validates
- *  the pairing at runtime regardless (`handleBarrier`). */
 type ReconcilePayload = {
   sessionId?: string
   /** `initial: true` means this is the first reconcile for that channel — the server may
@@ -148,15 +138,11 @@ type ReconcilePayload = {
   open: { id: string; ix: number; lastSeq: number; initial?: true }[]
 } & ({ barrier?: undefined; upgradeId?: undefined } | { barrier: true; upgradeId: string })
 
-/** Stages a barrier-commit upgrade on the probe wire, before that wire is the transport. Identity
- *  only: membership belongs to the barrier, which carries it authoritatively at commit time. */
 type PreparePayload = {
   upgradeId: string
   sessionId: string
 }
 
-/** The server's acknowledgment that the upgrade is staged. Echoes `upgradeId` so a client can
- *  never act on a `READY` belonging to an abandoned attempt. */
 type ReadyPayload = {
   upgradeId: string
 }
@@ -174,8 +160,6 @@ type ReconciledPayload = {
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
-  /** Echoed on the reconciled that COMMITS a barrier upgrade, so a delayed ordinary reconciled
-   *  can never be consumed as the commit of an in-flight attempt. */
   upgradeId?: string
 }
 
@@ -471,28 +455,12 @@ function decode(frame: Uint8Array): DecodedFrame {
   }
 }
 
-// ===== The client→server decode seam =====
-
-/** A client frame that violated the wire contract. `target` names the wire to terminate when it is
- *  not the one the frame arrived on — a barrier is the one case: the staged probe is at fault, and
- *  the old wire whose chain merely hosted the turn must not pay for it. */
 class ProtocolViolationError extends Error {
   constructor(readonly target?: unknown) {
     super()
   }
 }
 
-/**
- * Every tag a client may legally send — an ALLOWLIST, so a tag that is server-only, or that a later
- * revision adds without deciding its direction, is refused by default rather than admitted by
- * omission. A denylist got this wrong in both directions at once: `PUBLISH`/`PUBLISH_BINARY` reached
- * `_dispatchDataFrame`'s `assert(false)` and were misfiled as a telefunc bug, while `ABORT`/`ERROR`
- * — server→client terminal ctrls — were silently ACCEPTED and dropped by a switch with no case
- * for them.
- *
- * The publish pairs split: the `_ACK_REQ` halves are how a client publishes to a broadcast channel,
- * the bare halves are delivery to a subscriber and never travel this way.
- */
 const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.PING,
   TAG.RECONCILE,
@@ -514,16 +482,7 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.BROADCAST_UNSUB,
 ])
 
-/**
- * The single gate every inbound client frame crosses. Shape lives here, policy lives in the mux.
- *
- * `decode` casts JSON payloads without inspecting them, so past this point the mux's certified code
- * would otherwise be reading untrusted objects — which is what makes the caller's narrowed catch
- * sound: with shape guaranteed here, a `TypeError` downstream is a telefunc bug rather than a
- * client's malformed frame, and the two deserve opposite responses.
- */
 function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxPrepareBytes: number): DecodedFrame {
-  // Pre-parse, so this bounds what the decoder is asked to allocate rather than what survives it.
   if (raw[0] === TAG.PREPARE && raw.byteLength > maxPrepareBytes) throw new ProtocolViolationError()
   let frame: DecodedFrame
   try {
@@ -541,10 +500,6 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
-/** `decode` CASTS a JSON payload without inspecting it, so a literal `null` — or any other
- *  non-object JSON value — arrives typed as the payload it is not. Every field check below then
- *  dereferences it and throws a raw `TypeError`, which the mux rethrows as a telefunc bug. The
- *  validators are the boundary, so the boundary is where the shape has to be established. */
 function assertObjectPayload(payload: unknown): void {
   if (payload === null || typeof payload !== 'object') throw new ProtocolViolationError()
 }
@@ -556,14 +511,6 @@ function validatePrepare(payload: PreparePayload): void {
   if (!isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
 }
 
-/**
- * The barrier legs are a flat union — both absent, or `barrier === true` with string `upgradeId` and
- * `sessionId` — and nothing but this check enforces it at runtime. The two malformed shapes fail in
- * opposite directions, which is why one truthiness test cannot stand for both: a truthy non-`true`
- * `barrier` would COMMIT an upgrade, while a present-but-falsy one falls through to the ordinary
- * path and rotates the session destructively. Stated as the legal shapes so an unanticipated one is
- * refused by default.
- */
 function validateReconcile(payload: ReconcilePayload): void {
   assertObjectPayload(payload)
   const p = payload as { open?: unknown; sessionId?: unknown; barrier?: unknown; upgradeId?: unknown }

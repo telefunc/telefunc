@@ -3,28 +3,21 @@ export { recordUpgradePrepared, recordUpgradeCommitted }
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 
 /**
- * @internal @test-only Deliberately absent from the package's documented API.
+ * @internal @test-only Counts the upgrade's two authoritative server-side events so the browser e2e
+ * can assert the upgrade actually happened — no client-observable surface establishes that
+ * (`waitForEvent('websocket')` fires on the PROBE socket, so an aborted upgrade satisfies it).
  *
- * Counts the barrier upgrade's two authoritative server-side events so a browser e2e can assert the
- * upgrade actually *happened* — which no client-observable surface establishes today
- * (`page.waitForEvent('websocket')` fires on the PROBE socket, so an upgrade that aborts satisfies
- * it). `prepared` separates the two failures that both leave `committed === 0`: never attempted, and
- * attempted then failed.
- *
- * ⚠️ Its OWN global-object slot, not a field on the mux's: `getGlobalObject` is keyed by filename and
+ * ⚠️ Its OWN global slot, not a field on the mux's: `getGlobalObject` is keyed by filename and
  * returns the FIRST copy's object, so a field added to an existing factory reads back `undefined`
  * wherever a second copy of that module is loaded (dev serves a Vite-transformed copy beside Node's).
  */
 type UpgradeObservations = {
-  /** PREPARE frames the server accepted and answered with READY. */
   prepared: number
-  /** Barrier commits that RESOLVED — the upgrade is done and the probe wire owns the session. */
   committed: number
 }
 
-/** ⚠️ This literal is duplicated in `test/playground-stream/upgrade-observations.ts`, which reads the
- *  slot off `globalThis` rather than importing it — adding a package export for a test-only surface
- *  is not worth it. Rename the two together. */
+/** Duplicated in `test/playground-stream/upgrade-observations.ts`, which reads the slot off
+ *  `globalThis` rather than importing it. Rename the two together. */
 const UPGRADE_OBSERVER_KEY = 'wire-protocol/server/upgrade-observer.ts'
 
 function getGlobals(): UpgradeObservations {

@@ -8,10 +8,6 @@ import { decodeU32 } from '../../frame.js'
 const EMPTY = new Uint8Array(0)
 const DISCONNECT_MSG = 'Client disconnected during file upload'
 
-/** A frame whose DECLARED length is over the caller's ceiling. Distinct from the disconnect error
- *  because the two deserve opposite responses: a truncated body is an ordinary client death, this is
- *  a wire that must be terminated — and nothing after it is even frame-aligned, since the reader
- *  never consumed the body it announced. */
 class OversizeFrameError extends Error {}
 
 /**
@@ -49,27 +45,12 @@ class StreamReader {
     this.source = (source as AsyncIterable<Uint8Array<ArrayBuffer>>)[Symbol.asyncIterator]()
   }
 
-  /**
-   * Read the metadata: [u32 big-endian length][UTF-8 bytes].
-   *
-   * ⚠️ `maxBytes` is checked against the DECLARED length, so an oversize header is refused before a
-   * single body byte is pulled. This is the FIRST read on every POST shape and it runs ahead of all
-   * validation, so without the ceiling a hostile u32 drives unbounded accumulation through
-   * `readExact`'s repeated `concat` — quadratic, on a request nothing has authenticated yet.
-   */
   async readMetadata(maxBytes: number) {
     const length = await this.readU32()
     if (length > maxBytes) throw new OversizeFrameError()
     return new TextDecoder().decode(await this.readExact(length))
   }
 
-  /**
-   * Read one length-prefixed chunk, or null if the stream is cleanly exhausted.
-   *
-   * ⚠️ `maxBytes` is checked against the DECLARED length, so an oversize frame is refused before a
-   * single body byte is pulled. Checking after the read would bound what is RETAINED while still
-   * letting a hostile u32 drive the allocation.
-   */
   async readLengthPrefixedBytesOrNull(maxBytes: number) {
     const lengthBytes = await this.readExactOrNull(4)
     if (!lengthBytes) return null

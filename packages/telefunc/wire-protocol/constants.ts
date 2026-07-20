@@ -81,72 +81,29 @@ export const WS_PROBE_TIMEOUT_MS = 3_000
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
-/** Bounds the barrier's batch-mode quiesce — how long `emitBarrierBatch` waits for the SSE outbox to
- *  go naturally empty before it stops waiting for "the wire is busy". It does NOT bound "a POST is
- *  still in flight": that wait is unbounded by design and ends only with the attempt signal, because
- *  racing an in-flight POST is what lets the barrier commit ahead of frames the server then drops. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
-/** Deadline for the FIN(old wire) + RECONCILED(new wire) join that commits the handoff. Armed when
- *  the handoff is ENTERED, not when the first limb arrives — arming it on FIN leaves a MISSING FIN
- *  unbounded, which is the one case it exists to catch. */
 export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 
-/** ONE budget shared across BOTH handoff buffers (old + new); either limit trips the same fallback
- *  as a missing FIN. Frames are never evicted to stay under it — eviction would silently drop
- *  precisely the non-replayable old-wire frames the source partitioning exists to protect. */
 export const UPGRADE_HANDOFF_BUFFER_BYTES = 8 * 1024 * 1024
 export const UPGRADE_HANDOFF_BUFFER_FRAMES = 4_096
 
-/** CLIENT-side deadline for one attempt, armed at the `PREPARE` and disarmed at the flip (excluding
- *  the probe, which `WS_PROBE_TIMEOUT_MS` bounds). Not redundant with the server's stage TTL: a
- *  barrier the server finds STALE is refused SILENTLY, so nothing on the wire would otherwise ever
- *  end such an attempt. From the flip on, the join timeout takes over. */
 export const UPGRADE_ATTEMPT_TIMEOUT_MS = 10_000
 
-/** SERVER-side stage lifetime, from accepted PREPARE to commit. NON-refreshing on purpose: PING
- *  resets only the liveness timer, so a client that pings but never barriers would otherwise hold
- *  its stage forever. On expiry the old SSE session is left completely untouched. */
 export const UPGRADE_STAGE_TTL_MS = 10_000
 
-/** Admission caps for PREPARE and barrier RECONCILE frames ONLY — an ordinary RECONCILE keeps its
- *  uncapped contract. The entry/id caps bound what the JSON decoder allocated, which the byte cap
- *  alone does not: 1024 ids of 256 B is a very different object graph from one 256 KiB id. */
 export const UPGRADE_MAX_FRAME_BYTES = 256 * 1024
 export const UPGRADE_MAX_OPEN_ENTRIES = 1_024
 export const UPGRADE_MAX_ID_BYTES = 256
 
-/** Global staged budget per server instance. Both units are needed — thousands of empty stages still
- *  cost sockets, timers and closures. At capacity only the NEW probe is rejected. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
 export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 
-// ===== Inbound wire resource caps =====
-//
-// Not upgrade-specific: these sit at the two inbound entry points every frame crosses. Nothing here
-// bounds hostile APPLICATION memory — flow-control credit is cooperative at the sender — which is a
-// documented residual of the design, not an oversight.
-
-/** Ceiling on ONE raw wire frame, enforced before decode. Both SERVER-inbound paths need it for
- *  different reasons: an SSE frame is rejected by its DECLARED length before a body byte is pulled,
- *  while a WS binary message has already been read and is capped against the cost of DECODING it.
- *  The CLIENT enforces no inbound ceiling — a hostile server is outside the threat model, since it
- *  already controls every byte the client would act on. 64 MiB is the protocol's maximum adaptive
- *  byte credit, so no compliant frame comes near it. */
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
-/** Ceiling on the raw frames queued on ONE connection's recv chain — bytes AND count, because a
- *  flood of tiny frames costs closures and promise links rather than bytes. A frame parked behind an
- *  awaited turn is retained by the chain's closure until that turn completes, so without this a
- *  client that stalls the chain and keeps sending has an unbounded holding area. Overflow terminates
- *  that wire and any upgrade staged on it, never any other. */
 export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
 export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
 
-/** Ceiling on an SSE POST's metadata header — a tiny JSON object (`connId` plus two booleans), so
- *  the cap is generous by three orders of magnitude and no compliant request approaches it. It gets
- *  its own, much smaller ceiling than a frame because it is read FIRST, on every POST shape, ahead
- *  of every validation: it is the earliest allocation an unauthenticated request can drive. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
 
 /** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
@@ -156,9 +113,6 @@ export const SSE_METADATA_MAX_BYTES = 64 * 1024
  *  behind the un-acked RECONCILE hangs. */
 export const RECONCILE_TIMEOUT_MS = 10_000
 
-/** An aborted attempt must reach its sticky upgrade fallback BEFORE the reconcile timer takes the
- *  generic reconnect and leaves upgrades enabled. The attempt deadline is armed strictly earlier, so
- *  it wins as long as it is not the longer of the two — enforced here rather than argued in prose. */
 assert(UPGRADE_ATTEMPT_TIMEOUT_MS <= RECONCILE_TIMEOUT_MS)
 
 // ===== Multiplexed SSE transport =====

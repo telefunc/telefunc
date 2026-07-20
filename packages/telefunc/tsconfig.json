@@ -14,9 +14,5 @@
     "types": ["vite/client"]
   },
   "include": ["client/**/*", "node/**/*", "serve/**/*", "wire-protocol/**/*"],
-  // `*-harness.ts` is test-only infrastructure shared BETWEEN spec files, so it cannot be named
-  // `*.spec.ts` (vitest would run it as a suite with no tests, and every importing spec would
-  // re-register its exports). Excluding it keeps it out of `dist/`; `tsconfig.spec.json` still
-  // typechecks it, because entries in `files` bypass `exclude`.
-  "exclude": ["**/*.spec.ts", "**/*-harness.ts"]
+  "exclude": ["**/*.spec.ts"]
 }

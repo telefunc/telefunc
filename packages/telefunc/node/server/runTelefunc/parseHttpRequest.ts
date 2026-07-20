@@ -161,9 +161,6 @@ async function readBody(
     assert(source)
     const reader = new StreamReader(source)
     return {
-      // Deliberately uncapped, and deliberately spelled out rather than hidden behind a default: the
-      // RPC path's metadata ceiling is a separate, pre-existing gap outside this change's charter,
-      // and a default here would have made it invisible instead of pending.
       text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),
       consumeFile: (i, s) => reader.consumeFile(i, s),

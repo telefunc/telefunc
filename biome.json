@@ -34,17 +34,6 @@
   "organizeImports": {
     "enabled": false
   },
-  "overrides": [
-    {
-      "include": ["**/tsconfig.json", "**/tsconfig.*.json"],
-      "json": {
-        "parser": {
-          "allowComments": true,
-          "allowTrailingCommas": true
-        }
-      }
-    }
-  ],
   "vcs": {
     "enabled": true,
     "clientKind": "git"

@@ -36,9 +36,6 @@ type SseConnection = {
    *  POSTs gate on this before dispatching so they can't race ahead of the reconcile. */
   ready: Promise<void>
   resolveReady: () => void
-  /** Every in-flight dispatch on this connection, from any POST shape. ONE registry: it is both the
-   *  streamRequest body's drain set and what `runStreamResponse` awaits before `sendReconciled`, so
-   *  a frame that arrived on the upload wire cannot be reported un-applied by the reconcile. */
   pendingDispatches: Set<Promise<unknown>>
 }
 
@@ -80,9 +77,6 @@ class SseConnectionTransport {
       if (metadata.streamRequest) return await this.handleStreamRequestPost(metadata.connId, reader)
       return await this.handleBatchPost(metadata.connId, reader)
     } catch (err) {
-      // A 400 is the right answer to a malformed or truncated request, and those are the errors this
-      // sink is FOR. Anything else reaching it is ours, and answering 400 would file our bug under
-      // the client's mistakes — so it is logged rather than silently converted.
       if (!isExpectedRequestError(err)) console.error('[telefunc][channel] internal error handling an SSE POST', err)
       return badRequest()
     }
@@ -135,35 +129,18 @@ class SseConnectionTransport {
     }
   }
 
-  /** Long-lived client→server upload POST. Body streams over the connection's lifetime; each frame
-   *  is dispatched WITHOUT being awaited inside the loop, so a slow dispatch never stalls the body,
-   *  and the mux emits `reconciled` inline whenever one fires.
-   *
-   *  Dispatches are registered rather than discarded, so body-end is a real drain point: when this
-   *  POST completes, every frame it carried has finished its recv-chain turn. The `finally` is what
-   *  makes that hold on BOTH exits — a truncated body is the case a client is most likely to follow
-   *  with a reconnect, and the one where a half-applied turn matters most. */
   private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
     if (!(await this.waitReady(connection))) return badRequest()
-    // ⚠️ AFTER the readiness gate, never on connection resolution. The client treats this ack as
-    // "this wire will carry my uploads" and may enqueue immediately, so sending it while the initial
-    // reconcile was still in flight opened a window whose frames raced RECONCILED. `ready` now
-    // releases only once RECONCILED has been sent, which is what makes the early upload unreachable
-    // rather than merely unlikely.
     this.sendNow(connection, encode.streamRequestOpenAck())
     try {
       while (true) {
         const raw = await this.readFrameOrNull(connection, reader)
         if (!raw || connection.closed) break
         const dispatch = this.mux.onConnectionRawMessage(connection, raw)
-        // Settled dispatches are evicted as they complete, so a long-lived upload does not
-        // accumulate one retained promise per frame for the connection's lifetime.
         connection.pendingDispatches.add(dispatch)
         const evict = () => connection.pendingDispatches.delete(dispatch)
-        // `then(evict, evict)` rather than `.finally()`: it cannot itself produce an unhandled
-        // rejection if a dispatch ever rejects.
         dispatch.then(evict, evict)
       }
     } finally {
@@ -191,19 +168,6 @@ class SseConnectionTransport {
     return okResponse()
   }
 
-  /** Stream-response POST lifecycle: consume the initial reconcile batch, drain any dispatch already
-   *  in flight (so its `_lastClientSeq` mutation lands first), emit `reconciled` — and only THEN
-   *  release the `ready` gate.
-   *
-   *  ⚠️ The gate is released LAST, and that ordering is the whole point. Released before
-   *  `sendReconciled`, it let every POST parked in `waitReady` resume and register a dispatch — but
-   *  the drain below snapshots `pendingDispatches` SYNCHRONOUSLY, one turn before any of them can
-   *  resume, so their work was never in the set it awaits. RECONCILED then reported a `lastSeq`
-   *  taken before frames that were already being applied. Draining a set that work cannot yet have
-   *  entered is not a barrier; making the gate the last thing that opens is.
-   *
-   *  The drain is still needed: `closeConnection` resolves `ready` early on a mid-drain failure, and
-   *  a batch POST released that way registers unconditionally. */
   private async runStreamResponse(connection: SseConnection, reader: StreamReader): Promise<void> {
     let outcome: ReconcileOutcome | null = null
     try {
@@ -237,12 +201,6 @@ class SseConnectionTransport {
     return outcome
   }
 
-  /** The single read site for every C2S body, so the raw-frame ceiling has exactly one enforcement
-   *  point and exactly one termination point across all three POST shapes. Only an OVERSIZE frame
-   *  kills the wire: a truncated body is an ordinary client death, and the existing per-caller
-   *  handling of that stays exactly as it was. Permanent, because the declared length is a
-   *  protocol-level lie rather than a transient fault — a reconnect grace would just invite the
-   *  next one. */
   private async readFrameOrNull(connection: SseConnection, reader: StreamReader) {
     try {
       return await reader.readLengthPrefixedBytesOrNull(this.mux.maxRawFrameBytes)
@@ -321,9 +279,6 @@ class SseConnectionTransport {
   }
 }
 
-/** A closed connection normally suppresses its reconciled — but not when a barrier commit set
- *  `deliverTo`: that reconciled belongs to the staged WS, and this SSE connection is precisely the
- *  one the client is retiring. `mux.send` already no-ops on a connection with no live entry. */
 function shouldSendReconciled(
   outcome: ReconcileOutcome | null,
   connection: SseConnection,
@@ -332,10 +287,6 @@ function shouldSendReconciled(
   return outcome.deliverTo !== undefined || !connection.closed
 }
 
-/** The two error classes a malformed or dying REQUEST legitimately produces: a body that stopped
- *  mid-frame, and a declared length over a ceiling. Everything else is ours. `parseSseRequestMetadata`
- *  and `JSON.parse` throw plain errors on junk, so the disconnect message is matched by text — the
- *  same shape `StreamReader` already uses to signal it. */
 function isExpectedRequestError(err: unknown): boolean {
   if (err instanceof OversizeFrameError) return true
   if (!(err instanceof Error)) return true

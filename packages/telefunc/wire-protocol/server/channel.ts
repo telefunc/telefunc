@@ -42,16 +42,6 @@ import { assert } from '../../utils/assert.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag } from '../shared-ws.js'
 import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame } from '../shared-ws.js'
 
-/**
- * Serializer text off the wire. The decode seam validates FRAME shape but cannot validate this
- * without paying a second `parse` on the hot path, so the one place it is already parsed is where
- * a failure gets its meaning: a peer payload the serializer refuses is a protocol violation — the
- * client's fault, costing the client its wire — not the `SyntaxError` escaping `runInboundTurn`'s
- * narrowed catch as a telefunc bug.
- *
- * ⚠️ Every call site must be reachable SYNCHRONOUSLY from `_dispatchFrame`. Thrown from inside an
- * async body it becomes an unhandled rejection instead, which is the bug this closes.
- */
 function parsePeerText(text: string): unknown {
   try {
     return parse(text)
@@ -479,11 +469,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** ⚠️ The parse happens HERE, in a synchronous body, not inside `_dispatchAckReq`. The caller
-   *  `void`s this promise, so a violation thrown from the async side would be an unhandled rejection
-   *  rather than something `runInboundTurn` can act on. Cost: a hostile payload is now refused even
-   *  when no listener is registered, where before it earned an `ERROR` ack — the right direction,
-   *  since whether the frame is well-formed cannot depend on who happens to be listening. */
   _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
     return this._trackAck(this._dispatchAckReq(parsePeerText(text) as ChannelData<ClientToServer>, seq))
   }
