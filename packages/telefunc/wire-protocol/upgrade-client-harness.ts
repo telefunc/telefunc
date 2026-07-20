@@ -9,8 +9,8 @@
 // Real timers throughout. Fake timers and real `ReadableStream`s do not mix — stream-reader wakeups
 // are not timer-driven — so waits are condition-polled with a deadline rather than fixed sleeps.
 
-export { installWebSocketStub, createUpgradeHarness, waitUntil, reconciledPayload }
-export type { StubWebSocket, UpgradeHarness, UpgradeHarnessOptions, HarnessClientChannel }
+export { createUpgradeHarness, waitUntil }
+export type { UpgradeHarness }
 
 import { parse } from '@brillout/json-serializer/parse'
 
@@ -137,7 +137,6 @@ type HarnessClientChannel = {
    *  `ClientConnection.dispatchFrame`'s `trackSeq` dedup, which is the coalescer that silently
    *  drops. Observing above it would prove nothing. */
   readonly received: ReceivedPayload[]
-  readonly ctrl: ChannelFrame[]
   /** Every error handed to `_onTransportClose` — the abort-value oracle. */
   readonly closeErrors: (Error | undefined)[]
   /** `_onTransportOpen` calls, with the `batched` flag each carried. */
@@ -149,7 +148,6 @@ function createHarnessChannel(id: string): HarnessClientChannel {
     id,
     isClosed: false,
     received: [],
-    ctrl: [],
     closeErrors: [],
     opens: [],
     _onTransportOpen(batched: boolean) {
@@ -160,8 +158,6 @@ function createHarnessChannel(id: string): HarnessClientChannel {
         this.received.push({ kind: 'text', value: parse(frame.text) })
       } else if (frame.tag === TAG.BINARY || frame.tag === TAG.BINARY_ACK_REQ) {
         this.received.push({ kind: 'binary', bytes: frame.data })
-      } else {
-        this.ctrl.push(frame)
       }
     },
     _onTransportClose(err?: Error) {

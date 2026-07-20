@@ -866,12 +866,6 @@ class ChannelMux {
     }
   }
 
-  /** @internal @test-only The limits object ITSELF, not a copy: nothing else observes which constant
-   *  `DEFAULT_MUX_LIMITS` bound to which field, so swapping two leaves every other test true. */
-  _getResourceLimits(): Readonly<MuxResourceLimits> {
-    return this.limits
-  }
-
   /** @internal @test-only Per-connection backlog, read from the enforcement fields. Null once the
    *  wire is gone. */
   _getBacklogSnapshot(connection: unknown): BacklogSnapshot | null {

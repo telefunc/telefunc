@@ -145,6 +145,56 @@ describe('PREPARE stages, and staging alone is inert', () => {
     await expectWireDelivers(h.sse, chA)
   })
 
+  test('a PREPARE on a wire that already holds a session is a violation [T4-M13]', async () => {
+    // A stage pairs a SESSIONLESS probe with the old session it may commit against. Delivered on a
+    // wire that already owns a session, the record would name that wire as both the old side and the
+    // new one, and the commit would rotate a session onto the wire it was rotating away from.
+    //
+    // Restored: no spec reached this guard — every one of the suite's PREPARE deliveries targets a
+    // session-less probe, so the check was load-bearing and untested at once.
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    // Independent connection, opened BEFORE the violation so it is a bystander rather than a retry.
+    const sse2 = h.makeWire('sse-conn-2')
+    const chB = h.registerChannel('B')
+    await sse2.deliver(reconcileFrame({ open: [{ id: 'B', ix: 0, lastSeq: 0, initial: true }] }))
+
+    await h.sse.deliver(prepare(s0)) // ← the OLD wire, which holds s0
+
+    expect(h.sse.terminated()).toBe(true)
+    expect(readysOn(h.sse)).toHaveLength(0)
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+    // Live sentinel: the refusal is scoped to its sender and costs the bystander nothing.
+    expect(sse2.terminated()).toBe(false)
+    await sse2.deliver(textFrame(0, 1, 4_242))
+    expect(chB.received).toContain(4_242)
+  })
+
+  test('a second stage for the SAME old session is a violation [T4-M18]', async () => {
+    // One stage per old session, enforced separately from one-stage-per-probe-wire: this arrives on a
+    // DIFFERENT, perfectly valid probe. Without it two probes race to commit the same session and the
+    // loser's stage survives to its TTL holding a socket the client has forgotten.
+    //
+    // Restored: the suite's staging rows close each probe before opening the next, so no row ever
+    // held two live probes against one session.
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+    expect(readysOn(h.ws)).toHaveLength(1)
+
+    const ws2 = h.makeWire('ws-probe-2')
+    await ws2.deliver(prepare(s0, 'upg-2')) // ← a fresh probe, the same old session
+
+    expect(ws2.terminated()).toBe(true)
+    expect(readysOn(ws2)).toHaveLength(0)
+    // The INCUMBENT is untouched — refusing the newcomer must never evict the stage in progress.
+    expect(h.ws.terminated()).toBe(false)
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual({ records: 1, reverseRecords: 1, bytes: expect.any(Number) })
+    // And it can still commit, which is the property the eviction bug would have destroyed.
+    await h.sse.deliver(barrier(s0))
+    expect(reconciledOn(h.ws)).toHaveLength(1)
+  })
+
   test('a second PREPARE on the same probe wire is a violation — never a re-stage', async () => {
     // Without the guard the stage is silently re-installed (leaking the first timer) and a SECOND
     // READY goes out, so the client could act on an attempt the server re-keyed underneath it.
@@ -594,6 +644,57 @@ describe('only the commit continuation may release a committing stage', () => {
     expect(h.ws.terminated()).toBe(false)
     expect(reconciledOn(h.ws)).toHaveLength(1)
     expect(h.ws.sessionId()).toBeTypeOf('string')
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+  })
+
+  test('the probe dying INSIDE the commit window leaves no stage behind [T4-I8r4]', async () => {
+    // The third destroyer of the same window, and the one the guard deliberately does NOT cover:
+    // probe-close accounting clears the record raw. That is safe only because the close is recorded
+    // before the entry is deleted, so the suspended continuation still unwinds into its `finally`.
+    // What this pins is the OUTCOME of that reasoning — no leak, no throw, no half-released stage —
+    // rather than the reasoning itself.
+    //
+    // Restored: no row closed a wire inside the commit's async window at all.
+    const h = (harness = createMuxHarness())
+    const { chA, s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+
+    const commit = h.sse.deliver(barrier(s0)) // un-awaited: the continuation is in flight
+    h.ws.close() // ← the probe dies mid-commit
+    await commit
+
+    // The accounting is the assertion: a stage that survives its own probe is a leak the TTL would
+    // eventually reap while holding a dead socket's record until then.
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+    // The old wire was retired by the barrier either way, so the client's recovery is a fresh
+    // reconcile — but nothing here may take the whole mux down with it.
+    const sse2 = h.makeWire('sse-conn-2')
+    await sse2.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
+    expect(sse2.terminated()).toBe(false)
+    await expectWireDelivers(sse2, chA)
+  })
+
+  test('the old wire dying AFTER a successful commit leaves the new session alive [T4-I8r6]', async () => {
+    // The mirror of the old-wire-close row in the lifecycle block, on the other side of the commit.
+    // Before the commit, an old-wire close must release the stage and the probe; after it, the same
+    // close must touch nothing — the probe now owns the session, and tearing it down here would
+    // undo the upgrade at the exact moment it succeeded. One handler, two opposite duties, and only
+    // the pre-commit half had a row.
+    const h = (harness = createMuxHarness())
+    const { chA, s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+    await h.sse.deliver(barrier(s0))
+    const upgradedSession = h.ws.sessionId()
+    expect(upgradedSession).toBeTypeOf('string')
+    expect(upgradedSession).not.toBe(s0)
+
+    h.sse.close() // ← the retired wire goes away, as it must once the client sees FIN
+    await settle()
+
+    // The new session survives its predecessor's death, and the channel still routes to it.
+    expect(h.ws.terminated()).toBe(false)
+    expect(h.ws.sessionId()).toBe(upgradedSession)
+    await expectWireDelivers(h.ws, chA)
     expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
   })
 

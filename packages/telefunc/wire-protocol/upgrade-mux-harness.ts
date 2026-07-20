@@ -19,7 +19,6 @@
 
 export { createMuxHarness, settle, textFrame, reconcileFrame, prepareFrame, pingFrame }
 export { lengthPrefixed, globalRegisterChannel, disposeGlobalChannels, openSseDownstream, openGlobalProbeWire }
-export type { MuxHarness, HarnessWire, HarnessChannel }
 
 import { expect } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'

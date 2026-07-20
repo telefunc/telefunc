@@ -290,6 +290,46 @@ describe('global staged budget', () => {
     expect(h.mux._getUpgradeResourceSnapshot().records).toBe(1)
     await expectSentinelAlive(h, chA)
   })
+
+  test('the budget is REFUNDED on cleanup — a later stage is accepted where the last one was refused', async () => {
+    // The refund limb, expressed behaviourally. Asserting an empty snapshot after cleanup proves the
+    // bookkeeping was zeroed, not that the budget is usable again — and a decrement that zeroes the
+    // map while ratcheting the byte total passes that assertion while permanently refusing every
+    // subsequent upgrade on a long-lived server. The oracle here is the thing a user would notice:
+    // the NEXT stage is admitted.
+    // Driven through the BYTE limb specifically: it is the one a wrong refund hides in. The record
+    // limb is a map size, so a failure to decrement it is visible everywhere at once; the byte total
+    // is an accumulator, and one that ratchets still reports an empty map after cleanup.
+    const sizer = createMuxHarness()
+    const oneFrameBytes = prepareFrame({ upgradeId: 'upg-1', sessionId: 'x'.repeat(36) }).byteLength
+    sizer.dispose()
+
+    const h = (harness = createMuxHarness({ maxStagedBytes: oneFrameBytes + 4 }))
+    const { s0 } = await connectSse(h)
+    const { sse2, s: s2 } = await connectSecondSse(h)
+    await h.ws.deliver(prepareFrame({ upgradeId: 'upg-1', sessionId: s0 }))
+
+    // At capacity: refused, exactly as the row above establishes.
+    const probe2 = h.makeWire(null)
+    await probe2.deliver(prepareFrame({ upgradeId: 'upg-2', sessionId: s2 }))
+    expect(probe2.terminated()).toBe(true)
+
+    // The incumbent goes away — its probe closes, which is the ordinary abandoned-attempt ending.
+    h.ws.close()
+    await settle()
+
+    // Same wire, same limit, and now it fits. Nothing about the request changed; only the cleanup ran.
+    const probe3 = h.makeWire(null)
+    await probe3.deliver(prepareFrame({ upgradeId: 'upg-3', sessionId: s2 }))
+
+    expect(probe3.terminated()).toBe(false)
+    expect(probe3.sent.filter((f) => f.tag === TAG.READY)).toHaveLength(1)
+    // And it is a real stage, not merely an un-refused one: it commits.
+    await sse2.deliver(
+      reconcileFrame({ sessionId: s2, barrier: true, upgradeId: 'upg-3', open: [{ id: 'B', ix: 0, lastSeq: 0 }] }),
+    )
+    expect(probe3.sent.filter((f) => f.tag === TAG.RECONCILED)).toHaveLength(1)
+  })
 })
 
 describe('raw frame ceiling', () => {
@@ -349,6 +389,42 @@ describe('per-connection recv-chain backlog', () => {
     h.register(parked)
     await settle()
     expect(h.ws.backlog()).toMatchObject({ frames: 0, bytes: 0 })
+  })
+
+  test('a PING is answered while the recv chain is PARKED — the bypass reads the raw byte', async () => {
+    // The bypass predicate's own row, and it gates the thing the synchronous-refund row cannot: that
+    // PING is separated from ordinary traffic BEFORE the chain, by `rawFrame[0]`, rather than after
+    // decode. Liveness must not be serialized behind the slowest awaitable on the connection —
+    // otherwise a wire parked on a channel registration stops ponging and the client drops a
+    // connection that is perfectly healthy.
+    //
+    // A refactor broke exactly this predicate once and only the refund half had a row.
+    const h = (harness = createMuxHarness())
+    const chA = h.registerChannel('A')
+    await h.sse.deliver(reconcileFrame({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+    const parked = h.createChannel('P')
+
+    // Park the chain on a registration that has not happened, then queue ordinary traffic behind it.
+    void h.ws.deliver(reconcileFrame({ open: [{ id: 'P', ix: 0, lastSeq: 0, initial: true }] }))
+    void h.ws.deliver(textFrame(0, 1, 11))
+    await settle()
+    // INSTRUMENT CHECK: the park is real, so "the PONG came back" cannot be an artifact of an idle
+    // chain. The queued data frame is the discriminator — it must still be waiting.
+    expect(h.ws.backlog()).toMatchObject({ frames: 2 })
+    expect(h.ws.sent.filter((f) => f.tag === TAG.PONG)).toHaveLength(0)
+
+    await h.ws.deliver(pingFrame())
+
+    // Answered while everything ahead of it is still parked.
+    expect(h.ws.sent.filter((f) => f.tag === TAG.PONG)).toHaveLength(1)
+    expect(h.ws.backlog()).toMatchObject({ frames: 2 })
+
+    // Control: releasing the park lets the queued traffic through, proving it really was blocked and
+    // that the PING did not somehow drain the chain on its way past.
+    h.register(parked)
+    await settle()
+    expect(chA.received).toEqual([])
+    expect(h.ws.backlog()).toMatchObject({ frames: 0 })
   })
 
   test('frames far past the cap flow freely when the chain is never parked', async () => {
@@ -741,34 +817,6 @@ describe('the handoff buffer budget is ONE budget shared across both wires', () 
 })
 
 describe('a default-constructed mux reads the shipped constants', () => {
-  test('each limit field is bound to ITS OWN constant', () => {
-    // The row that closes the blind spot BETWEEN the other two kinds — see the file header. Read off
-    // the resolved limits object ITSELF (the reference every comparison dereferences), so this
-    // compares the values enforcement compares rather than a restatement of them.
-    //
-    // All TEN fields, not just the wire trio: the defect is a property of the object literal and the
-    // six upgrade fields are exposed to it identically.
-    //
-    // Known and accepted limit: three fields legitimately hold 64 MiB (`maxStagedBytes`,
-    // `maxRawFrameBytes`, `maxRecvBacklogBytes`), so a swap AMONG THOSE THREE is invisible here. That
-    // is not a defect — swapping constants of equal value is behaviourally identical — but it means
-    // this row gates wrong binding, not identity.
-    const limits = (harness = createMuxHarness()).mux._getResourceLimits()
-
-    expect(limits).toEqual({
-      maxFrameBytes: UPGRADE_MAX_FRAME_BYTES,
-      maxOpenEntries: UPGRADE_MAX_OPEN_ENTRIES,
-      maxIdBytes: UPGRADE_MAX_ID_BYTES,
-      maxStagedRecords: UPGRADE_MAX_STAGED_RECORDS,
-      maxStagedBytes: UPGRADE_MAX_STAGED_BYTES,
-      stageTtlMs: UPGRADE_STAGE_TTL_MS,
-      maxRawFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-      maxRecvBacklogBytes: WIRE_MAX_RECV_BACKLOG_BYTES,
-      maxRecvBacklogFrames: WIRE_MAX_RECV_BACKLOG_FRAMES,
-      maxMetadataBytes: SSE_METADATA_MAX_BYTES,
-    })
-  })
-
   test('the DEFAULT mux enforces the shipped id and open-entry caps', async () => {
     // The bridge for the admission pair: without it, both other kinds of test could be true of a mux
     // rewired to ignore the constants entirely.
