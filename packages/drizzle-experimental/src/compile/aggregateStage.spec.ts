@@ -1,4 +1,4 @@
-import { asc, avg, count, gt, max, min, sql, sum } from 'drizzle-orm'
+import { asc, avg, count, countDistinct, gt, max, min, sql, sum } from 'drizzle-orm'
 import * as pg from 'drizzle-orm/pg-core'
 import { describe, expect, it } from 'vitest'
 import { extractQueryShape } from '../extract/queryShape.js'
@@ -167,5 +167,53 @@ describe('aggregateStage — HAVING + DISTINCT', () => {
     // the parser marks a raw sql() count(distinct) opaque → dirty degradation is acceptable here;
     // assert only that a real change never misses.
     expect(graph.apply([ins({ id: 2, team_id: 5, score: 20, name: 'b' })]).invalidated).toBe(true)
+  })
+})
+
+// count(DISTINCT) asks "are these the same value?" — and answered it with `JSON.stringify(v) + typeof v`,
+// which is a DIFFERENT identity from the `canonicalValue` every other operator in the engine uses. Three
+// ways that diverges, each a wrong aggregate rather than a stale one:
+//   · JSON.stringify collapses NaN / Infinity / -Infinity all to `null` → three values counted as one (a
+//     MISS: the count never changes when it should);
+//   · JSON.stringify preserves key INSERTION order → one logical object counted twice (an over-fire, and a
+//     disagreement with the shadow and join keys, which sort);
+//   · JSON.stringify THROWS on a bigint → the aggregate stage crashes on an int8 column.
+describe('aggregateStage — DISTINCT uses the engine’s one value identity', () => {
+  const distinctScore = () => run(qb.select({ n: countDistinct(users.score) }).from(users))
+
+  it('counts NaN and Infinity as DIFFERENT values', () => {
+    const graph = distinctScore()
+    seed(graph, [ins({ id: 1, team_id: 5, score: Number.NaN, name: 'a' })])
+    // A second, genuinely different non-finite value takes the count 1 → 2.
+    expect(graph.apply([ins({ id: 2, team_id: 5, score: Number.POSITIVE_INFINITY, name: 'b' })]).invalidated).toBe(true)
+  })
+
+  it('counts Infinity and -Infinity as DIFFERENT values', () => {
+    const graph = distinctScore()
+    seed(graph, [ins({ id: 1, team_id: 5, score: Number.POSITIVE_INFINITY, name: 'a' })])
+    expect(graph.apply([ins({ id: 2, team_id: 5, score: Number.NEGATIVE_INFINITY, name: 'b' })]).invalidated).toBe(true)
+  })
+
+  it('counts two key ORDERINGS of one object as the SAME value', () => {
+    // What a jsonb column hands back: same logical value, whatever order the driver walked its keys in.
+    // Every other identity in the engine sorts keys, so this one disagreeing is the inconsistency.
+    const graph = run(qb.select({ n: countDistinct(users.name) }).from(users))
+    seed(graph, [ins({ id: 1, team_id: 5, score: 1, name: { a: 1, b: 2 } })])
+    expect(graph.apply([ins({ id: 2, team_id: 5, score: 2, name: { b: 2, a: 1 } })]).invalidated).toBe(false)
+  })
+
+  it('counts a number and its string form as DIFFERENT values', () => {
+    // The identity has to discriminate TYPE, not just rendering. Found by mutation: replacing it with
+    // `String(value)` passed every other case here and was caught only by an unrelated spec — which is not
+    // coverage of this property, it is a coincidence.
+    const graph = distinctScore()
+    seed(graph, [ins({ id: 1, team_id: 5, score: 1, name: 'a' })])
+    expect(graph.apply([ins({ id: 2, team_id: 5, score: '1', name: 'b' })]).invalidated).toBe(true)
+  })
+
+  it('does not THROW on a bigint value', () => {
+    const graph = distinctScore()
+    seed(graph, [ins({ id: 1, team_id: 5, score: BigInt(1), name: 'a' })])
+    expect(() => graph.apply([ins({ id: 2, team_id: 5, score: BigInt(2), name: 'b' })])).not.toThrow()
   })
 })

@@ -28,6 +28,7 @@ import type { AggCall, OrderKey, ProjItem, SelectShape } from '../ir/types.js'
 import { type DirtySink, containsUnknown } from './dirty.js'
 import { type Row, qualifiedKey, qualifiedRowView, requalify, sigmaMatch } from './rowSpace.js'
 import { keyedRow } from '../ir/encoding.js'
+import { canonicalValue } from '../utils/canonical.js'
 
 type AggregateResult = {
   stream: IStreamBuilder<Row>
@@ -146,10 +147,18 @@ function aggregate(call: AggCall, present: Array<[Row, number]>): unknown {
   }
 }
 
+/** The distinct values, by the SAME identity every other operator uses.
+ *
+ *  This asks "are these the same value?", which the engine already has one answer to (`canonicalValue`), and
+ *  answering it a second way here made DISTINCT disagree with the joins and shadows around it. The previous
+ *  `JSON.stringify(v) + typeof v` diverged three ways, each a wrong count rather than a stale one:
+ *  `JSON.stringify` renders NaN and ±Infinity all as `null` (three values counted as one — a MISS), it
+ *  preserves key INSERTION order (one logical object counted twice, where every other identity sorts), and
+ *  it THROWS on a bigint, which crashed the stage on an int8 column. */
 function distinctValues(values: Array<[unknown, number]>): Array<[unknown, number]> {
   const seen = new Map<string, unknown>()
   for (const [value] of values) {
-    const key = JSON.stringify(value ?? null) + typeof value
+    const key = canonicalValue(value)
     if (!seen.has(key)) seen.set(key, value)
   }
   return [...seen.values()].map((value) => [value, 1])
