@@ -242,7 +242,7 @@ describe('decodeClientFrame — the hostile-schema table', () => {
   })
 
   describe('malformed bytes', () => {
-    test('a truncated frame and unparseable JSON both become violations, not raw throws', () => {
+    test('a truncated frame and unparsable JSON both become violations, not raw throws', () => {
       // `decode` asserts and `JSON.parse` throws — two different error classes that the mux must not
       // have to tell apart. Wrapping them here is what leaves exactly one error class at the seam.
       expect(() => clientFrame(new Uint8Array(2) as Uint8Array<ArrayBuffer>)).toThrow(ProtocolViolationError)

@@ -159,19 +159,19 @@ describe('the PREPARE/barrier exchange', () => {
 describe('a server frame the client cannot parse', () => {
   /** A tag no decoder branch claims — the version-skew shape, and the only malformed frame a
    *  compliant-looking server realistically produces. */
-  const unparseable = () => {
+  const unparsable = () => {
     const frame = encode.ping()
     frame[0] = 0x7f
     return frame
   }
 
-  test('an unparseable frame on the LIVE wire kills it instead of throwing out of the handler', async () => {
+  test('an unparsable frame on the LIVE wire kills it instead of throwing out of the handler', async () => {
     const h = await upgradeHarness()
     await waitUntil(() => h.handoffDrained(), 'the upgrade completed, so h.ws is the live transport')
     const socket = h.sockets[0]!
     expect(socket.readyState).toBe(1) // OPEN — the instrument, before
 
-    h.ws.pushFrame(unparseable())
+    h.ws.pushFrame(unparsable())
 
     // The wire is dead by the same door an ordinary death uses; nothing escaped the event handler.
     expect(socket.readyState).toBe(3) // CLOSED
@@ -189,13 +189,13 @@ describe('a server frame the client cannot parse', () => {
     expect(h.channels[0]!.received).toContainEqual({ kind: 'text', value: 'still-alive' })
   })
 
-  test('an unparseable frame on the PROBE ends the attempt rather than throwing', async () => {
+  test('an unparsable frame on the PROBE ends the attempt rather than throwing', async () => {
     // The probe's handler is a second, independent decode site: it runs before any transport exists,
     // so its recovery is the attempt abort, not a reconnect.
     const h = await upgradeHarness({ prepare: 'withhold' })
     expect(h.upgradeTag()).toBe('staging')
 
-    h.ws.pushFrame(unparseable())
+    h.ws.pushFrame(unparsable())
 
     await waitUntil(() => h.upgradeTag() === 'none', 'the attempt ended')
     expect(h.sockets[0]!.readyState).toBe(3)
