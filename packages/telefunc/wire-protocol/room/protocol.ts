@@ -19,7 +19,6 @@ export {
   bytesToBase64,
   base64ToBytes,
   roomConfigKvKey,
-  roomIdFromConfigKey,
   roomMemberKvKey,
   roomMemberKvPrefix,
   roomIndexKvKey,
@@ -196,11 +195,6 @@ function base64ToBytes(b64: string): Uint8Array {
 function roomConfigKvKey(roomId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:config`
 }
-/** Inverse of `roomConfigKvKey` — `null` for keys that aren't room config records. */
-function roomIdFromConfigKey(key: string): string | null {
-  if (!key.startsWith(ROOM_KEY_NAMESPACE) || !key.endsWith(':config')) return null
-  return decodeURIComponent(key.slice(ROOM_KEY_NAMESPACE.length, -':config'.length))
-}
 /** KV key of one member record. */
 function roomMemberKvKey(roomId: string, memberId: string): string {
   return `${ROOM_KEY_NAMESPACE}${roomKeyId(roomId)}:m:${memberId}`
@@ -247,9 +241,10 @@ function roomHiddenMemberKvPrefix(roomId: string): string {
 const IDENTITY_KEY_NAMESPACE = 'telefunc:identity:'
 
 /** KV key marking one membership of an app identity: one key per (room, identity, member), so
- *  concurrent joins of the same identity never clobber each other (a list value would — the KV has
- *  no compare-and-set). The index is a hint — written before the member record and cleared after
- *  it, so it may transiently over-include but never silently under-includes; readers confirm each
+ *  concurrent joins of the same identity never clobber each other and each membership stays
+ *  independently removable — a shared list value would put every membership of an identity behind
+ *  one read-modify-write of the same record. The index is a hint — written before the member record
+ *  and cleared after it, so it may transiently over-include but never silently under-includes; readers confirm each
  *  member ID against its record (identity match), which makes phantoms impossible. Room and identity
  *  are encoded so a `:` in either can't collide across pairs; the member ID is a delimiter-free UUID. */
 function roomIdentityMemberKvKey(roomId: string, identity: string, memberId: string): string {

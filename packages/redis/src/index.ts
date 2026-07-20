@@ -87,10 +87,13 @@ const NIL_SENTINEL = '\0NIL'
 // ARGV[3]=order TTL ms ('' = none), ARGV[4]=fence count, then (key, expected) pairs. Returns {0} on a
 // stale fence (nothing written or published), else {1, seq, ts, receivers}.
 //
-// NOTE (Cluster): the order/retain/fence keys are reached via ARGV, not declared in KEYS, so this is
-// correct on a single Redis but not yet Cluster-slot-safe. Bracing a room's keys onto one hash slot
-// (so the whole commit runs in one slot) is the versioned key migration tracked for the Redis
-// hardening pass — it needs a real Cluster to certify.
+// NOTE (Cluster): the two declared keys carry no shared intentional hash tag — the order key
+// (KEYS[1]) is unbraced, so the whole key hashes, while the channel key (KEYS[2]) is tagged on the
+// broadcast key alone — so nothing co-slots them and any agreement is accidental. The retain and
+// fence keys are worse: the script reaches them through ARGV instead of declaring them as KEYS at
+// all. Either fact rules Cluster out, so this is correct on a single Redis only. Giving a room's
+// keys one shared tag and declaring them all in KEYS is the versioned key migration tracked for the
+// Redis hardening pass — it needs a real Cluster to certify.
 const COMMIT_FRAME_LUA = `
 local nf = tonumber(ARGV[4])
 for i = 1, nf do
@@ -271,7 +274,8 @@ class RedisTransport implements BroadcastTransport {
     const pattern = `${escapeGlob(this.kvKey(prefix))}*`
     const keys: string[] = []
     // On a Cluster, SCAN only walks the node it's sent to — walk every master.
-    // Master keyspaces are disjoint, so no deduplication is needed.
+    // Not deduplicated: Redis allows SCAN to return the same element more than once (e.g. across a
+    // rehash of the walked node), so a caller can see a repeated key.
     for (const node of this.scanTargets()) {
       let cursor = '0'
       do {

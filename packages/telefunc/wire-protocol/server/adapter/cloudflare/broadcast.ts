@@ -924,8 +924,10 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       await this.putPresence(key)
     } finally {
       memberState.setupInFlight = false
-      // Presence is now registered (or the write threw and its own refresh/reconnect will retry) — the
-      // subscription is as live as it gets, so release any retained replay waiting on its readiness.
+      // Release any retained replay waiting on this subscription's readiness. Readiness is marked on
+      // failure too: if the put threw, the error propagates from here — the refresh timer is never
+      // installed, the pending publishes are never flushed, and nothing re-attempts this initial
+      // registration, so the subscription is live locally with no presence entry behind it.
       memberState.markPresenceRegistered()
     }
 

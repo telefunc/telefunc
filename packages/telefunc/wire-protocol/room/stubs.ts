@@ -35,8 +35,10 @@ import {
 assertIsNotBrowser()
 
 // The wire adapters of the room domain: how a `Room` and a `LocalParticipant` cross a
-// response. All room semantics (membership, validation, relay decisions) stay in
-// `ServerRoom` — these classes only move frames between the peer and the room.
+// response. Room-wide authority (membership, admission, validation, ordering) stays in
+// `ServerRoom`; each stub owns one holder's view of that room — the client's declared wants
+// and the per-holder buffering, watermarks and correlations that deliver the room to that
+// one peer.
 
 /**
  * The channel registered with a response when a `Room` crosses the wire.

@@ -1266,8 +1266,10 @@ class ServerRoom implements Room {
     if (this._state.closed && !wasClosed) this._teardown()
   }
 
-  /** Whether a control event concerns a hidden (server-only) member and so must not reach clients —
-   *  their presence never rides the roster or the control lane (see `getParticipants({ hidden })`). */
+  /** Whether a control event concerns a hidden (server-only) member and so must not be relayed to
+   *  clients. The event still rides the control lane between servers — that is how every server's
+   *  projection converges on a hidden member — but it stops at the stub boundary, so a hidden member
+   *  never enters a client's roster or its presence narration (see `getParticipants({ hidden })`). */
   private _hidesFromClients(event: RoomEnvelope): boolean {
     switch (event.__r) {
       case 'join':
@@ -2237,7 +2239,8 @@ async function listHiddenMemberIds(kv: RoomKV, roomId: string): Promise<Set<stri
 
 // ── Identity index ──────────────────────────────────────────────────────────
 // The (room, identity)→members index is a hint: one marker key per membership (so concurrent
-// same-identity joins never clobber — the KV has no compare-and-set), written before the member
+// same-identity joins never clobber and each membership stays independently removable, instead of
+// every membership of an identity contending on one shared list value), written before the member
 // record and cleared after it. So it may briefly over-include but never silently under-includes;
 // resolveIdentityMembers() confirms each marker against its member record, making a stale marker
 // resolve to nothing. Only server-side statics need it, so it never touches the client wire.
