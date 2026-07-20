@@ -42,12 +42,31 @@ import { serializeTelefunctionResult } from '../../telefunc/dist/node/server/run
 /** The release that first carries telefunc's live-config union read in `serializeTelefunctionResult`. */
 const REQUIRED_TELEFUNC_MINIMUM = [0, 2, 23] as const
 
-/** The lowest version a range admits, as a numeric triple. Deliberately tolerant of the range SYNTAX
- *  (`>=x.y.z`, `^x.y.z`, `x.y.z`) and strict about the floor it implies — the point is to permit a
- *  legitimate future raise while refusing a drop, which an exact-string match could not do. */
+/** Exactly the range syntaxes this gate claims to understand, ANCHORED to the whole string: `>=x.y.z`,
+ *  `^x.y.z`, and a bare exact `x.y.z`. For each, the lowest admitted version is the triple itself. */
+const SUPPORTED_RANGE = /^(?:>=|\^)?(\d+)\.(\d+)\.(\d+)$/
+
+/** The lowest version a range admits, as a numeric triple — FAILING CLOSED on anything this gate cannot
+ *  reason about.
+ *
+ *  It used to scan for the first `x.y.z` anywhere in the string and ignore everything around it, which made
+ *  the gate green-light precisely the ranges it exists to reject: `<=0.2.23` and `<0.2.23` (which admit
+ *  older releases, and in the second case ONLY older ones) both "passed", as did the union
+ *  `>=0.2.23 || >=0.2.0`, whose second arm re-admits everything the first excludes. An operator-blind read
+ *  of a range is not a floor.
+ *
+ *  Unknown syntax now THROWS rather than guessing. A gate that cannot parse its input must not return an
+ *  answer: widening the grammar has to be a deliberate edit here, with a control added below for whatever
+ *  new form is admitted. */
 function minimumOf(range: string): [number, number, number] {
-  const matched = range.match(/(\d+)\.(\d+)\.(\d+)/)
-  if (!matched) throw new Error(`Cannot read a version floor from peer range ${JSON.stringify(range)}`)
+  const matched = range.trim().match(SUPPORTED_RANGE)
+  if (!matched) {
+    throw new Error(
+      `Cannot determine a version floor from peer range ${JSON.stringify(range)}. This gate understands ` +
+        `">=x.y.z", "^x.y.z" and exact "x.y.z" only. Use one of those, or extend SUPPORTED_RANGE ` +
+        `deliberately and add a control for the new form — do not loosen it to make a range parse.`,
+    )
+  }
   return [Number(matched[1]), Number(matched[2]), Number(matched[3])]
 }
 
@@ -81,6 +100,29 @@ describe('telefunc compatibility — the declared peer floor', () => {
     expect(atLeast(minimumOf('>=0.2.23'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true)
     expect(atLeast(minimumOf('>=0.3.0'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true) // a legitimate future raise
     expect(atLeast(minimumOf('^1.0.0'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true)
+    expect(atLeast(minimumOf('0.2.23'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true) // bare exact pin
+  })
+
+  it('CONTROL: an UNSAFE OPERATOR is rejected, not silently read as a floor', () => {
+    // The false green this gate shipped with: reading the first `x.y.z` anywhere ignored the operator, so
+    // `<=0.2.23` (admits every older release) and `<0.2.23` (admits ONLY older ones) both passed — the gate
+    // green-lighting exactly what it exists to reject. They must now fail loudly instead.
+    expect(() => minimumOf('<=0.2.23')).toThrow(/Cannot determine a version floor/)
+    expect(() => minimumOf('<0.2.23')).toThrow(/Cannot determine a version floor/)
+    expect(() => minimumOf('<0.3.0')).toThrow(/Cannot determine a version floor/)
+  })
+
+  it('CONTROL: a UNION is rejected — a safe first arm does not make the range safe', () => {
+    // `>=0.2.23 || >=0.2.0` reads as satisfied by the first arm while the second re-admits everything the
+    // first excludes. Parsing only the leading triple could never see that.
+    expect(() => minimumOf('>=0.2.23 || >=0.2.0')).toThrow(/Cannot determine a version floor/)
+    expect(() => minimumOf('>=0.2.23 || <0.2.23')).toThrow(/Cannot determine a version floor/)
+  })
+
+  it('CONTROL: other unparseable forms fail closed rather than guessing', () => {
+    for (const unsupported of ['*', 'x', '~0.2.23', '0.2.x', '>=0.2.23 <0.3.0', '0.2.0 - 0.2.30', 'latest', '']) {
+      expect(() => minimumOf(unsupported), `expected ${JSON.stringify(unsupported)} to be rejected`).toThrow()
+    }
   })
 })
 
