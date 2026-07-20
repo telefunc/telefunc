@@ -209,11 +209,20 @@ describe('decodeClientFrame — the hostile-schema table', () => {
   describe('direction', () => {
     // A client sending one of these is talking a protocol we do not speak. The check lives here
     // rather than in the mux because it is a property of the frame, not of any connection's state.
+    //
+    // Stated as an ALLOWLIST in the code, so this table has to be read together with the control
+    // below: a denylist admits by omission, and the four rows a denylist missed each reached a
+    // different downstream failure — PUBLISH/PUBLISH_BINARY an `assert(false)` filed as our bug,
+    // ABORT/ERROR a ctrl switch with no case, which accepted and silently dropped them.
     const rows: [name: string, frame: Uint8Array<ArrayBuffer>][] = [
       ['PONG', encode.pong()],
       ['FIN', encode.fin()],
       ['READY', encode.ready({ upgradeId: 'u' })],
       ['STREAM_REQUEST_OPEN_ACK', encode.streamRequestOpenAck()],
+      ['PUBLISH', encode.publish(0, `9,1700000000000\n${JSON.stringify(1)}`, 1)],
+      ['PUBLISH_BINARY', encode.publishBinary(0, new Uint8Array(12 + 2), 1)],
+      ['ABORT', encode.abort(0, JSON.stringify('nope'))],
+      ['ERROR', encode.error(0)],
     ]
     test.each(rows)('a client-sent %s is refused', (_name, frame) => {
       expect(() => clientFrame(frame)).toThrow(ProtocolViolationError)
@@ -235,9 +244,32 @@ describe('decodeClientFrame — the hostile-schema table', () => {
       expect(() => clientFrame(frame)).toThrow(ProtocolViolationError)
     })
 
-    test('control: PING and an ordinary data frame pass', () => {
-      expect(clientFrame(encode.ping()).tag).toBe(TAG.PING)
-      expect(clientFrame(encode.text(0, '"hi"', 1)).tag).toBe(TAG.TEXT)
+    // The other half of an allowlist, and the half a refusal table cannot supply: an allowlist that
+    // dropped a legal tag would break real clients while every row above stayed green. Enumerated
+    // rather than sampled, so a tag added to the protocol without a direction decision fails HERE —
+    // at a table naming it — instead of somewhere downstream at runtime.
+    const legalRows: [name: string, frame: Uint8Array<ArrayBuffer>][] = [
+      ['PING', encode.ping()],
+      ['RECONCILE', encode.reconcile({ open: goodOpen })],
+      ['PREPARE', encode.prepare({ upgradeId: 'u', sessionId: 's' })],
+      ['TEXT', encode.text(0, '"hi"', 1)],
+      ['BINARY', encode.binary(0, new Uint8Array([1]), 1)],
+      ['TEXT_ACK_REQ', encode.textAckReq(0, '"hi"', 1)],
+      ['BINARY_ACK_REQ', encode.binaryAckReq(0, new Uint8Array([1]), 1)],
+      ['ACK_RES', encode.ackRes(0, 1, 1, '"ok"')],
+      ['PUBLISH_ACK_REQ', encode.publishAckReq(0, '"hi"', 1)],
+      ['PUBLISH_BINARY_ACK_REQ', encode.publishBinaryAckReq(0, new Uint8Array([1]), 1)],
+      ['CLOSE', encode.close(0, 1_000)],
+      ['CLOSE_ACK', encode.closeAck(0)],
+      ['WINDOW', encode.window(0, 1_024)],
+      ['MSG_WINDOW', encode.msgWindow(0, 8)],
+      ['BDP_PING', encode.bdpPing(0)],
+      ['BDP_PING_ACK', encode.bdpPingAck(0)],
+      ['BROADCAST_SUB', encode.broadcastSub(0, false)],
+      ['BROADCAST_UNSUB', encode.broadcastUnsub(0, false)],
+    ]
+    test.each(legalRows)('control: a client-sent %s passes', (_name, frame) => {
+      expect(clientFrame(frame).tag).toBe(frame[0])
     })
   })
 
@@ -249,6 +281,22 @@ describe('decodeClientFrame — the hostile-schema table', () => {
       const junk = encode.text(0, 'not json', 1)
       junk[0] = TAG.RECONCILE
       expect(() => clientFrame(junk)).toThrow(ProtocolViolationError)
+    })
+
+    // `decode` CASTS the parsed JSON, so these arrive typed as the payload they are not and every
+    // field check dereferences them. The throw was a raw `TypeError` — rethrown by the mux as a
+    // telefunc bug, leaving the offending wire alive. Non-objects are refused at the boundary now.
+    const nonObjectRows: [name: string, payload: unknown][] = [
+      ['null', null],
+      ['a bare string', 'nope'],
+      ['a number', 7],
+      ['an array', []],
+    ]
+    test.each(nonObjectRows)('a PREPARE payload that is %s is a violation, not a TypeError', (_name, payload) => {
+      expect(() => clientFrame(hostile(encode.prepare, payload))).toThrow(ProtocolViolationError)
+    })
+    test.each(nonObjectRows)('a RECONCILE payload that is %s is a violation, not a TypeError', (_name, payload) => {
+      expect(() => clientFrame(hostile(encode.reconcile, payload))).toThrow(ProtocolViolationError)
     })
 
     test('an unknown tag is a violation', () => {

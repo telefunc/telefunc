@@ -41,13 +41,20 @@ import {
   textFrame,
 } from './upgrade-mux-harness.js'
 import { createUpgradeHarness, waitUntil, type UpgradeHarness } from './upgrade-client-harness.js'
-import { EMPTY_STAGE, connectSecondSse, connectSse, makeSentinel, type Harness } from './upgrade-spec-helpers.js'
+import {
+  EMPTY_STAGE,
+  connectSecondSse,
+  connectSse,
+  makeSentinel,
+  readysOn,
+  type Harness,
+} from './upgrade-spec-helpers.js'
 import { getChannelMux } from './server/mux.js'
 import { OversizeFrameError, StreamReader } from './server/request/StreamReader.js'
 import { handleSseChannelRequest } from './server/sse.js'
 import { encodeSseRequestMetadata } from './sse-request.js'
 import { encodeU32 } from './frame.js'
-import { TAG, encode } from './shared-ws.js'
+import { TAG, decode, encode } from './shared-ws.js'
 import {
   UPGRADE_HANDOFF_BUFFER_BYTES,
   UPGRADE_HANDOFF_BUFFER_FRAMES,
@@ -334,6 +341,119 @@ describe('raw frame ceiling', () => {
     // Refused BEFORE decode and before dispatch — not decoded and then discarded.
     expect(chW.received).toEqual([42])
     await expectSentinelAlive(h, chA)
+  })
+})
+
+// The seam's contract is TOTALITY: every byte a client can put on the wire leaves it as either a
+// validated frame or a `ProtocolViolationError`. That is what makes `runInboundTurn`'s narrowed catch
+// sound — it RETHROWS everything else as a telefunc bug. So each escape is two defects at once: the
+// offending wire survives, and a client's frame is misfiled as our fault. Driven end-to-end rather
+// than at the unit seam, because "throws a violation" and "kills that wire and no other" are
+// different claims and only the second is the one production depends on.
+describe('the client→server decode seam is TOTAL', () => {
+  /** Shapes the typed encoders cannot express — the reason only a runtime check stops them. */
+  const hostile = (build: (payload: never) => Uint8Array<ArrayBuffer>, payload: unknown) => build(payload as never)
+
+  /** A second wire with its own session and its own channel, so the sentinel on `h.sse` stays an
+   *  INDEPENDENT oracle: the row must kill the offender and leave every other connection alone. */
+  async function wsWithChannel(h: Harness) {
+    const chW = h.registerChannel('W')
+    await h.ws.deliver(reconcileFrame({ open: [{ id: 'W', ix: 0, lastSeq: 0, initial: true }] }))
+    await h.ws.deliver(textFrame(0, 1, 11))
+    expect(chW.received).toEqual([11]) // instrument: this wire delivers before the hostile frame
+    return chW
+  }
+
+  test('a JSON literal `null` PREPARE payload is a violation, not a TypeError', async () => {
+    // `decode` CASTS the parsed JSON, so `null` arrives typed as `PreparePayload` and the validator
+    // dereferences it. The throw is a raw `TypeError`, which `runInboundTurn` rethrows as our bug —
+    // the wire lives on and the fault is filed against telefunc.
+    const h = (harness = createMuxHarness())
+    const { chA } = await connectSse(h)
+    const probe = h.makeWire(null)
+
+    await probe.deliver(hostile(encode.prepare, null))
+
+    expect(probe.terminated()).toBe(true)
+    expect(readysOn(probe)).toHaveLength(0)
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+    await expectSentinelAlive(h, chA)
+  })
+
+  test('a JSON literal `null` RECONCILE payload is a violation, not a TypeError', async () => {
+    const h = (harness = createMuxHarness())
+    const { chA } = await connectSse(h)
+    await wsWithChannel(h)
+
+    await h.ws.deliver(hostile(encode.reconcile, null))
+
+    expect(h.ws.terminated()).toBe(true)
+    await expectSentinelAlive(h, chA)
+  })
+
+  // Direction is a property of the FRAME, not of any connection's state, so it belongs at the seam.
+  // Each of these reached a different downstream failure: PUBLISH/PUBLISH_BINARY trip the
+  // `assert(false)` in `_dispatchDataFrame` (our-bug, wire survives), while ABORT and ERROR are
+  // server→client terminal ctrls that `_dispatchCtrl` has no case for — silently ACCEPTED and dropped.
+  //
+  // ⚠️ The publish rows carry a WELL-FORMED info prefix (`seq,timestamp\n` / the 12-byte binary
+  // header). Built without one they are refused by `decodePublishText`/`decodePublishBinary` inside
+  // `decode` — already a violation — and the row then passes with no direction check in the code at
+  // all. `expectDecodesAs` is the instrument that keeps each row a statement about DIRECTION.
+  const serverOnlyRows: [name: string, tag: number, frame: Uint8Array<ArrayBuffer>][] = [
+    ['PUBLISH', TAG.PUBLISH, encode.publish(0, `9,1700000000000\n${stringify(1)}`, 5)],
+    ['PUBLISH_BINARY', TAG.PUBLISH_BINARY, encode.publishBinary(0, new Uint8Array(12 + 2), 5)],
+    ['ABORT', TAG.ABORT, encode.abort(0, stringify('nope'))],
+    ['ERROR', TAG.ERROR, encode.error(0)],
+  ]
+  test.each(serverOnlyRows)('a client-sent %s terminates that wire', async (_name, tag, frame) => {
+    const h = (harness = createMuxHarness())
+    const { chA } = await connectSse(h)
+    const chW = await wsWithChannel(h)
+
+    expect(decode(frame).tag).toBe(tag) // instrument: the codec accepts it, so only direction can refuse it
+    await h.ws.deliver(frame)
+
+    expect(h.ws.terminated()).toBe(true)
+    expect(chW.received).toEqual([11]) // refused, not delivered-then-discarded
+    await expectSentinelAlive(h, chA)
+  })
+
+  // The tag and the frame layout are both legal here — only the SERIALIZER text inside is hostile,
+  // so nothing above the channel can see it. `parse` throws a `SyntaxError` well past the seam.
+  const badSerializerRows: [name: string, frame: Uint8Array<ArrayBuffer>][] = [
+    ['TEXT', encode.text(0, 'not-json', 5)],
+    // The dangerous one: `_dispatchDataFrame` `void`s this path, so the throw was not merely
+    // misfiled — it never reached `runInboundTurn`'s catch at all, surfacing as an unhandled rejection.
+    ['TEXT_ACK_REQ', encode.textAckReq(0, 'not-json', 5)],
+  ]
+  test.each(badSerializerRows)('a %s whose payload is not parseable terminates that wire', async (_name, frame) => {
+    const h = (harness = createMuxHarness())
+    const { chA } = await connectSse(h)
+    const chW = await wsWithChannel(h)
+
+    await h.ws.deliver(frame)
+    await settle()
+
+    expect(h.ws.terminated()).toBe(true)
+    expect(chW.received).toEqual([11])
+    await expectSentinelAlive(h, chA)
+  })
+
+  test('control: the legal client tags this table brackets still flow on the same wire', async () => {
+    // Without it, every row above is satisfied by a seam that refuses everything. PUBLISH_ACK_REQ is
+    // in the pair deliberately: it is the client-legal sibling of the PUBLISH row above, so the
+    // allowlist cannot be read as "no publish tag from a client".
+    const h = (harness = createMuxHarness())
+    const chW = await wsWithChannel(h)
+
+    await h.ws.deliver(encode.textAckReq(0, stringify(22), 2))
+    await h.ws.deliver(encode.publishAckReq(0, stringify(33), 3))
+    await h.ws.deliver(textFrame(0, 4, 44))
+    await settle()
+
+    expect(h.ws.terminated()).toBe(false)
+    expect(chW.received).toEqual([11, 22, 44])
   })
 })
 

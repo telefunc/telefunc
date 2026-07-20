@@ -482,13 +482,36 @@ class ProtocolViolationError extends Error {
   }
 }
 
-/** Tags only a server may send. A client sending one is talking a protocol we do not speak. */
-const SERVER_ONLY_TAGS: ReadonlySet<number> = new Set([
-  TAG.PONG,
-  TAG.FIN,
-  TAG.RECONCILED,
-  TAG.READY,
-  TAG.STREAM_REQUEST_OPEN_ACK,
+/**
+ * Every tag a client may legally send — an ALLOWLIST, so a tag that is server-only, or that a later
+ * revision adds without deciding its direction, is refused by default rather than admitted by
+ * omission. A denylist got this wrong in both directions at once: `PUBLISH`/`PUBLISH_BINARY` reached
+ * `_dispatchDataFrame`'s `assert(false)` and were misfiled as a telefunc bug, while `ABORT`/`ERROR`
+ * — server→client terminal ctrls — were silently ACCEPTED and dropped by a switch with no case
+ * for them.
+ *
+ * The publish pairs split: the `_ACK_REQ` halves are how a client publishes to a broadcast channel,
+ * the bare halves are delivery to a subscriber and never travel this way.
+ */
+const CLIENT_TAGS: ReadonlySet<number> = new Set([
+  TAG.PING,
+  TAG.RECONCILE,
+  TAG.PREPARE,
+  TAG.TEXT,
+  TAG.BINARY,
+  TAG.TEXT_ACK_REQ,
+  TAG.BINARY_ACK_REQ,
+  TAG.ACK_RES,
+  TAG.PUBLISH_ACK_REQ,
+  TAG.PUBLISH_BINARY_ACK_REQ,
+  TAG.CLOSE,
+  TAG.CLOSE_ACK,
+  TAG.WINDOW,
+  TAG.MSG_WINDOW,
+  TAG.BDP_PING,
+  TAG.BDP_PING_ACK,
+  TAG.BROADCAST_SUB,
+  TAG.BROADCAST_UNSUB,
 ])
 
 /**
@@ -508,7 +531,7 @@ function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxPrepareBytes: number
   } catch {
     throw new ProtocolViolationError()
   }
-  if (SERVER_ONLY_TAGS.has(frame.tag)) throw new ProtocolViolationError()
+  if (!CLIENT_TAGS.has(frame.tag)) throw new ProtocolViolationError()
   if (frame.tag === TAG.PREPARE) validatePrepare(frame.payload)
   if (frame.tag === TAG.RECONCILE) validateReconcile(frame.payload)
   return frame
@@ -518,7 +541,16 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
+/** `decode` CASTS a JSON payload without inspecting it, so a literal `null` — or any other
+ *  non-object JSON value — arrives typed as the payload it is not. Every field check below then
+ *  dereferences it and throws a raw `TypeError`, which the mux rethrows as a telefunc bug. The
+ *  validators are the boundary, so the boundary is where the shape has to be established. */
+function assertObjectPayload(payload: unknown): void {
+  if (payload === null || typeof payload !== 'object') throw new ProtocolViolationError()
+}
+
 function validatePrepare(payload: PreparePayload): void {
+  assertObjectPayload(payload)
   const p = payload as { upgradeId?: unknown; sessionId?: unknown }
   if (!isNonEmptyString(p.upgradeId)) throw new ProtocolViolationError()
   if (!isNonEmptyString(p.sessionId)) throw new ProtocolViolationError()
@@ -533,6 +565,7 @@ function validatePrepare(payload: PreparePayload): void {
  * refused by default.
  */
 function validateReconcile(payload: ReconcilePayload): void {
+  assertObjectPayload(payload)
   const p = payload as { open?: unknown; sessionId?: unknown; barrier?: unknown; upgradeId?: unknown }
   if (!Array.isArray(p.open)) throw new ProtocolViolationError()
   for (const entry of p.open) {
