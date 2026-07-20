@@ -6,21 +6,12 @@
 // filter (NULL excludes / MISSING widens), and the canonical row encoding that makes
 // consolidate/distinct cancel equal projections and only equal projections.
 
-export {
-  type Row,
-  qualifiedKey,
-  projectRaw,
-  requalify,
-  qualifiedRowView,
-  sigmaMatch,
-  rowString,
-  canonicalKeys,
-  rowChanged,
-}
+export { type Row, qualifiedKey, projectRaw, requalify, qualifiedRowView, sigmaMatch, canonicalKeys, rowChanged }
 
 import { evalK } from '../ir/eval.js'
 import type { ColRef, Predicate, RowView, ScalarExpr } from '../ir/types.js'
-import { canonicalValue, frame } from '../utils/canonical.js'
+import { frame } from '../utils/canonical.js'
+import { canonicalRow } from '../ir/encoding.js'
 
 type Row = Record<string, unknown>
 
@@ -94,28 +85,10 @@ function sigmaMatch(pred: Predicate, row: RowView): boolean {
   return q === true || q === 'missing'
 }
 
-/** Canonical, collision-free encoding of a row restricted to `keys`: equal projections
- *  encode identically (so consolidate/distinct cancel them) and any observable
- *  difference — a value change or a presence change — encodes differently. */
-function rowString(row: Row, keys: string[]): string {
-  return keys
-    .slice()
-    .sort()
-    .map((key) => frame(key) + (Object.hasOwn(row, key) ? `P${canonicalValue(row[key])}` : 'A'))
-    .join('')
-}
-
 /** Whether a change actually changes anything: an insert (no old) or delete (no new) always does; a
  *  pure-replay update (old canonically equals new) does not. Shared by the compile coarse/stateless
  *  fast-paths and the live graph's per-change witness — one row-equality definition in one place. */
 function rowChanged(change: { old?: Row; new?: Row }): boolean {
   if (!change.old || !change.new) return true
   return canonicalRow(change.old) !== canonicalRow(change.new)
-}
-
-function canonicalRow(row: Row): string {
-  return Object.keys(row)
-    .sort()
-    .map((key) => frame(key) + canonicalValue(row[key]))
-    .join('')
 }

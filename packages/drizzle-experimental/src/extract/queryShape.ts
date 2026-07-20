@@ -23,6 +23,7 @@ import { relationIdOf } from '../ir/relation.js'
 import { colRefOf, collectTables, relationKeyOf, tableOf, tableRefOf } from './columns.js'
 import { extractPredicate } from './predicate.js'
 import { type SqlToken, readAggCall, tokenize } from './sqlChunks.js'
+import { isSelectBuilder } from './predicate.js'
 
 /** Read a drizzle select builder into a QueryShape. Every mechanic the compiler
  *  understands (from/joins/where/projection/group/having/distinct/set-ops/order/
@@ -356,11 +357,6 @@ function extractProjection(
 
   for (const [key, value] of Object.entries(fields)) visit(key, value)
   return { projection: { items, star: !partial }, window }
-}
-
-/** A drizzle select query builder (has a `toSQL()`), as opposed to a plain object. */
-function isSelectBuilder(value: unknown): boolean {
-  return typeof value === 'object' && value !== null && typeof (value as { toSQL?: unknown }).toSQL === 'function'
 }
 
 /** The first select-builder embedded in an SQL expression (a wrapped scalar subquery). */

@@ -25,6 +25,7 @@ import { type SetOpBranch, applySetOps } from './setOpsStage.js'
 import { applyWindow } from './windowStage.js'
 import { assertUsage } from '../utils/assert.js'
 import type { FireResult, GraphPlan, SeedDescriptor, StatefulGraph } from './compile.js'
+import { conjunction } from '../ir/predicateAlgebra.js'
 
 // THE STATEFUL COMPILER — a SelectShape whose semantics need operator STATE (joins, aggregates, distinct,
 // window functions, set-ops, EXISTS) becomes a db-ivm dataflow, built in SQL stage order.
@@ -382,8 +383,4 @@ function isAggregate(shape: SelectShape): boolean {
 
 function projectRowWith(shape: SelectShape): (row: Row) => string {
   return isAggregate(shape) ? wholeRowFn : projectFnOf(shape)
-}
-
-function conjunction(parts: Predicate[]): Predicate {
-  return parts.length === 1 ? parts[0]! : { kind: 'and', parts }
 }

@@ -2,6 +2,7 @@ export { oldNewReturningOf, oldNewProvenOf, markOldNewProven, demoteOldNewReturn
 
 import { type SQL, sql } from 'drizzle-orm'
 import { dialectOf, rowRunnerFor } from '../binding/database.js'
+import { causeChain } from '../utils/causeChain.js'
 
 type AnyDb = { dialect?: unknown; $client?: unknown }
 
@@ -128,11 +129,10 @@ async function runOldNewProbe(db: AnyDb): Promise<OldNewCapability> {
  *  SQLSTATE lives on the original. Reading only the outer error classified every refusal as a syntax
  *  refusal, which silently disabled the fallback this function exists to enable. */
 function isPermissionDenied(error: unknown): boolean {
-  for (let current = error, depth = 0; current != null && depth < 5; depth++) {
-    if ((current as { code?: unknown }).code === '42501') return true
-    const message = current instanceof Error ? current.message.toLowerCase() : ''
+  for (const link of causeChain(error)) {
+    if ((link as { code?: unknown }).code === '42501') return true
+    const message = link instanceof Error ? link.message.toLowerCase() : ''
     if (message.includes('permission denied') || message.includes('must be owner')) return true
-    current = (current as { cause?: unknown }).cause
   }
   return false
 }

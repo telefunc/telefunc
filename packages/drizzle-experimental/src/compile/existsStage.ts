@@ -12,7 +12,7 @@ export { type ExistsSpec, applyExists, correlationKey }
 
 import { type IStreamBuilder, filterBy, keyBy, map } from '../graph/ivm.js'
 import type { Row } from './rowSpace.js'
-import { canonicalValue } from '../utils/canonical.js'
+import { correlationKey } from '../ir/encoding.js'
 
 type ExistsSpec = {
   /** The outer correlation column (qualified key) whose value keys the semi-join. */
@@ -33,18 +33,4 @@ function applyExists(outer: IStreamBuilder<Row>, specs: ExistsSpec[]): IStreamBu
       .pipe(map(([, row]: [string, Row]) => row))
   }
   return stream
-}
-
-/** The semi-join key of a correlation value; a NULL / uncaptured value becomes a sentinel
- *  that shares no key, so it never matches (SQL `NULL IN (…)` is not true). */
-function correlationKey(row: Row, key: string): string {
-  const value = row[key]
-  if (!Object.hasOwn(row, key) || value === null) return ` N${canonicalValue(sortedContent(row))}`
-  return ` K${canonicalValue(value)}`
-}
-
-function sortedContent(row: Row): Record<string, unknown> {
-  const out: Record<string, unknown> = {}
-  for (const k of Object.keys(row).sort()) out[k] = row[k]
-  return out
 }

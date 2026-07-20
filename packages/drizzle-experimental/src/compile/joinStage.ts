@@ -17,7 +17,8 @@ import type { JoinShape, Predicate, SelectShape } from '../ir/types.js'
 import type { DirtySink } from './dirty.js'
 import { containsUnknown, dirtyFrontier } from './dirty.js'
 import { type Row, canonicalKeys, qualifiedRowView, requalify, sigmaMatch } from './rowSpace.js'
-import { canonicalValue } from '../utils/canonical.js'
+import { conjunction } from '../ir/predicateAlgebra.js'
+import { equiKey } from '../ir/encoding.js'
 
 type JoinResult = { kind: 'exact'; stream: IStreamBuilder<Row> } | { kind: 'degrade' }
 
@@ -130,28 +131,4 @@ function splitOn(join: JoinShape, leftAliases: Set<string>): { equi: EquiPair[];
 
 function key(alias: string, column: string): string {
   return canonicalKeys(alias, [column])[0]!
-}
-
-/** The composite equi-key. A SQL NULL (or an uncaptured column) in any component yields a
- *  per-content sentinel that no cross-side row shares — the row can never equi-match,
- *  matching SQL's `NULL <> NULL`, while a re-fed identical row keys identically so its
- *  retraction still cancels. */
-function equiKey(row: Row, keys: string[]): string {
-  const values: unknown[] = []
-  for (const k of keys) {
-    const cell = row[k]
-    if (!Object.hasOwn(row, k) || cell === null) return `\0N${canonicalValue(contentOf(row))}`
-    values.push(cell)
-  }
-  return `\0K${canonicalValue(values)}`
-}
-
-function contentOf(row: Row): Record<string, unknown> {
-  const sorted: Record<string, unknown> = {}
-  for (const k of Object.keys(row).sort()) sorted[k] = row[k]
-  return sorted
-}
-
-function conjunction(parts: Predicate[]): Predicate {
-  return parts.length === 1 ? parts[0]! : { kind: 'and', parts }
 }

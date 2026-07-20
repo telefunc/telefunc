@@ -8,6 +8,7 @@ import { report } from './captureReport.js'
 import type { Images } from './writeChanges.js'
 import { type Plan, writeConfigOf } from './writePlan.js'
 import type { Row } from '../router/events.js'
+import { causeChain } from '../utils/causeChain.js'
 
 // The adapter around drizzle's execution machinery for a write whose RETURNING capture CHOSE. The caller
 // never asked for that clause, so the whole of this module exists to make one guarantee: capture's own
@@ -502,10 +503,9 @@ function isSubstitutionFault(error: unknown): boolean {
  *  the original. SQLSTATEs are exactly five characters, which is what tells one apart from a transport
  *  code like `ECONNRESET`. */
 function sqlStateOf(error: unknown): string | undefined {
-  for (let current = error, depth = 0; current != null && depth < 5; depth++) {
-    const code = (current as { code?: unknown }).code
+  for (const link of causeChain(error)) {
+    const code = (link as { code?: unknown }).code
     if (typeof code === 'string' && code.length === 5) return code
-    current = (current as { cause?: unknown }).cause
   }
   return undefined
 }

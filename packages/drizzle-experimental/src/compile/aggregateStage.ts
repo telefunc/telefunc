@@ -26,7 +26,8 @@ import {
 import { compareValues } from '../ir/eval.js'
 import type { AggCall, OrderKey, ProjItem, SelectShape } from '../ir/types.js'
 import { type DirtySink, containsUnknown } from './dirty.js'
-import { type Row, qualifiedKey, qualifiedRowView, requalify, rowString, sigmaMatch } from './rowSpace.js'
+import { type Row, qualifiedKey, qualifiedRowView, requalify, sigmaMatch } from './rowSpace.js'
+import { keyedRow } from '../ir/encoding.js'
 
 type AggregateResult = {
   stream: IStreamBuilder<Row>
@@ -51,7 +52,7 @@ function applyAggregate(graph: D2, shape: SelectShape, stream: IStreamBuilder<Ro
   }
 
   const reduced = input.pipe(
-    keyBy((row: Row) => rowString(row, groupKeys)),
+    keyBy((row: Row) => keyedRow(row, groupKeys)),
     reduce<string, Row, Row, [string, Row]>((values) => {
       const present = values.filter(([, multiplicity]) => multiplicity > 0)
       if (present.length === 0) return grouped ? [] : [[emptyRecord(outputItems, orderCols), 1]]

@@ -6,9 +6,9 @@
 
 export { projectionKeysOf, projectFnOf, wholeRowFn }
 
-import { canonicalValue } from '../utils/canonical.js'
 import type { SelectShape } from '../ir/types.js'
-import { type Row, qualifiedKey, rowString } from './rowSpace.js'
+import { type Row, qualifiedKey } from './rowSpace.js'
+import { keyedRow, positionalRow } from '../ir/encoding.js'
 
 /** The observable projection keys in output ORDER: projected + opaque-contributing columns, then
  *  the ORDER BY columns (so a reorder rides in the tuple). `'*'` = whole row (SELECT *). */
@@ -34,15 +34,11 @@ function projectionKeysOf(shape: SelectShape): string[] | '*' {
  *  columns dedupe by value tuple exactly as SQL does. */
 function projectFnOf(shape: SelectShape): (row: Row) => string {
   const keys = projectionKeysOf(shape)
-  return keys === '*' ? wholeRowFn : (row) => positional(row, keys)
-}
-
-function positional(row: Row, keys: string[]): string {
-  return keys.map((key) => (Object.hasOwn(row, key) ? `P${canonicalValue(row[key])}` : 'A')).join('')
+  return keys === '*' ? wholeRowFn : (row) => positionalRow(row, keys)
 }
 
 /** A projection over every key present in the row (by name) — used for SELECT * and for
  *  the already-final aggregate record produced by the aggregate stage. */
 function wholeRowFn(row: Row): string {
-  return rowString(row, Object.keys(row))
+  return keyedRow(row, Object.keys(row))
 }

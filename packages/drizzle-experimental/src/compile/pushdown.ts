@@ -12,7 +12,8 @@ export { type InputPlan, type Change, pushdownOf, applyChange }
 import { conjunctsOf } from '../extract/predicate.js'
 import type { ColRef, Predicate, ScalarExpr, SelectShape, TableRef } from '../ir/types.js'
 import { dirtyFrontier } from './dirty.js'
-import { type Row, projectRaw, qualifiedRowView, requalify, rowString, sigmaMatch } from './rowSpace.js'
+import { type Row, projectRaw, qualifiedRowView, requalify, sigmaMatch } from './rowSpace.js'
+import { keyedRow } from '../ir/encoding.js'
 
 type InputPlan = {
   alias: string
@@ -99,7 +100,7 @@ function applyChange(plan: InputPlan, change: Change): InputDelta {
 
   const data: Array<[Row, number]> = []
   const dataKeys = [...new Set([...(oldQ ? Object.keys(oldQ) : []), ...(newQ ? Object.keys(newQ) : [])])]
-  const noopData = oldIn && newIn && !!oldQ && !!newQ && rowString(oldQ, dataKeys) === rowString(newQ, dataKeys)
+  const noopData = oldIn && newIn && !!oldQ && !!newQ && keyedRow(oldQ, dataKeys) === keyedRow(newQ, dataKeys)
   if (!noopData) {
     if (oldIn && oldQ) data.push([oldQ, -1])
     if (newIn && newQ) data.push([newQ, 1])
@@ -116,7 +117,7 @@ function dirtyDecision(plan: InputPlan, change: Change): boolean {
   const oldFull = change.old ? projectRaw(plan.alias, change.old, '*') : undefined
   const newFull = change.new ? projectRaw(plan.alias, change.new, '*') : undefined
   const allKeys = [...new Set([...(oldFull ? Object.keys(oldFull) : []), ...(newFull ? Object.keys(newFull) : [])])]
-  const replay = !!oldFull && !!newFull && rowString(oldFull, allKeys) === rowString(newFull, allKeys)
+  const replay = !!oldFull && !!newFull && keyedRow(oldFull, allKeys) === keyedRow(newFull, allKeys)
   if (replay) return false
   const gateOld = oldFull ? sigmaMatch(plan.gate, qualifiedRowView(oldFull)) : false
   const gateNew = newFull ? sigmaMatch(plan.gate, qualifiedRowView(newFull)) : false

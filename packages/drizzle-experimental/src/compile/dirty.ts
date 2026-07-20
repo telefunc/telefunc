@@ -11,6 +11,7 @@ export type { DirtySink }
 import { conjunctsOf } from '../extract/predicate.js'
 import { type IStreamBuilder, concat, map, output } from '../graph/ivm.js'
 import type { Predicate } from '../ir/types.js'
+import { conjunction } from '../ir/predicateAlgebra.js'
 
 /** A constant marker: the terminal only asks "did anything flow", so the payload is
  *  irrelevant — but the dirty path is never consolidated, so markers never cancel. */
@@ -32,12 +33,6 @@ function dirtyFrontier(pred: Predicate): DirtyFrontier {
   const conjuncts = conjunctsOf(pred)
   const exact = conjuncts.filter((conjunct) => !containsUnknown(conjunct))
   return { active: exact.length !== conjuncts.length, gate: conjunction(exact) }
-}
-
-function conjunction(parts: Predicate[]): Predicate {
-  if (parts.length === 0) return { kind: 'true' }
-  if (parts.length === 1) return parts[0]!
-  return { kind: 'and', parts }
 }
 
 /** Whether a predicate tree carries a leaf the compiler cannot prove in the data stream —
