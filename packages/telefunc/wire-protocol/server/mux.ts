@@ -444,7 +444,9 @@ class ChannelMux {
 
   /** Kill one wire and abandon any upgrade staged on it: a wire being torn down can never commit. */
   private terminateWire(entry: ConnectionEntry, connection: unknown): void {
-    this.clearStage(connection)
+    // A `committing` stage is the continuation's to release; killing this wire only marks intent,
+    // and the continuation unwinds into its own `finally` either way.
+    if (this.stagedUpgrades.get(connection)?.phase === 'staged') this.clearStage(connection)
     entry.state.terminatePermanently = true
     entry.transport.terminateConnection(connection)
   }
@@ -605,7 +607,7 @@ class ChannelMux {
       stage.phase = 'committing'
       // The old wire is spent: the barrier is its final semantic frame by contract.
       entry.state.retiredByBarrier = true
-      return this.settleBarrierCommit(wsEntry, wsConnection, ctrl, stage.upgradeId)
+      return this.settleBarrierCommit(entry, wsEntry, wsConnection, ctrl, stage.upgradeId)
     } catch (err) {
       this.clearStage(wsConnection)
       throw err
@@ -616,6 +618,7 @@ class ChannelMux {
    *  failures SYNCHRONOUSLY. The stage is released however `reconcile` settles — on success that is
    *  the session-set boundary, past which the probe legitimately owns a session. */
   private async settleBarrierCommit(
+    oldEntry: ConnectionEntry,
     wsEntry: ConnectionEntry,
     wsConnection: unknown,
     ctrl: ReconcilePayload,
@@ -627,6 +630,12 @@ class ChannelMux {
       // change to how COMMITTED is delivered cannot quietly detach the e2e oracle from the commit.
       recordUpgradeCommitted()
       return { ...outcome, deliverTo: wsConnection, upgradeId }
+    } catch (err) {
+      // The barrier was the old wire's final frame only if the commit happened. It did not, so the
+      // old session is whole and its wire must answer ordinary traffic again — above all the
+      // client's own recovery reconcile, which the stale flag is exactly what would refuse.
+      oldEntry.state.retiredByBarrier = false
+      throw err
     } finally {
       this.clearStage(wsConnection)
     }
@@ -635,9 +644,11 @@ class ChannelMux {
   /** Release a stage that can no longer commit, and let go of its probe with it. Clearing the record
    *  alone would leave a session-less WS that PING keeps alive indefinitely, waiting on a commit the
    *  server will never perform. The OLD session is never touched here — that is the entire pre-barrier
-   *  rule: an abandoned attempt costs the established client nothing. */
+   *  rule: an abandoned attempt costs the established client nothing.
+   *
+   *  Refuses a `committing` stage: only the commit continuation may release one. */
   private abandonStage(wsConnection: unknown): void {
-    if (!this.stagedUpgrades.has(wsConnection)) return
+    if (this.stagedUpgrades.get(wsConnection)?.phase !== 'staged') return
     this.clearStage(wsConnection)
     const entry = this.connectionEntries.get(wsConnection)
     if (!entry) return

@@ -556,6 +556,120 @@ describe('the barrier discriminant is a shape, not a truthiness test', () => {
   })
 })
 
+// `staged → committing` is a LINEARIZATION POINT: past it the commit continuation owns the stage's
+// fate exclusively, and every other actor may only mark intent. Without that rule the six stage
+// destroyers all reach a stage whose commit is mid-flight — `settleBarrierCommit` awaits `reconcile`,
+// and any turn on another connection's chain runs inside that await. The observable damage is a
+// COMMITTED delivered to a probe the server just terminated: the client flips onto a corpse and can
+// only recover at its join deadline.
+//
+// The commit never parks, so the continuation completes in a bounded microtask chain — a barrier
+// refuses `initial: true`, which is the one thing that could make `reconcile` await a registration.
+// That is what makes owning the stage across the await safe rather than unbounded.
+describe('only the commit continuation may release a committing stage', () => {
+  const ordinaryClaim = (sessionId: string) => reconcileFrame({ sessionId, open: [{ id: 'A', ix: 0, lastSeq: 1 }] })
+
+  test('a concurrent claim on the old session lands mid-commit and does not strand it', async () => {
+    // SOL's reproduced merge blocker. The claim is delivered on a THIRD wire while the barrier's
+    // continuation is suspended, so `releaseStagesForReconcile` reaches a `committing` stage.
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+
+    const commit = h.sse.deliver(barrier(s0)) // deliberately un-awaited: the continuation is in flight
+    const sse2 = h.makeWire('sse-conn-2')
+    const claim = sse2.deliver(ordinaryClaim(s0))
+    await Promise.all([commit, claim])
+
+    expect(h.ws.terminated()).toBe(false) // ← the probe survives the claim
+    const committed = reconciledOn(h.ws)
+    expect(committed).toHaveLength(1) // ← COMMITTED reached a LIVE probe
+    expect(h.ws.sessionId()).toBeTypeOf('string')
+    // The continuation is the sole releaser, and it did release: no stage leaks past the commit.
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+    // The claim is not collateral either — it is ordinary traffic and must complete on its own wire.
+    expect(reconciledOn(sse2)).toHaveLength(1)
+  })
+
+  test('the stage TTL handler refuses a committing stage', async () => {
+    // The same rule reached through a timer rather than a peer wire — `abandonStage` is the TTL's
+    // handler, so both interleavings share one guard.
+    //
+    // ⚠️ Honest scope: this interleaving is NOT reachable through the real event loop today. The
+    // commit is a bounded microtask chain (a barrier refuses `initial: true`, which is the only
+    // thing that could make `reconcile` park), and timer callbacks cannot land between microtasks.
+    // The SYNCHRONOUS `advanceTimersByTime` below is what places the callback inside the suspended
+    // continuation; `advanceTimersByTimeAsync` would drain the commit first and the row would assert
+    // nothing. It is therefore a structural guard on the handler, not a reproduction — and what it
+    // protects is the day someone introduces a park into the commit path. The reachable interleaving
+    // is the concurrent claim above.
+    vi.useFakeTimers()
+    const h = (harness = createMuxHarness({ stageTtlMs: 50 }))
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+
+    const commit = h.sse.deliver(barrier(s0))
+    await Promise.resolve() // the continuation is now suspended inside `reconcileSession`
+    vi.advanceTimersByTime(51) // ← sync: the TTL callback runs while it is suspended
+    await commit
+
+    expect(h.ws.terminated()).toBe(false)
+    expect(reconciledOn(h.ws)).toHaveLength(1)
+    expect(h.ws.sessionId()).toBeTypeOf('string')
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+  })
+
+  test('control: the same claim BEFORE the barrier still abandons the stage', async () => {
+    // The discriminator. The guard must refuse only `committing` stages — a `staged` one is exactly
+    // what the claim is supposed to destroy, and a guard that refused both would silently convert
+    // every abandoned attempt into a leak.
+    const h = (harness = createMuxHarness())
+    const { s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+
+    const sse2 = h.makeWire('sse-conn-2')
+    await sse2.deliver(ordinaryClaim(s0))
+
+    expect(h.ws.terminated()).toBe(true)
+    expect(h.mux._getUpgradeResourceSnapshot()).toEqual(EMPTY_STAGE)
+  })
+})
+
+describe('a refused commit leaves the old session fully intact', () => {
+  test('a commit that fails after the phase flip unwinds the retired flag', async () => {
+    // B1b. `retiredByBarrier` is written BEFORE the commit is known to succeed, because the barrier
+    // is the old wire's final frame only if the commit happens. When it does not, the flag is a
+    // wire that refuses every semantic frame it is sent — the client's own recovery is an ordinary
+    // reconcile, and that is precisely what the stale flag rejects. The old wire is then unusable
+    // until the join deadline, for a commit the server never performed.
+    const h = (harness = createMuxHarness())
+    const { chA, s0 } = await connectSse(h)
+    await h.ws.deliver(prepare(s0))
+
+    // The probe dies INSIDE the commit window — after the phase flip, while `reconcileSession` is
+    // suspended — which is the only way to reach a post-flip refusal: `reconcile`'s `state.closed`
+    // check is the one throw downstream of `retiredByBarrier = true`. The single microtask hop is
+    // what places the close there rather than before the barrier's turn (where it would merely clear
+    // a `staged` record and the barrier would find nothing to commit).
+    // Transient, which is what a probe socket dropping actually is: the channels keep their
+    // `_onPeerDisconnect` grace, so the old wire's recovery reconcile can re-attach them. A
+    // permanent close would detach them outright and the session would be gone for a reason that
+    // has nothing to do with the flag under test.
+    const commit = h.sse.deliver(barrier(s0))
+    await Promise.resolve()
+    h.ws.close(false)
+    await commit
+
+    // The client's recovery: an ordinary reconcile on the wire it still holds. This is the assertion
+    // the stale flag breaks — the wire answers with a violation instead of a fresh session.
+    await h.sse.deliver(reconcileFrame({ sessionId: s0, open: [{ id: 'A', ix: 0, lastSeq: 1 }] }))
+
+    expect(h.sse.terminated()).toBe(false)
+    expect(h.sse.sessionId()).not.toBe(s0) // ← the rotation succeeded
+    await expectWireDelivers(h.sse, chA)
+  })
+})
+
 describe('a stage never outlives what it depends on', () => {
   test('the TTL expires the stage and releases the probe, without disturbing the old session', async () => {
     // Confounder control: BOTH wires are PINGed across the window, because the mux's own ping deadline
