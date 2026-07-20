@@ -730,6 +730,33 @@ describe('a join limb that arrives before the handoff exists', () => {
     expect(h.channels[0]!.isClosed).toBe(false)
   }, 20_000)
 
+  test('a data frame held BEHIND the pre-flip COMMITTED survives the flip', async () => {
+    // The row above stops at the COMMITTED, so the flip's re-ingest loop never has an entry left to
+    // process after the join completes. Give it one. Both limbs are in before the flip AND a live
+    // data frame sits behind the COMMITTED in the same pre-flip partition, so the re-ingest reaches
+    // it only after `handleReconciled` has already driven the join. The committing record owns the
+    // WHOLE flip window — completing the join part-way through the loop tears the record down under
+    // the entries still to come, and the trailing frame is lost with it.
+    const h = await upgradeHarness({ batchMode: true, barrier: 'refuse', hangBarrierPost: true })
+    expect(h.upgradeTag()).toBe('committing')
+    expect(h.flipped()).toBe(false)
+
+    h.sse.pushFrame(encode.fin())
+    // Synchronous on the stub socket, so the ORDER inside the pre-flip new partition is exactly
+    // this: COMMITTED first, live data behind it.
+    h.ws.pushFrame(h.committedFrame([{ ix: 0, lastSeq: 0 }]))
+    h.ws.pushFrame(encode.text(0, stringify('behind-the-committed'), 1))
+    await waitUntil(() => h.handoffFinReceived(), 'the FIN was recorded pre-flip')
+
+    h.releaseHungPosts()
+    await waitUntil(() => h.handoffDrained(), 'the join settled inside the flip', UPGRADE_HANDOFF_JOIN_TIMEOUT_MS - 500)
+    // The oracle is DELIVERY, read at `_dispatchFrame` — below the dedup that silently drops. A
+    // handoff that settles while dropping the frame behind the COMMITTED is the defect.
+    expect(h.channels[0]!.received).toEqual([{ kind: 'text', value: 'behind-the-committed' }])
+    expect(h.sseConnects()).toBe(1)
+    expect(h.channels[0]!.isClosed).toBe(false)
+  }, 20_000)
+
   test('control: the same handoff with the FIN AFTER the flip settles the same way', async () => {
     // The instrument that can disagree. Identical harness, identical frames, one variable moved:
     // WHEN the FIN is pushed. It passes on the unfixed client too — which is what makes the row

@@ -356,6 +356,11 @@ class ClientConnection implements MuxConnection {
   private reconciling = false
   private reconcileTimer: ReturnType<typeof setTimeout> | null = null
   private ttl: ReturnType<typeof setTimeout> | null = null
+  /** Held across the flip's synchronous re-ingest. The committing record spans the WHOLE flip
+   *  window, so the join must not settle part-way through it: a held COMMITTED would exit
+   *  `committing` mid-loop and every entry behind it would find no record left to buffer into.
+   *  `flip` re-drives the completion check once the loop has run. */
+  private reingestingFlip = false
 
   private get closed(): boolean {
     return this.state.tag === 'closed'
@@ -951,7 +956,7 @@ class ClientConnection implements MuxConnection {
    *  once the flip has happened — they may arrive in any order. */
   private tryCompleteUpgrade(): void {
     const u = this.committing
-    if (u === null || this.transport !== u.to) return
+    if (u === null || this.transport !== u.to || this.reingestingFlip) return
     if (!u.finReceived || u.upgradeId !== null || this.reconciling) return
     const { from, buffer, deferredOmitted } = this.exitUpgradeCommitting()
     this.retireOldWire(from)
@@ -1258,7 +1263,14 @@ class ClientConnection implements MuxConnection {
     }
     // ⚠️ Must stay fully synchronous: an `await` here would let a concurrent arrival exceed the
     // budget mid-loop, and the remainder would then have to be DISCARDED rather than dispatched.
-    for (const entry of pending) this.bufferDuringCommitting(entry.frame, 'new', entry.byteLength)
+    this.reingestingFlip = true
+    try {
+      for (const entry of pending) this.bufferDuringCommitting(entry.frame, 'new', entry.byteLength)
+    } finally {
+      this.reingestingFlip = false
+    }
+    // Deferred out of the loop, so it runs once, after the record has absorbed every held entry.
+    this.tryCompleteUpgrade()
   }
 
   /** The attempt ended pre-barrier on a wire that can no longer make progress. A REPLACEMENT
