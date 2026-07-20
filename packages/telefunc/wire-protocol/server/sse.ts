@@ -35,8 +35,9 @@ type SseConnection = {
    *  POSTs gate on this before dispatching so they can't race ahead of the reconcile. */
   ready: Promise<void>
   resolveReady: () => void
-  /** Batch data POSTs whose dispatch is in flight. Drained by `runStreamResponse` before
-   *  `sendReconciled` so their `_lastClientSeq` mutations land first. */
+  /** Every in-flight dispatch on this connection, from any POST shape. ONE registry: it is both the
+   *  streamRequest body's drain set and what `runStreamResponse` awaits before `sendReconciled`, so
+   *  a frame that arrived on the upload wire cannot be reported un-applied by the reconcile. */
   pendingDispatches: Set<Promise<unknown>>
 }
 
@@ -133,17 +134,14 @@ class SseConnectionTransport {
     }
   }
 
-  /** Long-lived client→server upload POST. Body streams over the connection's lifetime;
-   *  each frame is dispatched WITHOUT being awaited inside the loop, so a slow dispatch never
-   *  stalls the body, and the mux emits `reconciled` inline whenever one fires.
+  /** Long-lived client→server upload POST. Body streams over the connection's lifetime; each frame
+   *  is dispatched WITHOUT being awaited inside the loop, so a slow dispatch never stalls the body,
+   *  and the mux emits `reconciled` inline whenever one fires.
    *
-   *  The dispatches are retained rather than discarded, and EOF awaits them all before the
-   *  response resolves. That makes body-end a real drain point: when this POST completes, every
-   *  frame it carried has finished its recv-chain turn. Previously the promises were dropped on
-   *  the floor (`void`), so the response could resolve with frames still queued behind an
-   *  unfinished turn — and a client treating POST completion as "the server has processed
-   *  everything I sent" was simply wrong. The batch path already had this property via
-   *  `drainDeferred`; this brings the streaming path in line. */
+   *  Dispatches are registered rather than discarded, so body-end is a real drain point: when this
+   *  POST completes, every frame it carried has finished its recv-chain turn. The `finally` is what
+   *  makes that hold on BOTH exits — a truncated body is the case a client is most likely to follow
+   *  with a reconnect, and the one where a half-applied turn matters most. */
   private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
@@ -151,20 +149,22 @@ class SseConnectionTransport {
     // its handshake timeout to commit to using this wire as its upload channel.
     this.sendNow(connection, encode.streamRequestOpenAck())
     if (!(await this.waitReady(connection))) return badRequest()
-    // Settled dispatches are evicted as they complete, so a long-lived upload does not
-    // accumulate one retained promise per frame for the connection's lifetime.
-    const inFlight = new Set<Promise<unknown>>()
-    while (true) {
-      const raw = await this.readFrameOrNull(connection, reader)
-      if (!raw || connection.closed) break
-      const dispatch = this.mux.onConnectionRawMessage(connection, raw)
-      inFlight.add(dispatch)
-      const evict = () => inFlight.delete(dispatch)
-      // `then(evict, evict)` rather than `.finally()`: it cannot itself produce an unhandled
-      // rejection if a dispatch ever rejects.
-      dispatch.then(evict, evict)
+    try {
+      while (true) {
+        const raw = await this.readFrameOrNull(connection, reader)
+        if (!raw || connection.closed) break
+        const dispatch = this.mux.onConnectionRawMessage(connection, raw)
+        // Settled dispatches are evicted as they complete, so a long-lived upload does not
+        // accumulate one retained promise per frame for the connection's lifetime.
+        connection.pendingDispatches.add(dispatch)
+        const evict = () => connection.pendingDispatches.delete(dispatch)
+        // `then(evict, evict)` rather than `.finally()`: it cannot itself produce an unhandled
+        // rejection if a dispatch ever rejects.
+        dispatch.then(evict, evict)
+      }
+    } finally {
+      await Promise.allSettled(connection.pendingDispatches)
     }
-    if (inFlight.size > 0) await Promise.allSettled(inFlight)
     return okResponse()
   }
 
@@ -204,7 +204,7 @@ class SseConnectionTransport {
       connection.resolveReady()
     }
     if (!shouldSendReconciled(outcome, connection)) return
-    if (connection.pendingDispatches.size > 0) await Promise.allSettled(connection.pendingDispatches)
+    await Promise.allSettled(connection.pendingDispatches)
     this.mux.sendReconciled(connection, outcome)
   }
 

@@ -1571,7 +1571,16 @@ class WsTransport implements ClientChannelTransport {
     let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
     ws.onmessage = ({ data }: MessageEvent) => {
       const raw = new Uint8Array(data as ArrayBuffer)
-      const frame = decode(raw)
+      let frame: DecodedFrame
+      try {
+        frame = decode(raw)
+      } catch {
+        // Unparseable means this wire is no longer speaking the protocol. Closing routes it into the
+        // ordinary wire-death path — here, `onClose` aborting the attempt. Letting it throw would
+        // surface as an uncaught exception out of an event handler, recovering nothing.
+        ws.close()
+        return
+      }
       if (frame.tag === TAG.PONG) {
         onPong?.()
         return
@@ -1699,7 +1708,16 @@ class WsTransport implements ClientChannelTransport {
   private setupHandlers(ws: WebSocket): void {
     ws.onmessage = ({ data }: MessageEvent) => {
       const raw = new Uint8Array(data as ArrayBuffer)
-      const frame = decode(raw)
+      let frame: DecodedFrame
+      try {
+        frame = decode(raw)
+      } catch {
+        // Unparseable means this wire is no longer speaking the protocol. Closing routes it into the
+        // ordinary wire-death path (`onclose` → `_onTransportClosed`), which already knows how to
+        // reconnect. Letting it throw would surface as an uncaught exception out of an event handler.
+        ws.close()
+        return
+      }
       if (frame.tag === TAG.PONG) {
         this.heartbeat?.resetPong()
         return

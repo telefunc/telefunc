@@ -905,4 +905,59 @@ describe('through the real sse.ts', () => {
 
     expect((await response)?.statusCode).toBe(200)
   })
+
+  test('a TRUNCATED streamRequest body drains its parked frames before the POST resolves', async () => {
+    // The exit that matters most: a client whose upload body dies mid-frame is the one about to
+    // reconnect, so a turn left half-applied here is what the reconnect then reconciles against.
+    // Draining only on clean EOF made the contract hold exactly where it was least needed. The
+    // control for this row is the clean-EOF row above — same setup, same park, other exit.
+    const connId = crypto.randomUUID()
+    const chA = globalRegisterChannel(`A-${connId}`)
+    await openSseDownstream(connId, chA.id)
+
+    let controller!: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>>
+    const body = new ReadableStream<Uint8Array<ArrayBuffer>>({ start: (c) => (controller = c) })
+    controller.enqueue(encodeSseRequestMetadata({ connId, streamRequest: true }))
+    let resolved = false
+    const response = handleSseChannelRequest(
+      new Request('http://test.local/_telefunc', { method: 'POST', body, duplex: 'half' } as RequestInit),
+    ).then((r) => {
+      resolved = true
+      return r
+    })
+
+    const parkedId = `B-${connId}`
+    controller.enqueue(
+      lengthPrefixed(
+        encode.reconcile({
+          open: [
+            { id: chA.id, ix: 0, lastSeq: 0 },
+            { id: parkedId, ix: 1, lastSeq: 0, initial: true },
+          ],
+        }),
+      ),
+    )
+    // The frame has to be read — and its turn parked — before the body dies, or this row would
+    // prove nothing about draining.
+    await settle()
+    await settle()
+
+    // Truncation is specifically MID-FRAME: a length prefix that promises more bytes than ever
+    // arrive. A body that merely stops at a frame boundary is a clean EOF as far as `StreamReader`
+    // is concerned (`pullChunk` reports a fault as end-of-stream), and would take the exit the row
+    // above already covers.
+    controller.enqueue(lengthPrefixed(encode.ping()).subarray(0, 6) as Uint8Array<ArrayBuffer>)
+    controller.close()
+
+    // INSTRUMENT CHECK: the read loop has already thrown and the event loop has turned, yet the
+    // response is still pending because the frame it carried is still parked.
+    await settle()
+    await settle()
+    expect(resolved).toBe(false)
+
+    globalRegisterChannel(parkedId)
+
+    // 400, not 200: the truncation is a real read failure that reached `handleRequest`'s sink.
+    expect((await response)?.statusCode).toBe(400)
+  })
 })

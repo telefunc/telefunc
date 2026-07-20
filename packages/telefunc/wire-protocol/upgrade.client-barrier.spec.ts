@@ -156,6 +156,52 @@ describe('the PREPARE/barrier exchange', () => {
   })
 })
 
+describe('a server frame the client cannot parse', () => {
+  /** A tag no decoder branch claims — the version-skew shape, and the only malformed frame a
+   *  compliant-looking server realistically produces. */
+  const unparseable = () => {
+    const frame = encode.ping()
+    frame[0] = 0x7f
+    return frame
+  }
+
+  test('an unparseable frame on the LIVE wire kills it instead of throwing out of the handler', async () => {
+    const h = await upgradeHarness()
+    await waitUntil(() => h.handoffDrained(), 'the upgrade completed, so h.ws is the live transport')
+    const socket = h.sockets[0]!
+    expect(socket.readyState).toBe(1) // OPEN — the instrument, before
+
+    h.ws.pushFrame(unparseable())
+
+    // The wire is dead by the same door an ordinary death uses; nothing escaped the event handler.
+    expect(socket.readyState).toBe(3) // CLOSED
+  })
+
+  test('control: a well-formed frame on the same wire leaves it open', async () => {
+    // Without this, "the socket is closed" is satisfied by a client that closes on every frame.
+    const h = await upgradeHarness()
+    await waitUntil(() => h.handoffDrained(), 'the upgrade completed')
+    const socket = h.sockets[0]!
+
+    h.ws.pushFrame(encode.text(0, '"still-alive"', 1))
+
+    expect(socket.readyState).toBe(1)
+    expect(h.channels[0]!.received).toContainEqual({ kind: 'text', value: 'still-alive' })
+  })
+
+  test('an unparseable frame on the PROBE ends the attempt rather than throwing', async () => {
+    // The probe's handler is a second, independent decode site: it runs before any transport exists,
+    // so its recovery is the attempt abort, not a reconnect.
+    const h = await upgradeHarness({ prepare: 'withhold' })
+    expect(h.upgradeTag()).toBe('preparing')
+
+    h.ws.pushFrame(unparseable())
+
+    await waitUntil(() => h.upgradeTag() === 'none', 'the attempt ended')
+    expect(h.sockets[0]!.readyState).toBe(3)
+  })
+})
+
 describe('settlement happens on COMMITTED, and exactly once', () => {
   test('sendBuffer is released only after COMMITTED, and the channel opens once with batched:false', async () => {
     const h = await upgradeHarness({ barrier: 'refuse' })
