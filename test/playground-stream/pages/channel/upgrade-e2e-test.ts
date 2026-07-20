@@ -19,7 +19,8 @@ import { navigate, getResult, getCleanupState, resetCleanupState } from '../../e
  * That is not a fixable oversight, and deliberately no sleep is tuned in to chase it: a browser
  * cannot deterministically park a frame mid-`recvChain`, so any such gate would be timing-luck and
  * a flake generator. The happens-before edge is gated where it can be gated deterministically —
- * `upgrade.barrier.spec.ts`'s I1 rows, which park a real frame and are mutation-verified. This file
+ * the park/burst rows in `upgrade.barrier-server.spec.ts`, which park a real frame and are
+ * mutation-verified. This file
  * gates the things only a browser can: that the upgrade fires at all, exactly once, and leaves a
  * healthy connection behind.
  *

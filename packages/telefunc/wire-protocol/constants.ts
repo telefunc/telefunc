@@ -81,8 +81,10 @@ export const WS_PROBE_TIMEOUT_MS = 3_000
  *  before declaring the upstream wire dead and falling back to outbox+batch POSTs. */
 export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
-/** How long phase 1 of the upgrade drain waits for natural SSE outbox drain before
- *  phase 2 gates the producer and forces the cutover. */
+/** Bounds the barrier's batch-mode quiesce — how long `emitBarrierBatch` waits for the SSE outbox to
+ *  go naturally empty before it stops waiting for "the wire is busy". It does NOT bound "a POST is
+ *  still in flight": that wait is unbounded by design and ends only with the attempt signal, because
+ *  racing an in-flight POST is what lets the barrier commit ahead of frames the server then drops. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
 /** Deadline for the FIN(old wire) + RECONCILED(new wire) join that commits the handoff. Armed when

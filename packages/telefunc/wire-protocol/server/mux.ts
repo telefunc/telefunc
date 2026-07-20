@@ -385,10 +385,9 @@ class ChannelMux {
    *  leave QUEUED by stalling the chain and continuing to send. Rejection kills only the wire that
    *  overran, so a flood costs its author its own connection and nobody else theirs. */
   private admitInboundFrame(state: ConnectionState, byteLength: number): boolean {
-    // ⚠️ Stated as REJECTION and negated, not as an admit-form comparison. Bytes compare post-add and
-    // frames pre-increment because this frame is not charged yet — and `>=` is not the complement of
-    // `<` for a non-finite limit, which the constructor does not exclude: an injected `NaN` admits
-    // under `>=` and would reject under `<`.
+    // ⚠️ Stated as REJECTION and negated: for a non-finite limit `>=` is not the complement of `<`,
+    // so an admit-form comparison would refuse every frame instead of admitting them. Bytes compare
+    // post-add and frames pre-increment because this frame is not charged yet.
     const overBudget =
       byteLength > this.limits.maxRawFrameBytes ||
       state.recvBacklogBytes + byteLength > this.limits.maxRecvBacklogBytes ||

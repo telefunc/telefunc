@@ -305,10 +305,9 @@ type CommittingUpgrade = Extract<UpgradeState, { tag: 'committing' }>
  *  through the one charge site — the frame is charged once, never twice. */
 type BufferedWireFrame = { frame: DecodedFrame; byteLength: number }
 
-/** ⚠️ Partitioned BY SOURCE WIRE, not one arrival-ordered list, and the old buffer drains FIRST.
- *  Old-wire frames are largely non-recoverable (seq-less terminal ctrls) while new-wire frames all
- *  replay — so merging by arrival order lets a replayed new-wire frame advance `trackSeq` past an
- *  in-flight old-wire frame, which is then dropped as a `'dup'` forever. */
+/** Partitioned BY SOURCE WIRE, not one arrival-ordered list, and the old buffer drains FIRST:
+ *  old-wire frames are largely non-recoverable (seq-less terminal ctrls) while new-wire frames all
+ *  replay. Cursor honesty (`trackSeq`). */
 type UpgradeBuffer = { old: BufferedWireFrame[]; new: BufferedWireFrame[] }
 
 /** Per-channel lifecycle. `releasing` = unregistered before the server confirmed —
@@ -829,9 +828,9 @@ class ClientConnection implements MuxConnection {
   /** The ONE charge site: both partitions, both sides of the flip. A frame is charged exactly once —
    *  the flip refunds before re-ingesting rather than charging a second time.
    *
-   *  Returns whether this frame tripped the budget. ⚠️ Tested AFTER the push, so the frame that
-   *  trips it is still in the old prefix the fallback delivers. Overshooting by one frame is the
-   *  cheap direction to be wrong in; dropping a non-replayable old-wire ctrl is not. */
+   *  Returns whether this frame tripped the budget. Tested AFTER the push, so the frame that trips
+   *  it is still in the old prefix the fallback delivers — overshooting by one is the cheap
+   *  direction to be wrong in. */
   private chargeAndBuffer(
     u: CommittingUpgrade,
     source: 'old' | 'new',
@@ -847,7 +846,7 @@ class ClientConnection implements MuxConnection {
   /** Frames the probe receives before it is the transport. Only the COMMITTED legitimately lands
    *  here, and it must WAIT: acting on it before the flip would settle a swap that has not happened.
    *  Before the commit record exists the probe is nobody's wire and carries no session, so its
-   *  frames are dropped rather than buffered — dropping never advances `trackSeq`. */
+   *  frames are dropped rather than buffered — safe because dropping never dispatches. */
   private ingestPreFlipNewFrame(frame: DecodedFrame, byteLength: number): void {
     const u = this.committing
     if (u === null) return
@@ -1077,10 +1076,9 @@ class ClientConnection implements MuxConnection {
 
   /** Tear down upgrade state, fall back to a fresh SSE, and disable upgrades for this connection.
    *
-   *  ⚠️ Post-flip this is the R2 fallback and its ORDER is load-bearing: stop buffering, then
-   *  dispatch the OLD wire's FIFO prefix while channel membership is still intact (seq-less terminal
-   *  ctrls no replay can reproduce). The NEW wire's buffer is discarded WHOLE — a prefix of it would
-   *  advance `trackSeq` past old-wire frames that never arrived. */
+   *  ⚠️ Post-flip the ORDER is load-bearing: stop buffering, then dispatch the OLD wire's prefix
+   *  while channel membership is still intact. The NEW wire's buffer is discarded WHOLE, never as a
+   *  prefix — cursor honesty (`trackSeq`). */
   private fallbackToSse(err: Error): void {
     if (this.closed) return
     const abandoned = this.teardownUpgrade()
@@ -1250,17 +1248,16 @@ class ClientConnection implements MuxConnection {
     // one rotates the session again and deletes the FIN finalizer the barrier just installed.
     u.to.adoptProbe()
     u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS)
-    // ⚠️ Adopt BEFORE re-ingesting: a pre-flip arrival must land ahead of anything the adopted wire
-    // delivers afterwards, or `trackSeq` advances past it and drops it as a `'dup'` forever.
+    // ⚠️ Adopt BEFORE re-ingesting: the completion check reads transport identity, so a join whose
+    // both limbs are already here settles from inside this call or never gets a second chance.
     // Refunded on the way out and re-charged by the same site on the way back in — never twice.
     const pending = u.buffer.new.splice(0)
     for (const entry of pending) {
       u.bufferedFrames -= 1
       u.bufferedBytes -= entry.byteLength
     }
-    // ⚠️ Fully synchronous, so the budget cannot be exceeded mid-loop by a concurrent arrival.
-    // Adding an `await` here breaks that, and the remainder would have to be DISCARDED rather than
-    // dispatched — otherwise `trackSeq` advances past frames the fallback dropped.
+    // ⚠️ Must stay fully synchronous: an `await` here would let a concurrent arrival exceed the
+    // budget mid-loop, and the remainder would then have to be DISCARDED rather than dispatched.
     for (const entry of pending) this.bufferDuringCommitting(entry.frame, 'new', entry.byteLength)
   }
 
@@ -1523,9 +1520,13 @@ class ClientConnection implements MuxConnection {
     this.dispose()
   }
 
-  /** Dedup against double-delivery. Transports are TCP-ordered and replay sends a
-   *  contiguous slice starting at our reported `lastSeq + 1`, so duplicates shouldn't
-   *  occur in normal operation — kept as a cheap safety net. */
+  /** CURSOR HONESTY — the rule the upgrade's buffering is shaped around, stated once here because
+   *  this is where the cursor moves: a channel's S2C cursor may only advance past a frame that was
+   *  actually DISPATCHED. Advance it past one that was dropped and the client reports the higher
+   *  `lastSeq`, so the server's replay of everything below it is dup-suppressed — permanently.
+   *
+   *  Its owner-scenario is the upgrade, not general double-delivery: during the two-wire window the
+   *  new wire's replayed frames overlap the old wire's in-flight ones (PC2). */
   private trackSeq(ix: number, seq: number): 'accept' | 'dup' {
     const prev = this.lastSeqByChannel.get(ix) ?? 0
     if (seq <= prev) return 'dup'

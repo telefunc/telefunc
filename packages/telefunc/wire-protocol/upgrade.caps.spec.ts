@@ -427,6 +427,27 @@ describe('per-connection recv-chain backlog', () => {
     expect(h.ws.backlog()).toMatchObject({ frames: 0 })
   })
 
+  test('a non-finite backlog limit keeps the wire USABLE rather than killing every frame', async () => {
+    // `admitInboundFrame` is written as a rejection test and negated, not as an admit-form
+    // comparison, and the difference is only visible for a limit that is not finite: `>=` is not the
+    // complement of `<` there. Every comparison against `NaN` is false, so the rejection form finds
+    // nothing over budget and ADMITS, while an admit-form predicate would find nothing under budget
+    // and terminate the wire on its first frame. The constructor does not exclude a non-finite
+    // limit, so a misconfigured ceiling degrades to "unbounded" rather than to "nothing works".
+    //
+    // Until this row the choice lived only in a comment, and a constraint no gate enforces is not a
+    // contract. Delivered on a wire that HOLDS a session: on a session-less one the frame is refused
+    // by the routing guard instead, which would make this pass for a reason it is not about.
+    const h = (harness = createMuxHarness({ maxRecvBacklogFrames: Number.NaN }))
+    const chA = h.registerChannel('A')
+    await h.sse.deliver(reconcileFrame({ open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] }))
+
+    await h.sse.deliver(textFrame(0, 1, 11))
+
+    expect(h.sse.terminated()).toBe(false)
+    expect(chA.received).toEqual([11])
+  })
+
   test('frames far past the cap flow freely when the chain is never parked', async () => {
     // The decrement's own row. With the refund skipped the counter ratchets and this wire dies
     // partway through — even though it never has more than one frame in flight at a time.
