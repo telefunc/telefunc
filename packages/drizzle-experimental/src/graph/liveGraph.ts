@@ -19,6 +19,7 @@ export { type LiveGraph, type LiveGraphSpec, type ApplyOutcome, type GraphCore, 
 import type { CompiledGraph, StatefulGraph, Change } from '../compile/compile.js'
 import type { RowChange, TableChange } from '../router/events.js'
 import { rowChanged } from '../compile/rowSpace.js'
+import { assertUsage } from '../utils/assert.js'
 import type { HydrationExecutor } from './hydrate.js'
 import { createStatefulVariant } from './statefulLiveGraph.js'
 
@@ -91,8 +92,9 @@ type GraphCore = {
 
 /** What ONE variant supplies over the shared core. */
 type GraphVariant = {
-  /** apply() while LIVE. A coarse-born graph never reaches it. */
-  applyLive(changes: RowChange[]): ApplyOutcome
+  /** apply() while LIVE — OMITTED by a variant that is never live. `coarseApply` already answers for
+   *  the `coarse` state, so a born-coarse variant supplying this could only ever be supplying dead code. */
+  applyLive?(changes: RowChange[]): ApplyOutcome
   /** apply() while SEEDING — only the stateful variant can be in that state. */
   applySeeding?(changes: TableChange[]): ApplyOutcome
   /** An image-less mutation arrived and the sequence has ALREADY been advanced. What, if anything, this
@@ -171,8 +173,6 @@ function createCoarseVariant(core: GraphCore): GraphVariant {
   core.toState('coarse')
   core.settle()
   return {
-    // Unreachable: a coarse graph never leaves `coarse`, so `apply` answers from `coarseApply` above.
-    applyLive: (changes) => coarseApply(core, changes),
     reseed: () => {},
     dispose: () => {},
   }
@@ -226,6 +226,10 @@ function assembleLiveGraph(spec: LiveGraphSpec, core: GraphCore, variant: GraphV
       // `applySeeding` exists exactly where `seeding` is reachable — only the stateful variant. The
       // fallback is the same answer that variant gives: a buffered change reports no invalidation.
       if (state === 'seeding') return variant.applySeeding?.(changes) ?? { invalidated: false }
+      // `live` is reachable only for a variant that supplies `applyLive`; a born-coarse one never leaves
+      // `coarse` and was answered above. Asserted rather than softened into a coarse fallback, which would
+      // turn a compiler bug into a silent permanent over-fire.
+      assertUsage(variant.applyLive, 'live graph: a variant with no applyLive reached the live state')
       return variant.applyLive(changes as RowChange[])
     },
     fault() {
