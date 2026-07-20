@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { LiveCell } from './primitive/live.js'
 import { installLiveReplacer } from './primitive/wireServer.js'
@@ -22,15 +23,68 @@ import { serializeTelefunctionResult } from '../../telefunc/dist/node/server/run
 // raised anywhere, and the client silently receives something that was never replaced. Every released
 // telefunc through 0.2.22 behaves that way.
 //
-// `peerDependencies.telefunc: >=0.2.23` states that requirement; this spec ENFORCES it. A version range is
-// a claim about the world and drifts (a republish, a wrong floor, a consumer on an older core resolved by a
-// loose range). This fails against any telefunc that cannot serve the package's own registration ordering,
-// whatever its version says.
+// TWO COMPLEMENTARY CHECKS, and neither substitutes for the other:
 //
-// Red-provable: revert the union read in telefunc's serializeTelefunctionResult and this goes red with the
-// silent plain-object miss — the real defect, not a crash.
+//  - the BEHAVIOUR test proves the telefunc actually installed HAS the seam this package needs. It says
+//    nothing about what the manifest promises — it passed identically while `peerDependencies.telefunc`
+//    still said `>=0.2.0`, because the workspace core is fixed either way.
+//  - the MANIFEST test proves the declared floor cannot drift back below the release that carries the fix.
+//    It says nothing about whether the installed core works — only about what consumers are promised.
+//
+// The first without the second is what let a stale `>=0.2.0` sit unnoticed: a user installing against a
+// released 0.2.x would have resolved a core that silently serializes the Live as a plain object, and no
+// test in this repo would have objected.
+//
+// Red-provable in both directions: revert the union read in telefunc's serializeTelefunctionResult (rebuild
+// dist — that is the artifact this spec loads) and the behaviour test goes red with the silent plain-object
+// miss; loosen the manifest floor and the manifest test goes red.
 
-describe('telefunc compatibility — the peer floor, enforced', () => {
+/** The release that first carries telefunc's live-config union read in `serializeTelefunctionResult`. */
+const REQUIRED_TELEFUNC_MINIMUM = [0, 2, 23] as const
+
+/** The lowest version a range admits, as a numeric triple. Deliberately tolerant of the range SYNTAX
+ *  (`>=x.y.z`, `^x.y.z`, `x.y.z`) and strict about the floor it implies — the point is to permit a
+ *  legitimate future raise while refusing a drop, which an exact-string match could not do. */
+function minimumOf(range: string): [number, number, number] {
+  const matched = range.match(/(\d+)\.(\d+)\.(\d+)/)
+  if (!matched) throw new Error(`Cannot read a version floor from peer range ${JSON.stringify(range)}`)
+  return [Number(matched[1]), Number(matched[2]), Number(matched[3])]
+}
+
+const atLeast = (actual: readonly number[], required: readonly number[]) =>
+  actual[0]! !== required[0]!
+    ? actual[0]! > required[0]!
+    : actual[1]! !== required[1]!
+      ? actual[1]! > required[1]!
+      : actual[2]! >= required[2]!
+
+describe('telefunc compatibility — the declared peer floor', () => {
+  it('peerDependencies.telefunc admits nothing below the release that carries the fix', () => {
+    // Reads THIS package's own manifest, so loosening the range is what fails — the check the behaviour
+    // test structurally cannot make, since the workspace core is fixed regardless of what is declared.
+    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      peerDependencies: Record<string, string>
+    }
+    const range = manifest.peerDependencies.telefunc
+    expect(range, 'telefunc must be a declared peer dependency').toBeTypeOf('string')
+    expect(
+      atLeast(minimumOf(range!), REQUIRED_TELEFUNC_MINIMUM),
+      `peerDependencies.telefunc is "${range}", which admits a telefunc older than ` +
+        `${REQUIRED_TELEFUNC_MINIMUM.join('.')} — those releases silently serialize a Live as a plain object`,
+    ).toBe(true)
+  })
+
+  it('CONTROL: the floor comparison rejects a lower range and accepts a higher one', () => {
+    // Without this, the assertion above could pass because `atLeast` is simply permissive.
+    expect(atLeast(minimumOf('>=0.2.0'), REQUIRED_TELEFUNC_MINIMUM)).toBe(false)
+    expect(atLeast(minimumOf('>=0.2.22'), REQUIRED_TELEFUNC_MINIMUM)).toBe(false)
+    expect(atLeast(minimumOf('>=0.2.23'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true)
+    expect(atLeast(minimumOf('>=0.3.0'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true) // a legitimate future raise
+    expect(atLeast(minimumOf('^1.0.0'), REQUIRED_TELEFUNC_MINIMUM)).toBe(true)
+  })
+})
+
+describe('telefunc compatibility — the installed core has the seam', () => {
   it('the installed telefunc consults a replacer registered AFTER the request resolved its config', () => {
     // Reproduce runTelefunc's ordering: the request resolves its config, THEN the telefunc files evaluate
     // and this package registers. `installLiveReplacer()` is the real registration path — the same call
