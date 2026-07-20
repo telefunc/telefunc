@@ -2,6 +2,7 @@ export { testRoom }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
+import { assertRoomScenarioExecutions, roomScenario, type RoomScenarioId } from './Room.scenarios'
 
 type ChatResult = {
   events: string[]
@@ -62,10 +63,17 @@ type MemberResult = {
   sameObject: boolean
 }
 
+const executedScenarios: RoomScenarioId[] = []
+
+function testRoomScenario(id: RoomScenarioId, name: string, validate: () => Promise<void>) {
+  executedScenarios.push(id)
+  test(name, validate)
+}
+
 function testRoom() {
-  test('room: join, publish with sender identity, setMeta, leave', async () => {
+  testRoomScenario('chat', 'room: join, publish with sender identity, setMeta, leave', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-chat')
+    await page.click(roomScenario('chat').selector)
 
     await autoRetry(async () => {
       const result = await getResult<ChatResult>('#room-result')
@@ -90,41 +98,49 @@ function testRoom() {
     })
   })
 
-  test('room: a retained message reaches a subscriber that joins after it was published', async () => {
+  testRoomScenario(
+    'retain',
+    'room: a retained message reaches a subscriber that joins after it was published',
+    async () => {
+      await navigate(`${getServerUrl()}/room`)
+      await page.click(roomScenario('retain').selector)
+
+      await autoRetry(async () => {
+        const r = await getResult<{ received: string[] }>('#room-result')
+        // The late subscriber gets the pinned message via the retained slot — read only after its
+        // subscription is live, so an async transport (the docker run uses real Redis) can't drop it.
+        expect(r.received).deep.equal(['pinned'])
+      })
+    },
+  )
+
+  testRoomScenario(
+    'participant',
+    'room: server-joined participant publishes, updates metadata, receives a DM',
+    async () => {
+      await navigate(`${getServerUrl()}/room`)
+      await page.click(roomScenario('participant').selector)
+
+      await autoRetry(async () => {
+        const result = await getResult<ParticipantResult>('#room-result')
+
+        expect(result.received).deep.equal([{ text: 'from-bob', from: 'Bob' }]) // the DM never hit the room stream
+        expect(result.count).toBe(2) // Bob + Ally
+        // Identity: stamped at the server-side join, visible locally and on the remote view.
+        expect(result.localIdentity).toBe('user:Bob')
+        expect(result.remoteIdentity).toBe('user:Bob')
+        // setMeta propagated both to the room's remote view and back to the participant stub.
+        expect(result.remoteMetaName).toBe('Bobby')
+        expect(result.localMetaName).toBe('Bobby')
+        // The DM reached the standalone participant's inbox, with sender identity.
+        expect(result.dms).deep.equal([{ data: 'psst', fromAlly: true }])
+      })
+    },
+  )
+
+  testRoomScenario('binary', 'room: binary frames round-trip', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-retain')
-
-    await autoRetry(async () => {
-      const r = await getResult<{ received: string[] }>('#room-result')
-      // The late subscriber gets the pinned message via the retained slot — read only after its
-      // subscription is live, so an async transport (the docker run uses real Redis) can't drop it.
-      expect(r.received).deep.equal(['pinned'])
-    })
-  })
-
-  test('room: server-joined participant publishes, updates metadata, receives a DM', async () => {
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-participant')
-
-    await autoRetry(async () => {
-      const result = await getResult<ParticipantResult>('#room-result')
-
-      expect(result.received).deep.equal([{ text: 'from-bob', from: 'Bob' }]) // the DM never hit the room stream
-      expect(result.count).toBe(2) // Bob + Ally
-      // Identity: stamped at the server-side join, visible locally and on the remote view.
-      expect(result.localIdentity).toBe('user:Bob')
-      expect(result.remoteIdentity).toBe('user:Bob')
-      // setMeta propagated both to the room's remote view and back to the participant stub.
-      expect(result.remoteMetaName).toBe('Bobby')
-      expect(result.localMetaName).toBe('Bobby')
-      // The DM reached the standalone participant's inbox, with sender identity.
-      expect(result.dms).deep.equal([{ data: 'psst', fromAlly: true }])
-    })
-  })
-
-  test('room: binary frames round-trip', async () => {
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-binary')
+    await page.click(roomScenario('binary').selector)
 
     await autoRetry(async () => {
       const result = await getResult<BinaryResult>('#room-result')
@@ -144,9 +160,9 @@ function testRoom() {
     })
   })
 
-  test('room: a returned RemoteParticipant is the same object as the room view', async () => {
+  testRoomScenario('member', 'room: a returned RemoteParticipant is the same object as the room view', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-member')
+    await page.click(roomScenario('member').selector)
 
     await autoRetry(async () => {
       const result = await getResult<MemberResult>('#room-result')
@@ -156,9 +172,9 @@ function testRoom() {
     })
   })
 
-  test('room: guards reject over the wire; allowed messages flow', async () => {
+  testRoomScenario('guard', 'room: guards reject over the wire; allowed messages flow', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-guard')
+    await page.click(roomScenario('guard').selector)
 
     await autoRetry(async () => {
       const result = await getResult<GuardResult>('#room-result')
@@ -173,24 +189,28 @@ function testRoom() {
     })
   })
 
-  test('room: the declared message type is shielded at runtime — a malformed publish is rejected', async () => {
+  testRoomScenario(
+    'shield',
+    'room: the declared message type is shielded at runtime — a malformed publish is rejected',
+    async () => {
+      await navigate(`${getServerUrl()}/room`)
+      await page.click(roomScenario('shield').selector)
+
+      await autoRetry(async () => {
+        const r = await getResult<{ okAck: boolean; badError: string | null; received: string[] }>('#room-result')
+
+        expect(r.okAck).toBe(true) // the well-typed payload is admitted
+        // The shield auto-generated from `Room<…, ChatMsg>` rejects the malformed payload at the ingress;
+        // the branded error rides home over the wire and rejects the client's `publish()` promise.
+        expect(r.badError).toBe('ShieldValidationError')
+        expect(r.received).deep.equal(['hi']) // only the valid payload ever reached the room
+      })
+    },
+  )
+
+  testRoomScenario('admin', 'room: room-authored messages, admin kick and close reach the client', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-shield')
-
-    await autoRetry(async () => {
-      const r = await getResult<{ okAck: boolean; badError: string | null; received: string[] }>('#room-result')
-
-      expect(r.okAck).toBe(true) // the well-typed payload is admitted
-      // The shield auto-generated from `Room<…, ChatMsg>` rejects the malformed payload at the ingress;
-      // the branded error rides home over the wire and rejects the client's `publish()` promise.
-      expect(r.badError).toBe('ShieldValidationError')
-      expect(r.received).deep.equal(['hi']) // only the valid payload ever reached the room
-    })
-  })
-
-  test('room: room-authored messages, admin kick and close reach the client', async () => {
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-admin')
+    await page.click(roomScenario('admin').selector)
 
     await autoRetry(async () => {
       const result = await getResult<AdminResult>('#room-result')
@@ -207,9 +227,9 @@ function testRoom() {
     })
   })
 
-  test('room: coalesce conflates a same-key burst to first + latest', async () => {
+  testRoomScenario('conflate', 'room: coalesce conflates a same-key burst to first + latest', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-conflate')
+    await page.click(roomScenario('conflate').selector)
 
     await autoRetry(async () => {
       const r = await getResult<{ received: number[]; acked: number; allSeqs: boolean }>('#room-result')
@@ -219,9 +239,9 @@ function testRoom() {
     })
   })
 
-  test('room: setAttributes merges per key and deletes on undefined', async () => {
+  testRoomScenario('attributes', 'room: setAttributes merges per key and deletes on undefined', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-attributes')
+    await page.click(roomScenario('attributes').selector)
 
     await autoRetry(async () => {
       const r = await getResult<{
@@ -239,20 +259,24 @@ function testRoom() {
     })
   })
 
-  test('room: onDemand turns on when a subscriber wants a track and off when it leaves', async () => {
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-demand')
+  testRoomScenario(
+    'demand',
+    'room: onDemand turns on when a subscriber wants a track and off when it leaves',
+    async () => {
+      await navigate(`${getServerUrl()}/room`)
+      await page.click(roomScenario('demand').selector)
 
-    await autoRetry(async () => {
-      const r = await getResult<{ cam: boolean[] }>('#room-result')
-      expect(r.cam).toContain(true) // a viewer arrived (the track is wanted)
-      expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again — back to unwanted
-    })
-  })
+      await autoRetry(async () => {
+        const r = await getResult<{ cam: boolean[] }>('#room-result')
+        expect(r.cam).toContain(true) // a viewer arrived (the track is wanted)
+        expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again — back to unwanted
+      })
+    },
+  )
 
-  test('room: Room.get({ tail }) holds a between-get-and-subscribe message', async () => {
+  testRoomScenario('tail', 'room: Room.get({ tail }) holds a between-get-and-subscribe message', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-tail')
+    await page.click(roomScenario('tail').selector)
 
     await autoRetry(async () => {
       const r = await getResult<{ received: string[] }>('#room-result')
@@ -260,9 +284,9 @@ function testRoom() {
     })
   })
 
-  test('room: onAfterJoin/Publish/Send fire with authoritative receipts', async () => {
+  testRoomScenario('hooks', 'room: onAfterJoin/Publish/Send fire with authoritative receipts', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-hooks')
+    await page.click(roomScenario('hooks').selector)
 
     await autoRetry(async () => {
       const r = await getResult<{
@@ -278,9 +302,9 @@ function testRoom() {
     })
   })
 
-  test('room: a per-member subscription receives only that member', async () => {
+  testRoomScenario('memberSub', 'room: a per-member subscription receives only that member', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-member-sub')
+    await page.click(roomScenario('memberSub').selector)
 
     await autoRetry(async () => {
       const r = await getResult<{ xText: string[]; xBin: number[]; all: string[] }>('#room-result')
@@ -290,9 +314,9 @@ function testRoom() {
     })
   })
 
-  test('room: a DM sent before listen() is held and flushed on attach', async () => {
+  testRoomScenario('dmHold', 'room: a DM sent before listen() is held and flushed on attach', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-dm-hold')
+    await page.click(roomScenario('dmHold').selector)
 
     await autoRetry(async () => {
       const r = await getResult<{ held: string[] }>('#room-result')
@@ -300,9 +324,9 @@ function testRoom() {
     })
   })
 
-  test('room: selfDelivery:false suppresses your own frames locally, not for others', async () => {
+  testRoomScenario('self', 'room: selfDelivery:false suppresses your own frames locally, not for others', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-self')
+    await page.click(roomScenario('self').selector)
 
     await autoRetry(async () => {
       const r = await getResult<{ mine: string[]; theirs: string[]; selfDelivery: boolean }>('#room-result')
@@ -312,21 +336,25 @@ function testRoom() {
     })
   })
 
-  test('room: a co-returned server-side selfDelivery:false member is suppressed at the source, while a client join on the same stub is delivered', async () => {
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-self-server')
+  testRoomScenario(
+    'selfServer',
+    'room: a co-returned server-side selfDelivery:false member is suppressed at the source, while a client join on the same stub is delivered',
+    async () => {
+      await navigate(`${getServerUrl()}/room`)
+      await page.click(roomScenario('selfServer').selector)
 
-    await autoRetry(async () => {
-      const r = await getResult<{ mine: string[]; theirs: string[]; selfDelivery: boolean }>('#room-result')
-      expect(r.selfDelivery).toBe(false)
-      expect(r.theirs).deep.equal(['from-me', 'from-notme']) // the observer receives both
-      expect(r.mine).deep.equal(['from-notme']) // own co-return echo suppressed; client join delivered
-    })
-  })
+      await autoRetry(async () => {
+        const r = await getResult<{ mine: string[]; theirs: string[]; selfDelivery: boolean }>('#room-result')
+        expect(r.selfDelivery).toBe(false)
+        expect(r.theirs).deep.equal(['from-me', 'from-notme']) // the observer receives both
+        expect(r.mine).deep.equal(['from-notme']) // own co-return echo suppressed; client join delivered
+      })
+    },
+  )
 
-  test('room: Room.setMeta propagates; list and getOrCreate resolve', async () => {
+  testRoomScenario('reconfig', 'room: Room.setMeta propagates; list and getOrCreate resolve', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-reconfig')
+    await page.click(roomScenario('reconfig').selector)
 
     await autoRetry(async () => {
       const r = await getResult<{
@@ -344,9 +372,9 @@ function testRoom() {
     })
   })
 
-  test('room: removeParticipant({ identity }) kicks; onEmpty fires', async () => {
+  testRoomScenario('identity', 'room: removeParticipant({ identity }) kicks; onEmpty fires', async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-identity')
+    await page.click(roomScenario('identity').selector)
 
     await autoRetry(async () => {
       const r = await getResult<{ cause: { type: string; reason?: unknown } | null; count: number; empty: boolean }>(
@@ -357,4 +385,6 @@ function testRoom() {
       expect(r.empty).toBe(true) // onEmpty fired when the last member went
     })
   })
+
+  assertRoomScenarioExecutions(executedScenarios)
 }

@@ -23,6 +23,7 @@ import {
   onKickByIdentity,
   onCloseRoom,
 } from './Room.telefunc'
+import { roomScenario } from './Room.scenarios'
 
 /** Render every poll so the e2e autoRetry sees fresh data on each iteration (see Publish.tsx).
  *  `render` may be async — some scenarios read server-side state (e.g. an audit log) each tick. */
@@ -45,7 +46,7 @@ function Room() {
       <h2>Presence & Chat</h2>
 
       <button
-        id="test-room-chat"
+        id={roomScenario('chat').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-chat:${crypto.randomUUID()}`
@@ -98,7 +99,7 @@ function Room() {
       <h2>Retained Replay</h2>
 
       <button
-        id="test-room-retain"
+        id={roomScenario('retain').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-retain:${crypto.randomUUID()}`
@@ -129,7 +130,7 @@ function Room() {
       <h2>Server-Joined Participant</h2>
 
       <button
-        id="test-room-participant"
+        id={roomScenario('participant').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-participant:${crypto.randomUUID()}`
@@ -185,7 +186,7 @@ function Room() {
       <h2>Binary</h2>
 
       <button
-        id="test-room-binary"
+        id={roomScenario('binary').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-binary:${crypto.randomUUID()}`
@@ -241,7 +242,7 @@ function Room() {
       <h2>Guards</h2>
 
       <button
-        id="test-room-guard"
+        id={roomScenario('guard').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-guard:${crypto.randomUUID()}`
@@ -282,7 +283,7 @@ function Room() {
       </button>
 
       <button
-        id="test-room-shield"
+        id={roomScenario('shield').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-shield:${crypto.randomUUID()}`
@@ -316,7 +317,7 @@ function Room() {
       <h2>Returnable member view</h2>
 
       <button
-        id="test-room-member"
+        id={roomScenario('member').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-member:${crypto.randomUUID()}`
@@ -341,7 +342,7 @@ function Room() {
       <h2>Admin (announce, system send, kick & close)</h2>
 
       <button
-        id="test-room-admin"
+        id={roomScenario('admin').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-admin:${crypto.randomUUID()}`
@@ -394,7 +395,7 @@ function Room() {
       <h2>Coalesce (conflation)</h2>
 
       <button
-        id="test-room-conflate"
+        id={roomScenario('conflate').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-conflate:${crypto.randomUUID()}`
@@ -420,7 +421,7 @@ function Room() {
       <h2>setAttributes (partial merge)</h2>
 
       <button
-        id="test-room-attributes"
+        id={roomScenario('attributes').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-attr:${crypto.randomUUID()}`
@@ -459,7 +460,7 @@ function Room() {
       <h2>onDemand (track demand)</h2>
 
       <button
-        id="test-room-demand"
+        id={roomScenario('demand').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-demand:${crypto.randomUUID()}`
@@ -493,7 +494,7 @@ function Room() {
       <h2>Tail (single-call history)</h2>
 
       <button
-        id="test-room-tail"
+        id={roomScenario('tail').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-tail:${crypto.randomUUID()}`
@@ -521,7 +522,7 @@ function Room() {
       <h2>After-hooks (persistence receipts)</h2>
 
       <button
-        id="test-room-hooks"
+        id={roomScenario('hooks').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-hooks:${crypto.randomUUID()}`
@@ -565,7 +566,7 @@ function Room() {
       <h2>Member-selective receive</h2>
 
       <button
-        id="test-room-member-sub"
+        id={roomScenario('memberSub').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-membersub:${crypto.randomUUID()}`
@@ -605,7 +606,7 @@ function Room() {
       <h2>DM pre-listen hold</h2>
 
       <button
-        id="test-room-dm-hold"
+        id={roomScenario('dmHold').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-dmhold:${crypto.randomUUID()}`
@@ -631,7 +632,7 @@ function Room() {
       <h2>selfDelivery: false</h2>
 
       <button
-        id="test-room-self"
+        id={roomScenario('self').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-self:${crypto.randomUUID()}`
@@ -660,7 +661,7 @@ function Room() {
       <h2>selfDelivery: false (server co-return + client join on one stub)</h2>
 
       <button
-        id="test-room-self-server"
+        id={roomScenario('selfServer').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-self-server:${crypto.randomUUID()}`
@@ -693,7 +694,7 @@ function Room() {
       <h2>Reconfigure, list, getOrCreate</h2>
 
       <button
-        id="test-room-reconfig"
+        id={roomScenario('reconfig').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const base = `e2e-reconfig:${crypto.randomUUID()}`
@@ -730,7 +731,7 @@ function Room() {
       <h2>Kick by identity, onEmpty</h2>
 
       <button
-        id="test-room-identity"
+        id={roomScenario('identity').selector.slice(1)}
         onClick={async () => {
           setResult('')
           const roomId = `e2e-identity:${crypto.randomUUID()}`
