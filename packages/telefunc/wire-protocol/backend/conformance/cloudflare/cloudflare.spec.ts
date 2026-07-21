@@ -397,6 +397,31 @@ describe('cloudflare — CF-specific mechanics', () => {
       expect(stillRouted.receivers).toBe(1)
       expect(await settled(stillRouted.delivery)).toBe('rejected')
     })
+
+    it('does not let late failures from a replaced lease evict the current route', async () => {
+      const { roomId, inc, stub } = await openCfRoom()
+      const laneKey = laneKeyOf(SEMANTIC)
+      const subscriber = 'guarded-failure-subscriber'
+      await installReceiver(roomId, inc, laneKey, subscriber, () => {
+        throw new Error('old attempt failed')
+      })
+      await stub.registerRoute(roomId, inc, laneKey, subscriber, 'lease-old', null)
+      await holdReceiverDeliveries(subscriber)
+      const oldAttempts = await Promise.all(
+        [1, 2, 3].map(async (index) =>
+          acceptedCommit(await stub.commitLane(roomId, inc, SEMANTIC, bytes(`old-${index}`))),
+        ),
+      )
+      await stub.registerRoute(roomId, inc, laneKey, subscriber, 'lease-current', null)
+      await releaseReceiverDeliveries(subscriber)
+      for (const attempt of oldAttempts) {
+        await expect(stub.awaitDelivery(attempt.deliveryToken)).rejects.toThrow()
+      }
+
+      const current = acceptedCommit(await stub.commitLane(roomId, inc, SEMANTIC, bytes('current')))
+      expect(current.receivers).toBe(1)
+      await expect(stub.awaitDelivery(current.deliveryToken)).rejects.toThrow()
+    })
   })
 
   describe('SQLite supplementary-Unicode prefix parity', () => {
