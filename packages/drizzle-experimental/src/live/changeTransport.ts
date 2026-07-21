@@ -28,7 +28,7 @@ export { defaultChangeTransport, createInMemoryChangeTransport }
  * package does it, because leaving it to the adapter is how two unrelated databases with a `users` table
  * end up applying each other's row deltas.
  *
- * CONTRACT — a custom transport MUST honor all three, or the Live guarantees silently weaken:
+ * CONTRACT — a custom transport MUST honor all four clauses, or the Live guarantees silently weaken:
  *  - **`subscribe()` resolves only once the subscription is ADMITTED** — for Redis, after the broker's
  *    `SUBSCRIBE` acknowledgement, not when the command is written. Resolution IS the readiness proof a live
  *    read waits on: it asserts that publications made after it can be observed. A transport that resolves

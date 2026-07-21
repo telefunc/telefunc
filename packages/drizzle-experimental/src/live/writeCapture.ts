@@ -92,42 +92,15 @@ function captureMutation(
 function wrapWrite(builder: unknown, table: Table, op: Op, context: WriteContext): unknown {
   return new Proxy(builder as object, {
     get(target, prop, receiver) {
-      // EVERY promise terminal routes through the captured run — `.catch()`/`.finally()` included. A
-      // terminal left out reaches the raw QueryPromise and executes the write uncaptured, which is a
-      // systematic missed invalidation rather than a one-off.
-      //
-      // Each is gated on the underlying builder ACTUALLY having it. An insert builder before `.values()`
-      // has none of them, so synthesizing them made `db.insert(t)` spuriously thenable: `await` on an
-      // unfinished chain would run a write the caller never asked for, and `typeof b.then === 'function'`
-      // lied about a proxy that is transparent except for `.live()`.
+      // Preserve the builder's actual terminal surface (`writeCapture.terminals.spec.ts`: "does not SYNTHESIZE").
       const has = (name: string): boolean => typeof Reflect.get(target, name, receiver) === 'function'
-      // ONE write at a time per transaction. The serialization sits HERE, around the whole captured write,
-      // rather than around the substituted statement alone: a savepoint's `ROLLBACK TO` rewinds everything
-      // done after it, so an interleaved write's already-completed recovery statement would be undone by a
-      // neighbour rewinding. Observed — three concurrent inserts on one transaction committed one row.
-      // Outside a transaction there is nothing to serialize and writes stay fully concurrent.
       const start = (args?: unknown[]): Promise<unknown> => {
         const run = () => runWrite(target, table, op, context, args)
-        // INSIDE A TRANSACTION, keyed by the ROOT of the physical transaction rather than by this scope's own
-        // handle: a nested transaction is a SAVEPOINT on the same connection, so keying per handle gave
-        // parent and child separate queues, let their savepoints interleave, and turned a transaction plain
-        // Drizzle commits into "savepoint does not exist" → 25P02. That queue already covers everything on
-        // the connection, this builder included.
-        //
-        // OUTSIDE one, keyed by the BUILDER. Substitution rewrites the builder's RETURNING in place and puts
-        // it back when the statement finishes, so two executions of the SAME builder overlapping in time see
-        // each other's half-applied state: `Promise.all([b, b])` had the second execution plan against
-        // CAPTURE's full RETURNING and hand that caller capture's rows where plain Drizzle returns the plain
-        // count-shape twice — and their two taps shadowed and restored one `_prepare` out of order. Different
-        // builders keep different queues, so unrelated autocommit writes stay fully concurrent.
+        // Queue ownership is pinned by writeCapture.mechanism.spec.ts (same builder) and
+        // writeCapture.transaction.spec.ts (concurrent + nested physical transaction).
         return serializeOn(context.serializationKey ?? target, run)
       }
-      // WHETHER this member executes is `writeTerminals`' question; the branches below only differ on the
-      // signature each verb takes. Every one is gated on the underlying builder ACTUALLY having it: PG write
-      // builders have no `run`/`all`/`get`, and synthesizing one made `typeof builder.get === 'function'`
-      // report true on a proxy that is supposed to be transparent except for `.live()` — then died inside the
-      // interceptor ("Cannot read properties of undefined") instead of with the driver's own error. Mirrors
-      // the `prepare` guard below and the coarse-all guard in reactiveDrizzle.
+      // `writeTerminals` classifies the verbs; `has` keeps the proxy surface transparent (same terminals pin).
       if (isBuilderTerminal(prop) && has(prop as string)) {
         if (prop === 'then') {
           return (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>

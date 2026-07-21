@@ -12,53 +12,11 @@ import { type ChangeSubscription, type ChangeTransport, defaultChangeTransport }
 import { type OriginSequence, coarsenClosingBet, observeEnvelopeSequence } from './changeSequence.js'
 import type { ChangeBatch } from '../router/events.js'
 
-// THE CHANGE RUNTIME for one logical database — everything that is true of a db's presence on the change
-// bus, in one place: which transport and namespace it resolved, what it has published, who is subscribed on
-// its behalf, whether it is quiescent, and what to do with each delivery.
-//
-// ONE quiescence rule, read from this module's own state, because every entry point that can rotate a
-// transport has to agree about when that is admissible. Splitting the transport config from the runtime puts
-// the two on opposite sides of a boundary: the caller then has to read quiescence out of one and hand it to
-// the other, which makes a private state machine's internals part of the calling convention and lets the two
-// entry points drift into contradictory contracts.
-//
-// The deletion test settles the merge: remove this abstraction and its state and reconciliation logic
-// reappear across configuration, publish and subscription callers alike.
-//
-// A committed batch is published ONCE, to ONE topic per logical database, over the db's DEDICATED
-// changeTransport (never the user's app Broadcast — see changeTransport.ts). A receiver feeds the whole
-// batch into its own graphs via `router.ingest`; the router already slices it per table and notifies each
-// affected graph at most once, so one message is one atomic graph tick.
-//
-// SINGLE TOPIC, deliberately. Receiver filtering is the router's job — it ignores tables no graph watches —
-// and publishing a copy per touched table instead would buy that filtering at the price of a correctness
-// protocol to undo its own duplicates: apply-once memory, a time bound on it, a sweeper, and a cross-topic
-// skew guarantee every adapter would owe. If measured broker traffic ever justifies per-table filtering, it
-// returns as a versioned additive capability, never as a baseline the runtime compensates for.
-//
-// Two obligations survive, and neither is about fan-out:
-//   - ORIGIN self-suppression — a db feeds its own graphs DIRECTLY in `ingestWrite`, before publishing, so
-//     it must drop its own echo or apply the same delta twice.
-//   - ORDERING, which the RUNTIME owns rather than the adapter: every envelope carries the publisher's
-//     origin and a monotonic seq, so a duplicate is dropped and a gap or reorder coarsens. The rules
-//     themselves are a pure transition — see changeSequence.ts. The adapter owes at-least-once delivery of
-//     the exact payload and nothing more.
-//
-// NAMESPACED per logical database (topic and envelope both). One process-wide default bus with a constant
-// topic meant two unrelated databases sharing a table name applied each other's ROW DELTAS — a wrong row in
-// a precise graph, not an over-fire.
-//
-// READINESS BARRIER (acquireSubscription): a live read is not admitted until the transport has ADMITTED
-// this db's subscription — which is what awaiting `subscribe()` means (changeTransport.ts). Readiness is a
-// control-plane fact and is asked of the control plane; proving it on the data plane instead (publish a
-// token, await it back) would demand self-delivery from every adapter and still say nothing about the
-// cluster, since an isolated Redis namespace loops its own probe back happily. A rejected subscribe fails
-// the read CLOSED.
-//
-// LIFETIME: the subscription is REFCOUNTED against the ownership the graph registry already models — a read
-// token holds a ref from before `registry.acquire` until it redeems into a channel lease, and the last lease
-// to close drops it. At zero the listener is detached, so a db nobody reads live is not pinned by a callback
-// closing over it.
+// Per-logical-database bus runtime: owns transport/namespace resolution, publication order and origin
+// suppression, subscription lifetime and the quiescence rule that permits transport rotation. A committed
+// batch is published once to one namespaced topic; local graphs are fed directly, own echoes are dropped,
+// duplicates are ignored, and a gap or reorder coarsens. A live read is admitted only after `subscribe()`
+// resolves, and its read-token/channel-lease ownership keeps that listener attached exactly while needed.
 
 // ── which transport this db resolved ───────────────────────────────
 //

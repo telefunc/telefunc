@@ -51,13 +51,6 @@ function registryFor(client: QueryClient): Registry {
  *
  * `data` is the value itself (`Todo[]`), not the handle — the wrapper unwraps it.
  *
- * TAKES THE TELEFUNCTION ITSELF, never a closure. An earlier version also accepted `live(() =>
- * onGetTodos(id))`, which meant it could not know whether the function it was handed actually reached a
- * telefunction inside the per-call context window — a wrapper that awaited first, or returned something
- * other than the call it made, produced a query whose cancellation signal silently went nowhere. Detecting
- * that needed attribution machinery in telefunc core. Calling the telefunction here instead makes the
- * question unaskable: the call this function issues IS the call the context was set around.
- *
  * This wraps the `queryFn`, not the hook, so it works unchanged with the React, Vue, Solid and Svelte
  * TanStack adapters. There is nothing else to install or configure.
  */

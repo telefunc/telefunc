@@ -31,15 +31,8 @@ const liveReplacer: ReplacerType<LiveContract, ServerReplacerContext> = {
     // does, to register its graph before the snapshot read) still has to reclaim those itself.
     // No payload: the ARRIVAL of a message is the whole signal, so the channel carries `undefined`.
     const channel = context.createChannel<never, undefined>()
-    // The producer's coalesced invalidation rides the channel; the channel owns its teardown.
-    //
-    // The tap is installed BEFORE `activate()` so that subscription ordering can never matter. Inherited
-    // from core with a stronger claim than it can carry ("MUST … otherwise the client keeps a stale
-    // snapshot"): a mutation moving this below `activate()` SURVIVES the suite, because `invalidate()`
-    // defers to a microtask — a source replaying a catch-up synchronously on subscribe sets the pending
-    // flag and flushes after the tap is attached either way. Kept in this order regardless, since it costs
-    // nothing and removes the question; recorded as defence in depth rather than a proven invariant.
-    // The signal IS the message — its arrival is the event, so nothing is carried.
+    // LiveCell owns microtask coalescing (`live.spec.ts`: "per-cell coalescing"); this tap forwards that
+    // signal to the channel. The signal IS the message, so nothing is carried.
     const offInvalidate = live.onInvalidate(() => void channel.send(undefined))
     // Deferred activation, refcounted by cell-local leases: cascade-activate this cell's pending
     // deps/source (idempotent — a dep also returned elsewhere activates exactly once). This channel holds
