@@ -299,17 +299,42 @@ export class TelefuncRoomDurableObject extends DurableObject {
 
   // ── routes / readiness ──
 
-  async captureRouteGeneration(inc: string): Promise<GenerationWire> {
+  async captureRouteGeneration(inc: string, attemptId: string | null = null): Promise<GenerationWire> {
     let generationToken: string | null = null
     this.ctx.storage.transactionSync(() => {
+      if (attemptId !== null) {
+        const prior = this.#sql
+          .exec<{ inc: string; token: string }>('SELECT inc, token FROM route_capture WHERE attempt_id = ?', attemptId)
+          .toArray()[0]
+        if (prior !== undefined) {
+          if (prior.inc === inc) generationToken = prior.token
+          return
+        }
+      }
       const head = readLiveHead(this.#sql, authorityNow())
       if (head?.currentInc === inc && head.state === 'open') {
         generationToken = readGenerationToken(this.#sql, inc)
+        if (generationToken !== null && attemptId !== null) {
+          // Durable idempotency for a lost first capture response. This fence intentionally survives
+          // generation drop/reuse until the owning lifecycle closes and releases it.
+          this.#sql.exec(
+            'INSERT OR IGNORE INTO route_capture (attempt_id, inc, token) VALUES (?, ?, ?)',
+            attemptId,
+            inc,
+            generationToken,
+          )
+        }
       }
     })
     return generationToken === null
       ? { rejected: true, reason: `room has no open incarnation '${inc}'`, terminal: true }
       : { ok: true, generationToken }
+  }
+
+  async releaseRouteGenerationCapture(attemptId: string): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec('DELETE FROM route_capture WHERE attempt_id = ?', attemptId)
+    })
   }
 
   async registerRoute(
@@ -390,7 +415,9 @@ export class TelefuncRoomDurableObject extends DurableObject {
       result = renewRoute(this.#sql, inc, laneKey, subscriber, leaseId, now)
     })
     if (generationInvalid) return { ok: false, terminal: true }
-    return result.ok ? { ok: true, expiresAt: result.expiresAt } : { ok: false, terminal: true }
+    // A missing/non-live exact route inside the SAME generation is recoverable: the subscription
+    // lifecycle enters lost and establishes a fresh lease. Only generation identity loss is terminal.
+    return result.ok ? { ok: true, expiresAt: result.expiresAt } : { ok: false }
   }
 
   async unsubscribeRoute(inc: string, laneKey: string, subscriber: string, leaseId: string): Promise<void> {

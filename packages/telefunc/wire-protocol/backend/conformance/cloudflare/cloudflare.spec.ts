@@ -368,6 +368,68 @@ describe('cloudflare — CF-specific mechanics', () => {
       await sub.unsubscribe()
     })
 
+    it('retries transient transport loss during the first generation-token capture', async () => {
+      const { roomId, inc } = await openCfRoom()
+      const controls = cloudflareRenewalControls(fx.backend)
+      controls.forceGenerationCaptureFailures(2)
+      const seen = collector()
+      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, seen.receiver)
+      const states: string[] = []
+      sub.onStateChange((state) => states.push(state))
+
+      expect(await settled(sub.ready)).toBe('rejected')
+      expect(sub.state()).toBe('establishing')
+      await controls.advance(250 + 500)
+      expect(sub.state()).toBe('ready')
+      expect(states).toEqual(['ready'])
+      const frame = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('after-capture-retry')))
+      await frame.delivery
+      expect(seen.payloads()).toEqual(['after-capture-retry'])
+      await sub.unsubscribe()
+    })
+
+    it('closes only after five bounded initial generation-capture transport failures', async () => {
+      const { roomId, inc } = await openCfRoom()
+      const controls = cloudflareRenewalControls(fx.backend)
+      controls.forceGenerationCaptureFailures(5)
+      const sub = fx.backend.subscribeLane(roomId, inc, SEMANTIC, () => {})
+
+      expect(await settled(sub.ready)).toBe('rejected')
+      expect(sub.state()).toBe('establishing')
+      await controls.advance(250 + 500 + 1_000 + 2_000)
+      expect(sub.state()).toBe('closed')
+    })
+
+    it('does not rebind a lost first capture response across generation drop and reuse', async () => {
+      const { roomId, inc } = await openCfRoom()
+      const controls = cloudflareRenewalControls(fx.backend)
+      controls.forceGenerationCaptureFailures(1)
+      const seen: string[] = []
+      const stale = fx.backend.subscribeLane(roomId, inc, SEMANTIC, (payload) => seen.push(text(payload)))
+      expect(await settled(stale.ready)).toBe('rejected')
+      expect(stale.state()).toBe('establishing')
+
+      const head = await readHeadOrThrow(fx.backend, roomId)
+      const { head: closing, leaseId } = await enterClosing(fx.backend, roomId, head)
+      accepted(await fx.backend.commitLane(roomId, inc, CONTROL, bytes('closed'), { closingLease: leaseId }))
+      const tombstone = okHead(await finalizeClose(fx.backend, roomId, closing, leaseId))
+      await fx.backend.dropGeneration(roomId, inc)
+      okHead(
+        await fx.backend.compareExchangeHead(
+          roomId,
+          { expect: { rev: tombstone.rev } },
+          { head: { currentInc: inc, state: 'open', config: tombstone.config } },
+        ),
+      )
+
+      await controls.advance(250)
+      expect(stale.state()).toBe('closed')
+      const frame = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('new-generation')))
+      expect(frame.receivers).toBe(0)
+      await frame.delivery
+      expect(seen).toEqual([])
+    })
+
     it('never lets a retryable tokenless establishment rebind across drop and exact incarnation reuse', async () => {
       const { roomId, inc } = await openCfRoom()
       const controls = cloudflareRenewalControls(fx.backend)
@@ -534,6 +596,25 @@ describe('cloudflare — CF-specific mechanics', () => {
       await stub.awaitDelivery(afterExpiry.deliveryToken)
       await evictReceiver(roomId, inc, laneKey, subscriber, leaseId)
     })
+
+    it('retains an expired exact-route source when uninstall fails once, then retries it', async () => {
+      const { roomId, inc, stub } = await openCfRoom()
+      const laneKey = laneKeyOf(SEMANTIC)
+      const subscriber = 'subscriber-do-expiry-uninstall-retry'
+      const leaseId = 'lease-expiry-uninstall-retry'
+      await installReceiver(roomId, inc, laneKey, subscriber, leaseId, () => {})
+      await registerRoute(stub, roomId, inc, laneKey, subscriber, leaseId)
+
+      fx.advanceAuthority(ROUTE_TTL_MS)
+      await fx.backend.readHead(roomId)
+      await failReceiverUninstalls(subscriber, 1)
+      expect(await stub.runJanitor()).toEqual({ prunedRoutes: 0 })
+      expect(await stub.runJanitor()).toEqual({ prunedRoutes: 1 })
+      const afterRetry = acceptedCommit(await stub.commitLane(roomId, inc, SEMANTIC, bytes('after-retry')))
+      expect(afterRetry.receivers).toBe(0)
+      await stub.awaitDelivery(afterRetry.deliveryToken)
+      await evictReceiver(roomId, inc, laneKey, subscriber, leaseId)
+    })
   })
 
   describe('room-authority delivery ownership', () => {
@@ -660,7 +741,7 @@ describe('cloudflare — CF-specific mechanics', () => {
       expect(await settled(evicted.delivery)).toBe('resolved')
     })
 
-    it('fails a late mux attachment closed when K=3 removed its exact route', async () => {
+    it('re-establishes a fresh lease for a late attachment after same-generation K=3 eviction', async () => {
       const { roomId, inc } = await openCfRoom()
       let failuresRemaining = 3
       const firstSeen: string[] = []
@@ -679,24 +760,16 @@ describe('cloudflare — CF-specific mechanics', () => {
       }
 
       const late = fx.backend.subscribeLane(roomId, inc, SEMANTIC, (payload) => lateSeen.push(text(payload)))
-      expect(await settled(late.ready)).toBe('rejected')
-      expect(first.state()).toBe('closed')
-      expect(late.state()).toBe('closed')
-      const absent = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('absent')))
-      expect(absent.receivers).toBe(0)
-      await absent.delivery
-
-      // A new lifecycle may explicitly establish a fresh exact lease for the still-current generation.
-      const freshSubscription = fx.backend.subscribeLane(roomId, inc, SEMANTIC, (payload) =>
-        lateSeen.push(text(payload)),
-      )
-      await freshSubscription.ready
-      const fresh = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('fresh')))
-      expect(fresh.receivers).toBe(1)
-      await fresh.delivery
-      expect(firstSeen).toEqual([])
-      expect(lateSeen).toEqual(['fresh'])
-      await freshSubscription.unsubscribe()
+      await late.ready
+      expect(first.state()).toBe('ready')
+      expect(late.state()).toBe('ready')
+      const recovered = accepted(await fx.backend.commitLane(roomId, inc, SEMANTIC, bytes('recovered')))
+      expect(recovered.receivers).toBe(1)
+      await recovered.delivery
+      expect(firstSeen).toEqual(['recovered'])
+      expect(lateSeen).toEqual(['recovered'])
+      await first.unsubscribe()
+      await late.unsubscribe()
     })
 
     it('lets explicit generation invalidation close a mux after K=3 eviction retained its route source', async () => {

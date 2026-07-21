@@ -70,7 +70,8 @@ type RoomStub = {
   readRetained(inc: string, lane: LaneId): Promise<RetainedWire | null>
   listRetained(inc: string): Promise<LaneId[]>
   deleteRetainedLane(inc: string, lane?: LaneId): Promise<void>
-  captureRouteGeneration(inc: string): Promise<GenerationWire>
+  captureRouteGeneration(inc: string, attemptId?: string | null): Promise<GenerationWire>
+  releaseRouteGenerationCapture(attemptId: string): Promise<void>
   registerRoute(
     roomId: string,
     inc: string,
@@ -412,6 +413,7 @@ class CloudflareRoomBackend implements RoomBackendSpi {
   #disposed = false
   #forcedRenewalFailures = 0
   #forcedEstablishmentFailures = 0
+  #forcedGenerationCaptureFailures = 0
   // Fully-scoped local ownership; one shared route lifecycle sits behind each local callback mux.
   // Delivery chains themselves live only in the room DO.
   readonly #muxes = new Map<string, { identity: SubscriberRouteIdentity; mux: CloudflareLaneSubscriptionMultiplexer }>()
@@ -432,6 +434,10 @@ class CloudflareRoomBackend implements RoomBackendSpi {
 
   forceEstablishmentFailures(count: number): void {
     this.#forcedEstablishmentFailures = count
+  }
+
+  forceGenerationCaptureFailures(count: number): void {
+    this.#forcedGenerationCaptureFailures = count
   }
 
   async advanceRenewalTimers(ms: number): Promise<void> {
@@ -583,6 +589,7 @@ class CloudflareRoomBackend implements RoomBackendSpi {
 
     let leaseId = crypto.randomUUID()
     let generationToken: string | null = null
+    const generationCaptureAttemptId = crypto.randomUUID()
     let mux!: CloudflareLaneSubscriptionMultiplexer
     const sharedSubscription = new CloudflareLaneSubscription(
       {
@@ -590,11 +597,17 @@ class CloudflareRoomBackend implements RoomBackendSpi {
           await clockPush
           let captured: GenerationWire
           try {
-            captured = await this.#stub(roomId).captureRouteGeneration(inc)
+            captured = await this.#stub(roomId).captureRouteGeneration(inc, generationCaptureAttemptId)
+            if (this.#forcedGenerationCaptureFailures > 0) {
+              this.#forcedGenerationCaptureFailures -= 1
+              throw new Error('forced generation-capture transport failure')
+            }
           } catch (error) {
             return {
               ready: false,
-              retryable: generationToken !== null,
+              // Transport loss is recoverable even before the first token response. A structured
+              // authority rejection/token mismatch below remains terminal.
+              retryable: true,
               reason: (error as Error).message,
             }
           }
@@ -683,6 +696,12 @@ class CloudflareRoomBackend implements RoomBackendSpi {
           } catch (error) {
             failure ??= error
           }
+          try {
+            await this.#stub(roomId).releaseRouteGenerationCapture(generationCaptureAttemptId)
+          } catch {
+            // The lifecycle is already terminal; an idempotency-fence cleanup transport failure is
+            // hygiene-only and must not replace the route teardown result.
+          }
           if (failure !== undefined) throw failure
         },
         closed: () => {
@@ -690,6 +709,9 @@ class CloudflareRoomBackend implements RoomBackendSpi {
           mux.lifecycleClosed(new Error('shared subscription lifecycle closed'))
           void this.#subscriberStub(subscriber)
             .uninstallRoute(identity, closedLeaseId)
+            .catch(() => {})
+          void this.#stub(roomId)
+            .releaseRouteGenerationCapture(generationCaptureAttemptId)
             .catch(() => {})
         },
       },
@@ -766,12 +788,14 @@ class CloudflareRoomBackend implements RoomBackendSpi {
 export function cloudflareRenewalControls(backend: RoomBackendSpi): {
   forceFailures(count: number): void
   forceEstablishmentFailures(count: number): void
+  forceGenerationCaptureFailures(count: number): void
   advance(ms: number): Promise<void>
 } {
   if (!(backend instanceof CloudflareRoomBackend)) throw new Error('expected the Cloudflare conformance backend')
   return {
     forceFailures: (count) => backend.forceRenewalFailures(count),
     forceEstablishmentFailures: (count) => backend.forceEstablishmentFailures(count),
+    forceGenerationCaptureFailures: (count) => backend.forceGenerationCaptureFailures(count),
     advance: (ms) => backend.advanceRenewalTimers(ms),
   }
 }

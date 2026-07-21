@@ -73,6 +73,9 @@ export function initSchema(sql: SqlStorage): void {
       lease_id TEXT NOT NULL, bucket TEXT, expires_at INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (inc, lane_key, subscriber)
     );
+    CREATE TABLE IF NOT EXISTS route_capture (
+      attempt_id TEXT PRIMARY KEY, inc TEXT NOT NULL, token TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL);
   `)
 }
