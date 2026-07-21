@@ -62,7 +62,15 @@ function fakeSeed(inputId: string, table: string, primaryKey: string[] = ['id'])
 }
 function statefulFake(seeds: SeedDescriptor[]): StatefulGraph {
   const noFire = { invalidated: false }
-  return { seeds, seedInput() {}, flushSeed() {}, feedInput() {}, runBatch: () => noFire, apply: () => noFire }
+  return {
+    seeds,
+    seedInput() {},
+    flushSeed() {},
+    feedInput() {},
+    feedDirtyWitness() {},
+    runBatch: () => noFire,
+    apply: () => noFire,
+  }
 }
 function statefulSpec(executor: HydrationExecutor): LiveGraphSpec {
   return {

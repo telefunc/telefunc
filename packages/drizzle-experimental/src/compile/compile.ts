@@ -59,12 +59,15 @@ type CompiledGraph = { apply(commit: Change[]): FireResult }
 
 /** The stateful seam. `seedInput` + `flushSeed` feed a σ-pruned baseline with notifications MUTED
  *  (state, not change); `feedInput` + `runBatch` give per-input control so a self-join feeds each
- *  alias exactly once, never fanning across aliases. */
+ *  alias exactly once, never fanning across aliases. `feedDirtyWitness` feeds the dirty-only inputs that
+ *  have no seed and no dataflow sink (subquery inner tables) — the live driver feeds seeds by descriptor,
+ *  so witnesses need their own door or a change to one is silently dropped. */
 type StatefulGraph = CompiledGraph & {
   readonly seeds: SeedDescriptor[]
   seedInput(inputId: string, rows: Row[]): void
   flushSeed(): void
   feedInput(inputId: string, change: Change): void
+  feedDirtyWitness(change: Change): void
   runBatch(): FireResult
 }
 type GraphPlan = {

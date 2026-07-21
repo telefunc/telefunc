@@ -40,6 +40,7 @@ export function statefulFake(seeds: SeedDescriptor[]): StatefulGraph {
     seedInput() {},
     flushSeed() {},
     feedInput() {},
+    feedDirtyWitness() {},
     runBatch: () => NO_FIRE,
     apply: () => NO_FIRE,
   }

@@ -187,6 +187,9 @@ function createStatefulVariant(spec: StatefulSpec, core: GraphCore): GraphVarian
           graph!.feedInput(descriptor.inputId, resolvedChange)
           updateShadow(descriptor, shadows.get(descriptor.inputId)!, resolvedChange)
         }
+        // A dirty-only witness (a subquery inner table) has no descriptor above, so it is fed here or its
+        // change is dropped. No-op for a seed table — witnesses and seed inputs are disjoint.
+        graph!.feedDirtyWitness(change)
       }
       const result = graph!.runBatch()
       if (result.invalidated) core.fire()

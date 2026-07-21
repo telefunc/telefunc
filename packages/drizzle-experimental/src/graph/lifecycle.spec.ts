@@ -49,6 +49,7 @@ function statefulFake(): StatefulGraph {
     seedInput() {},
     flushSeed() {},
     feedInput() {},
+    feedDirtyWitness() {},
     runBatch: () => noFire,
     apply: () => noFire,
   }

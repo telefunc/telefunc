@@ -153,6 +153,14 @@ function statefulGraph(shape: SelectShape): StatefulGraph {
       assertUsage(input, `feedInput: unknown input id ${inputId}`)
       pump(input.plan, input.builder, change)
     },
+    // The dirty-only witnesses for `change.table` — the builderless feeds a subquery inner table registered.
+    // The live driver already feeds seed inputs by descriptor, and a witness table is never also a seed
+    // input (registerDirtyTable only fires for an UNCOVERED table), so the `builder === undefined` guard
+    // pumps ONLY witnesses — feeding a seed feed here too would double-count its dataflow.
+    feedDirtyWitness(change) {
+      for (const feed of registry.get(change.table) ?? [])
+        if (feed.builder === undefined) pump(feed.plan, undefined, change)
+    },
     runBatch,
   }
 }

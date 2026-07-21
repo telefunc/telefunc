@@ -37,7 +37,15 @@ export function fakeSeed(inputId: string, table: string, primaryKey: string[] = 
 }
 export function statefulFake(seeds: SeedDescriptor[]): StatefulGraph {
   const noFire = { invalidated: false }
-  return { seeds, seedInput() {}, flushSeed() {}, feedInput() {}, runBatch: () => noFire, apply: () => noFire }
+  return {
+    seeds,
+    seedInput() {},
+    flushSeed() {},
+    feedInput() {},
+    feedDirtyWitness() {},
+    runBatch: () => noFire,
+    apply: () => noFire,
+  }
 }
 
 // ── a real compiled users ⋈ teams graph, seeded to live through its HydrationExecutor ──
